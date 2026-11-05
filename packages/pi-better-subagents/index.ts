@@ -38,7 +38,7 @@ import { selectSessionByName } from "./session-selection.ts";
 import { isWithinWorkspace } from "./workspace-scope.ts";
 import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
 import { createSubagentSettingsPage } from "./settings-page.ts";
-import { appendSubagentSettings, effectiveSubagentSettings, formatSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
+import { effectiveSubagentSettings, formatSubagentSettings, publishSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
 import {
     decideTiming,
@@ -56,7 +56,7 @@ import {
 } from "./timing.ts";
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
-import { appendExecutionPolicy } from "./shared-execution-policy.ts";
+import { publishExecutionPolicy } from "./shared-execution-policy.ts";
 import { resolveChildClosure, resolveChildLaunch, configSnapshot } from "./child-dependencies.mjs";
 import { PREFLIGHT_ENV } from "./child-preflight.mjs";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
@@ -3602,12 +3602,12 @@ export default function (pi: ExtensionAPI) {
     const discoveryTool = agentOperations.createDiscoveryTool(Type as never);
     pi.registerTool(discoveryTool as Parameters<ExtensionAPI["registerTool"]>[0]);
 
-    pi.on("before_agent_start", (event) => ({
-        systemPrompt: appendSubagentSettings(
-            `${appendExecutionPolicy(event.systemPrompt)}\n\nTreat the Subagent settings block at the end of this prompt as the authoritative delegation mode and cap. Its delegation guidance replaces earlier mode-specific guidance, including guidance in a plan. Live occupancy is not pushed into context: inspect subagent_settings when it matters, and never treat the concurrency limit as a target number of agents.`,
-            effectiveSettings(),
-        ),
-    }));
+    // Sections, never a returned `systemPrompt`: returning text sets forceSystemPrompt,
+    // which makes the prompt opaque and drops any section another package published.
+    pi.on("before_agent_start", (event) => {
+        publishExecutionPolicy(event.systemPromptOptions);
+        publishSubagentSettings(event.systemPromptOptions, effectiveSettings());
+    });
 
     // ---- live-status lifecycle -----------------------------------------
     pi.on("agent_start", async (_event, ctx) => {

@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-    appendSubagentSettings,
     effectiveSubagentSettings,
     formatSubagentSettings,
+    publishSubagentSettings,
+    SUBAGENT_SETTINGS_SECTION,
 } from "../effective-settings.ts";
+
+// A section target is all the publisher needs, so the test never fakes a prompt string.
+const publish = (settings) => publishSubagentSettings({ sections: {} }, settings).sections[SUBAGENT_SETTINGS_SECTION];
 
 function snapshot(mode, overrides = {}) {
     return effectiveSubagentSettings(
@@ -14,26 +18,29 @@ function snapshot(mode, overrides = {}) {
     );
 }
 
-test("the policy is appended at the very end of the system prompt", () => {
+test("the policy is published as its own section, with the block last and its note first", () => {
     const settings = snapshot("adaptive");
-    const prompt = appendSubagentSettings("base system prompt", settings);
-    assert.ok(prompt.startsWith("base system prompt"));
-    assert.ok(prompt.endsWith(formatSubagentSettings(settings)), "the policy is the last thing the model reads");
+    const section = publish(settings);
+    assert.ok(section.startsWith("Treat the Subagent settings block at the end of this prompt as the authoritative delegation mode and cap."),
+        "the note that points at the block has to travel with it, and lead it");
+    assert.ok(section.endsWith(formatSubagentSettings(settings)),
+        "the block stays last, because the note calls it the block at the end of the prompt");
 });
 
-test("appending is idempotent, so a rebuilt prompt cannot stack copies", () => {
+test("publishing is an assignment, so a rebuilt prompt cannot stack copies", () => {
     const settings = snapshot("manual");
-    const once = appendSubagentSettings("base", settings);
-    assert.equal(appendSubagentSettings(once, settings), once);
+    const options = { sections: { [SUBAGENT_SETTINGS_SECTION]: "stale text" } };
+    publishSubagentSettings(options, settings);
+    assert.equal(options.sections[SUBAGENT_SETTINGS_SECTION], publish(settings));
 });
 
 test("the policy survives compaction because it is not conversation content", () => {
     // Compaction rewrites the message list, never the system prompt; the policy
     // must therefore be reachable without any injected message.
     const settings = snapshot("manual");
-    const prompt = appendSubagentSettings("base", settings);
-    assert.match(prompt, /Do not proactively delegate/);
-    assert.ok(prompt.includes(formatSubagentSettings(settings)));
+    const section = publish(settings);
+    assert.match(section, /Do not proactively delegate/);
+    assert.ok(section.includes(formatSubagentSettings(settings)));
 });
 
 test("live occupancy never reaches the system prompt", () => {
@@ -42,7 +49,7 @@ test("live occupancy never reaches the system prompt", () => {
         const busy = snapshot(mode, { running: 3, pending: 2 });
         assert.equal(formatSubagentSettings(quiet), formatSubagentSettings(busy),
             `${mode}: occupancy belongs to the tool, not the cached prefix`);
-        assert.equal(appendSubagentSettings("base", quiet), appendSubagentSettings("base", busy),
+        assert.equal(publish(quiet), publish(busy),
             `${mode}: child churn must not rewrite the cached system prompt`);
     }
 });

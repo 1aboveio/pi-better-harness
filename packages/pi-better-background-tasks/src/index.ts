@@ -8,7 +8,8 @@ import { createObservedWaitHost } from "./observed-waits.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { observeForegroundSandboxPolicy } from "./sandbox.js";
 import { registerTools } from "./tools.js";
-import { appendExecutionPolicy } from "./shared-execution-policy.js";
+import { publishBackgroundTasksGuidance } from "./prompt.js";
+import { publishExecutionPolicy } from "./shared-execution-policy.js";
 
 export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   // Created before registerTools so the tools can resolve it lazily; the durable
@@ -36,7 +37,12 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     },
   });
   initializeNavigatorPanels(pi);
-  pi.on("before_agent_start", (event) => ({ systemPrompt: appendExecutionPolicy(event.systemPrompt) }));
+  // Sections, never a returned `systemPrompt`: returning text sets forceSystemPrompt,
+  // which makes the prompt opaque and drops any section another package published.
+  pi.on("before_agent_start", (event) => {
+    publishExecutionPolicy(event.systemPromptOptions);
+    publishBackgroundTasksGuidance(event.systemPromptOptions);
+  });
   registerBackgroundTasksGoalProvider(pi);
   ensureBackgroundTasksNavigatorProvider(pi);
   // Subscribed at load so a sandbox extension that publishes later is heard, and

@@ -11,6 +11,7 @@ import extension from "./extension-fixture.js";
 import { continuationStateEntry, createContinuationState, createGoalSnapshot, goalSetEntry } from "../src/goal-state.js";
 import { ACTIVE_GOAL_REFRESH_MS } from "../src/goal-clock.js";
 import type { TaskContextRequest } from "../src/task-context.js";
+import { invokeBeforeAgentStart } from "./before-agent-start.ts";
 
 interface SessionEntry {
   type: string;
@@ -141,7 +142,7 @@ function createTaskContextHarness(options: {
       await commands.get("goal")!.handler(args, ctx);
     },
     async prompt(base = "base prompt") {
-      return handlers.get("before_agent_start")?.({ systemPrompt: base }, ctx) as Promise<{ systemPrompt?: string } | undefined>;
+      return invokeBeforeAgentStart(handlers, ctx, base) as Promise<{ systemPrompt?: string } | undefined>;
     },
     async shutdown() {
       await handlers.get("session_shutdown")?.({}, ctx);

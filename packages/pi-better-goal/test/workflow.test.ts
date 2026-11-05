@@ -10,6 +10,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import extension, { toolContext } from "./extension-fixture.js";
 import { currentGoalSnapshot } from "../src/goal-state.js";
 import { currentWorkflowOwner, skillCommandName, workflowOwnerFromSkill } from "../src/workflow.js";
+import { invokeBeforeAgentStart } from "./before-agent-start.ts";
 
 test("workflow metadata opts in through Pi's skill command provenance", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
@@ -65,7 +66,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   await handlers.get("session_start")?.({ reason: "startup" }, ctx);
   await handlers.get("input")?.({ source: "interactive", text: "/skill:fixture implement task" }, ctx);
   assert.equal(currentWorkflowOwner(entries)?.name, "fixture");
-  const prompt = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  const prompt = await invokeBeforeAgentStart(handlers, ctx, "base");
   assert.match(prompt.systemPrompt, /Only coordinate work/);
   assert.doesNotMatch(prompt.systemPrompt, /Keep working through clear low-risk next steps/);
 
@@ -84,7 +85,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   assert.match(userMessages[2]?.content ?? "", /^\/skill:fixture implement task/);
   assert.match(userMessages[2]?.content ?? "", /Continue the existing goal/);
   assert.equal(currentWorkflowOwner(entries)?.name, "fixture");
-  const resumed = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  const resumed = await invokeBeforeAgentStart(handlers, ctx, "base");
   assert.match(resumed.systemPrompt, /Only coordinate work/);
   await tools.get("release_workflow")!.execute("release", {}, undefined, undefined, toolContext(ctx));
   assert.equal(currentWorkflowOwner(entries), null);
@@ -94,7 +95,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   registeredSkillPath = join(dir, "replaced-skill.md");
   await handlers.get("session_start")?.({ reason: "resume" }, ctx);
   assert.equal(currentGoalSnapshot(ctx)?.status, "paused");
-  const unavailable = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  const unavailable = await invokeBeforeAgentStart(handlers, ctx, "base");
   assert.match(unavailable.systemPrompt, /no longer a registered, valid skill/);
   assert.equal(currentWorkflowOwner(entries), null, "a stale skill path loses ownership on resume");
   await commands.get("workflow")?.handler("clear", ctx);
@@ -231,7 +232,7 @@ test("an alias declaring workflow-alias-of binds its coordinator for goal handba
   await goalHandlers.get("session_start")?.({ reason: "startup" }, ctx);
   await goalHandlers.get("input")?.({ source: "interactive", text: "/skill:resolve-issues #312" }, ctx);
   assert.deepEqual(currentWorkflowOwner(entries), rushOwner);
-  const prompt = await goalHandlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  const prompt = await invokeBeforeAgentStart(goalHandlers, ctx, "base");
   assert.match(prompt.systemPrompt, /Coordinate the rush run/, "resumed turns carry the coordinator's instructions");
   assert.doesNotMatch(prompt.systemPrompt, /Active objective:/, "Harness owns the structured outcome text");
   assert.match(prompt.systemPrompt, /Complete the goal only after the workflow completion audit/);
@@ -336,7 +337,7 @@ test("an escape-paused workflow goal puts the paused instruction before, and ove
   await handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [], stopReason: "aborted" }] }, ctx);
   assert.equal(currentGoalSnapshot(ctx)?.pauseReason, "interrupt");
 
-  const prompt = (await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string }).systemPrompt;
+  const prompt = (await invokeBeforeAgentStart(handlers, ctx, "base")).systemPrompt;
   const paused = prompt.indexOf("paused because the user pressed escape");
   const override = prompt.indexOf("this overrides the workflow instructions below");
   const workflow = prompt.indexOf("Follow the workflow instructions below");
@@ -347,7 +348,7 @@ test("an escape-paused workflow goal puts the paused instruction before, and ove
 
   await commands.get("goal")?.handler("settings conversational-resume off", ctx);
   await handlers.get("session_start")?.({ reason: "reload" }, ctx);
-  const disabled = (await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string }).systemPrompt;
+  const disabled = (await invokeBeforeAgentStart(handlers, ctx, "base")).systemPrompt;
   assert.equal(currentGoalSnapshot(ctx)?.status, "paused", "reloading the saved control never resumes the goal");
   assert.match(disabled, /do not continue the goal's work until it is resumed/);
   assert.match(disabled, /this overrides the workflow instructions below/);
@@ -355,7 +356,7 @@ test("an escape-paused workflow goal puts the paused instruction before, and ove
   assert.doesNotMatch(disabled, /goal_resume/, "disabling the resume tool retains the workflow pause override");
 
   await commands.get("goal")?.handler("resume", ctx);
-  const running = (await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string }).systemPrompt;
+  const running = (await invokeBeforeAgentStart(handlers, ctx, "base")).systemPrompt;
   assert.doesNotMatch(running, /pressed escape|overrides the workflow/);
   await handlers.get("session_shutdown")?.({}, ctx);
 });

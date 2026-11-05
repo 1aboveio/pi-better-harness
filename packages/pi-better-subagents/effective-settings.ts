@@ -48,18 +48,37 @@ export function formatSubagentSettings(settings: EffectiveSubagentSettings): str
 }
 
 /**
- * Append the delegation policy to the end of the system prompt.
+ * Publish the delegation policy as its own prompt section.
  *
- * The system prompt is not part of the compaction window, so the policy survives
- * a summary that rewrites the conversation. It is also part of the cached
- * prefix, so it costs nothing per request while it stays unchanged.
+ * A section survives a summary that rewrites the conversation without being
+ * appended text, and it is part of the cached prefix, so it costs nothing per
+ * request while it stays unchanged. Assignment is idempotent: a repeated turn
+ * rewrites the same value and pi's section diff reports no change.
  *
  * Nothing volatile goes in here: live occupancy would rewrite the cached prefix
  * on every run, and admission rechecks capacity at spawn anyway.
  */
-export function appendSubagentSettings(systemPrompt: string, settings: EffectiveSubagentSettings): string {
-    const policy = formatSubagentSettings(settings);
-    return systemPrompt.includes(policy) ? systemPrompt : `${systemPrompt}\n\n${policy}`;
+export const SUBAGENT_SETTINGS_SECTION = "subagents";
+
+/** `sections` is optional because the repo typechecks against older pi typings. */
+export interface PromptSectionTarget {
+    sections?: Record<string, string>;
+}
+
+/**
+ * Published with the settings block: the block is the authority on delegation, so
+ * the sentence that says so has to sit beside it rather than in a separate section
+ * whose position would depend on package load order.
+ */
+const SUBAGENT_DELEGATION_NOTE = "Treat the Subagent settings block at the end of this prompt as the authoritative delegation mode and cap. Its delegation guidance replaces earlier mode-specific guidance, including guidance in a plan. Live occupancy is not pushed into context: inspect subagent_settings when it matters, and never treat the concurrency limit as a target number of agents.";
+
+export function publishSubagentSettings<T extends PromptSectionTarget>(options: T, settings: EffectiveSubagentSettings): T {
+    // Note first, block last: the note points at "the settings block at the end of
+    // this prompt", so reversing them would describe the wrong thing and would
+    // also change what the model reads last on every turn.
+    const sections = (options.sections ??= {});
+    sections[SUBAGENT_SETTINGS_SECTION] = `${SUBAGENT_DELEGATION_NOTE}\n\n${formatSubagentSettings(settings)}`;
+    return options;
 }
 
 export function subagentSettingsTool(Type: any, read: () => EffectiveSubagentSettings) {

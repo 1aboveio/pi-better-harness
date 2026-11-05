@@ -9,11 +9,25 @@ subagent delegation. Package-owned defaults and delegation settings retain
 ## Decision
 
 Use `packages/pi-better-harness/extensions/execution-policy.ts` as the canonical policy module. Vendor
-it into Subagents, Background Tasks, and Plan through the existing
+it into Subagents and Background Tasks through the existing
 `scripts/sync-shared-log-utils.mjs` script so standalone packages need no installed
-Harness bundle. Each package registers the policy for `before_agent_start`; an
-idempotent append injects it once per prompt regardless of which packages are
-loaded or their registration order. Keep delegation guidance separate.
+Harness bundle. Each package publishes the policy as the `harness_execution_policy`
+system-prompt section. Assignment, not concatenation, keeps it to one copy per
+prompt regardless of which packages are loaded or their registration order. Keep
+delegation guidance separate, in its own section.
+
+Publish sections rather than returning a whole prompt. A `before_agent_start`
+handler that returns `systemPrompt` sets `forceSystemPrompt`, and pi then renders
+`{ content }` with no sections while still diffing the sections it never sends.
+Mixing the two modes therefore drops whichever package published last, with the
+result decided by load order. Each package owns a distinct section
+(`harness_execution_policy`, `subagents`, `worker_handoff`, `background_tasks`,
+`goal`), so no publisher can erase another, and nothing appends to prompt text.
+Background Tasks owns the wait guidance in that section: the check is cheap, the
+wait is not, so an external or long wait becomes `bg_task_watch`,
+`bg_task_spawn` plus `wait_for_operations`, or `watch_delivery` rather than a
+foreground `sleep`. No package depends on an unversioned global append file for
+this guidance.
 
 Identify ready, authorized independent units, including separate per-host
 migrations, and start them concurrently within resource constraints before
@@ -47,7 +61,9 @@ terminal and inspect and integrate its result or failure.
 
 Verify single policy injection with each package alone, combined packages in
 different registration orders, repeated registration, and successive prompts.
-Check behavior through the vendored modules as well as the canonical module. Verify guidance covers
+Assert that no extension returns a whole prompt, since one such return makes every
+published section invisible. Check behavior through the vendored modules as well as
+the canonical module. Verify guidance covers
 independent host migrations, resource and dependency constraints, manual-mode
 foreground/background concurrency, unresolved availability tradeoffs, host-local
 failure isolation, and terminal-result inspection without changing delegation,

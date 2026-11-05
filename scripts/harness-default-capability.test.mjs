@@ -184,7 +184,6 @@ test("the bundled tarball carries the sandbox extension and its synchronized sha
       "extensions/task-context/workflow-plan.ts",
       "extensions/task-context/workflow-plan-update.ts",
       "extensions/task-context/cancelled-rows.ts",
-      "extensions/task-context/shared-execution-policy.ts",
       "extensions/task-context/types.ts",
       "node_modules/pi-better-sandbox/index.ts",
       "node_modules/pi-better-sandbox/shared-sandbox-core.ts",

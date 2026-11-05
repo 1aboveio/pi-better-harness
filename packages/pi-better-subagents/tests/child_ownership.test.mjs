@@ -105,13 +105,18 @@ describe("worker monitoring ownership", () => {
         } finally { rmSync(root, { recursive: true, force: true }); }
     });
 
-    it("adds a worker handoff contract on each turn without changing the supplied prompt", () => {
+    it("publishes the worker handoff as a section without returning a whole prompt", () => {
         const handlers = harness();
-        const original = { systemPrompt: "Existing security and task instructions." };
-        const injected = handlers.get("before_agent_start")(original);
-        assert.ok(injected.systemPrompt.startsWith(original.systemPrompt));
-        assert.match(injected.systemPrompt, /Pending CI is a handoff/);
-        assert.match(injected.systemPrompt, /Legitimate local tests and builds may run to completion/);
-        assert.equal(original.systemPrompt, "Existing security and task instructions.");
+        const options = { sections: {} };
+        const event = { systemPromptOptions: options, systemPrompt: "Existing security and task instructions." };
+        const returned = handlers.get("before_agent_start")(event);
+        // Returning text would set forceSystemPrompt and make the prompt opaque,
+        // which drops the sections every other package publishes in the same turn.
+        assert.equal(returned, undefined);
+        const injected = options.sections.worker_handoff;
+        assert.ok(typeof injected === "string" && injected.length > 0, "the handoff is published");
+        assert.match(injected, /Pending CI is a handoff/);
+        assert.match(injected, /Legitimate local tests and builds may run to completion/);
+        assert.equal(event.systemPrompt, "Existing security and task instructions.");
     });
 });

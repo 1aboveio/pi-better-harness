@@ -1,4 +1,25 @@
-/** Harness-wide scheduling guidance, vendored so standalone extensions share it. */
+/**
+ * Harness-wide scheduling guidance, vendored so standalone extensions share it.
+ *
+ * Published as a named system-prompt section, never as appended text. A
+ * `before_agent_start` handler that returns `systemPrompt` sets
+ * `forceSystemPrompt`, and a forced prompt is opaque to pi: `buildSystemPromptState`
+ * returns `{ content }` with no sections while `diffSystemPromptSections` keeps
+ * diffing the sections that the request therefore never shows. Mixing the two
+ * modes loses whichever handler published last, so every package that speaks
+ * here publishes a section.
+ */
+export const EXECUTION_POLICY_SECTION = "harness_execution_policy";
+
+/**
+ * The minimum shape this module needs. `sections` stays optional because this
+ * repo typechecks against older pi typings whose event options predate sections;
+ * the shipped runtime always supplies the map.
+ */
+export interface PromptSectionTarget {
+  sections?: Record<string, string>;
+}
+
 const EXECUTION_POLICY = [
   "Harness execution policy: concurrency is separate from subagent delegation.",
   "Before multi-unit work, identify ready, authorized, independent units, actual prerequisites, shared mutable resources, and capacity or availability constraints. Represent independently verifiable deliverables (such as each host migration) separately in the plan; do not hide them in one serial rollout step or create dependencies merely from list order.",
@@ -11,10 +32,15 @@ const EXECUTION_POLICY = [
   "A unit waiting or failing does not block other ready independent units unless the evidence shows a shared blocker. Preserve each unit's guards and rollback boundary. Before completing verification, the plan, or the goal, inspect and integrate every relevant terminal result or failure; launch is not completion.",
 ].join("\n");
 
-export function appendExecutionPolicy(systemPrompt: string): string {
-  // Inspect the prompt, not module-global state: vendored copies have separate
-  // module identities, and every fresh turn or reload needs the policy again.
-  return systemPrompt.includes(EXECUTION_POLICY)
-    ? systemPrompt
-    : `${systemPrompt}\n\n${EXECUTION_POLICY}`;
+/**
+ * Publish the policy into `options.sections`.
+ *
+ * Assignment, not concatenation: two packages publishing the same section write
+ * identical text, so load order cannot duplicate or drop it, and a repeated turn
+ * rewrites the same value so pi's section diff reports no change.
+ */
+export function publishExecutionPolicy<T extends PromptSectionTarget>(options: T): T {
+  const sections = (options.sections ??= {});
+  sections[EXECUTION_POLICY_SECTION] = EXECUTION_POLICY;
+  return options;
 }

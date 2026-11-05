@@ -23,7 +23,7 @@ function run(t, scenario) {
     const ctx = { model: selected, modelRegistry: { getAvailable: () => ${scenario === 'missing-model' ? '[]' : '[selected]'} } };
     await hooks.get('session_start')({}, ctx);
     active = ${JSON.stringify(scenario === 'inactive-tool' ? ['read'] : ['read', 'bash'])};
-    await hooks.get('before_agent_start')({}, ctx);
+    await hooks.get('before_agent_start')({ systemPromptOptions: { sections: {} } }, ctx);
     process.stdout.write('request permitted');
   `;
   return spawnSync(process.execPath, ['--input-type=module', '-e', source], {
