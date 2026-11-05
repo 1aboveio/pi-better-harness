@@ -135,7 +135,8 @@ export default function childOwnership(pi: Pick<ExtensionAPI, "on">, env: NodeJS
     // This marker is supplied by the parent on every child launch, including clean/unsandboxed runs.
     if (!env[STEER_FILE_ENV]) return;
     // A section, not a returned `systemPrompt`: returning text sets forceSystemPrompt,
-    // which makes the prompt opaque and drops every section other packages published.
+    // and the request then carries a rendered snapshot, so sections published after
+    // it never reach the model.
     pi.on("before_agent_start", (event) => {
         const options = event.systemPromptOptions as { sections?: Record<string, string> };
         const sections = (options.sections ??= {});

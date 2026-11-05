@@ -38,7 +38,8 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   });
   initializeNavigatorPanels(pi);
   // Sections, never a returned `systemPrompt`: returning text sets forceSystemPrompt,
-  // which makes the prompt opaque and drops any section another package published.
+  // and the request then carries a rendered snapshot, so sections published after
+  // it never reach the model.
   pi.on("before_agent_start", (event) => {
     publishExecutionPolicy(event.systemPromptOptions);
     publishBackgroundTasksGuidance(event.systemPromptOptions);

@@ -153,8 +153,8 @@ test("combined extensions inject once in every load order and again in fresh tur
 test("no extension forces a whole prompt, in any load order or on repeated registration", async () => {
   // A returned `systemPrompt` sets forceSystemPrompt, and pi then renders
   // `{ content }` with no sections while still diffing the sections it never
-  // sends. That silently drops whichever package published last, so the ban is
-  // asserted rather than assumed.
+  // sends, so a section published after the snapshot is silently absent. The ban
+  // is asserted rather than assumed.
   const orders = [
     [subagents, backgroundTasks, taskContext], [subagents, taskContext, backgroundTasks],
     [backgroundTasks, subagents, taskContext], [backgroundTasks, taskContext, subagents],
@@ -181,10 +181,11 @@ test("each package owns a distinct section, so no publisher can erase another", 
   await h.prompt();
   assert.deepEqual([...h.sections().keys()].sort(), ["background_tasks", "harness_execution_policy", "subagents"]);
   const background = h.sections().get("background_tasks");
-  assert.match(background, /Never write `sleep N` before a command when N > 3/);
+  assert.match(background, /Never use foreground `sleep` to wait or poll/);
+  assert.match(background, /instead of `nohup`, `&`, or `disown`/);
   assert.match(background, /bg_task_watch/);
   assert.match(background, /wait_for_operations/);
-  assert.match(background, /Nothing here diverts a foreground command for you/,
+  assert.match(background, /Nothing here automatically diverts a foreground command/,
     "the section must state that nothing diverts a foreground sleep");
   assert.match(h.sections().get("subagents"), /Delegation mode: adaptive/);
   assert.equal(h.sections().get("harness_execution_policy"), policy);

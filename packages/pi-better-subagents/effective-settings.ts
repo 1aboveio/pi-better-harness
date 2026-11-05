@@ -69,13 +69,17 @@ export interface PromptSectionTarget {
  * Published with the settings block: the block is the authority on delegation, so
  * the sentence that says so has to sit beside it rather than in a separate section
  * whose position would depend on package load order.
+ *
+ * The note must not say the block is at the end of the prompt. Custom sections
+ * render in publication order, so Background Tasks and Goal publish after this one;
+ * naming its own section keeps the sentence true whatever the load order.
  */
-const SUBAGENT_DELEGATION_NOTE = "Treat the Subagent settings block at the end of this prompt as the authoritative delegation mode and cap. Its delegation guidance replaces earlier mode-specific guidance, including guidance in a plan. Live occupancy is not pushed into context: inspect subagent_settings when it matters, and never treat the concurrency limit as a target number of agents.";
+const SUBAGENT_DELEGATION_NOTE = "Treat the Subagent settings block in this section as the authoritative delegation mode and cap. Its delegation guidance replaces earlier mode-specific guidance, including guidance in a plan. Live occupancy is not pushed into context: inspect subagent_settings when it matters, and never treat the concurrency limit as a target number of agents.";
 
 export function publishSubagentSettings<T extends PromptSectionTarget>(options: T, settings: EffectiveSubagentSettings): T {
-    // Note first, block last: the note points at "the settings block at the end of
-    // this prompt", so reversing them would describe the wrong thing and would
-    // also change what the model reads last on every turn.
+    // Note first, block last inside the section: the note introduces the block it
+    // describes. Section order in the prompt is a separate concern, decided by
+    // publication order, so the note never claims a position in the whole prompt.
     const sections = (options.sections ??= {});
     sections[SUBAGENT_SETTINGS_SECTION] = `${SUBAGENT_DELEGATION_NOTE}\n\n${formatSubagentSettings(settings)}`;
     return options;

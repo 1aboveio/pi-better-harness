@@ -6,9 +6,9 @@
  * `before_agent_start` handler that returns `systemPrompt` sets
  * `forceSystemPrompt`, and a forced prompt is opaque to pi: `buildSystemPromptState`
  * returns `{ content }` with no sections while `diffSystemPromptSections` keeps
- * diffing the sections that the request therefore never shows. Mixing the two
- * modes loses whichever handler published last, so every package that speaks
- * here publishes a section.
+ * diffing the sections the request therefore never shows. The request carries a
+ * rendered snapshot, so any section published after that snapshot never reaches
+ * it, so every package that speaks here publishes a section.
  */
 export const EXECUTION_POLICY_SECTION = "harness_execution_policy";
 

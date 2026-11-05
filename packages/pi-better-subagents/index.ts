@@ -3603,7 +3603,8 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool(discoveryTool as Parameters<ExtensionAPI["registerTool"]>[0]);
 
     // Sections, never a returned `systemPrompt`: returning text sets forceSystemPrompt,
-    // which makes the prompt opaque and drops any section another package published.
+    // and the request then carries a rendered snapshot, so sections published after
+    // it never reach the model.
     pi.on("before_agent_start", (event) => {
         publishExecutionPolicy(event.systemPromptOptions);
         publishSubagentSettings(event.systemPromptOptions, effectiveSettings());

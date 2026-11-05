@@ -4,9 +4,8 @@
  * Published as a named section, never as a returned `systemPrompt`. Returning text
  * sets `forceSystemPrompt`, and a forced prompt is opaque: `buildSystemPromptState`
  * yields `{ content }` with no sections while pi keeps diffing the sections that
- * the request therefore no longer carries. Whichever handler published last wins,
- * so goal text and Harness text would silently erase one another depending on load
- * order.
+ * the request therefore no longer carries. The request carries a rendered
+ * snapshot, so goal text published after that snapshot is silently absent.
  */
 export const GOAL_SECTION = "goal";
 

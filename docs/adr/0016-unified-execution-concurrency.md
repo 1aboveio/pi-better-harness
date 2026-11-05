@@ -18,8 +18,9 @@ delegation guidance separate, in its own section.
 
 Publish sections rather than returning a whole prompt. A `before_agent_start`handler that returns `systemPrompt` sets `forceSystemPrompt`, and pi then renders
 `{ content }` with no sections while still diffing the sections it never sends.
-Mixing the two modes therefore drops whichever package published last, with the
-result decided by load order. Each package owns a distinct section
+Mixing the two modes therefore sends a rendered snapshot, so a section published
+after that snapshot never reaches the request. The ban removes the dependence on
+load order rather than eliminating one particular ordering. Each package owns a distinct section
 (`harness_execution_policy`, `subagents`, `worker_handoff`, `background_tasks`,
 `goal`), so no publisher can erase another, and nothing appends to prompt text.
 Background Tasks owns the wait guidance in that section: the check is cheap, the

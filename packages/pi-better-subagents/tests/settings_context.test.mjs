@@ -21,10 +21,14 @@ function snapshot(mode, overrides = {}) {
 test("the policy is published as its own section, with the block last and its note first", () => {
     const settings = snapshot("adaptive");
     const section = publish(settings);
-    assert.ok(section.startsWith("Treat the Subagent settings block at the end of this prompt as the authoritative delegation mode and cap."),
+    assert.ok(section.startsWith("Treat the Subagent settings block in this section as the authoritative delegation mode and cap."),
         "the note that points at the block has to travel with it, and lead it");
     assert.ok(section.endsWith(formatSubagentSettings(settings)),
-        "the block stays last, because the note calls it the block at the end of the prompt");
+        "the block stays last inside its own section, so the note introduces it");
+    // Custom sections render in publication order, so Background Tasks and Goal
+    // publish after this one. Claiming a position in the whole prompt would be a
+    // false statement the model could catch and then discount the rest.
+    assert.doesNotMatch(section, /at the end of this prompt/);
 });
 
 test("publishing is an assignment, so a rebuilt prompt cannot stack copies", () => {
