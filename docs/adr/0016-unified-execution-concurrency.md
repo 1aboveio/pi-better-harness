@@ -16,8 +16,7 @@ system-prompt section. Assignment, not concatenation, keeps it to one copy per
 prompt regardless of which packages are loaded or their registration order. Keep
 delegation guidance separate, in its own section.
 
-Publish sections rather than returning a whole prompt. A `before_agent_start`
-handler that returns `systemPrompt` sets `forceSystemPrompt`, and pi then renders
+Publish sections rather than returning a whole prompt. A `before_agent_start`handler that returns `systemPrompt` sets `forceSystemPrompt`, and pi then renders
 `{ content }` with no sections while still diffing the sections it never sends.
 Mixing the two modes therefore drops whichever package published last, with the
 result decided by load order. Each package owns a distinct section
@@ -28,6 +27,12 @@ wait is not, so an external or long wait becomes `bg_task_watch`,
 `bg_task_spawn` plus `wait_for_operations`, or `watch_delivery` rather than a
 foreground `sleep`. No package depends on an unversioned global append file for
 this guidance.
+
+Sections carry instructions only. No rationale, no worked examples, and no
+defaults the tool schemas already state: the model already has every schema in
+context, so restating `timeout_seconds` or a condition shape spends prefix
+tokens on text it can read. Keep the imperative and the tool name; drop the
+argument for why.
 
 Identify ready, authorized independent units, including separate per-host
 migrations, and start them concurrently within resource constraints before
