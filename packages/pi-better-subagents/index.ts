@@ -38,7 +38,7 @@ import { selectSessionByName } from "./session-selection.ts";
 import { isWithinWorkspace } from "./workspace-scope.ts";
 import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
 import { createSubagentSettingsPage } from "./settings-page.ts";
-import { effectiveSubagentSettings, formatSubagentSettings, publishSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
+import { deliverSubagentPrompt, effectiveSubagentSettings, formatSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
 import {
     decideTiming,
@@ -56,7 +56,6 @@ import {
 } from "./timing.ts";
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
-import { publishExecutionPolicy } from "./shared-execution-policy.ts";
 import { resolveChildClosure, resolveChildLaunch, configSnapshot } from "./child-dependencies.mjs";
 import { PREFLIGHT_ENV } from "./child-preflight.mjs";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
@@ -3602,13 +3601,10 @@ export default function (pi: ExtensionAPI) {
     const discoveryTool = agentOperations.createDiscoveryTool(Type as never);
     pi.registerTool(discoveryTool as Parameters<ExtensionAPI["registerTool"]>[0]);
 
-    // Sections, never a returned `systemPrompt`: returning text sets forceSystemPrompt,
-    // and the request then carries a rendered snapshot, so sections published after
-    // it never reach the model.
-    pi.on("before_agent_start", (event) => {
-        publishExecutionPolicy(event.systemPromptOptions);
-        publishSubagentSettings(event.systemPromptOptions, effectiveSettings());
-    });
+    // Sections on a host that renders them; text only where it renders none.
+    // Returning a prompt on modern pi would set forceSystemPrompt, and the request
+    // would then carry a snapshot, so sections published after it never arrive.
+    pi.on("before_agent_start", (event) => deliverSubagentPrompt(event, effectiveSettings()));
 
     // ---- live-status lifecycle -----------------------------------------
     pi.on("agent_start", async (_event, ctx) => {

@@ -21,7 +21,7 @@ export interface PromptSectionTarget {
   sections?: Record<string, string>;
 }
 
-const EXECUTION_POLICY = [
+export const EXECUTION_POLICY_TEXT: string = [
   "Harness execution policy: concurrency is separate from subagent delegation.",
   "Before multi-unit work, identify ready, authorized, independent units, actual prerequisites, shared mutable resources, and capacity or availability constraints. Represent each independently verifiable deliverable as its own plan step; do not create dependencies from list order.",
   "Start all ready, authorized, non-conflicting units concurrently within known resource limits before waiting for any one to finish. Reassess ready work after launches and results; continue unblocked foreground work instead of polling running tasks. Do not equate one background launch with scheduling all ready work.",
@@ -34,6 +34,19 @@ const EXECUTION_POLICY = [
 ].join("\n");
 
 /**
+ * True when this pi runtime renders custom prompt sections.
+ *
+ * pi gained `systemPromptOptions.sections` after 0.84.4, and the packages here
+ * declare support back to 0.84.4. A section-only publisher is a silent no-op on
+ * an older host: the handler runs, the map is populated, and the prompt the model
+ * receives is unchanged. Callers must fall back to appending text instead.
+ */
+export function supportsPromptSections(options: unknown): boolean {
+  const sections = (options as { sections?: unknown } | undefined)?.sections;
+  return typeof sections === "object" && sections !== null;
+}
+
+/**
  * Publish the policy into `options.sections`.
  *
  * Assignment, not concatenation: two packages publishing the same section write
@@ -43,6 +56,6 @@ const EXECUTION_POLICY = [
 export function publishExecutionPolicy<T extends object>(options: T): T {
   const target = options as PromptSectionTarget;
   const sections = (target.sections ??= {});
-  sections[EXECUTION_POLICY_SECTION] = EXECUTION_POLICY;
+  sections[EXECUTION_POLICY_SECTION] = EXECUTION_POLICY_TEXT;
   return options;
 }

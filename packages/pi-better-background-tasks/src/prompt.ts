@@ -11,12 +11,14 @@
  */
 export const BACKGROUND_TASKS_SECTION = "background_tasks";
 
+import { EXECUTION_POLICY_TEXT, publishExecutionPolicy, supportsPromptSections } from "./shared-execution-policy.js";
+
 /** `sections` is optional because the repo typechecks against older pi typings. */
 export interface PromptSectionTarget {
   sections?: Record<string, string>;
 }
 
-const BACKGROUND_TASKS_PROMPT = [
+export const BACKGROUND_TASKS_PROMPT: string = [
   "Background tasks: never wait in the foreground.",
   "",
   "- Never use foreground `sleep` to wait or poll, whether alone, before another command, or inside a loop. The sole permitted foreground sleep is at most 3 s immediately after `pkill`, `kill`, or `systemctl stop`, while the process exits.",
@@ -39,4 +41,32 @@ export function publishBackgroundTasksGuidance<T extends object>(options: T): T 
   const sections = (target.sections ??= {});
   sections[BACKGROUND_TASKS_SECTION] = BACKGROUND_TASKS_PROMPT;
   return options;
+}
+
+/** What a handler receives; only these two fields are used. */
+export interface BeforeAgentStartEvent {
+  systemPrompt: string;
+  systemPromptOptions?: unknown;
+}
+
+/**
+ * Deliver this package's guidance on both kinds of host.
+ *
+ * Modern pi renders custom sections, so publishing keeps the prompt structured
+ * and lets pi diff it. Older pi (the packages declare support back to 0.84.4)
+ * renders no sections at all, so publishing there would silently deliver nothing;
+ * returning the text is the behaviour those hosts already had.
+ */
+export function deliverBackgroundTasksPrompt(event: BeforeAgentStartEvent): { systemPrompt: string } | undefined {
+  if (!supportsPromptSections(event.systemPromptOptions)) {
+    // Several packages carry the same policy, so appending blindly would print it
+    // once per publisher. The text path stays idempotent exactly as it used to be.
+    const policy = event.systemPrompt.includes(EXECUTION_POLICY_TEXT) ? "" : `${EXECUTION_POLICY_TEXT}\n\n`;
+    const guidance = event.systemPrompt.includes(BACKGROUND_TASKS_PROMPT) ? "" : BACKGROUND_TASKS_PROMPT;
+    return { systemPrompt: `${event.systemPrompt}\n\n${policy}${guidance}` };
+  }
+  const options = event.systemPromptOptions as { sections?: Record<string, string> };
+  publishExecutionPolicy(options);
+  publishBackgroundTasksGuidance(options);
+  return undefined;
 }

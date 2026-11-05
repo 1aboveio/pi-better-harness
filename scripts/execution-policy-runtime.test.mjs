@@ -93,6 +93,17 @@ async function harness(extensions, options = {}) {
     // handler mutating `sections` in place. A handler returning `systemPrompt`
     // would set forceSystemPrompt and make the prompt opaque, so it is recorded
     // as a violation instead of being honored.
+    // pi 0.84.4 accepts a handler that publishes a section and renders nothing,
+    // so this path must keep appending text instead of silently delivering nothing.
+    async promptLegacyHost(base = "Existing user and safety instructions.") {
+      const options = { selectedTools: [], hiddenTools: [], toolSnippets: {}, toolGuidelines: {}, promptGuidelines: [], appendSystemPrompt: "", contextFiles: [], skills: [], cwd: process.cwd() };
+      let systemPrompt = base;
+      for (const handler of handlers.get("before_agent_start") ?? []) {
+        const result = await handler({ systemPromptOptions: options, systemPrompt }, ctx);
+        if (result?.systemPrompt !== undefined) systemPrompt = result.systemPrompt;
+      }
+      return systemPrompt;
+    },
     async prompt(base = "Existing user and safety instructions.") {
       const options = { sections: {}, promptGuidelines: [], selectedTools: [], hiddenTools: [], toolSnippets: {}, toolGuidelines: {}, appendSystemPrompt: "", contextFiles: [], skills: [], cwd: process.cwd() };
       for (const handler of handlers.get("before_agent_start") ?? []) {
@@ -247,4 +258,30 @@ test("workflow ownership suppresses stale generic guidance but not the shared sa
   await assert.rejects(h.tools.get("update_todo").execute("overwrite", {
     todo: [{ step: "Unauthorized replacement", status: "in_progress" }],
   }, undefined, undefined, h.ctx), /owns the task plan/);
+});
+
+test("a host without section support still receives the guidance as appended text", async () => {
+  // Publishing alone is a silent no-op on pi versions that render no custom
+  // sections, and these packages declare support back to 0.84.4. The gate caught
+  // exactly this: Goal's pause instruction vanished from a real 0.84.4 session.
+  for (const order of [
+    [subagents, backgroundTasks, taskContext],
+    [backgroundTasks, subagents, taskContext],
+    [taskContext, backgroundTasks, subagents],
+  ]) {
+    const h = await harness(order);
+    const prompt = await h.promptLegacyHost();
+    assert.ok(prompt.startsWith("Existing user and safety instructions.\n\n"));
+    assert.equal(prompt.split(heading).length - 1, 1, "the policy is delivered once as text");
+    assert.match(prompt, /never wait in the foreground/, "the wait guidance survives without sections");
+    assert.match(prompt, /Delegation mode: adaptive/, "the delegation settings survive without sections");
+    assert.match(prompt, /Concurrency limit: 6/);
+  }
+});
+
+test("a modern host publishes sections and returns nothing", async () => {
+  const h = await harness([subagents, backgroundTasks, taskContext]);
+  await h.prompt();
+  assert.deepEqual(h.forced, [], "publishing must not also return a prompt");
+  assert.ok(h.sections().size >= 3, "the sections are populated instead");
 });

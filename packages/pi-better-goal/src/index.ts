@@ -1361,14 +1361,12 @@ export default function (pi: ExtensionAPI): void {
         (permissions.blockers.length === 0 ? "\nBlocker evidence is unavailable. Stay held; do not invent a retry scope." : "") : "";
     // A held goal overrides workflow ownership without invoking or invalidating that workflow.
     if (permissionPrompt && goal?.status === "paused") {
-      publishGoalGuidance(event.systemPromptOptions, permissionPrompt);
-      return;
+      return publishGoalGuidance(event, permissionPrompt);
     }
     const pausedInstruction = permissionPrompt || (goal?.status === "paused" && (goal.pauseReason === "interrupt" || goal.pauseReason === "handback")
       ? pausedGoalPrompt(goal, preferences.conversationalResume, !harnessPresent) : "");
     if (!isPokeable(goal) && !owner) {
-      publishGoalGuidance(event.systemPromptOptions, pausedInstruction);
-      return;
+      return publishGoalGuidance(event, pausedInstruction);
     }
 
     const questionInstruction = snapshot.backgroundRunning
@@ -1382,19 +1380,17 @@ export default function (pi: ExtensionAPI): void {
       if (!workflowAvailable(owner)) {
         if (isPokeable(goal)) setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
         recordWorkflow(null);
-        publishGoalGuidance(event.systemPromptOptions, `Workflow ${owner.name} is no longer a registered, valid skill. Stop work and ask the user to reinvoke the skill.`);
-        return;
+        return publishGoalGuidance(event, `Workflow ${owner.name} is no longer a registered, valid skill. Stop work and ask the user to reinvoke the skill.`);
       }
       let instructions: string;
       try {
         instructions = readFileSync(owner.path, "utf8");
       } catch {
         if (isPokeable(goal)) setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
-        publishGoalGuidance(event.systemPromptOptions, `Workflow ${owner.name} is unavailable. Stop work and ask the user to restore or reinvoke the skill.`);
-        return;
+        return publishGoalGuidance(event, `Workflow ${owner.name} is unavailable. Stop work and ask the user to restore or reinvoke the skill.`);
       }
-      publishGoalGuidance(
-        event.systemPromptOptions,
+      return publishGoalGuidance(
+        event,
         pausedInstruction &&
           `${pausedInstruction}\n` + (permissionPrompt
             ? "These permission constraints override the workflow instructions below.\n\n"
@@ -1406,7 +1402,6 @@ export default function (pi: ExtensionAPI): void {
         questionInstruction && questionInstruction.trim(),
         heldInstruction,
       );
-      return;
     }
 
     if (!isPokeable(goal)) return;
@@ -1416,17 +1411,16 @@ export default function (pi: ExtensionAPI): void {
     if (harnessPresent) {
       // Harness owns the outcome text. Retain only the Goal-specific guidance
       // that the Outcome & Todo prompt cannot replace.
-      publishGoalGuidance(
-        event.systemPromptOptions,
+      return publishGoalGuidance(
+        event,
         heldInstruction,
         backgroundInstruction.trim(),
         questionInstruction.trim(),
         permissionPrompt,
       );
-      return;
     }
-    publishGoalGuidance(
-      event.systemPromptOptions,
+    return publishGoalGuidance(
+      event,
       `Pi Better Goal active objective: ${goal.objective}. ${heldInstruction || "Keep working through clear low-risk next steps, and mark complete only after an evidence-backed completion audit."}${backgroundInstruction}${questionInstruction}`,
       permissionPrompt,
     );

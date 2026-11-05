@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { delegationPrompt, type DelegationMode } from "./delegation.ts";
 
+import { EXECUTION_POLICY_TEXT, publishExecutionPolicy, supportsPromptSections } from "./shared-execution-policy.ts";
+
 export const SUBAGENT_SETTINGS_CONTEXT = "pi-better-subagents-settings";
 
 export interface EffectiveSubagentSettings {
@@ -105,4 +107,31 @@ export function subagentSettingsTool(Type: any, read: () => EffectiveSubagentSet
                 details: settings, structuredContent: settings };
         },
     };
+}
+/** What a handler receives; only these two fields are used. */
+export interface BeforeAgentStartEvent {
+    systemPrompt: string;
+    systemPromptOptions?: unknown;
+}
+
+/**
+ * Deliver the policy and the settings on both kinds of host.
+ *
+ * pi before 0.84.4+ renders no custom sections, so publishing alone would
+ * deliver nothing on a host this package still declares support for. There the
+ * guidance is appended as text, which is what those hosts did before sections.
+ */
+export function deliverSubagentPrompt(event: BeforeAgentStartEvent, settings: EffectiveSubagentSettings): { systemPrompt: string } | undefined {
+    if (!supportsPromptSections(event.systemPromptOptions)) {
+        // Both packages carry this policy, so appending blindly would print it
+        // once per publisher; keep the text path idempotent as it used to be.
+        const policy = event.systemPrompt.includes(EXECUTION_POLICY_TEXT) ? "" : `${EXECUTION_POLICY_TEXT}\n\n`;
+        const block = `${SUBAGENT_DELEGATION_NOTE}\n\n${formatSubagentSettings(settings)}`;
+        const guidance = event.systemPrompt.includes(block) ? "" : block;
+        return { systemPrompt: `${event.systemPrompt}\n\n${policy}${guidance}` };
+    }
+    const options = event.systemPromptOptions as PromptSectionTarget;
+    publishExecutionPolicy(options);
+    publishSubagentSettings(options, settings);
+    return undefined;
 }
