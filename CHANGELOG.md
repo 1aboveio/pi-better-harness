@@ -4,6 +4,41 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.40.2] - 2026-11-05
+
+### Fixed
+
+- Bundle Background Tasks 0.14.2, Subagents 0.27.2, and Goal 0.12.1, which deliver their system-prompt guidance as named sections instead of returning a whole prompt.
+- Publish the execution policy as the `harness_execution_policy` section, and trim the policy and wait guidance to instructions: no rationale, no worked examples, and no defaults the tool schemas already state. Harness prompt sections fall from 7,026 to about 5,200 characters while the sleep prohibition, the tool mapping, and the launch-is-not-completion rule remain.
+- Remove a stale, unvendored copy of the execution policy under `extensions/task-context/`. The generator never wrote it, so it had drifted.
+- Keep the previous text append on pi versions that render no custom sections. Sections are a later pi feature, and these packages still declare support back to 0.84.4, where publishing a section delivers nothing at all. Real 0.84.4 coverage caught Goal's pause instruction disappearing entirely.
+
+## [pi-better-background-tasks@0.14.2] - 2026-11-05
+
+### Added
+
+- Publish the foreground-wait guidance as a `background_tasks` system-prompt section instead of relying on an unversioned append file that no install could reproduce. The section names the shapes that produced multi-minute foreground sleeps — a sleep on its own, before another command, or inside a loop — maps each wait to `bg_task_watch`, `bg_task_spawn` plus `wait_for_operations`, or `watch_delivery`, and restores the explicit `nohup`/`&`/`disown` prohibition.
+
+### Fixed
+
+- Stop appending the execution policy to the prompt text. A `before_agent_start` handler that returns `systemPrompt` sets `forceSystemPrompt`, so the request carries an opaque rendered snapshot and any section published later never reaches the model. The policy is now an assignment to `harness_execution_policy`, which keeps one copy in any load order. On a host without section support the policy and the wait guidance are appended as text instead, idempotently, so an older host receives exactly what it received before.
+
+## [pi-better-subagents@0.27.2] - 2026-11-05
+
+### Fixed
+
+- Publish the delegation settings and the worker handoff contract as the `subagents` and `worker_handoff` sections. Returning a whole prompt to deliver them set `forceSystemPrompt` and hid every section published after it.
+- Stop claiming the settings block sits at the end of the prompt. Custom sections render in publication order, so Background Tasks follows it; the note now names its own section.
+- Append the settings and the policy as text on hosts that render no custom sections, so support back to 0.84.4 is unchanged.
+
+## [pi-better-goal@0.12.1] - 2026-11-05
+
+### Fixed
+
+- Publish goal and workflow guidance as the `goal` section instead of returning a whole prompt, which suppressed every other package's section. Branch conditions, ordering, and text are unchanged.
+- Fail the test helper when a handler returns `systemPrompt`, so a regression that hides sections cannot pass. The helper previously rendered sections from the options object and ignored the return value.
+- Append the guidance as text on hosts that render no custom sections. Goal's real 0.84.4 end-to-end session in CI caught the pause instruction vanishing when it was delivered only as a section.
+
 ## [pi-better-harness@0.40.1] - 2026-11-04
 
 ### Fixed

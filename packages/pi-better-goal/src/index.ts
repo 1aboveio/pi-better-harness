@@ -30,6 +30,7 @@ import {
 } from "./goal-state.js";
 import { continuationEvidence, type ContinuationEvidence } from "./continuation.js";
 import { currentPermissionHold, logicalPermissionBlockerKey, MAX_PERMISSION_BLOCKERS, MAX_PERMISSION_RECORDS, permissionHoldRecord, permissionInstruction, permissionRecord, reportedPermissionBlockers, reportedPermissionGap, type PermissionHold } from "./permission-hold.js";
+import { publishGoalGuidance } from "./prompt.js";
 import { observeGoalStall } from "./stall.js";
 import {
   flattenObjectiveForRail,
@@ -1360,12 +1361,12 @@ export default function (pi: ExtensionAPI): void {
         (permissions.blockers.length === 0 ? "\nBlocker evidence is unavailable. Stay held; do not invent a retry scope." : "") : "";
     // A held goal overrides workflow ownership without invoking or invalidating that workflow.
     if (permissionPrompt && goal?.status === "paused") {
-      return { systemPrompt: `${event.systemPrompt}\n\n${permissionPrompt}` };
+      return publishGoalGuidance(event, permissionPrompt);
     }
     const pausedInstruction = permissionPrompt || (goal?.status === "paused" && (goal.pauseReason === "interrupt" || goal.pauseReason === "handback")
       ? pausedGoalPrompt(goal, preferences.conversationalResume, !harnessPresent) : "");
     if (!isPokeable(goal) && !owner) {
-      return pausedInstruction ? { systemPrompt: `${event.systemPrompt}\n\n${pausedInstruction}` } : undefined;
+      return publishGoalGuidance(event, pausedInstruction);
     }
 
     const questionInstruction = snapshot.backgroundRunning
@@ -1379,31 +1380,28 @@ export default function (pi: ExtensionAPI): void {
       if (!workflowAvailable(owner)) {
         if (isPokeable(goal)) setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
         recordWorkflow(null);
-        return { systemPrompt: `${event.systemPrompt}\n\nWorkflow ${owner.name} is no longer a registered, valid skill. Stop work and ask the user to reinvoke the skill.` };
+        return publishGoalGuidance(event, `Workflow ${owner.name} is no longer a registered, valid skill. Stop work and ask the user to reinvoke the skill.`);
       }
       let instructions: string;
       try {
         instructions = readFileSync(owner.path, "utf8");
       } catch {
         if (isPokeable(goal)) setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
-        return { systemPrompt: `${event.systemPrompt}\n\nWorkflow ${owner.name} is unavailable. Stop work and ask the user to restore or reinvoke the skill.` };
+        return publishGoalGuidance(event, `Workflow ${owner.name} is unavailable. Stop work and ask the user to restore or reinvoke the skill.`);
       }
-      return {
-        systemPrompt: `${event.systemPrompt}\n\n` +
-          (pausedInstruction
-            ? `${pausedInstruction}\n` + (permissionPrompt
-              ? "These permission constraints override the workflow instructions below.\n\n"
-              : "While the goal is paused, this overrides the workflow instructions below: do not advance the workflow until the goal is resumed.\n\n")
-            : "") +
-          `Active workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}` +
-          (isPokeable(goal)
-            ? harnessPresent
-              ? "\n\nComplete the goal only after the workflow completion audit."
-              : `\n\nActive objective: ${goal.objective}. Complete it only after the workflow completion audit.`
-            : "") +
-          (questionInstruction ? `\n\n${questionInstruction.trim()}` : "") +
-          (heldInstruction ? `\n\n${heldInstruction}` : ""),
-      };
+      return publishGoalGuidance(
+        event,
+        pausedInstruction &&
+          `${pausedInstruction}\n` + (permissionPrompt
+            ? "These permission constraints override the workflow instructions below.\n\n"
+            : "While the goal is paused, this overrides the workflow instructions below: do not advance the workflow until the goal is resumed.\n\n"),
+        `Active workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}`,
+        isPokeable(goal) && (harnessPresent
+          ? "Complete the goal only after the workflow completion audit."
+          : `Active objective: ${goal.objective}. Complete it only after the workflow completion audit.`),
+        questionInstruction && questionInstruction.trim(),
+        heldInstruction,
+      );
     }
 
     if (!isPokeable(goal)) return;
@@ -1413,18 +1411,19 @@ export default function (pi: ExtensionAPI): void {
     if (harnessPresent) {
       // Harness owns the outcome text. Retain only the Goal-specific guidance
       // that the Outcome & Todo prompt cannot replace.
-      const retained = [heldInstruction, backgroundInstruction.trim(), questionInstruction.trim(), permissionPrompt]
-        .filter((part) => part.length > 0);
-      return retained.length > 0
-        ? { systemPrompt: `${event.systemPrompt}\n\n${retained.join("\n\n")}` }
-        : undefined;
+      return publishGoalGuidance(
+        event,
+        heldInstruction,
+        backgroundInstruction.trim(),
+        questionInstruction.trim(),
+        permissionPrompt,
+      );
     }
-    return {
-      systemPrompt:
-        `${event.systemPrompt}\n\n` +
-        `Pi Better Goal active objective: ${goal.objective}. ${heldInstruction || "Keep working through clear low-risk next steps, and mark complete only after an evidence-backed completion audit."}${backgroundInstruction}${questionInstruction}` +
-        (permissionPrompt ? `\n\n${permissionPrompt}` : ""),
-    };
+    return publishGoalGuidance(
+      event,
+      `Pi Better Goal active objective: ${goal.objective}. ${heldInstruction || "Keep working through clear low-risk next steps, and mark complete only after an evidence-backed completion audit."}${backgroundInstruction}${questionInstruction}`,
+      permissionPrompt,
+    );
   });
 
   pi.on("agent_start", async (_event, ctx) => {

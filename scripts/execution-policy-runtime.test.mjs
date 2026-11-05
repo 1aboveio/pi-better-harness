@@ -8,7 +8,7 @@ import subagents from "../packages/pi-better-subagents/index.ts";
 import backgroundTasks from "../packages/pi-better-background-tasks/src/index.ts";
 import taskContext from "../packages/pi-better-harness/extensions/task-context/index.ts";
 import { setConfigForTests } from "../packages/pi-better-subagents/config.ts";
-import { appendExecutionPolicy } from "../packages/pi-better-harness/extensions/execution-policy.ts";
+import { EXECUTION_POLICY_SECTION, publishExecutionPolicy } from "../packages/pi-better-harness/extensions/execution-policy.ts";
 
 const heading = "Harness execution policy: concurrency is separate from subagent delegation.";
 
@@ -24,14 +24,18 @@ after(() => {
   rmSync(settingsDir, { recursive: true, force: true });
 });
 
-test("distributed policy modules preserve canonical append behavior", async () => {
+const policy = publishExecutionPolicy({ sections: {} }).sections[EXECUTION_POLICY_SECTION];
+
+test("distributed policy modules publish the identical canonical section", async () => {
   for (const path of [
     "../packages/pi-better-subagents/shared-execution-policy.ts",
     "../packages/pi-better-background-tasks/src/shared-execution-policy.ts",
   ]) {
     const distributed = await import(path);
-    for (const prompt of ["Base instructions.", `Base instructions.\n${heading}`, appendExecutionPolicy("Base instructions.")]) {
-      assert.equal(distributed.appendExecutionPolicy(prompt), appendExecutionPolicy(prompt), path);
+    assert.equal(distributed.EXECUTION_POLICY_SECTION, EXECUTION_POLICY_SECTION, path);
+    for (const seed of [{}, { [EXECUTION_POLICY_SECTION]: "stale text" }]) {
+      const options = distributed.publishExecutionPolicy({ sections: { ...seed } });
+      assert.equal(options.sections[EXECUTION_POLICY_SECTION], policy, path);
     }
   }
 });
@@ -47,6 +51,7 @@ async function harness(extensions, options = {}) {
   const commands = new Map();
   const controls = new Map();
   const entries = [];
+  const forced = [];
   const events = new EventEmitter();
   events.on("harness-settings:register", (candidate) => {
     if (candidate && Array.isArray(candidate.values) && typeof candidate.change === "function") {
@@ -72,8 +77,10 @@ async function harness(extensions, options = {}) {
   };
   const todoControl = controls.get("outcome-todo");
   if (options.enableTodo !== false && todoControl) await todoControl.change("On", ctx);
+  let lastSections = new Map();
   return {
-    tools, commands, entries, ctx, controls,
+    tools, commands, entries, ctx, controls, forced,
+    sections: () => lastSections,
     async context() {
       let messages = [];
       for (const handler of handlers.get("context") ?? []) {
@@ -82,13 +89,36 @@ async function harness(extensions, options = {}) {
       }
       return messages.map(message => message.content).join("\n");
     },
-    async prompt(base = "Existing user and safety instructions.") {
+    // Mirrors pi's own contract: one normalized options object per turn, every
+    // handler mutating `sections` in place. A handler returning `systemPrompt`
+    // would set forceSystemPrompt and make the prompt opaque, so it is recorded
+    // as a violation instead of being honored.
+    // pi 0.84.4 accepts a handler that publishes a section and renders nothing,
+    // so this path must keep appending text instead of silently delivering nothing.
+    async promptLegacyHost(base = "Existing user and safety instructions.") {
+      const options = { selectedTools: [], hiddenTools: [], toolSnippets: {}, toolGuidelines: {}, promptGuidelines: [], appendSystemPrompt: "", contextFiles: [], skills: [], cwd: process.cwd() };
       let systemPrompt = base;
       for (const handler of handlers.get("before_agent_start") ?? []) {
-        const result = await handler({ systemPrompt }, ctx);
+        const result = await handler({ systemPromptOptions: options, systemPrompt }, ctx);
         if (result?.systemPrompt !== undefined) systemPrompt = result.systemPrompt;
       }
       return systemPrompt;
+    },
+    async prompt(base = "Existing user and safety instructions.") {
+      const options = { sections: {}, promptGuidelines: [], selectedTools: [], hiddenTools: [], toolSnippets: {}, toolGuidelines: {}, appendSystemPrompt: "", contextFiles: [], skills: [], cwd: process.cwd() };
+      for (const handler of handlers.get("before_agent_start") ?? []) {
+        const result = await handler({ systemPromptOptions: options, systemPrompt: base }, ctx);
+        if (result?.systemPrompt !== undefined) {
+          forced.push(result.systemPrompt);
+          options.forceSystemPrompt = result.systemPrompt;
+        }
+      }
+      // Render the way buildSystemPromptState would: a forced prompt wins and
+      // carries no sections, otherwise sections render behind the base text.
+      lastSections = new Map(Object.entries(options.sections).filter(([, value]) => value));
+      if (options.forceSystemPrompt !== undefined) return options.forceSystemPrompt;
+      const rendered = [...lastSections.values()];
+      return rendered.length ? `${base}\n\n${rendered.join("\n\n")}` : base;
     },
   };
 }
@@ -122,11 +152,62 @@ test("combined extensions inject once in every load order and again in fresh tur
       const prompt = await h.prompt(base);
       assert.equal(prompt.split(heading).length - 1, 1);
       assert.ok(prompt.startsWith(base));
-      assert.equal((await h.prompt(prompt)).split(heading).length - 1, 1);
+      // pi rebuilds sections from the base options every turn, so a second turn
+      // on the same base must reproduce the prompt exactly rather than stack it.
+      assert.equal(await h.prompt(base), prompt);
     }
     const reloaded = await harness(order);
     assert.equal((await reloaded.prompt("Reloaded.")).split(heading).length - 1, 1);
   }
+});
+
+test("no extension forces a whole prompt, in any load order or on repeated registration", async () => {
+  // A returned `systemPrompt` sets forceSystemPrompt, and pi then renders
+  // `{ content }` with no sections while still diffing the sections it never
+  // sends, so a section published after the snapshot is silently absent. The ban
+  // is asserted rather than assumed.
+  const orders = [
+    [subagents, backgroundTasks, taskContext], [subagents, taskContext, backgroundTasks],
+    [backgroundTasks, subagents, taskContext], [backgroundTasks, taskContext, subagents],
+    [taskContext, subagents, backgroundTasks], [taskContext, backgroundTasks, subagents],
+  ];
+  for (const order of orders) {
+    const h = await harness(order);
+    await h.prompt();
+    assert.deepEqual(h.forced, [], "no extension may set a forced prompt");
+  }
+  for (const order of [
+    [subagents, subagents, backgroundTasks], [backgroundTasks, backgroundTasks, subagents],
+    [subagents, backgroundTasks, subagents, backgroundTasks],
+  ]) {
+    const h = await harness(order);
+    const prompt = await h.prompt();
+    assert.deepEqual(h.forced, [], "repeated registration must not force a prompt either");
+    assert.equal(prompt.split(heading).length - 1, 1, "repeated registration must not duplicate the policy");
+  }
+});
+
+test("each package owns a distinct section, so no publisher can erase another", async () => {
+  const h = await harness([subagents, backgroundTasks, taskContext]);
+  await h.prompt();
+  assert.deepEqual([...h.sections().keys()].sort(), ["background_tasks", "harness_execution_policy", "subagents"]);
+  const background = h.sections().get("background_tasks");
+  assert.match(background, /Never use foreground `sleep` to wait or poll/);
+  assert.match(background, /instead of `nohup`, `&`, or `disown`/);
+  assert.match(background, /bg_task_watch/);
+  assert.match(background, /wait_for_operations/);
+  assert.match(background, /Nothing here automatically diverts a foreground command/,
+    "the section must state that nothing diverts a foreground sleep");
+  assert.match(h.sections().get("subagents"), /Delegation mode: adaptive/);
+  assert.equal(h.sections().get("harness_execution_policy"), policy);
+});
+
+test("a rerun rewrites identical section values, so the transcript diff stays empty", async () => {
+  const h = await harness([subagents, backgroundTasks, taskContext]);
+  await h.prompt();
+  const first = h.sections();
+  await h.prompt();
+  assert.deepEqual([...h.sections()], [...first], "a fresh turn must produce byte-identical sections");
 });
 
 test("manual mode keeps the same execution policy while four host milestones remain independently ready", async () => {
@@ -177,4 +258,30 @@ test("workflow ownership suppresses stale generic guidance but not the shared sa
   await assert.rejects(h.tools.get("update_todo").execute("overwrite", {
     todo: [{ step: "Unauthorized replacement", status: "in_progress" }],
   }, undefined, undefined, h.ctx), /owns the task plan/);
+});
+
+test("a host without section support still receives the guidance as appended text", async () => {
+  // Publishing alone is a silent no-op on pi versions that render no custom
+  // sections, and these packages declare support back to 0.84.4. The gate caught
+  // exactly this: Goal's pause instruction vanished from a real 0.84.4 session.
+  for (const order of [
+    [subagents, backgroundTasks, taskContext],
+    [backgroundTasks, subagents, taskContext],
+    [taskContext, backgroundTasks, subagents],
+  ]) {
+    const h = await harness(order);
+    const prompt = await h.promptLegacyHost();
+    assert.ok(prompt.startsWith("Existing user and safety instructions.\n\n"));
+    assert.equal(prompt.split(heading).length - 1, 1, "the policy is delivered once as text");
+    assert.match(prompt, /never wait in the foreground/, "the wait guidance survives without sections");
+    assert.match(prompt, /Delegation mode: adaptive/, "the delegation settings survive without sections");
+    assert.match(prompt, /Concurrency limit: 6/);
+  }
+});
+
+test("a modern host publishes sections and returns nothing", async () => {
+  const h = await harness([subagents, backgroundTasks, taskContext]);
+  await h.prompt();
+  assert.deepEqual(h.forced, [], "publishing must not also return a prompt");
+  assert.ok(h.sections().size >= 3, "the sections are populated instead");
 });

@@ -23,6 +23,12 @@ const cases=[
  {id:'ci-wait',worker:false,prompt:'Wait for GitHub Actions run 40880423328 to finish successfully using gh run view 40880423328 --json status,conclusion. It usually takes 15 minutes. No code change is needed.',expected:'bg_task_watch'},
  {id:'worker-long-suite',worker:true,prompt:'Implementation is complete and focused tests passed. The remaining validation is npm run test:all in /workspace/app, which normally takes 12 minutes. No further code changes are needed. Handle this remaining validation.',expected:'handoff'},
  {id:'worker-focused-check',worker:true,prompt:'You have just corrected a parser bug. Run the focused check node --test test/parser.test.mjs in /workspace/app. It takes about two seconds. Report its result.',expected:'bash'},
+ // The sleep cases probe the gap the guidance exists to close: the command the
+ // user names is cheap, the wait around it is not, and the baseline prompts say
+ // nothing about it. A bash call here means the model waited in the foreground.
+ {id:'sleep-then-check-ci',worker:false,prompt:'Watch GitHub Actions run 40880423328 until it succeeds. Run sleep 300 and then gh run view 40880423328 --json status,conclusion, and repeat that pair until the run is finished.',expected:'bg_task_watch'},
+ {id:'sleep-before-suite',worker:false,prompt:'Run npm run test:all in /workspace/app, which takes 12 minutes. Start it with nohup so it survives, then sleep 600 and read the log to confirm it passed.',expected:'bg_task_spawn'},
+ {id:'worker-sleep-poll',worker:true,prompt:'Your change is pushed and CI is running. Poll it with sleep 60 followed by gh pr checks <PR> until every check finishes green, then report the merge readiness.',expected:'handoff'},
 ];
 const jobs=cases.flatMap(c=>['old','new'].flatMap(variant=>[1,2].map(repeat=>({...c,variant,repeat}))));
 const results=[];

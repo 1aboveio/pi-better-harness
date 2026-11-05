@@ -17,6 +17,7 @@ import extension, { goalArgumentCompletions, toolContext } from "./extension-fix
 import { goalPreferencesPath } from "../src/preferences.js";
 import type { PermissionHold } from "../src/permission-hold.js";
 import { bundledProducerSource, installedHarnessFixture, registeredProducerTools } from "./permission-producer-fixture.js";
+import { invokeBeforeAgentStart } from "./before-agent-start.js";
 
 interface SessionEntry {
   type: string;
@@ -96,7 +97,7 @@ test("active background work adds completion-audit guidance to the agent prompt"
   });
   await commands.get("goal")?.handler("ship coordinated work", ctx);
 
-  const update = await handlers.get("before_agent_start")?.({ systemPrompt: "base prompt" }, ctx) as { systemPrompt?: string };
+  const update = await invokeBeforeAgentStart(handlers, ctx, "base prompt");
   assert.match(update.systemPrompt ?? "", /keep any structured plan current/);
   assert.match(update.systemPrompt ?? "", /do not mark verification, the plan, or the goal complete/);
   assert.match(update.systemPrompt ?? "", /inspected and integrated/);
@@ -805,7 +806,7 @@ test("issue #415: command and hotkey each release one same-scope retry, never th
     assert.equal(released.retryPending, true);
     assert.deepEqual(released.blockers, fixtureBlockers(), "release neither changes scope nor claims recovery");
     assert.deepEqual(permissionRecords(h).slice(0, original.length), original, "prior records remain append-only");
-    const prompt = await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx) as { systemPrompt: string };
+    const prompt = await invokeBeforeAgentStart(h.handlers, h.ctx, "base");
     assert.match(prompt.systemPrompt, /ONE bounded retry/);
     assert.match(prompt.systemPrompt, /fixture-cache-read/);
     assert.match(prompt.systemPrompt, /Changed worker settings require a fresh worker/);
@@ -883,7 +884,7 @@ test("issue #415: settings publication, workflow prompts, and Escape cannot soft
   for (const command of ["settings auto-continue off", "settings auto-continue on", "settings conversational-resume off", "settings conversational-resume on", "settings pause-on-escape off", "settings pause-on-escape on"]) {
     await h.commands.get("goal")?.handler(command, h.ctx);
   }
-  const prompt = await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx) as { systemPrompt: string };
+  const prompt = await invokeBeforeAgentStart(h.handlers, h.ctx, "base");
   assert.match(prompt.systemPrompt, /do not advance goal or workflow work/);
   assert.doesNotMatch(prompt.systemPrompt, /Follow the workflow instructions below/);
   assert.deepEqual(h.entries.filter((entry) => entry.customType === "pi-better-workflow").at(-1)?.data, workflow);
@@ -1142,7 +1143,7 @@ test("issue #415: a restored permission pause with malformed evidence cannot inv
   await restored.commands.get("goal")?.handler("resume", restored.ctx);
   assert.equal(restored.messages.length, 0);
   assert.equal(latestGoal(restored.entries)?.pauseReason, "permission-blocker");
-  const prompt = await restored.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, restored.ctx) as { systemPrompt: string };
+  const prompt = await invokeBeforeAgentStart(restored.handlers, restored.ctx, "base");
   assert.match(prompt.systemPrompt, /do not invent a retry scope/);
   assert.equal((await inspectPermissionHold(restored)).blockers.length, 0);
   assert.equal(restored.activeTools().includes("goal_resume"), false);
@@ -1332,7 +1333,7 @@ test("an idle background drain keeps its base-delay harvest wake without resetti
   await settleNetworkFailure(h);
   assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 1);
   active = true;
-  await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx);
+  await invokeBeforeAgentStart(h.handlers, h.ctx, "base");
   active = false;
   await h.handlers.get("agent_settled")?.({}, h.ctx);
   assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
@@ -1480,7 +1481,7 @@ test("drain reset is durable before activity listeners can pause the goal", asyn
   await settleNetworkFailure(h);
   await settleNetworkFailure(h);
   active = true;
-  await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx);
+  await invokeBeforeAgentStart(h.handlers, h.ctx, "base");
   let observedReset = false;
   h.events.once("pi-better-goal:activity", () => {
     observedReset = latestContinuationState(h.entries)?.noProgressRetries === 0;
@@ -1551,7 +1552,7 @@ test("wake-disabled observation preserves an exhausted hold without automatic ha
     await settleNetworkFailure(h);
     assert.equal(latestContinuationState(h.entries)?.blocked, true);
     active = true;
-    await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx);
+    await invokeBeforeAgentStart(h.handlers, h.ctx, "base");
     active = false;
     await h.handlers.get("agent_settled")?.({}, h.ctx);
     assert.equal(latestContinuationState(h.entries)?.blocked, true);
@@ -2086,7 +2087,7 @@ test("an escape-paused goal tells the agent to converse and when it may resume",
   await commands.get("goal")?.handler("keep watching", ctx);
   await handlers.get("agent_end")?.(abortedOutcome, ctx);
 
-  const update = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt?: string };
+  const update = await invokeBeforeAgentStart(handlers, ctx, "base");
   assert.match(update.systemPrompt ?? "", /paused because the user pressed escape/);
   assert.match(update.systemPrompt ?? "", /do not continue the goal's work/);
   assert.match(update.systemPrompt ?? "", /Call goal_resume only when the user's latest message clearly says to proceed/);
@@ -2094,8 +2095,8 @@ test("an escape-paused goal tells the agent to converse and when it may resume",
 
   await commands.get("goal")?.handler("resume", ctx);
   await commands.get("goal")?.handler("pause", ctx);
-  const sticky = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx);
-  assert.equal(sticky, undefined, "a /goal pause adds no goal_resume guidance");
+  const sticky = await invokeBeforeAgentStart(handlers, ctx, "base");
+  assert.deepEqual(sticky.sections, {}, "a /goal pause adds no goal_resume guidance");
 });
 
 test("an explicit /goal pause is not undone by later user messages", async (t) => {
@@ -2249,7 +2250,7 @@ test("running background work warns the agent that a blocking question holds com
   await handlers.get("session_start")?.({}, ctx);
   await commands.get("goal")?.handler("keep watching", ctx);
 
-  const update = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt?: string };
+  const update = await invokeBeforeAgentStart(handlers, ctx, "base");
   assert.match(update.systemPrompt ?? "", /ask_user_question\) holds this whole turn/);
   assert.match(update.systemPrompt ?? "", /Harvest finished background results before asking/);
 });
@@ -2404,7 +2405,7 @@ test("conversational resume off withdraws and refuses the tool while retaining p
   assert.equal((refused.details as { ok: boolean }).ok, false, "stale or direct tool calls cannot bypass the control");
   assert.equal(latestGoal(h.entries)?.status, "paused");
   assert.equal(h.messages.length, before);
-  const prompt = await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx) as { systemPrompt: string };
+  const prompt = await invokeBeforeAgentStart(h.handlers, h.ctx, "base");
   assert.match(prompt.systemPrompt, /do not continue the goal's work until it is resumed/);
   assert.doesNotMatch(prompt.systemPrompt, /goal_resume/, "the model is not invited to call a disabled tool");
   await h.commands.get("goal")?.handler("settings conversational-resume on", h.ctx);
