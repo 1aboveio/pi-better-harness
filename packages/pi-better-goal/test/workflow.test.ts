@@ -10,7 +10,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import extension, { toolContext } from "./extension-fixture.js";
 import { currentGoalSnapshot } from "../src/goal-state.js";
 import { currentWorkflowOwner, skillCommandName, workflowOwnerFromSkill } from "../src/workflow.js";
-import { invokeBeforeAgentStart } from "./before-agent-start.ts";
+import { invokeBeforeAgentStart } from "./before-agent-start.js";
 
 test("workflow metadata opts in through Pi's skill command provenance", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });

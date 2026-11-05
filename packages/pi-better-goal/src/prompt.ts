@@ -21,10 +21,11 @@ export interface PromptSectionTarget {
  * every `before_agent_start`, so this never accumulates between requests; within a
  * single turn the parts belong together and keep their order.
  */
-export function publishGoalGuidance<T extends PromptSectionTarget>(options: T, ...parts: Array<string | undefined | false>): T {
+export function publishGoalGuidance<T extends object>(options: T, ...parts: Array<string | undefined | false>): T {
   const text = parts.filter((part): part is string => typeof part === "string" && part.trim().length > 0).join("\n\n");
   if (!text) return options;
-  const sections = (options.sections ??= {});
+  const target = options as PromptSectionTarget;
+  const sections = (target.sections ??= {});
   const existing = sections[GOAL_SECTION];
   sections[GOAL_SECTION] = existing ? `${existing}\n\n${text}` : text;
   return options;

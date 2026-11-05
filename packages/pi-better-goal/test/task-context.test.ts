@@ -11,7 +11,7 @@ import extension from "./extension-fixture.js";
 import { continuationStateEntry, createContinuationState, createGoalSnapshot, goalSetEntry } from "../src/goal-state.js";
 import { ACTIVE_GOAL_REFRESH_MS } from "../src/goal-clock.js";
 import type { TaskContextRequest } from "../src/task-context.js";
-import { invokeBeforeAgentStart } from "./before-agent-start.ts";
+import { invokeBeforeAgentStart } from "./before-agent-start.js";
 
 interface SessionEntry {
   type: string;

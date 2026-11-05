@@ -40,8 +40,9 @@ const EXECUTION_POLICY = [
  * identical text, so load order cannot duplicate or drop it, and a repeated turn
  * rewrites the same value so pi's section diff reports no change.
  */
-export function publishExecutionPolicy<T extends PromptSectionTarget>(options: T): T {
-  const sections = (options.sections ??= {});
+export function publishExecutionPolicy<T extends object>(options: T): T {
+  const target = options as PromptSectionTarget;
+  const sections = (target.sections ??= {});
   sections[EXECUTION_POLICY_SECTION] = EXECUTION_POLICY;
   return options;
 }

@@ -34,8 +34,9 @@ const BACKGROUND_TASKS_PROMPT = [
 ].join("\n");
 
 /** Publish the guidance into `options.sections`; assignment keeps it idempotent across turns. */
-export function publishBackgroundTasksGuidance<T extends PromptSectionTarget>(options: T): T {
-  const sections = (options.sections ??= {});
+export function publishBackgroundTasksGuidance<T extends object>(options: T): T {
+  const target = options as PromptSectionTarget;
+  const sections = (target.sections ??= {});
   sections[BACKGROUND_TASKS_SECTION] = BACKGROUND_TASKS_PROMPT;
   return options;
 }

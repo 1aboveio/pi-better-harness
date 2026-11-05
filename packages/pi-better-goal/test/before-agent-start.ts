@@ -10,7 +10,7 @@
  * where the old appended string did.
  */
 export async function invokeBeforeAgentStart(
-  handlers: { get(event: string): ((event: unknown, ctx: unknown) => unknown) | undefined },
+  handlers: { get(event: string): ((...args: any[]) => unknown) | undefined },
   ctx: unknown,
   base = "base",
 ): Promise<{ systemPrompt: string; sections: Record<string, string> }> {

@@ -17,7 +17,7 @@ import extension, { goalArgumentCompletions, toolContext } from "./extension-fix
 import { goalPreferencesPath } from "../src/preferences.js";
 import type { PermissionHold } from "../src/permission-hold.js";
 import { bundledProducerSource, installedHarnessFixture, registeredProducerTools } from "./permission-producer-fixture.js";
-import { invokeBeforeAgentStart } from "./before-agent-start.ts";
+import { invokeBeforeAgentStart } from "./before-agent-start.js";
 
 interface SessionEntry {
   type: string;
