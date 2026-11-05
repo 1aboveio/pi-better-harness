@@ -26,7 +26,7 @@ const BACKGROUND_TASKS_PROMPT = [
   "- Waiting on your own long command (tests, build, migration): `bg_task_spawn`, then `wait_for_operations`. Do not sleep and re-read the log.",
   "- Waiting for a server you just started: `bg_task_spawn` the server, then `bg_task_watch` on a readiness check (`curl -fsS ...`).",
   "- Retry until a condition with one `bg_task_watch`, never `for i in ...; do ...; sleep N; done`.",
-  "- Not ready and no watcher running? Start one. Do not loop short sleeps.",
+  "- If a dependency is pending and no watcher is running, start `bg_task_watch`; do not loop short sleeps.",
   "- Nothing here automatically diverts a foreground command. A sleep or monitor loop submitted through foreground `bash` blocks the turn.",
   "- Omit `timeout_seconds` on `bg_task_spawn` unless you need a bound. Raise it on `bg_task_watch` for a wait longer than 15 minutes, and leave `callback` alone: do not poll.",
   "- Write the check so a broken check is visible; do not end it with `exit 0` or `|| true`.",
