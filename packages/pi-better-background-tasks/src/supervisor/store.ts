@@ -45,7 +45,7 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { validateCondition } from "../conditions.ts";
 import {
   SUPERVISOR_FENCE_WAIT_MS,
@@ -171,7 +171,9 @@ function fsyncDirectoryOf(path: string): void {
 }
 
 function tempPathFor(path: string): string {
-  return join(dirname(path), `.${path.split("/").at(-1)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
+  // `basename`, not `split("/")`: a Windows path has no `/`, so the whole path
+  // would become the temp file name.
+  return join(dirname(path), `.${basename(path)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
 }
 
 /** Write a durable temp file; the caller publishes it. */
