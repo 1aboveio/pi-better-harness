@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.40.3] - 2026-11-06
+
+### Fixed
+
+- Bundle Model Router 0.1.3, which declares the virtual model's context window so Pi no longer compacts after every routing error at any context size, and which keeps a transient provider failure retryable inside a long turn.
+
+## [pi-better-model-router@0.1.3] - 2026-11-06
+
+### Fixed
+
+- Declare the virtual model's 1M context window and 384k output limit. Pi reads the virtual model's limits whenever a response names no physical model, and the router's own routing error is such a response. An undeclared limit counts as zero, so Pi treated every conversation as past the compaction threshold and compacted after each routing error — in real sessions at 80k, 217k, 521k, and 599k tokens instead of the 983,616 threshold a 1M window gives.
+- Keep transient provider failures retryable inside a turn. A timeout, connection failure, `429`, or overloaded endpoint now only demotes that provider behind the other candidate, and is retried when every candidate is excluded, so one network blip no longer ends a long turn with `no eligible Flash model is available`. Rejected requests, such as a `400`, a bad schema, or an invalid key, still keep their provider out and can still end the turn when no route is left.
+- Cover connection-level failures in the transient classification: `Connection error.`, `terminated`, upstream HTTP failures, and aborted operations were previously indistinguishable from a rejected request.
+
 ## [pi-better-harness@0.40.2] - 2026-11-05
 
 ### Fixed

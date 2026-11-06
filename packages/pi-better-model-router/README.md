@@ -104,10 +104,12 @@ DeepSeek also excludes Chinese public holidays. The bundled holiday list is curr
 - Compare estimated uncached input and output cost using catalog rates, bundled schedules, and policy overrides.
 - On equal cost, prefer DeepSeek by default. If the preferred provider is unavailable, preserve the previous eligible model, then use candidate order.
 - Keep a turn's model while it is still the cheapest, and move the turn to the other provider when that provider becomes strictly cheaper at a price boundary. Equal cost keeps the current provider, so a switch never pays a cold prompt cache for no gain.
-- On a retry after any error, exclude the failed provider for the rest of that user turn, so the retry uses the other candidate.
+- On a retry, send the request to the other candidate. A rejected request, such as a `400`, a bad schema, or an invalid key, keeps that provider out for the rest of the user turn; a timeout, connection failure, `429`, or overloaded endpoint only demotes it, so the turn keeps both routes.
+- When every candidate is excluded but at least one failed transiently, retry the model the turn already uses instead of ending the turn. Only rejected requests can end it with no route left.
 - Preserve the failed model only after a context overflow, because Pi retries that request after compacting the conversation and a switch would pay a cold cache.
-- Report excluded providers as router state only when that list changes, so a long session does not append one state entry per request.
-- Stop with an error when all candidates are unavailable or excluded. A new user turn clears exclusions.
+- Report excluded and demoted providers as router state only when those lists change, so a long session does not append one state entry per request.
+- Declare the virtual model's 1M context window and 384k output limit. Pi reads them whenever a response names no physical model, which is what the router's own routing error looks like, and an undeclared limit counts as zero. A zero window makes every conversation look over the compaction threshold, so Pi would compact after each routing error at any context size.
+- Stop with an error when every candidate is unavailable or rejected. A new user turn clears the exclusions.
 - Direct requests, such as compaction summaries, compare prices independently.
 
 Pi records the physical provider and model on responses and displays its native routed-model indicator. Pi clamps the selected thinking level to the physical model's supported levels.
