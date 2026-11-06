@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import extension, { route, type VirtualDefinition } from "./index.ts";
-import { defaults, chooseCandidate, ratesAt, resolveCandidates } from "./routing.ts";
+import { defaults, chooseCandidate, isTransient, ratesAt, resolveCandidates } from "./routing.ts";
 import { parseConfig, loadConfig } from "./config.ts";
 
 const catalog = [
@@ -113,8 +113,11 @@ test("registered route preserves continuations and bounds transient fallback", (
     const failed = { ...selected, message: { errorMessage: "429 rate limit" } };
     const fallback = route({ reason: "retry", thinkingLevel: "high", failed }, ctx, now);
     assert.equal(fallback.model.provider, "deepseek");
-    assert.throws(() => route({ reason: "retry", thinkingLevel: "high", state: fallback.state,
-      failed: { ...fallback, message: { errorMessage: "503 overloaded" } } }, ctx, now), /no eligible Flash model/);
+    // Every candidate timed out, so the retry reuses one of them instead of ending the turn.
+    const recovered = route({ reason: "retry", thinkingLevel: "high", state: fallback.state,
+      failed: { ...fallback, message: { errorMessage: "503 overloaded" } } }, ctx, now);
+    assert.equal(recovered.model.provider, "ollama-cloud");
+    assert.deepEqual(recovered.state, { failedProviders: [] });
     assert.equal(route({ reason: "retry", thinkingLevel: "high",
       failed: { ...selected, message: { errorMessage: "context_length_exceeded" } } }, ctx, now).model.provider, "ollama-cloud");
     assert.equal(route({ reason: "user", thinkingLevel: "high", state: fallback.state }, ctx, now).model.provider, "ollama-cloud");
@@ -195,9 +198,9 @@ test("router state is reported only when the excluded providers change", () => {
     const now = new Date("2026-10-26T02:00Z");
     const selected = route({ reason: "user", thinkingLevel: "high" }, ctx, now);
     assert.equal("state" in selected, false);
-    const fallback = route({ reason: "retry", thinkingLevel: "high",
-      failed: { ...selected, message: { errorMessage: "503 overloaded" } } }, ctx, now);
-    assert.deepEqual(fallback.state, { failedProviders: ["ollama-cloud"] });
+    const failed = { ...selected, message: { errorMessage: "503 overloaded" } };
+    const fallback = route({ reason: "retry", thinkingLevel: "high", failed }, ctx, now);
+    assert.deepEqual(fallback.state, { failedProviders: [], transientProviders: ["ollama-cloud"] });
     // Pi appends a session entry for every state object it receives, so an unchanged
     // exclusion list must not be reported again on each request.
     assert.equal("state" in route({ reason: "continuation", thinkingLevel: "high",
@@ -206,6 +209,63 @@ test("router state is reported only when the excluded providers change", () => {
       { failedProviders: [] });
     assert.equal("state" in route({ reason: "user", thinkingLevel: "high",
       state: { failedProviders: [] } }, ctx, now), false);
+  } finally {
+    if (original === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = original;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+test("declared limits cover a routing error that names no physical model", () => {
+  let definition: VirtualDefinition | undefined;
+  extension({ registerVirtualModel(d: VirtualDefinition) { definition = d; } } as unknown as ExtensionAPI);
+  // Pi reads the virtual model's window whenever a response carries no physical model, and
+  // the router's own routing error is such a response. An undeclared window becomes zero,
+  // which makes every conversation look over the threshold and compacts it after each error.
+  assert.equal(definition?.contextWindow, 1_000_000);
+  assert.equal(definition?.maxTokens, 384_000);
+});
+test("outage errors stay retryable while rejected requests are final", () => {
+  for (const message of ["Request timed out.", "Connection error.", "terminated", "502 <html>",
+    "ECONNRESET", "Upstream HTTP/2 stream failed", "This operation was aborted"]) {
+    assert.equal(isTransient(message), true, message);
+  }
+  for (const message of ["400 invalid_request_error: tools[0] schema is invalid", "401 invalid api key",
+    "This model's maximum context length is 65536 tokens", "Model router: no eligible Flash model is available."]) {
+    assert.equal(isTransient(message), false, message);
+  }
+});
+test("rejected requests end the turn while a transient failure only demotes the provider", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "model-router-outage-"));
+  const original = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = cwd;
+  try {
+    const models = [...catalog];
+    const ctx = { cwd, modelRegistry: { getAvailable: () => models } } as unknown as ExtensionContext;
+    const now = new Date("2026-10-26T02:00Z");
+    const selected = route({ reason: "user", thinkingLevel: "high" }, ctx, now);
+    assert.equal(selected.model.provider, "ollama-cloud");
+    // A rejected request is final for the turn, so the other candidate takes over.
+    const rejected = route({ reason: "retry", thinkingLevel: "high",
+      failed: { ...selected, message: { errorMessage: "400 invalid_request_error" } } }, ctx, now);
+    assert.equal(rejected.model.provider, "deepseek");
+    assert.deepEqual(rejected.state, { failedProviders: ["ollama-cloud"] });
+    // Two rejected providers leave no route, which is still the documented outcome.
+    assert.throws(() => route({ reason: "retry", thinkingLevel: "high", state: rejected.state,
+      failed: { ...rejected, message: { errorMessage: "400 invalid_request_error" } } }, ctx, now),
+      /no eligible Flash model/);
+    // A timeout only sends the next attempt elsewhere; the turn keeps both routes.
+    const timedOut = route({ reason: "retry", thinkingLevel: "high",
+      failed: { ...selected, message: { errorMessage: "Request timed out." } } }, ctx, now);
+    assert.equal(timedOut.model.provider, "deepseek");
+    assert.deepEqual(timedOut.state, { failedProviders: [], transientProviders: ["ollama-cloud"] });
+    const continued = route({ reason: "continuation", thinkingLevel: "high",
+      previous: timedOut, state: timedOut.state }, ctx, now);
+    assert.equal(continued.model.provider, "deepseek");
+    // A rejected request on the current provider leaves the demoted one as the only route,
+    // so it is retried rather than ending the turn.
+    const rejectedAgain = route({ reason: "retry", thinkingLevel: "high", state: timedOut.state,
+      failed: { ...timedOut, message: { errorMessage: "400 invalid_request_error" } } }, ctx, now);
+    assert.equal(rejectedAgain.model.provider, "ollama-cloud");
+    assert.deepEqual(rejectedAgain.state, { failedProviders: ["deepseek"] });
   } finally {
     if (original === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = original;
     rmSync(cwd, { recursive: true, force: true });

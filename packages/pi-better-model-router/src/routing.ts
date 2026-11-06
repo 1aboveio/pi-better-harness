@@ -95,8 +95,11 @@ export function chooseCandidate(config: RouterConfig, available: Candidate[], no
   return tied.find(candidate => candidate.provider === config.preferredProvider)
     ?? tied.find(candidate => candidate.provider === previous?.provider && candidate.model === previous.id) ?? tied[0];
 }
+// A retry can repair these: throttling, an overloaded or unreachable endpoint, or a
+// connection that failed before the provider answered. Everything else is final for the
+// turn, because the provider rejected the request itself.
 export function isTransient(error: string): boolean {
-  return /\b429\b|\b50[0234]\b|rate.?limit|overload|temporar(?:y|ily)|service unavailable|timed? ?out|ECONNRESET|ECONNREFUSED|fetch failed/i.test(error);
+  return /\b429\b|\b50[0234]\b|rate.?limit|overload|temporar(?:y|ily)|service unavailable|timed? ?out|connection (?:error|reset|refused|closed|lost)|socket hang up|upstream http|operation was aborted|\bterminated\b|E(?:PIPE|NOTFOUND|AI_AGAIN)|ECONNRESET|ECONNREFUSED|fetch failed/i.test(error);
 }
 // Pi retries a context overflow after compacting the conversation. That retry keeps
 // the failed model, because a switch would pay a cold cache right after compaction.
