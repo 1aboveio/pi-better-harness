@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.40.5] - 2026-11-07
+
+### Fixed
+
+- Stop the tool-row shimmer latching off. The clock cleared itself once 400 ms passed without a render, but the clock is what requests those renders, so nothing could restart it: the spinner stayed dead until an unrelated render happened to arrive. Instrumenting a real session showed this needs no particular cause — with nothing displaying the TUI at all, one frame still saw the last render 522 ms old, which is enough to trip the old check. Measured over 80 seconds and 941 frames, the animation now falls to one frame a second during such a pause and returns to 80 ms as soon as the row paints again.
+- Declare the shimmer cadence through `shimmerFrameDelay`, and cover the deferred-render recovery path, which is the path production uses: all 994 renders recorded in that session arrived asynchronously rather than inside a timer frame.
+
 ## [pi-better-harness@0.40.4] - 2026-11-07
 
 ### Fixed
