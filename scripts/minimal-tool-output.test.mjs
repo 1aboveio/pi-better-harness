@@ -727,6 +727,36 @@ test("an idle running row keeps a slow clock and returns to the frame cadence wh
   assert.equal(component.render(80)[0], failure);
 });
 
+test("a deferred render shortens a pending idle timeout to the frame cadence", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
+  const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
+  handles.push(hook);
+  hook.setEnabled(true);
+  let redraws = 0;
+  let deferredRender;
+  let component;
+  // A host that paints after the timer callback returns leaves paintingFrame false, so the
+  // render path itself has to shorten the idle timeout paintFrame already armed.
+  const ui = animationUI(() => [component], () => {
+    redraws++;
+    deferredRender = () => component.render(80);
+  });
+  component = new ToolExecutionComponent("read", "deferred-render", {}, {}, undefined, ui, process.cwd());
+  component.render(80);
+  for (let frame = 0; frame < 6; frame++) t.mock.timers.tick(80);
+  const paint = deferredRender;
+  assert.equal(typeof paint, "function", "the idling frame requested a render");
+  paint();
+  redraws = 0;
+  // Deferred painting restored the frame cadence, so the next 80 ms fires instead of waiting
+  // out the idle second that was pending when this render arrived.
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1, "a deferred render replaces the pending idle timeout");
+  redraws = 0;
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1, "the shortened timeout keeps the frame cadence");
+});
+
 test("scrollback hosts and unresolved palettes never start a redundant animation clock", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
   let theme = themeModule.theme;
