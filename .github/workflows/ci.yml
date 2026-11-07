@@ -170,6 +170,8 @@ jobs:
             extensions/model-router/index.ts \
             extensions/execution-policy.ts \
             extensions/minimal-output/index.ts \
+            extensions/tool-call-guard/index.ts \
+            extensions/tool-call-guard/waits.ts \
             extensions/settings/index.ts \
             node_modules/pi-better-sandbox/index.ts \
             node_modules/pi-better-sandbox/shared-sandbox-core.ts \

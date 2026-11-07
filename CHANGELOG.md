@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.40.6] - 2026-11-07
+
+### Added
+
+- Guard against foreground waits with a `tool_call` check that blocks a command waiting on CI, a merge, a deploy, or a remote service, and tells the caller to spawn it as a background task instead. A foreground wait ties its result to the turn and dies with it; a background task outlives the turn. The guard reads command shape rather than duration, so a long build whose output belongs in the foreground still runs there.
+- Tool call guard (On/Off) in Harness settings gates the check itself. It takes effect on the next tool call, so turning it off needs no reload, and it is On by default.
+
 ## [pi-better-harness@0.40.5] - 2026-11-07
 
 ### Fixed
