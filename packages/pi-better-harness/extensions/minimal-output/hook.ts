@@ -278,6 +278,19 @@ function sdkEntry(require: ReturnType<typeof createRequire>): string {
 }
 
 /** Internal TUI adapter: no tools are replaced and no result content is changed. */
+const FRAME_MS = 80;
+const IDLE_FRAME_MS = 1000;
+const STALE_RENDER_MS = 400;
+
+/**
+ * Shimmer cadence for the next frame. Fast while any animated row rendered recently, one frame
+ * a second once none has, and never off: an unfocused window can stop repainting without the row
+ * being gone, and stopping the timer would latch the animation until an unrelated render restarted it.
+ */
+export function shimmerFrameDelay(lastRenderMs: number, nowMs: number): number {
+  return nowMs - lastRenderMs <= STALE_RENDER_MS ? FRAME_MS : IDLE_FRAME_MS;
+}
+
 export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: () => Theme, compactionPrototype?: CompactionPrototype, customMessagePrototype?: CustomMessagePrototype): MinimalOutputHook {
   for (const name of ["updateDisplay", "getResultRenderer", "getTextOutput", "setExpanded", "invalidate", "render"] as const) {
     if (typeof prototype[name] !== "function") {
@@ -319,10 +332,15 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
     const animationReferences = new WeakMap<ToolComponent, WeakRef<ToolComponent>>();
     const animated = new Map<WeakRef<ToolComponent>, number>();
     const settled = new WeakSet<ToolComponent>();
-    let animationTimer: ReturnType<typeof setInterval> | undefined;
+    // Frame while the transcript paints, then one frame a second once it stops. An unfocused
+    // window may stop repainting, and clearing the timer outright would latch the animation off
+    // until an unrelated render happened to restart it. Slowing keeps the saving without the latch.
+    let animationTimer: ReturnType<typeof setTimeout> | undefined;
+    let animationIdle = false;
     const stopAnimation = () => {
-      if (animationTimer !== undefined) clearInterval(animationTimer);
+      if (animationTimer !== undefined) clearTimeout(animationTimer);
       animationTimer = undefined;
+      animationIdle = false;
       animated.clear();
     };
     const canAnimate = (component: ToolComponent) => {
@@ -333,31 +351,43 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         && !settled.has(component);
     };
     const pruneAnimation = () => {
-      for (const [reference, lastRender] of animated) {
+      for (const reference of animated.keys()) {
         const component = reference.deref();
-        if (!component || !canAnimate(component) || Date.now() - lastRender > 400
+        if (!component || !canAnimate(component)
           || toolVisibility(component.ui, component) !== true) animated.delete(reference);
       }
       if (!animated.size) stopAnimation();
+    };
+    const scheduleFrame = (delayMs: number) => {
+      if (animationTimer !== undefined) clearTimeout(animationTimer);
+      animationTimer = setTimeout(paintFrame, Math.max(0, delayMs));
+      animationTimer.unref?.();
+    };
+    const paintFrame = () => {
+      animationTimer = undefined;
+      let newestRender = 0;
+      for (const lastRender of animated.values()) {
+        if (lastRender > newestRender) newestRender = lastRender;
+      }
+      const delay = shimmerFrameDelay(newestRender, Date.now());
+      animationIdle = delay === IDLE_FRAME_MS;
+      pruneAnimation();
+      if (!animated.size) return;
+      const uis = new Set<ToolUI>();
+      for (const reference of animated.keys()) {
+        const component = reference.deref();
+        if (!component) continue;
+        uis.add(component.ui);
+      }
+      for (const ui of uis) ui.requestRender();
+      scheduleFrame(delay);
     };
     const animationTime = (component: ToolComponent, width: number, indent: number) => {
       if (width <= indent + 3 || !canAnimate(component) || toolVisibility(component.ui, component) === false) return undefined;
       let reference = animationReferences.get(component);
       if (!reference) { reference = new WeakRef(component); animationReferences.set(component, reference); }
       animated.set(reference, Date.now());
-      if (animationTimer === undefined) {
-        animationTimer = setInterval(() => {
-          pruneAnimation();
-          const uis = new Set<ToolUI>();
-          for (const reference of animated.keys()) {
-            const component = reference.deref();
-            if (!component) continue;
-            uis.add(component.ui);
-          }
-          for (const ui of uis) ui.requestRender();
-        }, 80);
-        animationTimer.unref?.();
-      }
+      if (animationTimer === undefined) scheduleFrame(animationIdle ? IDLE_FRAME_MS : FRAME_MS);
       return toolVisibility(component.ui, component) === true ? Date.now() : undefined;
     };
     let completed = new Map<string, object>();
