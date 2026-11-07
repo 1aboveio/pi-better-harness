@@ -337,6 +337,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
     // until an unrelated render happened to restart it. Slowing keeps the saving without the latch.
     let animationTimer: ReturnType<typeof setTimeout> | undefined;
     let animationIdle = false;
+    let paintingFrame = false;
     const stopAnimation = () => {
       if (animationTimer !== undefined) clearTimeout(animationTimer);
       animationTimer = undefined;
@@ -365,12 +366,6 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
     };
     const paintFrame = () => {
       animationTimer = undefined;
-      let newestRender = 0;
-      for (const lastRender of animated.values()) {
-        if (lastRender > newestRender) newestRender = lastRender;
-      }
-      const delay = shimmerFrameDelay(newestRender, Date.now());
-      animationIdle = delay === IDLE_FRAME_MS;
       pruneAnimation();
       if (!animated.size) return;
       const uis = new Set<ToolUI>();
@@ -379,7 +374,23 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         if (!component) continue;
         uis.add(component.ui);
       }
-      for (const ui of uis) ui.requestRender();
+      paintingFrame = true;
+      try {
+        for (const ui of uis) ui.requestRender();
+      } finally {
+        paintingFrame = false;
+      }
+      pruneAnimation();
+      if (!animated.size) return;
+      // Choose the cadence from the timestamps this frame produced. Reading them before the
+      // renders instead would keep seeing the previous idle gap and re-arm the idle period
+      // forever, so painting that resumed on a timer-driven frame could never speed back up.
+      let newestRender = 0;
+      for (const lastRender of animated.values()) {
+        if (lastRender > newestRender) newestRender = lastRender;
+      }
+      const delay = shimmerFrameDelay(newestRender, Date.now());
+      animationIdle = delay === IDLE_FRAME_MS;
       scheduleFrame(delay);
     };
     const animationTime = (component: ToolComponent, width: number, indent: number) => {
@@ -387,7 +398,12 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
       let reference = animationReferences.get(component);
       if (!reference) { reference = new WeakRef(component); animationReferences.set(component, reference); }
       animated.set(reference, Date.now());
-      if (animationTimer === undefined) scheduleFrame(animationIdle ? IDLE_FRAME_MS : FRAME_MS);
+      // A render outside the clock means painting resumed. Re-arm at the frame cadence rather
+      // than waiting out a pending idle period, which would otherwise cost up to a second.
+      if (!paintingFrame && (animationTimer === undefined || animationIdle)) {
+        animationIdle = false;
+        scheduleFrame(FRAME_MS);
+      }
       return toolVisibility(component.ui, component) === true ? Date.now() : undefined;
     };
     let completed = new Map<string, object>();
