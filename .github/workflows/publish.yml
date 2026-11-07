@@ -233,6 +233,8 @@ jobs:
                 extensions/model-router/index.ts \
                 extensions/task-context/index.ts \
                 extensions/minimal-output/index.ts \
+                extensions/tool-call-guard/index.ts \
+                extensions/tool-call-guard/waits.ts \
                 extensions/settings/index.ts \
                 extensions/execution-policy.ts \
                 node_modules/pi-better-sandbox/index.ts \
