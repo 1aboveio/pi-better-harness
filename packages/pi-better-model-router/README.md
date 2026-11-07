@@ -108,7 +108,9 @@ DeepSeek also excludes Chinese public holidays. The bundled holiday list is curr
 - When every candidate is excluded but at least one failed transiently, retry the model the turn already uses instead of ending the turn. Only rejected requests can end it with no route left.
 - Preserve the failed model only after a context overflow, because Pi retries that request after compacting the conversation and a switch would pay a cold cache.
 - Report excluded and demoted providers as router state only when those lists change, so a long session does not append one state entry per request.
-- Declare the virtual model's 1M context window and 384k output limit. Pi reads them whenever a response names no physical model, which is what the router's own routing error looks like, and an undeclared limit counts as zero. A zero window makes every conversation look over the compaction threshold, so Pi would compact after each routing error at any context size.
+- Declare the virtual model's context limits as a pair that fits the provider window. Pi reads them whenever a response names no physical model, which is what the router's own routing error looks like, and an undeclared limit counts as zero. A zero window makes every conversation look over the compaction threshold, so Pi would compact after each routing error at any context size.
+
+  Both candidates share one 1,048,576-token window between input and output, but Pi treats `contextWindow` as the input allowance and `maxTokens` as room beyond it. The router therefore declares an input budget of `1,048,576 - 64,000` beside a 64,000-token output budget, so the two add up to the provider window. Declaring the raw 1,048,576 window beside a large output budget promises capacity no endpoint has: a 746,917-token conversation plus a 384,000-token completion is 1,130,917 tokens, which the provider rejects. The same pair also keeps Pi's compaction trigger below the point where output stops fitting.
 - Stop with an error when every candidate is unavailable or rejected. A new user turn clears the exclusions.
 - Direct requests, such as compaction summaries, compare prices independently.
 

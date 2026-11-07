@@ -220,8 +220,14 @@ test("declared limits cover a routing error that names no physical model", () =>
   // Pi reads the virtual model's window whenever a response carries no physical model, and
   // the router's own routing error is such a response. An undeclared window becomes zero,
   // which makes every conversation look over the threshold and compacts it after each error.
-  assert.equal(definition?.contextWindow, 1_000_000);
-  assert.equal(definition?.maxTokens, 384_000);
+  //
+  // Both candidates share one 1,048,576-token window between input and output, so the
+  // declared pair must fit inside it: input + output <= 1,048,576. Reporting the raw window
+  // alongside a large output budget promises capacity the provider does not have, and Pi's
+  // clamp then sends a max_tokens the endpoint rejects on a long conversation.
+  assert.equal(definition?.contextWindow, 1_048_576 - 64_000);
+  assert.equal(definition?.maxTokens, 64_000);
+  assert.ok((definition?.contextWindow ?? 0) + (definition?.maxTokens ?? 0) <= 1_048_576);
 });
 test("outage errors stay retryable while rejected requests are final", () => {
   for (const message of ["Request timed out.", "Connection error.", "terminated", "502 <html>",
