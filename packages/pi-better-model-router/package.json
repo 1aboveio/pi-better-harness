@@ -1,6 +1,6 @@
 {
   "name": "pi-better-model-router",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Price-aware virtual model routing for Pi.",
   "type": "module",
   "license": "MIT",

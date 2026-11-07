@@ -22,12 +22,20 @@ export interface VirtualDefinition {
   contextWindow: number; maxTokens: number;
   route(request: RouteRequest, ctx: ExtensionContext): RouteResult;
 }
-// Both candidate families declare a 1M context window, so the router declares the shared
-// floor. Pi needs it whenever a response names no physical model, which is exactly the
-// router's own routing error: with no declared limit Pi falls back to a zero window, sees
+// Pi needs a declared window whenever a response names no physical model, which is exactly
+// the router's own routing error: with no declared limit Pi falls back to a zero window, sees
 // every conversation as over the threshold, and compacts after each routing error.
-const CONTEXT_WINDOW = 1_000_000;
-const MAX_TOKENS = 384_000;
+//
+// Both candidate families share one 1,048,576-token window between input and output, but Pi
+// treats contextWindow as the input allowance and maxTokens as room beyond it. Declaring the
+// raw window beside a large output budget therefore promises capacity the provider does not
+// have: 746,917 tokens of history plus a 384,000-token completion is 1,130,917, and the
+// request is rejected for exceeding 1,048,576. Declare the input budget the shared window
+// leaves after the output budget instead, so both the compaction threshold and the
+// request-time clamp stay inside the real window.
+const PROVIDER_CONTEXT_WINDOW = 1_048_576;
+const MAX_TOKENS = 64_000;
+const CONTEXT_WINDOW = PROVIDER_CONTEXT_WINDOW - MAX_TOKENS;
 function sameList(left: readonly string[] = [], right: readonly string[] = []): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }

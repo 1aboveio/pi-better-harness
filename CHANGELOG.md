@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.40.4] - 2026-11-07
+
+### Fixed
+
+- Bundle Model Router 0.1.4, which declares context limits that fit inside the providers' shared window, so a long conversation routed through `router/deepseek-flash-auto` is no longer rejected for requesting more tokens than the endpoint accepts.
+
+## [pi-better-model-router@0.1.4] - 2026-11-07
+
+### Fixed
+
+- Declare an input budget and output budget that add up to the providers' real window. Both candidates share one 1,048,576-token window between input and output, but Pi reads `contextWindow` as the input allowance and `maxTokens` as room beyond it, so the previous 1,000,000/384,000 pair promised 1,384,000 tokens of capacity. A 746,917-token conversation plus the advertised 384,000-token completion is 1,130,917 tokens, which the provider rejects with `maximum context length is 1048576`. The virtual model now declares `1,048,576 - 64,000` input tokens beside a 64,000-token output budget.
+- The same pair keeps Pi's compaction trigger below the point where output stops fitting. The trigger is `contextWindow - reserveTokens` while output stops fitting at `contextWindow - maxTokens`, so any `maxTokens` above the reserve fires compaction too late to help. Catalog output limits are routinely far above the 16,384-token reserve Pi defaults to.
+
 ## [pi-better-harness@0.40.3] - 2026-11-06
 
 ### Fixed
