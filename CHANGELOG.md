@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.41.1] - 2026-11-08
+
+### Fixed
+
+- Bundle Subagents 0.28.1 so sandboxed launches use the active Pi SDK even when PATH points to the managed Pi shell launcher.
+
+## [pi-better-subagents@0.28.1] - 2026-11-08
+
+### Fixed
+
+- Start confined children with the active Pi SDK directly instead of rejecting managed Pi launchers on PATH. Explicitly supplied foreign CLI paths remain rejected.
+- Omit refused implicit tools before child preflight so restrictive sandbox profiles can launch the remaining supported tools.
+
 ## [pi-better-harness@0.41.0] - 2026-11-08
 
 ### Added
