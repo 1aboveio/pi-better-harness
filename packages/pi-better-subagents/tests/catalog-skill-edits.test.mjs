@@ -66,6 +66,14 @@ function fixture(t, options = {}) {
 }
 
 /** Definition file parsed from disk, independent of the in-memory catalog. */
+function skillFile(t, name) {
+    const dir = mkdtempSync(join(tmpdir(), `catalog-skill-${name}-`));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const path = join(dir, "SKILL.md");
+    writeFileSync(path, "---\nname: selected\n---\n");
+    return path;
+}
+
 function saved(path) {
     const parsed = parseDefinition(readFileSync(path, "utf8"));
     assert.equal(parsed.ok, true, JSON.stringify(parsed.diagnostics));
@@ -86,6 +94,36 @@ function chooseSkills(component, choice) {
     if (choice === "selected") { component.handleInput("\x1b[B"); component.handleInput("\x1b[B"); }
     component.handleInput("\r");
     return screen;
+}
+
+function stripAnsi(text) {
+    return text.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b_pi:[^\x07]*\x07/g, "");
+}
+
+function selectedPickerText(component) {
+    return stripAnsi(component.render(160).join("\n")).split("\n")
+        .find((line) => line.trimStart().startsWith("> "))?.trimStart().slice(2).trim();
+}
+
+function selectPickerEntry(component, text) {
+    for (let attempt = 0; attempt < 48; attempt++) component.handleInput("\x1b[A");
+    for (let attempt = 0; attempt < 64; attempt++) {
+        if ((selectedPickerText(component) ?? "").includes(text)) return;
+        component.handleInput("\x1b[B");
+    }
+    throw new Error(`could not select ${text}; selected ${selectedPickerText(component)}`);
+}
+
+function addPickerPath(component, path) {
+    selectPickerEntry(component, "Add skill path");
+    component.handleInput("\r");
+    component.handleInput(path);
+    component.handleInput("\r");
+}
+
+function applyPicker(component) {
+    selectPickerEntry(component, "Apply selection");
+    component.handleInput("\r");
 }
 
 function type(component, text) {
@@ -143,21 +181,22 @@ describe("catalog skill exposure edits", () => {
 
     it("starts on the definition's own choice and restores the base role's list when an override is removed", async (t) => {
         const fx = fixture(t, { roleSkills: [ROLE_SKILL], config: {} });
+        const agentSkill = skillFile(t, "agent-selected");
         const component = await fx.open();
         const inherited = viewOf(fx.loc, "agent.worker");
         assert.deepEqual(inherited.skills.effective, { mode: "explicit", paths: [ROLE_SKILL], source: "role-default" });
         assert.equal(skillsOriginLabel(inherited.skills, "agent"), "inherited");
 
         chooseSkills(component, "selected");
-        assert.match(component.render(100).join("\n"), /Agents \/ skills · selected/);
-        type(component, AGENT_SKILL);
-        component.handleInput("\r");
+        assert.match(component.render(100).join("\n"), /Selected skills/);
+        addPickerPath(component, agentSkill);
+        applyPicker(component);
 
-        assert.deepEqual(saved(fx.agentPath).overrides.skills, [AGENT_SKILL]);
+        assert.deepEqual(saved(fx.agentPath).overrides.skills, [agentSkill]);
         const overridden = viewOf(fx.loc, "agent.worker");
         assert.equal(overridden.skills.source, "agent-override");
-        assert.deepEqual(overridden.skills.effective.paths, [AGENT_SKILL]);
-        assert.match(component.render(100).join("\n"), /Skills\s+1 selected · \/skills\/agent\/SKILL\.md\s+override/);
+        assert.deepEqual(overridden.skills.effective.paths, [agentSkill]);
+        assert.match(component.render(100).join("\n"), /Skills\s+1 selected.*override/);
 
         // Reopen: the picker must start on "Selected skills", the definition's own choice.
         component.handleInput("\r");
@@ -176,30 +215,26 @@ describe("catalog skill exposure edits", () => {
         });
     });
 
-    it("rejects an empty or relative selected list without writing and keeps [] distinct from discovery", async (t) => {
+    it("zero checked becomes none while invalid manual paths do not write", async (t) => {
         const fx = fixture(t, { roleSkills: undefined, config: {} });
         const original = readFileSync(fx.agentPath, "utf8");
         const component = await fx.open();
         chooseSkills(component, "selected");
-        component.handleInput("\r");
-        assert.match(component.render(140).join("\n"), /at least one absolute path/);
-        assert.equal(readFileSync(fx.agentPath, "utf8"), original, "empty selected means an error, not [] and not discovery");
+        assert.match(component.render(140).join("\n"), /Selected skills/);
 
-        type(component, "skills/relative/SKILL.md");
-        component.handleInput("\r");
-        assert.match(component.render(140).join("\n"), /must be absolute/);
+        addPickerPath(component, "skills/relative/SKILL.md");
+        assert.match(component.render(140).join("\n"), /Enter an absolute path/);
         assert.equal(readFileSync(fx.agentPath, "utf8"), original);
+        component.handleInput("\x1b");
 
-        // Replace the relative text with an absolute path, repeated, and save.
-        for (let index = 0; index < "skills/relative/SKILL.md".length; index++) component.handleInput("\x7f");
-        type(component, `${AGENT_SKILL}, ${AGENT_SKILL}`);
-        component.handleInput("\r");
-        assert.deepEqual(saved(fx.agentPath).overrides.skills, [AGENT_SKILL], "duplicate paths collapse; the list stays explicit");
+        applyPicker(component);
+        assert.match(component.render(140).join("\n"), /No skills checked\. Skill exposure set to No skill catalog/);
+        assert.deepEqual(saved(fx.agentPath).overrides.skills, [], "zero checked saves the explicit none value");
 
         assert.throws(
             () => applySkillExposure(saved(fx.agentPath), { mode: "explicit", paths: [] }),
             /at least one absolute path/,
-            "the save helper refuses an ambiguous empty explicit selection",
+            "the save helper still refuses an ambiguous empty explicit selection",
         );
         assert.throws(
             () => applySkillExposure(saved(fx.agentPath), { mode: "explicit", paths: ["relative/SKILL.md"] }),

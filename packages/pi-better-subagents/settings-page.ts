@@ -1,10 +1,9 @@
-import { existsSync } from "node:fs";
-import { isAbsolute } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import * as Tui from "@earendil-works/pi-tui";
 import { isConcurrencyCap } from "./config.ts";
 import { DELEGATION_MODES, type DelegationMode } from "./delegation.ts";
 import type { SkillExposureMode } from "./skills.ts";
+import { createSkillPicker, type DiscoveredSkill } from "./skill-picker.ts";
 
 export interface SubagentSettingsSnapshot {
     mode: DelegationMode;
@@ -26,20 +25,21 @@ export interface SubagentSettingsHandlers {
     changeMode(mode: DelegationMode): void;
     changeCap(cap: number): void;
     changeSkills(mode: SkillExposureMode, paths: readonly string[]): void;
+    /** Loaded Pi skill metadata for the checkbox picker. Absent means manual paths only. */
+    discoverSkills?(): readonly DiscoveredSkill[];
     save(): { ok: boolean; message: string };
     reset(): void;
     /** Opens the same catalog as `/agents`. The caller closes this page first. */
     openAgents?(): void;
 }
 
-type EditTarget = { kind: "cap" } | { kind: "skill"; index: number } | { kind: "add" };
+type EditTarget = { kind: "cap" };
 
 type Row =
     | { kind: "mode" }
     | { kind: "cap" }
     | { kind: "skills" }
-    | { kind: "path"; index: number; path: string }
-    | { kind: "add" }
+    | { kind: "choose" }
     | { kind: "agents" }
     | { kind: "reset" };
 
@@ -55,9 +55,8 @@ function skillLabel(mode: SkillExposureMode): string {
     return SKILL_MODES.find((entry) => entry.mode === mode)!.label;
 }
 
-function nextSkillMode(mode: SkillExposureMode): SkillExposureMode {
-    const index = SKILL_MODES.findIndex((entry) => entry.mode === mode);
-    return SKILL_MODES[(index + 1) % SKILL_MODES.length]!.mode;
+function cycleSkillMode(mode: SkillExposureMode): SkillExposureMode {
+    return mode === "inherit" ? "none" : "inherit";
 }
 
 function skillSource(settings: SubagentSettingsSnapshot): string {
@@ -65,17 +64,6 @@ function skillSource(settings: SubagentSettingsSnapshot): string {
     if (settings.skillsSource === "session") return "Source: this session (unsaved)";
     if (settings.skillsSource === "config") return "Source: config defaultSkills";
     return "Source: discovery default";
-}
-
-function skillPathProblem(value: string, paths: readonly string[], except?: number): { path?: string; problem?: string } {
-    const path = value.trim();
-    if (!path) return { problem: "Enter an absolute path to a SKILL.md file or skill directory. Esc cancels." };
-    if (!isAbsolute(path)) return { problem: "Enter an absolute path so every child resolves the same skill." };
-    if (paths.some((entry, index) => index !== except && entry === path)) {
-        return { problem: "That skill path is already listed." };
-    }
-    if (!existsSync(path)) return { problem: "No file or directory exists at that path." };
-    return { path };
 }
 
 function cell(text: string, width: number): string {
@@ -94,6 +82,7 @@ export function createSubagentSettingsPage(
     let focused = false;
     let row = 0;
     let editing: EditTarget | undefined;
+    let picker: ReturnType<typeof createSkillPicker> | undefined;
     let rememberedSkillPaths: string[] | undefined;
     let viewportStart = 0;
     let message = "";
@@ -106,11 +95,7 @@ export function createSubagentSettingsPage(
     }
 
     function rowsOf(settings: SubagentSettingsSnapshot): Row[] {
-        const rows: Row[] = [{ kind: "mode" }, { kind: "cap" }, { kind: "skills" }];
-        if (settings.skillsMode === "explicit") {
-            settings.skillsPaths.forEach((path, index) => rows.push({ kind: "path", index, path }));
-            rows.push({ kind: "add" });
-        }
+        const rows: Row[] = [{ kind: "mode" }, { kind: "cap" }, { kind: "skills" }, { kind: "choose" }];
         rows.push({ kind: "agents" }, { kind: "reset" });
         return rows;
     }
@@ -129,6 +114,41 @@ export function createSubagentSettingsPage(
         report(text);
     }
 
+    function openSkillPicker(initial: readonly string[], previousMode: SkillExposureMode): void {
+        picker = createSkillPicker({
+            theme,
+            skills: handlers.discoverSkills?.() ?? [],
+            selected: initial,
+            requestRender,
+            getHeight,
+            title: "Selected skills",
+            apply(paths) {
+                try {
+                    if (paths.length === 0) {
+                        handlers.changeSkills("none", []);
+                        rememberedSkillPaths = [];
+                        report("No skills checked. Skill exposure set to No skill catalog.");
+                        return { ok: true, message: "No skill catalog selected." };
+                    }
+                    handlers.changeSkills("explicit", paths);
+                    rememberedSkillPaths = [...paths];
+                    report(`${paths.length} skill${paths.length === 1 ? "" : "s"} selected.`);
+                    return { ok: true, message: `${paths.length} selected.` };
+                } catch (cause) {
+                    return { ok: false, message: cause instanceof Error ? cause.message : String(cause) };
+                }
+            },
+            finish() { picker = undefined; requestRender(); },
+            cancel() {
+                picker = undefined;
+                report(previousMode === "explicit" ? "Skill selection unchanged." : "Skill mode unchanged.");
+                requestRender();
+            },
+        });
+        picker.focused = focused;
+        requestRender();
+    }
+
     function action(settings: SubagentSettingsSnapshot, selected: Row): void {
         try {
             if (selected.kind === "mode") {
@@ -139,21 +159,15 @@ export function createSubagentSettingsPage(
                 startEditing({ kind: "cap" }, String(settings.maxConcurrent));
             } else if (selected.kind === "skills") {
                 if (settings.skillsMode === "explicit") rememberedSkillPaths = [...settings.skillsPaths];
-                const next = nextSkillMode(settings.skillsMode);
-                const paths = next === "explicit"
-                    ? rememberedSkillPaths ?? [...settings.skillsPaths]
-                    : [];
-                handlers.changeSkills(next, paths);
-                if (next === "explicit") rememberedSkillPaths = [...paths];
-                if (next === "explicit" && paths.length === 0) {
-                    report("Add at least one skill path, or choose No skill catalog to load none.");
-                } else {
-                    report(`Skill exposure: ${skillLabel(next).toLowerCase()}.`);
-                }
-            } else if (selected.kind === "path") {
-                startEditing({ kind: "skill", index: selected.index }, selected.path);
-            } else if (selected.kind === "add") {
-                startEditing({ kind: "add" }, "");
+                const next = cycleSkillMode(settings.skillsMode);
+                handlers.changeSkills(next, []);
+                report(`Skill exposure: ${skillLabel(next).toLowerCase()}.`);
+            } else if (selected.kind === "choose") {
+                openSkillPicker(
+                    settings.skillsMode === "explicit" ? settings.skillsPaths : rememberedSkillPaths ?? [],
+                    settings.skillsMode,
+                );
+                return;
             } else if (selected.kind === "agents") {
                 handlers.openAgents?.();
             } else {
@@ -164,15 +178,6 @@ export function createSubagentSettingsPage(
         } catch (cause) {
             report(cause instanceof Error ? cause.message : String(cause), true);
         }
-    }
-
-    function removePath(settings: SubagentSettingsSnapshot, index: number): void {
-        const paths = settings.skillsPaths.filter((_, position) => position !== index);
-        handlers.changeSkills("explicit", paths);
-        rememberedSkillPaths = [...paths];
-        report(paths.length === 0
-            ? "No skills selected. Add a path or choose No skill catalog to save none."
-            : "Skill path removed.");
     }
 
     const submit = (value: string) => {
@@ -193,28 +198,8 @@ export function createSubagentSettingsPage(
             }
             return;
         }
-        const checked = skillPathProblem(value, settings.skillsPaths, target.kind === "skill" ? target.index : undefined);
-        if (!checked.path) {
-            report(checked.problem!, true);
-            return;
-        }
-        try {
-            if (target.kind === "add") {
-                const paths = [...settings.skillsPaths, checked.path];
-                handlers.changeSkills("explicit", paths);
-                rememberedSkillPaths = [...paths];
-                finishEditing("Skill path added.");
-            } else {
-                const paths = [...settings.skillsPaths];
-                paths[target.index] = checked.path;
-                handlers.changeSkills("explicit", paths);
-                rememberedSkillPaths = [...paths];
-                finishEditing("Skill path updated.");
-            }
-        } catch (cause) {
-            report(cause instanceof Error ? cause.message : String(cause), true);
-        }
     };
+
     input.onSubmit = submit;
     input.onEscape = () => {
         input.focused = false;
@@ -224,9 +209,18 @@ export function createSubagentSettingsPage(
 
     return {
         get focused() { return focused; },
-        set focused(value: boolean) { focused = value; input.focused = editing !== undefined && value; },
-        invalidate() { input.invalidate(); },
+        set focused(value: boolean) {
+            focused = value;
+            input.focused = editing !== undefined && value;
+            if (picker) picker.focused = value;
+        },
+        invalidate() { input.invalidate(); picker?.invalidate(); },
         handleInput(data: string) {
+            if (picker) {
+                picker.handleInput(data);
+                requestRender();
+                return;
+            }
             const settings = handlers.get();
             if (editing) {
                 input.handleInput(data);
@@ -239,10 +233,7 @@ export function createSubagentSettingsPage(
             if (Tui.matchesKey(data, Tui.Key.escape)) close();
             else if (Tui.matchesKey(data, Tui.Key.up)) row = Math.max(0, row - 1);
             else if (Tui.matchesKey(data, Tui.Key.down)) row = Math.min(rows.length - 1, row + 1);
-            else if (selected.kind === "path" && (data === "x" || Tui.matchesKey(data, Tui.Key.delete))) {
-                removePath(settings, selected.index);
-                row = Math.min(row, rowsOf(handlers.get()).length - 1);
-            } else if (Tui.matchesKey(data, Tui.Key.enter) || data === " ") action(settings, selected);
+            else if (Tui.matchesKey(data, Tui.Key.enter) || data === " ") action(settings, selected);
             else if (Tui.matchesKey(data, "ctrl+s")) {
                 const result = handlers.save();
                 if (result.ok) {
@@ -253,6 +244,7 @@ export function createSubagentSettingsPage(
             requestRender();
         },
         render(width: number) {
+            if (picker) return picker.render(width);
             const settings = handlers.get();
             const rows = rowsOf(settings);
             row = Math.min(row, rows.length - 1);
@@ -293,21 +285,9 @@ export function createSubagentSettingsPage(
                     const sourceLine = compact ? "    " + source : " ".repeat(LABEL_WIDTH) + " " + source;
                     lines.push(theme.fg(settings.skillsError ? "error" : "muted",
                         Tui.truncateToWidth(sourceLine, w, "")));
-                } else if (entry.kind === "path") {
-                    if (selected && editing?.kind === "skill" && editing.index === entry.index) {
-                        lines.push(input.render(w)[0]!);
-                    } else {
-                        const indent = selected ? ">   " : "    ";
-                        const line = indent + Tui.truncateToWidth(entry.path, Math.max(1, w - 4), "");
-                        lines.push(selected ? highlight(line, true) : theme.fg("text", line));
-                    }
-                } else if (entry.kind === "add") {
-                    if (selected && editing?.kind === "add") {
-                        lines.push(input.render(w)[0]!);
-                    } else {
-                        const text = marker(selected) + "  + Add a skill path";
-                        lines.push(selected ? highlight(text, true) : theme.fg("dim", text));
-                    }
+                } else if (entry.kind === "choose") {
+                    const value = settings.skillsMode === "explicit" ? `${settings.skillsPaths.length} checked` : "Choose…";
+                    pushSetting("Selected skills", value, selected, value);
                 } else if (entry.kind === "agents") {
                     lines.push(highlight(theme.fg(selected ? "accent" : "text", marker(selected) + "Agents"), selected));
                 } else {
@@ -320,10 +300,9 @@ export function createSubagentSettingsPage(
             const body = lines.slice(2);
             const footer: string[] = [];
             if (message) footer.push("", theme.fg(error ? "error" : "muted", message));
-            const removeHint = settings.skillsMode === "explicit" && !editing ? " · x Remove path" : "";
             footer.push("", theme.fg("dim", editing
                 ? "Enter Apply · Esc Cancel"
-                : `Up/Down Select · Space/Enter Change · ctrl+s Save default${removeHint} · Esc Back`));
+                : "Up/Down Select · Space/Enter Change · ctrl+s Save default · Esc Back"));
             const height = Math.max(1, Math.floor(getHeight()));
             const room = Math.max(1, height - 2 - footer.length);
             if (selectedEnd - 2 > viewportStart + room) viewportStart = selectedEnd - 2 - room;

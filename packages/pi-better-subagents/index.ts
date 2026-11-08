@@ -173,6 +173,7 @@ import {
     skillLaunchArgs,
     type SkillExposureMode,
 } from "./skills.ts";
+import type { DiscoveredSkill } from "./skill-picker.ts";
 import { createAgentOperations } from "./agent-operations.ts";
 import { createAgentSessionSettings } from "./agent-session-settings.ts";
 import {
@@ -1978,6 +1979,32 @@ function catalogRoleSchema(purpose: string) {
     ], { description: `${one} ${many}` }));
 }
 
+/** Loaded Pi skill metadata from the current prompt resources. No model call, no directory scan. */
+function discoveredSkillsFromContext(ctx: { getSystemPromptOptions?: () => { skills?: readonly unknown[] } }): DiscoveredSkill[] {
+    try {
+        const loaded = ctx.getSystemPromptOptions?.().skills ?? [];
+        const skills: DiscoveredSkill[] = [];
+        for (const raw of loaded) {
+            if (!raw || typeof raw !== "object") continue;
+            const skill = raw as {
+                name?: unknown; description?: unknown; filePath?: unknown; baseDir?: unknown;
+                sourceInfo?: { source?: unknown };
+            };
+            if (typeof skill.name !== "string" || !skill.name || typeof skill.filePath !== "string" || !skill.filePath) continue;
+            skills.push({
+                name: skill.name,
+                description: typeof skill.description === "string" ? skill.description : "",
+                path: skill.filePath,
+                ...(typeof skill.baseDir === "string" ? { baseDir: skill.baseDir } : {}),
+                ...(typeof skill.sourceInfo?.source === "string" ? { source: skill.sourceInfo.source } : {}),
+            });
+        }
+        return skills;
+    } catch {
+        return [];
+    }
+}
+
 export default function (pi: ExtensionAPI) {
     // A standalone Subagents install has no Harness extension, so the parent
     // session applies the same linked-worktree project boundary as its children.
@@ -2093,11 +2120,18 @@ export default function (pi: ExtensionAPI) {
             if (skills.mode === "explicit" && skills.paths.length === 0) {
                 return { ok: false, message: "Add at least one skill path, or choose No skill catalog to load none." };
             }
+            // Saving mode and cap must not write a skill key into a config that
+            // never had one. Discovery only replaces a saved choice when a saved
+            // skill value already exists.
+            const savedSkillValue = loadConfig().defaultSkills;
+            const hasSavedSkillChoice = savedSkillValue !== undefined && savedSkillValue !== null;
             writeSubagentSettings({
                 delegationMode: activeDelegationMode(),
                 maxConcurrent: activeConcurrencyCap(),
-                // null is an explicit discovery choice; it must override a saved path list.
-                defaultSkills: skills.mode === "inherit" ? null : [...skills.paths],
+                ...(skills.mode === "inherit" && !hasSavedSkillChoice ? {} : {
+                    // null is an explicit discovery choice; it must override a saved path list.
+                    defaultSkills: skills.mode === "inherit" ? null : [...skills.paths],
+                }),
             });
             resetSettings();
             return { ok: true, message: "Subagent defaults saved." };
@@ -3657,6 +3691,7 @@ export default function (pi: ExtensionAPI) {
         projectConfigDirName,
         sessionSettings: agentSessionSettings,
         readSkillDefaults,
+        discoverSkills: (commandCtx) => discoveredSkillsFromContext(commandCtx),
         editableModels: () => catalogModelRegistry?.getAvailable().map((model) => `${model.provider}/${model.id}`) ?? [],
         propagateCommandContext(commandCtx) {
             noteCatalogHost(catalogHostFrom(commandCtx));
@@ -3699,6 +3734,7 @@ export default function (pi: ExtensionAPI) {
                     };
                 },
                 changeMode, changeCap, changeSkills, save: saveSettings, reset: resetSettings,
+                discoverSkills: () => discoveredSkillsFromContext(ctx),
                 // Close this page first; the catalog opens after ui.custom resolves.
                 openAgents: () => done("agents"),
             }, () => { refreshBackgroundWorkNavigator(ctx); tui.requestRender(); }, () => done(undefined)));

@@ -52,6 +52,7 @@ import {
 import { resolveRoleAssignment } from "./role-assignment.ts";
 import { saveAgentSessionDefaults, withAgentSessionSettings, type AgentSessionOverrides, type AgentSessionSettings } from "./agent-session-settings.ts";
 import { saveSkillExposure } from "./catalog-skill-edits.ts";
+import type { DiscoveredSkill } from "./skill-picker.ts";
 
 const MODEL_PATTERN = /^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 const TIER_PATTERN = /^[a-z][a-z0-9-]{0,32}$/;
@@ -75,6 +76,10 @@ export interface AgentCommandDeps {
     enrich?: LaunchEnricher;
     /** Live session/config default skill choice; absent keeps the legacy config read. */
     readSkillDefaults?: ReadSkillDefaults;
+    /** Read loaded Pi skill metadata for the checkbox picker. */
+    discoverSkills?: (ctx: ExtensionCommandContext) => readonly DiscoveredSkill[];
+    /** Snapshot captured for this invocation. */
+    discoveredSkills?: readonly DiscoveredSkill[];
     sessionSettings?: AgentSessionSettings;
     /** Available foreground registry models, as provider/id. */
     editableModels?: () => readonly string[];
@@ -156,6 +161,7 @@ export function registerAgentCommands(pi: Pick<ExtensionAPI, "registerCommand">,
 /** Slash commands and settings shortcuts must resolve against the same live context. */
 export function executeAgentsCommandContext(args: string, ctx: ExtensionCommandContext, deps: AgentCommandDeps = {}): Promise<AgentCommandResult> {
     deps.propagateCommandContext?.(ctx);
+    const discoveredSkills = deps.discoverSkills?.(ctx) ?? deps.discoveredSkills;
     return executeAgentsCommand(args, {
         cwd: ctx.cwd,
         hasUI: ctx.hasUI,
@@ -163,7 +169,7 @@ export function executeAgentsCommandContext(args: string, ctx: ExtensionCommandC
         isProjectTrusted: () => ctx.isProjectTrusted(),
         scopedModels: scopedModelsFromContext(ctx),
         ui: ctx.ui,
-    }, deps);
+    }, discoveredSkills ? { ...deps, discoveredSkills } : deps);
 }
 
 /**
@@ -762,6 +768,7 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
                         }
                         return { ok: result.ok, message: result.message };
                     },
+                    discoverSkills: () => deps.discoveredSkills ?? [],
                     save(id) {
                         const loc = location(host, deps);
                         const saved = saveAgentSessionDefaults(loadCatalog(loc), id, deps.sessionSettings!.snapshot(), loc);

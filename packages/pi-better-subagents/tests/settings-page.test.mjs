@@ -15,7 +15,7 @@ function skillFile(name) {
     return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-function harness({ openAgents = true, skills, height } = {}) {
+function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
     const savedSkills = { mode: "inherit", paths: [], source: "default" };
     let current = {
         mode: "adaptive", maxConcurrent: 4, modeSource: "config", capSource: "config",
@@ -61,13 +61,14 @@ function harness({ openAgents = true, skills, height } = {}) {
             };
         },
     };
+    handlers.discoverSkills = () => discovered;
     if (openAgents) handlers.openAgents = () => { agents++; };
     const page = createSubagentSettingsPage(theme, handlers, () => {}, () => { closed++; }, height);
     page.focused = true;
     return { page, settings: () => current, saved: () => saved, closed: () => closed, agents: () => agents, failSave: () => { saveFailure = true; } };
 }
 
-const LABELS = ["Delegation mode", "Concurrent subagents", "Skill exposure", "Agents", "Reset to defaults"];
+const LABELS = ["Delegation mode", "Concurrent subagents", "Skill exposure", "Selected skills", "Agents", "Reset to defaults"];
 
 function rowLabels(page) {
     return page.render(100).flatMap((line) => {
@@ -100,15 +101,6 @@ function selectLabel(page, label) {
     throw new Error(`could not select ${label}; selected ${selectedText(page)}`);
 }
 
-function selectPath(page, path) {
-    for (let attempt = 0; attempt < 32; attempt++) page.handleInput("\x1b[A");
-    for (let attempt = 0; attempt < 32; attempt++) {
-        if (selectedText(page) === path) return;
-        page.handleInput("\x1b[B");
-    }
-    throw new Error(`could not select path ${path}; selected ${selectedText(page)}`);
-}
-
 function typeAndSubmit(page, value) {
     page.handleInput("\x15");
     page.handleInput(value);
@@ -120,20 +112,50 @@ function enterCap(page, value) {
     typeAndSubmit(page, value);
 }
 
-function addSkill(page, path) {
-    selectLabel(page, "+ Add a skill path");
+function pickerOpen(page) {
+    return /Apply selection|0 checked applies No skill catalog/.test(stripAnsi(page.render(160).join("\n")));
+}
+
+function selectPickerEntry(page, text) {
+    const screen = () => stripAnsi(page.render(160).join("\n"));
+    for (let attempt = 0; attempt < 48; attempt++) page.handleInput("\x1b[A");
+    for (let attempt = 0; attempt < 64; attempt++) {
+        if ((selectedText(page) ?? "").includes(text) || screen().includes(`> ${text}`)) return;
+        page.handleInput("\x1b[B");
+    }
+    throw new Error(`could not select picker entry ${text}; selected ${selectedText(page)}`);
+}
+
+function openSkillPicker(page) {
+    selectLabel(page, "Selected skills");
+    page.handleInput("\r");
+    if (!pickerOpen(page)) throw new Error(`skill picker did not open:\n${stripAnsi(page.render(120).join("\n"))}`);
+}
+
+function applySkillPicker(page) {
+    selectPickerEntry(page, "Apply selection");
+    page.handleInput("\r");
+}
+
+function addSkillViaPicker(page, path) {
+    selectPickerEntry(page, "Add skill path");
     page.handleInput("\r");
     typeAndSubmit(page, path);
+}
+
+function chooseSkillPath(page, path) {
+    openSkillPicker(page);
+    addSkillViaPicker(page, path);
+    applySkillPicker(page);
 }
 
 function selectSkillMode(page, mode) {
     selectLabel(page, "Skill exposure");
     for (let attempt = 0; attempt < 3; attempt++) {
-        page.handleInput("\r");
         const text = selectedText(page) ?? "";
         if (mode === "inherit" && text.includes("Discover automatically")) return;
         if (mode === "none" && text.includes("No skill catalog")) return;
-        if (mode === "explicit" && text.includes("Selected skills")) return;
+        page.handleInput("\r");
     }
     throw new Error(`could not select skill mode ${mode}`);
 }
@@ -150,8 +172,7 @@ test("settings page changes session mode and numeric cap, saves both, and resets
     assert.equal(h.settings().maxConcurrent, 7);
     assert.equal(h.settings().capSource, "session");
     assert.equal(h.saved(), 0, "cap changes do not save defaults");
-    selectSkillMode(h.page, "explicit");
-    addSkill(h.page, skill.path);
+    chooseSkillPath(h.page, skill.path);
     h.page.handleInput("\x13");
     assert.equal(h.saved(), 1);
     assert.equal(h.settings().defaultCap, 7);
@@ -218,7 +239,7 @@ test("failed save keeps session choices and narrow rendering fits the terminal",
     for (const line of h.page.render(20)) assert.ok(visibleWidth(line) <= 20);
 });
 
-test("Skill exposure cycles the three states, and Selected skills will not save empty", () => {
+test("Skill exposure cycles discovery and none, and an empty picker applies No skill catalog", () => {
     const h = harness();
     selectLabel(h.page, "Skill exposure");
     assert.match(h.page.render(100).join("\n"), /Discover automatically/);
@@ -227,133 +248,130 @@ test("Skill exposure cycles the three states, and Selected skills will not save 
     assert.equal(h.settings().skillsMode, "none");
     assert.match(h.page.render(100).join("\n"), /No skill catalog/);
     h.page.handleInput("\r");
-    assert.equal(h.settings().skillsMode, "explicit");
-    assert.match(h.page.render(100).join("\n"), /Selected skills/);
-    assert.match(h.page.render(100).join("\n"), /\+ Add a skill path/);
-    assert.match(h.page.render(100).join("\n"), /Source: this session/);
+    assert.equal(h.settings().skillsMode, "inherit");
+    openSkillPicker(h.page);
+    applySkillPicker(h.page);
+    assert.equal(h.settings().skillsMode, "none", "zero checked is the explicit none choice");
+    assert.deepEqual(h.settings().skillsPaths, []);
+    assert.match(h.page.render(100).join("\n"), /No skills checked.*No skill catalog/);
     h.page.handleInput("\x13");
-    assert.equal(h.saved(), 0);
-    assert.match(h.page.render(100).join("\n"), /Add at least one skill path/);
-    assert.equal(h.settings().skillsMode, "explicit");
+    assert.equal(h.saved(), 1);
 });
 
-test("Add a skill path becomes an input, and Escape cancels without adding", () => {
+test("Add a skill path opens an input and Escape cancels without adding", () => {
     const h = harness();
-    selectSkillMode(h.page, "explicit");
-    selectLabel(h.page, "+ Add a skill path");
+    openSkillPicker(h.page);
+    selectPickerEntry(h.page, "Add skill path");
     h.page.handleInput("\r");
-    const editing = h.page.render(100);
-    assert.ok(editing.some((line) => stripAnsi(line).trim() === ">"), "the add row renders the input");
-    assert.doesNotMatch(editing.join("\n"), /\+ Add a skill path/);
+    const editing = stripAnsi(h.page.render(100).join("\n"));
+    assert.match(editing, /Add skill path/);
+    assert.match(editing, /Absolute SKILL\.md or skill directory/);
     h.page.handleInput("half-typed-path");
     h.page.handleInput("\x1b");
     assert.deepEqual(h.settings().skillsPaths, []);
     assert.equal(h.closed(), 0);
-    assert.match(h.page.render(100).join("\n"), /Edit cancelled/);
+    assert.match(h.page.render(100).join("\n"), /Add path cancelled/);
+    h.page.handleInput("\x1b");
+    assert.equal(h.closed(), 0, "Escape from the picker returns to the settings page");
+    h.page.handleInput("\x1b");
+    assert.equal(h.closed(), 1);
 });
 
-test("a path is added, saved, and shown with its source", (t) => {
+test("a checked path is applied, saved, and shown with its source", (t) => {
     const skill = skillFile("add");
     t.after(skill.cleanup);
     const h = harness();
-    selectSkillMode(h.page, "explicit");
-    addSkill(h.page, skill.path);
+    chooseSkillPath(h.page, skill.path);
+    assert.equal(h.settings().skillsMode, "explicit");
     assert.deepEqual(h.settings().skillsPaths, [skill.path]);
     assert.equal(h.settings().skillsSource, "session");
-    assert.match(h.page.render(240).join("\n"), new RegExp(skill.path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(h.page.render(100).join("\n"), /Selected skills\s+1 checked/);
     h.page.handleInput("\x13");
     assert.equal(h.saved(), 1);
     assert.deepEqual(h.settings().skillsPaths, [skill.path]);
     assert.match(h.page.render(100).join("\n"), /Source: config defaultSkills/);
 });
 
-test("invalid path input is reported and kept until cancel, without discarding the list", (t) => {
+test("picker path validation retains the input and keeps the current list", (t) => {
     const skill = skillFile("validation");
     t.after(skill.cleanup);
     const h = harness();
-    selectSkillMode(h.page, "explicit");
-    addSkill(h.page, skill.path);
-    const before = [...h.settings().skillsPaths];
+    openSkillPicker(h.page);
 
-    selectLabel(h.page, "+ Add a skill path");
+    selectPickerEntry(h.page, "Add skill path");
     h.page.handleInput("\r");
     typeAndSubmit(h.page, "relative/SKILL.md");
-    assert.match(h.page.render(100).join("\n"), /absolute path/);
-    assert.deepEqual(h.settings().skillsPaths, before);
+    assert.match(h.page.render(120).join("\n"), /absolute path/);
+    assert.deepEqual(h.settings().skillsPaths, []);
     h.page.handleInput("\x1b");
-    assert.equal(h.closed(), 0, "escape cancels the unfinished path, not the page");
-    assert.match(h.page.render(100).join("\n"), /Edit cancelled/);
-    assert.deepEqual(h.settings().skillsPaths, before);
 
-    selectLabel(h.page, "+ Add a skill path");
+    selectPickerEntry(h.page, "Add skill path");
     h.page.handleInput("\r");
     typeAndSubmit(h.page, join(tmpdir(), "missing-skill-page-path", "SKILL.md"));
-    assert.match(h.page.render(100).join("\n"), /No file or directory/);
-    assert.deepEqual(h.settings().skillsPaths, before);
+    assert.match(h.page.render(120).join("\n"), /No file or directory/);
+    assert.deepEqual(h.settings().skillsPaths, []);
     h.page.handleInput("\x1b");
 
-    selectLabel(h.page, "+ Add a skill path");
-    h.page.handleInput("\r");
-    typeAndSubmit(h.page, skill.path);
-    assert.match(h.page.render(100).join("\n"), /already listed/);
-    assert.deepEqual(h.settings().skillsPaths, before);
-    h.page.handleInput("\x1b");
-
-    selectLabel(h.page, "+ Add a skill path");
+    selectPickerEntry(h.page, "Add skill path");
     h.page.handleInput("\r");
     typeAndSubmit(h.page, "");
-    assert.match(h.page.render(100).join("\n"), /Enter an absolute path/);
-    assert.deepEqual(h.settings().skillsPaths, before);
+    assert.match(h.page.render(120).join("\n"), /Enter an absolute path/);
+    h.page.handleInput("\x1b");
+
+    addSkillViaPicker(h.page, skill.path);
+    assert.match(h.page.render(120).join("\n"), /Skill path added/);
+    selectPickerEntry(h.page, "Add skill path");
+    h.page.handleInput("\r");
+    typeAndSubmit(h.page, skill.path);
+    assert.match(h.page.render(120).join("\n"), /already selected/);
+    assert.deepEqual(h.settings().skillsPaths, []);
+    h.page.handleInput("\x1b");
+    applySkillPicker(h.page);
+    assert.deepEqual(h.settings().skillsPaths, [skill.path]);
 });
 
-test("a path can be edited and removed without touching the saved default until save", (t) => {
-    const first = skillFile("edit-a");
-    const second = skillFile("edit-b");
+test("filtering keeps checked items and unavailable saved paths survive apply", () => {
+    const available = "/skills/available/SKILL.md";
+    const unavailable = "/skills/legacy, archived/SKILL.md";
+    const h = harness({
+        skills: { skillsMode: "explicit", skillsPaths: [unavailable], skillsSource: "config" },
+        discovered: [
+            { name: "available", description: "Available skill.", path: available },
+            { name: "another", description: "Another skill.", path: "/skills/another/SKILL.md" },
+        ],
+    });
+    openSkillPicker(h.page);
+    assert.match(h.page.render(120).join("\n"), /\(unavailable\)/);
+    selectPickerEntry(h.page, "available");
+    h.page.handleInput(" ");
+    h.page.handleInput("another");
+    assert.doesNotMatch(h.page.render(120).join("\n"), /\[x\] available/, "filter hides the unchecked row");
+    assert.match(h.page.render(120).join("\n"), /checked hidden by filter|1 checked/);
+    applySkillPicker(h.page);
+    assert.deepEqual(h.settings().skillsPaths, [unavailable, available], "hidden checked items and unavailable paths survive");
+});
+
+test("Enter on Selected skills edits the same picker list without saving", (t) => {
+    const first = skillFile("edit-first");
+    const second = skillFile("edit-second");
     t.after(first.cleanup);
     t.after(second.cleanup);
     const h = harness();
-    selectSkillMode(h.page, "explicit");
-    addSkill(h.page, first.path);
-    addSkill(h.page, second.path);
+    chooseSkillPath(h.page, first.path);
+    chooseSkillPath(h.page, second.path);
     assert.deepEqual(h.settings().skillsPaths, [first.path, second.path]);
-
-    selectPath(h.page, second.path);
-    h.page.handleInput("\r");
-    typeAndSubmit(h.page, first.path);
-    assert.match(h.page.render(100).join("\n"), /already listed/);
-    assert.deepEqual(h.settings().skillsPaths, [first.path, second.path]);
-    h.page.handleInput("\x1b");
-
-    selectPath(h.page, second.path);
-    h.page.handleInput("\r");
-    typeAndSubmit(h.page, first.path.replace(/SKILL\.md$/, "OTHER.md"));
-    assert.deepEqual(h.settings().skillsPaths, [first.path, second.path], "a missing replacement is not applied");
-    h.page.handleInput("\x1b");
-
-    selectPath(h.page, second.path);
-    h.page.handleInput("\r");
-    typeAndSubmit(h.page, second.path);
-    assert.deepEqual(h.settings().skillsPaths, [first.path, second.path], "an unchanged path is still valid");
-
-    selectPath(h.page, second.path);
-    h.page.handleInput("x");
-    assert.deepEqual(h.settings().skillsPaths, [first.path]);
-    selectSkillMode(h.page, "none");
-    selectSkillMode(h.page, "explicit");
-    assert.deepEqual(h.settings().skillsPaths, [first.path], "a removed path is not resurrected by mode cycling");
-    h.page.handleInput("\x13");
-    assert.deepEqual(h.settings().skillsPaths, [first.path]);
+    assert.equal(h.saved(), 0);
 });
 
 test("switching away from Selected skills and back keeps the draft list", (t) => {
     const skill = skillFile("remember");
     t.after(skill.cleanup);
     const h = harness();
-    selectSkillMode(h.page, "explicit");
-    addSkill(h.page, skill.path);
+    chooseSkillPath(h.page, skill.path);
     selectSkillMode(h.page, "none");
     assert.deepEqual(h.settings().skillsPaths, []);
-    selectSkillMode(h.page, "explicit");
+    openSkillPicker(h.page);
+    applySkillPicker(h.page);
     assert.deepEqual(h.settings().skillsPaths, [skill.path]);
 });
 
@@ -361,12 +379,12 @@ test("saving a non-explicit choice forgets an abandoned path draft", (t) => {
     const skill = skillFile("forget");
     t.after(skill.cleanup);
     const h = harness();
-    selectSkillMode(h.page, "explicit");
-    addSkill(h.page, skill.path);
+    chooseSkillPath(h.page, skill.path);
     selectSkillMode(h.page, "none");
     h.page.handleInput("\x13");
     assert.equal(h.saved(), 1);
-    selectSkillMode(h.page, "explicit");
+    openSkillPicker(h.page);
+    applySkillPicker(h.page);
     assert.deepEqual(h.settings().skillsPaths, [], "the saved none default does not resurrect the old draft");
 });
 
@@ -374,8 +392,7 @@ test("reset restores the saved skill default together with mode and cap", (t) =>
     const skill = skillFile("reset");
     t.after(skill.cleanup);
     const h = harness();
-    selectSkillMode(h.page, "explicit");
-    addSkill(h.page, skill.path);
+    chooseSkillPath(h.page, skill.path);
     h.page.handleInput("\x13");
     selectSkillMode(h.page, "none");
     assert.equal(h.settings().skillsMode, "none");
@@ -438,36 +455,33 @@ test("selected paths render inside narrow and normal widths and name their sourc
     }
     assert.match(h.page.render(120).join("\n"), /Skill exposure/);
     assert.match(h.page.render(120).join("\n"), /Source: config defaultSkills/);
-    selectPath(h.page, skill.path);
+    assert.match(h.page.render(120).join("\n"), /Selected skills\s+2 checked/);
+    openSkillPicker(h.page);
     for (const width of [1, 20, 40, 100]) {
         for (const line of h.page.render(width)) assert.ok(visibleWidth(line) <= width);
     }
+    assert.match(h.page.render(120).join("\n"), /\(unavailable\)/);
 });
 
-test("long lists keep keyboard selection and path editing visible after resize", () => {
-    let height = 12;
-    const paths = Array.from({ length: 30 }, (_, index) => `/skills/skill-${index}/SKILL.md`);
-    const h = harness({ height: () => height,
-        skills: { skillsMode: "explicit", skillsPaths: paths, skillsSource: "config" } });
+test("long skill lists keep the selected checkbox visible after resize", () => {
+    let height = 14;
+    const discovered = Array.from({ length: 30 }, (_, index) => ({
+        name: `skill-${index}`, description: `Description ${index}.`, path: `/skills/skill-${index}/SKILL.md`,
+    }));
+    const h = harness({ height: () => height, discovered });
     const screen = () => {
         const lines = h.page.render(80);
-        assert.ok(lines.length <= height, "the page must fit the available terminal height");
-        return lines.join("\n");
+        assert.ok(lines.length <= height, "the picker must fit the available terminal height");
+        return stripAnsi(lines.join("\n"));
     };
-    assert.match(screen(), /> Delegation mode/);
-    for (let step = 0; step < 32; step++) {
-        h.page.handleInput("\x1b[B");
-        assert.match(screen(), />/, "every selected control stays visible while scrolling");
-    }
-    assert.match(screen(), />   \/skills\/skill-29\/SKILL.md/);
-    h.page.handleInput("\r");
-    assert.match(screen(), /skill-29\/SKILL.md/);
-    assert.match(screen(), /Enter Apply/);
-    height = 7;
-    assert.match(screen(), /skill-29\/SKILL.md/, "resize keeps the active input visible");
-    h.page.handleInput("\x1b");
-    h.page.handleInput("\x1b[B");
-    assert.match(screen(), />   \+ Add a skill path/);
+    openSkillPicker(h.page);
+    selectPickerEntry(h.page, "skill-23");
+    assert.match(screen(), /> \[ \] skill-23/);
+    height = 8;
+    assert.match(screen(), /skill-23/, "resize keeps the active row visible");
     for (let step = 0; step < 40; step++) h.page.handleInput("\x1b[A");
-    assert.match(screen(), /> Delegation mode/, "scrolling back restores the first control");
+    assert.match(screen(), /> \[ \] skill-0/);
+    h.page.handleInput("\x1b");
+    for (let step = 0; step < 40; step++) h.page.handleInput("\x1b[A");
+    assert.match(stripAnsi(h.page.render(80).join("\n")), /> Delegation mode/);
 });

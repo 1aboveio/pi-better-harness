@@ -95,6 +95,10 @@ const ui = {
 const host = { cwd: loc.cwd, hasUI: true, mode: "tui", isProjectTrusted: () => true, ui };
 const deps = {
     ...loc,
+    discoveredSkills: [
+        { name: "review", description: "Review a change before handoff.", path: ROLE_SKILL, baseDir: dirname(ROLE_SKILL), source: "user" },
+        { name: "test-quality", description: "Write tests that catch real bugs.", path: GLOBAL_SKILL, baseDir: dirname(GLOBAL_SKILL), source: "user" },
+    ],
     sessionSettings: { snapshot: () => ({}), change() {}, reset() {} },
 };
 const open = async (id) => {
@@ -123,17 +127,18 @@ worker.handleInput("\x1b[B"); worker.render(100);
 worker.handleInput("\r");
 capture("agent-skills-picker-100", 100, "Picker opens on the definition's own choice. The header names the effective value and source.");
 
-// 3. Selected paths with a relative path rejected; nothing is written.
+// 3. Selected skills opens the shared checkbox picker with loaded metadata.
 worker.handleInput("\x1b[B"); worker.handleInput("\x1b[B"); worker.handleInput("\r");
-for (const character of ".agents/skills/review/SKILL.md") worker.handleInput(character);
+capture("agent-skill-checkbox-100", 100, "The checkbox picker lists loaded skills by name and description; none are checked for this agent.");
+capture("agent-skill-checkbox-42", 42, "The same checkbox picker at 42 columns.");
+worker.handleInput(" ");
+capture("agent-skill-checkbox-checked-100", 100, "Space checks one skill; Enter applies the selection.");
 worker.handleInput("\r");
-capture("agent-skills-relative-error-100", 100, "A relative path is refused because a definition has no workspace of its own.");
+capture("agent-detail-after-selected-100", 100, "The checked skill is saved as the agent's explicit override.");
 
 // 4. Choose none, then show the saved override and the refreshed detail.
-for (let index = 0; index < ".agents/skills/review/SKILL.md".length; index++) worker.handleInput("\x7f");
-worker.handleInput("\x1b");
 worker.handleInput("\r");
-worker.handleInput("\x1b[B");
+worker.handleInput("\x1b[A");
 worker.handleInput("\r");
 capture("agent-detail-after-none-100", 100, "No skill catalog saves [] to overrides.skills; the picker is no longer a role inheritance.");
 capture("agent-detail-after-none-42", 42, "The same saved override at 42 columns.");
@@ -244,8 +249,8 @@ ${screens.map((screen) => `| \`${screen.name}\` | ${screen.width} | ${screen.not
 ## Real Pi captures
 
 \`scripts/agents-skills.tui.e2e.test.mjs\` drives the same row in a real Pi TUI
-through tmux: choose No skill catalog, reload, reopen, choose one absolute
-skill, then restore inheritance. It also proves the saved definition and the
+through tmux: choose No skill catalog, reload, reopen, tick one discovered
+skill in the checkbox picker, then restore inheritance. It also proves the saved definition and the
 effective launch resolution afterwards. The \`real-pi-*.txt\` files are raw
 \`tmux capture-pane\` output at 100 columns plus one 42-column render.
 

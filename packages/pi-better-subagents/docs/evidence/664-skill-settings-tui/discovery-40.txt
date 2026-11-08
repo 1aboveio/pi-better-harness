@@ -7,6 +7,7 @@
   Concurrent subagents     6
   Skill exposure           Discover auto
                            Source: disco
+  Selected skills          Choose…
   Agents
 
   Reset to defaults

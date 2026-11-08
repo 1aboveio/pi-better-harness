@@ -5,7 +5,7 @@ Tab / Shift+Tab switch  ·  ↑↓ select / scroll  ·  Enter change  ·  Esc li
     Model     openai/gpt-4o-mini                                              inherited
     Effort    medium                                                          inherited
   > Skills    1 selected · /private/var/folders/hh/j9d9ym9d1n3b_lks9_4b5zx40  override
-              000gn/T/pi-scripts-test-l2MEBf/pi-agents-skills-Bh2ImW/skills/
+              000gn/T/pi-scripts-test-8sxhO0/pi-agents-skills-8IERbb/skills/
               review/SKILL.md
 
   Model and effort are session edits. Skills save to the definition.

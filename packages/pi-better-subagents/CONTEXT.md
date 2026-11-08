@@ -85,9 +85,12 @@ them the child discovers the catalog as before. `/subagents settings` edits the
 session default immediately, and Ctrl+S saves it globally. The session choice
 applies to the next launch even before it is saved. It saves discovery as
 `null`, so choosing discovery overrides an older path list instead of reading as
-"not set". An empty Selected skills draft refuses the launch rather than silently
-becoming no skills. The effective choice is frozen in the launch recipe, so a
-later catalog or config edit cannot change a saved conversation's exposure, and
+"not set". Both Selected skills screens use one checkbox picker over the skills
+Pi already loaded for the session; saved paths absent from discovery stay
+visible as unavailable, and zero checked applies to No skill catalog rather
+than becoming discovery or an empty explicit draft. The effective choice is
+frozen in the launch recipe, so a later catalog or config edit cannot change a
+saved conversation's exposure, and
 a recipe written before the choice existed keeps discovery. Catalog inspection
 reads the same live session-or-config default, so `/agents` and `agents_catalog`
 name the source a launch would actually use; an invalid draft or saved value is

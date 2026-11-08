@@ -13,14 +13,16 @@ proof lives in `packages/pi-better-subagents/tests/skill-settings-tui.test.mjs`.
 
 ## Keyboard script
 
-1. `Up/Down` moves between rows; when Selected skills is active the path rows and
-   Add a skill path join the same list.
-2. `Space` or `Enter` on Skill exposure cycles
-   Discover automatically → No skill catalog → Selected skills.
-3. `Enter` on Add a skill path opens the path input; `Enter` applies and
-   `Esc` cancels. An empty, relative, duplicate, or missing path stays in the
-   editor with a message.
-4. `Enter` on a path edits it in place; `x` removes it.
-5. `Ctrl+S` saves mode, cap, and skill exposure together.
-6. Reset to defaults restores the saved mode, cap, and skill exposure.
-7. `Esc` closes the page.
+1. `Up/Down` moves between rows.
+2. `Space` or `Enter` on Skill exposure cycles Discover automatically and
+   No skill catalog. Selected skills is a separate row that opens the shared
+   checkbox picker.
+3. In the picker, `Up/Down` moves, `Space` toggles a skill, typing filters,
+   `Enter` applies, and `Esc` cancels without changing the list.
+4. `Enter` on Add skill path opens the manual path input. An empty, relative,
+   duplicate, or missing path stays in the editor with a message.
+5. Zero checked applies No skill catalog. It never means discovery and never
+   leaves an invalid empty Selected skills draft.
+6. `Ctrl+S` saves mode, cap, and skill exposure together.
+7. Reset to defaults restores the saved mode, cap, and skill exposure.
+8. `Esc` closes the page.

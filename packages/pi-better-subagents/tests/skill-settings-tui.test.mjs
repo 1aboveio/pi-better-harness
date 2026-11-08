@@ -53,7 +53,9 @@ process.env.PATH = `${fakeBin}:${process.env.PATH}`;
 
 const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text, inverse: (text) => text };
 const pages = [];
+const renders = [];
 const keyBatches = [];
+let promptSkills = [];
 
 function readSkills() {
     const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
@@ -68,6 +70,7 @@ function reloadedConfig() {
 function ctx() {
     return {
         cwd: root, mode: "tui", hasUI: true, isProjectTrusted: () => false,
+        getSystemPromptOptions: () => ({ cwd: root, skills: promptSkills }),
         sessionManager: { getBranch: () => [] },
         ui: {
             notify() {},
@@ -83,7 +86,8 @@ function ctx() {
                         if (settled) break;
                         page.handleInput(key);
                     }
-                    if (!settled) page.handleInput("\x1b");
+                    renders.push(page.render(160).join("\n"));
+                    for (let attempt = 0; attempt < 3 && !settled; attempt++) page.handleInput("\x1b");
                 });
             },
         },
@@ -124,6 +128,7 @@ async function agentsView(runtime) {
     const components = [];
     const host = {
         cwd: root, mode: "tui", hasUI: true, isProjectTrusted: () => false,
+        getSystemPromptOptions: () => ({ cwd: root, skills: promptSkills }),
         sessionManager: { getBranch: () => [] },
         ui: {
             notify() {}, setWidget() {},
@@ -242,11 +247,13 @@ test("the settings page saves selected skills, reloads, and reaches the child ar
 
     const page = await openSettings([
         ...keysToSkillsRow(),
-        "\r", // discovery -> none
-        "\r", // none -> selected
-        "\x1b[B", // selected skills -> add path
+        "\x1b[B", // Selected skills row
+        "\r", // open checkbox picker
+        "\x1b[B", // apply -> add path
         "\r",
         skill,
+        "\r",
+        "\x1b[A", // add path -> apply
         "\r",
         "\x13", // save default
         "\x1b",
@@ -317,10 +324,13 @@ test("save preserves unrelated Pi and harness settings", async () => {
 
     await openSettings([
         ...keysToSkillsRow(),
-        "\r", // none -> selected
-        "\x1b[B",
+        "\x1b[B", // Selected skills row
+        "\r", // open checkbox picker
+        "\x1b[B", // apply -> add path
         "\r",
         join(root, "skills", "review", "SKILL.md"),
+        "\r",
+        "\x1b[A", // add path -> apply
         "\r",
         "\x13",
         "\x1b",
@@ -347,7 +357,13 @@ test("unsaved session skill choices drive the actual child argv", async () => {
     assert.match(run.text, /source session/);
 
     const chosen = skill("chosen");
-    await openSettings([...keysToSkillsRow(), "\r", "\x1b[B", "\r", chosen, "\r", "\x1b"], runtime);
+    await openSettings([
+        ...keysToSkillsRow(),
+        "\x1b[B", "\r", // Selected skills -> picker
+        "\x1b[B", "\r", chosen, "\r", // add path
+        "\x1b[A", "\r", // apply
+        "\x1b",
+    ], runtime);
     run = await spawn(runtime);
     assert.deepEqual(run.meta.skills, [chosen]);
     assert.equal(run.meta.skillsSource, "session");
@@ -389,22 +405,22 @@ test("reset restores the saved default and a saved choice reaches later launches
     assert.equal(run.argv.includes("--no-skills"), true);
 });
 
-test("an empty Selected skills draft rejects the launch instead of becoming no-skills", async () => {
+test("zero checked in the settings picker becomes No skill catalog and launches --no-skills", async () => {
     saveConfig([]);
     const runtime = createRuntime();
-    clearRuns();
 
-    const draftPage = await openSettings([...keysToSkillsRow(), "\r", "\x1b"], runtime);
-    assert.match(draftPage.render(100).join("\n"), /Selected skills/);
-    assert.match(draftPage.render(100).join("\n"), /Add a skill path/);
-    await assert.rejects(
-        () => runtime.tools.subagent_spawn.execute("tc-empty-draft", {
-            prompt: "probe empty draft", tools: "read,bash", sandbox: false,
-        }, null, null, toolCtx()),
-        /Selected skills has no paths\. Add at least one skill path or choose No skill catalog/,
-    );
-    assert.equal(registry.listMetas().length, 0, "a rejected draft leaves no run record");
-    assert.deepEqual(readSkills(), [], "the saved config is untouched");
+    const draftPage = await openSettings([
+        ...keysToSkillsRow(),
+        "\x1b[B", "\r", // open picker
+        "\r", // zero checked -> apply
+        "\x1b",
+    ], runtime);
+    assert.match(draftPage.render(100).join("\n"), /No skills checked\. Skill exposure set to No skill catalog/);
+    const run = await spawn(runtime);
+    assert.deepEqual(run.meta.skills, []);
+    assert.equal(run.meta.skillsSource, "session");
+    assert.equal(run.argv.includes("--no-skills"), true);
+    assert.deepEqual(readSkills(), [], "zero checked is an explicit none, not an empty explicit draft");
 });
 
 test("Ctrl+S keeps a malformed saved defaultSkills until the user deliberately replaces it", async () => {
@@ -453,14 +469,6 @@ test("catalog inspection and the /agents view follow the live session skill defa
 
     await openSettings([...keysToSkillsRow(), "\r", "\x1b"], runtime);
     view = await inspectRole(runtime);
-    assert.equal(view.skills.effective.mode, "error");
-    assert.equal(view.skills.effective.source, "session");
-    assert.match(view.skills.effective.error, /Selected skills has no paths/);
-    assert.match(view.text, /skills effective: mode=error source=session/);
-    assert.match(await agentsView(runtime), /Skills\s+inherit\s+session \(invalid\)/);
-
-    await openSettings([...keysToSkillsRow(), "\r", "\x1b"], runtime);
-    view = await inspectRole(runtime);
     assert.deepEqual(view.skills.effective, { mode: "discovery", paths: [], source: "session" });
     assert.match(await agentsView(runtime), /Skills\s+inherit\s+session/);
     run = await spawn(runtime);
@@ -483,4 +491,16 @@ test("catalog inspection and the /agents view follow the live session skill defa
     run = await spawn(runtime);
     assert.equal(run.argv.includes("--no-skills"), false);
     assert.equal(run.meta.skillsSource, "default");
+});
+
+test("the settings picker uses loaded Pi skill metadata from the command context", async () => {
+    promptSkills = [{
+        name: "alpha", description: "Reviews changes.", filePath: "/skills/alpha/SKILL.md",
+        baseDir: "/skills/alpha", sourceInfo: { source: "user" },
+    }];
+    const runtime = createRuntime();
+    await openSettings([...keysToSkillsRow(), "\x1b[B", "\r"], runtime);
+    const picker = renders.at(-1);
+    assert.match(picker, /\[ \] alpha\s+Reviews changes\./);
+    promptSkills = [];
 });

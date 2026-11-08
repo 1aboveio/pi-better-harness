@@ -45,7 +45,7 @@ test("the real /agents TUI configures, persists, reloads, and restores skill exp
     const args = ["-L", name];
     const q = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
     const piBin = process.env.PI_AGENTS_SETTINGS_CLI ?? join(ROOT, "node_modules/.bin/pi");
-    const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(agentDir)} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(piBin)} -e ${q(join(ROOT, "packages/pi-better-subagents/index.ts"))} --no-skills --no-context-files --approve --model openai/gpt-4o-mini --models openai/gpt-4o`;
+    const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(agentDir)} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(piBin)} -e ${q(join(ROOT, "packages/pi-better-subagents/index.ts"))} --no-skills --skill ${q(skillPath)} --no-context-files --approve --model openai/gpt-4o-mini --models openai/gpt-4o`;
     const tmux = (...more) => execFileSync("tmux", [...args, ...more], { encoding: "utf8" });
     const key = (value) => tmux("send-keys", "-t", "agents", value);
     const literal = (value) => tmux("send-keys", "-t", "agents", "-l", value);
@@ -108,8 +108,12 @@ test("the real /agents TUI configures, persists, reloads, and restores skill exp
 
         openSkills();
         key("Down"); // No skill catalog -> Selected skills
-        key("Enter"); wait(/Agents \/ skills · selected/);
-        literal(skillPath);
+        key("Enter");
+        wait(/Selected skills/);
+        wait(/\[ \] review/);
+        capture("real-pi-skill-checkbox-100.txt");
+        key("Space");
+        capture("real-pi-skill-checkbox-checked-100.txt");
         key("Enter");
         const selected = wait(/Skills\s+1 selected/);
         assert.match(selected, /Skills saved \(user\): agent\.fixture · 1 selected/);

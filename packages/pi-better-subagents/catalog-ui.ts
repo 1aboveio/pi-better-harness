@@ -1,9 +1,9 @@
-import { isAbsolute } from "node:path";
 import { Input, SelectList, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { OperationList, OperationView } from "./agent-inspection.ts";
 import { EFFORT_LEVELS, type SkillExposureEdit } from "./catalog-schema.ts";
 import { catalogModelChoices, catalogModelOptionLabel, catalogModelScopeLabel, type ScopedModelLike } from "./catalog-editor.ts";
 import type { AgentSessionOverrides, AgentSettingKey } from "./agent-session-settings.ts";
+import { createSkillPicker, type DiscoveredSkill } from "./skill-picker.ts";
 
 type Theme = { fg(color: string, text: string): string; bg?(color: string, text: string): string; bold?(text: string): string; inverse?(text: string): string };
 
@@ -17,6 +17,8 @@ export interface CatalogEditor {
     change(id: string, key: AgentSettingKey, value: string | null): void;
     /** Skill exposure is edited through the definition save path, not session settings. */
     changeSkills?(entry: OperationView, edit: SkillExposureEdit): { ok: boolean; message: string };
+    /** Loaded Pi skill metadata for the checkbox picker. */
+    discoverSkills?(): readonly DiscoveredSkill[];
     save(id: string): { ok: boolean; message: string };
     resetToBundled?(entry: OperationView): { ok: boolean; message: string };
     resetDefinition?(entry: OperationView): { ok: boolean; message: string };
@@ -199,8 +201,7 @@ export function createCatalogComponent(
     let pickerKey: AgentSettingKey | "skills" | undefined;
     let modelScopeNote: string | undefined;
     const search = new Input();
-    const skillPaths = new Input();
-    let editingSkillPaths = false;
+    let skillPicker: ReturnType<typeof createSkillPicker> | undefined;
     let focused = false;
     let message = "";
     let error = false;
@@ -252,56 +253,44 @@ export function createCatalogComponent(
         noMatch: (text) => theme.fg("warning", text),
     };
     function openSkillPaths(current: OperationView) {
-        editingSkillPaths = true;
         picker = undefined;
         search.focused = false;
         message = "";
         // Only the definition's own list is prefilled. An inherited list is shown
-        // in the picker header; typing here creates an override instead of
-        // silently copying the role's value into this definition.
+        // in the picker; ticking creates an override instead of silently copying
+        // the role's value into this definition.
         const own = current.identity.kind === "agent"
             ? current.skills?.source === "agent-override" ? current.skills.value ?? [] : []
             : current.skills?.value ?? [];
-        skillPaths.setValue(own.map((path) => JSON.stringify(path)).join(", "));
-        skillPaths.handleInput("\x05");
-        skillPaths.focused = focused;
-    }
-    function submitSkillPaths() {
-        const current = selected();
-        if (!current || !editor?.changeSkills) return;
-        const text = skillPaths.getValue().trim();
-        let paths: unknown;
-        try {
-            paths = text.startsWith("[") ? JSON.parse(text)
-                : text.startsWith('"') ? JSON.parse(`[${text}]`)
-                : text.split(/,\s*(?=\/|[A-Za-z]:[\\/])|\n/);
-        } catch {
-            report("Check the quoted paths. Separate paths with commas and quote paths containing commas.", true);
-            return;
-        }
-        if (!Array.isArray(paths) || paths.some((path) => typeof path !== "string")) {
-            report("Enter paths separated by commas, quoting each path when needed.", true);
-            return;
-        }
-        const unique = [...new Set((paths as string[]).map((entry) => entry.trim()).filter(Boolean))];
-        if (unique.length === 0) {
-            report("Selected skills needs at least one absolute path. Choose No skill catalog for none.", true);
-            return;
-        }
-        const relative = unique.filter((entry) => !isAbsolute(entry));
-        if (relative.length > 0) {
-            report(`Skill paths must be absolute: ${relative.join(", ")}.`, true);
-            return;
-        }
-        try {
-            const result = editor.changeSkills(current, { mode: "explicit", paths: unique });
-            if (result.ok) {
-                refresh();
-                editingSkillPaths = false;
-                skillPaths.focused = false;
-            }
-            report(result.message, !result.ok);
-        } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
+        skillPicker = createSkillPicker({
+            theme, skills: editor?.discoverSkills?.() ?? [], selected: own,
+            requestRender, getHeight, title: "Selected skills",
+            apply(paths) {
+                if (!editor?.changeSkills) return { ok: false, message: "Skill editing is unavailable." };
+                try {
+                    const result = editor.changeSkills(current, paths.length === 0
+                        ? { mode: "none" }
+                        : { mode: "explicit", paths: [...paths] });
+                    if (result.ok) {
+                        refresh();
+                        report(paths.length === 0
+                            ? "No skills checked. Skill exposure set to No skill catalog."
+                            : result.message, false);
+                    }
+                    return { ok: result.ok, message: result.message };
+                } catch (cause) {
+                    return { ok: false, message: cause instanceof Error ? cause.message : String(cause) };
+                }
+            },
+            finish() { skillPicker = undefined; requestRender(); },
+            cancel() {
+                skillPicker = undefined;
+                report("Skill selection unchanged.");
+                requestRender();
+            },
+        });
+        skillPicker.focused = focused;
+        requestRender();
     }
     function editSkills(current: OperationView) {
         if (!editor?.changeSkills) return;
@@ -412,7 +401,7 @@ export function createCatalogComponent(
         set focused(value: boolean) {
             focused = value;
             search.focused = value && !!picker && pickerKey === "model";
-            skillPaths.focused = value && editingSkillPaths;
+            if (skillPicker) skillPicker.focused = value;
         },
         render(width: number): string[] {
             resetPointerRows = [];
@@ -437,17 +426,7 @@ export function createCatalogComponent(
             const selectedIndex = rows.findIndex((entry) => entry.id === selectedId);
             const start = Math.max(0, Math.min(selectedIndex - Math.floor(listSize / 2), rows.length - listSize));
 
-            if (editingSkillPaths) return fit([
-                theme.fg("accent", "Agents / skills · selected"), "",
-                ...wrapLine(theme.fg("dim", safeWidth < 60
-                    ? "Absolute paths · quote commas · Enter save · Esc cancel"
-                    : "Absolute paths separated by commas. Quote paths containing commas."), safeWidth),
-                "",
-                ...skillPaths.render(safeWidth),
-                "",
-                ...wrapLine(theme.fg("dim", safeWidth < 60 ? "Empty is an error, not discovery" : "At least one path. Empty is an error; choose No skill catalog for none."), safeWidth),
-                ...(messageLines.length ? ["", ...messageLines] : []),
-            ]);
+            if (skillPicker) return fit(skillPicker.render(safeWidth));
             if (picker) return fit([
                 theme.fg("accent", `Agents / ${pickerKey}`), "",
                 ...(pickerKey === "skills" && current
@@ -533,16 +512,8 @@ export function createCatalogComponent(
         },
         handleInput(data: string): void {
             const rows = filtered();
-            if (editingSkillPaths) {
-                if (matchesKey(data, "escape")) {
-                    editingSkillPaths = false;
-                    skillPaths.focused = false;
-                    message = "";
-                    requestRender();
-                    return;
-                }
-                if (matchesKey(data, "enter")) { submitSkillPaths(); requestRender(); return; }
-                skillPaths.handleInput(data);
+            if (skillPicker) {
+                skillPicker.handleInput(data);
                 requestRender();
                 return;
             }
@@ -605,7 +576,7 @@ export function createCatalogComponent(
         },
         handleMouse(event: { type: string; button: string; x: number; y: number; width: number; shift?: boolean; alt?: boolean; ctrl?: boolean }) {
             const entry = resetPointerEntry;
-            const hit = !picker && !editingSkillPaths && (mode === "detail" || mode === "prompt") && entry && event.button === "left" && !event.shift && !event.alt && !event.ctrl
+            const hit = !picker && !skillPicker && (mode === "detail" || mode === "prompt") && entry && event.button === "left" && !event.shift && !event.alt && !event.ctrl
                 && event.x >= 0 && event.x < event.width && resetPointerRows.includes(event.y);
             if (event.type === "press") {
                 pressedReset = hit ? entry : undefined;
@@ -619,6 +590,6 @@ export function createCatalogComponent(
             reset(pressed, mode === "prompt");
             return { handled: true as const, render: true };
         },
-        invalidate() { picker?.invalidate(); search.invalidate(); skillPaths.invalidate(); },
+        invalidate() { picker?.invalidate(); search.invalidate(); skillPicker?.invalidate(); },
     };
 }

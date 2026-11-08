@@ -46,13 +46,14 @@ Enter on Skills offers three choices:
   role's list; a role falls through to the global default and then discovery.
   Removing an override therefore restores inheritance instead of storing a null.
 - **No skill catalog** writes `skills: []`, which becomes `--no-skills`.
-- **Selected skills…** asks for one or more absolute `SKILL.md` or skill-directory
-  paths, comma-separated. Quote paths containing commas; existing paths are
-  quoted automatically. Failed saves keep the editable draft for retry.
-  Definitions require absolute paths because a catalog
-  file has no workspace of its own. An empty list is an error with the recovery
-  named; it is never saved as `[]` and never silently means discovery. Duplicate
-  paths collapse, and a saved list survives as an explicit override.
+- **Selected skills…** opens the shared searchable checkbox picker with skill
+  names and descriptions. Space toggles a skill, Enter applies, and Escape
+  cancels. Filtering preserves checked items. Saved paths missing from discovery
+  remain available as unavailable rows. Add skill path accepts an absolute
+  `SKILL.md` or skill-directory path, including commas and spaces. Failed saves
+  keep the draft for retry. Applying zero checked explicitly selects No skill
+  catalog (`[]`); it never means discovery. Definitions require absolute paths
+  because a catalog file has no workspace of its own.
 
 Unlike model and effort, the skill value is not a `settings.json` preference: it
 is a launch value the definition carries. Selecting a choice rewrites that

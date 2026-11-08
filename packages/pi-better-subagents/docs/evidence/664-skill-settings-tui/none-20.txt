@@ -10,6 +10,8 @@
   Skill exposure
   No skill catalog
     Source: config d
+  Selected skills
+  Choose…
   Agents
 
   Reset to defaults

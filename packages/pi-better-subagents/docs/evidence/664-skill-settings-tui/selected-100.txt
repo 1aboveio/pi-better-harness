@@ -7,11 +7,9 @@
   Concurrent subagents     6
   Skill exposure           Selected skills
                            Source: config defaultSkills
-    /Users/someone/.pi/agent/skills/better-review/SKILL.md
-    /Users/someone/.pi/agent/skills/test-quality/SKILL.md
-    + Add a skill path
+  Selected skills          2 checked
   Agents
 
   Reset to defaults
 
-Up/Down Select · Space/Enter Change · ctrl+s Save default · x Remove path · Esc Back
+Up/Down Select · Space/Enter Change · ctrl+s Save default · Esc Back

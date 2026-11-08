@@ -21,19 +21,21 @@ not child permissions or catalog definitions. `/subagents settings` (or simply
 `/subagents`) opens the terminal settings page with mode, concurrent-subagent
 cap, and default skill-exposure controls, an Agents shortcut to `/agents`, and
 Reset to defaults. The page uses the same selected-row and active-cell styling
-as `/sandbox`, with one editable value column. Skill exposure cycles through
-Discover automatically, No skill catalog, and Selected skills; the last state
-shows an editable path list and the source of the current value. A path must be
-absolute and exist; invalid input stays in the editor with an explanation rather
+as `/sandbox`, with one editable value column. Skill exposure cycles between
+Discover automatically and No skill catalog. The Selected skills row opens the
+shared searchable checkbox picker, which lists loaded skills by name and
+description, uses Space to toggle, Enter to apply, and Esc to cancel. Typing
+filters the list without losing checked items. A saved path missing from current
+discovery stays visible as unavailable and survives apply. Zero checked applies
+No skill catalog, never discovery and never an invalid empty Selected skills
+draft. Manual Add skill path remains available inside the picker; a path must be
+absolute and exist. Invalid input stays in the editor with an explanation rather
 than being dropped.
 Edits automatically persist for this session, including across reloads; Escape
 closes the page without undoing them.
 Enter edits the cap as a positive whole number; Escape cancels an unfinished edit.
-On Selected skills, Enter edits a path, `x` removes one, and Add a skill path
-appends one. Selected skills will not save with an empty list: choose No skill
-catalog to save `[]`, or add at least one path. Ctrl+S saves mode, cap, and skill
-exposure as defaults. Reset to defaults restores all three from the saved config.
-Sandbox permissions remain in `/sandbox`.
+Ctrl+S saves mode, cap, and skill exposure as defaults. Reset to defaults restores
+all three from the saved config. Sandbox permissions remain in `/sandbox`.
 
 Command equivalents also work outside the terminal UI:
 
@@ -602,14 +604,21 @@ its system prompt even when the task already names the one `SKILL.md` it needs.
 
 Precedence, highest first: the launch option (or the batch job's value, then
 `shared`), a catalog role/agent's `defaults.skills` / `overrides.skills`
-([catalog](agent-catalog.md#portable-preferences-vs-host-controls)), `config.json`
-`defaultSkills`, then discovery. Each level distinguishes "not set" from `[]`, so
-`[]` disables discovery rather than falling through to a wider default.
+([catalog](agent-catalog.md#portable-preferences-vs-host-controls)), the current
+session's `/subagents settings` choice, saved `defaultSkills`, then discovery.
+Each level distinguishes "not set" from `[]`, so `[]` disables discovery rather
+than falling through to a wider default. The session choice applies to the next
+launch even before Ctrl+S.
 
 `/agents` edits the catalog's own value: the Skills row shows the effective mode
-and whether it comes from the agent override, the base role, the global default,
-or discovery, and offers Inherit, No skill catalog, or Selected skills. `/subagents`
-edits the global `defaultSkills`. See
+and whether it comes from the agent override, the base role, the session or
+global default, or discovery, and offers Inherit, No skill catalog, or Selected
+skills. `/subagents` edits the session choice first, then saves it as the global
+`defaultSkills`. Both Selected skills screens use the same checkbox picker. Its
+available entries come from the skills Pi already loaded for the current session
+through `ctx.getSystemPromptOptions().skills`; saved paths that are not in that
+list stay visible as unavailable. If the host reports no loaded skills, the
+picker says so and manual Add skill path remains available. See
 [catalog operations](agent-catalog-operations.md#skill-exposure-edits).
 
 Relative paths resolve against the child's workspace. The effective choice is

@@ -1,0 +1,14 @@
+The same checkbox picker at 42 columns.
+
+  Selected skills
+  Up/Down Move · Space Toggle · Enter Appl
+
+  Search >                                
+> [ ] review                              
+    Review a change before handoff.
+  [ ] test-quality
+    Write tests that catch real bugs.
+  ✓ Apply selection (0 checked)
+  + Add skill path…
+  0 checked
+  0 checked applies No skill catalog, not 

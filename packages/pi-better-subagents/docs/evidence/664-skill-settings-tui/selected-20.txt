@@ -10,9 +10,8 @@
   Skill exposure
   Selected skills
     Source: config d
-    /Users/someone/.
-    /Users/someone/.
-    + Add a skill pa
+  Selected skills
+  2 checked
   Agents
 
   Reset to defaults
