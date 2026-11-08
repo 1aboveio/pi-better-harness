@@ -12,7 +12,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
@@ -23,11 +23,33 @@ process.env.PI_CODING_AGENT_DIR = agentDir;
 
 const { default: extension } = await import("../index.ts");
 const config = await import("../config.ts");
+const registry = await import("../registry.ts");
 const { resolveSkillExposure, skillLaunchArgs } = await import("../skills.ts");
 
 const settingsPath = join(root, "settings.json");
 config.setConfigPathForTests(settingsPath);
 config.setConfigForTests(undefined);
+process.env.PI_SUBAGENTS_TEST_REGISTRY = registry.baseDir();
+
+const fakeBin = join(root, "fake-bin");
+mkdirSync(fakeBin, { recursive: true });
+const fakePi = join(fakeBin, "pi");
+writeFileSync(fakePi, `#!/bin/bash
+args=("$@")
+id=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session-id) id="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+base="$PI_SUBAGENTS_TEST_REGISTRY"
+mkdir -p "$base/runs/$id"
+printf '%s\\n' "\${args[@]}" > "$base/runs/$id/argv.txt"
+printf '%s\\n' '{"type":"agent_settled"}' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}' > "$base/runs/$id/output.log"
+`, { mode: 0o755 });
+chmodSync(fakePi, 0o755);
+process.env.PATH = `${fakeBin}:${process.env.PATH}`;
 
 const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text, inverse: (text) => text };
 const pages = [];
@@ -72,25 +94,138 @@ function keysToSkillsRow() {
     return ["\x1b[B", "\x1b[B"];
 }
 
-async function openSettings(keys) {
-    keyBatches.push(keys);
+function writeRoleDefinition() {
+    const dir = join(agentDir, "agents", "roles");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "role.work.md"), `---
+schema: pi-agent/v1
+kind: role
+id: role.work
+name: Worker
+description: Does the work.
+defaults:
+  model: openai/alpha
+  effort: medium
+  tier: balanced
+---
+Role instructions.
+`);
+}
+
+async function inspectRole(runtime) {
+    const result = await runtime.tools.agents_catalog.execute(
+        "tc-inspect-role", { action: "inspect", id: "role.work" }, null, null, toolCtx(),
+    );
+    assert.equal(result.isError, undefined, result.content[0].text);
+    return result.details.view;
+}
+
+async function agentsView(runtime) {
+    const components = [];
+    const host = {
+        cwd: root, mode: "tui", hasUI: true, isProjectTrusted: () => false,
+        sessionManager: { getBranch: () => [] },
+        ui: {
+            notify() {}, setWidget() {},
+            custom(factory) {
+                return new Promise((resolve) => {
+                    let settled = false;
+                    const done = (value) => { if (!settled) { settled = true; resolve(value); } };
+                    const component = factory({ requestRender() {} }, theme, {}, done);
+                    components.push(component);
+                    let screen = component.render(100).join("\n");
+                    if (!screen.includes("Skills")) {
+                        component.handleInput("\r");
+                        screen = component.render(100).join("\n");
+                    }
+                    if (!settled) done(undefined);
+                });
+            },
+        },
+    };
+    await runtime.commands.get("agents").handler("show role.work", host);
+    assert.ok(components.length > 0, "the /agents view must open");
+    return components.at(-1).render(100).join("\n");
+}
+
+function skill(name) {
+    const dir = join(root, "skills", name);
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "SKILL.md");
+    writeFileSync(path, `---\nname: ${name}\n---\n`);
+    return path;
+}
+
+function saveConfig(defaultSkills) {
+    config.writeSubagentSettings({ delegationMode: "adaptive", maxConcurrent: 4, defaultSkills });
+    config.setConfigForTests(undefined);
+}
+
+function createRuntime() {
     const events = createEventBus();
     const registrations = [];
     events.on("harness-settings:register", (item) => registrations.push(item));
+    const tools = {};
     const commands = new Map();
+    const entries = [];
     extension({
         events,
-        registerTool() {},
+        registerTool(definition) { tools[definition.name] = definition; },
         registerCommand(name, command) { commands.set(name, command); },
         on() {},
-        appendEntry() {},
-        sendMessage() { assert.fail("settings must not send messages"); },
-        sendUserMessage() { assert.fail("settings must not send user messages"); },
+        appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
+        sendMessage() {},
+        sendUserMessage() {},
     });
     const contribution = registrations.find((item) => item.id === "subagents");
     assert.equal(contribution.command, "/subagents settings", "the harness-settings link points at this page");
-    await contribution.open(ctx());
+    return { events, registrations, tools, commands, entries, contribution };
+}
+
+async function openSettings(keys, runtime = createRuntime()) {
+    keyBatches.push(keys);
+    await runtime.contribution.open(ctx());
     return pages.at(-1);
+}
+
+function toolCtx() {
+    return {
+        cwd: root,
+        model: { provider: "test", id: "model" },
+        hasUI: false,
+        isProjectTrusted: () => false,
+        ui: { notify() {}, setWidget() {} },
+        sessionManager: { getBranch: () => [] },
+    };
+}
+
+function clearRuns() {
+    rmSync(join(registry.baseDir(), "runs"), { recursive: true, force: true });
+    if (process.env.PI_SUBAGENT_DURABLE_DIR) {
+        rmSync(process.env.PI_SUBAGENT_DURABLE_DIR, { recursive: true, force: true });
+    }
+}
+
+async function waitForFinished(id) {
+    for (let attempt = 0; attempt < 200; attempt++) {
+        const meta = registry.readMeta(id);
+        if (meta && meta.status !== "running") return meta;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`run ${id} did not finish`);
+}
+
+async function spawn(runtime, params = {}) {
+    clearRuns();
+    const res = await runtime.tools.subagent_spawn.execute("tc-skill-session", {
+        prompt: "probe skill exposure", tools: "read,bash", sandbox: false, ...params,
+    }, null, null, toolCtx());
+    const id = res.content[0].text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
+    assert.ok(id, `launch must return a run id, got: ${res.content[0].text}`);
+    const meta = await waitForFinished(id);
+    const argvPath = join(registry.baseDir(), "runs", id, "argv.txt");
+    const argv = readFileSync(argvPath, "utf8").trim().split("\n");
+    return { id, meta, argv, text: res.content[0].text };
 }
 
 test.after(() => {
@@ -195,4 +330,157 @@ test("save preserves unrelated Pi and harness settings", async () => {
     assert.deepEqual(saved.packages, ["npm:example"]);
     assert.deepEqual(saved.piBetterHarness.goal, { autoContinue: false });
     assert.deepEqual(saved.piBetterHarness.subagents.defaultSkills, [join(root, "skills", "review", "SKILL.md")]);
+});
+
+test("unsaved session skill choices drive the actual child argv", async () => {
+    const saved = skill("saved");
+    saveConfig([saved]);
+    const runtime = createRuntime();
+
+    await openSettings([...keysToSkillsRow(), "\r", "\r", "\x1b"], runtime);
+    let run = await spawn(runtime);
+    assert.deepEqual(readSkills(), [saved], "the unsaved choice did not rewrite the saved config");
+    assert.equal(run.argv.includes("--no-skills"), true);
+    assert.equal(run.argv.includes("--skill"), false);
+    assert.deepEqual(run.meta.skills, []);
+    assert.equal(run.meta.skillsSource, "session");
+    assert.match(run.text, /source session/);
+
+    const chosen = skill("chosen");
+    await openSettings([...keysToSkillsRow(), "\r", "\x1b[B", "\r", chosen, "\r", "\x1b"], runtime);
+    run = await spawn(runtime);
+    assert.deepEqual(run.meta.skills, [chosen]);
+    assert.equal(run.meta.skillsSource, "session");
+    assert.deepEqual(run.argv.flatMap((arg, index) => arg === "--skill" ? [run.argv[index + 1]] : []), [chosen]);
+
+    await openSettings([...keysToSkillsRow(), "\r", "\x1b"], runtime);
+    run = await spawn(runtime);
+    assert.equal(run.argv.includes("--no-skills"), false, "session discovery emits no flag");
+    assert.equal(run.meta.skills, undefined);
+    assert.equal(run.meta.skillsSource, "session");
+    assert.match(run.text, /discovery \(user catalog\) · source session/);
+
+    const launchChoice = skill("launch");
+    run = await spawn(runtime, { skills: [launchChoice] });
+    assert.deepEqual(run.meta.skills, [launchChoice]);
+    assert.equal(run.meta.skillsSource, "launch", "the launch option still wins over the session default");
+});
+
+test("reset restores the saved default and a saved choice reaches later launches", async () => {
+    const saved = skill("saved-reset");
+    saveConfig([saved]);
+    const runtime = createRuntime();
+
+    await openSettings([...keysToSkillsRow(), "\r", "\r", "\x1b"], runtime);
+    let run = await spawn(runtime);
+    assert.deepEqual(run.meta.skills, []);
+    assert.equal(run.meta.skillsSource, "session");
+
+    await runtime.commands.get("subagents").handler("reset", toolCtx());
+    run = await spawn(runtime);
+    assert.deepEqual(run.meta.skills, [saved]);
+    assert.equal(run.meta.skillsSource, "config");
+
+    await openSettings([...keysToSkillsRow(), "\r", "\r", "\x13", "\x1b"], runtime);
+    assert.deepEqual(readSkills(), []);
+    run = await spawn(runtime);
+    assert.deepEqual(run.meta.skills, []);
+    assert.equal(run.meta.skillsSource, "config");
+    assert.equal(run.argv.includes("--no-skills"), true);
+});
+
+test("an empty Selected skills draft rejects the launch instead of becoming no-skills", async () => {
+    saveConfig([]);
+    const runtime = createRuntime();
+    clearRuns();
+
+    const draftPage = await openSettings([...keysToSkillsRow(), "\r", "\x1b"], runtime);
+    assert.match(draftPage.render(100).join("\n"), /Selected skills/);
+    assert.match(draftPage.render(100).join("\n"), /Add a skill path/);
+    await assert.rejects(
+        () => runtime.tools.subagent_spawn.execute("tc-empty-draft", {
+            prompt: "probe empty draft", tools: "read,bash", sandbox: false,
+        }, null, null, toolCtx()),
+        /Selected skills has no paths\. Add at least one skill path or choose No skill catalog/,
+    );
+    assert.equal(registry.listMetas().length, 0, "a rejected draft leaves no run record");
+    assert.deepEqual(readSkills(), [], "the saved config is untouched");
+});
+
+test("Ctrl+S keeps a malformed saved defaultSkills until the user deliberately replaces it", async () => {
+    writeFileSync(settingsPath, JSON.stringify({
+        piBetterHarness: { subagents: { delegationMode: "adaptive", maxConcurrent: 4, defaultSkills: "review" } },
+    }, null, 2));
+    config.setConfigForTests(undefined);
+    writeRoleDefinition();
+
+    const runtime = createRuntime();
+    const catalogView = await inspectRole(runtime);
+    assert.equal(catalogView.skills.effective.mode, "error");
+    assert.equal(catalogView.skills.effective.source, "global");
+    assert.match(catalogView.skills.effective.error, /config defaultSkills must be an array/);
+    assert.match(await agentsView(runtime), /Skills\s+inherit\s+global \(invalid\)/);
+    await assert.rejects(
+        () => runtime.tools.subagent_spawn.execute("tc-malformed-config", {
+            prompt: "probe malformed config", tools: "read,bash", sandbox: false,
+        }, null, null, toolCtx()),
+        /Cannot read config defaultSkills: config defaultSkills must be an array/,
+        "a malformed saved value is reported, not treated as discovery",
+    );
+
+    const page = await openSettings(["\x13", "\x1b"]);
+    assert.match(page.render(100).join("\n"), /Config error:.*must be an array/);
+    assert.equal(readSkills(), "review", "an unchanged invalid value is not replaced by discovery");
+
+    await openSettings([...keysToSkillsRow(), "\r", "\x13", "\x1b"]);
+    assert.deepEqual(readSkills(), [], "a deliberate choice is allowed to replace the invalid value");
+});
+
+test("catalog inspection and the /agents view follow the live session skill default", async () => {
+    const saved = skill("catalog-saved");
+    saveConfig([saved]);
+    writeRoleDefinition();
+    const runtime = createRuntime();
+
+    await openSettings([...keysToSkillsRow(), "\r", "\r", "\x1b"], runtime);
+    let view = await inspectRole(runtime);
+    assert.deepEqual(view.skills.effective, { mode: "none", paths: [], source: "session" });
+    assert.match(await agentsView(runtime), /Skills\s+inherit\s+session/);
+    let run = await spawn(runtime);
+    assert.deepEqual(run.meta.skills, []);
+    assert.equal(run.meta.skillsSource, "session");
+    assert.equal(run.argv.includes("--no-skills"), true);
+
+    await openSettings([...keysToSkillsRow(), "\r", "\x1b"], runtime);
+    view = await inspectRole(runtime);
+    assert.equal(view.skills.effective.mode, "error");
+    assert.equal(view.skills.effective.source, "session");
+    assert.match(view.skills.effective.error, /Selected skills has no paths/);
+    assert.match(view.text, /skills effective: mode=error source=session/);
+    assert.match(await agentsView(runtime), /Skills\s+inherit\s+session \(invalid\)/);
+
+    await openSettings([...keysToSkillsRow(), "\r", "\x1b"], runtime);
+    view = await inspectRole(runtime);
+    assert.deepEqual(view.skills.effective, { mode: "discovery", paths: [], source: "session" });
+    assert.match(await agentsView(runtime), /Skills\s+inherit\s+session/);
+    run = await spawn(runtime);
+    assert.equal(run.argv.includes("--no-skills"), false);
+    assert.equal(run.meta.skills, undefined);
+    assert.equal(run.meta.skillsSource, "session");
+
+    await runtime.commands.get("subagents").handler("reset", toolCtx());
+    view = await inspectRole(runtime);
+    assert.deepEqual(view.skills.effective, { mode: "explicit", paths: [saved], source: "global" });
+    assert.match(await agentsView(runtime), /Skills\s+inherit\s+global/);
+    run = await spawn(runtime);
+    assert.deepEqual(run.meta.skills, [saved]);
+    assert.equal(run.meta.skillsSource, "config");
+
+    await openSettings([...keysToSkillsRow(), "\r", "\x13", "\x1b"], runtime);
+    view = await inspectRole(runtime);
+    assert.deepEqual(view.skills.effective, { mode: "discovery", paths: [], source: "discovery" });
+    assert.match(await agentsView(runtime), /Skills\s+inherit\s+discovery/);
+    run = await spawn(runtime);
+    assert.equal(run.argv.includes("--no-skills"), false);
+    assert.equal(run.meta.skillsSource, "default");
 });

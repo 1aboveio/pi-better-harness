@@ -15,7 +15,7 @@ function skillFile(name) {
     return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-function harness({ openAgents = true, skills } = {}) {
+function harness({ openAgents = true, skills, height } = {}) {
     const savedSkills = { mode: "inherit", paths: [], source: "default" };
     let current = {
         mode: "adaptive", maxConcurrent: 4, modeSource: "config", capSource: "config",
@@ -62,7 +62,7 @@ function harness({ openAgents = true, skills } = {}) {
         },
     };
     if (openAgents) handlers.openAgents = () => { agents++; };
-    const page = createSubagentSettingsPage(theme, handlers, () => {}, () => { closed++; });
+    const page = createSubagentSettingsPage(theme, handlers, () => {}, () => { closed++; }, height);
     page.focused = true;
     return { page, settings: () => current, saved: () => saved, closed: () => closed, agents: () => agents, failSave: () => { saveFailure = true; } };
 }
@@ -442,4 +442,32 @@ test("selected paths render inside narrow and normal widths and name their sourc
     for (const width of [1, 20, 40, 100]) {
         for (const line of h.page.render(width)) assert.ok(visibleWidth(line) <= width);
     }
+});
+
+test("long lists keep keyboard selection and path editing visible after resize", () => {
+    let height = 12;
+    const paths = Array.from({ length: 30 }, (_, index) => `/skills/skill-${index}/SKILL.md`);
+    const h = harness({ height: () => height,
+        skills: { skillsMode: "explicit", skillsPaths: paths, skillsSource: "config" } });
+    const screen = () => {
+        const lines = h.page.render(80);
+        assert.ok(lines.length <= height, "the page must fit the available terminal height");
+        return lines.join("\n");
+    };
+    assert.match(screen(), /> Delegation mode/);
+    for (let step = 0; step < 32; step++) {
+        h.page.handleInput("\x1b[B");
+        assert.match(screen(), />/, "every selected control stays visible while scrolling");
+    }
+    assert.match(screen(), />   \/skills\/skill-29\/SKILL.md/);
+    h.page.handleInput("\r");
+    assert.match(screen(), /skill-29\/SKILL.md/);
+    assert.match(screen(), /Enter Apply/);
+    height = 7;
+    assert.match(screen(), /skill-29\/SKILL.md/, "resize keeps the active input visible");
+    h.page.handleInput("\x1b");
+    h.page.handleInput("\x1b[B");
+    assert.match(screen(), />   \+ Add a skill path/);
+    for (let step = 0; step < 40; step++) h.page.handleInput("\x1b[A");
+    assert.match(screen(), /> Delegation mode/, "scrolling back restores the first control");
 });

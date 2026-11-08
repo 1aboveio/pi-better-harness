@@ -88,12 +88,14 @@ export function createSubagentSettingsPage(
     handlers: SubagentSettingsHandlers,
     requestRender: () => void,
     close: () => void,
+    getHeight: () => number = () => process.stdout.rows ?? 30,
 ): Tui.Component & Tui.Focusable {
     const input = new Tui.Input();
     let focused = false;
     let row = 0;
     let editing: EditTarget | undefined;
     let rememberedSkillPaths: string[] | undefined;
+    let viewportStart = 0;
     let message = "";
     let error = false;
 
@@ -274,8 +276,11 @@ export function createSubagentSettingsPage(
                 }
             };
 
+            let selectedStart = 2;
+            let selectedEnd = 3;
             rows.forEach((entry, index) => {
                 const selected = index === row;
+                if (selected) selectedStart = lines.length;
                 if (entry.kind === "mode" || entry.kind === "cap") {
                     const label = entry.kind === "mode" ? "Delegation mode" : "Concurrent subagents";
                     const value = entry.kind === "mode" ? settings.mode : String(settings.maxConcurrent);
@@ -309,14 +314,25 @@ export function createSubagentSettingsPage(
                     lines.push("");
                     lines.push(highlight(theme.fg(selected ? "accent" : "text", marker(selected) + "Reset to defaults"), selected));
                 }
+                if (selected) selectedEnd = lines.length;
             });
 
-            if (message) lines.push("", theme.fg(error ? "error" : "muted", message));
+            const body = lines.slice(2);
+            const footer: string[] = [];
+            if (message) footer.push("", theme.fg(error ? "error" : "muted", message));
             const removeHint = settings.skillsMode === "explicit" && !editing ? " · x Remove path" : "";
-            lines.push("", theme.fg("dim", editing
+            footer.push("", theme.fg("dim", editing
                 ? "Enter Apply · Esc Cancel"
                 : `Up/Down Select · Space/Enter Change · ctrl+s Save default${removeHint} · Esc Back`));
-            return lines.map((line) => Tui.truncateToWidth(line, w, ""));
+            const height = Math.max(1, Math.floor(getHeight()));
+            const room = Math.max(1, height - 2 - footer.length);
+            if (selectedEnd - 2 > viewportStart + room) viewportStart = selectedEnd - 2 - room;
+            if (selectedStart - 2 < viewportStart) viewportStart = selectedStart - 2;
+            viewportStart = Math.max(0, Math.min(viewportStart, body.length - room));
+            const visible = [...lines.slice(0, 2), ...body.slice(viewportStart, viewportStart + room), ...footer];
+            // A very short terminal prioritizes the active control over chrome.
+            const result = height < 2 + footer.length + 1 ? body.slice(selectedStart - 2, selectedStart - 2 + height) : visible;
+            return result.map((line) => Tui.truncateToWidth(line, w, ""));
         },
     };
 }

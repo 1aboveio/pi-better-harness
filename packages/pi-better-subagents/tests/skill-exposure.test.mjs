@@ -105,13 +105,17 @@ describe("skill exposure argv", () => {
 
 describe("skill exposure precedence", () => {
     const table = [
-        ["launch beats catalog, config, and discovery", { requested: [SKILL_A], catalog: [SKILL_B], configured: [] }, "explicit", "launch", [SKILL_A]],
-        ["catalog beats config and discovery", { catalog: [], configured: [SKILL_B] }, "none", "catalog", []],
+        ["launch beats catalog, session, config, and discovery", { requested: [SKILL_A], catalog: [SKILL_B], session: { value: [SKILL_B] }, configured: [] }, "explicit", "launch", [SKILL_A]],
+        ["catalog beats session, config, and discovery", { catalog: [], session: { value: [SKILL_A] }, configured: [SKILL_B] }, "none", "catalog", []],
+        ["session beats config and discovery", { session: { value: [SKILL_A] }, configured: [SKILL_B] }, "explicit", "session", [SKILL_A]],
+        ["session discovery beats a saved config list", { session: {}, configured: [SKILL_B] }, "inherit", "session", []],
+        ["session none beats a saved config list", { session: { value: [] }, configured: [SKILL_B] }, "none", "session", []],
         ["config beats discovery when the others are unset", { catalog: null, configured: [SKILL_B] }, "explicit", "config", [SKILL_B]],
         ["nothing set keeps discovery", {}, "inherit", "default", []],
         // `[]` is a choice: it must not be treated as "unset" and widen to config.
-        ["an empty launch list does not fall through to config", { requested: [], configured: [SKILL_B] }, "none", "launch", []],
-        ["an empty catalog list does not fall through to config", { catalog: [], configured: [SKILL_B] }, "none", "catalog", []],
+        ["an empty launch list does not fall through to session or config", { requested: [], session: { value: [SKILL_A] }, configured: [SKILL_B] }, "none", "launch", []],
+        ["an empty catalog list does not fall through to session or config", { catalog: [], session: { value: [SKILL_A] }, configured: [SKILL_B] }, "none", "catalog", []],
+        ["an empty session list does not fall through to config", { session: { value: [] }, configured: [SKILL_B] }, "none", "session", []],
     ];
     for (const [name, input, mode, source, paths] of table) {
         it(name, () => {
@@ -135,6 +139,7 @@ describe("skill exposure precedence", () => {
 describe("skill exposure reporting", () => {
     it("states the resolved mode and source for each state", () => {
         assert.match(describeSkillExposure(resolveSkillExposure({ cwd: WORKSPACE })), /discovery/);
+        assert.match(describeSkillExposure(resolveSkillExposure({ session: {}, configured: [SKILL_A], cwd: WORKSPACE })), /discovery.*source session/);
         const none = describeSkillExposure(resolveSkillExposure({ requested: [], cwd: WORKSPACE }));
         assert.match(none, /none/);
         assert.match(none, /--no-skills/);

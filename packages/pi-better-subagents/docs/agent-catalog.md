@@ -91,6 +91,8 @@ Markdown definition precedence is project, then personal, then bundled. The high
 
 Model and effort choices saved through `/agents` live separately in the catalog's `settings.json` (`version: 1`, with a `defaults` map keyed by role/agent id). They override only those fields, without shadowing the Markdown prompt. Branch edits win over saved preferences; trusted project preferences win over user preferences. User preferences do not override project-owned definitions. Existing Markdown overrides stay whole definitions until explicitly archived through **Reset to bundled** in Instructions. See [catalog operations](agent-catalog-operations.md#model-and-effort-edits).
 
+Skill exposure is a definition value, not a `settings.json` preference. `/agents` edits `defaults.skills` or `overrides.skills` through the normal definition save path: user and trusted project definitions are updated in place, and editing a bundled definition writes a personal whole-definition override with the bundled prompt unchanged. See [skill exposure edits](agent-catalog-operations.md#skill-exposure-edits).
+
 | Scope | Path |
 | --- | --- |
 | Project | `<cwd>/<CONFIG_DIR_NAME>/agents/roles/*.md` and `.../agents/agents/*.md`. `CONFIG_DIR_NAME` defaults to `.pi`. Pass Pi's export from the host. |

@@ -12,6 +12,7 @@ import { formatDiagnostic, shortRoleName, type Diagnostic } from "./catalog-sche
 import type { CatalogSnapshot } from "./catalog-store.ts";
 import { loadConfig, normalizeTools, SAFE_DEFAULT_TOOLS, type SubagentConfig } from "./config.ts";
 import { resolveExtensions } from "./extensions.ts";
+import { configuredSkillExposure } from "./skills.ts";
 import type { PermissionProfile } from "./permission-policy.ts";
 
 export const LEGACY_CAPABILITY_CONTROLS = [
@@ -74,6 +75,16 @@ export type LaunchEnricher = (input: {
     snapshotDigest: string;
 }) => LaunchEnrichment | undefined;
 
+/** The active default a launch would use when the definition chooses nothing. */
+export interface SkillDefaultsSnapshot {
+    /** Explicit session discovery is `undefined`; none is `[]`. */
+    value?: readonly string[] | null;
+    source: "session" | "config" | "default";
+    error?: string;
+}
+
+export type ReadSkillDefaults = () => SkillDefaultsSnapshot;
+
 export interface OperationField {
     value: string | null;
     source: "agent-override" | "role-default" | "absent";
@@ -133,7 +144,21 @@ export interface OperationView {
     instructions?: string;
     fields?: { model: OperationField; effort: OperationField; tier: OperationField };
     /** Skill exposure the definition resolves to; absent is discovery. */
-    skills?: { value: string[] | null; source: OperationField["source"]; explicit: boolean; inherited: boolean };
+    skills?: {
+        value: string[] | null;
+        source: OperationField["source"];
+        explicit: boolean;
+        inherited: boolean;
+        /** Global `defaultSkills`; null when the current config sets none. */
+        global: string[] | null;
+        /** What a launch with no `skills` option would use for this definition. */
+        effective: {
+            mode: "discovery" | "none" | "explicit" | "error";
+            paths: string[];
+            source: "agent-override" | "role-default" | "session" | "global" | "discovery";
+            error?: string;
+        };
+    };
     /** The definition's own default model and effort (role default, or the agent's override or inherited value). Null when neither is set. */
     defaults: DefinitionDefaults | null;
     requestedModel: string | null;
@@ -226,8 +251,12 @@ export function describeDefaultLaunchCapabilities(input: {
     };
 }
 
-export function presentCatalog(snapshot: CatalogSnapshot, enrich?: LaunchEnricher): OperationList {
-    const entries = listCatalog(snapshot).map((entry) => presentCatalogEntry(snapshot, entry.id, enrich));
+export function presentCatalog(
+    snapshot: CatalogSnapshot,
+    enrich?: LaunchEnricher,
+    readSkillDefaults?: ReadSkillDefaults,
+): OperationList {
+    const entries = listCatalog(snapshot).map((entry) => presentCatalogEntry(snapshot, entry.id, enrich, readSkillDefaults));
     const lines = [
         `Catalog revision ${snapshot.digest}.`,
         "Definition validity is not launchability. Model availability is decided only by the injected resolver.",
@@ -240,7 +269,12 @@ export function presentCatalog(snapshot: CatalogSnapshot, enrich?: LaunchEnriche
     return { revision: snapshot.digest, entries, diagnostics: [...snapshot.diagnostics], text: lines.join("\n") };
 }
 
-export function presentCatalogEntry(snapshot: CatalogSnapshot, id: string, enrich?: LaunchEnricher): OperationView {
+export function presentCatalogEntry(
+    snapshot: CatalogSnapshot,
+    id: string,
+    enrich?: LaunchEnricher,
+    readSkillDefaults?: ReadSkillDefaults,
+): OperationView {
     const inspection = inspectCatalog(snapshot, id);
     const entry = snapshot.roles.get(id) ?? snapshot.agents.get(id) ?? snapshot.blocked.find((item) => item.id === id);
     const definitionValid = Boolean(entry?.structurallyValid && entry.definition);
@@ -310,6 +344,9 @@ export function presentCatalogEntry(snapshot: CatalogSnapshot, id: string, enric
     const metadata = entry?.definition && "metadata" in entry.definition ? entry.definition.metadata : undefined;
     const codex = metadata && typeof metadata === "object" ? (metadata as { codex?: { model?: unknown } }).codex : undefined;
     const codexProvenanceModel = typeof codex?.model === "string" ? codex.model : null;
+    const skillDefaults = readSkillDefaults?.() ?? configuredSkillDefaults();
+    const globalSkills = skillDefaults.value === undefined || skillDefaults.value === null
+        ? null : [...skillDefaults.value];
     const view: OperationView = {
         id,
         found: inspection.found,
@@ -346,6 +383,8 @@ export function presentCatalogEntry(snapshot: CatalogSnapshot, id: string, enric
             source: inspection.skills.source,
             explicit: inspection.skills.explicit,
             inherited: inspection.skills.source === "role-default",
+            global: globalSkills,
+            effective: effectiveSkillExposure(inspection.skills, skillDefaults),
         } : undefined,
         defaults: definitionDefaults(fields),
         requestedModel: enrichment?.requestedModel ?? fields?.model.value ?? null,
@@ -422,6 +461,10 @@ export function renderOperationView(view: OperationView): string {
     lines.push(view.skills
         ? `skills: value=${JSON.stringify(view.skills.value)} mode=${skillMode(view.skills.value)} source=${view.skills.source} explicit=${yesNo(view.skills.explicit)} inherited=${yesNo(view.skills.inherited)}`
         : "skills: mode=discovery source=default");
+    if (view.skills) {
+        lines.push(`skills effective: mode=${view.skills.effective.mode} source=${view.skills.effective.source} paths=${JSON.stringify(view.skills.effective.paths)}${view.skills.effective.error ? ` error=${JSON.stringify(view.skills.effective.error)}` : ""}`);
+        lines.push(`skills default: ${view.skills.global === null ? "not set" : JSON.stringify(view.skills.global)}`);
+    }
     lines.push(`requested model: ${JSON.stringify(view.requestedModel)}`);
     lines.push(`actual model: ${JSON.stringify(view.actualModel)}`);
     lines.push(`requested effort: ${JSON.stringify(view.requestedEffort)}`);
@@ -471,6 +514,58 @@ function field(value: { value: string | null; source: OperationField["source"]; 
 function skillMode(value: string[] | null): "discovery" | "none" | "explicit" {
     if (value === null) return "discovery";
     return value.length === 0 ? "none" : "explicit";
+}
+
+/** Saved global `defaultSkills`; a malformed or unreadable config stays visible as an error. */
+function configuredSkillDefaults(): SkillDefaultsSnapshot {
+    try {
+        const exposure = configuredSkillExposure(loadConfig().defaultSkills);
+        return {
+            value: exposure.mode === "inherit" ? null : exposure.paths,
+            source: exposure.source,
+        };
+    } catch (error) {
+        return {
+            source: "config",
+            error: error instanceof Error ? error.message : String(error),
+        };
+    }
+}
+
+/** Where the active default resolves: session choice, saved global config, or discovery. */
+function defaultSkillSource(defaults: SkillDefaultsSnapshot): NonNullable<OperationView["skills"]>["effective"]["source"] {
+    if (defaults.source === "session") return "session";
+    if (defaults.source === "config" && (defaults.error || (defaults.value !== undefined && defaults.value !== null))) return "global";
+    return "discovery";
+}
+
+/**
+ * The exposure a launch with no `skills` option would resolve for this
+ * definition. A definition's own list wins; otherwise an explicit null or an
+ * absent key falls to the active default and then discovery. A session choice
+ * that means discovery stays a session source, not a false discovery fallback.
+ */
+function effectiveSkillExposure(
+    field: { value: readonly string[] | null; source: OperationField["source"] },
+    defaults: SkillDefaultsSnapshot,
+): NonNullable<OperationView["skills"]>["effective"] {
+    if (field.value !== null) {
+        const paths = [...field.value];
+        return {
+            mode: paths.length === 0 ? "none" : "explicit",
+            paths,
+            source: field.source === "agent-override" ? "agent-override" : "role-default",
+        };
+    }
+    const source = defaultSkillSource(defaults);
+    if (defaults.error) {
+        return { mode: "error", paths: [], source, error: defaults.error };
+    }
+    if (defaults.value === undefined || defaults.value === null) {
+        return { mode: "discovery", paths: [], source };
+    }
+    const paths = [...defaults.value];
+    return { mode: paths.length === 0 ? "none" : "explicit", paths, source };
 }
 
 function yesNo(value: boolean): "yes" | "no" {

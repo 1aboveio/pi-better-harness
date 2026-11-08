@@ -1,0 +1,25 @@
+An explicit null suppresses the role list but still falls through to the global default.
+
+Agents / Release Auditor
+[Settings]   Instructions   Files
+Tab / Shift+Tab switch  ·  ↑↓ select / scroll  ·  Enter change  ·  Esc list
+
+  > Model     openai/gpt-6-astra                                              inherited
+    Effort    medium                                                          inherited
+    Skills    inherit (role list suppressed)                                  override → global
+
+  Model and effort are session edits. Skills save to the definition.
+
+  ID       agent.auditor
+  Scope    user
+  Role     role.review
+  Tier     frontier
+  Actual   not resolved
+
+  Launch resolution
+  The catalog definition has no blocking diagnostic, but that is not launchability. Inject model a
+  vailability and effort support before launching. No actual model was selected here.
+
+Showing 1-15 of 15 lines
+
+Ctrl+S Save defaults

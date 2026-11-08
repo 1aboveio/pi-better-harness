@@ -2005,6 +2005,15 @@ export default function (pi: ExtensionAPI) {
         if (skillsOverride) return { ...skillsOverride, source: "session" };
         return savedSkills();
     };
+    /** The same active default a launch sees, shaped for catalog inspection. */
+    const readSkillDefaults = () => {
+        const skills = activeSkills();
+        const value = skills.mode === "inherit" ? undefined : [...skills.paths];
+        const error = skills.error ?? (skills.mode === "explicit" && skills.paths.length === 0
+            ? "Selected skills has no paths. Add at least one skill path or choose No skill catalog."
+            : undefined);
+        return { value, source: skills.source, ...(error ? { error } : {}) };
+    };
     const changeSkills = (mode: SkillExposureMode, paths: readonly string[]): void => {
         if (mode !== "explicit" && paths.length > 0) throw new Error("Only Selected skills carries a path list.");
         if (mode === "explicit" && paths.some((path) => !isAbsolute(path))) {
@@ -2013,6 +2022,15 @@ export default function (pi: ExtensionAPI) {
         const next = { mode, paths: [...paths] };
         skillsOverride = next;
         pi.appendEntry("pi-better-subagents-skills", { version: 1, ...next });
+    };
+    /** The current-session choice, with `{}` preserving explicit discovery. */
+    const sessionSkillChoice = (): { value?: unknown } | undefined => {
+        if (!skillsOverride) return undefined;
+        if (skillsOverride.mode === "explicit" && skillsOverride.paths.length === 0) {
+            throw new Error("Selected skills has no paths. Add at least one skill path or choose No skill catalog before launching.");
+        }
+        if (skillsOverride.mode === "inherit") return {};
+        return { value: skillsOverride.mode === "none" ? [] : [...skillsOverride.paths] };
     };
     const activeConcurrencyCap = (): number => capOverride ?? normalizeConcurrencyCap(loadConfig().maxConcurrent);
     const changeCap = (cap: number): void => {
@@ -2065,6 +2083,13 @@ export default function (pi: ExtensionAPI) {
     const saveSettings = (): { ok: boolean; message: string } => {
         try {
             const skills = activeSkills();
+            if (!skillsOverride && skills.error) {
+                return {
+                    ok: false,
+                    message: `Cannot save subagent defaults: the saved defaultSkills value is invalid (${skills.error}). ` +
+                        `Choose a skill mode in this session to replace it, or fix the saved config first.`,
+                };
+            }
             if (skills.mode === "explicit" && skills.paths.length === 0) {
                 return { ok: false, message: "Add at least one skill path, or choose No skill catalog to load none." };
             }
@@ -2422,13 +2447,22 @@ export default function (pi: ExtensionAPI) {
 
             // Skill exposure is decided once per attempt. A continuation replays the
             // frozen recipe (including its absence, which keeps discovery); a fresh
-            // launch resolves launch option → catalog role/agent → config default →
-            // discovery. Relative paths belong to the workspace the child runs in.
+            // launch resolves launch option → catalog role/agent → this session's
+            // default → saved config default → discovery. Relative paths belong to
+            // the workspace the child runs in.
+            const sessionSkills = resume ? undefined : sessionSkillChoice();
+            if (!resume && !sessionSkills) {
+                const saved = savedSkills();
+                if (saved.error) {
+                    throw new Error(`Cannot read config defaultSkills: ${saved.error}`);
+                }
+            }
             const skills = resolveSkillExposure(resume
                 ? { saved: { paths: resume.recipe.skills }, cwd }
                 : {
                     requested: p.skills,
                     catalog: p.catalog?.effective?.skills?.value,
+                    session: sessionSkills,
                     configured: cfg.defaultSkills,
                     cwd,
                 });
@@ -3622,6 +3656,7 @@ export default function (pi: ExtensionAPI) {
     const agentOperations = createAgentOperations({
         projectConfigDirName,
         sessionSettings: agentSessionSettings,
+        readSkillDefaults,
         editableModels: () => catalogModelRegistry?.getAvailable().map((model) => `${model.provider}/${model.id}`) ?? [],
         propagateCommandContext(commandCtx) {
             noteCatalogHost(catalogHostFrom(commandCtx));

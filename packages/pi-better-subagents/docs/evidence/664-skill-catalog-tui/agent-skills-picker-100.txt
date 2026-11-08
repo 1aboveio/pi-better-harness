@@ -1,0 +1,9 @@
+Picker opens on the definition's own choice. The header names the effective value and source.
+
+Agents / skills
+
+1 selected · /Users/exoulster/.agents/skills/review/SKILL.md · inherited
+
+→ Inherit                         Remove this override; use the base role's list.
+  No skill catalog                Load no skills (--no-skills).
+  Selected skills…                One or more absolute SKILL.md or skill-directory paths.

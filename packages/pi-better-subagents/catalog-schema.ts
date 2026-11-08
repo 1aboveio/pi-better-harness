@@ -348,6 +348,57 @@ export function updateAgentOverrides(
     return { ...agent, overrides };
 }
 
+/**
+ * One `/agents` skill edit. `inherit` removes the definition's own key,
+ * `none` writes `[]`, and `explicit` writes the absolute paths.
+ *
+ * `explicit` with no paths is rejected on purpose: an empty selected list must
+ * not become `[]` (which means "none") or absence (which means discovery).
+ */
+export type SkillExposureEdit =
+    | { mode: "inherit" }
+    | { mode: "none" }
+    | { mode: "explicit"; paths: readonly string[] };
+
+/** The definition's own skill value: undefined inherits, null suppresses, `[]` is none. */
+export function definitionSkillPreference(definition: CatalogDefinition): string[] | null | undefined {
+    const preferences = definition.kind === "role" ? definition.defaults : definition.overrides;
+    if (!Object.prototype.hasOwnProperty.call(preferences, "skills")) return undefined;
+    return preferences.skills === null || preferences.skills === undefined ? null : [...preferences.skills];
+}
+
+/** Absolute definition paths, with the empty selection rejected rather than stored as "none". */
+export function definitionSkillPaths(paths: readonly string[]): string[] {
+    if (paths.length === 0) {
+        throw new Error("Selected skills needs at least one absolute path. Choose No skill catalog for none.");
+    }
+    return paths.map((entry, index) => {
+        if (typeof entry !== "string" || entry.trim() === "") {
+            throw new Error(`Selected skills[${index}] must be a non-empty absolute path.`);
+        }
+        const path = entry.trim();
+        if (!ABSOLUTE_PATH.test(path)) {
+            throw new Error(`Selected skills[${index}] must be absolute: ${path}. A definition has no workspace of its own.`);
+        }
+        return path;
+    });
+}
+
+/** Apply one edit without flattening inherited values or touching other fields. */
+export function applySkillExposure<T extends CatalogDefinition>(definition: T, edit: SkillExposureEdit): T {
+    const paths = edit.mode === "explicit" ? definitionSkillPaths(edit.paths) : undefined;
+    const apply = (preferences: PortablePreferences): PortablePreferences => {
+        const next = { ...preferences };
+        if (edit.mode === "inherit") delete next.skills;
+        else if (edit.mode === "none") next.skills = [];
+        else next.skills = [...paths!];
+        return next;
+    };
+    return definition.kind === "role"
+        ? { ...definition, defaults: apply(definition.defaults) }
+        : { ...definition, overrides: apply(definition.overrides) };
+}
+
 export function parseDefinition(markdown: string, sourcePath?: string): ParseResult {
     const diagnostics: Diagnostic[] = [];
     try {

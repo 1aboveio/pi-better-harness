@@ -49,7 +49,7 @@ below the running count leaves existing work untouched and blocks new admissions
 until capacity becomes available. Slots already reserved by an in-flight launch
 remain admitted. Settings apply to this parent Pi process, not
 all Pi sessions on the machine. Saving preserves unrelated config keys and
-clears both session overrides. The command form asks for confirmation when a UI
+clears the mode, cap, and skill session overrides. The command form asks for confirmation when a UI
 is available. Reset restores saved defaults without changing config.
 
 `/reload` retains session overrides; new sessions use config, while resuming or
@@ -605,6 +605,12 @@ Precedence, highest first: the launch option (or the batch job's value, then
 ([catalog](agent-catalog.md#portable-preferences-vs-host-controls)), `config.json`
 `defaultSkills`, then discovery. Each level distinguishes "not set" from `[]`, so
 `[]` disables discovery rather than falling through to a wider default.
+
+`/agents` edits the catalog's own value: the Skills row shows the effective mode
+and whether it comes from the agent override, the base role, the global default,
+or discovery, and offers Inherit, No skill catalog, or Selected skills. `/subagents`
+edits the global `defaultSkills`. See
+[catalog operations](agent-catalog-operations.md#skill-exposure-edits).
 
 Relative paths resolve against the child's workspace. The effective choice is
 frozen in the launch recipe and printed at launch as

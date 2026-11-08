@@ -27,7 +27,7 @@ export type SkillExposureMode = "inherit" | "none" | "explicit";
  * Where the effective choice came from. `recipe` is a continuation replaying a
  * frozen launch, and `default` is the ultimate fallback: discovery.
  */
-export type SkillExposureSource = "launch" | "catalog" | "config" | "default" | "recipe";
+export type SkillExposureSource = "launch" | "catalog" | "session" | "config" | "default" | "recipe";
 
 export interface SkillExposure {
     mode: SkillExposureMode;
@@ -67,6 +67,12 @@ export interface SkillExposureInput {
     requested?: unknown;
     /** Catalog role/agent choice for this launch. */
     catalog?: unknown;
+    /**
+     * A current-session override. Presence is the choice: `{}` means discovery,
+     * `{ value: [] }` means none, and `{ value: paths }` means exactly those.
+     * It must beat the saved config without reopening discovery.
+     */
+    session?: { value?: unknown };
     /** Global `defaultSkills` from the subagent config. */
     configured?: unknown;
     /** Workspace the child runs in; relative paths are resolved against it. */
@@ -76,6 +82,7 @@ export interface SkillExposureInput {
 const LABELS = {
     launch: "skills",
     catalog: "the catalog definition's skills",
+    session: "session skills default",
     config: "config defaultSkills",
 } as const;
 
@@ -114,8 +121,10 @@ export function absolutizeSkillPaths(paths: readonly string[], cwd: string | und
  * Resolve the effective exposure for an attempt.
  *
  * Precedence, highest first: the frozen recipe (continuation), the launch
- * option, the catalog role/agent choice, the global config default, discovery.
- * Every level distinguishes "not set" from `[]`.
+ * option, the catalog role/agent choice, the current-session default, the saved
+ * global config default, discovery. Every level distinguishes "not set" from
+ * `[]`; an absent session override falls through, a present one decides even
+ * when it means discovery.
  */
 export function resolveSkillExposure(input: SkillExposureInput): SkillExposure {
     if (input.saved) {
@@ -125,12 +134,19 @@ export function resolveSkillExposure(input: SkillExposureInput): SkillExposure {
         if (input.saved.paths === undefined) return { mode: "inherit", paths: [], source: "recipe" };
         return exposureFrom([...input.saved.paths], "recipe");
     }
-    for (const source of ["launch", "catalog", "config"] as const) {
-        const value = source === "launch" ? input.requested : source === "catalog" ? input.catalog : input.configured;
+    for (const source of ["launch", "catalog"] as const) {
+        const value = source === "launch" ? input.requested : input.catalog;
         const normalized = normalizeSkillExposure(value, LABELS[source]);
         if (normalized === undefined) continue;
         return exposureFrom(absolutizeSkillPaths(normalized, input.cwd), source);
     }
+    if (input.session) {
+        const normalized = normalizeSkillExposure(input.session.value, LABELS.session);
+        if (normalized === undefined) return { mode: "inherit", paths: [], source: "session" };
+        return exposureFrom(absolutizeSkillPaths(normalized, input.cwd), "session");
+    }
+    const configured = normalizeSkillExposure(input.configured, LABELS.config);
+    if (configured !== undefined) return exposureFrom(absolutizeSkillPaths(configured, input.cwd), "config");
     return { mode: "inherit", paths: [], source: "default" };
 }
 
@@ -154,10 +170,11 @@ export function skillLaunchArgs(exposure: SkillExposure): string[] {
 /** One line for a launch confirmation or a continuation message. */
 export function describeSkillExposure(exposure: SkillExposure): string {
     if (exposure.mode === "inherit") {
-        // Nothing chose an exposure, so naming a source would only add noise to
-        // the line every ordinary launch prints. The run metadata still records
-        // `skillsSource` for structured inspection.
-        return "Skills: discovery (user catalog)";
+        // An ordinary launch chose nothing, so naming a source would only add
+        // noise. A session override that chose discovery is different: the user
+        // needs to see that the saved path list is not in effect.
+        const source = exposure.source === "session" ? " · source session" : "";
+        return `Skills: discovery (user catalog)${source}`;
     }
     const detail = exposure.mode === "none"
         ? "none (--no-skills)"

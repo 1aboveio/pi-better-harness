@@ -84,10 +84,14 @@ for delegation mode, the concurrent-subagent cap (default 6), and the default
 skill exposure. Skill exposure cycles through Discover automatically, No skill
 catalog, and Selected skills; Selected skills lists editable absolute paths to a
 `SKILL.md` file or skill directory, and the page names whether the current value
-comes from the saved config or this session. Edits apply to this session and
-persist across reloads; Ctrl+S saves all three as defaults, and Reset to defaults
-clears session overrides, including the skill list. Agents opens the same catalog
-as `/agents`. `/subagents mode manual|adaptive|coordinator` and
+comes from the saved config or this session. The session choice controls the next
+launch before Ctrl+S, an empty Selected skills draft is refused instead of
+silently becoming No skill catalog, and edits persist across reloads. Ctrl+S
+saves all three as defaults, and Reset to defaults clears session overrides,
+including the skill list. Agents opens the same catalog
+as `/agents`; a definition that inherits skill exposure shows whether the live
+value comes from this session, saved config, or discovery, and an invalid draft
+is marked invalid rather than shown as discovery. `/subagents mode manual|adaptive|coordinator` and
 `/subagents cap <number>` are command equivalents; `/subagents save` persists
 the current settings. Lowering the cap blocks new single and batch launches, including launches
 still preparing, without stopping running work. Saved configuration changes are
