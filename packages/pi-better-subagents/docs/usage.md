@@ -146,7 +146,10 @@ Each attempt gets a new run id, log, timing record, and capacity slot while the
 native session id and history stay the same. The launch recipe preserves the
 worker's role, tools, skill exposure, model, and workspace, including uncommitted
 changes. Repeating a launch-only option is accepted only with the saved value;
-a different `skills` list is refused rather than silently dropped.
+a different `skills` list is refused rather than silently dropped. A continuation
+whose frozen tool loadout can no longer be admitted (for example its trusted
+package is gone) is refused before anything is spawned, instead of reopening the
+saved conversation with different tools.
 
 A run stopped with `subagent_stop` (status `killed`) can be continued the same
 way. Stopping ends that execution, not the saved conversation or its
@@ -522,11 +525,15 @@ chosen in `/sandbox` → Subagents · Tools
   name is refused. A single extension file with no package manifest is loaded
   and admitted by itself, never its directory. Known network tool names
   (`web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name) are refused while Network access is Off; this is a name list, not a
-  network sandbox. A ticked tool whose package can't be found is refused at launch. Ticked tools
-  join the default tool list; an explicit `tools` list still decides.
+  network sandbox. A ticked tool whose package can't be found is left out of a
+  default loadout and reported with its reason in the launch output; an explicit
+  `tools` request for a tool the task boundary cannot provide refuses the launch.
+  Ticked tools join the default tool list; an explicit `tools` list still decides.
 
-Other tools are disabled in confined children and listed in launch output with
-the reason. The launch line shows what was admitted, for example
+Other tools are disabled in confined children. One that only joined the default
+loadout is omitted from the child and listed in launch output with the reason;
+one the caller named in `tools` refuses the launch with the reason. The launch
+line shows what was admitted, for example
 `Runtime: isolated · guarded apply_patch · trusted web_fetch (@juicesharp/rpiv-web-tools)`.
 Provider extensions are trusted runtime code; arbitrary extension tools are not
 admitted merely because their names were requested. Confined children disable project

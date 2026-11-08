@@ -62,7 +62,7 @@ import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime, applyDirectApplicationLoadout, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.ts";
 import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.ts";
 import { TASK_BUILTINS } from "./shared-task-sandbox.ts";
-import { APPLY_PATCH, describeTaskTools, planTaskTools } from "./subagent-tools.ts";
+import { APPLY_PATCH, describeTaskTools, planTaskTools, selectEffectiveTaskTools } from "./subagent-tools.ts";
 import {
     announceExecutionAdapter, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions,
 } from "./permission-policy.ts";
@@ -2574,13 +2574,51 @@ export default function (pi: ExtensionAPI) {
                 }).tools.join(",");
             }
             const bridgeToolNames = new Set<string>(bridgeEnabled ? bridgePlan.tools : []);
+            // A bridge tool the supervisor withholds (no production schema, clean,
+            // excluded) explains itself better than extension admission would.
+            const withheldBridgeReasons = new Map<string, string>(bridgePlan.withheld.map((tool) => [tool.name, tool.reason]));
+            // Candidates for the task-tool plan: exclusions and bridge-supplied
+            // names never reach extension admission.
+            const plannedTools = allow.split(",").filter((name) => name && !requestedExcludes.has(name) && !bridgeToolNames.has(name));
             const taskTools = sandboxEnabled ? planTaskTools({
-                requested: allow.split(",").filter((name) => name && !requestedExcludes.has(name) && !bridgeToolNames.has(name)),
+                requested: plannedTools,
                 settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
                 processAccess: permissionPlan.permissions?.processAccess ?? "off",
                 builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
                 toolExtensions: cfg.toolExtensions, resolvePath: resolveExtensionPath,
             }) : undefined;
+            // One effective selection feeds the task policy, child preflight, worker
+            // bridge and frozen recipe, so a refused tool cannot leak into any of them
+            // (#669). A name this attempt requires - the caller's explicit `tools`, or a
+            // continuation's frozen loadout - refuses the launch instead of narrowing it;
+            // an inherited default is dropped from the child with the reason.
+            const requiredToolNames = new Set(requestedTools === undefined
+                ? []
+                : requestedTools.split(",").map((name) => name.trim()).filter(Boolean));
+            const toolSelection = taskTools
+                ? selectEffectiveTaskTools({
+                    tools: allow.split(",").filter(Boolean), plan: taskTools, required: requiredToolNames,
+                })
+                : undefined;
+            if (toolSelection?.required.length) {
+                const detail = toolSelection.required
+                    .map((tool) => `${tool.name} (${withheldBridgeReasons.get(tool.name) ?? tool.reason})`).join(", ");
+                throw resume
+                    ? new ContinuationError(
+                        `Cannot continue ${resume.prior.id}: its frozen launch requires tool(s) this parent can no longer provide: ${detail}. ` +
+                        `Launch a new run instead of continuing this conversation.`,
+                    )
+                    : new Error(
+                        `Requested tool(s) are not available in the task sandbox: ${detail}. ` +
+                        `Remove them from the tools list, or make them available in /sandbox (Subagents · Tools); nothing was launched.`,
+                    );
+            }
+            if (toolSelection) {
+                if (plannedTools.length > 0 && toolSelection.tools.length === 0) {
+                    throw new Error(`No requested tool has a verified task sandbox adapter: ${toolSelection.refused.map((tool) => `${tool.name} (${withheldBridgeReasons.get(tool.name) ?? tool.reason})`).join(", ")}.`);
+                }
+                allow = toolSelection.tools.join(",");
+            }
             const dependencyOptions = {
                 model, virtual: (() => {
                     const slash = model?.indexOf("/") ?? -1;
@@ -2673,11 +2711,7 @@ export default function (pi: ExtensionAPI) {
 
             const piBin = resolvePiBinary();
             const selectedTools = allow.split(",").filter((name) => name && !excludes.has(name));
-            const unavailable = taskTools?.refused.filter((tool) => selectedTools.includes(tool.name)) ?? [];
-            const unavailableTools = unavailable.map((tool) => tool.name);
-            if (sandboxEnabled && selectedTools.length && unavailableTools.length === selectedTools.length) {
-                throw new Error(`No requested tool has a verified task sandbox adapter: ${unavailable.map((tool) => `${tool.name} (${tool.reason})`).join(", ")}.`);
-            }
+            const dropped = toolSelection?.dropped ?? [];
             const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
                 root: requestedSandboxDir, controlDir: join(runDir(id), "control"), piBin,
                 tools: selectedTools,
@@ -2945,7 +2979,7 @@ export default function (pi: ExtensionAPI) {
                     : resolution.specs.length
                     ? `Runtime: isolated · extensions ${resolution.specs.join(", ")}\n`
                     : `Runtime: isolated · built-in tools only\n`;
-            const warn = (unavailable.length ? `Task sandbox: ${unavailable.map((tool) => `${tool.name} disabled (${tool.reason})`).join("; ")}.\n` : "") +
+            const warn = (dropped.length ? `Task sandbox: ${dropped.map((tool) => `${tool.name} disabled (${withheldBridgeReasons.get(tool.name) ?? tool.reason})`).join("; ")}.\n` : "") +
                 (!sandboxEnabled && resolution.unmapped.length
                 ? `NOTE: no extension mapped for ${resolution.unmapped.join(", ")} — ` +
                   `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
