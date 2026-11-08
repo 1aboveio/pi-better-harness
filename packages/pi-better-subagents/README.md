@@ -80,13 +80,16 @@ Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or ne
 
 The user config sets `delegationMode` to `manual`, `adaptive` (default), or
 `coordinator`. `/subagents settings` (or `/subagents`) opens a settings page
-for delegation mode and the concurrent-subagent cap (default 6). Edits apply to
-this session and persist across reloads; Ctrl+S saves both as defaults, and
-Reset to defaults clears
-session overrides. Agents opens the same catalog as `/agents`.
-`/subagents mode manual|adaptive|coordinator` and
+for delegation mode, the concurrent-subagent cap (default 6), and the default
+skill exposure. Skill exposure cycles through Discover automatically, No skill
+catalog, and Selected skills; Selected skills lists editable absolute paths to a
+`SKILL.md` file or skill directory, and the page names whether the current value
+comes from the saved config or this session. Edits apply to this session and
+persist across reloads; Ctrl+S saves all three as defaults, and Reset to defaults
+clears session overrides, including the skill list. Agents opens the same catalog
+as `/agents`. `/subagents mode manual|adaptive|coordinator` and
 `/subagents cap <number>` are command equivalents; `/subagents save` persists
-both. Lowering the cap blocks new single and batch launches, including launches
+the current settings. Lowering the cap blocks new single and batch launches, including launches
 still preparing, without stopping running work. Saved configuration changes are
 picked up on subsequent reads; explicit session overrides still take precedence.
 Before every model request, including continuations after tool calls,
@@ -112,7 +115,9 @@ Saved defaults live in global `~/.pi/agent/settings.json` under
 `piBetterHarness.subagents` (or under `PI_CODING_AGENT_DIR`) and survive package
 reinstalls and upgrades. The old user config migrates on first use. Global values
 override the package's `config.json`, which remains a compatibility fallback.
-Save existing mode and cap choices with `/subagents save` or Ctrl+S. Put other
+Save existing mode, cap, and skill choices with `/subagents save` or Ctrl+S.
+Discovery is saved as `defaultSkills: null`, which clears a previously saved
+path list. Put other
 custom config keys in `piBetterHarness.subagents` as well; edits made only inside
 the installed package can be lost on upgrade.
 

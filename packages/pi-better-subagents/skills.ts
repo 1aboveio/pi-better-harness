@@ -36,6 +36,26 @@ export interface SkillExposure {
     source: SkillExposureSource;
 }
 
+export interface ConfiguredSkillExposure {
+    mode: SkillExposureMode;
+    paths: string[];
+    /** `config` when the key is present (including null/[]), `default` when absent. */
+    source: "config" | "default";
+}
+
+/**
+ * Turn the saved global `defaultSkills` value into the same three states a
+ * launch uses. An absent key and `null` both mean discovery; `[]` is the
+ * explicit "none" choice and paths are exactly those skills.
+ */
+export function configuredSkillExposure(value: unknown): ConfiguredSkillExposure {
+    if (value === undefined) return { mode: "inherit", paths: [], source: "default" };
+    const paths = normalizeSkillExposure(value, "config defaultSkills");
+    if (paths === undefined) return { mode: "inherit", paths: [], source: "config" };
+    if (paths.length === 0) return { mode: "none", paths: [], source: "config" };
+    return { mode: "explicit", paths, source: "config" };
+}
+
 export interface SkillExposureInput {
     /**
      * Present only on a continuation. The frozen recipe decides, including its

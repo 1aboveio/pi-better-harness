@@ -18,14 +18,22 @@ Set `delegationMode` in the user config described under
 [Tool scoping](#tool-scoping-allowlist) to `manual`, `adaptive`, or
 `coordinator` (default `adaptive`). This controls foreground delegation guidance,
 not child permissions or catalog definitions. `/subagents settings` (or simply
-`/subagents`) opens the terminal settings page with mode and concurrent-subagent
-cap controls, an Agents shortcut to `/agents`, and Reset to defaults.
-The page uses the same selected-row and
-active-cell styling as `/sandbox`, with one editable value column.
+`/subagents`) opens the terminal settings page with mode, concurrent-subagent
+cap, and default skill-exposure controls, an Agents shortcut to `/agents`, and
+Reset to defaults. The page uses the same selected-row and active-cell styling
+as `/sandbox`, with one editable value column. Skill exposure cycles through
+Discover automatically, No skill catalog, and Selected skills; the last state
+shows an editable path list and the source of the current value. A path must be
+absolute and exist; invalid input stays in the editor with an explanation rather
+than being dropped.
 Edits automatically persist for this session, including across reloads; Escape
 closes the page without undoing them.
 Enter edits the cap as a positive whole number; Escape cancels an unfinished edit.
-Ctrl+S saves both settings as defaults. Sandbox permissions remain in `/sandbox`.
+On Selected skills, Enter edits a path, `x` removes one, and Add a skill path
+appends one. Selected skills will not save with an empty list: choose No skill
+catalog to save `[]`, or add at least one path. Ctrl+S saves mode, cap, and skill
+exposure as defaults. Reset to defaults restores all three from the saved config.
+Sandbox permissions remain in `/sandbox`.
 
 Command equivalents also work outside the terminal UI:
 
@@ -653,7 +661,9 @@ The effective config also sets:
   foreground model).
 - `defaultSkills` — skill exposure when neither the launch nor a catalog role or
   agent chooses one. Omit it (or set `null`) for discovery, `[]` for no skills,
-  or absolute paths for exactly those skills. See [skill exposure](#skill-exposure).
+  or absolute paths for exactly those skills. `/subagents settings` writes
+  `null` when Discover automatically is saved, so it overrides an older path
+  list. See [skill exposure](#skill-exposure).
 - `delegationMode` — foreground policy (`manual`, `adaptive`, or `coordinator`;
   default `adaptive`). `/subagents mode ...` changes only the current session.
   `/subagents save` saves mode and cap together as config defaults.

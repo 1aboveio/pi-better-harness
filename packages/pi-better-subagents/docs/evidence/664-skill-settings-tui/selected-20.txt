@@ -1,0 +1,20 @@
+# Selected skills · saved config
+# width: 20
+
+  Subagent settings
+
+> Delegation mode   
+  adaptive
+  Concurrent subagen
+  6
+  Skill exposure
+  Selected skills
+    Source: config d
+    /Users/someone/.
+    /Users/someone/.
+    + Add a skill pa
+  Agents
+
+  Reset to defaults
+
+Up/Down Select · Spa

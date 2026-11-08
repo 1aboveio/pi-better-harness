@@ -1,0 +1,14 @@
+# Discover automatically · no saved default
+# width: 40
+
+  Subagent settings
+
+> Delegation mode          adaptive     
+  Concurrent subagents     6
+  Skill exposure           Discover auto
+                           Source: disco
+  Agents
+
+  Reset to defaults
+
+Up/Down Select · Space/Enter Change · ct

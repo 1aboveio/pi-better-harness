@@ -1,0 +1,15 @@
+# Selected skills with no paths yet · this session
+# width: 60
+
+  Subagent settings
+
+> Delegation mode          adaptive                         
+  Concurrent subagents     6
+  Skill exposure           Selected skills
+                           Source: this session (unsaved)
+    + Add a skill path
+  Agents
+
+  Reset to defaults
+
+Up/Down Select · Space/Enter Change · ctrl+s Save default · 

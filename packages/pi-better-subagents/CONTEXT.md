@@ -81,9 +81,11 @@ narrows the prompt and grants nothing.
 
 A launch option wins over the catalog definition's choice, which wins over the
 global subagent default; with none of them the child discovers the catalog as
-before. The effective choice is frozen in the launch recipe, so a later catalog
-or config edit cannot change a saved conversation's exposure, and a recipe
-written before the choice existed keeps discovery.
+before. `/subagents settings` edits that global default. It saves discovery as
+`null`, so choosing discovery overrides an older path list instead of reading as
+"not set". The effective choice is frozen in the launch recipe, so a later
+catalog or config edit cannot change a saved conversation's exposure, and a
+recipe written before the choice existed keeps discovery.
 
 Discovery and "none" are distinct: an absent choice means the child advertises
 the user catalog, an empty list means it advertises nothing. A continuation

@@ -67,7 +67,7 @@ import {
     announceExecutionAdapter, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions,
 } from "./permission-policy.ts";
 import { resolveSubagentWorkspace } from "./git-workspace.ts";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import {
     baseDir,
     taskWorkspaceDir,
@@ -166,10 +166,12 @@ import { createHash } from "node:crypto";
 import { assertThinkingLevel, parseModelThinking, type ThinkingLevel } from "./thinking.ts";
 import {
     absolutizeSkillPaths,
+    configuredSkillExposure,
     describeSkillExposure,
     normalizeSkillExposure,
     resolveSkillExposure,
     skillLaunchArgs,
+    type SkillExposureMode,
 } from "./skills.ts";
 import { createAgentOperations } from "./agent-operations.ts";
 import { createAgentSessionSettings } from "./agent-session-settings.ts";
@@ -1987,6 +1989,31 @@ export default function (pi: ExtensionAPI) {
     let catalogModelRegistry: ExtensionContext["modelRegistry"] | undefined;
     let delegationOverride: DelegationMode | undefined;
     let capOverride: number | undefined;
+    interface SkillSelection { mode: SkillExposureMode; paths: string[] }
+    let skillsOverride: SkillSelection | undefined;
+    const savedSkills = (): SkillSelection & { source: "config" | "default"; error?: string } => {
+        try {
+            return configuredSkillExposure(loadConfig().defaultSkills);
+        } catch (error) {
+            return {
+                mode: "inherit", paths: [], source: "config",
+                error: error instanceof Error ? error.message : String(error),
+            };
+        }
+    };
+    const activeSkills = (): SkillSelection & { source: "session" | "config" | "default"; error?: string } => {
+        if (skillsOverride) return { ...skillsOverride, source: "session" };
+        return savedSkills();
+    };
+    const changeSkills = (mode: SkillExposureMode, paths: readonly string[]): void => {
+        if (mode !== "explicit" && paths.length > 0) throw new Error("Only Selected skills carries a path list.");
+        if (mode === "explicit" && paths.some((path) => !isAbsolute(path))) {
+            throw new Error("Enter absolute skill paths so every child resolves the same files.");
+        }
+        const next = { mode, paths: [...paths] };
+        skillsOverride = next;
+        pi.appendEntry("pi-better-subagents-skills", { version: 1, ...next });
+    };
     const activeConcurrencyCap = (): number => capOverride ?? normalizeConcurrencyCap(loadConfig().maxConcurrent);
     const changeCap = (cap: number): void => {
         if (!isConcurrencyCap(cap)) throw new Error("Concurrent subagents must be a positive whole number.");
@@ -2000,8 +2027,10 @@ export default function (pi: ExtensionAPI) {
     const resetSettings = (): void => {
         capOverride = undefined;
         delegationOverride = undefined;
+        skillsOverride = undefined;
         pi.appendEntry("pi-better-subagents-cap", { version: 1, maxConcurrent: null });
         pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: null });
+        pi.appendEntry("pi-better-subagents-skills", { version: 1, mode: null });
     };
     const activeDelegationMode = (): DelegationMode => delegationOverride ?? normalizeDelegationMode(loadConfig().delegationMode);
     const countRunning = () =>
@@ -2035,7 +2064,16 @@ export default function (pi: ExtensionAPI) {
     }, countRunning(), getSharedCapacityGate(countRunning).pending);
     const saveSettings = (): { ok: boolean; message: string } => {
         try {
-            writeSubagentSettings({ delegationMode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap() });
+            const skills = activeSkills();
+            if (skills.mode === "explicit" && skills.paths.length === 0) {
+                return { ok: false, message: "Add at least one skill path, or choose No skill catalog to load none." };
+            }
+            writeSubagentSettings({
+                delegationMode: activeDelegationMode(),
+                maxConcurrent: activeConcurrencyCap(),
+                // null is an explicit discovery choice; it must override a saved path list.
+                defaultSkills: skills.mode === "inherit" ? null : [...skills.paths],
+            });
             resetSettings();
             return { ok: true, message: "Subagent defaults saved." };
         } catch (error) {
@@ -2064,6 +2102,7 @@ export default function (pi: ExtensionAPI) {
     const restoreDelegationMode = (ctx: ExtensionContext): void => {
         delegationOverride = undefined;
         capOverride = undefined;
+        skillsOverride = undefined;
         const branch = ctx.sessionManager?.getBranch?.();
         if (!Array.isArray(branch)) return;
         for (const entry of branch) {
@@ -2073,6 +2112,19 @@ export default function (pi: ExtensionAPI) {
                     if (data.maxConcurrent === null) capOverride = undefined;
                     else if (isConcurrencyCap(data.maxConcurrent)) capOverride = data.maxConcurrent;
                 }
+            }
+            if (entry.type === "custom" && entry.customType === "pi-better-subagents-skills") {
+                const data = entry.data as { version?: unknown; mode?: unknown; paths?: unknown } | null;
+                if (data?.version !== 1) continue;
+                if (data.mode === null) {
+                    skillsOverride = undefined;
+                } else if ((data.mode === "inherit" || data.mode === "none") && Array.isArray(data.paths) && data.paths.length === 0) {
+                    skillsOverride = { mode: data.mode, paths: [] };
+                } else if (data.mode === "explicit" && Array.isArray(data.paths)
+                    && data.paths.every((path): path is string => typeof path === "string" && isAbsolute(path))) {
+                    skillsOverride = { mode: "explicit", paths: [...data.paths] };
+                }
+                continue;
             }
             if (entry.type !== "custom" || entry.customType !== "pi-better-subagents-delegation") continue;
             const data = entry.data as { version?: unknown; mode?: unknown } | null;
@@ -3600,21 +3652,27 @@ export default function (pi: ExtensionAPI) {
             const next = await ctx.ui.custom<"agents" | undefined>((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
                 get: () => {
                     const settings = effectiveSettings();
+                    const skills = activeSkills();
                     return {
                         mode: settings.delegationMode, maxConcurrent: settings.maxConcurrent,
                         modeSource: settings.sources.delegationMode,
                         capSource: settings.sources.maxConcurrent,
                         defaultMode: normalizeDelegationMode(loadConfig().delegationMode),
                         defaultCap: normalizeConcurrencyCap(loadConfig().maxConcurrent),
+                        skillsMode: skills.mode, skillsPaths: skills.paths, skillsSource: skills.source,
+                        skillsError: skills.error,
                     };
                 },
-                changeMode, changeCap, save: saveSettings, reset: resetSettings,
+                changeMode, changeCap, changeSkills, save: saveSettings, reset: resetSettings,
                 // Close this page first; the catalog opens after ui.custom resolves.
                 openAgents: () => done("agents"),
             }, () => { refreshBackgroundWorkNavigator(ctx); tui.requestRender(); }, () => done(undefined)));
             if (next === "agents") await agentOperations.openCatalog(ctx);
         } else {
-            ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. Use /subagents mode <mode> or /subagents cap <number>; /subagents save persists both.`, "info");
+            const skills = activeSkills();
+            const skillChoice = skills.mode === "inherit" ? "discovery"
+                : skills.mode === "none" ? "no skills" : `${skills.paths.length} selected skills`;
+            ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. Skills: ${skillChoice}. Use /subagents mode <mode>, cap <number>, or settings; /subagents save persists them.`, "info");
         }
     };
     const contribution = { id: "subagents", label: "Subagents", command: "/subagents settings", open: openSettings };
@@ -3639,7 +3697,14 @@ export default function (pi: ExtensionAPI) {
                 }
                 const requested = tokens[1];
                 if (tokens.length === 1 && tokens[0] === "save") {
-                    if (ctx.hasUI && !(await ctx.ui.confirm("Save subagent defaults?", `Future sessions will start in ${activeDelegationMode()} with a cap of ${activeConcurrencyCap()}.`))) {
+                    const skills = activeSkills();
+                    if (skills.mode === "explicit" && skills.paths.length === 0) {
+                        ctx.ui.notify("Add at least one skill path, or choose No skill catalog to load none.", "warning");
+                        return;
+                    }
+                    const skillChoice = skills.mode === "inherit" ? "skill discovery"
+                        : skills.mode === "none" ? "no skills" : `${skills.paths.length} selected skills`;
+                    if (ctx.hasUI && !(await ctx.ui.confirm("Save subagent defaults?", `Future sessions will start in ${activeDelegationMode()} with a cap of ${activeConcurrencyCap()} and ${skillChoice}.`))) {
                         ctx.ui.notify("Subagent defaults unchanged.", "info");
                         return;
                     }

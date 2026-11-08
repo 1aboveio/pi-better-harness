@@ -1,0 +1,17 @@
+# Editing an existing skill path
+# width: 40
+
+  Subagent settings
+
+  Delegation mode          adaptive
+  Concurrent subagents     6
+  Skill exposure           Selected skil
+                           Source: confi
+> i/agent/skills/better-review/SKILL.md 
+    /Users/someone/.pi/agent/skills/test
+    + Add a skill path
+  Agents
+
+  Reset to defaults
+
+Enter Apply · Esc Cancel

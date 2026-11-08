@@ -1,0 +1,17 @@
+# Adding a skill path
+# width: 40
+
+  Subagent settings
+
+  Delegation mode          adaptive
+  Concurrent subagents     6
+  Skill exposure           Selected skil
+                           Source: confi
+    /Users/someone/.pi/agent/skills/bett
+    /Users/someone/.pi/agent/skills/test
+>                                       
+  Agents
+
+  Reset to defaults
+
+Enter Apply · Esc Cancel
