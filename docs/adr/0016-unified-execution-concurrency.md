@@ -65,6 +65,11 @@ terminal and inspect and integrate its result or failure.
 
 ## Verification
 
+[ADR 0021](0021-prompt-prefix-stays-cached.md) records the caching consequence of
+this rule: no request-local prompt block and no volatile state in prompt text,
+because only an unchanged leading prefix can be read back from the provider
+cache.
+
 Verify single policy injection with each package alone, combined packages in
 different registration orders, repeated registration, and successive prompts.
 Assert that no extension returns a whole prompt, since one such return makes every
