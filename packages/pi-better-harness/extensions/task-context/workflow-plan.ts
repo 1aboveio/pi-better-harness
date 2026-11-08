@@ -68,10 +68,18 @@ export function readRushPlan(path: string, cwd: string): RushPlan {
 
 /** Validate a parsed task-plan.json document and project the fields the plan view shows. */
 export function projectRushPlan(data: unknown, runId: string): RushPlan {
-  if (!isRecord(data) || data.runId !== runId || !Number.isSafeInteger(data.planRevision) ||
-      (data.planRevision as number) < 0 || !isRecord(data.fleet)) {
+  if (!isRecord(data) || !Number.isSafeInteger(data.planRevision) ||
+      (data.planRevision as number) < 0) {
     throw new Error("Invalid Rush plan identity or revision.");
   }
+  // Current preflight plans carry runDir instead of duplicating its basename
+  // in runId. The caller has already confined the file to the run directory.
+  const validIdentity = data.runId === undefined
+    ? typeof data.runDir === "string" && isAbsolute(data.runDir) && basename(data.runDir) === runId
+    : data.runId === runId;
+  if (!validIdentity) throw new Error("Invalid Rush plan identity or revision.");
+  const persistedFleet = data.fleet === undefined ? {} : data.fleet;
+  if (!isRecord(persistedFleet)) throw new Error("Invalid Rush fleet stages.");
   const persistedUnits = Array.isArray(data.issues) ? data.issues : data.units;
   if (!Array.isArray(persistedUnits)) throw new Error("Invalid Rush plan units.");
   const issues = persistedUnits.map((unit: unknown) => {
@@ -90,13 +98,13 @@ export function projectRushPlan(data: unknown, runId: string): RushPlan {
     };
   });
   const fleet: RushPlan["fleet"] = {};
-  for (const [stage, value] of Object.entries(data.fleet)) {
+  for (const [stage, value] of Object.entries(persistedFleet)) {
     const status = typeof value === "string" ? value : isRecord(value) ? value.status : undefined;
     if (typeof status !== "string") throw new Error("Invalid Rush fleet stage.");
     fleet[stage] = { status };
   }
   return {
-    runId: data.runId as string,
+    runId,
     planRevision: data.planRevision as number,
     issues,
     fleet,

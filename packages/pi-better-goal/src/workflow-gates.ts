@@ -3,7 +3,7 @@ import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import type { WorkflowOwner } from "./workflow.js";
+import { ISSUE_WORKFLOW_SKILLS, type WorkflowOwner } from "./workflow.js";
 
 /** Branch entry the plan extension writes when it binds a workflow-owned task plan. */
 const WORKFLOW_PLAN_ENTRY = "pi-better-workflow-plan";
@@ -88,13 +88,18 @@ function parseSchedulerOutput(stdout: string): SchedulerRun {
     return { ok: false, reason: "the scheduler printed output that is not JSON" };
   }
   if (!isRecord(parsed) || !Array.isArray(parsed.due)) return { ok: false, reason: "the scheduler output has no due list" };
-  const due = parsed.due.flatMap((item): SchedulerAction[] => isRecord(item) && typeof item.action === "string"
-    ? [{
+  const due: SchedulerAction[] = [];
+  for (const item of parsed.due) {
+    // A malformed entry could hide due work, so it invalidates the answer instead of being dropped.
+    if (!isRecord(item) || typeof item.action !== "string") {
+      return { ok: false, reason: "the scheduler output has a due entry without an action" };
+    }
+    due.push({
       action: item.action,
       unit: item.unit === null || item.unit === undefined ? null : String(item.unit),
       detail: typeof item.detail === "string" ? item.detail : "",
-    }]
-    : []);
+    });
+  }
   return { ok: true, due };
 }
 
@@ -114,6 +119,10 @@ function executeScheduler(script: string, runDir: string, timeoutMs: number, liv
         if (error) {
           // An exit status of 1 means "actions due"; any other failure (exit 2, timeout, spawn error) is real.
           if ((error as { code?: unknown }).code !== 1) {
+            if ((error as { killed?: unknown }).killed === true) {
+              resolve({ ok: false, reason: `the scheduler timed out after ${timeoutMs} ms` });
+              return;
+            }
             const detail = String(stderr).trim().split("\n")[0] || error.message;
             resolve({ ok: false, reason: `the scheduler failed (${detail.slice(0, DETAIL_LIMIT)})` });
             return;
@@ -150,11 +159,14 @@ interface PlannedRun {
   script: string;
 }
 
-function locateRun(entries: Iterable<EntryLike>, owner: WorkflowOwner): PlannedRun | { warning: string } {
+/** The run a gate would check, or what it could not locate, so each gate decides how to report it. */
+type RunLocation = PlannedRun | { missing: "scheduler" | "plan"; problem: string };
+
+function locateRun(entries: Iterable<EntryLike>, owner: WorkflowOwner): RunLocation {
   const script = findScheduler(owner);
-  if (!script) return { warning: `${owner.name} ships no scheduler, so the run was not checked` };
+  if (!script) return { missing: "scheduler", problem: `${owner.name} ships no scheduler` };
   const plan = boundPlanPath(entries, owner);
-  if (!plan) return { warning: `no task plan is bound for ${owner.name} yet, so the run was not checked` };
+  if (!plan) return { missing: "plan", problem: `no task plan is bound for ${owner.name} yet` };
   return { runDir: dirname(plan), script };
 }
 
@@ -167,16 +179,50 @@ function describe(action: SchedulerAction): string {
   return `- ${action.action}${action.unit ? ` (unit ${action.unit})` : ""}: ${detail}`;
 }
 
-/** Completion is allowed only when the scheduler reports `finish` and nothing else is due. */
+/** Coordinators whose runs the resolve-issues scheduler drives, so only it can declare the run finished. */
+function schedulerOwnsCompletion(owner: WorkflowOwner): boolean {
+  return ISSUE_WORKFLOW_SKILLS.has(owner.name);
+}
+
+function unverifiedCompletion(owner: WorkflowOwner, problem: string, recovery: string): GateVerdict {
+  return {
+    allow: false,
+    due: [],
+    message: `Goal not marked complete: ${problem}, so the run's completion is not verified. ${recovery} ` +
+      `The ${owner.name} workflow stays bound and the Goal stays active.`,
+  };
+}
+
+/**
+ * Completion is allowed only when the scheduler reports `finish` and nothing else is due. For the
+ * issue workflows an unavailable plan or scheduler never counts as permission: the run has a
+ * completion authority, and only that authority may declare it finished. Any other coordinator has
+ * no scheduler to consult, so its gate keeps the fail-open warning that avoids deadlocking it.
+ */
 export async function completionGate(
   entries: Iterable<EntryLike>,
   owner: WorkflowOwner,
   options: { timeoutMs?: number } = {},
 ): Promise<GateVerdict> {
+  const owned = schedulerOwnsCompletion(owner);
   const located = locateRun(entries, owner);
-  if ("warning" in located) return unchecked(located.warning);
+  if ("missing" in located) {
+    if (!owned) return unchecked(`${located.problem}, so the run was not checked`);
+    const recovery = located.missing === "plan"
+      ? `Bind the run's task plan with update_todo({workflow:{path,revision}}), or rebind the run with /skill:${owner.name}, ` +
+        "then call update_goal again once the scheduler reports finish."
+      : `Restore the run's scheduler or rebind the run with /skill:${owner.name}, ` +
+        "then call update_goal again once the scheduler reports finish.";
+    return unverifiedCompletion(owner, located.problem, recovery);
+  }
   const run = await settlementScheduler(located.script, located.runDir, options.timeoutMs);
-  if (!run.ok) return unchecked(`could not check the ${owner.name} run (${run.reason})`);
+  if (!run.ok) {
+    const problem = `the ${owner.name} run could not be checked (${run.reason})`;
+    if (!owned) return unchecked(problem);
+    return unverifiedCompletion(owner, problem,
+      `Fix the scheduler, or rebind the run with /skill:${owner.name} if its plan moved, ` +
+      "then call update_goal again once the scheduler reports finish.");
+  }
   const open = run.due.filter((action) => action.action !== "finish");
   if (open.length === 0 && run.due.length > 0) return { allow: true };
   if (open.length === 0) {
@@ -215,7 +261,7 @@ export async function pauseGate(
   options: { timeoutMs?: number } = {},
 ): Promise<GateVerdict> {
   const located = locateRun(entries, owner);
-  if ("warning" in located) return unchecked(located.warning);
+  if ("missing" in located) return unchecked(`${located.problem}, so the run was not checked`);
   const units = readUnits(located.runDir);
   if (!units) return unchecked(`could not read the ${owner.name} task plan`);
   const run = await settlementScheduler(located.script, located.runDir, options.timeoutMs);
@@ -271,7 +317,7 @@ export async function operationResumeSchedulerGate(
   options: { timeoutMs?: number } = {},
 ): Promise<OperationResumeSchedulerGate> {
   const located = locateRun(entries, owner);
-  if ("warning" in located) return { ok: false, reason: located.warning };
+  if ("missing" in located) return { ok: false, reason: `${located.problem}, so the run was not checked` };
   const run = await runScheduler(located.script, located.runDir, options.timeoutMs);
   if (!run.ok) return { ok: false, reason: `Workflow admission evidence unavailable: ${run.reason}` };
   return { ok: true, waitUntil: waitUntil(run.due) };
@@ -284,7 +330,7 @@ export async function schedulerWaitUntil(
   options: { timeoutMs?: number } = {},
 ): Promise<number | undefined> {
   const located = locateRun(entries, owner);
-  if ("warning" in located) return undefined;
+  if ("missing" in located) return undefined;
   const run = await runScheduler(located.script, located.runDir, options.timeoutMs);
   return run.ok ? waitUntil(run.due) : undefined;
 }

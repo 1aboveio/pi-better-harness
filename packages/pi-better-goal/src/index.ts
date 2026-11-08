@@ -42,7 +42,7 @@ import {
 import { createRenderScheduler } from "./shared-render-scheduler.js";
 import { initializeNavigatorPanels, setNavigatorPanel } from "./shared-navigator-panels.js";
 import { collectSubagentActivity } from "./subagents.js";
-import { currentWorkflowOwner, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
+import { currentWorkflowOwner, ISSUE_WORKFLOW_SKILLS, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
 import { completionGate, pauseGate, schedulerWaitUntil, operationResumeSchedulerGate } from "./workflow-gates.js";
 import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
 import { requestTaskContext } from "./task-context.js";
@@ -66,7 +66,7 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 /** Never re-poll a workflow's scheduler sooner than this, even when its stated attempt time has passed. */
 const MIN_WAIT_DELAY_MS = 5_000;
 /** Workflow skills whose invocation binds a goal when none is active, so the run cannot stop silently. */
-const AUTO_BIND_SKILLS = new Set(["rush-issues", "resolve-issues"]);
+const AUTO_BIND_SKILLS = ISSUE_WORKFLOW_SKILLS;
 const WAKE_DISABLED =
   process.env.PI_BETTER_GOAL_DISABLE_WAKE === "1" ||
   process.env.PI_BETTER_EXTENSION_DISABLE_WAKE === "1";

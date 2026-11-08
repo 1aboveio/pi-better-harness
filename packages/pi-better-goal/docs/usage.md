@@ -279,6 +279,10 @@ Calculated delays saturate at Node's timer limit, 2,147,483,647 ms, so a large
 base or multiplier cannot overflow into an immediate retry. A zero base keeps
 immediate continuations enabled.
 
+The workflow completion gate gives each scheduler check 20 seconds and the
+live tree sync four minutes. A check that does not answer in time is a failure,
+so an issue-workflow run cannot complete on a timeout.
+
 These are outer Goal continuations, not model-request retries. Pi completes its
 own network retry loop before Goal evaluates a settled turn. Goal does not
 change Pi's retry configuration or request timeouts; a new outer continuation
