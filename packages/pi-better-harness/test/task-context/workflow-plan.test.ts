@@ -523,10 +523,66 @@ test("Rush plan reader rejects unrelated paths and invalid run identity", () => 
     const path = join(runDir, "task-plan.json");
     writeFileSync(path, JSON.stringify({ runId: "another-run", planRevision: 1, fleet: {}, issues: [] }));
     assert.throws(() => readRushPlan(path, cwd), /identity or revision/);
+    const otherRunDir = join(cwd, "another-project", "run-2");
+    mkdirSync(otherRunDir, { recursive: true });
+    for (const patch of [
+      { runDir: otherRunDir },
+      { runDir: join(cwd, ".resolve-issues", "rush", "another-run") },
+      { runDir: "run-2" },
+      { planRevision: -1 },
+      { fleet: null },
+      { fleet: [] },
+    ]) {
+      writeFileSync(path, JSON.stringify({ runDir, planRevision: 0, units: [], ...patch }));
+      assert.throws(() => readRushPlan(path, cwd), /Invalid Rush/, JSON.stringify(patch));
+    }
     const unrelated = join(cwd, "task-plan.json");
     writeFileSync(unrelated, JSON.stringify({ runId: "run-2", planRevision: 1, fleet: {}, issues: [] }));
     assert.throws(() => readRushPlan(unrelated, cwd), /must be inside this project's/);
   } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+for (const owner of ["rush-issues", "resolve-issues"])
+test(`${owner} binds a revision-zero preflight plan without rewriting it and records a transition`, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "rush-preflight-"));
+  const runId = "followups-20261108T102520Z";
+  const runDir = join(cwd, ".resolve-issues", "rush", runId);
+  const path = join(runDir, "task-plan.json");
+  mkdirSync(runDir, { recursive: true });
+  const original = JSON.stringify({
+    skill: "rush-issues", runDir, repository: "fixture/repo", planRevision: 0,
+    targetBranch: "main", deliveryMode: "per-unit", decisions: [],
+    units: [{ id: "U1", title: "Fix plan binding", stage: "implement", status: "pending", dependsOn: [] }],
+  }, null, 2) + "\n";
+  writeFileSync(path, original);
+  const h = workflowHarness(cwd);
+  try {
+    await h.start();
+    h.owner(owner);
+    await h.update({ workflow: { path, revision: 0 }, outcome: { objective: "Fix plan binding" } });
+    assert.equal(readFileSync(path, "utf8"), original, "a read-only bind must not migrate the plan");
+    assert.equal((await h.get()).details.plan?.runId, runId);
+    assert.equal((await h.get()).details.plan?.planRevision, 0);
+    assert.match(h.widget(), /Fix plan binding/);
+    const afterBind = readFileSync(path, "utf8");
+    await assert.rejects(h.update({ workflow: { event: "move-run", changes: [
+      { target: "run", set: { runDir: join(cwd, "another-project", runId) } },
+    ] } }), /runDir cannot be changed/);
+    assert.equal(readFileSync(path, "utf8"), afterBind, "rejected identity changes leave the plan untouched");
+    await h.update({ workflow: { event: "implementation-started", changes: [
+      { id: "U1", set: { status: "in-flight" } },
+    ] } });
+    const persisted = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(persisted.planRevision, 1);
+    assert.equal(persisted.units[0].status, "in-flight");
+    assert.equal(Object.hasOwn(persisted, "runId"), false, "updates preserve the supported preflight shape");
+    assert.equal(Object.hasOwn(persisted, "fleet"), false);
+    assert.equal((await h.get()).details.plan?.planRevision, 1);
+    await assert.rejects(h.update({ workflow: { path, revision: 0 } }), /revision mismatch/);
+  } finally {
+    h.shutdown();
     rmSync(cwd, { recursive: true, force: true });
   }
 });

@@ -63,15 +63,31 @@ export const MAX_RUSH_PLAN_BYTES = 2_000_000;
 
 export function readRushPlan(path: string, cwd: string): RushPlan {
   const { file, runId } = resolveRushPlanFile(path, cwd);
-  return projectRushPlan(JSON.parse(readFileSync(file, "utf8")), runId);
+  return projectRushPlan(JSON.parse(readFileSync(file, "utf8")), runId, dirname(file));
 }
 
 /** Validate a parsed task-plan.json document and project the fields the plan view shows. */
-export function projectRushPlan(data: unknown, runId: string): RushPlan {
-  if (!isRecord(data) || data.runId !== runId || !Number.isSafeInteger(data.planRevision) ||
-      (data.planRevision as number) < 0 || !isRecord(data.fleet)) {
+export function projectRushPlan(data: unknown, runId: string, expectedRunDir?: string): RushPlan {
+  if (!isRecord(data) || !Number.isSafeInteger(data.planRevision) ||
+      (data.planRevision as number) < 0) {
     throw new Error("Invalid Rush plan identity or revision.");
   }
+  // Current preflight plans carry runDir instead of duplicating its basename
+  // in runId. The caller has already confined the file to the run directory.
+  const validIdentity = data.runId === undefined
+    ? typeof data.runDir === "string" && isAbsolute(data.runDir) && basename(data.runDir) === runId
+    : data.runId === runId;
+  if (!validIdentity) throw new Error("Invalid Rush plan identity or revision.");
+  if (expectedRunDir !== undefined && data.runDir !== undefined) {
+    let matches = false;
+    try {
+      matches = typeof data.runDir === "string" && isAbsolute(data.runDir)
+        && realpathSync(data.runDir) === realpathSync(expectedRunDir);
+    } catch { /* An unavailable run directory cannot establish identity. */ }
+    if (!matches) throw new Error("Invalid Rush plan identity or revision: runDir does not match the plan directory.");
+  }
+  const persistedFleet = data.fleet === undefined ? {} : data.fleet;
+  if (!isRecord(persistedFleet)) throw new Error("Invalid Rush fleet stages.");
   const persistedUnits = Array.isArray(data.issues) ? data.issues : data.units;
   if (!Array.isArray(persistedUnits)) throw new Error("Invalid Rush plan units.");
   const issues = persistedUnits.map((unit: unknown) => {
@@ -90,13 +106,13 @@ export function projectRushPlan(data: unknown, runId: string): RushPlan {
     };
   });
   const fleet: RushPlan["fleet"] = {};
-  for (const [stage, value] of Object.entries(data.fleet)) {
+  for (const [stage, value] of Object.entries(persistedFleet)) {
     const status = typeof value === "string" ? value : isRecord(value) ? value.status : undefined;
     if (typeof status !== "string") throw new Error("Invalid Rush fleet stage.");
     fleet[stage] = { status };
   }
   return {
-    runId: data.runId as string,
+    runId,
     planRevision: data.planRevision as number,
     issues,
     fleet,
