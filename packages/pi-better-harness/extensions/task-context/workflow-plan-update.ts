@@ -52,7 +52,7 @@ const FLEET_STATUS_ALIASES: Record<string, string> = { "n/a": "not-applicable" }
 
 const ROW_PROTECTED = new Set(["id"]);
 const RUN_PROTECTED = new Set([
-  "runId", "planRevision", "updatedAt", "startedAt", "units", "issues", "components", "fleet", "decisions",
+  "runId", "runDir", "planRevision", "updatedAt", "startedAt", "units", "issues", "components", "fleet", "decisions",
 ]);
 const PROFILING_RESERVED = new Set([
   "ts", "runId", "planRevision", "event", "changes", "decision", "scope", "unit", "component", "stage", "logAheadRevision",
@@ -80,7 +80,7 @@ export function applyRushPlanUpdate(
 
   const originalText = readFileSync(file, "utf8");
   const original: unknown = JSON.parse(originalText);
-  const current = projectRushPlan(original, runId);
+  const current = projectRushPlan(original, runId, dirname(file));
   if (update.revision !== undefined && update.revision !== current.planRevision) {
     throw new Error(`Rush plan revision mismatch: expected ${update.revision}, found ${current.planRevision}. Read the plan with get_todo and retry.`);
   }
@@ -117,7 +117,7 @@ export function applyRushPlanUpdate(
   const revision = current.planRevision + 1;
   next.planRevision = revision;
   next.updatedAt = ts;
-  const projected = projectRushPlan(next, runId);
+  const projected = projectRushPlan(next, runId, dirname(file));
 
   const extra = update.profiling ?? {};
   if (!isRecord(extra)) throw new Error("workflow.profiling must be an object of extra event fields.");

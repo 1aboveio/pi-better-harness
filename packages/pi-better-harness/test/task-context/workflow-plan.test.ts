@@ -523,7 +523,10 @@ test("Rush plan reader rejects unrelated paths and invalid run identity", () => 
     const path = join(runDir, "task-plan.json");
     writeFileSync(path, JSON.stringify({ runId: "another-run", planRevision: 1, fleet: {}, issues: [] }));
     assert.throws(() => readRushPlan(path, cwd), /identity or revision/);
+    const otherRunDir = join(cwd, "another-project", "run-2");
+    mkdirSync(otherRunDir, { recursive: true });
     for (const patch of [
+      { runDir: otherRunDir },
       { runDir: join(cwd, ".resolve-issues", "rush", "another-run") },
       { runDir: "run-2" },
       { planRevision: -1 },
@@ -563,6 +566,11 @@ test(`${owner} binds a revision-zero preflight plan without rewriting it and rec
     assert.equal((await h.get()).details.plan?.runId, runId);
     assert.equal((await h.get()).details.plan?.planRevision, 0);
     assert.match(h.widget(), /Fix plan binding/);
+    const afterBind = readFileSync(path, "utf8");
+    await assert.rejects(h.update({ workflow: { event: "move-run", changes: [
+      { target: "run", set: { runDir: join(cwd, "another-project", runId) } },
+    ] } }), /runDir cannot be changed/);
+    assert.equal(readFileSync(path, "utf8"), afterBind, "rejected identity changes leave the plan untouched");
     await h.update({ workflow: { event: "implementation-started", changes: [
       { id: "U1", set: { status: "in-flight" } },
     ] } });
