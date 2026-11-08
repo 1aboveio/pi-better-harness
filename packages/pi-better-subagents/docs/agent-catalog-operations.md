@@ -58,7 +58,7 @@ Create and import ask for a missing role, name, or path only when `hasUI` is tru
 
 `launchable` stays `unknown` until lifecycle injects a `LaunchEnricher` from the model resolver. That enricher supplies availability, requested and actual model, requested and actual effort, and its launch decision. If the catalog already blocks the id, enrichment cannot flip it to launchable. This module does not call the model registry and does not implement fallback.
 
-Effective capabilities stay the existing spawn controls: tool selection, extension loading, skills setup, sandbox and workspace, and nested delegation. `grantedByCatalog` is false. No tool preset or permission is added. A prompt that says read-only is not enforcement.
+Effective capabilities stay the existing spawn controls: tool selection, extension loading, sandbox and workspace, and nested delegation. `grantedByCatalog` is false. No tool preset or permission is added. Skill exposure is the exception the launcher reproduces from a definition (`skills`, shown as `skills: value=… mode=…`), and it only narrows which skills the child can see. A prompt that says read-only is not enforcement.
 
 ## Codex import
 

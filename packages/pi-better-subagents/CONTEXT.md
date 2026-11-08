@@ -72,6 +72,19 @@ by session id or by an unambiguous name in the current folder, independently of
 the foreground session that launched it. A saved conversation keeps no process
 alive and occupies no concurrency slot.
 
+### Skill Exposure
+
+Which skills a child can see, chosen once per attempt. The three observable
+states are discovery of the user-level catalog (an absent choice), none, and
+exactly a list of skill paths. It is a launch value, not a permission: a list
+narrows the prompt and grants nothing.
+
+A launch option wins over the catalog definition's choice, which wins over the
+global subagent default; with none of them the child discovers the catalog as
+before. The effective choice is frozen in the launch recipe, so a later catalog
+or config edit cannot change a saved conversation's exposure, and a recipe
+written before the choice existed keeps discovery.
+
 ### Run Alias
 
 A user-supplied label for an individual run, rather than a reusable agent

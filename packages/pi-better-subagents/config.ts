@@ -6,6 +6,7 @@
  *
  * `defaultModel: null` / absent → inherit the foreground model.
  * `defaultTools` absent → the built-in SAFE_DEFAULT_TOOLS.
+ * `defaultSkills` absent → the child discovers the user-level skills catalog.
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -23,6 +24,12 @@ export interface SubagentConfig extends TimingSettings {
     delegationMode?: DelegationMode | null;
     defaultModel?: string | null;
     defaultTools?: string | null;
+    /**
+     * Skill exposure when neither the launch nor a catalog role/agent chooses
+     * one: absent/null keeps discovery, `[]` loads no skills, and absolute
+     * paths load exactly those skills. See `skills.ts`.
+     */
+    defaultSkills?: string[] | null;
     /** Default concurrency cap; /subagents cap overrides it for the current session. */
     maxConcurrent?: number | null;
     /**

@@ -13,6 +13,7 @@
  */
 
 import type { RunTiming } from "./timing.ts";
+import type { SkillExposureSource } from "./skills.ts";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -109,6 +110,12 @@ export interface LaunchRecipe {
     /** Effective tool allowlist (already adjusted for confinement). */
     tools: string;
     excludeTools?: string;
+    /**
+     * Effective skill exposure: absent means discovery of the user catalog,
+     * `[]` means none, and paths mean exactly those skills. Recipes written
+     * before skill controls existed have no key and keep discovery.
+     */
+    skills?: string[];
     clean: boolean;
     allowNested: boolean;
     approve: boolean;
@@ -191,6 +198,10 @@ export interface RunMeta {
     model?: string;
     /** Reasoning effort passed to the child via Pi's --thinking option. */
     effort?: string;
+    /** Effective skill exposure when it is not discovery; absent means discovery. */
+    skills?: string[];
+    /** Which layer chose that exposure: launch, catalog, config, default, or a replayed recipe. */
+    skillsSource?: SkillExposureSource;
     cwd: string;
     /** First ~200 chars of the task prompt, for listings. */
     promptPreview: string;

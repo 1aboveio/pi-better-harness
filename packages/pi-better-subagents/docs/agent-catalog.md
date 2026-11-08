@@ -63,8 +63,17 @@ People type and read a role by its short name: `developer` is `role.developer`. 
 | `model` | `provider/model`. No `@effort` suffix. |
 | `effort` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
 | `tier` | Catalog-policy label (`balanced`, `efficient`, `frontier`, or another short label). Not a benchmark claim. |
+| `skills` | Skill exposure for a launch: a list of absolute `SKILL.md` or skill-directory paths, or `[]` for no skills. Absent keeps user-catalog discovery. |
 
 A missing key inherits. A present key, including `null`, is an explicit value and does not inherit. Removing an override means deleting the key. Writers must not copy effective inherited values back into `overrides`. Agents must not store a `defaults` object; that mapping is kept only so it is not discarded, and it is not promoted into overrides.
+
+Model, effort, and tier choose which model runs. `skills` is the one launch value
+here that changes what the child can see: `[]` becomes `--no-skills`, and paths
+become `--no-skills --skill <path>…`. It is reproduced exactly like model and
+effort, and it grants nothing — a list narrows prompt exposure and cannot add a
+tool, an extension, or a permission. See
+[skill exposure](usage.md#skill-exposure) for the launch-level precedence, which
+puts an explicit `skills` option above the catalog.
 
 These preferences do not grant tools, sandbox behavior, extension loading, or nested delegation. Launch keeps the existing subagent controls. A role name or a prompt that says "read-only" is not enforcement.
 
@@ -149,7 +158,7 @@ DEV-39 owns Agentier adaptation, migration, remote model policy, credentials, an
 | `id` | Stable identity, distinct from `name`, filename, and run id. |
 | `roleId` | Exactly one live base role. Membership lists are not parents. |
 | `instructions.mode` + body | `add` appends; `replace` swaps instruction text only. |
-| Missing override vs `overrides.<field>` | Absence inherits the current role. Presence, including null, is explicit. Deleting the key removes the override. |
+| Missing override vs `overrides.<field>` | Absence inherits the current role. Presence, including null, is explicit. Deleting the key removes the override. An explicit `skills: null` on an agent suppresses the role's skill list, so the launch falls back to the config default and then discovery. |
 | Role `defaults` | Live source for the next resolution. Not copied onto the agent at save time. |
 | `provenance` | Import origin of an independent copy. Not a subscription to the external file. |
 | `executionRestrictions` | Required restrictions stay visible and blocking until a real host control exists. |

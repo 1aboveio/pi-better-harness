@@ -96,7 +96,7 @@ thresholds continue to take precedence for subagent health.
 
 | Tool | Blocks? | What it does |
 |------|---------|--------------|
-| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`. |
+| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `skills` ([skill exposure](#skill-exposure)), `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`. |
 | `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; optional per-job `session_id` or `session_name` continues a saved conversation), `onCapacity` (`reject` or `launch-available`). |
 | `subagent_settings` | never | Read-only effective settings and capacity snapshot. No parameters. Returns `delegationMode`, `maxConcurrent`, per-setting `sources` (`session` or `config`), a stable settings `revision`, `runningCount`, `pendingCount`, `occupiedSlots`, and `availableSlots`. The limit is a ceiling, not a target; spawn admission rechecks live capacity. |
 | `subagent_list` | never | Compact list for the current folder and descendants across foreground sessions (default 10 rows / 1 KiB page). Each row includes `session_id`. Params: `all` (machine-global search), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. Abandoned launch records are reported separately and are never counted as runs. |
@@ -134,7 +134,9 @@ A launch without a session selector starts a new conversation. With a selector,
 `prompt` is the next user turn; the original task and role are already saved.
 Each attempt gets a new run id, log, timing record, and capacity slot while the
 native session id and history stay the same. The launch recipe preserves the
-worker's role, tools, model, and workspace, including uncommitted changes.
+worker's role, tools, skill exposure, model, and workspace, including uncommitted
+changes. Repeating a launch-only option is accepted only with the saved value;
+a different `skills` list is refused rather than silently dropped.
 
 A run stopped with `subagent_stop` (status `killed`) can be continued the same
 way. Stopping ends that execution, not the saved conversation or its
@@ -578,6 +580,31 @@ The mandatory task guard is independent of optional guardrails extensions.
 Adding a package to the tool map does not make its tools safe to execute outside
 the task boundary.
 
+## Skill exposure
+
+A child otherwise inherits the whole user-level skills catalog, which dominates
+its system prompt even when the task already names the one `SKILL.md` it needs.
+`skills` bounds that exposure:
+
+| `skills` | Child argv | Effect |
+| --- | --- | --- |
+| omitted | (no flag) | discover the user catalog |
+| `[]` | `--no-skills` | no skills at all |
+| `["/abs/SKILL.md", …]` | `--no-skills --skill <path>…` | exactly those skills |
+
+Precedence, highest first: the launch option (or the batch job's value, then
+`shared`), a catalog role/agent's `defaults.skills` / `overrides.skills`
+([catalog](agent-catalog.md#portable-preferences-vs-host-controls)), `config.json`
+`defaultSkills`, then discovery. Each level distinguishes "not set" from `[]`, so
+`[]` disables discovery rather than falling through to a wider default.
+
+Relative paths resolve against the child's workspace. The effective choice is
+frozen in the launch recipe and printed at launch as
+`Skills: none (--no-skills) · source launch`, so a continuation reproduces it.
+A recipe written before this option existed has no `skills` key and keeps
+discovery. There is no `exclude_skills`: Pi cannot drop single entries from a
+discovered catalog without also taking over discovery.
+
 ## Tool scoping (allowlist)
 
 Precedence, highest first: the per-call `tools` param → `config.json`
@@ -606,6 +633,9 @@ The effective config also sets:
 
 - `defaultModel` — model for spawns that don't specify one (`null` = inherit the
   foreground model).
+- `defaultSkills` — skill exposure when neither the launch nor a catalog role or
+  agent chooses one. Omit it (or set `null`) for discovery, `[]` for no skills,
+  or absolute paths for exactly those skills. See [skill exposure](#skill-exposure).
 - `delegationMode` — foreground policy (`manual`, `adaptive`, or `coordinator`;
   default `adaptive`). `/subagents mode ...` changes only the current session.
   `/subagents save` saves mode and cap together as config defaults.

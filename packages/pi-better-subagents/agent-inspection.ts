@@ -17,12 +17,11 @@ import type { PermissionProfile } from "./permission-policy.ts";
 export const LEGACY_CAPABILITY_CONTROLS = [
     "tool selection",
     "extension loading",
-    "skills setup",
     "sandbox and workspace",
     "nested delegation",
 ] as const;
 
-export const CAPABILITY_NOTE = "Tool selection, extension loading, skills setup, sandbox and workspace, and nested delegation stay on the existing spawn path. The catalog grants no extra tools or permissions. A role name or instruction that says read-only is not enforcement.";
+export const CAPABILITY_NOTE = "Tool selection, extension loading, sandbox and workspace, and nested delegation stay on the existing spawn path. Skill exposure is the one launch value a definition carries (`defaults.skills` / `overrides.skills`) because the launcher reproduces it exactly; like those controls it grants no extra tools or permissions, it only narrows which skills the child can see. A role name or instruction that says read-only is not enforcement.";
 
 /** Existing spawn defaults a catalog launch uses when the caller does not override them. Not grants. */
 export interface EffectiveLaunchCapabilities {
@@ -133,6 +132,8 @@ export interface OperationView {
     preferenceSources?: Partial<Record<"model" | "effort", { scope: "user" | "project"; path: string; bundled?: boolean }>>;
     instructions?: string;
     fields?: { model: OperationField; effort: OperationField; tier: OperationField };
+    /** Skill exposure the definition resolves to; absent is discovery. */
+    skills?: { value: string[] | null; source: OperationField["source"]; explicit: boolean; inherited: boolean };
     /** The definition's own default model and effort (role default, or the agent's override or inherited value). Null when neither is set. */
     defaults: DefinitionDefaults | null;
     requestedModel: string | null;
@@ -340,6 +341,12 @@ export function presentCatalogEntry(snapshot: CatalogSnapshot, id: string, enric
         })),
         instructions: inspection.instructions,
         fields,
+        skills: inspection.skills ? {
+            value: inspection.skills.value ? [...inspection.skills.value] : null,
+            source: inspection.skills.source,
+            explicit: inspection.skills.explicit,
+            inherited: inspection.skills.source === "role-default",
+        } : undefined,
         defaults: definitionDefaults(fields),
         requestedModel: enrichment?.requestedModel ?? fields?.model.value ?? null,
         requestedEffort: enrichment?.requestedEffort ?? (fields?.effort.value ?? null),
@@ -412,6 +419,9 @@ export function renderOperationView(view: OperationView): string {
             lines.push(`${key}: value=${JSON.stringify(fieldValue.value)} source=${fieldValue.source} explicit=${yesNo(fieldValue.explicit)} inherited=${yesNo(fieldValue.inherited)}`);
         }
     }
+    lines.push(view.skills
+        ? `skills: value=${JSON.stringify(view.skills.value)} mode=${skillMode(view.skills.value)} source=${view.skills.source} explicit=${yesNo(view.skills.explicit)} inherited=${yesNo(view.skills.inherited)}`
+        : "skills: mode=discovery source=default");
     lines.push(`requested model: ${JSON.stringify(view.requestedModel)}`);
     lines.push(`actual model: ${JSON.stringify(view.actualModel)}`);
     lines.push(`requested effort: ${JSON.stringify(view.requestedEffort)}`);
@@ -455,6 +465,12 @@ function field(value: { value: string | null; source: OperationField["source"]; 
         explicit: value.explicit,
         inherited: value.source === "role-default",
     };
+}
+
+/** The child's observable skill modes: discovery, none, or exactly these paths. */
+function skillMode(value: string[] | null): "discovery" | "none" | "explicit" {
+    if (value === null) return "discovery";
+    return value.length === 0 ? "none" : "explicit";
 }
 
 function yesNo(value: boolean): "yes" | "no" {

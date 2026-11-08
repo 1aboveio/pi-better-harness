@@ -164,6 +164,13 @@ import {
 } from "./continuation.ts";
 import { createHash } from "node:crypto";
 import { assertThinkingLevel, parseModelThinking, type ThinkingLevel } from "./thinking.ts";
+import {
+    absolutizeSkillPaths,
+    describeSkillExposure,
+    normalizeSkillExposure,
+    resolveSkillExposure,
+    skillLaunchArgs,
+} from "./skills.ts";
 import { createAgentOperations } from "./agent-operations.ts";
 import { createAgentSessionSettings } from "./agent-session-settings.ts";
 import {
@@ -1827,6 +1834,25 @@ function sameLaunchTools(left: unknown, right: string): boolean {
     return typeof left === "string" && normalizeTools(left) === normalizeTools(right);
 }
 
+/**
+ * A continuation may repeat its launch's skill exposure, and only that. The
+ * saved paths are absolute (frozen at launch), so a caller repeating relative
+ * paths is compared against the recipe's own workspace; `[]` and "inherit" stay
+ * different choices rather than both reading as "nothing set".
+ */
+function sameLaunchSkills(value: unknown, recipe: ContinuationPlan["recipe"]): boolean {
+    let requested: string[] | undefined;
+    try {
+        requested = normalizeSkillExposure(value, "skills");
+    } catch {
+        return false;
+    }
+    if (requested === undefined) return false;
+    const saved = recipe.skills ?? [];
+    const resolved = requested.length === 0 ? [] : absolutizeSkillPaths(requested, recipe.cwd);
+    return resolved.length === saved.length && resolved.every((path, index) => path === saved[index]);
+}
+
 function sameLaunchRoles(left: unknown, right: string | readonly string[] | undefined): boolean {
     if (typeof left === "string") return left === right;
     if (Array.isArray(left) && Array.isArray(right)) {
@@ -1851,6 +1877,7 @@ function continuationLaunchConflicts(
     check("alias", (value) => value === recipe.alias);
     check("tools", (value) => sameLaunchTools(value, recipe.tools));
     check("exclude_tools", (value) => typeof value === "string" && normalizeTools(value) === normalizeTools(recipe.excludeTools ?? ""));
+    check("skills", (value) => sameLaunchSkills(value, recipe));
     check("clean", (value) => value === recipe.clean);
     check("sandbox", (value) => value === recipe.sandbox);
     check("sandbox_dir", (value) => sameLaunchPath(value, recipe.sandboxDir));
@@ -2141,6 +2168,8 @@ export default function (pi: ExtensionAPI) {
     type SpawnParams = {
         prompt: string; name?: string; model?: string; thinking?: ThinkingLevel; tools?: string;
         exclude_tools?: string; clean?: boolean; sandbox?: boolean;
+        /** Skill exposure for this launch; omit to inherit catalog/config/discovery. */
+        skills?: readonly string[];
         sandbox_dir?: string; callback?: boolean; cwd?: string;
         git_clone_workspace?: boolean; approve?: boolean; allow_nested?: boolean;
         agent?: string; role?: string | readonly string[]; alias?: string;
@@ -2207,6 +2236,9 @@ export default function (pi: ExtensionAPI) {
         modelNote?: string;
     }> {
         assertThinkingLevel(p.thinking);
+        // Skill exposure is a caller choice, not a launch: validate its shape
+        // before any attempt directory or capacity effect exists.
+        if (!resume) normalizeSkillExposure(p.skills, "skills");
         // A conversation parked on an observed wait resumes through the
         // coordinator's claim. An ordinary manual continuation would leave that
         // automatic resume armed for the same assignment, so it is refused until
@@ -2321,6 +2353,19 @@ export default function (pi: ExtensionAPI) {
                 });
             const cwd = workspace.cwd;
             const requestedSandboxDir = workspace.requestedSandboxDir;
+
+            // Skill exposure is decided once per attempt. A continuation replays the
+            // frozen recipe (including its absence, which keeps discovery); a fresh
+            // launch resolves launch option → catalog role/agent → config default →
+            // discovery. Relative paths belong to the workspace the child runs in.
+            const skills = resolveSkillExposure(resume
+                ? { saved: { paths: resume.recipe.skills }, cwd }
+                : {
+                    requested: p.skills,
+                    catalog: p.catalog?.effective?.skills?.value,
+                    configured: cfg.defaultSkills,
+                    cwd,
+                });
 
             if (requestedSandboxDir) mkdirSync(requestedSandboxDir, { recursive: true });
             writeFileSync(promptPathFor(id), p.prompt);
@@ -2485,6 +2530,7 @@ export default function (pi: ExtensionAPI) {
                 ...commandExtArgs,
                 ...(model ? ["--model", model] : []),
                 ...(thinking ? ["--thinking", thinking] : []),
+                ...skillLaunchArgs(skills),
                 ...(allow && !sandboxEnabled ? ["--tools", allow] : []),
                 ...(excludes.size ? ["--exclude-tools", [...excludes].join(",")] : []),
                 ...(sandboxEnabled ? ["--no-builtin-tools", "--no-approve"] : approve ? ["--approve"] : []),
@@ -2644,6 +2690,7 @@ export default function (pi: ExtensionAPI) {
                 effort: thinking,
                 tools: allow,
                 excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
+                skills: skills.mode === "inherit" ? undefined : [...skills.paths],
                 clean,
                 allowNested,
                 approve,
@@ -2665,6 +2712,8 @@ export default function (pi: ExtensionAPI) {
                 id, name: launchName, status: "running",
                 pid: spawned.pid, spawnPid: process.pid, spawnPidStartTime: parentStartToken(), model,
                 effort: thinking, cwd,
+                ...(skills.mode === "inherit" ? {} : { skills: [...skills.paths] }),
+                skillsSource: skills.source,
                 ...identity,
                 promptPreview: p.prompt.slice(0, 200),
                 startedAt, logPath: logPathFor(id), sessionId,
@@ -2769,7 +2818,9 @@ export default function (pi: ExtensionAPI) {
                   `Add a toolExtensions entry in config.json.\n`
                 : "");
             const modelNote = catalogDefaultNote(resume ? undefined : p.catalog, model, thinking);
-            return { id, meta, spawned, runtime: runtime + (meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""), warn, sandboxDir, modelNote };
+            // The resolved skill exposure rides with the runtime summary, which every
+            // launch and continuation message already prints.
+            return { id, meta, spawned, runtime: `${runtime}${describeSkillExposure(skills)}\n${meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""}`, warn, sandboxDir, modelNote };
         } catch (error) {
             // A launch that never committed metadata is not a run: drop
             // everything the attempt created so the registry keeps no
@@ -3040,13 +3091,13 @@ export default function (pi: ExtensionAPI) {
             "After subagent_spawn, do NOT call subagent_output or subagent_result in a loop to wait for the result, and do NOT sleep. The run completes on its own and reports back on the next turn.",
             "Call subagent_result after a completion or attention callback, or when the user explicitly asks for the result. Use subagent_output only when the user explicitly asks how a run is progressing; never use either tool to poll.",
             ...SUBAGENT_ORCHESTRATION_GUIDELINES,
-            "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Without an agent or role, pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
+            "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. When the task already names its SKILL.md by path, pass skills with those absolute paths (or [] for none) so the child does not advertise the whole skills catalog. Without an agent or role, pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
             ...CATALOG_GUIDELINES,
             "Subagent sandboxing defaults to off. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Set sandbox:true to request kernel confinement, including without published settings. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
             "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. No progress for stuck_minutes (default 10) wakes you once without stopping the run. Elapsed-time limits are opt-in: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace. Do not set elapsed-time limits merely because a task may take a while; use them only when the work needs a real wall-clock bound.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
             "Saved conversations persist automatically. To continue a completed or stopped worker in its own history, call subagent_spawn with session_id (the native session id reported for the saved conversation) and the new feedback as prompt. Omit session_id for a brand-new conversation.",
-            "On a continuation, pass prompt, session_id, and only optional model, thinking, callback, or timing overrides. Launch-only options (name, agent, role, alias, tools, exclude_tools, clean, sandbox, sandbox_dir, cwd, git_clone_workspace, approve, allow_nested) keep the saved recipe; repeat them only with the same value, otherwise the launch is refused.",
+            "On a continuation, pass prompt, session_id, and only optional model, thinking, callback, or timing overrides. Launch-only options (name, agent, role, alias, tools, exclude_tools, skills, clean, sandbox, sandbox_dir, cwd, git_clone_workspace, approve, allow_nested) keep the saved recipe; repeat them only with the same value, otherwise the launch is refused.",
             "Do not restate the original task or role when continuing: they already live in the saved conversation. A running or orphaned latest attempt blocks continuation until it stops, and missing saved history is refused rather than recreated.",
         ],
         parameters: Type.Object({
@@ -3061,6 +3112,7 @@ export default function (pi: ExtensionAPI) {
             thinking: Type.Optional(Type.String({ description: "Reasoning effort for the child: off, minimal, low, medium, high, xhigh, or max. Omit to use the agent or role default; without one, the Pi/model default." })),
             tools: Type.Optional(Type.String({ description: "Tool allowlist: comma-separated names the child may use (e.g. 'read,bash,web_fetch'). This ALSO selects which extensions load — only packages backing a requested tool are loaded. Defaults to the configured safe set." })),
             exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist, applied on top of the allowlist." })),
+            skills: Type.Optional(Type.Array(Type.String(), { description: "Skill exposure for the child. Omit to inherit the catalog role/agent choice, then config defaultSkills, then user-catalog discovery. [] loads no skills (--no-skills). Absolute paths load exactly those skills (--no-skills --skill <path>), which is how a task that names one SKILL.md by path avoids advertising the whole catalog. Relative paths resolve against the child workspace." })),
             clean: Type.Optional(Type.Boolean({ description: "Run a hermetic child with NO extensions at all (only built-ins: read, bash, edit, write). Default false — the extensions backing the requested tools load, so web_fetch and model auth (e.g. xai) work." })),
             sandbox: Type.Optional(Type.Boolean({ description: "Use the human Subagents profile from /sandbox. Defaults to off without published settings. True requests kernel confinement; false cannot bypass an enabled human profile." })),
             sandbox_dir: Type.Optional(Type.String({ description: "Confine writes to (and run the child in) this directory instead of the working dir. Created if missing." })),
@@ -3229,6 +3281,7 @@ export default function (pi: ExtensionAPI) {
                 thinking: Type.Optional(Type.String({ description: "Reasoning effort applied to every job: off, minimal, low, medium, high, xhigh, or max." })),
                 tools: Type.Optional(Type.String({ description: "Tool allowlist applied to every job." })),
                 exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist applied to every job." })),
+                skills: Type.Optional(Type.Array(Type.String(), { description: "Skill exposure applied to every job. Per-job skills override this. [] loads no skills; absolute paths load exactly those skills; omit to inherit discovery." })),
                 sandbox: Type.Optional(Type.Boolean({ description: "Use the human Subagents profile; false cannot override an enabled profile. Defaults to off without published settings; true requests kernel confinement." })),
                 sandbox_dir: Type.Optional(Type.String({ description: "Writable root for every job." })),
                 callback: Type.Optional(Type.Boolean({ description: "Default TRUE: post result back on completion." })),
@@ -3251,6 +3304,7 @@ export default function (pi: ExtensionAPI) {
                 thinking: Type.Optional(Type.String()),
                 tools: Type.Optional(Type.String()),
                 exclude_tools: Type.Optional(Type.String()),
+                skills: Type.Optional(Type.Array(Type.String())),
                 sandbox: Type.Optional(Type.Boolean()),
                 sandbox_dir: Type.Optional(Type.String()),
                 callback: Type.Optional(Type.Boolean()),
