@@ -605,6 +605,15 @@ A recipe written before this option existed has no `skills` key and keeps
 discovery. There is no `exclude_skills`: Pi cannot drop single entries from a
 discovered catalog without also taking over discovery.
 
+### Project context in a linked worktree
+
+A child keeps its parent's working directory. When that directory is inside a
+linked Git worktree, the worktree is the project context root: the child receives
+the global `AGENTS.md` from the agent directory and the context files at or below
+the worktree root, not the main checkout's file or any ancestor above it. Ordinary
+repositories keep every ancestor context file. The child filters the loaded list
+and adds no rules of its own.
+
 ## Tool scoping (allowlist)
 
 Precedence, highest first: the per-call `tools` param → `config.json`

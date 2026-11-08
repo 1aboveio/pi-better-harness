@@ -22,6 +22,7 @@
       "./packages/pi-better-goal/src/index.ts",
       "./packages/pi-better-harness/extensions/model-router/index.ts",
       "./packages/pi-better-harness/extensions/task-context/index.ts",
+      "./packages/pi-better-harness/extensions/project-context/index.ts",
       "./packages/pi-better-harness/extensions/minimal-output/index.ts",
       "./packages/pi-better-harness/extensions/settings/index.ts"
     ]

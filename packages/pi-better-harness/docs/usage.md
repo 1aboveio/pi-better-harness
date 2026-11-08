@@ -91,6 +91,20 @@ resume, fork, and reload. It ships no launcher. See
 [the sandbox package](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme)
 for the full policy.
 
+## Linked Worktrees
+
+When the working directory is inside a linked Git worktree (`git worktree add`),
+the worktree is the project context root. Pi sends the global `AGENTS.md` from the
+agent directory and context files at or below the worktree root, and leaves out
+files loaded from the main checkout or from any ancestor above the worktree. A
+worktree without its own context file therefore starts without the main checkout's
+file instead of inheriting it.
+
+Ordinary repositories keep every ancestor context file. `--no-context-files` still
+loads nothing, because the extension filters the loaded list and adds no rules of
+its own. Subagents keep the same boundary, including a worker launched inside a
+worktree.
+
 ## Included Tools
 
 After installation, Pi can use these model-callable tools:
