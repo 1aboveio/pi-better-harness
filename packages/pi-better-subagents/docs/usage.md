@@ -611,8 +611,12 @@ A child keeps its parent's working directory. When that directory is inside a
 linked Git worktree, the worktree is the project context root: the child receives
 the global `AGENTS.md` from the agent directory and the context files at or below
 the worktree root, not the main checkout's file or any ancestor above it. Ordinary
-repositories keep every ancestor context file. The child filters the loaded list
-and adds no rules of its own.
+repositories keep every ancestor context file. The parent session applies the same
+boundary, so a standalone Subagents install behaves like the bundled one.
+
+The boundary follows where Pi selected a file, not what a filename symlink points
+at. It needs a Pi host that rebuilds the prompt from `systemPromptOptions` after
+the `before_agent_start` hook (Pi 1.x); an older host keeps the prompt it loaded.
 
 ## Tool scoping (allowlist)
 

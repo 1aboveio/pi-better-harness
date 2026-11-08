@@ -23,7 +23,7 @@
  */
 
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 /** The subset of a loaded context file this module needs to read. */
 export interface ProjectContextFile {
@@ -117,21 +117,40 @@ export function findLinkedWorktreeRoot(cwd: string): string | undefined {
 }
 
 /**
+ * Where Pi selected a context file, canonicalized through its directory only.
+ *
+ * Resolving the whole path would follow a filename symlink to its target, which
+ * inverts both cases that matter: a worktree `AGENTS.md` linking to the main
+ * checkout's file would look like inherited context, and the main checkout's
+ * `AGENTS.md` linking back into the worktree would look local. The boundary is
+ * the location the loader selected, so resolve the containing directory (macOS
+ * `/tmp` → `/private/tmp`, a symlinked cwd, a symlinked agent directory) and
+ * keep the selected filename itself.
+ */
+function selectedContextPath(filePath: string): string {
+    return join(canonicalizePath(dirname(filePath)), basename(filePath));
+}
+
+/**
  * Drop project context loaded above the linked worktree that owns `cwd`.
  *
- * The global file under `agentDir` always survives. Outside a linked worktree
- * this is a no-op, so ordinary repositories keep every ancestor file. Mutates
+ * The global file Pi selected under `agentDir` always survives, even when that
+ * filename is a symlink to a file outside the agent directory, because the
+ * global selection is not inherited checkout context. Outside a linked worktree
+ * this is a no-op, so ordinary repositories keep every ancestor file. A host
+ * that hands over no prompt options is left unchanged. Mutates
  * `options.contextFiles` in place because Pi hands the handler its mutable
  * prompt options.
  */
-export function restrictContextFilesToWorktree(options: ProjectContextOptions, agentDir: string): void {
+export function restrictContextFilesToWorktree(options: ProjectContextOptions | undefined, agentDir: string): void {
+    if (!options) return;
     const files = options.contextFiles;
     if (!files || files.length === 0) return;
     const worktreeRoot = findLinkedWorktreeRoot(options.cwd ?? process.cwd());
     if (!worktreeRoot) return;
     const allowedRoots = [worktreeRoot, canonicalizePath(agentDir)];
     const kept = files.filter((file) => {
-        const path = canonicalizePath(file.path);
+        const path = selectedContextPath(file.path);
         return allowedRoots.some((root) => isPathWithin(root, path));
     });
     if (kept.length === files.length) return;

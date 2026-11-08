@@ -216,6 +216,7 @@ import {
     type WorkerOperationsHost,
 } from "./worker-waits.ts";
 import { defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
+import { restrictContextFilesToWorktree } from "./shared-worktree-context.ts";
 
 const SUBAGENT_MODE_ACTIONS: readonly AutocompleteItem[] = [
     { value: "settings", label: "settings", description: "Open delegation mode and concurrency settings" },
@@ -1970,6 +1971,11 @@ function catalogRoleSchema(purpose: string) {
 }
 
 export default function (pi: ExtensionAPI) {
+    // A standalone Subagents install has no Harness extension, so the parent
+    // session applies the same linked-worktree project boundary as its children.
+    pi.on("before_agent_start", (event) => {
+        restrictContextFilesToWorktree(event.systemPromptOptions, PiCodingAgent.getAgentDir());
+    });
     initializeNavigatorPanels(pi);
     const agentSessionSettings = createAgentSessionSettings(pi);
     let catalogModelRegistry: ExtensionContext["modelRegistry"] | undefined;

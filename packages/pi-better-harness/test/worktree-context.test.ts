@@ -96,6 +96,35 @@ function createFixture(t: { after(fn: () => void): void }, layout: "nested" | "s
 
 type BeforeAgentStartHandler = (event: Record<string, unknown>) => unknown;
 
+/**
+ * A host stub for an extension entry that registers more than one hook.
+ * Property reads return another stub, so the entry's real registration code runs
+ * without a live Pi; `on` records the hook under test.
+ */
+function registeringHost(handlers: BeforeAgentStartHandler[]): unknown {
+    const method = () => undefined;
+    function stub(): unknown {
+        return new Proxy(method, {
+            get(_target, property) {
+                if (["getAllTools", "getAllCommands", "getActiveTools", "getCommands"].includes(String(property))) return () => [];
+                if (property === "getSettings") return () => ({});
+                return stub();
+            },
+            apply() { return undefined; },
+        });
+    }
+    return new Proxy({}, {
+        get(_target, property) {
+            if (property === "on") {
+                return (event: string, handler: BeforeAgentStartHandler) => {
+                    if (event === "before_agent_start") handlers.push(handler);
+                };
+            }
+            return stub();
+        },
+    });
+}
+
 /** Register the extension exactly as Pi's loader does, then keep its hook. */
 function beforeAgentStartHandlers(register: (pi: unknown) => void): BeforeAgentStartHandler[] {
     const handlers: BeforeAgentStartHandler[] = [];
@@ -186,6 +215,63 @@ test("a symlinked working directory keeps the same worktree boundary", async (t)
         [MAIN_RULE, ABOVE_MAIN_RULE]);
 });
 
+test("a worktree context file that links to the main checkout stays local", async (t) => {
+    const fixture = createFixture(t, "nested");
+    const worktreeFile = join(fixture.worktree, "AGENTS.md");
+    const mainFile = join(fixture.main, "AGENTS.md");
+    // The loader selected this file at the worktree root. Where the filename
+    // points is the worktree's choice, so it survives with the worktree path.
+    rmSync(worktreeFile);
+    symlinkSync(mainFile, worktreeFile, "file");
+    const options = contextOptions(fixture.cwd, fixture.agentDir);
+
+    await runHook(beforeAgentStartHandlers(projectContextExtension), options);
+
+    assert.deepEqual(options.contextFiles.map((file) => file.path), [
+        join(fixture.agentDir, "AGENTS.md"),
+        worktreeFile,
+        join(fixture.worktree, "packages", "app", "AGENTS.md"),
+    ]);
+    assertPromptHas(buildSystemPrompt(options), [worktreeFile], [MAIN_RULE], [mainFile], [ABOVE_MAIN_RULE]);
+});
+
+test("an inherited main context file that links into the worktree stays out", async (t) => {
+    const fixture = createFixture(t, "nested");
+    const mainFile = join(fixture.main, "AGENTS.md");
+    const worktreeFile = join(fixture.worktree, "AGENTS.md");
+    // The main checkout selected this ancestor file. It must not enter the
+    // worktree just because its target happens to live there.
+    rmSync(mainFile);
+    symlinkSync(worktreeFile, mainFile, "file");
+    const options = contextOptions(fixture.cwd, fixture.agentDir);
+
+    await runHook(beforeAgentStartHandlers(projectContextExtension), options);
+
+    assert.deepEqual(options.contextFiles.map((file) => file.path), [
+        join(fixture.agentDir, "AGENTS.md"),
+        worktreeFile,
+        join(fixture.worktree, "packages", "app", "AGENTS.md"),
+    ]);
+    assertPromptHas(buildSystemPrompt(options), [worktreeFile], [WORKTREE_RULE], [mainFile], []);
+});
+
+test("a global context file that links outside the agent directory is still global", async (t) => {
+    const fixture = createFixture(t, "nested");
+    const globalFile = join(fixture.agentDir, "AGENTS.md");
+    rmSync(globalFile);
+    symlinkSync(write(join(fixture.root, "shared-global.md"), GLOBAL_RULE), globalFile, "file");
+    const options = contextOptions(fixture.cwd, fixture.agentDir);
+
+    await runHook(beforeAgentStartHandlers(projectContextExtension), options);
+
+    assert.deepEqual(options.contextFiles.map((file) => file.path), [
+        globalFile,
+        join(fixture.worktree, "AGENTS.md"),
+        join(fixture.worktree, "packages", "app", "AGENTS.md"),
+    ]);
+    assertPromptHas(buildSystemPrompt(options), [globalFile], [GLOBAL_RULE], [join(fixture.main, "AGENTS.md")], [MAIN_RULE]);
+});
+
 test("ordinary repositories still inherit every ancestor context file", async (t) => {
     const fixture = createFixture(t, "sibling");
     const cwd = join(fixture.main, "packages", "app");
@@ -248,4 +334,49 @@ test("a subagent child applies the same boundary as its parent", async (t) => {
     assert.equal(buildSystemPrompt(childOptions), buildSystemPrompt(parentOptions));
     assertPromptHas(buildSystemPrompt(childOptions), [join(fixture.worktree, "AGENTS.md")], [WORKTREE_RULE],
         [join(fixture.main, "AGENTS.md")], [MAIN_RULE]);
+});
+
+test("a standalone Subagents parent applies the same boundary", async (t) => {
+    const fixture = createFixture(t, "nested");
+    const options = contextOptions(fixture.cwd, fixture.agentDir);
+    const handlers: BeforeAgentStartHandler[] = [];
+    const { default: subagentsExtension } = await import("../../pi-better-subagents/index.ts");
+    subagentsExtension(registeringHost(handlers) as never);
+    assert.ok(handlers.length > 0, "the Subagents entry must register a before_agent_start handler");
+
+    // The entry also owns the legacy settings prompt on hosts without sections,
+    // so identify the boundary hook by what it does to the loaded list.
+    let boundaryFiltered = false;
+    for (const handler of handlers) {
+        const before = options.contextFiles.length;
+        const result = await handler({
+            type: "before_agent_start",
+            prompt: "fixture",
+            systemPrompt: buildSystemPrompt(options),
+            systemPromptOptions: options,
+        });
+        if (result === undefined && options.contextFiles.length !== before) boundaryFiltered = true;
+    }
+    assert.ok(boundaryFiltered, "one registered hook filters the list and returns no prompt");
+
+    assert.deepEqual(options.contextFiles.map((file) => file.path), [
+        join(fixture.agentDir, "AGENTS.md"),
+        join(fixture.worktree, "AGENTS.md"),
+        join(fixture.worktree, "packages", "app", "AGENTS.md"),
+    ]);
+    assertPromptHas(buildSystemPrompt(options), [join(fixture.worktree, "AGENTS.md")], [WORKTREE_RULE],
+        [join(fixture.main, "AGENTS.md"), join(fixture.root, "AGENTS.md")], [MAIN_RULE, ABOVE_MAIN_RULE]);
+});
+
+test("an older host without structured prompt options is left unchanged", async (t) => {
+    createFixture(t, "nested");
+    const hostWithoutOptions = async (handlers: BeforeAgentStartHandler[]) => {
+        for (const handler of handlers) {
+            const result = await handler({ type: "before_agent_start", prompt: "fixture", systemPrompt: "existing prompt" });
+            assert.equal(result, undefined, "no host gets a whole-prompt return from the boundary");
+        }
+    };
+
+    await hostWithoutOptions(beforeAgentStartHandlers(projectContextExtension));
+    await hostWithoutOptions(beforeAgentStartHandlers((pi) => childOwnership(pi as never, {})));
 });
