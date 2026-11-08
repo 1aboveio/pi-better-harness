@@ -4,6 +4,33 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.41.0] - 2026-11-08
+
+### Added
+
+- Use the linked worktree as the project context boundary. Keep global AGENTS.md rules and the worktree's own rules without inheriting the main checkout or falling back when a worktree file is absent. This filtering requires a Pi host that applies structured prompt edits; it is verified on Pi 1.5.0 and remains inert on Pi 0.82.1.
+- Bundle Subagents 0.28.0 and Goal 0.12.2, including skill selection controls and verified issue-workflow completion.
+
+### Fixed
+
+- Bind revision-zero Rush preflight plans that carry runDir and units without runId or fleet. Read-only binding leaves the file unchanged, transitions advance its revision, and full real-path identity checks reject a different directory with the same name. The run directory cannot be changed through a transition.
+
+## [pi-better-subagents@0.28.0] - 2026-11-08
+
+### Added
+
+- Bound child skill exposure with launch options, role and agent definitions, session choices, and saved subagent defaults. Omitted settings keep discovery, an empty list disables the catalog, and explicit paths load only the selected skills. Continuations retain the original choice and reject conflicting overrides; clean still controls extensions only.
+- Select skills with a shared searchable checkbox picker in Subagent settings and Agents. Filtering preserves selections, unavailable saved paths remain visible, manual paths are supported, and applying zero checked explicitly selects No skill catalog. The picker uses Pi's loaded metadata and offers manual entry when the host reports none.
+- Show the effective skill choice and its source consistently in settings, catalog inspection, and launch metadata. Preserve edits on cancellation and failed saves, and keep the active control visible in short terminals.
+- Apply the worktree project-context boundary to standalone Subagents parents and their children on supported Pi hosts.
+
+## [pi-better-goal@0.12.2] - 2026-11-08
+
+### Fixed
+
+- Refuse completion of rush-issues and resolve-issues Goals when the plan is unbound or unavailable, or the scheduler fails, times out, or returns invalid evidence. Keep the Goal active and retain workflow ownership until the scheduler explicitly reports finish. Ordinary Goals, other coordinators, and human handback behavior remain unchanged.
+- Reject malformed scheduler due entries instead of dropping them, so a finish entry cannot hide unverified work. Recovery messages name the update_todo workflow binding API.
+
 ## [pi-better-harness@0.40.6] - 2026-11-07
 
 ### Added
