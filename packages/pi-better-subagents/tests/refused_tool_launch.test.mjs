@@ -36,6 +36,7 @@ import {
     mkdirSync,
     mkdtempSync,
     readFileSync,
+    readdirSync,
     rmSync,
     symlinkSync,
     writeFileSync,
@@ -236,6 +237,11 @@ function runIds() {
     return existsSync(dir) ? registry.listMetas().map((meta) => meta.id).sort() : [];
 }
 
+function runDirectories() {
+    const dir = join(RUNTIME, "pi-better-subagents", "runs");
+    return existsSync(dir) ? readdirSync(dir).filter((name) => name.startsWith("sa_")).sort() : [];
+}
+
 async function waitForTerminal(id, { attempts = 200, delayMs = 25 } = {}) {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
         const meta = registry.readMeta(id);
@@ -322,6 +328,7 @@ describe("refused task tools never reach the child loadout (#669)", () => {
         const ctx = makeCtx(workspace);
         const sandboxDir = newSandboxDir("explicit");
         const before = runIds();
+        const beforeDirectories = runDirectories();
 
         await assert.rejects(
             tools.subagent_spawn.execute("tc-explicit", {
@@ -336,7 +343,8 @@ describe("refused task tools never reach the child loadout (#669)", () => {
             },
         );
         assert.deepEqual(runIds(), before, "a refused explicit request leaves no run record");
-        assert.ok(!existsSync(join(sandboxDir, "child-preflight.json")));
+        assert.deepEqual(runDirectories(), beforeDirectories,
+            "a refused explicit request leaves no attempt directory containing preflight or task policy");
     });
 
     it("keeps exclusions ahead of a requested tool", { timeout: 30000 }, async (t) => {
