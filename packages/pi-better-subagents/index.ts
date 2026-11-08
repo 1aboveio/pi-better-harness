@@ -2709,11 +2709,10 @@ export default function (pi: ExtensionAPI) {
                 p.prompt,
             ];
 
-            const piBin = resolvePiBinary();
             const selectedTools = allow.split(",").filter((name) => name && !excludes.has(name));
             const dropped = toolSelection?.dropped ?? [];
             const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
-                root: requestedSandboxDir, controlDir: join(runDir(id), "control"), piBin,
+                root: requestedSandboxDir, controlDir: join(runDir(id), "control"),
                 tools: selectedTools,
                 permissions: permissionPlan.permissions && { ...permissionPlan.permissions, ...commandSettings },
                 applyPatch: taskTools?.applyPatch === true,
@@ -2742,7 +2741,7 @@ export default function (pi: ExtensionAPI) {
                     try { ctx.ui?.notify?.(`Subagent ${id}: recovery snapshot failed (run continues): ${outcome.detail}`, "warning"); } catch { /* ignore */ }
                 });
             }
-            const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: process.execPath, fileArgs: [join(selfDir(), "child-runtime.mjs"), piBin, ...args] };
+            const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: process.execPath, fileArgs: [join(selfDir(), "child-runtime.mjs"), resolvePiBinary(), ...args] };
             const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
 
             // Reservations prevent competing admissions, but do not grandfather
