@@ -1,0 +1,17 @@
+# Zero checked applies No skill catalog and returns to the settings page
+# width: 40
+
+  Subagent settings
+
+  Delegation mode          adaptive
+  Concurrent subagents     6
+  Skill exposure           No skill cata
+                           Source: this 
+> Selected skills          Choose…      
+  Agents
+
+  Reset to defaults
+
+No skills checked. Skill exposure set to
+
+Up/Down Select · Space/Enter Change · ct

@@ -15,7 +15,7 @@ Use `pi-better-subagents` when you want Pi to launch independent agent work with
 - Continue a saved conversation with `subagent_spawn({ session_id, prompt })`, or use `session_name` for a unique name in the current folder. Sessions persist by default. Lists show session IDs and search locally; `all:true` searches globally. Batch jobs use the same selectors. See [continuing a saved conversation](docs/usage.md#continuing-a-saved-conversation).
 - Typed foreground `subagent_spawn_batch` launch receipts for native Pi codemode (Pi 0.99.1+), preserving direct tool calls, per-run callbacks, and batch capacity/catalog guarantees. See [codemode batch launches](docs/usage.md#codemode-batch-launches).
 - Opt-in OS task sandboxing on macOS and Linux.
-- Explicit tool allowlists for child sessions.
+- Explicit tool allowlists for child sessions, and `skills` for prompt exposure: omit it to keep user-catalog discovery, pass `[]` for no skills, or pass absolute `SKILL.md` paths for exactly those. See [skill exposure](docs/usage.md#skill-exposure).
 - Durable logs, result retrieval, and [failure observations](docs/failure-observations.md) independent of lifecycle status. A live child handles its own tool errors; the parent is woken only for actionable incidents, and children can classify handled failures with `failure_disposition`.
 - Live background-work navigator for active runs.
 - Harness-owned run timing: every run gets a no-progress wake (10 min), while wall-clock soft deadlines and hard ceilings are opt-in so productive agents are not stopped solely for taking a long time. Configure per spawn with `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`, or globally in `config.json` / `PI_SUBAGENT_*_MINUTES`. See [usage notes](docs/usage.md#run-timing-deadline-ceiling-stuck).
@@ -80,13 +80,23 @@ Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or ne
 
 The user config sets `delegationMode` to `manual`, `adaptive` (default), or
 `coordinator`. `/subagents settings` (or `/subagents`) opens a settings page
-for delegation mode and the concurrent-subagent cap (default 6). Edits apply to
-this session and persist across reloads; Ctrl+S saves both as defaults, and
-Reset to defaults clears
-session overrides. Agents opens the same catalog as `/agents`.
-`/subagents mode manual|adaptive|coordinator` and
+for delegation mode, the concurrent-subagent cap (default 6), and the default
+skill exposure. Skill exposure cycles between Discover automatically and No skill
+catalog. The Selected skills row opens the same searchable checkbox picker used
+by `/agents`: it lists loaded skills by name and description, Space toggles one,
+Enter applies, and typing filters without dropping checked items. Saved paths
+missing from discovery stay visible as unavailable and survive apply. Zero
+checked applies No skill catalog, not discovery. Manual Add skill path remains
+available. The page names whether the current value comes from the saved config
+or this session. The session choice controls the next launch before Ctrl+S, and
+edits persist across reloads. Ctrl+S saves mode, cap, and skill exposure as
+defaults, and Reset to defaults clears session overrides, including the skill
+list. Agents opens the same catalog as `/agents`; a definition that inherits
+skill exposure shows whether the live value comes from this session, saved
+config, or discovery, and an invalid draft is marked invalid rather than shown
+as discovery. `/subagents mode manual|adaptive|coordinator` and
 `/subagents cap <number>` are command equivalents; `/subagents save` persists
-both. Lowering the cap blocks new single and batch launches, including launches
+the current settings. Lowering the cap blocks new single and batch launches, including launches
 still preparing, without stopping running work. Saved configuration changes are
 picked up on subsequent reads; explicit session overrides still take precedence.
 Before every model request, including continuations after tool calls,
@@ -112,7 +122,9 @@ Saved defaults live in global `~/.pi/agent/settings.json` under
 `piBetterHarness.subagents` (or under `PI_CODING_AGENT_DIR`) and survive package
 reinstalls and upgrades. The old user config migrates on first use. Global values
 override the package's `config.json`, which remains a compatibility fallback.
-Save existing mode and cap choices with `/subagents save` or Ctrl+S. Put other
+Save existing mode, cap, and skill choices with `/subagents save` or Ctrl+S.
+Discovery is saved as `defaultSkills: null`, which clears a previously saved
+path list. Put other
 custom config keys in `piBetterHarness.subagents` as well; edits made only inside
 the installed package can be lost on upgrade.
 

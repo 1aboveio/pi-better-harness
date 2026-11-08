@@ -9,7 +9,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { presentCatalog, presentCatalogEntry, type LaunchEnricher, type OperationView } from "./agent-inspection.ts";
+import { presentCatalog, presentCatalogEntry, type LaunchEnricher, type OperationView, type ReadSkillDefaults } from "./agent-inspection.ts";
 import { createCatalogComponent } from "./catalog-ui.ts";
 import type { ScopedModelLike } from "./catalog-editor.ts";
 import {
@@ -51,6 +51,8 @@ import {
 } from "./codex-import.ts";
 import { resolveRoleAssignment } from "./role-assignment.ts";
 import { saveAgentSessionDefaults, withAgentSessionSettings, type AgentSessionOverrides, type AgentSessionSettings } from "./agent-session-settings.ts";
+import { saveSkillExposure } from "./catalog-skill-edits.ts";
+import type { DiscoveredSkill } from "./skill-picker.ts";
 
 const MODEL_PATTERN = /^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 const TIER_PATTERN = /^[a-z][a-z0-9-]{0,32}$/;
@@ -72,6 +74,12 @@ export interface AgentCommandDeps {
     now?: () => string;
     /** Resolution unit injects availability, actual model/effort, and launchability. */
     enrich?: LaunchEnricher;
+    /** Live session/config default skill choice; absent keeps the legacy config read. */
+    readSkillDefaults?: ReadSkillDefaults;
+    /** Read loaded Pi skill metadata for the checkbox picker. */
+    discoverSkills?: (ctx: ExtensionCommandContext) => readonly DiscoveredSkill[];
+    /** Snapshot captured for this invocation. */
+    discoveredSkills?: readonly DiscoveredSkill[];
     sessionSettings?: AgentSessionSettings;
     /** Available foreground registry models, as provider/id. */
     editableModels?: () => readonly string[];
@@ -153,6 +161,7 @@ export function registerAgentCommands(pi: Pick<ExtensionAPI, "registerCommand">,
 /** Slash commands and settings shortcuts must resolve against the same live context. */
 export function executeAgentsCommandContext(args: string, ctx: ExtensionCommandContext, deps: AgentCommandDeps = {}): Promise<AgentCommandResult> {
     deps.propagateCommandContext?.(ctx);
+    const discoveredSkills = deps.discoverSkills?.(ctx) ?? deps.discoveredSkills;
     return executeAgentsCommand(args, {
         cwd: ctx.cwd,
         hasUI: ctx.hasUI,
@@ -160,7 +169,7 @@ export function executeAgentsCommandContext(args: string, ctx: ExtensionCommandC
         isProjectTrusted: () => ctx.isProjectTrusted(),
         scopedModels: scopedModelsFromContext(ctx),
         ui: ctx.ui,
-    }, deps);
+    }, discoveredSkills ? { ...deps, discoveredSkills } : deps);
 }
 
 /**
@@ -231,7 +240,7 @@ export function parseCommandArgs(input: string): ParsedArgs {
 
 async function runList(parsed: ParsedArgs, loc: CatalogLocation, deps: AgentCommandDeps): Promise<AgentCommandResult> {
     if (parsed.positionals.length > 1) return result("error", "list", false, "list does not take extra arguments. Use /agents show <id> to inspect one definition.");
-    const listed = presentCatalog(readCatalog(loc), deps.enrich);
+    const listed = presentCatalog(readCatalog(loc), deps.enrich, deps.readSkillDefaults);
     return {
         ...result("ok", "list", false, `Listed from a fresh catalog read. File edits show up on the next list or launch; /agents reload is not required for that.\n${listed.text}`),
         diagnostics: listed.diagnostics,
@@ -241,7 +250,7 @@ async function runList(parsed: ParsedArgs, loc: CatalogLocation, deps: AgentComm
 
 async function runReload(parsed: ParsedArgs, loc: CatalogLocation, deps: AgentCommandDeps): Promise<AgentCommandResult> {
     if (parsed.positionals.length > 1) return result("error", "reload", false, "reload does not take extra arguments.");
-    const listed = presentCatalog(withAgentSessionSettings(refreshCatalog(loc), loc.sessionSettings), deps.enrich);
+    const listed = presentCatalog(withAgentSessionSettings(refreshCatalog(loc), loc.sessionSettings), deps.enrich, deps.readSkillDefaults);
     return {
         ...result("ok", "reload", false, `Reloaded revision ${listed.revision} for inspection. The next launch reads the files again on its own; this command is not a prerequisite.\n${listed.text}`),
         diagnostics: listed.diagnostics,
@@ -263,7 +272,7 @@ async function runShow(
             return clarification(command, `${command} needs an id. UI is unavailable, so none was selected. Run /agents list and pass the id. Nothing was written.`);
         }
         if (host.mode === "tui" && host.ui.custom) {
-            const listed = presentCatalog(readCatalog(loc), deps.enrich);
+            const listed = presentCatalog(readCatalog(loc), deps.enrich, deps.readSkillDefaults);
             return { ...result("ok", command, false, listed.text), diagnostics: listed.diagnostics, data: listed };
         }
         const ids = listCatalog(readCatalog(loc)).map((entry) => entry.id);
@@ -272,7 +281,7 @@ async function runShow(
         if (!selected) return clarification(command, "Inspect was dismissed. Nothing was written.");
         id = selected;
     }
-    const view = presentCatalogEntry(readCatalog(loc), id, deps.enrich);
+    const view = presentCatalogEntry(readCatalog(loc), id, deps.enrich, deps.readSkillDefaults);
     return {
         ok: view.found,
         status: view.found ? "ok" : "error",
@@ -375,7 +384,7 @@ async function runCreate(
     if (!saved.ok || !saved.path) {
         return { ...result("error", "create", false, saved.diagnostics.map((item) => item.message).join("\n") || "Create did not write a file."), diagnostics: saved.diagnostics };
     }
-    const view = presentCatalogEntry(readCatalog(loc), id, deps.enrich);
+    const view = presentCatalogEntry(readCatalog(loc), id, deps.enrich, deps.readSkillDefaults);
     return {
         ok: true,
         status: "ok",
@@ -525,7 +534,7 @@ async function runImport(
     if (!saved.ok || !saved.path) {
         return { ...result("error", "import-codex", false, saved.diagnostics.map((item) => item.message).join("\n") || "Import did not write a file."), diagnostics: [...parsedSource.diagnostics, ...built.diagnostics, ...saved.diagnostics] };
     }
-    const view = presentCatalogEntry(readCatalog(loc), built.definition.id, deps.enrich);
+    const view = presentCatalogEntry(readCatalog(loc), built.definition.id, deps.enrich, deps.readSkillDefaults);
     const launchNote = view.catalogLaunchable
         ? "Catalog validation passed. Definition validity is not launchability."
         : "The file was saved and is not launchable.";
@@ -745,11 +754,21 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
             let viewportHeight = 30;
             await host.ui.custom<void>((tui, theme, _keys, done) =>
                 createCatalogComponent(entries, theme, () => tui.requestRender(), () => done(), view?.id, deps.sessionSettings ? {
-                    get: () => presentCatalog(readCatalog(location(host, deps)), deps.enrich),
+                    get: () => presentCatalog(readCatalog(location(host, deps)), deps.enrich, deps.readSkillDefaults),
                     models: () => deps.editableModels?.() ?? [],
                     scopedModels: () => host.scopedModels ?? [],
                     settings: () => deps.sessionSettings!.snapshot(),
                     change: (id, key, value) => deps.sessionSettings!.change(id, key, value),
+                    changeSkills(entry, edit) {
+                        const result = saveSkillExposure({ ...location(host, deps), entry }, edit);
+                        if (result.ok && result.path) {
+                            commandResult.wrote = true;
+                            commandResult.path = result.path;
+                            commandResult.scope = result.scope;
+                        }
+                        return { ok: result.ok, message: result.message };
+                    },
+                    discoverSkills: () => deps.discoveredSkills ?? [],
                     save(id) {
                         const loc = location(host, deps);
                         const saved = saveAgentSessionDefaults(loadCatalog(loc), id, deps.sessionSettings!.snapshot(), loc);
@@ -800,7 +819,7 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
                 });
             if (deps.sessionSettings) {
                 const current = readCatalog(location(host, deps));
-                const refreshed = view ? presentCatalogEntry(current, view.id, deps.enrich) : presentCatalog(current, deps.enrich);
+                const refreshed = view ? presentCatalogEntry(current, view.id, deps.enrich, deps.readSkillDefaults) : presentCatalog(current, deps.enrich, deps.readSkillDefaults);
                 commandResult.data = refreshed;
                 commandResult.message = refreshed.text;
             }

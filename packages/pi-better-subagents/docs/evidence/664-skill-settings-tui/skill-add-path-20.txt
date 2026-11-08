@@ -1,0 +1,17 @@
+# Manual Add skill path remains available
+# width: 20
+
+  Selected skills
+  Up/Down Move · Spa
+
+  Add skill path
+  Absolute SKILL.md 
+  >                 
+  [ ] better-review
+    Review the chang
+  [ ] test-quality
+    Write tests that
+  ✓ Apply selection 
+> + Add skill path… 
+  0 checked
+  0 checked applies 

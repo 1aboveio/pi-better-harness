@@ -72,6 +72,35 @@ by session id or by an unambiguous name in the current folder, independently of
 the foreground session that launched it. A saved conversation keeps no process
 alive and occupies no concurrency slot.
 
+### Skill Exposure
+
+Which skills a child can see, chosen once per attempt. The three observable
+states are discovery of the user-level catalog (an absent choice), none, and
+exactly a list of skill paths. It is a launch value, not a permission: a list
+narrows the prompt and grants nothing.
+
+A launch option wins over the catalog definition's choice, which wins over the
+current session's default, which wins over the saved global default; with none of
+them the child discovers the catalog as before. `/subagents settings` edits the
+session default immediately, and Ctrl+S saves it globally. The session choice
+applies to the next launch even before it is saved. It saves discovery as
+`null`, so choosing discovery overrides an older path list instead of reading as
+"not set". Both Selected skills screens use one checkbox picker over the skills
+Pi already loaded for the session; saved paths absent from discovery stay
+visible as unavailable, and zero checked applies to No skill catalog rather
+than becoming discovery or an empty explicit draft. The effective choice is
+frozen in the launch recipe, so a later catalog or config edit cannot change a
+saved conversation's exposure, and
+a recipe written before the choice existed keeps discovery. Catalog inspection
+reads the same live session-or-config default, so `/agents` and `agents_catalog`
+name the source a launch would actually use; an invalid draft or saved value is
+reported as an error instead of falling back to discovery.
+
+Discovery and "none" are distinct: an absent choice means the child advertises
+the user catalog, an empty list means it advertises nothing. A continuation
+repeats the frozen choice, and refuses an explicit list that would differ from
+it — including an empty list offered to a conversation launched with discovery.
+
 ### Run Alias
 
 A user-supplied label for an individual run, rather than a reusable agent

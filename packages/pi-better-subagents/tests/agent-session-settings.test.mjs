@@ -119,6 +119,7 @@ describe("branch-local agent model and effort", () => {
         component.render(80);
         component.handleInput("\x1b[B"); component.render(80);
         component.handleInput("\x1b[B"); component.render(80);
+        component.handleInput("\x1b[B"); // Skills precedes Reset.
         component.handleInput("\r");
         assert.equal(readFileSync(fx.saved.path, "utf8"), original);
         assert.equal(fx.settings.snapshot()["role.work"], undefined);
@@ -171,6 +172,7 @@ describe("branch-local agent model and effort", () => {
             component.render(100);
             component.handleInput("\x1b[B"); component.render(100);
             component.handleInput("\x1b[B"); component.render(100);
+            component.handleInput("\x1b[B"); // Skills precedes Reset.
             component.handleInput("\r");
             assert.equal(result.wrote, true, "the saved config did change even though session reset failed");
             assert.deepEqual(readCatalogPreferences(root).settings["role.work"], { bundled: true });
@@ -275,9 +277,12 @@ describe("branch-local agent model and effort", () => {
         component.handleInput("\r");
         component.handleInput("\x1b[B"); // medium -> high
         component.handleInput("\r");
-        component.handleInput("\x1b[B"); // Remains on Effort: there is no selectable save row.
+        assert.match(component.render(100).join("\n"), /> Effort\s+high/);
+        component.handleInput("\x1b[B"); // Skills is a setting row, never a save row.
+        assert.match(component.render(100).join("\n"), /> Skills\s+inherit/);
         component.handleInput("\r");
-        component.handleInput("\r");
+        component.handleInput("\r"); // Inherit is already the definition's choice; nothing is written.
+        component.handleInput("\x1b[A");
         assert.deepEqual(fx.settings.snapshot()["agent.worker"], { model: "openai/beta", effort: "high" });
         assert.equal(readFileSync(fx.saved.path, "utf8"), original);
         assert.equal(result.wrote, false);

@@ -1,8 +1,9 @@
 import { Input, SelectList, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { OperationList, OperationView } from "./agent-inspection.ts";
-import { EFFORT_LEVELS } from "./catalog-schema.ts";
+import { EFFORT_LEVELS, type SkillExposureEdit } from "./catalog-schema.ts";
 import { catalogModelChoices, catalogModelOptionLabel, catalogModelScopeLabel, type ScopedModelLike } from "./catalog-editor.ts";
 import type { AgentSessionOverrides, AgentSettingKey } from "./agent-session-settings.ts";
+import { createSkillPicker, type DiscoveredSkill } from "./skill-picker.ts";
 
 type Theme = { fg(color: string, text: string): string; bg?(color: string, text: string): string; bold?(text: string): string; inverse?(text: string): string };
 
@@ -14,6 +15,10 @@ export interface CatalogEditor {
     scopedModels?(): readonly ScopedModelLike[];
     settings(): AgentSessionOverrides;
     change(id: string, key: AgentSettingKey, value: string | null): void;
+    /** Skill exposure is edited through the definition save path, not session settings. */
+    changeSkills?(entry: OperationView, edit: SkillExposureEdit): { ok: boolean; message: string };
+    /** Loaded Pi skill metadata for the checkbox picker. */
+    discoverSkills?(): readonly DiscoveredSkill[];
     save(id: string): { ok: boolean; message: string };
     resetToBundled?(entry: OperationView): { ok: boolean; message: string };
     resetDefinition?(entry: OperationView): { ok: boolean; message: string };
@@ -28,6 +33,47 @@ function stateLabel(entry: OperationView): string {
 
 function modelLabel(entry: OperationView): string {
     return entry.actualModel ?? entry.requestedModel ?? entry.fields?.model.value ?? "not resolved";
+}
+
+/**
+ * The definition's visible skill mode. `inherit` is not discovery: an absent
+ * value or an explicit null still falls through the global default first.
+ */
+export function skillsValueLabel(skills: OperationView["skills"]): string {
+    if (!skills) return "(unknown)";
+    if (skills.value === null) {
+        return skills.source === "agent-override" ? "inherit (role list suppressed)" : "inherit";
+    }
+    if (skills.value.length === 0) return "no skill catalog";
+    return `${skills.value.length} selected · ${skills.value.join(", ")}`;
+}
+
+/** Where the effective value comes from: agent override, base role, global config, or discovery. */
+export function skillsOriginLabel(skills: OperationView["skills"], kind?: string): string {
+    if (!skills) return "unknown";
+    const own = skills.source === "agent-override" ? "override" : skills.source === "role-default"
+        ? kind === "role" ? "role default" : "inherited"
+        : undefined;
+    const base = skills.effective.source === "session" ? "session"
+        : skills.effective.source === "global" ? "global"
+        : skills.effective.source === "discovery" ? "discovery" : undefined;
+    const effective = base && skills.effective.mode === "error" ? `${base} (invalid)` : base;
+    if (own && effective) return `${own} → ${effective}`;
+    return own ?? effective ?? "discovery";
+}
+
+function skillsSettingLines(entry: OperationView, width: number, marker = "  ", theme?: Theme): string[] {
+    if (!entry.skills) return [];
+    return settingLines("Skills", skillsValueLabel(entry.skills), skillsOriginLabel(entry.skills, entry.identity.kind), width, marker, theme);
+}
+
+/** The picker starts on the definition's own choice, not the inherited effective value. */
+function skillChoiceIndex(entry: OperationView): 0 | 1 | 2 {
+    const skills = entry.skills;
+    if (!skills || skills.value === null) return 0;
+    const own = entry.identity.kind === "agent" ? skills.source === "agent-override" : true;
+    if (!own) return 0;
+    return skills.value.length === 0 ? 1 : 2;
 }
 
 function cell(value: string, width: number): string {
@@ -112,6 +158,7 @@ export function catalogDetailLines(entry: OperationView, editable = false, width
             }) : []),
             ...settingLines("Tier", entry.fields.tier.value ?? "(unset)", entry.fields.tier.source === "role-default" ? "inherited" : entry.fields.tier.source === "agent-override" ? "override" : "absent", contentWidth, "  ", theme),
         ] : []),
+        ...skillsSettingLines(entry, contentWidth, "  ", theme),
         `${label("Actual")}   ${entry.actualModel ?? "not resolved"}${entry.actualEffort ? `  ·  ${entry.actualEffort}` : ""}`,
         "",
         heading("Effective prompt"),
@@ -151,9 +198,10 @@ export function createCatalogComponent(
     let revealSetting = false;
     let picker: SelectList | undefined;
     let filterPicker: ((filter: string) => void) | undefined;
-    let pickerKey: AgentSettingKey | undefined;
+    let pickerKey: AgentSettingKey | "skills" | undefined;
     let modelScopeNote: string | undefined;
     const search = new Input();
+    let skillPicker: ReturnType<typeof createSkillPicker> | undefined;
     let focused = false;
     let message = "";
     let error = false;
@@ -188,34 +236,112 @@ export function createCatalogComponent(
             report(result.message, !result.ok);
         } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
     }
+    /** Selectable setting rows in display order; Reset is a row, not a save action. */
+    function settingKeys(entry: OperationView | undefined): ("model" | "effort" | "skills" | "reset")[] {
+        return [
+            "model",
+            "effort",
+            ...(editor?.changeSkills && entry?.skills ? ["skills" as const] : []),
+            ...(canReset(entry) ? ["reset" as const] : []),
+        ];
+    }
+    const pickerTheme: ConstructorParameters<typeof SelectList>[2] = {
+        selectedPrefix: (text) => theme.fg("accent", text),
+        selectedText: (text) => theme.inverse?.(text) ?? theme.fg("accent", text),
+        description: (text) => theme.fg("dim", text),
+        scrollInfo: (text) => theme.fg("dim", text),
+        noMatch: (text) => theme.fg("warning", text),
+    };
+    function openSkillPaths(current: OperationView) {
+        picker = undefined;
+        search.focused = false;
+        message = "";
+        // Only the definition's own list is prefilled. An inherited list is shown
+        // in the picker; ticking creates an override instead of silently copying
+        // the role's value into this definition.
+        const own = current.identity.kind === "agent"
+            ? current.skills?.source === "agent-override" ? current.skills.value ?? [] : []
+            : current.skills?.value ?? [];
+        skillPicker = createSkillPicker({
+            theme, skills: editor?.discoverSkills?.() ?? [], selected: own,
+            requestRender, getHeight, title: "Selected skills",
+            apply(paths) {
+                if (!editor?.changeSkills) return { ok: false, message: "Skill editing is unavailable." };
+                try {
+                    const result = editor.changeSkills(current, paths.length === 0
+                        ? { mode: "none" }
+                        : { mode: "explicit", paths: [...paths] });
+                    if (result.ok) {
+                        refresh();
+                        report(paths.length === 0
+                            ? "No skills checked. Skill exposure set to No skill catalog."
+                            : result.message, false);
+                    }
+                    return { ok: result.ok, message: result.message };
+                } catch (cause) {
+                    return { ok: false, message: cause instanceof Error ? cause.message : String(cause) };
+                }
+            },
+            finish() { skillPicker = undefined; requestRender(); },
+            cancel() {
+                skillPicker = undefined;
+                report("Skill selection unchanged.");
+                requestRender();
+            },
+        });
+        skillPicker.focused = focused;
+        requestRender();
+    }
+    function editSkills(current: OperationView) {
+        if (!editor?.changeSkills) return;
+        if (!current.definitionValid) { report("Repair the catalog definition before editing.", true); return; }
+        const items = [
+            { value: "inherit", label: "Inherit", description: current.identity.kind === "agent" ? "Remove this override; use the base role's list." : "Remove this default; use the global default or discovery." },
+            { value: "none", label: "No skill catalog", description: "Load no skills (--no-skills)." },
+            { value: "select", label: "Selected skills…", description: "One or more absolute SKILL.md or skill-directory paths." },
+        ];
+        pickerKey = "skills";
+        modelScopeNote = undefined;
+        search.focused = false;
+        picker = new SelectList(items, 8, pickerTheme);
+        picker.onCancel = () => { picker = undefined; };
+        picker.onSelect = (item) => {
+            if (item.value === "select") { openSkillPaths(current); return; }
+            try {
+                const result = editor!.changeSkills!(current, item.value === "none" ? { mode: "none" } : { mode: "inherit" });
+                refresh();
+                picker = undefined;
+                report(result.message, !result.ok);
+            } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
+        };
+        const selectedIndex = skillChoiceIndex(current);
+        picker.setSelectedIndex(selectedIndex);
+    }
     function edit() {
         const current = selected();
         if (!current || !editor) return;
-        if (settingRow === 2) { reset(current); return; }
+        const keys = settingKeys(current);
+        const key = keys[settingRow];
+        if (!key) { settingRow = 0; return; }
+        if (key === "reset") { reset(current); return; }
+        if (key === "skills") { editSkills(current); return; }
         if (!current.definitionValid) { report("Repair the catalog definition before editing.", true); return; }
-        const key: AgentSettingKey = settingRow === 0 ? "model" : "effort";
+        const setting: AgentSettingKey = key === "model" ? "model" : "effort";
         // Pi treats an empty scope as unrestricted. Scoped choices never include
         // an out-of-scope saved value; the detail view still displays it.
-        const choices = key === "model"
+        const choices = setting === "model"
             ? catalogModelChoices({ scoped: editor.scopedModels?.(), available: editor.models(), current: current.fields?.model.value })
             : undefined;
         modelScopeNote = choices ? catalogModelScopeLabel(choices) : undefined;
         const items = [{ value: "", label: "Inherit" }, ...(choices
             ? choices.values.map((value) => ({ value, label: catalogModelOptionLabel(choices, value) }))
             : EFFORT_LEVELS.map((value) => ({ value, label: value })))];
-        pickerKey = key;
+        pickerKey = setting;
         search.setValue("");
-        search.focused = focused && key === "model";
-        const pickerTheme: ConstructorParameters<typeof SelectList>[2] = {
-            selectedPrefix: (text) => theme.fg("accent", text),
-            selectedText: (text) => theme.inverse?.(text) ?? theme.fg("accent", text),
-            description: (text) => theme.fg("dim", text),
-            scrollInfo: (text) => theme.fg("dim", text),
-            noMatch: (text) => theme.fg("warning", text),
-        };
+        search.focused = focused && setting === "model";
         const onSelect = (item: { value: string }) => {
             try {
-                editor.change(current.id, key, item.value || null);
+                editor.change(current.id, setting, item.value || null);
                 refresh();
                 picker = undefined;
                 search.focused = false;
@@ -231,7 +357,7 @@ export function createCatalogComponent(
         // A saved value the scope does not offer is not in the list. Highlight
         // the first offered model instead of "Inherit" so Enter does not clear
         // the saved preference by accident.
-        const currentIndex = items.findIndex((item) => item.value === current.fields?.[key].value);
+        const currentIndex = items.findIndex((item) => item.value === current.fields?.[setting].value);
         picker!.setSelectedIndex(Math.max(0, currentIndex >= 0 ? currentIndex : choices && choices.scope === "scoped" ? 1 : 0));
     }
     const filtered = () => catalog.entries.filter((entry) =>
@@ -253,8 +379,11 @@ export function createCatalogComponent(
             ...(entry.shadowed.length ? ["", theme.fg("muted", "Shadowed definitions"), ...entry.shadowed.map(source => `${source.scope}: ${source.path}`)] : []),
         ];
         else lines = [
-            ...(editor ? controls : (["model", "effort"] as const).flatMap(key => settingLines(key === "model" ? "Model" : "Effort", entry.fields?.[key].value ?? "(unset)", entry.fields?.[key].inherited || entry.fields?.[key].source === "role-default" ? "inherited" : "catalog", Math.max(1, width - 4), "  ", theme))),
-            "", theme.fg("dim", "Model and effort save separately from instructions."), "",
+            ...(editor ? controls : [
+                ...(["model", "effort"] as const).flatMap(key => settingLines(key === "model" ? "Model" : "Effort", entry.fields?.[key].value ?? "(unset)", entry.fields?.[key].inherited || entry.fields?.[key].source === "role-default" ? "inherited" : "catalog", Math.max(1, width - 4), "  ", theme)),
+                ...skillsSettingLines(entry, Math.max(1, width - 4), "  ", theme),
+            ]),
+            "", theme.fg("dim", "Model and effort are session edits. Skills save to the definition."), "",
             `ID       ${entry.id}`, `Scope    ${entry.identity.scope ?? "unknown"}`,
             ...(entry.role?.id && entry.identity.kind === "agent" ? [`Role     ${entry.role.id}`] : []),
             `Tier     ${entry.fields?.tier.value ?? "(unset)"}`,
@@ -269,13 +398,18 @@ export function createCatalogComponent(
 
     return {
         get focused() { return focused; },
-        set focused(value: boolean) { focused = value; search.focused = value && !!picker && pickerKey === "model"; },
+        set focused(value: boolean) {
+            focused = value;
+            search.focused = value && !!picker && pickerKey === "model";
+            if (skillPicker) skillPicker.focused = value;
+        },
         render(width: number): string[] {
             resetPointerRows = [];
             resetPointerEntry = undefined;
             const safeWidth = Math.max(1, width);
             const height = Math.max(1, Math.floor(getHeight()));
-            const footerRows = (editor ? 2 : 0) + (message ? 2 : 0);
+            const messageLines = message ? wrapLine(theme.fg(error ? "error" : "muted", message), safeWidth) : [];
+            const footerRows = (editor ? 2 : 0) + (messageLines.length > 0 ? messageLines.length + 1 : 0);
             const diagnosticRows = Math.min(catalog.diagnostics.length, 3);
             const listSize = Math.max(1, height - 5 - footerRows - diagnosticRows - 1);
             const detailSize = Math.max(1, height - 6 - footerRows);
@@ -292,12 +426,16 @@ export function createCatalogComponent(
             const selectedIndex = rows.findIndex((entry) => entry.id === selectedId);
             const start = Math.max(0, Math.min(selectedIndex - Math.floor(listSize / 2), rows.length - listSize));
 
+            if (skillPicker) return fit(skillPicker.render(safeWidth));
             if (picker) return fit([
                 theme.fg("accent", `Agents / ${pickerKey}`), "",
+                ...(pickerKey === "skills" && current
+                    ? [theme.fg("dim", `${skillsValueLabel(current.skills)} · ${skillsOriginLabel(current.skills, current.identity.kind)}`), ""]
+                    : []),
                 ...(pickerKey === "model" && modelScopeNote ? [theme.fg("dim", modelScopeNote), ""] : []),
                 ...(pickerKey === "model" ? search.render(safeWidth) : []),
                 ...picker.render(safeWidth),
-                ...(message ? [theme.fg(error ? "error" : "muted", message)] : []),
+                ...(messageLines.length ? ["", ...messageLines] : []),
             ]);
             const controls = editor && mode === "detail" && current ? [
                 ...["Model", "Effort"].flatMap((label, index) => {
@@ -313,11 +451,13 @@ export function createCatalogComponent(
                             : current.identity.scope === "bundled" && !inherited ? "bundled" : field?.inherited ? "inherited" : "catalog";
                     return settingLines(label, field?.value ?? "(unset)", origin, Math.max(1, safeWidth - 4), settingRow === index ? "> " : "  ", theme);
                 }),
-                ...(canReset(current) ? [theme.fg(settingRow === 2 ? "accent" : "muted", `${settingRow === 2 ? "> " : "  "}Reset to bundled`), theme.fg("dim", "  Restores model/effort; keeps the role prompt.")] : []),
+                ...(editor.changeSkills && current.skills ? skillsSettingLines(current, Math.max(1, safeWidth - 4), settingRow === settingKeys(current).indexOf("skills") ? "> " : "  ", theme) : []),
+                ...(canReset(current) ? [theme.fg(settingRow === settingKeys(current).indexOf("reset") ? "accent" : "muted", `${settingRow === settingKeys(current).indexOf("reset") ? "> " : "  "}Reset to bundled`), theme.fg("dim", "  Restores model/effort; keeps the role prompt.")] : []),
             ] : [];
             const detailLines = current ? detailRows(current, safeWidth, controls) : [];
+            const keys = current ? settingKeys(current) : [];
             if (editor && mode === "detail") {
-                settingPositions = ["Model", "Effort", ...(canReset(current) ? ["Reset to bundled"] : [])].map((label) => detailLines.findIndex((text) =>
+                settingPositions = ["Model", "Effort", ...(editor.changeSkills && current?.skills ? ["Skills"] : []), ...(canReset(current) ? ["Reset to bundled"] : [])].map((label) => detailLines.findIndex((text) =>
                     new RegExp(`^  [> ] ${label}(?:\\s|$)`).test(text.replace(/\x1b\[[0-9;]*m/g, ""))));
                 if (revealSetting && settingPositions[settingRow] >= 0) {
                     const position = settingPositions[settingRow];
@@ -328,7 +468,7 @@ export function createCatalogComponent(
             }
             scroll = Math.max(0, Math.min(scroll, detailLines.length - detailSize));
             if (mode === "detail" && current && canReset(current)) {
-                const position = settingPositions[2];
+                const position = settingPositions[keys.indexOf("reset")];
                 if (position >= scroll && position < scroll + detailSize) {
                     resetPointerRows = [4 + position - scroll];
                     resetPointerEntry = current;
@@ -367,11 +507,16 @@ export function createCatalogComponent(
                 ...(catalog.diagnostics.length > 2 ? [theme.fg("warning", `! ${catalog.diagnostics.length - 2} more catalog diagnostics`)] : []),
             ];
             if (editor) lines.push("", theme.fg("dim", "Ctrl+S Save defaults"));
-            if (message) lines.push("", theme.fg(error ? "error" : "muted", message));
+            if (messageLines.length) lines.push("", ...messageLines);
             return fit(lines);
         },
         handleInput(data: string): void {
             const rows = filtered();
+            if (skillPicker) {
+                skillPicker.handleInput(data);
+                requestRender();
+                return;
+            }
             if (picker) {
                 if (pickerKey === "model" && !(["up", "down", "enter", "escape"] as const).some((key) => matchesKey(data, key))) {
                     search.handleInput(data);
@@ -431,7 +576,7 @@ export function createCatalogComponent(
         },
         handleMouse(event: { type: string; button: string; x: number; y: number; width: number; shift?: boolean; alt?: boolean; ctrl?: boolean }) {
             const entry = resetPointerEntry;
-            const hit = !picker && (mode === "detail" || mode === "prompt") && entry && event.button === "left" && !event.shift && !event.alt && !event.ctrl
+            const hit = !picker && !skillPicker && (mode === "detail" || mode === "prompt") && entry && event.button === "left" && !event.shift && !event.alt && !event.ctrl
                 && event.x >= 0 && event.x < event.width && resetPointerRows.includes(event.y);
             if (event.type === "press") {
                 pressedReset = hit ? entry : undefined;
@@ -445,6 +590,6 @@ export function createCatalogComponent(
             reset(pressed, mode === "prompt");
             return { handled: true as const, render: true };
         },
-        invalidate() { picker?.invalidate(); search.invalidate(); },
+        invalidate() { picker?.invalidate(); search.invalidate(); skillPicker?.invalidate(); },
     };
 }

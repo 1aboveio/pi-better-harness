@@ -252,6 +252,7 @@ Use the installer when you want every core extension with standalone package ide
 | Recommended install | `npx pi-better-harness install` |
 | Write sandbox on macOS | Seatbelt (`sandbox-exec`), ships with the OS |
 | Write sandbox on Linux | Bubblewrap — install `bubblewrap` |
+| Linked-worktree project context | A Pi host that applies `systemPromptOptions` after `before_agent_start` (Pi 1.x); older hosts keep the loaded prompt |
 | Development runtime | Node.js 22+ |
 
 ## Update Or Remove

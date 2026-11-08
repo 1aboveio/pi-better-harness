@@ -17,6 +17,10 @@ const executionPolicyTargets = [
   "packages/pi-better-subagents/shared-execution-policy.ts",
   "packages/pi-better-background-tasks/src/shared-execution-policy.ts",
 ];
+const worktreeContextSource = resolve(root, "packages/pi-better-harness/extensions/worktree-context.ts");
+const worktreeContextTargets = [
+  "packages/pi-better-subagents/shared-worktree-context.ts",
+];
 const sandboxDiagnosticsSource = resolve(root, "packages/sandbox-diagnostics/index.ts");
 const sandboxDiagnosticsTargets = [
   "packages/pi-better-sandbox/shared-sandbox-diagnostics.ts",
@@ -81,6 +85,10 @@ const callbackBatcherContent = `// Generated from packages/callback-batcher/inde
 
 for (const target of executionPolicyTargets) {
   writeFileAtomically(resolve(root, target), `// Generated from packages/pi-better-harness/extensions/execution-policy.ts. Do not edit directly.\n${readFileSync(executionPolicySource, "utf8")}`);
+}
+
+for (const target of worktreeContextTargets) {
+  writeFileAtomically(resolve(root, target), `// Generated from packages/pi-better-harness/extensions/worktree-context.ts. Do not edit directly.\n${readFileSync(worktreeContextSource, "utf8")}`);
 }
 
 for (const target of harnessSettingsTargets) {

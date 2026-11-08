@@ -67,7 +67,7 @@ import {
     announceExecutionAdapter, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions,
 } from "./permission-policy.ts";
 import { resolveSubagentWorkspace } from "./git-workspace.ts";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import {
     baseDir,
     taskWorkspaceDir,
@@ -164,6 +164,16 @@ import {
 } from "./continuation.ts";
 import { createHash } from "node:crypto";
 import { assertThinkingLevel, parseModelThinking, type ThinkingLevel } from "./thinking.ts";
+import {
+    absolutizeSkillPaths,
+    configuredSkillExposure,
+    describeSkillExposure,
+    normalizeSkillExposure,
+    resolveSkillExposure,
+    skillLaunchArgs,
+    type SkillExposureMode,
+} from "./skills.ts";
+import type { DiscoveredSkill } from "./skill-picker.ts";
 import { createAgentOperations } from "./agent-operations.ts";
 import { createAgentSessionSettings } from "./agent-session-settings.ts";
 import {
@@ -209,6 +219,7 @@ import {
     type WorkerOperationsHost,
 } from "./worker-waits.ts";
 import { defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
+import { restrictContextFilesToWorktree } from "./shared-worktree-context.ts";
 
 const SUBAGENT_MODE_ACTIONS: readonly AutocompleteItem[] = [
     { value: "settings", label: "settings", description: "Open delegation mode and concurrency settings" },
@@ -1827,6 +1838,31 @@ function sameLaunchTools(left: unknown, right: string): boolean {
     return typeof left === "string" && normalizeTools(left) === normalizeTools(right);
 }
 
+/**
+ * A continuation may repeat its launch's skill exposure, and only that. The
+ * saved paths are absolute (frozen at launch), so a caller repeating relative
+ * paths is compared against the recipe's own workspace.
+ *
+ * Discovery and `[]` are different choices and must never compare equal: a
+ * recipe with no `skills` key means "the child discovers the user catalog", and
+ * an explicit `[]` means "load no skills at all". Treating an absent key as an
+ * empty list would accept a continuation that silently disables discovery for a
+ * conversation that was launched with it.
+ */
+function sameLaunchSkills(value: unknown, recipe: ContinuationPlan["recipe"]): boolean {
+    let requested: string[] | undefined;
+    try {
+        requested = normalizeSkillExposure(value, "skills");
+    } catch {
+        return false;
+    }
+    if (requested === undefined) return false;
+    const saved = recipe.skills;
+    if (saved === undefined) return false;
+    const resolved = requested.length === 0 ? [] : absolutizeSkillPaths(requested, recipe.cwd);
+    return resolved.length === saved.length && resolved.every((path, index) => path === saved[index]);
+}
+
 function sameLaunchRoles(left: unknown, right: string | readonly string[] | undefined): boolean {
     if (typeof left === "string") return left === right;
     if (Array.isArray(left) && Array.isArray(right)) {
@@ -1851,6 +1887,7 @@ function continuationLaunchConflicts(
     check("alias", (value) => value === recipe.alias);
     check("tools", (value) => sameLaunchTools(value, recipe.tools));
     check("exclude_tools", (value) => typeof value === "string" && normalizeTools(value) === normalizeTools(recipe.excludeTools ?? ""));
+    check("skills", (value) => sameLaunchSkills(value, recipe));
     check("clean", (value) => value === recipe.clean);
     check("sandbox", (value) => value === recipe.sandbox);
     check("sandbox_dir", (value) => sameLaunchPath(value, recipe.sandboxDir));
@@ -1942,12 +1979,86 @@ function catalogRoleSchema(purpose: string) {
     ], { description: `${one} ${many}` }));
 }
 
+/** Loaded Pi skill metadata from the current prompt resources. No model call, no directory scan. */
+function discoveredSkillsFromContext(ctx: { getSystemPromptOptions?: () => { skills?: readonly unknown[] } }): DiscoveredSkill[] {
+    try {
+        const loaded = ctx.getSystemPromptOptions?.().skills ?? [];
+        const skills: DiscoveredSkill[] = [];
+        for (const raw of loaded) {
+            if (!raw || typeof raw !== "object") continue;
+            const skill = raw as {
+                name?: unknown; description?: unknown; filePath?: unknown; baseDir?: unknown;
+                sourceInfo?: { source?: unknown };
+            };
+            if (typeof skill.name !== "string" || !skill.name || typeof skill.filePath !== "string" || !skill.filePath) continue;
+            skills.push({
+                name: skill.name,
+                description: typeof skill.description === "string" ? skill.description : "",
+                path: skill.filePath,
+                ...(typeof skill.baseDir === "string" ? { baseDir: skill.baseDir } : {}),
+                ...(typeof skill.sourceInfo?.source === "string" ? { source: skill.sourceInfo.source } : {}),
+            });
+        }
+        return skills;
+    } catch {
+        return [];
+    }
+}
+
 export default function (pi: ExtensionAPI) {
+    // A standalone Subagents install has no Harness extension, so the parent
+    // session applies the same linked-worktree project boundary as its children.
+    pi.on("before_agent_start", (event) => {
+        restrictContextFilesToWorktree(event.systemPromptOptions, PiCodingAgent.getAgentDir());
+    });
     initializeNavigatorPanels(pi);
     const agentSessionSettings = createAgentSessionSettings(pi);
     let catalogModelRegistry: ExtensionContext["modelRegistry"] | undefined;
     let delegationOverride: DelegationMode | undefined;
     let capOverride: number | undefined;
+    interface SkillSelection { mode: SkillExposureMode; paths: string[] }
+    let skillsOverride: SkillSelection | undefined;
+    const savedSkills = (): SkillSelection & { source: "config" | "default"; error?: string } => {
+        try {
+            return configuredSkillExposure(loadConfig().defaultSkills);
+        } catch (error) {
+            return {
+                mode: "inherit", paths: [], source: "config",
+                error: error instanceof Error ? error.message : String(error),
+            };
+        }
+    };
+    const activeSkills = (): SkillSelection & { source: "session" | "config" | "default"; error?: string } => {
+        if (skillsOverride) return { ...skillsOverride, source: "session" };
+        return savedSkills();
+    };
+    /** The same active default a launch sees, shaped for catalog inspection. */
+    const readSkillDefaults = () => {
+        const skills = activeSkills();
+        const value = skills.mode === "inherit" ? undefined : [...skills.paths];
+        const error = skills.error ?? (skills.mode === "explicit" && skills.paths.length === 0
+            ? "Selected skills has no paths. Add at least one skill path or choose No skill catalog."
+            : undefined);
+        return { value, source: skills.source, ...(error ? { error } : {}) };
+    };
+    const changeSkills = (mode: SkillExposureMode, paths: readonly string[]): void => {
+        if (mode !== "explicit" && paths.length > 0) throw new Error("Only Selected skills carries a path list.");
+        if (mode === "explicit" && paths.some((path) => !isAbsolute(path))) {
+            throw new Error("Enter absolute skill paths so every child resolves the same files.");
+        }
+        const next = { mode, paths: [...paths] };
+        skillsOverride = next;
+        pi.appendEntry("pi-better-subagents-skills", { version: 1, ...next });
+    };
+    /** The current-session choice, with `{}` preserving explicit discovery. */
+    const sessionSkillChoice = (): { value?: unknown } | undefined => {
+        if (!skillsOverride) return undefined;
+        if (skillsOverride.mode === "explicit" && skillsOverride.paths.length === 0) {
+            throw new Error("Selected skills has no paths. Add at least one skill path or choose No skill catalog before launching.");
+        }
+        if (skillsOverride.mode === "inherit") return {};
+        return { value: skillsOverride.mode === "none" ? [] : [...skillsOverride.paths] };
+    };
     const activeConcurrencyCap = (): number => capOverride ?? normalizeConcurrencyCap(loadConfig().maxConcurrent);
     const changeCap = (cap: number): void => {
         if (!isConcurrencyCap(cap)) throw new Error("Concurrent subagents must be a positive whole number.");
@@ -1961,8 +2072,10 @@ export default function (pi: ExtensionAPI) {
     const resetSettings = (): void => {
         capOverride = undefined;
         delegationOverride = undefined;
+        skillsOverride = undefined;
         pi.appendEntry("pi-better-subagents-cap", { version: 1, maxConcurrent: null });
         pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: null });
+        pi.appendEntry("pi-better-subagents-skills", { version: 1, mode: null });
     };
     const activeDelegationMode = (): DelegationMode => delegationOverride ?? normalizeDelegationMode(loadConfig().delegationMode);
     const countRunning = () =>
@@ -1996,7 +2109,30 @@ export default function (pi: ExtensionAPI) {
     }, countRunning(), getSharedCapacityGate(countRunning).pending);
     const saveSettings = (): { ok: boolean; message: string } => {
         try {
-            writeSubagentSettings({ delegationMode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap() });
+            const skills = activeSkills();
+            if (!skillsOverride && skills.error) {
+                return {
+                    ok: false,
+                    message: `Cannot save subagent defaults: the saved defaultSkills value is invalid (${skills.error}). ` +
+                        `Choose a skill mode in this session to replace it, or fix the saved config first.`,
+                };
+            }
+            if (skills.mode === "explicit" && skills.paths.length === 0) {
+                return { ok: false, message: "Add at least one skill path, or choose No skill catalog to load none." };
+            }
+            // Saving mode and cap must not write a skill key into a config that
+            // never had one. Discovery only replaces a saved choice when a saved
+            // skill value already exists.
+            const savedSkillValue = loadConfig().defaultSkills;
+            const hasSavedSkillChoice = savedSkillValue !== undefined && savedSkillValue !== null;
+            writeSubagentSettings({
+                delegationMode: activeDelegationMode(),
+                maxConcurrent: activeConcurrencyCap(),
+                ...(skills.mode === "inherit" && !hasSavedSkillChoice ? {} : {
+                    // null is an explicit discovery choice; it must override a saved path list.
+                    defaultSkills: skills.mode === "inherit" ? null : [...skills.paths],
+                }),
+            });
             resetSettings();
             return { ok: true, message: "Subagent defaults saved." };
         } catch (error) {
@@ -2025,6 +2161,7 @@ export default function (pi: ExtensionAPI) {
     const restoreDelegationMode = (ctx: ExtensionContext): void => {
         delegationOverride = undefined;
         capOverride = undefined;
+        skillsOverride = undefined;
         const branch = ctx.sessionManager?.getBranch?.();
         if (!Array.isArray(branch)) return;
         for (const entry of branch) {
@@ -2034,6 +2171,19 @@ export default function (pi: ExtensionAPI) {
                     if (data.maxConcurrent === null) capOverride = undefined;
                     else if (isConcurrencyCap(data.maxConcurrent)) capOverride = data.maxConcurrent;
                 }
+            }
+            if (entry.type === "custom" && entry.customType === "pi-better-subagents-skills") {
+                const data = entry.data as { version?: unknown; mode?: unknown; paths?: unknown } | null;
+                if (data?.version !== 1) continue;
+                if (data.mode === null) {
+                    skillsOverride = undefined;
+                } else if ((data.mode === "inherit" || data.mode === "none") && Array.isArray(data.paths) && data.paths.length === 0) {
+                    skillsOverride = { mode: data.mode, paths: [] };
+                } else if (data.mode === "explicit" && Array.isArray(data.paths)
+                    && data.paths.every((path): path is string => typeof path === "string" && isAbsolute(path))) {
+                    skillsOverride = { mode: "explicit", paths: [...data.paths] };
+                }
+                continue;
             }
             if (entry.type !== "custom" || entry.customType !== "pi-better-subagents-delegation") continue;
             const data = entry.data as { version?: unknown; mode?: unknown } | null;
@@ -2141,6 +2291,8 @@ export default function (pi: ExtensionAPI) {
     type SpawnParams = {
         prompt: string; name?: string; model?: string; thinking?: ThinkingLevel; tools?: string;
         exclude_tools?: string; clean?: boolean; sandbox?: boolean;
+        /** Skill exposure for this launch; omit to inherit catalog/config/discovery. */
+        skills?: readonly string[];
         sandbox_dir?: string; callback?: boolean; cwd?: string;
         git_clone_workspace?: boolean; approve?: boolean; allow_nested?: boolean;
         agent?: string; role?: string | readonly string[]; alias?: string;
@@ -2207,6 +2359,11 @@ export default function (pi: ExtensionAPI) {
         modelNote?: string;
     }> {
         assertThinkingLevel(p.thinking);
+        // Skill exposure is a caller choice, not a launch: validate its shape
+        // before any attempt directory or capacity effect exists. A continuation
+        // validates too, so a malformed repeat is a shape error rather than being
+        // reported as a recipe conflict.
+        normalizeSkillExposure(p.skills, "skills");
         // A conversation parked on an observed wait resumes through the
         // coordinator's claim. An ordinary manual continuation would leave that
         // automatic resume armed for the same assignment, so it is refused until
@@ -2321,6 +2478,28 @@ export default function (pi: ExtensionAPI) {
                 });
             const cwd = workspace.cwd;
             const requestedSandboxDir = workspace.requestedSandboxDir;
+
+            // Skill exposure is decided once per attempt. A continuation replays the
+            // frozen recipe (including its absence, which keeps discovery); a fresh
+            // launch resolves launch option → catalog role/agent → this session's
+            // default → saved config default → discovery. Relative paths belong to
+            // the workspace the child runs in.
+            const sessionSkills = resume ? undefined : sessionSkillChoice();
+            if (!resume && !sessionSkills) {
+                const saved = savedSkills();
+                if (saved.error) {
+                    throw new Error(`Cannot read config defaultSkills: ${saved.error}`);
+                }
+            }
+            const skills = resolveSkillExposure(resume
+                ? { saved: { paths: resume.recipe.skills }, cwd }
+                : {
+                    requested: p.skills,
+                    catalog: p.catalog?.effective?.skills?.value,
+                    session: sessionSkills,
+                    configured: cfg.defaultSkills,
+                    cwd,
+                });
 
             if (requestedSandboxDir) mkdirSync(requestedSandboxDir, { recursive: true });
             writeFileSync(promptPathFor(id), p.prompt);
@@ -2485,6 +2664,7 @@ export default function (pi: ExtensionAPI) {
                 ...commandExtArgs,
                 ...(model ? ["--model", model] : []),
                 ...(thinking ? ["--thinking", thinking] : []),
+                ...skillLaunchArgs(skills),
                 ...(allow && !sandboxEnabled ? ["--tools", allow] : []),
                 ...(excludes.size ? ["--exclude-tools", [...excludes].join(",")] : []),
                 ...(sandboxEnabled ? ["--no-builtin-tools", "--no-approve"] : approve ? ["--approve"] : []),
@@ -2644,6 +2824,7 @@ export default function (pi: ExtensionAPI) {
                 effort: thinking,
                 tools: allow,
                 excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
+                skills: skills.mode === "inherit" ? undefined : [...skills.paths],
                 clean,
                 allowNested,
                 approve,
@@ -2665,6 +2846,8 @@ export default function (pi: ExtensionAPI) {
                 id, name: launchName, status: "running",
                 pid: spawned.pid, spawnPid: process.pid, spawnPidStartTime: parentStartToken(), model,
                 effort: thinking, cwd,
+                ...(skills.mode === "inherit" ? {} : { skills: [...skills.paths] }),
+                skillsSource: skills.source,
                 ...identity,
                 promptPreview: p.prompt.slice(0, 200),
                 startedAt, logPath: logPathFor(id), sessionId,
@@ -2769,7 +2952,9 @@ export default function (pi: ExtensionAPI) {
                   `Add a toolExtensions entry in config.json.\n`
                 : "");
             const modelNote = catalogDefaultNote(resume ? undefined : p.catalog, model, thinking);
-            return { id, meta, spawned, runtime: runtime + (meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""), warn, sandboxDir, modelNote };
+            // The resolved skill exposure rides with the runtime summary, which every
+            // launch and continuation message already prints.
+            return { id, meta, spawned, runtime: `${runtime}${describeSkillExposure(skills)}\n${meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""}`, warn, sandboxDir, modelNote };
         } catch (error) {
             // A launch that never committed metadata is not a run: drop
             // everything the attempt created so the registry keeps no
@@ -3040,13 +3225,13 @@ export default function (pi: ExtensionAPI) {
             "After subagent_spawn, do NOT call subagent_output or subagent_result in a loop to wait for the result, and do NOT sleep. The run completes on its own and reports back on the next turn.",
             "Call subagent_result after a completion or attention callback, or when the user explicitly asks for the result. Use subagent_output only when the user explicitly asks how a run is progressing; never use either tool to poll.",
             ...SUBAGENT_ORCHESTRATION_GUIDELINES,
-            "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Without an agent or role, pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
+            "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. When the task already names its SKILL.md by path, pass skills with those absolute paths (or [] for none) so the child does not advertise the whole skills catalog. Without an agent or role, pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
             ...CATALOG_GUIDELINES,
             "Subagent sandboxing defaults to off. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Set sandbox:true to request kernel confinement, including without published settings. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
             "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. No progress for stuck_minutes (default 10) wakes you once without stopping the run. Elapsed-time limits are opt-in: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace. Do not set elapsed-time limits merely because a task may take a while; use them only when the work needs a real wall-clock bound.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
             "Saved conversations persist automatically. To continue a completed or stopped worker in its own history, call subagent_spawn with session_id (the native session id reported for the saved conversation) and the new feedback as prompt. Omit session_id for a brand-new conversation.",
-            "On a continuation, pass prompt, session_id, and only optional model, thinking, callback, or timing overrides. Launch-only options (name, agent, role, alias, tools, exclude_tools, clean, sandbox, sandbox_dir, cwd, git_clone_workspace, approve, allow_nested) keep the saved recipe; repeat them only with the same value, otherwise the launch is refused.",
+            "On a continuation, pass prompt, session_id, and only optional model, thinking, callback, or timing overrides. Launch-only options (name, agent, role, alias, tools, exclude_tools, skills, clean, sandbox, sandbox_dir, cwd, git_clone_workspace, approve, allow_nested) keep the saved recipe; repeat them only with the same value, otherwise the launch is refused.",
             "Do not restate the original task or role when continuing: they already live in the saved conversation. A running or orphaned latest attempt blocks continuation until it stops, and missing saved history is refused rather than recreated.",
         ],
         parameters: Type.Object({
@@ -3061,6 +3246,7 @@ export default function (pi: ExtensionAPI) {
             thinking: Type.Optional(Type.String({ description: "Reasoning effort for the child: off, minimal, low, medium, high, xhigh, or max. Omit to use the agent or role default; without one, the Pi/model default." })),
             tools: Type.Optional(Type.String({ description: "Tool allowlist: comma-separated names the child may use (e.g. 'read,bash,web_fetch'). This ALSO selects which extensions load — only packages backing a requested tool are loaded. Defaults to the configured safe set." })),
             exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist, applied on top of the allowlist." })),
+            skills: Type.Optional(Type.Array(Type.String(), { description: "Skill exposure for the child. Omit to inherit the catalog role/agent choice, then config defaultSkills, then user-catalog discovery. [] loads no skills (--no-skills). Absolute paths load exactly those skills (--no-skills --skill <path>), which is how a task that names one SKILL.md by path avoids advertising the whole catalog. Relative paths resolve against the child workspace." })),
             clean: Type.Optional(Type.Boolean({ description: "Run a hermetic child with NO extensions at all (only built-ins: read, bash, edit, write). Default false — the extensions backing the requested tools load, so web_fetch and model auth (e.g. xai) work." })),
             sandbox: Type.Optional(Type.Boolean({ description: "Use the human Subagents profile from /sandbox. Defaults to off without published settings. True requests kernel confinement; false cannot bypass an enabled human profile." })),
             sandbox_dir: Type.Optional(Type.String({ description: "Confine writes to (and run the child in) this directory instead of the working dir. Created if missing." })),
@@ -3229,6 +3415,7 @@ export default function (pi: ExtensionAPI) {
                 thinking: Type.Optional(Type.String({ description: "Reasoning effort applied to every job: off, minimal, low, medium, high, xhigh, or max." })),
                 tools: Type.Optional(Type.String({ description: "Tool allowlist applied to every job." })),
                 exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist applied to every job." })),
+                skills: Type.Optional(Type.Array(Type.String(), { description: "Skill exposure applied to every job. Per-job skills override this. [] loads no skills; absolute paths load exactly those skills; omit to inherit discovery." })),
                 sandbox: Type.Optional(Type.Boolean({ description: "Use the human Subagents profile; false cannot override an enabled profile. Defaults to off without published settings; true requests kernel confinement." })),
                 sandbox_dir: Type.Optional(Type.String({ description: "Writable root for every job." })),
                 callback: Type.Optional(Type.Boolean({ description: "Default TRUE: post result back on completion." })),
@@ -3251,6 +3438,7 @@ export default function (pi: ExtensionAPI) {
                 thinking: Type.Optional(Type.String()),
                 tools: Type.Optional(Type.String()),
                 exclude_tools: Type.Optional(Type.String()),
+                skills: Type.Optional(Type.Array(Type.String())),
                 sandbox: Type.Optional(Type.Boolean()),
                 sandbox_dir: Type.Optional(Type.String()),
                 callback: Type.Optional(Type.Boolean()),
@@ -3502,6 +3690,8 @@ export default function (pi: ExtensionAPI) {
     const agentOperations = createAgentOperations({
         projectConfigDirName,
         sessionSettings: agentSessionSettings,
+        readSkillDefaults,
+        discoverSkills: (commandCtx) => discoveredSkillsFromContext(commandCtx),
         editableModels: () => catalogModelRegistry?.getAvailable().map((model) => `${model.provider}/${model.id}`) ?? [],
         propagateCommandContext(commandCtx) {
             noteCatalogHost(catalogHostFrom(commandCtx));
@@ -3532,21 +3722,28 @@ export default function (pi: ExtensionAPI) {
             const next = await ctx.ui.custom<"agents" | undefined>((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
                 get: () => {
                     const settings = effectiveSettings();
+                    const skills = activeSkills();
                     return {
                         mode: settings.delegationMode, maxConcurrent: settings.maxConcurrent,
                         modeSource: settings.sources.delegationMode,
                         capSource: settings.sources.maxConcurrent,
                         defaultMode: normalizeDelegationMode(loadConfig().delegationMode),
                         defaultCap: normalizeConcurrencyCap(loadConfig().maxConcurrent),
+                        skillsMode: skills.mode, skillsPaths: skills.paths, skillsSource: skills.source,
+                        skillsError: skills.error,
                     };
                 },
-                changeMode, changeCap, save: saveSettings, reset: resetSettings,
+                changeMode, changeCap, changeSkills, save: saveSettings, reset: resetSettings,
+                discoverSkills: () => discoveredSkillsFromContext(ctx),
                 // Close this page first; the catalog opens after ui.custom resolves.
                 openAgents: () => done("agents"),
             }, () => { refreshBackgroundWorkNavigator(ctx); tui.requestRender(); }, () => done(undefined)));
             if (next === "agents") await agentOperations.openCatalog(ctx);
         } else {
-            ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. Use /subagents mode <mode> or /subagents cap <number>; /subagents save persists both.`, "info");
+            const skills = activeSkills();
+            const skillChoice = skills.mode === "inherit" ? "discovery"
+                : skills.mode === "none" ? "no skills" : `${skills.paths.length} selected skills`;
+            ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. Skills: ${skillChoice}. Use /subagents mode <mode>, cap <number>, or settings; /subagents save persists them.`, "info");
         }
     };
     const contribution = { id: "subagents", label: "Subagents", command: "/subagents settings", open: openSettings };
@@ -3571,7 +3768,14 @@ export default function (pi: ExtensionAPI) {
                 }
                 const requested = tokens[1];
                 if (tokens.length === 1 && tokens[0] === "save") {
-                    if (ctx.hasUI && !(await ctx.ui.confirm("Save subagent defaults?", `Future sessions will start in ${activeDelegationMode()} with a cap of ${activeConcurrencyCap()}.`))) {
+                    const skills = activeSkills();
+                    if (skills.mode === "explicit" && skills.paths.length === 0) {
+                        ctx.ui.notify("Add at least one skill path, or choose No skill catalog to load none.", "warning");
+                        return;
+                    }
+                    const skillChoice = skills.mode === "inherit" ? "skill discovery"
+                        : skills.mode === "none" ? "no skills" : `${skills.paths.length} selected skills`;
+                    if (ctx.hasUI && !(await ctx.ui.confirm("Save subagent defaults?", `Future sessions will start in ${activeDelegationMode()} with a cap of ${activeConcurrencyCap()} and ${skillChoice}.`))) {
                         ctx.ui.notify("Subagent defaults unchanged.", "info");
                         return;
                     }

@@ -195,6 +195,7 @@ jobs:
             node_modules/pi-better-subagents/shared-failure-observations.ts \
             node_modules/pi-better-subagents/shared-callback-batcher.ts \
             node_modules/pi-better-subagents/shared-execution-policy.ts \
+            node_modules/pi-better-subagents/shared-worktree-context.ts \
             node_modules/pi-better-subagents/shared-operation-coordinator/index.ts \
             node_modules/pi-better-subagents/child-operations.ts \
             node_modules/pi-better-subagents/worker-waits.ts \
@@ -214,7 +215,9 @@ jobs:
             node_modules/pi-better-model-router/src/index.ts \
             node_modules/pi-better-model-router/node_modules/pi-ollama-cloud/index.ts \
             node_modules/pi-better-goal/src/index.ts \
-            extensions/task-context/index.ts
+            extensions/task-context/index.ts \
+            extensions/project-context/index.ts \
+            extensions/worktree-context.ts
           do
             node -e 'const d = require(process.argv[1]); const pack = Array.isArray(d) ? d[0] : Object.values(d)[0]; if (!pack.files.some((file) => file.path === process.argv[2])) throw new Error(`missing bundled extension: ${process.argv[2]}`);' /tmp/pi-harness-pack.json "$path"
           done
