@@ -1212,6 +1212,69 @@ describe("completed-subagent continuation", () => {
         }
     });
 
+    it("refuses an explicit skill list for a discovery recipe, fresh or older", async () => {
+        const h = makeHarness();
+        const skillPath = join(WORKSPACE, "skills", "review", "SKILL.md");
+        let discoveryId;
+        let noneId;
+        let noneReplayId;
+        let legacyId;
+        try {
+            // A fresh launch that never chose an exposure records no skills key.
+            discoveryId = await spawnRun(h, { tools: "read,bash" });
+            await waitTerminal(discoveryId);
+            assert.equal(readMeta(discoveryId).recipe.skills, undefined);
+
+            // Discovery is not "no skills": an explicit list of either shape would
+            // change this conversation's prompt, so both are refused. Treating the
+            // absent key as [] would let the empty list through.
+            const before = listMetas().length;
+            for (const conflicting of [[], [skillPath]]) {
+                await assert.rejects(
+                    resumeRun(h, { id: discoveryId, prompt: "NARROW", skills: conflicting }),
+                    /`skills` conflicts with the saved launch recipe/,
+                    `skills ${JSON.stringify(conflicting)} must not be accepted for a discovery recipe`,
+                );
+            }
+            assert.equal(listMetas().length, before, "each refused continuation launched nothing");
+
+            // A recipe saved before the option existed has no key at all. Strip it
+            // from a real record and prove the older shape behaves like a fresh
+            // discovery launch rather than like a frozen empty list.
+            legacyId = await spawnRun(h, { tools: "read,bash", skills: [] });
+            await waitTerminal(legacyId);
+            assert.deepEqual(readMeta(legacyId).recipe.skills, []);
+            const legacy = readMeta(legacyId);
+            assert.ok(legacy.recipe);
+            delete legacy.recipe.skills;
+            writeMeta(legacy);
+            assert.equal(readMeta(legacyId).recipe.skills, undefined);
+            await assert.rejects(
+                resumeRun(h, { id: legacyId, prompt: "LEGACY NARROW", skills: [] }),
+                /`skills` conflicts with the saved launch recipe/,
+                "a pre-#664 recipe keeps discovery and cannot be narrowed by an empty list",
+            );
+
+            // The empty list is a real choice, so a recipe that froze it accepts an
+            // identical repeat and still refuses paths.
+            noneId = await spawnRun(h, { tools: "read,bash", skills: [] });
+            await waitTerminal(noneId);
+            await assert.rejects(
+                resumeRun(h, { id: noneId, prompt: "WIDEN", skills: [skillPath] }),
+                /`skills` conflicts with the saved launch recipe/,
+            );
+            noneReplayId = idOf(await resumeRun(h, { id: noneId, prompt: "SAME", skills: [] }));
+            const replayed = await waitTerminal(noneReplayId);
+            assert.deepEqual(replayed.recipe.skills, []);
+            assert.equal(replayed.skillsSource, "recipe");
+            assert.equal(childRecord(replayed.pid).argv.includes("--no-skills"), true,
+                "a frozen empty list still reaches the child as --no-skills");
+        } finally {
+            await reap([discoveryId, noneId, noneReplayId, legacyId].filter(Boolean));
+            h.shutdown();
+        }
+    });
+
     it("continues per-job session ids in a batch alongside fresh jobs without sharing one writer", async () => {
         const h = makeHarness();
         let rootId;
@@ -1266,12 +1329,19 @@ describe("completed-subagent continuation", () => {
                 jobs: [
                     { session_id: rootId, prompt: "CONFLICTING", clean: false },
                     { prompt: "STILL FRESH" },
+                    // A discovery recipe cannot be narrowed to no skills either; the
+                    // batch path shares the same conflict rule as a single launch.
+                    { session_id: rootId, prompt: "NARROW", name: "narrow", skills: [] },
                 ],
             }, undefined, undefined, h.ctx);
             assert.equal(partial.details.status, "partial");
             assert.equal(partial.details.launched.length, 1, JSON.stringify(partial.details));
             assert.equal(partial.details.launched[0].job, 2);
             assert.match(partial.details.failed[0].reason, /conflicts? with the saved launch recipe/);
+            const narrowed = partial.details.failed.find((job) => job.name === "narrow");
+            assert.ok(narrowed, JSON.stringify(partial.details));
+            assert.match(narrowed.reason, /`skills` conflicts with the saved launch recipe/,
+                "skills:[] must not be accepted for a batch job continuing a discovery recipe");
             await reap([partial.details.launched[0].id]);
             removeRun(partial.details.launched[0].id);
         } finally {

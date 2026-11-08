@@ -1838,8 +1838,13 @@ function sameLaunchTools(left: unknown, right: string): boolean {
 /**
  * A continuation may repeat its launch's skill exposure, and only that. The
  * saved paths are absolute (frozen at launch), so a caller repeating relative
- * paths is compared against the recipe's own workspace; `[]` and "inherit" stay
- * different choices rather than both reading as "nothing set".
+ * paths is compared against the recipe's own workspace.
+ *
+ * Discovery and `[]` are different choices and must never compare equal: a
+ * recipe with no `skills` key means "the child discovers the user catalog", and
+ * an explicit `[]` means "load no skills at all". Treating an absent key as an
+ * empty list would accept a continuation that silently disables discovery for a
+ * conversation that was launched with it.
  */
 function sameLaunchSkills(value: unknown, recipe: ContinuationPlan["recipe"]): boolean {
     let requested: string[] | undefined;
@@ -1849,7 +1854,8 @@ function sameLaunchSkills(value: unknown, recipe: ContinuationPlan["recipe"]): b
         return false;
     }
     if (requested === undefined) return false;
-    const saved = recipe.skills ?? [];
+    const saved = recipe.skills;
+    if (saved === undefined) return false;
     const resolved = requested.length === 0 ? [] : absolutizeSkillPaths(requested, recipe.cwd);
     return resolved.length === saved.length && resolved.every((path, index) => path === saved[index]);
 }
@@ -2243,8 +2249,10 @@ export default function (pi: ExtensionAPI) {
     }> {
         assertThinkingLevel(p.thinking);
         // Skill exposure is a caller choice, not a launch: validate its shape
-        // before any attempt directory or capacity effect exists.
-        if (!resume) normalizeSkillExposure(p.skills, "skills");
+        // before any attempt directory or capacity effect exists. A continuation
+        // validates too, so a malformed repeat is a shape error rather than being
+        // reported as a recipe conflict.
+        normalizeSkillExposure(p.skills, "skills");
         // A conversation parked on an observed wait resumes through the
         // coordinator's claim. An ordinary manual continuation would leave that
         // automatic resume armed for the same assignment, so it is refused until

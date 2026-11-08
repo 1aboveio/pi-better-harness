@@ -85,6 +85,11 @@ before. The effective choice is frozen in the launch recipe, so a later catalog
 or config edit cannot change a saved conversation's exposure, and a recipe
 written before the choice existed keeps discovery.
 
+Discovery and "none" are distinct: an absent choice means the child advertises
+the user catalog, an empty list means it advertises nothing. A continuation
+repeats the frozen choice, and refuses an explicit list that would differ from
+it — including an empty list offered to a conversation launched with discovery.
+
 ### Run Alias
 
 A user-supplied label for an individual run, rather than a reusable agent

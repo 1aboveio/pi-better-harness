@@ -605,6 +605,11 @@ A recipe written before this option existed has no `skills` key and keeps
 discovery. There is no `exclude_skills`: Pi cannot drop single entries from a
 discovered catalog without also taking over discovery.
 
+Discovery and an empty list are different choices. A continuation may repeat
+only the frozen choice: `skills: []` is refused for a conversation launched with
+discovery, including a recipe written before this option. A conversation that
+froze `[]` accepts an identical `[]` and refuses paths.
+
 ### Project context in a linked worktree
 
 A child keeps its parent's working directory. When that directory is inside a
