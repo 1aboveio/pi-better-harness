@@ -2,8 +2,30 @@
 
 ## Status
 
-Accepted for issue #415. Extends [ADR 0006](0006-shared-failure-observations.md)
+Accepted for issue #415. The Goal pause and bounded-recovery decision below is
+superseded by the amendment in this document. Extends [ADR 0006](0006-shared-failure-observations.md)
 and [ADR 0007](0007-trusted-runtime-task-boundary.md).
+
+## Amendment: permission reports do not control the Goal loop
+
+Goal is an agent continuation loop. A failed operation does not establish that
+all useful work must stop. The agent may retry transient failures, wait, or
+continue other authorized work using the reported evidence.
+
+Permission reports remain diagnostic evidence. They do not pause Goal, suppress
+wakes, restrict resume to one turn, or inject a prohibition on continuing work.
+Historical permission records must not reestablish a hold after reload or resume.
+A legacy permission-paused goal can be resumed through the ordinary resume path.
+An explicit user pause remains a pause.
+
+Actual tool and sandbox permissions remain enforced by their owning runtimes.
+Continuing the loop grants no permissions. Goal's existing no-progress detection
+still stops repeated unchanged work; completion and explicit pause behavior stay
+in place. Goal does not become a task scheduler or add a retry policy of its own.
+
+The original decision below records the previous behavior. Its structured
+report validation and failure-evidence rules remain applicable; its Goal hold,
+single-release, and workflow-precedence rules no longer apply.
 
 ## Context
 

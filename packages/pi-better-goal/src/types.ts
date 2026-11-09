@@ -71,12 +71,11 @@ export type GoalStatus = "active" | "paused" | "budgetLimited" | "complete";
  * resume a goal on their own. An `interrupt` pause may be resumed by the agent
  * with `goal_resume` when the user clearly says to proceed. A paused goal
  * without a reason (`/goal pause`, an unavailable command or workflow) resumes
- * only through `/goal resume` or the resume hotkey. `permission-blocker` also
- * requires those human controls, and releases just one same-scope retry while
- * keeping its separate blocker/release history.
+ * only through `/goal resume` or the resume hotkey. Permission failure reports
+ * are diagnostics and never create a pause reason.
  */
-/** Why a goal paused: escape, a permission hold, or a workflow handing back unfinished work for the user's answer. */
-export type GoalPauseReason = "interrupt" | "permission-blocker" | "handback";
+/** Why a goal paused: escape, or a workflow handing back unfinished work for the user's answer. */
+export type GoalPauseReason = "interrupt" | "handback";
 
 export interface GoalUsage {
   tokensUsed: number;
