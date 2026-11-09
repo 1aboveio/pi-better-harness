@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.41.2] - 2026-11-09
+
+### Fixed
+
+- Bundle Goal 0.12.3 so permission failure reports no longer pause the Goal continuation loop or require repeated manual resume.
+
+## [pi-better-goal@0.12.3] - 2026-11-09
+
+### Fixed
+
+- Keep permission failure reports as diagnostics without pausing Goal, suppressing continuation, or limiting resume to one turn. Agents can retry or continue other authorized work while tool and sandbox permissions remain enforced.
+- Preserve ordinary no-progress protection and explicit pauses. Legacy permission-paused sessions resume normally, and retained workflows remain paused until resume.
+
 ## [pi-better-harness@0.41.1] - 2026-11-08
 
 ### Fixed
