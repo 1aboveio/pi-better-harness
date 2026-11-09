@@ -6,11 +6,11 @@ Commands, the read-only discovery tool, and the Codex importer for `pi-agent/v1`
 
 `/agents` is one Pi command. Dialogs use `ctx.ui.select`, `confirm`, `input`, and `editor`. `ctx.hasUI` is false in print and JSON mode. When a choice or confirmation is required there, the command returns `clarification-needed` and writes nothing.
 
-In an interactive TUI, `/agents`, `/agents list`, and `/agents show` open a focused catalog view instead of leaving the listing in a persistent widget. Rows align name, effective model, source, and launch state; narrow terminals retain name and model. The model is the resolved actual model when available, otherwise the requested or inherited preference, or `not resolved`. Type to filter by id, name, description, or base role; use Up/Down and Enter to inspect. The detail view opens **Settings**, with Model, Effort, launch resolution, and diagnostics. **Instructions** contains the complete effective prompt (role plus agent in add mode, agent text in replace mode); this is not the task-specific launch prompt. **Files** shows definition and saved-config sources plus current session edits. Tab and Shift+Tab cycle between these pages; `p` opens Instructions. Up/Down selects settings or scrolls the current page. Left or Escape returns to Settings, then list, clears the filter, then closes. `/agents show <id>` opens that definition directly. Print/JSON callers still receive the complete text and structured result; bare `/agents` still returns help outside the custom TUI.
+In an interactive TUI, `/agents`, `/agents list`, and `/agents show` open a focused catalog view instead of leaving the listing in a persistent widget. Rows align name, effective model, source, and launch state; narrow terminals retain name and model. The model is the resolved actual model when available, otherwise the requested or inherited preference, or `not resolved`. Type to filter by id, name, description, or base role; use Up/Down and Enter to inspect. The detail view opens **Settings**, with Model, Effort, Skills, launch resolution, and diagnostics. **Instructions** contains the complete effective prompt (role plus agent in add mode, agent text in replace mode); this is not the task-specific launch prompt. **Files** shows definition and saved-config sources plus current session edits. Tab and Shift+Tab cycle between these pages; `p` opens Instructions. Up/Down selects settings or scrolls the current page. Left or Escape returns to Settings, then list, clears the filter, then closes. `/agents show <id>` opens that definition directly. Print/JSON callers still receive the complete text and structured result; bare `/agents` still returns help outside the custom TUI.
 
 ### Model and effort edits
 
-When lifecycle supplies `sessionSettings`, press `e` in detail to edit Model or Effort. Up/Down selects the setting and Enter opens its choices. Model choices follow the session's model scope (`ctx.scopedModels`, the same resolved set `/scoped-models` shows), with a header row naming the source, and type filters the names. A saved value outside the scope stays on the definition and in the detail view but is not offered by the picker; the header says so instead. An empty scope means no restriction in Pi, so the picker falls back to the foreground registry's available models, keeping a current preference that is no longer available labelled `saved`. Effort choices use the existing catalog effort levels. Escape cancels an unselected choice. Only these two fields are editable; instructions, base role, tier, and execution controls are unchanged.
+When lifecycle supplies `sessionSettings`, press `e` in detail to edit Model or Effort. Up/Down selects the setting and Enter opens its choices. Model choices follow the session's model scope (`ctx.scopedModels`, the same resolved set `/scoped-models` shows), with a header row naming the source, and type filters the names. A saved value outside the scope stays on the definition and in the detail view but is not offered by the picker; the header says so instead. An empty scope means no restriction in Pi, so the picker falls back to the foreground registry's available models, keeping a current preference that is no longer available labelled `saved`. Effort choices use the existing catalog effort levels. Escape cancels an unselected choice. Only Model, Effort, and Skills are editable; instructions, base role, tier, and execution controls are unchanged. Skills are documented below because they save to the definition rather than to the session.
 
 The scope affects only the picker. Launch and runtime model resolution keep reading the catalog/session preference as before, and the package imposes no global model restriction.
 
@@ -31,12 +31,55 @@ The dedicated config has this shape:
 
 Saved fields override definition defaults one field at a time; branch edits override saved fields. A record with `bundled: true` takes model/effort defaults from the current bundled definition before applying any explicit fields in that record. Trusted project config wins over user config. User config does not override a project-owned Markdown definition. The detail view labels saved fields as `user config` or `project config`.
 
+### Skill exposure edits
+
+The **Skills** row shows the effective mode and where it comes from: `override`
+(the named agent's own `overrides.skills`), `role default` / `inherited`
+(the base role's `defaults.skills`), `global` (the subagent config's
+`defaultSkills`), or `discovery`. An explicit `skills: null` on an agent is shown
+as `inherit (role list suppressed)` and the origin names the fall-through, for
+example `override → global`.
+
+Enter on Skills offers three choices:
+
+- **Inherit** deletes the definition's own key. A named agent then uses its base
+  role's list; a role falls through to the global default and then discovery.
+  Removing an override therefore restores inheritance instead of storing a null.
+- **No skill catalog** writes `skills: []`, which becomes `--no-skills`.
+- **Selected skills…** opens the shared searchable checkbox picker with skill
+  names and descriptions. Space toggles a skill, Enter applies, and Escape
+  cancels. Filtering preserves checked items. Saved paths missing from discovery
+  remain available as unavailable rows. Add skill path accepts an absolute
+  `SKILL.md` or skill-directory path, including commas and spaces. Failed saves
+  keep the draft for retry. Applying zero checked explicitly selects No skill
+  catalog (`[]`); it never means discovery. Definitions require absolute paths
+  because a catalog file has no workspace of its own.
+
+Unlike model and effort, the skill value is not a `settings.json` preference: it
+is a launch value the definition carries. Selecting a choice rewrites that
+definition through the catalog's existing save path, keeping the prompt,
+description, restrictions, and sibling preferences unchanged. A personal or
+trusted project definition is updated in place. A bundled definition is
+immutable, so the same save creates or updates a personal whole-definition
+override with the bundled content unchanged except for `skills`; the message
+says `Personal definition saved` and names the path. The **Instructions** tab's
+Reset to bundled archives that personal definition. The **Settings** reset only
+follows bundled model and effort, so it does not remove a skill value stored in a
+personal definition.
+
+Inspection and the launch path share the resolution: an inherited role list, an
+agent override including `[]`, the global `defaultSkills` value, and discovery
+stay distinct. Launch-level `skills` still wins over all of them. `/subagents`
+owns the global default and any current-session choice above this row; the
+catalog view reports the definition layer and that saved default, not the other
+surface's session choice.
+
 Both Settings and Instructions offer **Reset to bundled**, with independent effects:
 
 - **Settings:** follows the current bundled model and effort, clears that id's current-session choices, and leaves its Markdown prompt unchanged. A user definition records `{ "bundled": true }` instead of copied default values; the UI shows `bundled`, and later bundle updates apply automatically. An explicit model/effort choice can override one field while the other keeps following the bundle. Project-owned definitions and active project config are excluded.
 - **Instructions:** archives a user Markdown override in a hidden `.backup` file beside the original and reveals the bundled role prompt. Its model/effort choices move to the config where needed, and session choices remain unchanged. An already-bundled prompt needs no change. Project definitions are excluded.
 
-Click the action once, or select it in Settings and press Enter. In Instructions, Enter activates the reset when scrolled to the top. The action requires a valid bundled fallback and refuses stale selections, duplicates, and symlink redirects. Other definitions stay unchanged. Saving remains **Ctrl+S** only; there is no Save button or selectable save row. Existing overrides remain intact until explicitly reset.
+Click the action once, or select it in Settings and press Enter. In Instructions, Enter activates the reset when scrolled to the top. The action requires a valid bundled fallback and refuses stale selections, duplicates, and symlink redirects. Other definitions stay unchanged. Saving model and effort remains **Ctrl+S** only; there is no Save button or selectable save row. Skill choices save when selected and have no save row of their own. Existing overrides remain intact until explicitly reset.
 
 New launches and `agents_catalog` discovery use the same session overlay. Explicit per-run model/effort choices still win, a batch retains one immutable snapshot, and active/completed runs do not change. Role effort remains an inherited default with the existing nearest-supported adjustment; named-agent effort remains explicit and blocks when unsupported. The lifecycle wiring required to enable this surface is in [agent-catalog-lifecycle.md](./agent-catalog-lifecycle.md#session-settings-integration).
 
@@ -58,7 +101,7 @@ Create and import ask for a missing role, name, or path only when `hasUI` is tru
 
 `launchable` stays `unknown` until lifecycle injects a `LaunchEnricher` from the model resolver. That enricher supplies availability, requested and actual model, requested and actual effort, and its launch decision. If the catalog already blocks the id, enrichment cannot flip it to launchable. This module does not call the model registry and does not implement fallback.
 
-Effective capabilities stay the existing spawn controls: tool selection, extension loading, skills setup, sandbox and workspace, and nested delegation. `grantedByCatalog` is false. No tool preset or permission is added. A prompt that says read-only is not enforcement.
+Effective capabilities stay the existing spawn controls: tool selection, extension loading, sandbox and workspace, and nested delegation. `grantedByCatalog` is false. No tool preset or permission is added. Skill exposure is the exception the launcher reproduces from a definition (`skills`, shown as `skills: value=… mode=…`), and it only narrows which skills the child can see. A prompt that says read-only is not enforcement.
 
 ## Codex import
 

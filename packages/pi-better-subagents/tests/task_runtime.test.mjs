@@ -53,6 +53,16 @@ test('standalone launch defaults allow credential maintenance but keep process i
     assert.ok(Object.isFrozen(prepared.policy.permissions));
 });
 
+test('confined launch selects the active SDK without consulting the PATH launcher', { skip: !supported }, (t) => {
+    const f = fixture(t);
+    const prepared = prepareTaskRuntime({ root: f.project, controlDir: f.control, tools: ['read'] });
+    t.after(() => rmSync(prepared.policy.scratch, { recursive: true, force: true }));
+    assert.equal(prepared.file, process.execPath);
+    assert.equal(prepared.fileArgs[1], realpathSync(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))));
+    assert.throws(() => prepareTaskRuntime({ root: f.project, controlDir: f.control, tools: ['read'],
+        piBin: '/bin/sh' }), /requires the active Pi SDK CLI/);
+});
+
 test('old task policies retain inventory Off and invalid process levels fail closed', (t) => {
     const f = fixture(t);
     assert.equal(parseTaskPolicy(f.policy).permissions.processAccess, 'off');

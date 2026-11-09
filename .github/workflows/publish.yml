@@ -232,7 +232,11 @@ jobs:
                 extensions/goal/index.ts \
                 extensions/model-router/index.ts \
                 extensions/task-context/index.ts \
+                extensions/project-context/index.ts \
+                extensions/worktree-context.ts \
                 extensions/minimal-output/index.ts \
+                extensions/tool-call-guard/index.ts \
+                extensions/tool-call-guard/waits.ts \
                 extensions/settings/index.ts \
                 extensions/execution-policy.ts \
                 node_modules/pi-better-sandbox/index.ts \
@@ -256,6 +260,7 @@ jobs:
                 node_modules/pi-better-subagents/shared-failure-observations.ts \
                 node_modules/pi-better-subagents/shared-callback-batcher.ts \
                 node_modules/pi-better-subagents/shared-execution-policy.ts \
+                node_modules/pi-better-subagents/shared-worktree-context.ts \
                 node_modules/pi-better-subagents/shared-operation-coordinator/index.ts \
                 node_modules/pi-better-subagents/child-operations.ts \
                 node_modules/pi-better-subagents/worker-waits.ts \

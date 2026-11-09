@@ -4,6 +4,135 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.41.2] - 2026-11-09
+
+### Fixed
+
+- Bundle Goal 0.12.3 so permission failure reports no longer pause the Goal continuation loop or require repeated manual resume.
+
+## [pi-better-goal@0.12.3] - 2026-11-09
+
+### Fixed
+
+- Keep permission failure reports as diagnostics without pausing Goal, suppressing continuation, or limiting resume to one turn. Agents can retry or continue other authorized work while tool and sandbox permissions remain enforced.
+- Preserve ordinary no-progress protection and explicit pauses. Legacy permission-paused sessions resume normally, and retained workflows remain paused until resume.
+
+## [pi-better-harness@0.41.1] - 2026-11-08
+
+### Fixed
+
+- Bundle Subagents 0.28.1 so sandboxed launches use the active Pi SDK even when PATH points to the managed Pi shell launcher.
+
+## [pi-better-subagents@0.28.1] - 2026-11-08
+
+### Fixed
+
+- Start confined children with the active Pi SDK directly instead of rejecting managed Pi launchers on PATH. Explicitly supplied foreign CLI paths remain rejected.
+- Omit refused implicit tools before child preflight so restrictive sandbox profiles can launch the remaining supported tools.
+
+## [pi-better-harness@0.41.0] - 2026-11-08
+
+### Added
+
+- Use the linked worktree as the project context boundary. Keep global AGENTS.md rules and the worktree's own rules without inheriting the main checkout or falling back when a worktree file is absent. This filtering requires a Pi host that applies structured prompt edits; it is verified on Pi 1.5.0 and remains inert on Pi 0.82.1.
+- Bundle Subagents 0.28.0 and Goal 0.12.2, including skill selection controls and verified issue-workflow completion.
+
+### Fixed
+
+- Bind revision-zero Rush preflight plans that carry runDir and units without runId or fleet. Read-only binding leaves the file unchanged, transitions advance its revision, and full real-path identity checks reject a different directory with the same name. The run directory cannot be changed through a transition.
+
+## [pi-better-subagents@0.28.0] - 2026-11-08
+
+### Added
+
+- Bound child skill exposure with launch options, role and agent definitions, session choices, and saved subagent defaults. Omitted settings keep discovery, an empty list disables the catalog, and explicit paths load only the selected skills. Continuations retain the original choice and reject conflicting overrides; clean still controls extensions only.
+- Select skills with a shared searchable checkbox picker in Subagent settings and Agents. Filtering preserves selections, unavailable saved paths remain visible, manual paths are supported, and applying zero checked explicitly selects No skill catalog. The picker uses Pi's loaded metadata and offers manual entry when the host reports none.
+- Show the effective skill choice and its source consistently in settings, catalog inspection, and launch metadata. Preserve edits on cancellation and failed saves, and keep the active control visible in short terminals.
+- Apply the worktree project-context boundary to standalone Subagents parents and their children on supported Pi hosts.
+
+## [pi-better-goal@0.12.2] - 2026-11-08
+
+### Fixed
+
+- Refuse completion of rush-issues and resolve-issues Goals when the plan is unbound or unavailable, or the scheduler fails, times out, or returns invalid evidence. Keep the Goal active and retain workflow ownership until the scheduler explicitly reports finish. Ordinary Goals, other coordinators, and human handback behavior remain unchanged.
+- Reject malformed scheduler due entries instead of dropping them, so a finish entry cannot hide unverified work. Recovery messages name the update_todo workflow binding API.
+
+## [pi-better-harness@0.40.6] - 2026-11-07
+
+### Added
+
+- Guard against foreground waits with a `tool_call` check that blocks a command waiting on CI, a merge, a deploy, or a remote service, and tells the caller to spawn it as a background task instead. A foreground wait ties its result to the turn and dies with it; a background task outlives the turn. The guard reads command shape rather than duration, so a long build whose output belongs in the foreground still runs there.
+- Tool call guard (On/Off) in Harness settings gates the check itself. It takes effect on the next tool call, so turning it off needs no reload, and it is On by default.
+
+## [pi-better-harness@0.40.5] - 2026-11-07
+
+### Fixed
+
+- Stop the tool-row shimmer latching off. The clock cleared itself once 400 ms passed without a render, but the clock is what requests those renders, so nothing could restart it: the spinner stayed dead until an unrelated render happened to arrive. Instrumenting a real session showed this needs no particular cause — with nothing displaying the TUI at all, one frame still saw the last render 522 ms old, which is enough to trip the old check. Measured over 80 seconds and 941 frames, the animation now falls to one frame a second during such a pause and returns to 80 ms as soon as the row paints again.
+- Declare the shimmer cadence through `shimmerFrameDelay`, and cover the deferred-render recovery path, which is the path production uses: all 994 renders recorded in that session arrived asynchronously rather than inside a timer frame.
+
+## [pi-better-harness@0.40.4] - 2026-11-07
+
+### Fixed
+
+- Bundle Model Router 0.1.4, which declares context limits that fit inside the providers' shared window, so a long conversation routed through `router/deepseek-flash-auto` is no longer rejected for requesting more tokens than the endpoint accepts.
+
+## [pi-better-model-router@0.1.4] - 2026-11-07
+
+### Fixed
+
+- Declare an input budget and output budget that add up to the providers' real window. Both candidates share one 1,048,576-token window between input and output, but Pi reads `contextWindow` as the input allowance and `maxTokens` as room beyond it, so the previous 1,000,000/384,000 pair promised 1,384,000 tokens of capacity. A 746,917-token conversation plus the advertised 384,000-token completion is 1,130,917 tokens, which the provider rejects with `maximum context length is 1048576`. The virtual model now declares `1,048,576 - 64,000` input tokens beside a 64,000-token output budget.
+- The same pair keeps Pi's compaction trigger below the point where output stops fitting. The trigger is `contextWindow - reserveTokens` while output stops fitting at `contextWindow - maxTokens`, so any `maxTokens` above the reserve fires compaction too late to help. Catalog output limits are routinely far above the 16,384-token reserve Pi defaults to.
+
+## [pi-better-harness@0.40.3] - 2026-11-06
+
+### Fixed
+
+- Bundle Model Router 0.1.3, which declares the virtual model's context window so Pi no longer compacts after every routing error at any context size, and which keeps a transient provider failure retryable inside a long turn.
+
+## [pi-better-model-router@0.1.3] - 2026-11-06
+
+### Fixed
+
+- Declare the virtual model's 1M context window and 384k output limit. Pi reads the virtual model's limits whenever a response names no physical model, and the router's own routing error is such a response. An undeclared limit counts as zero, so Pi treated every conversation as past the compaction threshold and compacted after each routing error — in real sessions at 80k, 217k, 521k, and 599k tokens instead of the 983,616 threshold a 1M window gives.
+- Keep transient provider failures retryable inside a turn. A timeout, connection failure, `429`, or overloaded endpoint now only demotes that provider behind the other candidate, and is retried when every candidate is excluded, so one network blip no longer ends a long turn with `no eligible Flash model is available`. Rejected requests, such as a `400`, a bad schema, or an invalid key, still keep their provider out and can still end the turn when no route is left.
+- Cover connection-level failures in the transient classification: `Connection error.`, `terminated`, upstream HTTP failures, and aborted operations were previously indistinguishable from a rejected request.
+
+## [pi-better-harness@0.40.2] - 2026-11-05
+
+### Fixed
+
+- Bundle Background Tasks 0.14.2, Subagents 0.27.2, and Goal 0.12.1, which deliver their system-prompt guidance as named sections instead of returning a whole prompt.
+- Publish the execution policy as the `harness_execution_policy` section, and trim the policy and wait guidance to instructions: no rationale, no worked examples, and no defaults the tool schemas already state. Harness prompt sections fall from 7,026 to about 5,200 characters while the sleep prohibition, the tool mapping, and the launch-is-not-completion rule remain.
+- Remove a stale, unvendored copy of the execution policy under `extensions/task-context/`. The generator never wrote it, so it had drifted.
+- Keep the previous text append on pi versions that render no custom sections. Sections are a later pi feature, and these packages still declare support back to 0.84.4, where publishing a section delivers nothing at all. Real 0.84.4 coverage caught Goal's pause instruction disappearing entirely.
+
+## [pi-better-background-tasks@0.14.2] - 2026-11-05
+
+### Added
+
+- Publish the foreground-wait guidance as a `background_tasks` system-prompt section instead of relying on an unversioned append file that no install could reproduce. The section names the shapes that produced multi-minute foreground sleeps — a sleep on its own, before another command, or inside a loop — maps each wait to `bg_task_watch`, `bg_task_spawn` plus `wait_for_operations`, or `watch_delivery`, and restores the explicit `nohup`/`&`/`disown` prohibition.
+
+### Fixed
+
+- Stop appending the execution policy to the prompt text. A `before_agent_start` handler that returns `systemPrompt` sets `forceSystemPrompt`, so the request carries an opaque rendered snapshot and any section published later never reaches the model. The policy is now an assignment to `harness_execution_policy`, which keeps one copy in any load order. On a host without section support the policy and the wait guidance are appended as text instead, idempotently, so an older host receives exactly what it received before.
+
+## [pi-better-subagents@0.27.2] - 2026-11-05
+
+### Fixed
+
+- Publish the delegation settings and the worker handoff contract as the `subagents` and `worker_handoff` sections. Returning a whole prompt to deliver them set `forceSystemPrompt` and hid every section published after it.
+- Stop claiming the settings block sits at the end of the prompt. Custom sections render in publication order, so Background Tasks follows it; the note now names its own section.
+- Append the settings and the policy as text on hosts that render no custom sections, so support back to 0.84.4 is unchanged.
+
+## [pi-better-goal@0.12.1] - 2026-11-05
+
+### Fixed
+
+- Publish goal and workflow guidance as the `goal` section instead of returning a whole prompt, which suppressed every other package's section. Branch conditions, ordering, and text are unchanged.
+- Fail the test helper when a handler returns `systemPrompt`, so a regression that hides sections cannot pass. The helper previously rendered sections from the options object and ignored the return value.
+- Append the guidance as text on hosts that render no custom sections. Goal's real 0.84.4 end-to-end session in CI caught the pause instruction vanishing when it was delivered only as a section.
+
 ## [pi-better-harness@0.40.1] - 2026-11-04
 
 ### Fixed

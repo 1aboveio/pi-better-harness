@@ -85,6 +85,8 @@ export interface CatalogRunRecord {
         model: { value: string | null; source: string; explicit: boolean };
         effort: { value: string | null; source: string; explicit: boolean };
         tier: { value: string | null; source: string; explicit: boolean };
+        /** Absent exposure is discovery; [] is none; paths are exactly those skills. */
+        skills: { value: string[] | null; source: string; explicit: boolean };
     };
     modelSelection: ModelSelection;
     effortSelection: EffortSelection;
@@ -379,6 +381,7 @@ export async function prepareCatalogJob(snapshot: CatalogSnapshot, job: CatalogJ
             model: field(resolved.effective.model),
             effort: field(resolved.effective.effort),
             tier: field(resolved.effective.tier),
+            skills: skillField(resolved.effective.skills),
         },
         modelSelection: decision.modelSelection,
         effortSelection: decision.effortSelection,
@@ -652,6 +655,11 @@ function text(value: unknown): string | undefined {
 
 function field(value: { value: string | null; source: string; explicit: boolean }): { value: string | null; source: string; explicit: boolean } {
     return { value: value.value, source: value.source, explicit: value.explicit };
+}
+
+/** The catalog's skill exposure, frozen on the run record like model and effort. */
+function skillField(value: EffectiveDefinition["skills"]): CatalogRunRecord["effective"]["skills"] {
+    return { value: value.value ? [...value.value] : null, source: value.source, explicit: value.explicit };
 }
 
 function origin(value: EffectiveDefinition["source"]): CatalogRunRecord["source"] {

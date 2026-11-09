@@ -11,6 +11,7 @@ import { BUILTIN_TOOLS } from "./extensions.mjs";
 import { SAFE_CLEAN_TOOLS } from "./config.ts";
 import { assertThinkingLevel } from "./thinking.ts";
 import { assertTimingParams } from "./timing.ts";
+import { normalizeSkillExposure } from "./skills.ts";
 
 const VALID_CAPACITY_MODES = new Set(["reject", "launch-available"]);
 
@@ -84,6 +85,8 @@ export function mergeJobOptions(shared, job) {
         thinking: job.thinking ?? shared?.thinking,
         tools: job.tools ?? shared?.tools,
         exclude_tools: job.exclude_tools ?? shared?.exclude_tools,
+        // `[]` is a real choice ("no skills"), so only a missing value inherits.
+        skills: job.skills ?? shared?.skills,
         clean: job.clean ?? shared?.clean,
         sandbox: job.sandbox ?? shared?.sandbox,
         sandbox_dir: job.sandbox_dir ?? shared?.sandbox_dir,
@@ -171,6 +174,9 @@ export function validateBatchPlan({ shared, jobs, onCapacity, config }) {
         const merged = mergeJobOptions(shared, job);
         assertThinkingLevel(merged.thinking, `job ${i + 1} thinking`);
         assertTimingParams(merged, `job ${i + 1} `);
+        // Validate every job's skill exposure before any job launches, so a bad
+        // path list cannot leave a half-launched batch behind.
+        normalizeSkillExposure(merged.skills, `job ${i + 1} (${merged.name ?? i + 1}) skills`);
         if (merged.clean === true) {
             // Validate the effective tool allowlist, which resolves in this order:
             // per-job tools → shared tools → config.defaultTools → clean-safe built-ins.

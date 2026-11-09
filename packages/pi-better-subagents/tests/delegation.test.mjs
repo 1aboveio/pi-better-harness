@@ -29,7 +29,13 @@ function harness() {
     });
     const ctx = { ui: { notify(message, level) { notifications.push({ message, level }); } }, sessionManager: { getBranch: () => entries } };
     const mode = () => { const request = {}; events.emit(DELEGATION_MODE_REQUEST, request); return request.mode; };
-    const systemPrompt = (base = "base system prompt") => handlers.get("before_agent_start")({ type: "before_agent_start", systemPrompt: base }, ctx).systemPrompt;
+    // pi renders the base followed by every published section, in publication
+    // order; the handler returns nothing, so the prompt is assembled here.
+    const systemPrompt = (base = "base system prompt") => {
+        const options = { sections: {} };
+        handlers.get("before_agent_start")({ type: "before_agent_start", systemPrompt: base, systemPromptOptions: options }, ctx);
+        return [base, ...Object.values(options.sections).filter(Boolean)].join("\n\n");
+    };
     const prompt = () => systemPrompt();
     return { handlers, commands, tools, notifications, entries, ctx, mode, prompt, systemPrompt };
 }

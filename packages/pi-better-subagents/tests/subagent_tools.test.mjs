@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describeTaskTools, planTaskTools } from '../subagent-tools.ts';
+import { describeTaskTools, planTaskTools, selectEffectiveTaskTools } from '../subagent-tools.ts';
 import { defaultSubagentTools, discoverTrustedTools } from '../shared-task-tools.ts';
 
 const BUILTINS = ['read', 'write', 'edit', 'bash'];
@@ -137,4 +137,29 @@ test('a single extension file with no manifest is its own package: load and admi
         network: true, builtins: BUILTINS, registered, resolvePath: () => undefined });
     assert.deepEqual(plan.trusted.map(({ root, loadPath }) => ({ root, loadPath })), [{ root: file, loadPath: file }],
         'never the extensions directory, which Pi would scan for every extension');
+});
+
+test('the effective selection drops refused tools and splits required from inherited ones', (t) => {
+    const { registered } = packages(t);
+    const plan = planTaskTools({ requested: ['read', 'edit', 'apply_patch', 'web_fetch', 'web_search', 'not_ticked'],
+        settings: defaultSubagentTools(), network: false, builtins: BUILTINS, registered, resolvePath: () => undefined });
+    assert.deepEqual(plan.refused.map(({ name }) => name), ['web_fetch', 'web_search', 'not_ticked']);
+    const tools = ['read', 'edit', 'apply_patch', 'web_fetch', 'web_search', 'not_ticked'];
+
+    // Nothing was required: every refused name is dropped from the child loadout.
+    const inherited = selectEffectiveTaskTools({ tools, plan });
+    assert.deepEqual(inherited.tools, ['read', 'edit', 'apply_patch'], 'a refused tool never reaches the child');
+    assert.deepEqual(inherited.required, []);
+    assert.deepEqual(inherited.dropped.map(({ name }) => name), ['web_fetch', 'web_search', 'not_ticked']);
+
+    // A required name stops the launch; the others still just drop.
+    const required = selectEffectiveTaskTools({ tools, plan, required: new Set(['edit', 'web_fetch']) });
+    assert.deepEqual(required.tools, ['read', 'edit', 'apply_patch']);
+    assert.deepEqual(required.required.map(({ name }) => name), ['web_fetch']);
+    assert.deepEqual(required.dropped.map(({ name }) => name), ['web_search', 'not_ticked']);
+    assert.match(required.required[0].reason, /needs Network access, which is Off/);
+
+    // A name the plan never saw (excluded, or supplied by the worker bridge) is untouched.
+    const untouched = selectEffectiveTaskTools({ tools: ['read', 'edit'], plan });
+    assert.deepEqual(untouched, { tools: ['read', 'edit'], refused: [], required: [], dropped: [] });
 });

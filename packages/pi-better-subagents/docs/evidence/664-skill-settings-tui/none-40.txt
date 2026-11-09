@@ -1,0 +1,15 @@
+# No skill catalog · saved config
+# width: 40
+
+  Subagent settings
+
+> Delegation mode          adaptive     
+  Concurrent subagents     6
+  Skill exposure           No skill cata
+                           Source: confi
+  Selected skills          Choose…
+  Agents
+
+  Reset to defaults
+
+Up/Down Select · Space/Enter Change · ct

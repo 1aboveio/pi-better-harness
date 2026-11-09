@@ -112,7 +112,7 @@ export default function(pi) {
         open();
         wait(/Model\s+openai\/gpt-4o\s+user config/);
         const freshSettings = wait(/Effort\s+low\s+user config/);
-        assert.doesNotMatch(freshSettings, /(?:Model|Effort)[^\n]*session/, "fresh settings come from durable catalog defaults");
+        assert.doesNotMatch(freshSettings, /^\s*>?\s*(?:Model|Effort)\s{2,}[^\n]*\bsession\b/m, "fresh settings come from durable catalog defaults");
         close();
         literal("/agents inspect role.developer"); key("Tab"); key("Enter");
         wait(/Agents \/ Developer/);
@@ -122,7 +122,7 @@ export default function(pi) {
             literal(`\x1b[<0;5;${row + 1}M`);
             literal(`\x1b[<0;5;${row + 1}m`);
         } else {
-            key("Down"); key("Down");
+            key("Down"); key("Down"); key("Down"); // Model -> Effort -> Skills -> Reset
             wait(/> Reset to bundled/);
             key("Enter");
             t.diagnostic("Keyboard reset verified; native one-click routing requires a fullscreen mouse-capable Pi host.");

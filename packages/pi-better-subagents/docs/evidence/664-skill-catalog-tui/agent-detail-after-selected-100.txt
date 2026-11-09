@@ -1,0 +1,27 @@
+The checked skill is saved as the agent's explicit override.
+
+Agents / Payments Developer
+[Settings]   Instructions   Files
+Tab / Shift+Tab switch  ·  ↑↓ select / scroll  ·  Enter change  ·  Esc list
+
+    Model     openai/gpt-6.1-sol                                              inherited
+    Effort    high                                                            inherited
+  > Skills    1 selected · /Users/exoulster/.agents/skills/review/SKILL.md    override
+
+  Model and effort are session edits. Skills save to the definition.
+
+  ID       agent.worker
+  Scope    user
+  Role     role.work
+  Tier     balanced
+  Actual   not resolved
+
+  Launch resolution
+  The catalog definition has no blocking diagnostic, but that is not launchability. Inject model a
+  vailability and effort support before launching. No actual model was selected here.
+
+Showing 1-15 of 15 lines
+
+Ctrl+S Save defaults
+
+Skills saved (user): agent.worker · 1 selected

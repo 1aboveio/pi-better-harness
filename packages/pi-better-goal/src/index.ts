@@ -29,7 +29,8 @@ import {
   type GoalEntrySource,
 } from "./goal-state.js";
 import { continuationEvidence, type ContinuationEvidence } from "./continuation.js";
-import { currentPermissionHold, logicalPermissionBlockerKey, MAX_PERMISSION_BLOCKERS, MAX_PERMISSION_RECORDS, permissionHoldRecord, permissionInstruction, permissionRecord, reportedPermissionBlockers, reportedPermissionGap, type PermissionHold } from "./permission-hold.js";
+import { currentPermissionHold, logicalPermissionBlockerKey, MAX_PERMISSION_BLOCKERS, MAX_PERMISSION_RECORDS, permissionGapRecord, permissionHoldRecord, reportedPermissionBlockers, reportedPermissionGap, type PermissionHold } from "./permission-hold.js";
+import { publishGoalGuidance } from "./prompt.js";
 import { observeGoalStall } from "./stall.js";
 import {
   flattenObjectiveForRail,
@@ -41,7 +42,7 @@ import {
 import { createRenderScheduler } from "./shared-render-scheduler.js";
 import { initializeNavigatorPanels, setNavigatorPanel } from "./shared-navigator-panels.js";
 import { collectSubagentActivity } from "./subagents.js";
-import { currentWorkflowOwner, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
+import { currentWorkflowOwner, ISSUE_WORKFLOW_SKILLS, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
 import { completionGate, pauseGate, schedulerWaitUntil, operationResumeSchedulerGate } from "./workflow-gates.js";
 import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
 import { requestTaskContext } from "./task-context.js";
@@ -65,7 +66,7 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 /** Never re-poll a workflow's scheduler sooner than this, even when its stated attempt time has passed. */
 const MIN_WAIT_DELAY_MS = 5_000;
 /** Workflow skills whose invocation binds a goal when none is active, so the run cannot stop silently. */
-const AUTO_BIND_SKILLS = new Set(["rush-issues", "resolve-issues"]);
+const AUTO_BIND_SKILLS = ISSUE_WORKFLOW_SKILLS;
 const WAKE_DISABLED =
   process.env.PI_BETTER_GOAL_DISABLE_WAKE === "1" ||
   process.env.PI_BETTER_EXTENSION_DISABLE_WAKE === "1";
@@ -102,7 +103,6 @@ export function agentResumable(goal: GoalSnapshot | null, conversationalResume =
 
 /** Footer status for a paused goal, telling the user how to resume it. */
 export function pausedGoalStatus(goal: GoalSnapshot, conversationalResume = true): string {
-  if (goal.pauseReason === "permission-blocker") return "goal held: permission blocker · /goal resume (one retry)";
   return agentResumable(goal, conversationalResume) ? 'goal paused · say "go" or /goal resume' : "goal paused · /goal resume";
 }
 
@@ -110,9 +110,11 @@ function pausedGoalPrompt(goal: GoalSnapshot, conversationalResume: boolean, inc
   return [
     goal.pauseReason === "handback"
       ? `Pi Better Goal is paused because its workflow handed back unfinished work for the user's answer.${includeObjective ? ` Goal: ${goal.objective}` : ""}`
-      : `Pi Better Goal is paused because the user pressed escape.${includeObjective ? ` Goal: ${goal.objective}` : ""}`,
+      : goal.pauseReason === "interrupt"
+        ? `Pi Better Goal is paused because the user pressed escape.${includeObjective ? ` Goal: ${goal.objective}` : ""}`
+        : `Pi Better Goal is paused.${includeObjective ? ` Goal: ${goal.objective}` : ""}`,
     "Treat the user's messages as ordinary conversation: answer them, but do not continue the goal's work until it is resumed.",
-    conversationalResume ? GOAL_RESUME_RULE : "Only the user can resume this goal, with /goal resume or alt+g. A conversational go-ahead does not resume it.",
+    agentResumable(goal, conversationalResume) ? GOAL_RESUME_RULE : "Only the user can resume this goal, with /goal resume or alt+g. A conversational go-ahead does not resume it.",
   ].join("\n");
 }
 
@@ -259,8 +261,8 @@ function formatGoal(
     `Status: ${goal.status}`,
     ...(goal.pauseReason ? [`Pause reason: ${goal.pauseReason}`] : []),
     ...(permissions?.blockers.length ? [
-      `Permission hold: ${permissions.blockers.length} scope(s); ${permissions.recordCount} history records; retry ${permissions.retryPending ? "released once" : "held"}`,
-      ...(permissions.saturated ? ["Permission observation incomplete: history/scope limit reached; release refused."] : []),
+      `Permission diagnostics: ${permissions.blockers.length} scope(s); ${permissions.recordCount} history records`,
+      ...(permissions.saturated ? ["Permission observation incomplete: history/scope limit reached. Diagnostics only; continuation is unaffected."] : []),
     ] : []),
     `Token budget: ${budget}`,
     `Tokens used: ${goal.usage.tokensUsed}`,
@@ -395,13 +397,6 @@ export default function (pi: ExtensionAPI): void {
   };
 
   const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource): void => {
-    const permissionHold = currentPermissionHold(ctx, goal.goalId);
-    if (goal.status === "paused" && permissionHold.blockers.length > 0) {
-      if (permissionHold.retryPending && permissionHold.recordCount < MAX_PERMISSION_RECORDS) {
-        pi.appendEntry(EXTENSION_NAME, permissionRecord(goal.goalId, "permission-retry-finished"));
-      }
-      goal = { ...goal, pauseReason: "permission-blocker" };
-    }
     executionGeneration += 1;
     lastAgentEvidence = null;
     const previous = getGoal(ctx);
@@ -457,9 +452,7 @@ export default function (pi: ExtensionAPI): void {
     }
     const held = currentContinuationState(ctx, goal.goalId)?.blocked === true;
     setGoal(goalWithStatus(goal, "paused", undefined, held ? undefined : "interrupt"), ctx, "runtime");
-    notifyGoal(ctx, currentPermissionHold(ctx, goal.goalId).blockers.length > 0
-      ? "Goal remains permission-held. Use /goal resume or alt+g for one same-scope retry."
-      : preferences.conversationalResume && !held
+    notifyGoal(ctx, preferences.conversationalResume && !held
       ? 'Goal paused. Say "go" to resume it, or use /goal resume.'
       : "Goal paused. Use /goal resume or alt+g to resume it.");
   };
@@ -529,18 +522,6 @@ export default function (pi: ExtensionAPI): void {
       return { ok: false, message: blocker };
     }
     const goal = held ? current : goalWithStatus(current, "active");
-    const permissions = currentPermissionHold(ctx, current.goalId);
-    if (current.pauseReason === "permission-blocker" && permissions.blockers.length === 0) {
-      return { ok: false, message: "Permission hold evidence is unavailable. The goal stays held; inspect the report before replacing this goal explicitly." };
-    }
-    if (permissions.blockers.length > 0) {
-      if (source === "tool" || permissions.saturated) {
-        return { ok: false, message: permissions.saturated
-          ? "Permission hold history is full. The goal stays held; inspect it and create a new goal explicitly if needed."
-          : "Only /goal resume or alt+g can release one permission retry." };
-      }
-      pi.appendEntry(EXTENSION_NAME, permissionRecord(current.goalId, "permission-release"));
-    }
     // Resuming a skill-bound goal is explicit re-entry into its workflow: rebind the owner the
     // goal was created with (released by a handback) before the continuation runs.
     const owner = goalWorkflowOwner(current);
@@ -578,11 +559,8 @@ export default function (pi: ExtensionAPI): void {
     if (!boundCommandReady(goal, ctx)) return;
     clearIdleContinuation();
     continuationQueuedFor = goal.goalId;
-    const permissions = currentPermissionHold(ctx, goal.goalId);
-    if (permissions.blockers.length === 0) resetContinuationState(goal);
-    sendGoalContinuation(goal, permissions.blockers.length > 0
-      ? `${continuationPrompt(goal, getWorkflow(ctx))}\n\n${permissionInstruction(permissions)}`
-      : continuationPrompt(goal, getWorkflow(ctx)), "continuation");
+    resetContinuationState(goal);
+    sendGoalContinuation(goal, continuationPrompt(goal, getWorkflow(ctx)), "continuation");
   };
 
   function clearIdleContinuation(): void {
@@ -605,7 +583,6 @@ export default function (pi: ExtensionAPI): void {
     if (WAKE_DISABLED || !preferences.autoContinue || !isPokeable(goal) || continuationQueuedFor === goal.goalId) {
       return;
     }
-    if (currentPermissionHold(ctx, goal.goalId).blockers.length > 0) return;
     if (currentContinuationState(ctx, goal.goalId)?.blocked) {
       return;
     }
@@ -636,7 +613,6 @@ export default function (pi: ExtensionAPI): void {
       if (WAKE_DISABLED || !preferences.autoContinue || execution !== executionGeneration || wake !== wakeGeneration) return false;
       const current = currentGoalSnapshot(ctx);
       return isPokeable(current) && current.goalId === goalId &&
-        currentPermissionHold(ctx, goalId).blockers.length === 0 &&
         !currentContinuationState(ctx, goalId)?.blocked &&
         continuationQueuedFor !== goalId && !isForegroundBusy(ctx);
     };
@@ -702,8 +678,7 @@ export default function (pi: ExtensionAPI): void {
     const goal = currentGoalSnapshot(ctx);
     const wakePlan = planBackgroundDrainWake(backgroundDrainTracker, goal, snapshot);
     backgroundDrainTracker = wakePlan.nextTracker;
-    if (isPokeable(goal) && wakePlan.wakeSignature && currentPermissionHold(ctx, goal.goalId).blockers.length === 0 &&
-        !currentContinuationState(ctx, goal.goalId)?.blocked) {
+    if (isPokeable(goal) && wakePlan.wakeSignature && !currentContinuationState(ctx, goal.goalId)?.blocked) {
       // Persist external progress now: a foreground/callback turn may cancel its delayed wake.
       clearIdleContinuation();
       resetContinuationState(goal);
@@ -877,7 +852,6 @@ export default function (pi: ExtensionAPI): void {
     if ((request.owner.goalId ?? null) !== (goal?.goalId ?? null)) { held("Owning Goal is no longer current"); return; }
     if (goal && !preferences.autoContinue) { held("Goal automatic continuation is disabled"); return; }
     if (goal && !isPokeable(goal)) { held("Goal is not active"); return; }
-    if (goal && currentPermissionHold(ctx, goal.goalId).blockers.length) { held("Goal has an active permission hold"); return; }
     if (goal && currentContinuationState(ctx, goal.goalId)?.blocked) { held("Goal continuation requires human resume"); return; }
     if (goal && !boundCommandReady(goal, ctx)) { held("Bound workflow is not ready"); return; }
     const workflow = getWorkflow(ctx);
@@ -888,7 +862,7 @@ export default function (pi: ExtensionAPI): void {
       const latest = getGoal(ctx);
       if ((request.owner!.goalId ?? null) !== (latest?.goalId ?? null)) { held("Owning Goal changed during resume admission"); return; }
       if (latest && !preferences.autoContinue) { held("Goal automatic continuation is disabled"); return; }
-      if (latest && (!isPokeable(latest) || currentPermissionHold(ctx, latest.goalId).blockers.length || currentContinuationState(ctx, latest.goalId)?.blocked)) {
+      if (latest && (!isPokeable(latest) || currentContinuationState(ctx, latest.goalId)?.blocked)) {
         held("Goal became held during resume admission"); return;
       }
       if (!gate.ok) { held(gate.reason); return; }
@@ -902,7 +876,6 @@ export default function (pi: ExtensionAPI): void {
         if ((request.owner!.goalId ?? null) !== (active?.goalId ?? null)) return false;
         if (JSON.stringify(getWorkflow(ctx)) !== JSON.stringify(workflow)) return false;
         return !active || (preferences.autoContinue && isPokeable(active)
-          && !currentPermissionHold(ctx, active.goalId).blockers.length
           && !currentContinuationState(ctx, active.goalId)?.blocked && boundCommandReady(active, ctx));
       };
       reply({ allowed: true, revision, isCurrent });
@@ -1262,10 +1235,6 @@ export default function (pi: ExtensionAPI): void {
       notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
     }
     const restoredGoal = getGoal(ctx);
-    if (restoredGoal?.status === "active" && currentPermissionHold(ctx, restoredGoal.goalId).blockers.length > 0) {
-      // A persisted release is not a replayable dispatch ticket after reload.
-      setGoal(goalWithStatus(restoredGoal, "paused", undefined, "permission-blocker"), ctx, "runtime");
-    }
     if (restoredGoal?.status === "active" && !restoredGoal.command && skillCommandName(restoredGoal.objective)) {
       setGoal(goalWithStatus(restoredGoal, "paused"), ctx, "runtime");
       notifyGoal(ctx, "Goal paused: invoke its skill directly before resuming.", "error");
@@ -1335,8 +1304,7 @@ export default function (pi: ExtensionAPI): void {
     // A paused goal stays paused while the user talks: the message is ordinary
     // conversation. Only /goal resume, the hotkey, or goal_resume resume it.
     const goal = getGoal(ctx);
-    if (goal?.status === "active" && currentPermissionHold(ctx, goal.goalId).blockers.length === 0 &&
-        !currentContinuationState(ctx, goal.goalId)?.blocked) {
+    if (goal?.status === "active" && !currentContinuationState(ctx, goal.goalId)?.blocked) {
       executionGeneration += 1;
       clearIdleContinuation();
       lastAgentEvidence = null;
@@ -1353,19 +1321,10 @@ export default function (pi: ExtensionAPI): void {
     const harnessPresent = requestTaskContext(pi, "inspect", goal).enabled !== undefined;
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
-    const permissions = goal ? currentPermissionHold(ctx, goal.goalId) : null;
-    const permissionPrompt = permissions && goal?.status !== "complete" &&
-      (permissions.blockers.length > 0 || goal?.pauseReason === "permission-blocker")
-      ? permissionInstruction({ ...permissions, retryPending: permissions.retryPending && goal?.status === "active" }) +
-        (permissions.blockers.length === 0 ? "\nBlocker evidence is unavailable. Stay held; do not invent a retry scope." : "") : "";
-    // A held goal overrides workflow ownership without invoking or invalidating that workflow.
-    if (permissionPrompt && goal?.status === "paused") {
-      return { systemPrompt: `${event.systemPrompt}\n\n${permissionPrompt}` };
-    }
-    const pausedInstruction = permissionPrompt || (goal?.status === "paused" && (goal.pauseReason === "interrupt" || goal.pauseReason === "handback")
-      ? pausedGoalPrompt(goal, preferences.conversationalResume, !harnessPresent) : "");
+    const pausedInstruction = goal?.status === "paused"
+      ? pausedGoalPrompt(goal, preferences.conversationalResume, !harnessPresent) : "";
     if (!isPokeable(goal) && !owner) {
-      return pausedInstruction ? { systemPrompt: `${event.systemPrompt}\n\n${pausedInstruction}` } : undefined;
+      return publishGoalGuidance(event, pausedInstruction);
     }
 
     const questionInstruction = snapshot.backgroundRunning
@@ -1379,31 +1338,26 @@ export default function (pi: ExtensionAPI): void {
       if (!workflowAvailable(owner)) {
         if (isPokeable(goal)) setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
         recordWorkflow(null);
-        return { systemPrompt: `${event.systemPrompt}\n\nWorkflow ${owner.name} is no longer a registered, valid skill. Stop work and ask the user to reinvoke the skill.` };
+        return publishGoalGuidance(event, `Workflow ${owner.name} is no longer a registered, valid skill. Stop work and ask the user to reinvoke the skill.`);
       }
       let instructions: string;
       try {
         instructions = readFileSync(owner.path, "utf8");
       } catch {
         if (isPokeable(goal)) setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
-        return { systemPrompt: `${event.systemPrompt}\n\nWorkflow ${owner.name} is unavailable. Stop work and ask the user to restore or reinvoke the skill.` };
+        return publishGoalGuidance(event, `Workflow ${owner.name} is unavailable. Stop work and ask the user to restore or reinvoke the skill.`);
       }
-      return {
-        systemPrompt: `${event.systemPrompt}\n\n` +
-          (pausedInstruction
-            ? `${pausedInstruction}\n` + (permissionPrompt
-              ? "These permission constraints override the workflow instructions below.\n\n"
-              : "While the goal is paused, this overrides the workflow instructions below: do not advance the workflow until the goal is resumed.\n\n")
-            : "") +
-          `Active workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}` +
-          (isPokeable(goal)
-            ? harnessPresent
-              ? "\n\nComplete the goal only after the workflow completion audit."
-              : `\n\nActive objective: ${goal.objective}. Complete it only after the workflow completion audit.`
-            : "") +
-          (questionInstruction ? `\n\n${questionInstruction.trim()}` : "") +
-          (heldInstruction ? `\n\n${heldInstruction}` : ""),
-      };
+      return publishGoalGuidance(
+        event,
+        pausedInstruction &&
+          `${pausedInstruction}\n` + "While the goal is paused, this overrides the workflow instructions below: do not advance the workflow until the goal is resumed.\n\n",
+        `Active workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}`,
+        isPokeable(goal) && (harnessPresent
+          ? "Complete the goal only after the workflow completion audit."
+          : `Active objective: ${goal.objective}. Complete it only after the workflow completion audit.`),
+        questionInstruction && questionInstruction.trim(),
+        heldInstruction,
+      );
     }
 
     if (!isPokeable(goal)) return;
@@ -1413,18 +1367,17 @@ export default function (pi: ExtensionAPI): void {
     if (harnessPresent) {
       // Harness owns the outcome text. Retain only the Goal-specific guidance
       // that the Outcome & Todo prompt cannot replace.
-      const retained = [heldInstruction, backgroundInstruction.trim(), questionInstruction.trim(), permissionPrompt]
-        .filter((part) => part.length > 0);
-      return retained.length > 0
-        ? { systemPrompt: `${event.systemPrompt}\n\n${retained.join("\n\n")}` }
-        : undefined;
+      return publishGoalGuidance(
+        event,
+        heldInstruction,
+        backgroundInstruction.trim(),
+        questionInstruction.trim(),
+      );
     }
-    return {
-      systemPrompt:
-        `${event.systemPrompt}\n\n` +
-        `Pi Better Goal active objective: ${goal.objective}. ${heldInstruction || "Keep working through clear low-risk next steps, and mark complete only after an evidence-backed completion audit."}${backgroundInstruction}${questionInstruction}` +
-        (permissionPrompt ? `\n\n${permissionPrompt}` : ""),
-    };
+    return publishGoalGuidance(
+      event,
+      `Pi Better Goal active objective: ${goal.objective}. ${heldInstruction || "Keep working through clear low-risk next steps, and mark complete only after an evidence-backed completion audit."}${backgroundInstruction}${questionInstruction}`,
+    );
   });
 
   pi.on("agent_start", async (_event, ctx) => {
@@ -1473,31 +1426,22 @@ export default function (pi: ExtensionAPI): void {
     const incomplete = reportedPermissionGap(pi, event.toolName, event.details);
     if (reports.length === 0 && !incomplete) return;
     let hold = currentPermissionHold(ctx, goal.goalId);
-    let changed = false;
     for (const blocker of reports) {
       const previous = hold.blockers.find((item) => logicalPermissionBlockerKey(item) === logicalPermissionBlockerKey(blocker));
-      if (!hold.retryPending && previous && JSON.stringify(previous) === JSON.stringify(blocker)) continue;
+      if (previous && JSON.stringify(previous) === JSON.stringify(blocker)) continue;
       if (hold.saturated || (!previous && hold.blockers.length >= MAX_PERMISSION_BLOCKERS)) {
         if (!hold.saturated && hold.recordCount < MAX_PERMISSION_RECORDS) {
-          pi.appendEntry(EXTENSION_NAME, permissionRecord(goal.goalId, "permission-gap"));
+          pi.appendEntry(EXTENSION_NAME, permissionGapRecord(goal.goalId));
         }
         break;
       }
       pi.appendEntry(EXTENSION_NAME, permissionHoldRecord(goal.goalId, blocker));
-      changed = true;
       hold = currentPermissionHold(ctx, goal.goalId);
     }
     if (incomplete && !hold.saturated && hold.recordCount < MAX_PERMISSION_RECORDS) {
-      pi.appendEntry(EXTENSION_NAME, permissionRecord(goal.goalId, "permission-gap"));
-      changed = true;
-      hold = currentPermissionHold(ctx, goal.goalId);
+      pi.appendEntry(EXTENSION_NAME, permissionGapRecord(goal.goalId));
     }
-    if (hold.retryPending && hold.recordCount < MAX_PERMISSION_RECORDS) {
-      pi.appendEntry(EXTENSION_NAME, permissionRecord(goal.goalId, "permission-retry-finished"));
-    }
-    if (!changed && goal.status === "paused" && goal.pauseReason === "permission-blocker") return;
-    setGoal(goalWithStatus(goal, "paused", undefined, "permission-blocker"), ctx, "runtime");
-    notifyGoal(ctx, "Goal held for a permission blocker. /goal resume or alt+g releases one same-scope retry.", "warning");
+    // Diagnostics only: the goal keeps running and continuation is unchanged.
   });
 
   pi.on("tool_execution_start", async (event, ctx) => {
@@ -1536,16 +1480,6 @@ export default function (pi: ExtensionAPI): void {
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
     const goal = getGoal(ctx);
-    if (isPokeable(goal)) {
-      const permissions = currentPermissionHold(ctx, goal.goalId);
-      if (permissions.blockers.length > 0) {
-        if (permissions.retryPending && permissions.recordCount < MAX_PERMISSION_RECORDS) {
-          pi.appendEntry(EXTENSION_NAME, permissionRecord(goal.goalId, "permission-retry-finished"));
-        }
-        setGoal(goalWithStatus(goal, "paused", undefined, "permission-blocker"), ctx, "runtime");
-        return;
-      }
-    }
     if (!isPokeable(goal) || snapshot.backgroundRunning) {
       return;
     }

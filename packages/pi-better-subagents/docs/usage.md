@@ -18,14 +18,24 @@ Set `delegationMode` in the user config described under
 [Tool scoping](#tool-scoping-allowlist) to `manual`, `adaptive`, or
 `coordinator` (default `adaptive`). This controls foreground delegation guidance,
 not child permissions or catalog definitions. `/subagents settings` (or simply
-`/subagents`) opens the terminal settings page with mode and concurrent-subagent
-cap controls, an Agents shortcut to `/agents`, and Reset to defaults.
-The page uses the same selected-row and
-active-cell styling as `/sandbox`, with one editable value column.
+`/subagents`) opens the terminal settings page with mode, concurrent-subagent
+cap, and default skill-exposure controls, an Agents shortcut to `/agents`, and
+Reset to defaults. The page uses the same selected-row and active-cell styling
+as `/sandbox`, with one editable value column. Skill exposure cycles between
+Discover automatically and No skill catalog. The Selected skills row opens the
+shared searchable checkbox picker, which lists loaded skills by name and
+description, uses Space to toggle, Enter to apply, and Esc to cancel. Typing
+filters the list without losing checked items. A saved path missing from current
+discovery stays visible as unavailable and survives apply. Zero checked applies
+No skill catalog, never discovery and never an invalid empty Selected skills
+draft. Manual Add skill path remains available inside the picker; a path must be
+absolute and exist. Invalid input stays in the editor with an explanation rather
+than being dropped.
 Edits automatically persist for this session, including across reloads; Escape
 closes the page without undoing them.
 Enter edits the cap as a positive whole number; Escape cancels an unfinished edit.
-Ctrl+S saves both settings as defaults. Sandbox permissions remain in `/sandbox`.
+Ctrl+S saves mode, cap, and skill exposure as defaults. Reset to defaults restores
+all three from the saved config. Sandbox permissions remain in `/sandbox`.
 
 Command equivalents also work outside the terminal UI:
 
@@ -41,7 +51,7 @@ below the running count leaves existing work untouched and blocks new admissions
 until capacity becomes available. Slots already reserved by an in-flight launch
 remain admitted. Settings apply to this parent Pi process, not
 all Pi sessions on the machine. Saving preserves unrelated config keys and
-clears both session overrides. The command form asks for confirmation when a UI
+clears the mode, cap, and skill session overrides. The command form asks for confirmation when a UI
 is available. Reset restores saved defaults without changing config.
 
 `/reload` retains session overrides; new sessions use config, while resuming or
@@ -96,7 +106,7 @@ thresholds continue to take precedence for subagent health.
 
 | Tool | Blocks? | What it does |
 |------|---------|--------------|
-| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`. |
+| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `skills` ([skill exposure](#skill-exposure)), `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`. |
 | `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; optional per-job `session_id` or `session_name` continues a saved conversation), `onCapacity` (`reject` or `launch-available`). |
 | `subagent_settings` | never | Read-only effective settings and capacity snapshot. No parameters. Returns `delegationMode`, `maxConcurrent`, per-setting `sources` (`session` or `config`), a stable settings `revision`, `runningCount`, `pendingCount`, `occupiedSlots`, and `availableSlots`. The limit is a ceiling, not a target; spawn admission rechecks live capacity. |
 | `subagent_list` | never | Compact list for the current folder and descendants across foreground sessions (default 10 rows / 1 KiB page). Each row includes `session_id`. Params: `all` (machine-global search), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. Abandoned launch records are reported separately and are never counted as runs. |
@@ -134,7 +144,12 @@ A launch without a session selector starts a new conversation. With a selector,
 `prompt` is the next user turn; the original task and role are already saved.
 Each attempt gets a new run id, log, timing record, and capacity slot while the
 native session id and history stay the same. The launch recipe preserves the
-worker's role, tools, model, and workspace, including uncommitted changes.
+worker's role, tools, skill exposure, model, and workspace, including uncommitted
+changes. Repeating a launch-only option is accepted only with the saved value;
+a different `skills` list is refused rather than silently dropped. A continuation
+whose frozen tool loadout can no longer be admitted (for example its trusted
+package is gone) is refused before anything is spawned, instead of reopening the
+saved conversation with different tools.
 
 A run stopped with `subagent_stop` (status `killed`) can be continued the same
 way. Stopping ends that execution, not the saved conversation or its
@@ -510,11 +525,15 @@ chosen in `/sandbox` → Subagents · Tools
   name is refused. A single extension file with no package manifest is loaded
   and admitted by itself, never its directory. Known network tool names
   (`web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name) are refused while Network access is Off; this is a name list, not a
-  network sandbox. A ticked tool whose package can't be found is refused at launch. Ticked tools
-  join the default tool list; an explicit `tools` list still decides.
+  network sandbox. A ticked tool whose package can't be found is left out of a
+  default loadout and reported with its reason in the launch output; an explicit
+  `tools` request for a tool the task boundary cannot provide refuses the launch.
+  Ticked tools join the default tool list; an explicit `tools` list still decides.
 
-Other tools are disabled in confined children and listed in launch output with
-the reason. The launch line shows what was admitted, for example
+Other tools are disabled in confined children. One that only joined the default
+loadout is omitted from the child and listed in launch output with the reason;
+one the caller named in `tools` refuses the launch with the reason. The launch
+line shows what was admitted, for example
 `Runtime: isolated · guarded apply_patch · trusted web_fetch (@juicesharp/rpiv-web-tools)`.
 Provider extensions are trusted runtime code; arbitrary extension tools are not
 admitted merely because their names were requested. Confined children disable project
@@ -578,6 +597,62 @@ The mandatory task guard is independent of optional guardrails extensions.
 Adding a package to the tool map does not make its tools safe to execute outside
 the task boundary.
 
+## Skill exposure
+
+A child otherwise inherits the whole user-level skills catalog, which dominates
+its system prompt even when the task already names the one `SKILL.md` it needs.
+`skills` bounds that exposure:
+
+| `skills` | Child argv | Effect |
+| --- | --- | --- |
+| omitted | (no flag) | discover the user catalog |
+| `[]` | `--no-skills` | no skills at all |
+| `["/abs/SKILL.md", …]` | `--no-skills --skill <path>…` | exactly those skills |
+
+Precedence, highest first: the launch option (or the batch job's value, then
+`shared`), a catalog role/agent's `defaults.skills` / `overrides.skills`
+([catalog](agent-catalog.md#portable-preferences-vs-host-controls)), the current
+session's `/subagents settings` choice, saved `defaultSkills`, then discovery.
+Each level distinguishes "not set" from `[]`, so `[]` disables discovery rather
+than falling through to a wider default. The session choice applies to the next
+launch even before Ctrl+S.
+
+`/agents` edits the catalog's own value: the Skills row shows the effective mode
+and whether it comes from the agent override, the base role, the session or
+global default, or discovery, and offers Inherit, No skill catalog, or Selected
+skills. `/subagents` edits the session choice first, then saves it as the global
+`defaultSkills`. Both Selected skills screens use the same checkbox picker. Its
+available entries come from the skills Pi already loaded for the current session
+through `ctx.getSystemPromptOptions().skills`; saved paths that are not in that
+list stay visible as unavailable. If the host reports no loaded skills, the
+picker says so and manual Add skill path remains available. See
+[catalog operations](agent-catalog-operations.md#skill-exposure-edits).
+
+Relative paths resolve against the child's workspace. The effective choice is
+frozen in the launch recipe and printed at launch as
+`Skills: none (--no-skills) · source launch`, so a continuation reproduces it.
+A recipe written before this option existed has no `skills` key and keeps
+discovery. There is no `exclude_skills`: Pi cannot drop single entries from a
+discovered catalog without also taking over discovery.
+
+Discovery and an empty list are different choices. A continuation may repeat
+only the frozen choice: `skills: []` is refused for a conversation launched with
+discovery, including a recipe written before this option. A conversation that
+froze `[]` accepts an identical `[]` and refuses paths.
+
+### Project context in a linked worktree
+
+A child keeps its parent's working directory. When that directory is inside a
+linked Git worktree, the worktree is the project context root: the child receives
+the global `AGENTS.md` from the agent directory and the context files at or below
+the worktree root, not the main checkout's file or any ancestor above it. Ordinary
+repositories keep every ancestor context file. The parent session applies the same
+boundary, so a standalone Subagents install behaves like the bundled one.
+
+The boundary follows where Pi selected a file, not what a filename symlink points
+at. It needs a Pi host that rebuilds the prompt from `systemPromptOptions` after
+the `before_agent_start` hook (Pi 1.x); an older host keeps the prompt it loaded.
+
 ## Tool scoping (allowlist)
 
 Precedence, highest first: the per-call `tools` param → `config.json`
@@ -606,6 +681,11 @@ The effective config also sets:
 
 - `defaultModel` — model for spawns that don't specify one (`null` = inherit the
   foreground model).
+- `defaultSkills` — skill exposure when neither the launch nor a catalog role or
+  agent chooses one. Omit it (or set `null`) for discovery, `[]` for no skills,
+  or absolute paths for exactly those skills. `/subagents settings` writes
+  `null` when Discover automatically is saved, so it overrides an older path
+  list. See [skill exposure](#skill-exposure).
 - `delegationMode` — foreground policy (`manual`, `adaptive`, or `coordinator`;
   default `adaptive`). `/subagents mode ...` changes only the current session.
   `/subagents save` saves mode and cap together as config defaults.

@@ -1,8 +1,11 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parse } from "shell-quote";
 import { STEER_FILE_ENV } from "./child-steer.ts";
+import { supportsPromptSections } from "./shared-execution-policy.ts";
+import { restrictContextFilesToWorktree } from "./shared-worktree-context.ts";
 
 export const WORKER_HANDOFF = "Worker ownership: complete your assigned implementation or diagnosis, run focused checks, push only when authorized, write the requested result, then return. Pending CI is a handoff, not a failed implementation or a CI pass. The coordinator owns CI/PR monitoring, review scheduling, readiness, enqueueing and merge. Do not start external delivery watchers or background monitoring. Short status reads and failed-log retrieval for diagnosis are allowed. Legitimate local tests and builds may run to completion within their command limits. Use Bash for short diagnostic commands and focused checks needed to implement the change. When supervised background tools are available, retain ownership of assigned validation: launch a known long command with bg_task_spawn or repeated observation with bg_task_watch, continue independent work, then call wait_for_operations to park when no independent work remains. On continuation, inspect the operation's terminal evidence and acknowledge its interpretation before continuing the assignment. Parking is a saved-conversation dependency, not a request for the parent model to relay commands or results. An explicit restricted tool loadout may omit background support; return the exact command, cwd, required environment variable names (never secret values), current evidence and remaining validation to the coordinator. Do not emulate background execution with polling, sleep loops, nohup or shell detachment. Established command-only operations and external delivery monitoring belong to the coordinator's background tools.";
+export const WORKER_HANDOFF_SECTION = "worker_handoff";
 const REFUSAL = "Worker ownership: CI/PR monitoring belongs to the coordinator. Return the PR/run ID, pushed HEAD and current evidence with CI pending; do not retry the watcher through another tool or script. Local tests/builds and short diagnostic status/log reads remain allowed.";
 const WATCH_SCRIPTS = new Set(["watch-pr-delivery.mjs", "watch-delivery.mjs", "watch-candidate-delivery.mjs"]);
 const nameOf = (value: string) => value.replaceAll("\\", "/").split("/").at(-1)!.replace(/\.exe$/i, "");
@@ -131,9 +134,25 @@ export function workerMonitoringRefusal(toolName: string, input: unknown): strin
 }
 
 export default function childOwnership(pi: Pick<ExtensionAPI, "on">, env: NodeJS.ProcessEnv = process.env): void {
+    // The child keeps the parent's cwd, so a linked worktree is its project root:
+    // send that worktree's context file, not the main checkout's ancestor files.
+    pi.on("before_agent_start", (event) => {
+        restrictContextFilesToWorktree(event.systemPromptOptions, getAgentDir());
+    });
     // This marker is supplied by the parent on every child launch, including clean/unsandboxed runs.
     if (!env[STEER_FILE_ENV]) return;
-    pi.on("before_agent_start", (event) => ({ systemPrompt: `${event.systemPrompt}\n\n${WORKER_HANDOFF}` }));
+    // A section on hosts that render them; appended text on hosts that do not.
+    // Returning a prompt on a modern host would set forceSystemPrompt, and the
+    // request would carry a snapshot, so later sections never arrive.
+    pi.on("before_agent_start", (event) => {
+        if (!supportsPromptSections(event.systemPromptOptions)) {
+            return { systemPrompt: `${event.systemPrompt}\n\n${WORKER_HANDOFF}` };
+        }
+        const options = event.systemPromptOptions as { sections?: Record<string, string> };
+        const sections = (options.sections ??= {});
+        sections[WORKER_HANDOFF_SECTION] = WORKER_HANDOFF;
+        return undefined;
+    });
     pi.on("tool_call", (event) => {
         const reason = workerMonitoringRefusal(event.toolName, event.input);
         if (reason) return { block: true, reason };

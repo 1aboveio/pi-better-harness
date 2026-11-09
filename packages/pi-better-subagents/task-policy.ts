@@ -172,7 +172,7 @@ export function parseTaskPolicy(value: unknown): TaskPolicy {    if (!value || t
 }
 
 export function prepareTaskRuntime(options: {
-    root: string; controlDir: string; tools: readonly string[]; piBin: string;
+    root: string; controlDir: string; tools: readonly string[]; piBin?: string;
     permissions?: SandboxPermissions & Partial<CommandSettings>; extensionPaths?: readonly string[]; runtimeRoots?: readonly string[];
     applyPatch?: boolean; extensionTools?: readonly TaskExtensionTool[];
 }): { file: string; fileArgs: string[]; policy: TaskPolicy; policyPath: string } {
@@ -194,7 +194,9 @@ export function prepareTaskRuntime(options: {
     mkdirSync(controlDir, { recursive: true });
     const sdkEntry = canonicalizePath(join(PiCodingAgent.getPackageDir(), "dist", "index.js"));
     const cliPaths = ["cli.js", join("bundle", "cli.js")].map((entry) => canonicalizePath(join(PiCodingAgent.getPackageDir(), "dist", entry)));
-    if (!cliPaths.includes(canonicalizePath(options.piBin))) {
+    // The guarded runtime invokes this SDK directly. PATH may name a managed
+    // shell launcher, so only validate a CLI when the caller explicitly pins one.
+    if (options.piBin !== undefined && !cliPaths.includes(canonicalizePath(options.piBin))) {
         throw new Error("Task sandbox requires the active Pi SDK CLI; a different pi executable is on PATH.");
     }
     const ownEntry = fileURLToPath(import.meta.url);

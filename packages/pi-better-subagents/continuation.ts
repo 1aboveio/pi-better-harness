@@ -210,6 +210,9 @@ export function buildLaunchRecipe(input: Omit<LaunchRecipe, "version">): LaunchR
     const recipe: LaunchRecipe = { version: 1, ...input };
     if (input.excludeTools === "") delete recipe.excludeTools;
     if (input.sandboxDir === "") delete recipe.sandboxDir;
+    // Absent means discovery. Never write an explicit undefined key, so a recipe
+    // that inherited skills reads back exactly like one written before #664.
+    if (input.skills === undefined) delete recipe.skills;
     return recipe;
 }
 

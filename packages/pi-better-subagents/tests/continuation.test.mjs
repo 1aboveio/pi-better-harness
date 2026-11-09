@@ -1141,6 +1141,140 @@ describe("completed-subagent continuation", () => {
         }
     });
 
+    it("replays the frozen skill exposure and refuses a conflicting one", async () => {
+        const h = makeHarness();
+        const skillPath = join(WORKSPACE, "skills", "review", "SKILL.md");
+        let rootId;
+        let replayedId;
+        let compatibleId;
+        try {
+            rootId = await spawnRun(h, { tools: "read,bash", skills: [skillPath] });
+            const root = await waitTerminal(rootId);
+            assert.deepEqual(root.recipe.skills, [skillPath], "the launch freezes what the child received");
+            assert.equal(root.skillsSource, "launch");
+            const rootArgv = childRecord(root.pid).argv;
+            assert.equal(rootArgv[rootArgv.indexOf("--skill") + 1], skillPath);
+
+            // A continuation replays the recipe, so the child sees the same skills
+            // even though it was launched with no skills option of its own.
+            replayedId = idOf(await resumeRun(h, { id: rootId, prompt: "FOLLOW-UP" }));
+            const replayed = await waitTerminal(replayedId);
+            assert.deepEqual(replayed.recipe.skills, [skillPath]);
+            assert.equal(replayed.skillsSource, "recipe");
+            const replayedArgv = childRecord(replayed.pid).argv;
+            assert.equal(replayedArgv.includes("--no-skills"), true);
+            assert.equal(replayedArgv[replayedArgv.indexOf("--skill") + 1], skillPath);
+
+            // Widening or disabling the exposure would change this conversation's
+            // prompt, so both are refused; repeating the saved value is accepted.
+            for (const conflicting of [{ skills: [] }, { skills: [join(WORKSPACE, "skills", "other", "SKILL.md")] }, { skills: [skillPath, skillPath] }]) {
+                await assert.rejects(
+                    resumeRun(h, { id: rootId, prompt: "CONFLICT", ...conflicting }),
+                    /`skills` conflicts with the saved launch recipe/,
+                    `skills ${JSON.stringify(conflicting.skills)} must not be silently dropped`,
+                );
+            }
+            compatibleId = idOf(await resumeRun(h, { id: rootId, prompt: "COMPATIBLE", skills: [skillPath] }));
+            const compatible = await waitTerminal(compatibleId);
+            assert.deepEqual(compatible.recipe.skills, [skillPath]);
+        } finally {
+            await reap([rootId, replayedId, compatibleId].filter(Boolean));
+            h.shutdown();
+        }
+    });
+
+    it("keeps discovery for a recipe written before skill controls existed", async () => {
+        const h = makeHarness();
+        let rootId;
+        let legacyId;
+        try {
+            rootId = await spawnRun(h, { tools: "read,bash" });
+            const root = await waitTerminal(rootId);
+            assert.equal(root.recipe.skills, undefined, "an inheriting launch records no key at all");
+
+            // Simulate a recipe archived by an older version: the same record with
+            // no skills key. A continuation must keep discovery instead of reading
+            // the absence as "none".
+            const legacyMeta = readMeta(rootId);
+            assert.ok(legacyMeta.recipe);
+            delete legacyMeta.recipe.skills;
+            writeMeta(legacyMeta);
+
+            legacyId = idOf(await resumeRun(h, { id: rootId, prompt: "LEGACY FOLLOW-UP" }));
+            const legacy = await waitTerminal(legacyId);
+            assert.equal(legacy.recipe.skills, undefined);
+            assert.equal(legacy.skillsSource, "recipe");
+            const argv = childRecord(legacy.pid).argv;
+            assert.equal(argv.includes("--no-skills"), false, "a pre-#664 recipe keeps the user catalog");
+        } finally {
+            await reap([rootId, legacyId].filter(Boolean));
+            h.shutdown();
+        }
+    });
+
+    it("refuses an explicit skill list for a discovery recipe, fresh or older", async () => {
+        const h = makeHarness();
+        const skillPath = join(WORKSPACE, "skills", "review", "SKILL.md");
+        let discoveryId;
+        let noneId;
+        let noneReplayId;
+        let legacyId;
+        try {
+            // A fresh launch that never chose an exposure records no skills key.
+            discoveryId = await spawnRun(h, { tools: "read,bash" });
+            await waitTerminal(discoveryId);
+            assert.equal(readMeta(discoveryId).recipe.skills, undefined);
+
+            // Discovery is not "no skills": an explicit list of either shape would
+            // change this conversation's prompt, so both are refused. Treating the
+            // absent key as [] would let the empty list through.
+            const before = listMetas().length;
+            for (const conflicting of [[], [skillPath]]) {
+                await assert.rejects(
+                    resumeRun(h, { id: discoveryId, prompt: "NARROW", skills: conflicting }),
+                    /`skills` conflicts with the saved launch recipe/,
+                    `skills ${JSON.stringify(conflicting)} must not be accepted for a discovery recipe`,
+                );
+            }
+            assert.equal(listMetas().length, before, "each refused continuation launched nothing");
+
+            // A recipe saved before the option existed has no key at all. Strip it
+            // from a real record and prove the older shape behaves like a fresh
+            // discovery launch rather than like a frozen empty list.
+            legacyId = await spawnRun(h, { tools: "read,bash", skills: [] });
+            await waitTerminal(legacyId);
+            assert.deepEqual(readMeta(legacyId).recipe.skills, []);
+            const legacy = readMeta(legacyId);
+            assert.ok(legacy.recipe);
+            delete legacy.recipe.skills;
+            writeMeta(legacy);
+            assert.equal(readMeta(legacyId).recipe.skills, undefined);
+            await assert.rejects(
+                resumeRun(h, { id: legacyId, prompt: "LEGACY NARROW", skills: [] }),
+                /`skills` conflicts with the saved launch recipe/,
+                "a pre-#664 recipe keeps discovery and cannot be narrowed by an empty list",
+            );
+
+            // The empty list is a real choice, so a recipe that froze it accepts an
+            // identical repeat and still refuses paths.
+            noneId = await spawnRun(h, { tools: "read,bash", skills: [] });
+            await waitTerminal(noneId);
+            await assert.rejects(
+                resumeRun(h, { id: noneId, prompt: "WIDEN", skills: [skillPath] }),
+                /`skills` conflicts with the saved launch recipe/,
+            );
+            noneReplayId = idOf(await resumeRun(h, { id: noneId, prompt: "SAME", skills: [] }));
+            const replayed = await waitTerminal(noneReplayId);
+            assert.deepEqual(replayed.recipe.skills, []);
+            assert.equal(replayed.skillsSource, "recipe");
+            assert.equal(childRecord(replayed.pid).argv.includes("--no-skills"), true,
+                "a frozen empty list still reaches the child as --no-skills");
+        } finally {
+            await reap([discoveryId, noneId, noneReplayId, legacyId].filter(Boolean));
+            h.shutdown();
+        }
+    });
+
     it("continues per-job session ids in a batch alongside fresh jobs without sharing one writer", async () => {
         const h = makeHarness();
         let rootId;
@@ -1195,12 +1329,19 @@ describe("completed-subagent continuation", () => {
                 jobs: [
                     { session_id: rootId, prompt: "CONFLICTING", clean: false },
                     { prompt: "STILL FRESH" },
+                    // A discovery recipe cannot be narrowed to no skills either; the
+                    // batch path shares the same conflict rule as a single launch.
+                    { session_id: rootId, prompt: "NARROW", name: "narrow", skills: [] },
                 ],
             }, undefined, undefined, h.ctx);
             assert.equal(partial.details.status, "partial");
             assert.equal(partial.details.launched.length, 1, JSON.stringify(partial.details));
             assert.equal(partial.details.launched[0].job, 2);
             assert.match(partial.details.failed[0].reason, /conflicts? with the saved launch recipe/);
+            const narrowed = partial.details.failed.find((job) => job.name === "narrow");
+            assert.ok(narrowed, JSON.stringify(partial.details));
+            assert.match(narrowed.reason, /`skills` conflicts with the saved launch recipe/,
+                "skills:[] must not be accepted for a batch job continuing a discovery recipe");
             await reap([partial.details.launched[0].id]);
             removeRun(partial.details.launched[0].id);
         } finally {

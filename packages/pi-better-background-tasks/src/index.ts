@@ -8,7 +8,7 @@ import { createObservedWaitHost } from "./observed-waits.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { observeForegroundSandboxPolicy } from "./sandbox.js";
 import { registerTools } from "./tools.js";
-import { appendExecutionPolicy } from "./shared-execution-policy.js";
+import { deliverBackgroundTasksPrompt } from "./prompt.js";
 
 export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   // Created before registerTools so the tools can resolve it lazily; the durable
@@ -36,7 +36,10 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     },
   });
   initializeNavigatorPanels(pi);
-  pi.on("before_agent_start", (event) => ({ systemPrompt: appendExecutionPolicy(event.systemPrompt) }));
+  // Sections on a host that renders them; text only where it renders none.
+  // Returning a prompt on modern pi would set forceSystemPrompt, and the request
+  // would then carry a snapshot, so sections published after it never arrive.
+  pi.on("before_agent_start", (event) => deliverBackgroundTasksPrompt(event));
   registerBackgroundTasksGoalProvider(pi);
   ensureBackgroundTasksNavigatorProvider(pi);
   // Subscribed at load so a sandbox extension that publishes later is heard, and
