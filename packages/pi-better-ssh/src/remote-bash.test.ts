@@ -2,11 +2,33 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { failedResult, FakeRemoteRunner, successfulResult } from "../../ssh-core/test-support/index.js";
-import { executeRemoteBash } from "./remote-bash.js";
+import { executeRemoteBash as executeRemoteBashProduction } from "./remote-bash.js";
+
+const executeRemoteBash: typeof executeRemoteBashProduction = (params, dependencies, signal) =>
+  executeRemoteBashProduction(params, { platform: "linux", ...dependencies }, signal);
 
 // @covers pi-better-ssh.remote-bash
 // @level integration
 describe("executeRemoteBash", () => {
+  it("runs on Windows without opening a ControlMaster or honoring caller mux options", async () => {
+    const runner = new FakeRemoteRunner([successfulResult("windows ssh works\n")]);
+    const result = await executeRemoteBash({
+      host: "deploy",
+      command: "hostname",
+      timeout: 30,
+      options: { ControlMaster: "yes", ControlPath: "unsafe", ControlPersist: "600" },
+    }, { runner, sessionScope: "windows-session", platform: "win32" });
+
+    expect(result).toMatchObject({ output: "windows ssh works\n", exitCode: 0, mux: { state: "down", reused: false } });
+    expect(runner.runCalls).toHaveLength(1);
+    expect(runner.runCalls[0]?.argv).toEqual([
+      "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-T",
+      "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ControlPath=none",
+      "--", "deploy", "bash -c 'hostname'",
+    ]);
+    expect(runner.runTimeouts[0]).toBe(30_000);
+  });
+
   it("runs a safely wrapped command through an ensured mux and returns non-zero as data", async () => {
     const fixtureRoot = mkdtempSync("/tmp/pi-better-ssh-service-");
     try {

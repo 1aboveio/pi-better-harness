@@ -27,6 +27,7 @@ export interface SshMuxRegistry {
 export function createSshMuxRegistry(options: {
   runner: RemoteRunner;
   controlPathRoot?: string;
+  platform?: NodeJS.Platform;
   entries?: SshMuxEntryMap;
 }): SshMuxRegistry {
   const entries = options.entries ?? processMuxEntries();
@@ -36,12 +37,13 @@ export function createSshMuxRegistry(options: {
       ...resolved,
       runner: options.runner,
       sessionScope,
+      ...(options.platform !== undefined ? { platform: options.platform } : {}),
       ...(options.controlPathRoot ? { controlPathRoot: options.controlPathRoot } : {}),
     });
 
   const controllerFor = (resolved: ResolvedSshCommand, sessionScope: string): SshMuxController => {
     const controller = makeController(resolved, sessionScope);
-    entries.set(controller.controlPath, { sessionScope, resolved });
+    if (controller.controlPath) entries.set(controller.controlPath, { sessionScope, resolved });
     return controller;
   };
 
