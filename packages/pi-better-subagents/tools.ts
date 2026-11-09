@@ -15,7 +15,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus, type RunMeta, type RunStatus } from "./registry.ts";
+import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus, type RunCallbackOrigin, type RunMeta, type RunStatus } from "./registry.ts";
 import { buildSubagentResultPayload } from "./finalization.ts";
 import { stopRun } from "./stop.ts";
 import {
@@ -24,6 +24,7 @@ import {
     SUBAGENT_LIST_STATUSES,
     collectSubagentList,
     formatSubagentListRow,
+    listFolderScopeKey,
 } from "./list.ts";
 import {
     assembleOrphanedResult,
@@ -34,11 +35,9 @@ import {
     listIncidentCount,
     formatIncidentLabel,
     listRevisions,
-    listScopeKey,
     requestScopeKey,
     resolveActiveOrigin,
     resolveRunAccess,
-    runInListScope,
     unknownRunError,
     type SubagentToolSession,
 } from "./output-payload.ts";
@@ -110,6 +109,7 @@ function normalizeOutputRequest<T extends Record<string, unknown>>(params: T): T
 
 const MAX_BYTES_ALIAS_DESCRIPTION = "Deprecated alias for max_bytes. max_bytes wins when both are given.";
 const HISTORY_DESCRIPTION = "If true, return an incident page that also lists failure history: unclassified child tool errors, expected failures, and recovered or superseded incidents. Default output lists only failures that need action and counts the rest.";
+const TAIL_DESCRIPTION = "With mode=raw: read from the newest retained byte first instead of byte 0. The page is end-anchored and nextCursor then pages toward the oldest bytes; once the start is reached the cursor reads only bytes appended later. Use this to reach the end of a multi-MB log without paging from byte zero.";
 const INCLUDE_DESCRIPTION = "Explicit opt-in facts omitted by default: \"cost\" adds one token/cost spend line, \"tools\" adds one tool-call count line with the distinct tool names.";
 
 /** pi's tool-result text shape. */
@@ -292,18 +292,31 @@ function forCall(session: SubagentToolSession, ctx: unknown): SubagentToolSessio
     return { getActiveOrigin: () => provider(ctx) };
 }
 
+/**
+ * Folder this list call runs in. `ctx.cwd` is the foreground's live workspace
+ * and wins; a readable origin is the fallback for hosts that omit it. Listing
+ * by folder never needs a foreground session id, so an unavailable origin does
+ * not narrow the default scope.
+ */
+function listCwd(ctx: unknown, origin: RunCallbackOrigin | undefined): string {
+    const ctxCwd = (ctx as { cwd?: unknown } | undefined)?.cwd;
+    if (typeof ctxCwd === "string" && ctxCwd !== "") return ctxCwd;
+    return origin?.cwd ?? process.cwd();
+}
+
 export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSession = {}): ToolDefinition {
     return {
         name: "subagent_list",
         label: "List Subagents",
         description:
             `List background subagent runs with compact status rows. Non-blocking. ` +
-            `Default: current session, newest first, limit ${SUBAGENT_LIST_DEFAULT_LIMIT} (1 KiB page). ` +
+            `Default: current folder and its descendants across foreground sessions, newest first, ` +
+            `limit ${SUBAGENT_LIST_DEFAULT_LIMIT} (1 KiB page). ` +
             `Pass all:true for machine-global; limit is clamped to max ${SUBAGENT_LIST_MAX_LIMIT}. ` +
             `Pass cursor to continue. Incident counts are compact; full failure text lives on subagent_result/output.`,
         promptSnippet: "List background subagent runs and their status",
         parameters: Type.Object({
-            all: Type.Optional(Type.Boolean({ description: "If true, list every run on this machine. Default false = current session only." })),
+            all: Type.Optional(Type.Boolean({ description: "If true, list every run on this machine. Default false = current folder and its descendants, regardless of foreground session." })),
             limit: Type.Optional(Type.Number({ description: `Maximum rows to display (default ${SUBAGENT_LIST_DEFAULT_LIMIT}, max ${SUBAGENT_LIST_MAX_LIMIT}; larger values are clamped).` })),
             status: Type.Optional(Type.Array(Type.String(), { description: `Effective statuses to include: ${SUBAGENT_LIST_STATUSES.join(", ")}.` })),
             cursor: Type.Optional(Type.String({ description: "Caller-owned page or status cursor from a previous list response." })),
@@ -318,15 +331,11 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
             const now = Date.now();
             const index = listRunRecords();
             const metas = index.metas;
-            const parentPid = process.pid;
             const resolved = resolveActiveOrigin(session);
-            const origin = resolved.origin;
-            const sessionAvailable = !(resolved.wired && !resolved.available);
-            const scopeKey = listScopeKey(p.all === true, origin, parentPid, sessionAvailable);
-            let sessionWarning: string | undefined;
-            if (p.all !== true && !sessionAvailable) {
-                sessionWarning = `Session identity unavailable; ownership of ${metas.length} run(s) cannot be verified, so none are listed. Pass all:true for machine-global.`;
-            }
+            // List scope is a folder, not a session: peers in the same folder
+            // are listed even when they were spawned by another foreground.
+            const cwd = listCwd(ctx, resolved.origin);
+            const scopeKey = listFolderScopeKey(p.all === true, cwd);
             const healthCache = new Map<string, HealthObservation>();
             const healthById = (id: string) => {
                 const hit = healthCache.get(id);
@@ -337,21 +346,13 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 healthCache.set(id, obs);
                 return obs;
             };
-            const inScope = (meta: RunMeta) => runInListScope(
-                meta,
-                { all: p.all === true },
-                origin,
-                parentPid,
-                sessionAvailable,
-            );
             const collected = collectSubagentList({
                 metas,
                 params: p,
-                parentPid,
+                cwd,
                 now,
                 statusOf: effectiveStatus,
                 healthById,
-                inScope,
             });
             const items = collected.items as Array<{ meta: RunMeta; status: string }>;
             const incidents = new Map(items.map((row) => [row.meta.id, listIncidentCount(
@@ -384,8 +385,8 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 failureRevision: revisions.failureRevision,
                 scopeKey,
                 statusesKey,
-                sessionWarning,
                 unreadable: index.unreadable,
+                abandonedLaunches: index.abandoned,
                 indexError: index.indexError,
                 incidentRuns,
             }));
@@ -401,6 +402,7 @@ export function subagentOutputTool(Type: TypeModule, baseSession: SubagentToolSe
         description:
             "Read a subagent run's current output without waiting. Default is a 1 KiB / 10-line excerpt of the current session. " +
             "Pass all:true to read a foreign-session id. Pass mode=raw for retained-log pages (16 KiB default, 64 KiB cap). " +
+            "Pass tail:true with mode=raw to start from the newest retained bytes and page toward the oldest. " +
             "Pass cursor to continue or to poll for failure-only changes. Missing or unreadable logs are reported as gaps, not as empty healthy output. " +
             "Spend and tool counts are omitted unless include:[\"cost\",\"tools\"] asks for them.",
         promptSnippet: "Peek at a subagent's current output without waiting",
@@ -416,13 +418,14 @@ export function subagentOutputTool(Type: TypeModule, baseSession: SubagentToolSe
             max_bytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 1 KiB, max 4 KiB; raw default 16 KiB, max 64 KiB)." })),
             maxBytes: Type.Optional(Type.Number({ description: MAX_BYTES_ALIAS_DESCRIPTION })),
             mode: Type.Optional(Type.String({ description: "raw = page retained log bytes. Default is the bounded assembled excerpt." })),
+            tail: Type.Optional(Type.Boolean({ description: TAIL_DESCRIPTION })),
             include: Type.Optional(Type.Array(Type.String(), { description: INCLUDE_DESCRIPTION })),
             history: Type.Optional(Type.Boolean({ description: HISTORY_DESCRIPTION })),
             all: Type.Optional(Type.Boolean({ description: "If true, allow a foreign-session id. Default is current session only." })),
         }),
         async execute(_id: string, params: unknown, _signal?: unknown, _onUpdate?: unknown, ctx?: unknown) {
             const session = forCall(baseSession, ctx);
-            const p = normalizeOutputRequest(params as Record<string, unknown>) as { id: string; cursor?: string; maxBytes?: unknown; mode?: string; all?: boolean; lines?: unknown; include?: unknown; history?: boolean };
+            const p = normalizeOutputRequest(params as Record<string, unknown>) as { id: string; cursor?: string; maxBytes?: unknown; mode?: string; all?: boolean; lines?: unknown; include?: unknown; history?: boolean; tail?: boolean };
             const access = resolveRunAccess(p.id, p, session);
             if (access.kind === "missing") throw unknownRunError(p.id);
             if (access.kind === "unreadable") return text(assembleUnreadableMetadata(p.id, access.detail, p));
@@ -442,7 +445,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
         name: "subagent_result",
         label: "Subagent Result",
         description:
-            "Read a subagent's final output if it has finished. NEVER waits. Default current session. Ordinary answers are preserved verbatim in a 2048-byte UTF-8 page (max_bytes up to 8192 bytes, optional lines cap); pass cursor to reconstruct the rest. Pass all:true for a foreign-session id. mode=raw pages retained log bytes (16 KiB default, 64 KiB cap). Failures and exceptional lifecycle facts come before progress. No tool-name histories or default cost lines; pass include:[\"cost\",\"tools\"] to opt in.",
+            "Read a subagent's final output if it has finished. NEVER waits. Default current session. Ordinary answers are preserved verbatim in a 2048-byte UTF-8 page (max_bytes up to 8192 bytes, optional lines cap); pass cursor to reconstruct the rest. Pass all:true for a foreign-session id. mode=raw pages retained log bytes (16 KiB default, 64 KiB cap) and tail:true with mode=raw starts from the newest bytes. Failures and exceptional lifecycle facts come before progress. No tool-name histories or default cost lines; pass include:[\"cost\",\"tools\"] to opt in.",
         promptSnippet: "Read a finished subagent's final result (never waits)",
         promptGuidelines: [
             "Use subagent_result to collect a finished run's output. If it reports the run is still going, stop — do not poll; you'll be notified when it finishes.",
@@ -456,6 +459,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
             lines: Type.Optional(Type.Number({ description: "Optional line cap for each answer page (default: bytes only). nextCursor continues after the last line shown." })),
             tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines. lines wins when both are given." })),
             mode: Type.Optional(Type.String({ description: "raw = page retained log bytes (16 KiB default, 64 KiB cap). Default is the bounded assembled result." })),
+            tail: Type.Optional(Type.Boolean({ description: TAIL_DESCRIPTION })),
             include: Type.Optional(Type.Array(Type.String(), { description: INCLUDE_DESCRIPTION })),
             history: Type.Optional(Type.Boolean({ description: HISTORY_DESCRIPTION })),
             all: Type.Optional(Type.Boolean({ description: "If true, allow a foreign-session id. Default is current session only." })),
@@ -465,7 +469,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
         },
         async execute(_id: string, params: unknown, _signal?: unknown, _onUpdate?: unknown, ctx?: unknown) {
             const session = forCall(baseSession, ctx);
-            const p = normalizeOutputRequest(params as Record<string, unknown>) as { id: string; cursor?: string; maxBytes?: unknown; mode?: string; all?: boolean; lines?: unknown; include?: unknown; history?: boolean };
+            const p = normalizeOutputRequest(params as Record<string, unknown>) as { id: string; cursor?: string; maxBytes?: unknown; mode?: string; all?: boolean; lines?: unknown; include?: unknown; history?: boolean; tail?: boolean };
             const access = resolveRunAccess(p.id, p, session);
             if (access.kind === "missing") throw unknownRunError(p.id);
             if (access.kind === "unreadable") {
@@ -499,10 +503,12 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
 /**
  * Stop is the one tool with a UI side effect (widget redraw after a kill);
  * the caller injects it so the factory stays loadable without a TUI context.
+ * The hook receives the run id so the host can also queue the run's one
+ * terminal completion callback (#624).
  */
 export function subagentStopTool(
     Type: TypeModule,
-    deps: { onStopped?: () => void } = {},
+    deps: { onStopped?: (id: string) => void } = {},
 ): ToolDefinition {
     return {
         name: "subagent_stop",
@@ -510,7 +516,10 @@ export function subagentStopTool(
         description:
             "Stop a running or orphaned subagent. Terminates identifiable related " +
             "process-group members when present; otherwise finalizes from log " +
-            "evidence (completed/failed) or records lost.",
+            "evidence (completed/failed) or records lost. " +
+            "An abandoned launch record (a launch that never wrote metadata and never " +
+            "started a child) is removed instead; a launch that is still preparing or " +
+            "published concurrently is preserved.",
         promptSnippet: "Stop a running or orphaned background subagent",
         parameters: Type.Object({
             id: Type.String({ description: "Run id from subagent_spawn." }),
@@ -520,10 +529,23 @@ export function subagentStopTool(
             // Shared stop semantics with the TUI navigator close action (#44/#68):
             // stopRun rereads meta + effective status from disk before acting.
             const outcome = stopRun(p.id);
+            if (outcome.action === "purged") {
+                // No run record exists, so the stop hook's completion half is a
+                // no-op (#624); the widget/ticker refresh still applies.
+                deps.onStopped?.(p.id);
+                return text(`Removed abandoned launch record ${p.id} (no run metadata was written, so no child ever ran).`);
+            }
+            if (outcome.action === "preserved") {
+                // Nothing stopped: a live run owes no terminal completion, so the
+                // stop hook is deliberately not fired here (#624).
+                return text(outcome.status === "launching"
+                    ? `Preserved ${p.id}: a launch is still preparing it (no metadata yet), so nothing was removed. Retry after it publishes, or after it fails.`
+                    : `Preserved ${p.id}: a concurrent launch published this run (${outcome.status}), so nothing was removed. Call subagent_stop again to stop the run.`);
+            }
             if (outcome.action === "not-running") {
                 return text(`Run ${p.id} is not running (${outcome.status}).`);
             }
-            deps.onStopped?.();
+            deps.onStopped?.(p.id);
             if (outcome.action === "finalized") {
                 return text(`Resolved orphaned subagent ${p.id} → ${outcome.status}.`);
             }

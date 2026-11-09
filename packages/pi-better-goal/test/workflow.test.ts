@@ -10,6 +10,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import extension, { toolContext } from "./extension-fixture.js";
 import { currentGoalSnapshot } from "../src/goal-state.js";
 import { currentWorkflowOwner, skillCommandName, workflowOwnerFromSkill } from "../src/workflow.js";
+import { invokeBeforeAgentStart } from "./before-agent-start.js";
 
 test("workflow metadata opts in through Pi's skill command provenance", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
@@ -65,7 +66,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   await handlers.get("session_start")?.({ reason: "startup" }, ctx);
   await handlers.get("input")?.({ source: "interactive", text: "/skill:fixture implement task" }, ctx);
   assert.equal(currentWorkflowOwner(entries)?.name, "fixture");
-  const prompt = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  const prompt = await invokeBeforeAgentStart(handlers, ctx, "base");
   assert.match(prompt.systemPrompt, /Only coordinate work/);
   assert.doesNotMatch(prompt.systemPrompt, /Keep working through clear low-risk next steps/);
 
@@ -84,7 +85,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   assert.match(userMessages[2]?.content ?? "", /^\/skill:fixture implement task/);
   assert.match(userMessages[2]?.content ?? "", /Continue the existing goal/);
   assert.equal(currentWorkflowOwner(entries)?.name, "fixture");
-  const resumed = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  const resumed = await invokeBeforeAgentStart(handlers, ctx, "base");
   assert.match(resumed.systemPrompt, /Only coordinate work/);
   await tools.get("release_workflow")!.execute("release", {}, undefined, undefined, toolContext(ctx));
   assert.equal(currentWorkflowOwner(entries), null);
@@ -94,7 +95,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   registeredSkillPath = join(dir, "replaced-skill.md");
   await handlers.get("session_start")?.({ reason: "resume" }, ctx);
   assert.equal(currentGoalSnapshot(ctx)?.status, "paused");
-  const unavailable = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  const unavailable = await invokeBeforeAgentStart(handlers, ctx, "base");
   assert.match(unavailable.systemPrompt, /no longer a registered, valid skill/);
   assert.equal(currentWorkflowOwner(entries), null, "a stale skill path loses ownership on resume");
   await commands.get("workflow")?.handler("clear", ctx);
@@ -130,7 +131,15 @@ test("a legacy slash-shaped goal pauses on resume rather than executing as plain
   await handlers.get("session_shutdown")?.({}, ctx);
 });
 
-test("an alias declaring workflow-alias-of binds its coordinator, so the coordinator's plan can sync", async (t) => {
+// Goal must not depend on Harness at compile time (ADR 0018), so the real
+// runtime crosses this package boundary only when the test runs. The specifier
+// stays opaque to TypeScript: Goal's SDK copy differs from Harness's.
+const taskContextModulePath = "../../pi-better-harness/extensions/task-context/index.js";
+const { default: taskContext } = await import(taskContextModulePath) as {
+  default: (pi: ExtensionAPI) => void;
+};
+
+test("an alias declaring workflow-alias-of binds its coordinator for goal handback", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const dir = mkdtempSync(join(tmpdir(), "pi-workflow-alias-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -141,6 +150,14 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   const registered = new Map([["rush-issues", rushPath], ["resolve-issues", aliasPath]]);
   const resolve = (name: string) => registered.get(name);
   const rushOwner = { name: "rush-issues", path: rushPath, role: "coordinator", planOwner: "workflow" };
+  const runDir = join(dir, ".resolve-issues", "rush", "run-1");
+  mkdirSync(runDir, { recursive: true });
+  const planPath = join(runDir, "task-plan.json");
+  writeFileSync(planPath, JSON.stringify({
+    runId: "run-1", planRevision: 1, warehouseCanaryRequired: false,
+    fleet: { explore: { status: "pending" }, implement: { status: "pending" } },
+    issues: [{ id: "1", title: "Unit", stage: "pending", status: "pending", dependsOn: [] }],
+  }));
 
   assert.deepEqual(workflowOwnerFromSkill("resolve-issues", aliasPath, resolve), rushOwner);
   assert.throws(() => workflowOwnerFromSkill("resolve-issues", aliasPath), /rush-issues, which is not a registered skill/);
@@ -159,23 +176,11 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   writeFileSync(self, "---\nmetadata:\n  workflow-alias-of: self\n---\n");
   assert.throws(() => workflowOwnerFromSkill("self", self, resolve), /Invalid workflow metadata/);
 
-  // The session-level failure: after /skill:resolve-issues, pi-better-plan's
-  // sync_workflow_plan refused with "Only an active rush-issues workflow can sync its plan."
-  const { default: planExtension } = await import("../../pi-better-plan/src/index.js");
-  const runDir = join(dir, ".resolve-issues", "rush", "run-1");
-  mkdirSync(runDir, { recursive: true });
-  const planPath = join(runDir, "task-plan.json");
-  writeFileSync(planPath, JSON.stringify({
-    runId: "run-1", planRevision: 1, warehouseCanaryRequired: false,
-    fleet: { explore: { status: "pending" }, implement: { status: "pending" } },
-    issues: [{ id: "1", title: "Unit", stage: "pending", status: "pending", dependsOn: [] }],
-  }));
   type Command = { handler(args: string, ctx: ExtensionContext): Promise<void> | void };
   const entries: Array<{ type: string; customType?: string; data?: unknown }> = [];
   const goalHandlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const goalCommands = new Map<string, Command>();
   const goalTools = new Map<string, ToolDefinition>();
-  const planTools = new Map<string, ToolDefinition>();
   const userMessages: string[] = [];
   const notices: string[] = [];
   const ctx = {
@@ -196,19 +201,42 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
     registerTool(tool: ToolDefinition) { goalTools.set(tool.name, tool); },
     on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown) { goalHandlers.set(event, handler); },
   } as unknown as ExtensionAPI);
-  planExtension({
+
+  // The standalone Plan package is retired; the Harness Outcome & Todo runtime
+  // owns the workflow plan bridge. Its hooks control starts Off and is switched on
+  // through the real setting, so this test never touches personal settings.
+  let todoControl: { get(): string; change(value: string, ctx: ExtensionContext): Promise<void> } | undefined;
+  shared.events.on("harness-settings:register", (candidate: { id?: string }) => {
+    if (candidate?.id === "outcome-todo") todoControl = candidate as typeof todoControl;
+  });
+  const harnessHandlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
+  const harnessTools = new Map<string, ToolDefinition>();
+  let harnessActiveTools = ["read"];
+  taskContext({
     ...shared,
     registerCommand() {},
-    registerTool(tool: ToolDefinition) { planTools.set(tool.name, tool); },
-    on() {},
-  } as unknown as Parameters<typeof planExtension>[0]);
+    registerTool(tool: ToolDefinition) { harnessTools.set(tool.name, tool); },
+    on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown) { harnessHandlers.set(event, handler); },
+    getActiveTools: () => harnessActiveTools,
+    setActiveTools: (next: string[]) => { harnessActiveTools = next; },
+  } as unknown as ExtensionAPI);
+  await harnessHandlers.get("session_start")?.({ reason: "startup" }, ctx);
+  assert.equal(todoControl?.get(), "Off", "Outcome & Todo hooks default off");
+  await assert.rejects(
+    harnessTools.get("update_todo")!.execute("off", { outcome: { objective: "x" } }, undefined, undefined, toolContext(ctx)),
+    /Outcome & Todo hooks are off/,
+  );
+  await todoControl!.change("On", ctx);
+  assert.deepEqual(harnessActiveTools, ["read", "update_todo", "get_todo"]);
 
   await goalHandlers.get("session_start")?.({ reason: "startup" }, ctx);
   await goalHandlers.get("input")?.({ source: "interactive", text: "/skill:resolve-issues #312" }, ctx);
   assert.deepEqual(currentWorkflowOwner(entries), rushOwner);
-  const prompt = await goalHandlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  const prompt = await invokeBeforeAgentStart(goalHandlers, ctx, "base");
   assert.match(prompt.systemPrompt, /Coordinate the rush run/, "resumed turns carry the coordinator's instructions");
-  const synced = await planTools.get("update_plan")!.execute("bind", { workflow: { path: planPath, revision: 1 } }, undefined, undefined, toolContext(ctx));
+  assert.doesNotMatch(prompt.systemPrompt, /Active objective:/, "Harness owns the structured outcome text");
+  assert.match(prompt.systemPrompt, /Complete the goal only after the workflow completion audit/);
+  const synced = await harnessTools.get("update_todo")!.execute("bind", { workflow: { path: planPath, revision: 1 } }, undefined, undefined, toolContext(ctx));
   assert.equal((synced.details as { runId: string }).runId, "run-1");
 
   await goalCommands.get("workflow")?.handler("clear", ctx);
@@ -218,21 +246,26 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   await goalCommands.get("goal")?.handler("/skill:resolve-issues #312", ctx);
   assert.equal(userMessages.at(-1), "/skill:resolve-issues #312");
   assert.deepEqual(currentWorkflowOwner(entries), rushOwner, "a goal bound to the alias binds the coordinator too");
-  await planTools.get("update_plan")!.execute("bind-goal", { workflow: { path: planPath, revision: 1 } }, undefined, undefined, toolContext(ctx));
-
+  await harnessTools.get("update_todo")!.execute("bind-goal", { workflow: { path: planPath, revision: 1 } }, undefined, undefined, toolContext(ctx));
+  const bindGoalOutcome = await harnessTools.get("get_todo")!.execute("outcome", {}, undefined, undefined, toolContext(ctx));
   const goalId = currentGoalSnapshot(ctx)?.goalId;
+  assert.equal((bindGoalOutcome.details as any).outcome.goalId, goalId, "the Harness outcome binds the Goal id");
+  assert.equal((bindGoalOutcome.details as any).outcome.status, "active");
   await goalTools.get("release_workflow")!.execute("release", {}, undefined, undefined, toolContext(ctx));
   assert.equal(currentWorkflowOwner(entries), null);
   assert.equal(currentGoalSnapshot(ctx)?.status, "paused", "handoff stops the associated goal without completing it");
   assert.equal(currentGoalSnapshot(ctx)?.completedAt, null);
   assert.equal(currentGoalSnapshot(ctx)?.pauseReason, "handback", "a handback pause waits for the user's answer");
+  const pausedOutcome = await harnessTools.get("get_todo")!.execute("paused", {}, undefined, undefined, toolContext(ctx));
+  assert.equal((pausedOutcome.details as any).outcome.goalId, goalId);
+  assert.equal((pausedOutcome.details as any).outcome.status, "paused", "handoff pauses the bound Harness outcome");
   const before = userMessages.length;
   await goalHandlers.get("agent_settled")?.({}, ctx);
   await goalHandlers.get("session_start")?.({ reason: "reload" }, ctx);
   t.mock.timers.tick(720_000);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(userMessages.length, before, "handoff and reload do not dispatch synthetic skill invocations");
-  await assert.rejects(planTools.get("update_plan")!.execute("held-update", {
+  await assert.rejects(harnessTools.get("update_todo")!.execute("held-update", {
     workflow: { path: planPath, revision: 1, event: "held", changes: [{ target: "run", set: { note: "held" } }] },
   }, undefined, undefined, toolContext(ctx)), /read-only handoff/);
   await goalHandlers.get("input")?.({ source: "extension", text: "/skill:resolve-issues #312" }, ctx);
@@ -243,7 +276,10 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   assert.equal(currentGoalSnapshot(ctx)?.status, "active");
   assert.deepEqual(currentWorkflowOwner(entries), rushOwner, "resuming a handed-back goal rebinds its workflow");
   assert.equal(userMessages.at(-1)?.startsWith("/skill:resolve-issues #312"), true, "resume continues through the bound skill");
-  const updated = await planTools.get("update_plan")!.execute("resumed-update", {
+  const resumedOutcome = await harnessTools.get("get_todo")!.execute("resumed", {}, undefined, undefined, toolContext(ctx));
+  assert.equal((resumedOutcome.details as any).outcome.goalId, goalId);
+  assert.equal((resumedOutcome.details as any).outcome.status, "active", "resuming rebinds the outcome to the same goal");
+  const updated = await harnessTools.get("update_todo")!.execute("resumed-update", {
     workflow: { path: planPath, revision: 1, event: "resumed", changes: [{ target: "run", set: { note: "resumed" } }] },
   }, undefined, undefined, toolContext(ctx));
   assert.equal((updated.details as { revision: number }).revision, 2, "the resumed workflow can mutate its plan again");
@@ -261,6 +297,7 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   assert.match(notices.at(-1) ?? "", /not a registered skill/);
   assert.equal(currentWorkflowOwner(entries), null);
   await goalHandlers.get("session_shutdown")?.({}, ctx);
+  await harnessHandlers.get("session_shutdown")?.({}, ctx);
 });
 test("an escape-paused workflow goal puts the paused instruction before, and over, the workflow text", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
@@ -300,7 +337,7 @@ test("an escape-paused workflow goal puts the paused instruction before, and ove
   await handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [], stopReason: "aborted" }] }, ctx);
   assert.equal(currentGoalSnapshot(ctx)?.pauseReason, "interrupt");
 
-  const prompt = (await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string }).systemPrompt;
+  const prompt = (await invokeBeforeAgentStart(handlers, ctx, "base")).systemPrompt;
   const paused = prompt.indexOf("paused because the user pressed escape");
   const override = prompt.indexOf("this overrides the workflow instructions below");
   const workflow = prompt.indexOf("Follow the workflow instructions below");
@@ -311,15 +348,31 @@ test("an escape-paused workflow goal puts the paused instruction before, and ove
 
   await commands.get("goal")?.handler("settings conversational-resume off", ctx);
   await handlers.get("session_start")?.({ reason: "reload" }, ctx);
-  const disabled = (await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string }).systemPrompt;
+  const disabled = (await invokeBeforeAgentStart(handlers, ctx, "base")).systemPrompt;
   assert.equal(currentGoalSnapshot(ctx)?.status, "paused", "reloading the saved control never resumes the goal");
   assert.match(disabled, /do not continue the goal's work until it is resumed/);
   assert.match(disabled, /this overrides the workflow instructions below/);
   assert.match(disabled, /Only coordinate work/);
   assert.doesNotMatch(disabled, /goal_resume/, "disabling the resume tool retains the workflow pause override");
 
+  // Replay a permission pause written by an older release with its workflow retained.
+  entries.push({ type: "custom", customType: "pi-better-goal", data: {
+    version: 1, kind: "set", source: "command", at: 100,
+    goal: { ...currentGoalSnapshot(ctx)!, status: "paused", pauseReason: "permission-blocker" },
+  } });
+  await commands.get("goal")?.handler("settings conversational-resume on", ctx);
+  await handlers.get("session_start")?.({ reason: "reload" }, ctx);
+  assert.equal(currentGoalSnapshot(ctx)?.status, "paused");
+  assert.equal(currentGoalSnapshot(ctx)?.pauseReason, undefined);
+  assert.ok(currentWorkflowOwner(entries), "legacy replay retains the workflow owner");
+  const legacy = (await invokeBeforeAgentStart(handlers, ctx, "base")).systemPrompt;
+  assert.match(legacy, /do not continue the goal's work until it is resumed/);
+  assert.match(legacy, /this overrides the workflow instructions below/);
+  assert.doesNotMatch(legacy, /pressed escape|goal_resume/,
+    "a legacy pause neither invents an Escape nor allows conversational resume");
+
   await commands.get("goal")?.handler("resume", ctx);
-  const running = (await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string }).systemPrompt;
+  const running = (await invokeBeforeAgentStart(handlers, ctx, "base")).systemPrompt;
   assert.doesNotMatch(running, /pressed escape|overrides the workflow/);
   await handlers.get("session_shutdown")?.({}, ctx);
 });

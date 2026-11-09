@@ -62,23 +62,179 @@ async function settle() {
     await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
-test("default table has the locked rows and independent Main/Subagents values", () => {
+test("default table starts all profiles Off and hides retained details", () => {
     const h = harness();
     const lines = table(h.page, 84).map(plain);
-    assert.match(lines[0]!, /Sandbox permissions\s+Main\s+Subagents/);
-    assert.match(lines[1]!, /Sandbox\s+Off\s+On/);
-    assert.match(lines[2]!, /Project files\s+-\s+Write & delete/);
-    assert.match(lines[3]!, /Outside project\s+-\s+Write\s*$/);
-    assert.match(lines[4]!, /Stored credentials\s+-\s+Write & delete\s*$/);
-    assert.match(lines[5]!, /Run commands & applications\s+-\s+On/);
-    assert.match(lines[6]!, /Network access\s+-\s+On/);
-    assert.match(lines[7]!, /Process access\s+-\s+Read/);
-    assert.match(lines[8]!, /Subagents · Tools/);
-    assert.match(lines[9]!, /Guarded \(follows the file rules\)/);
-    assert.match(lines[10]!, /\[x\] apply_patch\s+harness adapter/);
-    assert.match(lines[11]!, /Trusted \(runs outside the file rules\)/);
-    assert.match(lines[12]!, /> \[x\] @juicesharp\/rpiv-web-tools 2\/2/);
+    assert.match(lines[0]!, /Sandbox permissions\s+Main\s+Subagents\s+Background tasks/);
+    assert.match(lines[1]!, /Sandbox\s+Off\s+Off\s+Off/);
+    for (const line of lines.slice(2, 10)) assert.match(line, /\s+-\s+-\s+-\s*$/);
+    assert.match(lines[5]!, /Run applications\s+-\s+-\s+-\s*$/);
+    assert.match(lines[6]!, /Shell scripts\s+-\s+-\s+-\s*$/);
+    assert.match(lines[7]!, /Command time limit\s+-\s+-\s+-\s*$/);
+    assert.match(lines[10]!, /Subagents · Tools/);
+    assert.match(lines[11]!, /Guarded \(follows the file rules\)/);
+    assert.match(lines[12]!, /\[x\] apply_patch\s+harness adapter/);
+    assert.match(lines[13]!, /Trusted \(runs outside the file rules\)/);
+    assert.match(lines[14]!, /> \[x\] @juicesharp\/rpiv-web-tools 2\/2/);
     assert.ok(!lines.some((line) => /\[x\] web_fetch/.test(line)), "tools are initially folded");
+});
+
+test("Shell scripts and Command time limit follow Run applications and save independently", async () => {
+    const h = harness();
+    h.press(Key.space); // Main On.
+    await settle();
+    h.press(...Array(5).fill(Key.down)); // Shell scripts.
+    assert.match(plain(table(h.page, 100)[6]!), /Shell scripts\s+On\s+-\s+-\s*$/);
+    h.press(Key.space);
+    await settle();
+    assert.equal(h.current.main.shell, false);
+    assert.equal(h.current.main.commands, true);
+    assert.deepEqual(h.current.subagents, h.initial.subagents);
+    assert.deepEqual(h.current.background, h.initial.background);
+    h.press(Key.space);
+    await settle();
+    assert.equal(h.current.main.shell, true, "Space toggles Shell scripts both ways");
+    h.press(Key.down); // Command time limit.
+    assert.match(plain(table(h.page, 100)[7]!), /Command time limit\s+No limit\s+-\s+-\s*$/);
+    for (const expected of [60, 300, 600, 1800, null]) {
+        h.press(Key.space);
+        await settle();
+        assert.equal(h.current.main.commandTimeoutSeconds, expected);
+    }
+    assert.equal(h.current.main.shell, true);
+    // Run applications Off dims both dependent rows and makes them inert.
+    h.press(Key.up, Key.up, Key.space);
+    await settle();
+    assert.equal(h.current.main.commands, false);
+    assert.match(plain(table(h.page, 100)[5]!), /Run applications\s+Off\s+-\s+-\s*$/);
+    assert.match(plain(table(h.page, 100)[6]!), /Shell scripts\s+-\s+-\s+-\s*$/);
+    assert.match(plain(table(h.page, 100)[7]!), /Command time limit\s+-\s+-\s+-\s*$/);
+    h.press(Key.down, Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.main.shell, true, "dependent rows cannot change while Run applications is Off");
+    assert.equal(h.current.main.commandTimeoutSeconds, null);
+    h.press(Key.up, Key.up, Key.space);
+    await settle();
+    assert.equal(h.current.main.commands, true);
+    // Set a persistent non-default pair; other columns stay untouched.
+    h.press(Key.down, Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
+    await settle();
+    h.press(Key.space);
+    await settle();
+    assert.equal(h.current.main.shell, false);
+    assert.equal(h.current.main.commandTimeoutSeconds, 300);
+    h.press("\x13");
+    await settle();
+    assert.equal(h.saved.length, 1);
+    assert.equal(h.saved[0]!.main.shell, false);
+    assert.equal(h.saved[0]!.main.commandTimeoutSeconds, 300);
+    assert.deepEqual(h.saved[0]!.subagents, h.initial.subagents);
+    assert.deepEqual(h.saved[0]!.background, h.initial.background);
+    const reopened = harness({ getConfig: () => h.saved[0]! });
+    reopened.press(...Array(5).fill(Key.down));
+    assert.match(plain(table(reopened.page, 100)[6]!), /Shell scripts\s+Off\s+-\s+-\s*$/);
+    reopened.press(Key.down);
+    assert.match(plain(table(reopened.page, 100)[7]!), /Command time limit\s+5 min\s+-\s+-\s*$/);
+});
+
+test("Shell scripts and Command time limit are independent in every column", async () => {
+    const h = harness();
+    h.press(Key.space); // Main On.
+    await settle();
+    h.press(Key.right, Key.space); // Subagents On.
+    await settle();
+    h.press(Key.right, Key.space); // Background tasks On.
+    await settle();
+    h.press(...Array(5).fill(Key.down)); // Background Shell scripts.
+    h.press(Key.space);
+    await settle();
+    h.press(Key.down, Key.space); // Background no limit -> 60.
+    await settle();
+    h.press(Key.space); // 60 -> 300.
+    await settle();
+    assert.equal(h.current.background.shell, false);
+    assert.equal(h.current.background.commandTimeoutSeconds, 300);
+    assert.equal(h.current.main.shell, true);
+    assert.equal(h.current.main.commandTimeoutSeconds, null);
+    assert.equal(h.current.subagents.shell, true);
+    assert.equal(h.current.subagents.commandTimeoutSeconds, null);
+    h.press(Key.left, ...Array(6).fill(Key.up)); // Subagents Sandbox, then its Shell scripts.
+    h.press(...Array(5).fill(Key.down));
+    h.press(Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.subagents.shell, false);
+    assert.equal(h.current.subagents.commandTimeoutSeconds, 60);
+    assert.equal(h.current.background.shell, false);
+    assert.equal(h.current.background.commandTimeoutSeconds, 300);
+    assert.equal(h.current.main.shell, true);
+    assert.equal(h.current.main.commandTimeoutSeconds, null);
+    h.press("\x13");
+    await settle();
+    assert.equal(h.saved[0]!.subagents.commandTimeoutSeconds, 60);
+    assert.equal(h.saved[0]!.background.commandTimeoutSeconds, 300);
+});
+
+test("legacy profiles render Shell scripts On and Command time limit No limit", async () => {
+    const legacy = structuredClone(DEFAULT_PERMISSION_SETTINGS);
+    delete legacy.main.shell;
+    delete legacy.main.commandTimeoutSeconds;
+    legacy.main.enabled = true;
+    const h = harness({ getConfig: () => structuredClone(legacy) });
+    h.press(...Array(5).fill(Key.down));
+    assert.match(plain(table(h.page, 100)[6]!), /Shell scripts\s+On\s+-\s+-\s*$/);
+    h.press(Key.down);
+    assert.match(plain(table(h.page, 100)[7]!), /Command time limit\s+No limit\s+-\s+-\s*$/);
+    h.press(Key.space);
+    await settle();
+    assert.equal(h.current.main.commandTimeoutSeconds, 60, "No limit cycles to 60");
+});
+
+test("Background cells navigate, retain disabled values, and save independently of Main and Subagents", async () => {
+    const h = harness();
+    h.press(Key.right, Key.right, Key.right, Key.space);
+    await settle();
+    assert.equal(h.current.background.enabled, true, "Right clamps at Background tasks");
+    assert.deepEqual(h.current.main, h.initial.main);
+    assert.deepEqual(h.current.subagents, h.initial.subagents);
+    const selected = h.page.render(100).find((line) => line.includes("\x1b[44m"))!;
+    assert.match(selected, /\x1b\[7m[\s\S]*On/);
+    assert.match(plain(table(h.page, 100)[1]!), /Sandbox\s+Off\s+Off\s+On/);
+    h.press(Key.down, Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.background.outsideProject, "write");
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.background.storedCredentials, "read-write");
+    for (let i = 0; i < 5; i++) {
+        h.press(Key.down, Key.space);
+        await settle();
+    }
+    assert.equal(h.current.background.commands, false);
+    assert.equal(h.current.background.network, false);
+    assert.equal(h.current.background.processAccess, "off");
+    h.press(...Array(8).fill(Key.up), Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.background.projectFiles, "read-write", "disabled details cannot change");
+    assert.match(table(h.page, 100)[2]!, /\x1b\[2m- /);
+    h.press(Key.up, Key.space);
+    await settle();
+    assert.equal(h.current.background.outsideProject, "write");
+    h.press("\x13");
+    await settle();
+    assert.deepEqual(h.saved, [h.current]);
+    h.press(Key.left, Key.left, Key.left, Key.space);
+    await settle();
+    assert.equal(h.current.main.enabled, true, "Left clamps at Main");
+    assert.deepEqual(h.current.background, h.saved[0]!.background);
+    assert.deepEqual(h.current.subagents, h.initial.subagents);
 });
 
 test("selected rows have a full-width background and bold text, with an inverse active cell", () => {
@@ -90,8 +246,8 @@ test("selected rows have a full-width background and bold text, with an inverse 
     assert.match(selected[0]!, /\x1b\[1m/);
     assert.match(selected[0]!, /\x1b\[7m[\s\S]*Off/);
     h.press(Key.right);
-    assert.match(selectedLines()[0]!, /\x1b\[7m[\s\S]*On/);
-    h.press(...Array(8).fill(Key.down));
+    assert.match(selectedLines()[0]!, /\x1b\[7m[\s\S]*Off/);
+    h.press(...Array(10).fill(Key.down));
     selected = selectedLines();
     assert.equal(selected.length, 1);
     assert.equal(visibleWidth(selected[0]!), 100);
@@ -110,7 +266,7 @@ test("disabled details are dimmed and inactive but survive off/on toggles", asyn
     h.press(Key.up, Key.space);
     await settle();
     assert.equal(h.current.main.enabled, true);
-    assert.match(plain(table(h.page)[2]!), /Project files\s+Write & delete\s+Write & delete/);
+    assert.match(plain(table(h.page)[2]!), /Project files\s+Write & delete\s+-\s+-/);
     h.press(Key.down, Key.space);
     await settle();
     assert.equal(h.current.main.projectFiles, "off");
@@ -118,15 +274,17 @@ test("disabled details are dimmed and inactive but survive off/on toggles", asyn
     await settle();
     assert.equal(h.current.main.enabled, false);
     assert.equal(h.current.main.projectFiles, "off");
-    assert.match(plain(table(h.page)[2]!), /Project files\s+-\s+Write & delete/);
+    assert.match(plain(table(h.page)[2]!), /Project files\s+-\s+-\s+-/);
     h.press(Key.space);
     await settle();
-    assert.match(plain(table(h.page)[2]!), /Project files\s+Off\s+Write & delete/);
+    assert.match(plain(table(h.page)[2]!), /Project files\s+Off\s+-\s+-/);
 });
 
 test("arrows select profiles, Space cycles, Enter folds only, Ctrl+S saves, Escape closes", async () => {
     const h = harness();
-    h.press(Key.right, Key.down, Key.space);
+    h.press(Key.right, Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "off");
     h.press(Key.space);
@@ -138,7 +296,7 @@ test("arrows select profiles, Space cycles, Enter folds only, Ctrl+S saves, Esca
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "read-write");
-    h.press(Key.down, Key.down, Key.down, Key.down, Key.space);
+    h.press(Key.down, Key.down, Key.down, Key.down, Key.down, Key.down, Key.space);
     await settle();
     assert.equal(h.current.subagents.network, false);
     h.press(Key.enter, ...toBottom, Key.enter);
@@ -156,34 +314,38 @@ test("arrows select profiles, Space cycles, Enter folds only, Ctrl+S saves, Esca
 test("file rows cycle four levels and credentials remain independent under Outside Write", async () => {
     const h = harness();
     const hint = () => h.page.render(140).map(plain).find((line) => /deletable|rename-based|Known credential/.test(line));
-    h.press(Key.right, Key.down, Key.down);
+    h.press(Key.right, Key.space);
+    await settle();
+    h.press(Key.down, Key.down);
     assert.match(hint()!, /Write: git and rename-based saves fail outside the project except in worktree folders/);
     h.press(Key.down);
     assert.match(hint()!, /Known credential files follow this row independently of Outside project/);
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s+-\s*$/);
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.storedCredentials, "off", "Write & delete to Off tightens immediately");
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Off\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Off\s+-\s*$/);
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.storedCredentials, "read");
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Read\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Read\s+-\s*$/);
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.storedCredentials, "read-write", "credentials skip unsupported Write");
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s+-\s*$/);
     assert.equal(h.current.subagents.outsideProject, "write");
 });
 
 test("Process access cycles only Off and Read without changing other permissions", async () => {
     const h = harness();
-    h.press(Key.right, ...Array(6).fill(Key.down), Key.space);
+    h.press(Key.right, Key.space);
+    await settle();
+    h.press(...Array(8).fill(Key.down), Key.space);
     await settle();
     assert.equal(h.current.subagents.processAccess, "off");
     assert.equal(h.current.main.processAccess, "read");
-    assert.match(plain(table(h.page, 100)[7]!), /Process access\s+-\s+Off/);
-    assert.deepEqual({ ...h.current.subagents, processAccess: "read" }, h.initial.subagents);
+    assert.match(plain(table(h.page, 100)[9]!), /Process access\s+-\s+Off/);
+    assert.deepEqual({ ...h.current.subagents, processAccess: "read" }, { ...h.initial.subagents, enabled: true });
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.processAccess, "read");
@@ -191,9 +353,11 @@ test("Process access cycles only Off and Read without changing other permissions
 
 test("a single Space applies both looser and tighter permission changes", async () => {
     const h = harness();
-    h.press(Key.right, Key.down, Key.down, Key.space);
+    h.press(Key.right, Key.space);
     await settle();
-    assert.equal(h.changes.length, 1);
+    h.press(Key.down, Key.down, Key.space);
+    await settle();
+    assert.equal(h.changes.length, 2);
     assert.equal(h.current.subagents.outsideProject, "read-write");
     assert.ok(!h.page.render(140).map(plain).join("\n").includes("Press Space again"));
     h.press(Key.space);
@@ -208,13 +372,15 @@ test("ctrl+s saves the current defaults from any row", async () => {
     h.press("\x13");
     await settle();
     assert.equal(h.saved.length, 1);
-    assert.equal(h.saved[0]!.subagents.enabled, false);
+    assert.equal(h.saved[0]!.subagents.enabled, true);
     assert.match(h.page.render(100).map(plain).join("\n"), /ctrl\+s Save default/);
 });
 
 test("saving looser defaults happens on the first Ctrl+S and names what loosened", async () => {
     const h = harness({ loosening: (next) => next.subagents.network ? [] : ["Subagents: network on"] });
-    h.press(Key.right, ...Array(5).fill(Key.down), Key.space);
+    h.press(Key.right, Key.space);
+    await settle();
+    h.press(...Array(7).fill(Key.down), Key.space);
     await settle();
     assert.equal(h.current.subagents.network, false);
     h.press("\x13");
@@ -234,15 +400,15 @@ test("change and save failures stay inline without optimistic state or closing",
     h.press(Key.right, Key.space);
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /change failed/);
-    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+On/);
+    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/);
     failChange = false;
     h.press(Key.space);
     await settle();
-    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/);
+    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+On/);
     h.press("\x13");
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /save failed/);
-    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/, "failed defaults save preserves the edit");
+    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+On/, "failed defaults save preserves the edit");
     assert.equal(h.closes, 0);
     failSave = false;
     h.press("\x13");
@@ -305,7 +471,7 @@ test("Tools groups fold, bulk-select with one Space, and retain per-tool choices
     ];
     const h = harness({ discoverTools: () => discovered });
     const rendered = () => h.page.render(160).map(plain).join("\n");
-    h.press(...Array(8).fill(Key.down));
+    h.press(...Array(10).fill(Key.down));
     assert.match(rendered(), />\s+> \[ \] @juicesharp\/rpiv-ask-user-question 0\/2/);
     h.press(Key.space);
     await settle();
@@ -343,7 +509,7 @@ test("Tools groups fold, bulk-select with one Space, and retain per-tool choices
 
 test("a ticked tool that is not loaded stays grouped so it can be unticked", async () => {
     const h = harness({ discoverTools: () => [] });
-    h.press(...Array(8).fill(Key.down), Key.right);
+    h.press(...Array(10).fill(Key.down), Key.right);
     const lines = h.page.render(120).map(plain);
     assert.ok(lines.some((line) => /\[x\] web_fetch\s+needs Network On · not loaded/.test(line)));
     h.press(Key.down, Key.space);
@@ -369,7 +535,7 @@ test("builtin provenance labels groups without relabeling dot packages or changi
     assert.match(rendered(), /> \[ \] \. 0\/1/);
     assert.match(rendered(), /> \[x\] built-in 1\/1/);
     assert.match(rendered(), /> \[ \] docs \(built-in\) 0\/1/);
-    h.press(...Array(9).fill(Key.down), Key.right);
+    h.press(...Array(11).fill(Key.down), Key.right);
     assert.match(rendered(), /\[x\] bundled_tool/);
     assert.ok(!/\[ \] local_tool/.test(rendered()), "the unmarked dot package is a separate collapsed group");
     h.press(Key.space);
@@ -401,7 +567,7 @@ test("MCP providers are separate groups and identical names in other packages st
     assert.match(rendered(), /> \[ \] linear \(mcp\) 0\/2/);
     assert.match(rendered(), /> \[ \] linear \(other\) 0\/1/);
     assert.match(rendered(), /> \[ \] worldpay_docs \(mcp\) 0\/1/);
-    h.press(...Array(9).fill(Key.down), Key.space);
+    h.press(...Array(11).fill(Key.down), Key.space);
     await settle();
     assert.deepEqual(h.current.subagentTools.trusted.slice(2), discovered.slice(0, 2));
     assert.match(rendered(), /> \[ \] linear \(other\) 0\/1/);
@@ -411,7 +577,7 @@ test("MCP providers are separate groups and identical names in other packages st
 test("folding preserves tool choices and narrow render bounds", async () => {
     const discovered = [{ name: "very_long_tool_name", package: "npm:a-very-long-package-name" }];
     const h = harness({ discoverTools: () => discovered });
-    h.press(...Array(9).fill(Key.down), Key.space);
+    h.press(...Array(11).fill(Key.down), Key.space);
     await settle();
     assert.deepEqual(h.current.subagentTools.trusted.at(-1), discovered[0]);
     h.press(Key.right);
@@ -426,7 +592,7 @@ test("folding preserves tool choices and narrow render bounds", async () => {
 test("individual children toggle with one Space and reopening does not grant new tools", async () => {
     const tool = { name: "first", package: "npm:zzz" };
     const h = harness({ discoverTools: () => [tool] });
-    h.press(...Array(9).fill(Key.down), Key.right, Key.down, Key.space);
+    h.press(...Array(11).fill(Key.down), Key.right, Key.down, Key.space);
     await settle();
     assert.equal(h.current.subagentTools.trusted.length, 3);
     assert.deepEqual(h.current.subagentTools.trusted.at(-1), tool);
@@ -434,7 +600,7 @@ test("individual children toggle with one Space and reopening does not grant new
     await settle();
     const reopened = harness({ getConfig: () => h.saved.at(-1)!, discoverTools: () => [tool, { name: "new", package: "npm:zzz" }] });
     assert.match(reopened.page.render(160).map(plain).join("\n"), /> \[-\] zzz 1\/2/);
-    reopened.press(...Array(9).fill(Key.down), Key.right);
+    reopened.press(...Array(11).fill(Key.down), Key.right);
     assert.match(reopened.page.render(160).map(plain).join("\n"), /\[ \] new/);
 });
 
@@ -447,7 +613,7 @@ test("async bulk completion preserves focus after an unloaded group disappears",
         discoverTools: () => [{ name: "new", package: "npm:zzz" }],
         change: () => new Promise<void>((resolve) => { release = resolve; }),
     });
-    h.press(...Array(8).fill(Key.down), Key.space, Key.down);
+    h.press(...Array(10).fill(Key.down), Key.space, Key.down);
     release();
     await settle();
     const rendered = h.page.render(160).map(plain).join("\n");
@@ -460,7 +626,7 @@ test("removing the last unavailable child focuses the next surviving group", asy
     initial.subagentTools.trusted = [{ name: "old", package: "npm:aaa" }];
     const next = { name: "next", package: "npm:bbb" };
     const h = harness({ getConfig: () => initial, discoverTools: () => [next, { name: "last", package: "npm:ccc" }] });
-    h.press(...Array(8).fill(Key.down), Key.right, Key.down, Key.space);
+    h.press(...Array(10).fill(Key.down), Key.right, Key.down, Key.space);
     await settle();
     assert.match(h.page.render(160).map(plain).join("\n"), />\s+> \[ \] bbb 0\/1/);
     h.press(Key.space);
@@ -473,7 +639,7 @@ test("a looser save note remains visible within narrow bounds", async () => {
         discoverTools: () => [{ name: "one", package: "npm:zzz" }, { name: "two", package: "npm:zzz" }],
         loosening: () => ["Subagents: two additional trusted tools run outside file rules"],
     });
-    h.press(...Array(9).fill(Key.down), Key.space);
+    h.press(...Array(11).fill(Key.down), Key.space);
     await settle();
     h.press("\x13");
     await settle();
@@ -494,7 +660,7 @@ test("deferred bulk failures retain state, suppress duplicate changes, and allow
             if (calls === 1) return new Promise<void>((_resolve, fail) => { reject = fail; });
         },
     });
-    h.press(...Array(9).fill(Key.down), Key.space, Key.right, Key.space, Key.space);
+    h.press(...Array(11).fill(Key.down), Key.space, Key.right, Key.space, Key.space);
     assert.equal(calls, 1, "input while busy cannot submit another change");
     reject(new Error("async bulk failed"));
     await settle();
@@ -511,7 +677,7 @@ test("failed bulk changes do not update group checkbox state", async () => {
         discoverTools: () => [{ name: "tool", package: "npm:zzz" }],
         change: () => { throw new Error("bulk failed"); },
     });
-    h.press(...Array(9).fill(Key.down), Key.space);
+    h.press(...Array(11).fill(Key.down), Key.space);
     await settle();
     assert.match(h.page.render(160).map(plain).join("\n"), /> \[ \] zzz 0\/1/);
     assert.match(plain(h.page.render(160).at(-1)!), /bulk failed/);

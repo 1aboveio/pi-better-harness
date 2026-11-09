@@ -4,6 +4,682 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.41.2] - 2026-11-09
+
+### Fixed
+
+- Bundle Goal 0.12.3 so permission failure reports no longer pause the Goal continuation loop or require repeated manual resume.
+
+## [pi-better-goal@0.12.3] - 2026-11-09
+
+### Fixed
+
+- Keep permission failure reports as diagnostics without pausing Goal, suppressing continuation, or limiting resume to one turn. Agents can retry or continue other authorized work while tool and sandbox permissions remain enforced.
+- Preserve ordinary no-progress protection and explicit pauses. Legacy permission-paused sessions resume normally, and retained workflows remain paused until resume.
+
+## [pi-better-harness@0.41.1] - 2026-11-08
+
+### Fixed
+
+- Bundle Subagents 0.28.1 so sandboxed launches use the active Pi SDK even when PATH points to the managed Pi shell launcher.
+
+## [pi-better-subagents@0.28.1] - 2026-11-08
+
+### Fixed
+
+- Start confined children with the active Pi SDK directly instead of rejecting managed Pi launchers on PATH. Explicitly supplied foreign CLI paths remain rejected.
+- Omit refused implicit tools before child preflight so restrictive sandbox profiles can launch the remaining supported tools.
+
+## [pi-better-harness@0.41.0] - 2026-11-08
+
+### Added
+
+- Use the linked worktree as the project context boundary. Keep global AGENTS.md rules and the worktree's own rules without inheriting the main checkout or falling back when a worktree file is absent. This filtering requires a Pi host that applies structured prompt edits; it is verified on Pi 1.5.0 and remains inert on Pi 0.82.1.
+- Bundle Subagents 0.28.0 and Goal 0.12.2, including skill selection controls and verified issue-workflow completion.
+
+### Fixed
+
+- Bind revision-zero Rush preflight plans that carry runDir and units without runId or fleet. Read-only binding leaves the file unchanged, transitions advance its revision, and full real-path identity checks reject a different directory with the same name. The run directory cannot be changed through a transition.
+
+## [pi-better-subagents@0.28.0] - 2026-11-08
+
+### Added
+
+- Bound child skill exposure with launch options, role and agent definitions, session choices, and saved subagent defaults. Omitted settings keep discovery, an empty list disables the catalog, and explicit paths load only the selected skills. Continuations retain the original choice and reject conflicting overrides; clean still controls extensions only.
+- Select skills with a shared searchable checkbox picker in Subagent settings and Agents. Filtering preserves selections, unavailable saved paths remain visible, manual paths are supported, and applying zero checked explicitly selects No skill catalog. The picker uses Pi's loaded metadata and offers manual entry when the host reports none.
+- Show the effective skill choice and its source consistently in settings, catalog inspection, and launch metadata. Preserve edits on cancellation and failed saves, and keep the active control visible in short terminals.
+- Apply the worktree project-context boundary to standalone Subagents parents and their children on supported Pi hosts.
+
+## [pi-better-goal@0.12.2] - 2026-11-08
+
+### Fixed
+
+- Refuse completion of rush-issues and resolve-issues Goals when the plan is unbound or unavailable, or the scheduler fails, times out, or returns invalid evidence. Keep the Goal active and retain workflow ownership until the scheduler explicitly reports finish. Ordinary Goals, other coordinators, and human handback behavior remain unchanged.
+- Reject malformed scheduler due entries instead of dropping them, so a finish entry cannot hide unverified work. Recovery messages name the update_todo workflow binding API.
+
+## [pi-better-harness@0.40.6] - 2026-11-07
+
+### Added
+
+- Guard against foreground waits with a `tool_call` check that blocks a command waiting on CI, a merge, a deploy, or a remote service, and tells the caller to spawn it as a background task instead. A foreground wait ties its result to the turn and dies with it; a background task outlives the turn. The guard reads command shape rather than duration, so a long build whose output belongs in the foreground still runs there.
+- Tool call guard (On/Off) in Harness settings gates the check itself. It takes effect on the next tool call, so turning it off needs no reload, and it is On by default.
+
+## [pi-better-harness@0.40.5] - 2026-11-07
+
+### Fixed
+
+- Stop the tool-row shimmer latching off. The clock cleared itself once 400 ms passed without a render, but the clock is what requests those renders, so nothing could restart it: the spinner stayed dead until an unrelated render happened to arrive. Instrumenting a real session showed this needs no particular cause — with nothing displaying the TUI at all, one frame still saw the last render 522 ms old, which is enough to trip the old check. Measured over 80 seconds and 941 frames, the animation now falls to one frame a second during such a pause and returns to 80 ms as soon as the row paints again.
+- Declare the shimmer cadence through `shimmerFrameDelay`, and cover the deferred-render recovery path, which is the path production uses: all 994 renders recorded in that session arrived asynchronously rather than inside a timer frame.
+
+## [pi-better-harness@0.40.4] - 2026-11-07
+
+### Fixed
+
+- Bundle Model Router 0.1.4, which declares context limits that fit inside the providers' shared window, so a long conversation routed through `router/deepseek-flash-auto` is no longer rejected for requesting more tokens than the endpoint accepts.
+
+## [pi-better-model-router@0.1.4] - 2026-11-07
+
+### Fixed
+
+- Declare an input budget and output budget that add up to the providers' real window. Both candidates share one 1,048,576-token window between input and output, but Pi reads `contextWindow` as the input allowance and `maxTokens` as room beyond it, so the previous 1,000,000/384,000 pair promised 1,384,000 tokens of capacity. A 746,917-token conversation plus the advertised 384,000-token completion is 1,130,917 tokens, which the provider rejects with `maximum context length is 1048576`. The virtual model now declares `1,048,576 - 64,000` input tokens beside a 64,000-token output budget.
+- The same pair keeps Pi's compaction trigger below the point where output stops fitting. The trigger is `contextWindow - reserveTokens` while output stops fitting at `contextWindow - maxTokens`, so any `maxTokens` above the reserve fires compaction too late to help. Catalog output limits are routinely far above the 16,384-token reserve Pi defaults to.
+
+## [pi-better-harness@0.40.3] - 2026-11-06
+
+### Fixed
+
+- Bundle Model Router 0.1.3, which declares the virtual model's context window so Pi no longer compacts after every routing error at any context size, and which keeps a transient provider failure retryable inside a long turn.
+
+## [pi-better-model-router@0.1.3] - 2026-11-06
+
+### Fixed
+
+- Declare the virtual model's 1M context window and 384k output limit. Pi reads the virtual model's limits whenever a response names no physical model, and the router's own routing error is such a response. An undeclared limit counts as zero, so Pi treated every conversation as past the compaction threshold and compacted after each routing error — in real sessions at 80k, 217k, 521k, and 599k tokens instead of the 983,616 threshold a 1M window gives.
+- Keep transient provider failures retryable inside a turn. A timeout, connection failure, `429`, or overloaded endpoint now only demotes that provider behind the other candidate, and is retried when every candidate is excluded, so one network blip no longer ends a long turn with `no eligible Flash model is available`. Rejected requests, such as a `400`, a bad schema, or an invalid key, still keep their provider out and can still end the turn when no route is left.
+- Cover connection-level failures in the transient classification: `Connection error.`, `terminated`, upstream HTTP failures, and aborted operations were previously indistinguishable from a rejected request.
+
+## [pi-better-harness@0.40.2] - 2026-11-05
+
+### Fixed
+
+- Bundle Background Tasks 0.14.2, Subagents 0.27.2, and Goal 0.12.1, which deliver their system-prompt guidance as named sections instead of returning a whole prompt.
+- Publish the execution policy as the `harness_execution_policy` section, and trim the policy and wait guidance to instructions: no rationale, no worked examples, and no defaults the tool schemas already state. Harness prompt sections fall from 7,026 to about 5,200 characters while the sleep prohibition, the tool mapping, and the launch-is-not-completion rule remain.
+- Remove a stale, unvendored copy of the execution policy under `extensions/task-context/`. The generator never wrote it, so it had drifted.
+- Keep the previous text append on pi versions that render no custom sections. Sections are a later pi feature, and these packages still declare support back to 0.84.4, where publishing a section delivers nothing at all. Real 0.84.4 coverage caught Goal's pause instruction disappearing entirely.
+
+## [pi-better-background-tasks@0.14.2] - 2026-11-05
+
+### Added
+
+- Publish the foreground-wait guidance as a `background_tasks` system-prompt section instead of relying on an unversioned append file that no install could reproduce. The section names the shapes that produced multi-minute foreground sleeps — a sleep on its own, before another command, or inside a loop — maps each wait to `bg_task_watch`, `bg_task_spawn` plus `wait_for_operations`, or `watch_delivery`, and restores the explicit `nohup`/`&`/`disown` prohibition.
+
+### Fixed
+
+- Stop appending the execution policy to the prompt text. A `before_agent_start` handler that returns `systemPrompt` sets `forceSystemPrompt`, so the request carries an opaque rendered snapshot and any section published later never reaches the model. The policy is now an assignment to `harness_execution_policy`, which keeps one copy in any load order. On a host without section support the policy and the wait guidance are appended as text instead, idempotently, so an older host receives exactly what it received before.
+
+## [pi-better-subagents@0.27.2] - 2026-11-05
+
+### Fixed
+
+- Publish the delegation settings and the worker handoff contract as the `subagents` and `worker_handoff` sections. Returning a whole prompt to deliver them set `forceSystemPrompt` and hid every section published after it.
+- Stop claiming the settings block sits at the end of the prompt. Custom sections render in publication order, so Background Tasks follows it; the note now names its own section.
+- Append the settings and the policy as text on hosts that render no custom sections, so support back to 0.84.4 is unchanged.
+
+## [pi-better-goal@0.12.1] - 2026-11-05
+
+### Fixed
+
+- Publish goal and workflow guidance as the `goal` section instead of returning a whole prompt, which suppressed every other package's section. Branch conditions, ordering, and text are unchanged.
+- Fail the test helper when a handler returns `systemPrompt`, so a regression that hides sections cannot pass. The helper previously rendered sections from the options object and ignored the return value.
+- Append the guidance as text on hosts that render no custom sections. Goal's real 0.84.4 end-to-end session in CI caught the pause instruction vanishing when it was delivered only as a section.
+
+## [pi-better-harness@0.40.1] - 2026-11-04
+
+### Fixed
+
+- Bundle Background Tasks 0.14.1 and Subagents 0.27.1, which stop probing process identity on the task panel's render path and keep the delegation policy in the system prompt instead of re-sending it on every request.
+
+## [pi-better-background-tasks@0.14.1] - 2026-11-04
+
+### Fixed
+
+- Stop spawning `ps` from the task panel. `supervisor.inspect` resolved claim and command identity for every retained task on every paint, synchronously, and the navigator rebuilt the projection twice more per frame. Process start tokens are now memoized for one second (including failures), identity is skipped once a terminal or lost record already decides the task, and a new `supervisor.snapshot` serves projections with durable-record reads only. One refresh now reuses a single projection for 250ms. Measured on six terminal tasks over thirty frames: 360 `ps` spawns and 1781ms became zero spawns and 28ms.
+- Signalling paths read the start token without the memo, so a recycled pid cannot inherit a remembered identity.
+
+## [pi-better-subagents@0.27.1] - 2026-11-04
+
+### Fixed
+
+- Carry the delegation policy at the end of the system prompt instead of appending a settings message to every provider request. The message was request-local, so Pi never persisted it: it was written to the prompt cache once per request and never read back, and it repeated a launch instruction on every turn. The system prompt is outside the compaction window and inside the cached prefix, so the policy survives summarization and costs nothing while it is unchanged.
+- Stop printing live occupancy in the pushed policy. Counters change as children come and go, which would rewrite the cached prefix; `subagent_settings` still reports them on demand. A `/subagents mode` edit now applies at the next agent start.
+- Stop telling a `manual` session to "launch ready, independent, useful work within available capacity". The capacity sentence contradicted the mode line that followed it, and manual sessions fanned work out to several subagents per turn.
+
+## [pi-better-harness@0.40.0] - 2026-11-03
+
+### Added
+
+- Bundle Background Tasks 0.14.0, Subagents 0.27.0, Goal 0.12.0 and Sandbox 0.14.1 for observed parent waits and worker park/resume. Workers keep ownership of assigned validation while supervised commands run and release their capacity slot while waiting.
+
+## [pi-better-background-tasks@0.14.0] - 2026-11-03
+
+### Added
+
+- Supervised local operations persist execution and terminal evidence across worker exit, reload and Pi shutdown. Ambiguous execution is reported as lost and is not automatically relaunched.
+- Register all-settled waits, inspect terminal revisions, acknowledge their interpretation, list wait generations and cancel observation separately from stopping the command. Delivery does not consume a wait or complete an assignment.
+- Observe supported merge delivery through the installed stateful watcher with `watch_delivery`. Durable operations appear in the task list, navigator and Goal activity view.
+- Apply both the captured worker authority and the current Background Tasks policy to worker commands.
+
+## [pi-better-subagents@0.27.0] - 2026-11-03
+
+### Added
+
+- Guarded operation tools let workers launch validation, save a wait checkpoint, exit cleanly and resume the same native conversation once dependencies settle. The attempt can finish while its assignment remains unfinished.
+- Recheck parent, branch, Goal, permissions, capacity, cancellation and writer ownership at execution release. Retain original task access across attempts, cancel published continuations by owned identity, and recover or visibly hold interrupted parks.
+- Show pending park dispositions in the navigator and protect their conversation and workspace from cleanup. Parking requires Pi SDK 0.82.1 or later; explicit tool exclusions and clean loadouts remain authoritative.
+
+## [pi-better-sandbox@0.14.1] - 2026-11-03
+
+### Fixed
+
+- Strip worker operation bridge credentials from task-command environments in the shared execution helper.
+
+## [pi-better-goal@0.12.0] - 2026-11-03
+
+### Added
+
+- Admit automatic worker resumes only for the owning active parent, eligible branch and current Goal. Pause, permission holds, disabled automatic continuation and unavailable workflow evidence hold resumption. A synchronous admission capability invalidates an earlier grant when state changes before execution release.
+
+## [pi-better-harness@0.39.2] - 2026-11-03
+
+### Fixed
+
+- Bundle Model Router 0.1.2, so a running turn moves to the cheaper provider at a price boundary instead of holding its first choice, and long sessions no longer append one router-state entry per request.
+
+## [pi-better-model-router@0.1.2] - 2026-11-03
+
+### Fixed
+
+- Re-check prices during a turn instead of only at the start of a user turn. A continuation keeps its model while that model is still the cheapest and moves to the other provider when one becomes strictly cheaper at a peak-window boundary. Equal cost keeps the current provider, so a switch never pays a cold prompt cache for no gain.
+- Move a retry to the other candidate after any error, and keep the failed model only after a context overflow, where Pi retries that request after compacting the conversation.
+- Report router state only when the excluded-provider list changes, so a long session no longer appends one `pi.virtual-model-state` entry per request.
+
+## [pi-better-harness@0.39.1] - 2026-11-03
+
+### Fixed
+
+- Bundle Subagents 0.26.2 and Model Router 0.1.1 so isolated router children load their declared dependencies, including Ollama Cloud, and check their model and tools before the first request.
+- Declare host-provided `@sinclair/typebox` as a peer dependency instead of a Harness runtime dependency, avoiding a duplicate runtime copy.
+
+## [pi-better-subagents@0.26.2] - 2026-11-03
+
+### Fixed
+
+- Resolve package `pi.childDependencies` and `pi.childRequirements` declarations recursively, including virtual-model provider dependencies such as Ollama Cloud. Resolve nested dependencies from the declaring package's context and report missing dependencies or cycles before launch.
+- Check the selected model, configured authentication, and active tools inside the child before its first request. Refuse changed dependency declarations or configuration between resolution and launch instead of running with configuration drift. These checks do not establish live provider connectivity.
+
+## [pi-better-model-router@0.1.1] - 2026-11-03
+
+### Fixed
+
+- Declare child requirements for the router's DeepSeek and Ollama Cloud candidates so isolated children load the required provider extensions and check candidate availability using the same model selection rules as routing.
+- Move `@sinclair/typebox` from runtime dependencies to a host-provided peer dependency, avoiding a duplicate runtime copy in the Harness bundle.
+
+## [pi-better-harness@0.39.0] - 2026-11-02
+
+### Added
+
+- Include Model Router 0.1.0 and its bundled Ollama Cloud provider in the Harness bundle and component installer. Select `router/deepseek-flash-auto` for price-based routing; the selected default model is unchanged. Older Pi hosts receive an upgrade notice and keep the other Harness extensions available.
+
+## [pi-better-model-router@0.1.0] - 2026-11-02
+
+### Added
+
+- Bundle and load `pi-ollama-cloud@0.13.1` so installing the router also supplies its Ollama Cloud provider.
+- Standalone `pi-better-model-router` extension with the `router/deepseek-flash-auto` virtual model, an explicit `price` policy, catalog model and price discovery, configurable peak/off-peak prices and UTC schedules, DeepSeek preference on equal prices, stable tool follow-ups, and bounded transient retry fallback. Requires Pi's native virtual-model API; tested with Pi 1.4.0. Not included in the Harness bundle.
+
+## [pi-better-harness@0.38.1] - 2026-11-02
+
+### Changed
+
+- Bundle Subagents 0.26.1, which keeps delegated work alive across a reload, recovers interrupted runs, and reports exactly one completion per terminal run, and Background Tasks 0.13.1, which adds an opt-in step gate and treats only a changed watch outcome as progress. Goal 0.11.0, Sandbox 0.14.0, and SSH 0.1.4 are unchanged.
+
+## [pi-better-subagents@0.26.1] - 2026-11-02
+
+### Added
+
+- Continue an attempt stopped with `subagent_stop` (status `killed`) through `subagent_spawn({ session_id, prompt })`, keeping its saved conversation, workspace, and frozen recipe while the stopped attempt's status, log, and result stay unchanged. A run that ended `failed` or `lost` is still refused. (#626)
+- Start a raw page from the newest retained bytes with `tail: true` on `subagent_output` and `subagent_result` in `mode=raw`, then page toward the oldest byte; the final step hands back an append-ready cursor. (#618)
+
+### Changed
+
+- Keep a live subagent child running when the session reloads or quits instead of killing delegated work: shutdown records a durable interruption and warns, and the replacing session re-adopts the record, finalizing an already-finished run from the child's own log. (#625)
+- Report an abandoned launch record — a run directory with a prompt but no metadata or log — separately in `subagent_list` instead of as an unknown-ownership gap, and reclaim it after one hour or immediately with `subagent_stop <id>`. (#623)
+
+### Fixed
+
+- Deliver exactly one completion per terminal run: `subagent_stop`, a navigator Close, the reload drain, and orphaned cleanup now record the pending completion instead of leaving the outcome to `subagent_list` polling, and duplicate ordinary callback events are deduplicated by source and id rather than by an enqueue-time status snapshot. (#624)
+- Recover an interrupted run across a full Pi restart from the child's own coherent log, and keep a live foreign parent's terminal callback under its original owner instead of delivering it into the resumed conversation. (#625)
+- Keep an interrupted run's owed completion for its own conversation, so an unrelated session that finishes first cannot consume it and the rightful session still receives exactly one delivery. (#625)
+- Refuse continuation while a recorded child is still alive, so a stopped attempt whose stop signal has not taken effect cannot let two writers append to one saved conversation. (#626)
+- Keep a running tool call from being judged stuck after `/reload`: the parent records the call it last saw open, so a bounded log read that no longer contains that call's start does not turn it into "no progress". (#620)
+- Stop the supervision ticker on a torn-down instance and let a new launch clear the teardown latch, so a run launched after a session shutdown still settles the health watcher instead of leaving it armed. (#625)
+- Report a miscopied cursor as `cursor-corrupt` instead of replaying page 1 as `source-replaced`, and resume only at an offset that a witness recomputed from the current source proves, so a damaged cursor cannot skip unread content or answer "end of text". (#617)
+- Stop purging a live launch attempt's artifacts, and re-classify debris under the same per-run metadata lock that publishes a run, so a launch that commits its metadata while a purge waits is preserved. (#623)
+- Keep a code point split across writes on a raw tail page, so tail-then-poll returns the whole character once and does not lose it at the page handoff. (#618)
+
+## [pi-better-background-tasks@0.13.1] - 2026-11-02
+
+### Added
+
+- Run a shell task under an opt-in `require_successful_steps` step gate: the command runs under bash `errexit`, so its first unhandled failing step ends the task with that step's exit code, and status reports `(step gate)` with the failing command and the shell's own exit. Handled failures stay green; the gate is refused before any task state exists for `shell: false`, structured `ssh`, and watch checks, which already report their real outcome. (#619)
+
+### Changed
+
+- Count only a changed watch outcome as progress: running a poll, appending its result, and polling on schedule are activity, so a watch that keeps reporting the same thing becomes quiet and then a suspected stall. The outcome is compared by content with sorted JSON keys and without poll timing, and the comparison survives `/reload` and session resume. (#616)
+
+### Fixed
+
+- Report a miscopied log cursor as `cursor-corrupt` instead of `source-replaced` with a replayed first page, and resume only at an offset that a witness recomputed from the current source proves, so unread log content is never skipped. (#617)
+
+## [pi-better-server@0.2.2] - 2026-11-02
+
+### Changed
+
+- Validate the native `/remote` bridge against the required host capabilities instead of requiring exactly Pi 1.2.0, so a client on another Pi version attaches when the native methods exist and an unsupported operation is named in the error. Automatic server setup now targets Pi SDK 1.4.0; Pi 1.2.0 clients need an explicitly configured matching server through `PI_SERVER_COMMAND`. (#636)
+
+## [pi-better-harness@0.38.0] - 2026-11-01
+
+### Changed
+
+- Bundle Subagents 0.26.0 with durable saved conversations, continuation through spawn, and local/global session discovery. (#614)
+
+## [pi-better-subagents@0.26.0] - 2026-11-01
+
+### Changed
+
+- Continue a saved native Pi conversation with `subagent_spawn({ session_id, prompt })`, or use `session_name` for an exact, unambiguous name in the current folder and its descendants. Batch jobs support the same per-job selectors. Each continuation gets a new attempt id while keeping its saved history, workspace, and worker configuration. (#614)
+- Let another foreground session continue saved work and receive its callback, with current mandatory permissions and the single-writer lease still enforced. (#614)
+- Make `subagent_list()` search the current folder and descendants across foreground sessions, show `session_id` on each row, and use `all: true` for global discovery. Duplicate names report matching session ids instead of guessing. (#614)
+
+### Fixed
+
+- Save new native sessions and compact attempt recipes in the Pi agent directory by default, independently of temporary event-log cleanup. Keep history through repeated sweeps, retry failed recipe publication before reclaiming the last copy, and expose storage failures through the existing incident journal. (#614)
+- Refuse missing history or workspaces and prevent an older archived completion from hiding a newer failed attempt. Legacy recipes keep their original paths and require those original files to exist. (#614)
+
+### Removed
+
+- Remove `subagent_resume`, `subagent_release`, and the `retain_session` launch flag. Use spawn with a session selector to continue work; saved native history no longer needs an explicit retention lifecycle. (#614)
+
+## [pi-better-harness@0.37.1] - 2026-11-01
+
+### Fixed
+
+- Bundle Subagents 0.25.1 so default subagents can use native Pi codemode. (#612)
+
+## [pi-better-subagents@0.25.1] - 2026-11-01
+
+### Fixed
+
+- Include native codemode in the default subagent tools on Pi 0.99.1 or newer, explicitly loading it when extension discovery is disabled. Custom tool lists and exclusions still control activation; older SDKs retain their existing tools. (#612)
+- Enforce sandbox permissions on nested codemode tool calls and disable direct classifier/image-model globals in confined children. (#612)
+
+## [pi-better-harness@0.37.0] - 2026-11-01
+
+### Changed
+
+- Bundle Subagents 0.25.0. Background Tasks 0.13.0, Goal 0.11.0, Sandbox 0.14.0, and SSH 0.1.4 are unchanged.
+
+## [pi-better-subagents@0.25.0] - 2026-11-01
+
+### Added
+
+- Continue a completed subagent in its own saved conversation with `subagent_resume`. The new attempt keeps the native session, its history, and the frozen launch recipe, and gets its own run id, log, result, timing record, and capacity slot with `resumedFrom`/`rootRunId` lineage. Single and batch launches both resume. (#610)
+- Protect a completed conversation and its workspace from ordinary cleanup with `retain_session` on `subagent_spawn`, and drop that protection with `subagent_release`. Retention is optional: resume needs no flag, and release deletes nothing, leaving logs, results, and completed metadata intact. (#610)
+
+### Changed
+
+- Admit one writer per conversation with a cross-process lease held from admission through the child lifetime and finalization, so a duplicate request is refused and a lease left by a dead process is recovered conservatively. Retained launches and continuation need a runtime that provides `node:sqlite`; ordinary one-shot launches remain available without it. (#610)
+- Re-apply current mandatory human permissions on every continuation, keep the saved recipe's tools and confinement, and refuse instead of silently changing them: a profile that would alter confinement refuses, and so does current tool or provider configuration that would replace a recorded extension implementation. A missing, ambiguous, or mismatched saved history or workspace refuses rather than starting a replacement conversation. (#610)
+
+## [pi-better-harness@0.36.0] - 2026-10-31
+
+### Changed
+
+- Bundle Subagents 0.24.0, Background Tasks 0.13.0, and Goal 0.11.0. Sandbox 0.14.0 and SSH 0.1.4 are unchanged.
+- Share the sticky navigator across Goal, Outcome & Todo, Subagents, and Background Tasks rows. **Sticky navigator** in `/harness-settings` defaults On and saves `piBetterHarness.navigator`; Off moves the navigator into the conversation. (#606)
+
+## [pi-better-subagents@0.24.0] - 2026-10-31
+
+### Added
+
+- Use shared navigator panels, with the standalone package shipping its own copy, for the same sticky navigator setting as Goal, Outcome & Todo, and Background Tasks. (#606)
+- Add native Settings, Instructions, and Files pages to `/agents`; Files shows definition and saved-config sources plus the current session edits. (#607)
+
+### Changed
+
+- Save model and effort with Ctrl+S to `agents/settings.json` instead of rewriting Markdown definitions, preserving prompts and other saved fields. Ctrl+S is the only save control. (#607)
+- Add independent **Reset to bundled** actions: Settings restores model/effort without changing the prompt, while Instructions restores the prompt while keeping model/effort. (#607)
+- Label saved values that inherit the current bundled defaults as `bundled`, so later bundle updates keep applying. (#607)
+- Give the Developer role release metadata preparation while leaving delivery and publishing to the coordinator. (#607)
+
+## [pi-better-background-tasks@0.13.0] - 2026-10-31
+
+### Changed
+
+- Use the shared navigator panels, with a standalone copy, so the Background Tasks row follows the shared Sticky navigator setting. (#606)
+
+## [pi-better-goal@0.11.0] - 2026-10-31
+
+### Changed
+
+- Use the shared navigator panels, with a standalone copy, so Goal rows follow the shared Sticky navigator setting. (#606)
+
+## [pi-better-harness@0.35.3] - 2026-10-31
+
+### Fixed
+
+- Bundle Subagents 0.23.3 so a role that resolves an `ollama-cloud` model starts in its isolated child with the provider's auth extension loaded.
+
+## [pi-better-subagents@0.23.3] - 2026-10-31
+
+### Fixed
+
+- Load the built-in `pi-ollama-cloud` provider extension for `ollama-cloud` models in isolated children, so a role that resolves that provider starts with its model auth instead of failing as an unknown model. A `providerExtensions` entry still replaces the built-in entry per provider, and an empty list opts out. (#604)
+
+## [pi-better-harness@0.35.2] - 2026-10-30
+
+### Fixed
+
+- Keep Harness packages off Pi's bottom status row while preserving the native footer, widgets, and permission controls.
+- Bundle Subagents 0.23.2, Background Tasks 0.12.2, Goal 0.10.4, and SSH 0.1.4.
+
+## [pi-better-subagents@0.23.2] - 2026-10-30
+
+### Fixed
+
+- Remove navigator status-row writes and show close confirmation inside the navigator, including immediate redraws when confirmation starts or expires.
+- Restrict the agent model picker to session-scoped models when available. Preserve saved out-of-scope defaults without offering them as picker choices; keep the unscoped fallback for older hosts.
+
+## [pi-better-background-tasks@0.12.2] - 2026-10-30
+
+### Fixed
+
+- Remove shared navigator status-row writes while preserving two-press stop and dismiss actions with confirmation inside the navigator.
+
+## [pi-better-goal@0.10.4] - 2026-10-30
+
+### Fixed
+
+- Stop writing Goal holds, pause guidance, progress warnings, and background completion notices to Pi's bottom status row. Preserve widgets, commands, permission holds, and pause/resume rules.
+
+## [pi-better-ssh@0.1.4] - 2026-10-30
+
+### Fixed
+
+- Remove the active SSH profile's footer chip while retaining profile inspection, remote execution, and mux management.
+
+## [pi-better-server@0.2.1] - 2026-10-30
+
+### Fixed
+
+- Remove remote connection, upgrade, and disconnect status-row writes. Suppress forwarded status text in the native client while preserving wire events, notifications, widgets, and dialogs.
+
+## [pi-better-harness@0.35.1] - 2026-10-30
+
+### Fixed
+
+- Bundle Subagents 0.23.1 so trusted packages that also register `apply_patch` no longer prevent sandboxed workers from starting. Keep all other component versions unchanged. (#590)
+
+## [pi-better-subagents@0.23.1] - 2026-10-30
+
+### Fixed
+
+- Retain harness ownership of guarded tools when a trusted extension registers the same name at startup or later. Preserve trusted package tools and sandbox source/schema verification without admitting the package's unguarded `apply_patch`. (#590)
+
+### Tests
+
+- Validate linked-worktree Git operations under Outside project = Write and Write & delete with real kernel confinement. Permission defaults are unchanged; Write still denies the metadata rename/removal that Git needs outside the project root. (#591)
+
+## [pi-better-harness@0.35.0] - 2026-10-30
+
+### Added
+
+- Ship a `pi-agent-catalog` executable that runs the shared worker catalog planning from the bundled Subagents package, so Pi and Codex plan agents from one catalog.
+
+### Changed
+
+- Bundle Subagents 0.23.0 with shared worker catalog planning and the Developer role's failure reporting. Keep all other component versions unchanged.
+
+## [pi-better-subagents@0.23.0] - 2026-10-30
+
+### Added
+
+- Export the worker catalog, catalog store, catalog resolver, and model resolution modules, and ship a `pi-agent-catalog` executable shared with the Harness bundle.
+
+### Changed
+
+- Require the Developer role to report a failed check's failing step, error, and evidence location, keep the first failure separate from cleanup errors, and keep long output in files instead of reporting an exit code alone.
+
+## [pi-better-harness@0.34.2] - 2026-10-29
+
+### Changed
+
+- Bundle Subagents 0.22.2 and Background Tasks 0.12.1 with clickable detail-view return controls and hover highlights. Keep all other component versions unchanged.
+
+## [pi-better-subagents@0.22.2] - 2026-10-29
+
+### Added
+
+- Highlight clickable work rows and the detail header's return control on mouse hover without changing keyboard selection.
+- Return to the main editor by clicking the detail header's main control or pressing Esc or Left, without stopping the run. Keep work rows clickable inside the detail overlay.
+
+### Fixed
+
+- Keep CI and pull-request monitoring with the coordinator instead of delegated implementation workers.
+
+## [pi-better-background-tasks@0.12.1] - 2026-10-29
+
+### Added
+
+- Highlight clickable work rows and the detail header's return control on mouse hover, and support clicking work rows inside the detail overlay.
+- Return from task details to the main editor by clicking the main control or pressing Esc or Left, without stopping the task.
+
+## [pi-better-harness@0.34.1] - 2026-10-29
+
+### Changed
+
+- Reduce the gap between Todo item numbers and text while preserving alignment for multi-digit numbers and workflow issue IDs.
+- Bundle Goal 0.10.3 and Subagents 0.22.1 with tighter Goal spacing and clearer agent details. Keep all other component versions unchanged.
+
+## [pi-better-goal@0.10.3] - 2026-10-29
+
+### Fixed
+
+- Remove the standalone Goal clock's trailing blank row so the next widget's leading row provides one separator instead of two.
+
+## [pi-better-subagents@0.22.1] - 2026-10-29
+
+### Changed
+
+- Organize agent catalog details into a spaced overview and aligned setting, value, and origin columns. Stack the overview in narrow terminals and distinguish labels from values with the active theme.
+- Show the resolved instruction prompt inline while retaining its full-screen reader.
+
+### Fixed
+
+- Keep Model and Effort visible and selectable when agent details scroll in short terminals. Preserve session edits, explicit saving, and complete wrapped IDs and paths.
+- Stop the shared supervision watcher when the last active subagent exits or stops. Leave completion retries to the callback batcher and retain supervision for pending lost-run alerts.
+
+## [pi-better-harness@0.34.0] - 2026-10-29
+
+### Added
+
+- Separate Outcome & Todo display and hooks controls. Display saved state by default, while leaving task-memory hooks Off until explicitly enabled. Preserve saved hook choices and unrelated settings.
+
+### Changed
+
+- Show the accepted outcome as a single muted subtitle beneath Todo. Combine a matching Goal's status and active-time clock with the Todo header, retain click expansion, and keep full outcome details in `/todo`.
+- Bundle Goal 0.10.2, Subagents 0.22.0, and Background Tasks 0.12.0 with shared clock ownership and clickable work details.
+
+## [pi-better-goal@0.10.2] - 2026-10-29
+
+### Fixed
+
+- Hand clock display to a matching Harness Todo header without changing Goal's stored trigger, continuation, pauses, or completion. Keep standalone display when the header is hidden, unrelated, or too narrow, and keep the shared clock ticking.
+
+## [pi-better-subagents@0.22.0] - 2026-10-29
+
+### Added
+
+- Open a work row's existing navigator details with a plain left click. Preserve keyboard navigation and editor input, and ignore headers, modified clicks, and stale or missing rows.
+
+## [pi-better-background-tasks@0.12.0] - 2026-10-29
+
+### Added
+
+- Open a background-task row's existing navigator details with a plain left click, using the same guarded mouse navigation as Subagents.
+
+## [pi-better-harness@0.33.1] - 2026-10-29
+
+### Changed
+
+- Bundle Subagents 0.21.1 with the updated Researcher model, six-slot concurrency default, and an Agents shortcut in the Subagents settings menu. Keep all other component versions unchanged.
+
+## [pi-better-subagents@0.21.1] - 2026-10-29
+
+### Added
+
+- Open the Agents catalog directly from the `/subagents` settings menu, closing the settings pane before opening the catalog.
+
+### Changed
+
+- Default the bundled Researcher role to `openai/gpt-6.1-terra` with medium reasoning effort.
+- Raise the shipped concurrency cap and its fallback from four to six. Preserve saved defaults and session overrides.
+
+## [pi-better-harness@0.33.0] - 2026-10-29
+
+### Added
+
+- Bundle Sandbox 0.14.0, Subagents 0.21.0, and Background Tasks 0.11.0 with independent application, shell, and command time-limit controls.
+- Show direct application commands in the compact transcript.
+
+## [pi-better-sandbox@0.14.0] - 2026-10-29
+
+### Added
+
+- Split command permissions into Run applications and Shell scripts in `/sandbox`, with a separate Command time limit for Main, Subagents, and Background tasks.
+- Add guarded direct application execution without shell parsing. Enforce command time limits even when the agent omits a timeout or requests more time.
+- Refuse incompatible subagent consumers when a launch requires the new execution restrictions.
+
+### Changed
+
+- Preserve shell access and unlimited command time for existing profiles. Keep all fresh sandbox switches Off, session persistence, and Ctrl+S defaults.
+
+## [pi-better-subagents@0.21.0] - 2026-10-29
+
+### Added
+
+- Give application-only confined subagents the guarded `run_application` tool instead of `bash`, while preserving read-only tool selections and exclusions.
+- Snapshot shell permissions and command time limits at launch and enforce them inside the task executor.
+
+## [pi-better-background-tasks@0.11.0] - 2026-10-29
+
+### Added
+
+- Honor Background tasks shell permissions for direct argv launches and refuse shell commands when Shell scripts is Off.
+- Apply immutable command time limits to each spawned command and watch check, including after reload, without limiting the watch's overall lifetime.
+
+## [pi-better-harness@0.32.1] - 2026-10-27
+
+### Changed
+
+- Bundle Subagents 0.20.1 with fullscreen agent views, an Effort list column, and settings editable directly from agent details. Keep all other component versions unchanged.
+
+## [pi-better-subagents@0.20.1] - 2026-10-27
+
+### Changed
+
+- Fill the terminal with the agents list, details, settings, and prompt views, adapting visible rows when the terminal resizes.
+- Show resolved effort beside the model in the agents list, falling back to the configured effort when resolution is unavailable.
+- Edit Model and Effort directly from agent details without pressing `e`. Preserve session-only changes, explicit Ctrl+S saving, inheritance, and prompt inspection.
+
+## [pi-better-harness@0.32.0] - 2026-10-25
+
+### Changed
+
+- Bundle Sandbox 0.13.0, Subagents 0.20.0, and Background Tasks 0.10.0. Keep Goal 0.10.1, Plan 0.9.1, and SSH 0.1.3 unchanged.
+- Fresh Main, Subagents, and Background tasks sandbox switches all start Off. Preserve saved choices and explicit opt-in.
+
+## [pi-better-sandbox@0.13.0] - 2026-10-25
+
+### Added
+
+- Add an independent Background tasks column to `/sandbox`, with separate session settings and saved defaults. Migrate older settings by copying Main's values once. (#572)
+- Admit verified first-party background tools through a versioned source-and-schema check, so Background permissions control local launches independently of Main's commands switch.
+
+### Changed
+
+- Default all fresh sandbox switches to Off without changing existing saved profiles.
+- Explain Background process diagnostics separately from Main and Subagents `process_list` permissions.
+
+## [pi-better-subagents@0.20.0] - 2026-10-25
+
+### Changed
+
+- Default standalone subagent launches to unconfined when no human profile or explicit `sandbox:true` selects confinement. Preserve enabled human profiles and reject attempts to bypass them with `sandbox:false`.
+- Report the current human sandbox profile in catalog inspection, including session changes, without claiming confinement has been applied before launch.
+
+## [pi-better-background-tasks@0.10.0] - 2026-10-25
+
+### Added
+
+- Persist launch-time sandbox provenance and report confined, unconfined, or unknown separately from current diagnostic permissions. Existing tasks keep their launch policy after settings changes and reload. (#572)
+- Add explicit, permission-gated process diagnostics to status tools. Check recorded process identity before exposing available state, CPU time, and wait evidence; report unsupported or restricted evidence without an unconfined fallback.
+- Show quiet work and suspected stalls consistently in status, navigator, and callbacks, with the last observed progress and silence duration. Silence alone never proves a hang or changes task lifecycle.
+
+### Fixed
+
+- Recover suspected-stall observations on new progress or termination, notify once per silent spell, and exclude log-retention writes from progress.
+- Keep verbose metadata pagination stable when live process samples change, and retain first-check output-omission notices within the launch budget.
+
+## [pi-better-server@0.2.0] - 2026-10-25
+
+### Added
+
+- Connect `/remote` to the daemon on this machine with `/remote connect localhost`, skipping SSH.
+- Name each connection stage and show how long that stage and the whole attempt have taken.
+
+### Changed
+
+- The session browser uses the available terminal height instead of stopping at 10 rows.
+
+### Fixed
+
+- Show Connected once SSH succeeds, and label later server, tunnel, and daemon stages as remote progress.
+
+## [pi-better-server@0.1.3] - 2026-10-23
+
+### Fixed
+
+- Reuse authenticated managed Node runtimes and verified source archives on reconnect, avoiding repeated downloads and uploads while retaining runtime integrity checks.
+- Keep the live navigator and status footer visible on the remote home screen in regular and fullscreen modes without showing local conversation history or widgets.
+- Keep concurrent activation callers waiting while the coordinator verifies and retires an abandoned staged build, instead of reporting a premature conflict.
+
+## [pi-better-server@0.1.2] - 2026-10-23
+
+### Fixed
+
+- Retire stale staged activation reservations after verified daemon exit, preserving compatibility checks and session state so a newer build can start.
+- Expose the managed runtime's bundled Node and npm to package-sync installers when the remote shell does not include them in `PATH`.
+
+## [pi-better-server@0.1.1] - 2026-10-22
+
+### Fixed
+
+- Check and synchronize approved host-level extensions immediately after remote connection, before opening the session browser.
+- Show the remote browser on a clean native screen, restoring the local view and history after cancellation or failure.
+- Deduplicate and summarize unsupported local-resource warnings, and keep update guidance visible inside the browser.
+- Defer unsupported legacy or busy-daemon extension updates without closing sessions or blocking the browser.
+
 ## [pi-better-harness@0.31.1] - 2026-10-18
 
 ### Changed

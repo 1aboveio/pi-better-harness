@@ -13,7 +13,8 @@ on:
           - pi-better-ssh
           - pi-better-subagents
           - pi-better-goal
-          - pi-better-plan
+          - pi-better-server
+          - pi-better-model-router
           - pi-better-harness
 
 permissions:
@@ -28,6 +29,8 @@ jobs:
   publish:
     name: publish ${{ inputs.package }}
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 60
     environment: npm-publish
 
     steps:
@@ -35,11 +38,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.14.1
           registry-url: https://registry.npmjs.org
 
-      - name: Install latest npm with trusted publishing support
-        run: npm install --global npm@latest
+      - name: Install pinned npm with trusted publishing support
+        run: npm install --global npm@11.19.0
 
       - name: Show toolchain
         run: |
@@ -85,7 +88,8 @@ jobs:
             pi-better-ssh) WORKSPACE="packages/pi-better-ssh" ;;
             pi-better-subagents) WORKSPACE="packages/pi-better-subagents" ;;
             pi-better-goal) WORKSPACE="packages/pi-better-goal" ;;
-            pi-better-plan) WORKSPACE="packages/pi-better-plan" ;;
+            pi-better-server) WORKSPACE="packages/pi-better-server" ;;
+            pi-better-model-router) WORKSPACE="packages/pi-better-model-router" ;;
             pi-better-harness) WORKSPACE="packages/pi-better-harness" ;;
             *) echo "Unsupported package: $PACKAGE" >&2; exit 1 ;;
           esac
@@ -157,6 +161,10 @@ jobs:
               check_pack_file /tmp/package-pack.json src/shared-failure-observations.ts
               check_pack_file /tmp/package-pack.json src/shared-callback-batcher.ts
               check_pack_file /tmp/package-pack.json src/shared-execution-policy.ts
+              check_pack_file /tmp/package-pack.json src/shared-operation-coordinator/index.ts
+              check_pack_file /tmp/package-pack.json src/observed-waits.ts
+              check_pack_file /tmp/package-pack.json src/supervisor/generated/runner.mjs
+              check_pack_file /tmp/package-pack.json src/supervisor/generated/store.mjs
               ;;
             pi-better-sandbox)
               check_pack_file /tmp/package-pack.json index.ts
@@ -165,6 +173,8 @@ jobs:
               check_pack_file /tmp/package-pack.json diagnostics-command.ts
               check_pack_file /tmp/package-pack.json shared-task-sandbox.ts
               check_pack_file /tmp/package-pack.json shared-task-files.ts
+              check_pack_file /tmp/package-pack.json shared-task-exec.ts
+              check_pack_file /tmp/package-pack.json shared-task-application.ts
               # This extension deliberately ships no launcher; ordinary `pi` loads it.
               node -e 'const data=require("/tmp/package-pack.json"); const p=Array.isArray(data)?data[0]:Object.values(data)[0]; const launcher=p.files.find((f)=>f.path.startsWith("bin/")); if (launcher) throw new Error("pi-better-sandbox must ship no launcher, found " + launcher.path);'
               ;;
@@ -178,19 +188,38 @@ jobs:
               check_pack_file /tmp/package-pack.json shared-sandbox-diagnostics.ts
               check_pack_file /tmp/package-pack.json shared-task-sandbox.ts
               check_pack_file /tmp/package-pack.json shared-task-files.ts
+              check_pack_file /tmp/package-pack.json shared-task-exec.ts
+              check_pack_file /tmp/package-pack.json shared-task-application.ts
               check_pack_file /tmp/package-pack.json task-runtime.mjs
               check_pack_file /tmp/package-pack.json task-guard.ts
               check_pack_file /tmp/package-pack.json task-policy.ts
               check_pack_file /tmp/package-pack.json shared-failure-observations.ts
               check_pack_file /tmp/package-pack.json shared-callback-batcher.ts
               check_pack_file /tmp/package-pack.json shared-execution-policy.ts
+              check_pack_file /tmp/package-pack.json shared-operation-coordinator/index.ts
+              check_pack_file /tmp/package-pack.json child-operations.ts
+              check_pack_file /tmp/package-pack.json worker-waits.ts
               ;;
             pi-better-goal)
               check_pack_file /tmp/package-pack.json src/index.ts
               ;;
-            pi-better-plan)
+            pi-better-model-router)
               check_pack_file /tmp/package-pack.json src/index.ts
-              check_pack_file /tmp/package-pack.json src/shared-execution-policy.ts
+              check_pack_file /tmp/package-pack.json node_modules/pi-ollama-cloud/index.ts
+              ;;
+            pi-better-server)
+              check_pack_file /tmp/package-pack.json src/index.ts
+              check_pack_file /tmp/package-pack.json src/cli.ts
+              check_pack_file /tmp/package-pack.json src/remote-cli.ts
+              check_pack_file /tmp/package-pack.json src/remote-client/extension.ts
+              check_pack_file /tmp/package-pack.json src/remote-client/session-browser.ts
+              check_pack_file /tmp/package-pack.json src/remote-client/folder-browser.ts
+              check_pack_file /tmp/package-pack.json src/remote-client/remote-progress.ts
+              check_pack_file /tmp/package-pack.json src/shared-ssh-core/index.ts
+              check_pack_file /tmp/package-pack.json scripts/private-runtime/format.ts
+              check_pack_file /tmp/package-pack.json scripts/private-runtime/installer.ts
+              check_pack_file /tmp/package-pack.json scripts/private-runtime/package.json
+              check_pack_file /tmp/package-pack.json scripts/private-runtime/package-lock.json
               ;;
             pi-better-harness)
               for required in \
@@ -201,7 +230,14 @@ jobs:
                 extensions/background-tasks/index.ts \
                 extensions/ssh/index.ts \
                 extensions/goal/index.ts \
-                extensions/plan/index.ts \
+                extensions/model-router/index.ts \
+                extensions/task-context/index.ts \
+                extensions/project-context/index.ts \
+                extensions/worktree-context.ts \
+                extensions/minimal-output/index.ts \
+                extensions/tool-call-guard/index.ts \
+                extensions/tool-call-guard/waits.ts \
+                extensions/settings/index.ts \
                 extensions/execution-policy.ts \
                 node_modules/pi-better-sandbox/index.ts \
                 node_modules/pi-better-sandbox/shared-sandbox-core.ts \
@@ -209,31 +245,67 @@ jobs:
                 node_modules/pi-better-sandbox/diagnostics-command.ts \
                 node_modules/pi-better-sandbox/shared-task-sandbox.ts \
                 node_modules/pi-better-sandbox/shared-task-files.ts \
+                node_modules/pi-better-sandbox/shared-task-exec.ts \
+                node_modules/pi-better-sandbox/shared-task-application.ts \
                 node_modules/pi-better-subagents/index.ts \
                 node_modules/pi-better-subagents/shared-sandbox-core.ts \
                 node_modules/pi-better-subagents/shared-sandbox-diagnostics.ts \
                 node_modules/pi-better-subagents/shared-task-sandbox.ts \
                 node_modules/pi-better-subagents/shared-task-files.ts \
+                node_modules/pi-better-subagents/shared-task-exec.ts \
+                node_modules/pi-better-subagents/shared-task-application.ts \
                 node_modules/pi-better-subagents/task-runtime.mjs \
                 node_modules/pi-better-subagents/task-guard.ts \
                 node_modules/pi-better-subagents/task-policy.ts \
                 node_modules/pi-better-subagents/shared-failure-observations.ts \
                 node_modules/pi-better-subagents/shared-callback-batcher.ts \
                 node_modules/pi-better-subagents/shared-execution-policy.ts \
+                node_modules/pi-better-subagents/shared-worktree-context.ts \
+                node_modules/pi-better-subagents/shared-operation-coordinator/index.ts \
+                node_modules/pi-better-subagents/child-operations.ts \
+                node_modules/pi-better-subagents/worker-waits.ts \
                 node_modules/pi-better-background-tasks/src/index.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-diagnostics.ts \
                 node_modules/pi-better-background-tasks/src/shared-failure-observations.ts \
                 node_modules/pi-better-background-tasks/src/shared-callback-batcher.ts \
                 node_modules/pi-better-background-tasks/src/shared-execution-policy.ts \
+                node_modules/pi-better-background-tasks/src/shared-operation-coordinator/index.ts \
+                node_modules/pi-better-background-tasks/src/observed-waits.ts \
+                node_modules/pi-better-background-tasks/src/supervisor/generated/runner.mjs \
+                node_modules/pi-better-background-tasks/src/supervisor/generated/store.mjs \
                 node_modules/pi-better-ssh/src/index.ts \
                 node_modules/pi-better-ssh/src/shared-ssh-core/index.ts \
-                node_modules/pi-better-goal/src/index.ts \
-                node_modules/pi-better-plan/src/index.ts \
-                node_modules/pi-better-plan/src/shared-execution-policy.ts
+                node_modules/pi-better-model-router/src/index.ts \
+                node_modules/pi-better-model-router/node_modules/pi-ollama-cloud/index.ts \
+                node_modules/pi-better-goal/src/index.ts
               do
                 check_pack_file /tmp/package-pack.json "$required"
               done
+              # Presence is not version: a stale staged component would ship a bundle that
+              # declares one version and carries another. Compare the Harness manifest and the
+              # packed tree against each workspace manifest.
+              node -e '
+                const { readFileSync } = require("node:fs");
+                const harness = JSON.parse(readFileSync("packages/pi-better-harness/package.json", "utf8"));
+                for (const name of harness.bundledDependencies) {
+                  const workspace = JSON.parse(readFileSync(`packages/${name}/package.json`, "utf8")).version;
+                  const declared = harness.dependencies?.[name];
+                  if (declared !== workspace) {
+                    throw new Error(`${name}: Harness declares ${declared}, workspace is ${workspace}`);
+                  }
+                  let staged;
+                  try {
+                    staged = JSON.parse(readFileSync(`packages/pi-better-harness/node_modules/${name}/package.json`, "utf8")).version;
+                  } catch {
+                    throw new Error(`${name}: not staged into packages/pi-better-harness/node_modules`);
+                  }
+                  if (staged !== workspace) {
+                    throw new Error(`${name}: staged ${staged} is not the workspace ${workspace}`);
+                  }
+                }
+                console.log("bundled component versions match their workspaces");
+              '
               ;;
           esac
 

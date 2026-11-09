@@ -21,6 +21,7 @@ import { subagentListTool, subagentOutputTool, subagentResultTool } from "../too
 import { listIncidentComputationCount } from "../output-payload.ts";
 import {
     OUTPUT_BUDGET_BYTES,
+    OUTPUT_BUDGET_MAX_BYTES,
     utf8ByteLength,
 } from "../shared-log-utils.ts";
 
@@ -48,7 +49,7 @@ const TypeStub = {
 
 const resultTool = subagentResultTool(TypeStub);
 const outputTool = subagentOutputTool(TypeStub);
-const listTool = subagentListTool(TypeStub);
+const listTool = subagentListTool(TypeStub, { getActiveOrigin: () => ({ cwd: "/tmp" }) });
 
 function textOf(result) {
     return result.content.map((c) => c.text ?? "").join("\n");
@@ -167,6 +168,22 @@ function completedLog(finalText, extras = {}) {
 }
 
 describe("registered subagent payloads", () => {
+    it("shows the exact conversation session id beside the distinct attempt id", async () => {
+        const stamp = Date.now();
+        const id = trackDisk(`sa_budget_attempt_${stamp}`);
+        const sessionId = `sa_budget_conversation_${stamp}`;
+        seedMeta(id, {
+            status: "completed", exitCode: 0, sessionId,
+            startedAt: 9_500_000_000_000, endedAt: 9_500_000_000_001,
+        });
+        writeEvents(id, completedLog("done"));
+        const listed = textOf(await listTool.execute("tc", {}));
+        const row = listed.split("\n").find((line) => line.includes(id));
+        assert.ok(row, listed);
+        assert.match(row, new RegExp(`session_id=${sessionId}`));
+        assert.notEqual(id, sessionId);
+    });
+
     it("omits ordered tool-name sequences and default usage/cost from ordinary result/output/list", async () => {
         const id = trackDisk(`sa_budget_tools_${Date.now()}`);
         seedMeta(id, { status: "completed", exitCode: 0 });
@@ -290,13 +307,13 @@ describe("registered subagent payloads", () => {
         const first = textOf(await resultTool.execute("tc", { id, history: true }));
         assert.match(first, /History page of 12 failure observations/);
         assert.doesNotMatch(first, /\{"content"/, "rows show the tool's text, not its result JSON");
-        let cursor = first.includes("hasMore=true") ? first.match(/\bnextCursor=(i1\.\S+)/)?.[1] : undefined;
+        let cursor = first.includes("hasMore=true") ? first.match(/\bnextCursor=(i2\.\S+)/)?.[1] : undefined;
         const pages = [first];
         for (let i = 0; i < 20 && cursor; i += 1) {
             const page = textOf(await resultTool.execute("tc", { id, cursor }));
             pages.push(page);
             assert.ok(utf8ByteLength(page) <= OUTPUT_BUDGET_BYTES.answer, page);
-            const next = page.match(/\bnextCursor=(i1\.\S+)/)?.[1];
+            const next = page.match(/\bnextCursor=(i2\.\S+)/)?.[1];
             if (!page.includes("hasMore=true") || !next || next === cursor) break;
             cursor = next;
         }
@@ -454,8 +471,94 @@ describe("registered subagent payloads", () => {
         assert.equal(text, blob, "raw pages must concatenate to the retained bytes exactly");
     });
 
+    // Issue #618: mode=raw used to page a multi-MB retained log only from byte zero.
+    it("reaches the newest retained bytes of a multi-MB log in one call and pages backwards", async () => {
+        const id = trackDisk(`sa_tail_raw_${Date.now()}`);
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        const unit = `${JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "z".repeat(200) } })}\n`;
+        const blobs = [];
+        for (let bytes = 0; bytes < 700_000; bytes += unit.length) blobs.push(unit);
+        const source = `${blobs.join("")}NEWEST_RETAINED_MARKER\n`;
+        writeFileSync(logPathFor(id), source);
+
+        // The default read is unchanged: it still starts at byte zero and now
+        // advertises the end-anchored read instead of forcing ~128 round-trips.
+        const forward = textOf(await outputTool.execute("tc", { id, mode: "raw" }));
+        assert.doesNotMatch(forward, /NEWEST_RETAINED_MARKER/);
+        assert.match(forward, /hasMore=true omittedBytes=\d+/);
+        assert.match(forward, /tail:true reads the newest bytes first/);
+
+        const tail = textOf(await outputTool.execute("tc", { id, mode: "raw", tail: true, max_bytes: OUTPUT_BUDGET_MAX_BYTES.rawPage }));
+        assert.ok(utf8ByteLength(tail) <= OUTPUT_BUDGET_MAX_BYTES.rawPage, "a tail page keeps the raw cap");
+        assert.match(tail, /raw retained log · newest first/);
+        assert.match(tail, /hasMore=true omittedBytes=\d+/);
+        assert.match(tail, /newest-first page; nextCursor reads earlier bytes/);
+        assert.match(rawBody(tail), /NEWEST_RETAINED_MARKER\n$/, "the first tail page ends at the newest retained byte");
+
+        // Following nextCursor walks toward the oldest byte and rebuilds the log exactly.
+        let cursor = nextCursorOf(tail);
+        let rebuilt = rawBody(tail);
+        let pages = 1;
+        let endCursor;
+        for (; pages < 200; pages += 1) {
+            const page = textOf(await outputTool.execute("tc", { id, mode: "raw", cursor, max_bytes: OUTPUT_BUDGET_MAX_BYTES.rawPage }));
+            assert.ok(utf8ByteLength(page) <= OUTPUT_BUDGET_MAX_BYTES.rawPage, `backward page ${pages} exceeded the raw cap`);
+            rebuilt = rawBody(page) + rebuilt;
+            if (!/hasMore=true/.test(page)) {
+                endCursor = page.match(/\bend nextCursor=(\S+)/)?.[1];
+                assert.ok(endCursor, page);
+                break;
+            }
+            assert.match(page, /newest-first page; nextCursor reads earlier bytes/);
+            cursor = nextCursorOf(page);
+            assert.ok(cursor, page);
+        }
+        assert.equal(rebuilt, source, "backward raw pages must concatenate to the retained bytes exactly");
+        assert.ok(pages > 2, `expected several backward pages, got ${pages}`);
+
+        // Reaching the oldest byte hands back an append-ready cursor.
+        appendFileSync(logPathFor(id), "APPENDED_AFTER_TAIL\n");
+        const appended = textOf(await outputTool.execute("tc", { id, mode: "raw", cursor: endCursor }));
+        assert.match(appended, /APPENDED_AFTER_TAIL/);
+        assert.doesNotMatch(appended, /message_update/);
+
+        // subagent_result shares the raw pager, so it takes the same flag.
+        const resultTail = textOf(await resultTool.execute("tc", { id, mode: "raw", tail: true, max_bytes: OUTPUT_BUDGET_MAX_BYTES.rawPage }));
+        assert.match(rawBody(resultTail), /APPENDED_AFTER_TAIL\n$/);
+    });
+
+    it("serves the whole retained log from the tail when one page is enough", async () => {
+        const id = trackDisk(`sa_tail_small_${Date.now()}`);
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        const blob = "first-line\nsecond-line\n";
+        writeFileSync(logPathFor(id), blob);
+        const page = textOf(await outputTool.execute("tc", { id, mode: "raw", tail: true }));
+        assert.equal(rawBody(page), blob);
+        assert.doesNotMatch(page, /hasMore=true/);
+        assert.doesNotMatch(page, /newest-first page/);
+    });
+
+    // Issue #618 review R1: a code point split across writes must survive the
+    // tail page and its append-ready handoff, not turn into replacement bytes.
+    it("withholds a split newest byte in a raw tail page and returns it whole from the append cursor", async () => {
+        const id = trackDisk(`sa_tail_split_${Date.now()}`);
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        const euro = Buffer.from("€\n", "utf8");
+        writeFileSync(logPathFor(id), Buffer.concat([Buffer.from("A", "utf8"), euro.subarray(0, 2)]));
+        const tail = textOf(await outputTool.execute("tc", { id, mode: "raw", tail: true }));
+        assert.equal(rawBody(tail), "A");
+        assert.doesNotMatch(tail, /\uFFFD/);
+        assert.match(tail, /pendingBytes=2 \(incomplete UTF-8 sequence withheld until the writer completes it\)/);
+        const endCursor = tail.match(/\bend nextCursor=(\S+)/)?.[1];
+        assert.ok(endCursor, tail);
+        appendFileSync(logPathFor(id), euro.subarray(2));
+        const completed = textOf(await outputTool.execute("tc", { id, mode: "raw", cursor: endCursor }));
+        assert.equal(rawBody(completed), "€\n", "the append cursor returns the completed character, not just later bytes");
+        assert.equal(rawBody(tail) + rawBody(completed), "A€\n");
+    });
     it("paginates list rows under the list budget without full failure paragraphs", async () => {
         const stamp = Date.now();
+        const folder = `/tmp/budget-list-${stamp}`;
         const ids = [];
         for (let i = 0; i < 40; i += 1) {
             const id = trackDisk(`sa_budget_list_${stamp}_${String(i).padStart(2, "0")}`);
@@ -463,6 +566,7 @@ describe("registered subagent payloads", () => {
             seedMeta(id, {
                 status: "completed",
                 exitCode: 0,
+                cwd: folder,
                 startedAt: 1_700_000_000_000 + i,
                 endedAt: 1_700_000_000_000 + i + 1_000,
                 promptPreview: `prompt-preview-${id}-${"p".repeat(80)}`,
@@ -475,13 +579,14 @@ describe("registered subagent payloads", () => {
                 summary: `very long unresolved failure paragraph for ${id} ${"x".repeat(400)}`,
             }]);
         }
-        const first = textOf(await listTool.execute("tc", { limit: 100 }));
+        const listFolder = { cwd: folder };
+        const first = textOf(await listTool.execute("tc", { limit: 100 }, undefined, undefined, listFolder));
         assert.ok(utf8ByteLength(first) <= OUTPUT_BUDGET_BYTES.list, `list page was ${utf8ByteLength(first)} bytes`);
         assert.doesNotMatch(first, /very long unresolved failure paragraph/);
         assert.match(first, /incident/);
         if (/hasMore=true/.test(first)) {
             const next = nextCursorOf(first);
-            const second = textOf(await listTool.execute("tc", { limit: 100, cursor: next }));
+            const second = textOf(await listTool.execute("tc", { limit: 100, cursor: next }, undefined, undefined, listFolder));
             assert.ok(utf8ByteLength(second) <= OUTPUT_BUDGET_BYTES.list);
             assert.notEqual(stripEnvelope(first), stripEnvelope(second));
         }
@@ -504,16 +609,30 @@ describe("registered subagent payloads", () => {
         assert.match(second, /output-line-11|output-line-12/);
     });
 
-    it("filters list and direct reads to the current session unless all:true", async () => {
+    it("lists local peers across foreground sessions while direct reads stay session-scoped", async () => {
         const stamp = Date.now();
-        const originA = { cwd: "/tmp", sessionId: `sess-a-${stamp}` };
-        const originB = { cwd: "/tmp", sessionId: `sess-b-${stamp}` };
+        const folder = `/tmp/budget-peers-${stamp}`;
+        const originA = { cwd: folder, sessionId: `sess-a-${stamp}` };
+        const originB = { cwd: folder, sessionId: `sess-b-${stamp}` };
+        const originElsewhere = { cwd: `${folder}-other`, sessionId: `sess-c-${stamp}` };
         const idA = trackDisk(`sa_budget_sess_a_${stamp}`);
         const idB = trackDisk(`sa_budget_sess_b_${stamp}`);
-        seedMeta(idA, { status: "completed", exitCode: 0, callbackOrigin: originA, promptPreview: "session-a-secret" });
-        seedMeta(idB, { status: "completed", exitCode: 0, callbackOrigin: originB, promptPreview: "session-b-secret", startedAt: 9_000_000_000_000, endedAt: 9_000_000_000_001 });
+        const idC = trackDisk(`sa_budget_sess_c_${stamp}`);
+        seedMeta(idA, {
+            status: "completed", exitCode: 0, cwd: folder, callbackOrigin: originA, promptPreview: "session-a-preview",
+            startedAt: 9_200_000_000_000, endedAt: 9_200_000_000_001,
+        });
+        seedMeta(idB, {
+            status: "completed", exitCode: 0, cwd: folder, callbackOrigin: originB, promptPreview: "session-b-preview",
+            startedAt: 9_100_000_000_000, endedAt: 9_100_000_000_001,
+        });
+        seedMeta(idC, {
+            status: "completed", exitCode: 0, cwd: `${folder}-other`, callbackOrigin: originElsewhere, promptPreview: "session-c-preview",
+            startedAt: 9_300_000_000_000, endedAt: 9_300_000_000_001,
+        });
         writeEvents(idA, completedLog("answer-from-session-a"));
         writeEvents(idB, completedLog("answer-from-session-b"));
+        writeEvents(idC, completedLog("answer-from-session-c"));
 
         const sessionedList = subagentListTool(TypeStub, { getActiveOrigin: () => originA });
         const sessionedResult = subagentResultTool(TypeStub, { getActiveOrigin: () => originA });
@@ -521,9 +640,12 @@ describe("registered subagent payloads", () => {
 
         const listed = textOf(await sessionedList.execute("tc", {}));
         assert.match(listed, new RegExp(idA));
-        assert.doesNotMatch(listed, new RegExp(idB));
-        assert.doesNotMatch(listed, /session-b-secret/);
-        assert.doesNotMatch(listed, /answer-from-session-b/);
+        assert.match(listed, new RegExp(idB), "another foreground session in the same folder is a local peer");
+        assert.match(listed, /session-b-preview/);
+        assert.doesNotMatch(listed, new RegExp(idC), "a sibling workspace is outside the folder");
+        for (const answer of [/answer-from-session-a/, /answer-from-session-b/, /answer-from-session-c/]) {
+            assert.doesNotMatch(listed, answer, "list rows never include retained answer text");
+        }
 
         const foreign = textOf(await sessionedResult.execute("tc", { id: idB }));
         assert.match(foreign, /foreign session/i);
@@ -539,26 +661,44 @@ describe("registered subagent payloads", () => {
 
         const globalList = textOf(await sessionedList.execute("tc", { all: true, limit: 10, maxBytes: 4096 }));
         assert.match(globalList, new RegExp(idB));
+        assert.match(globalList, new RegExp(idC));
+
+        // The folder alone is enough: ctx.cwd lists local peers even when the
+        // foreground session id is unavailable.
+        const cwdOnly = subagentListTool(TypeStub, { getActiveOrigin: () => undefined });
+        const byFolder = textOf(await cwdOnly.execute("tc", {}, undefined, undefined, { cwd: folder }));
+        assert.match(byFolder, new RegExp(idA));
+        assert.match(byFolder, new RegExp(idB));
+        assert.doesNotMatch(byFolder, new RegExp(idC));
     });
 
     it("does not leak evidence when session ownership cannot be read", async () => {
         const id = trackDisk(`sa_budget_unknown_${Date.now()}`);
-        seedMeta(id, { status: "completed", exitCode: 0, callbackOrigin: { cwd: "/tmp", sessionId: "hidden" } });
+        seedMeta(id, {
+            status: "completed", exitCode: 0, callbackOrigin: { cwd: "/tmp", sessionId: "hidden" },
+            startedAt: 9_900_000_000_000, endedAt: 9_900_000_000_001,
+        });
         writeEvents(id, completedLog("classified-answer"));
         const tool = subagentResultTool(TypeStub, { getActiveOrigin: () => undefined });
         const payload = textOf(await tool.execute("tc", { id }));
         assert.match(payload, /ownership unavailable/i);
         assert.doesNotMatch(payload, /classified-answer/);
         assert.doesNotMatch(payload, /Unknown run id/);
-        const listed = textOf(await subagentListTool(TypeStub, { getActiveOrigin: () => undefined }).execute("tc", {}));
+        const listWithoutCwd = subagentListTool(TypeStub, { getActiveOrigin: () => undefined });
+        const listed = textOf(await listWithoutCwd.execute("tc", {}));
         assert.doesNotMatch(listed, new RegExp(id));
-        assert.match(listed, /Session identity unavailable|No subagent runs match filters/i);
+        assert.match(listed, /No subagent runs match filters/i);
+        const byFolder = textOf(await listWithoutCwd.execute("tc", {}, undefined, undefined, { cwd: "/tmp" }));
+        assert.match(byFolder, new RegExp(id), "listing by folder does not require a foreground session id");
+        assert.doesNotMatch(byFolder, /classified-answer/);
     });
 
-    it("binds list cursors to the selected session scope", async () => {
+    it("binds list cursors to the selected folder scope", async () => {
         const stamp = Date.now();
-        const originA = { cwd: "/tmp", sessionId: `scope-a-${stamp}` };
-        const originB = { cwd: "/tmp", sessionId: `scope-b-${stamp}` };
+        const folderA = `/tmp/scope-a-${stamp}`;
+        const folderB = `/tmp/scope-b-${stamp}`;
+        const originA = { cwd: folderA, sessionId: `scope-a-${stamp}` };
+        const originB = { cwd: folderB, sessionId: `scope-b-${stamp}` };
         const idsA = [];
         for (let i = 0; i < 12; i += 1) {
             const id = trackDisk(`sa_budget_scope_a_${stamp}_${i}`);
@@ -566,6 +706,7 @@ describe("registered subagent payloads", () => {
             seedMeta(id, {
                 status: "completed",
                 exitCode: 0,
+                cwd: folderA,
                 callbackOrigin: originA,
                 startedAt: 1_700_000_000_000 + i,
                 endedAt: 1_700_000_000_000 + i + 10,
@@ -573,7 +714,7 @@ describe("registered subagent payloads", () => {
             writeEvents(id, completedLog("a"));
         }
         const idB = trackDisk(`sa_budget_scope_b_${stamp}`);
-        seedMeta(idB, { status: "completed", exitCode: 0, callbackOrigin: originB, startedAt: 1_800_000_000_000 });
+        seedMeta(idB, { status: "completed", exitCode: 0, cwd: folderB, callbackOrigin: originB, startedAt: 1_800_000_000_000 });
         writeEvents(idB, completedLog("b-secret"));
         const listA = subagentListTool(TypeStub, { getActiveOrigin: () => originA });
         const listB = subagentListTool(TypeStub, { getActiveOrigin: () => originB });
@@ -582,9 +723,16 @@ describe("registered subagent payloads", () => {
         assert.ok(next, first);
         assert.equal(next.includes("b-secret"), false);
         const crossed = textOf(await listB.execute("tc", { cursor: next }));
-        assert.match(crossed, /reset=stale-cursor|foreign|scope session:/);
+        assert.match(crossed, /reset=stale-cursor/);
         assert.doesNotMatch(crossed, /b-secret/);
-        assert.ok(!idsA.some((id) => stripEnvelope(crossed).includes(id)) || /reset=stale-cursor/.test(crossed), crossed);
+        assert.ok(!idsA.some((id) => stripEnvelope(crossed).includes(id)), crossed);
+
+        // A cursor is bound to the folder, not to the foreground session: a
+        // different session listing the same folder continues the same page.
+        const listA2 = subagentListTool(TypeStub, { getActiveOrigin: () => ({ cwd: folderA, sessionId: `other-${stamp}` }) });
+        const continued = textOf(await listA2.execute("tc", { cursor: next }));
+        assert.doesNotMatch(continued, /reset=stale-cursor/);
+        assert.ok(idsA.some((id) => stripEnvelope(continued).includes(id)), continued);
     });
 
     describe("review regressions (#312)", () => {
@@ -809,6 +957,7 @@ describe("output-control aliases and opt-in facts (#321)", () => {
             assert.ok(tool.parameters.lines, tool.name);
             assert.match(tool.parameters.tail_lines.description, /Deprecated alias for lines/, tool.name);
             assert.ok("include" in tool.parameters, tool.name);
+            assert.match(tool.parameters.tail.description, /newest retained byte/, tool.name);
         }
     });
 

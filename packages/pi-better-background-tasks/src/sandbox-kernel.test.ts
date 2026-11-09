@@ -292,8 +292,8 @@ describe.skipIf(!support.supported)(
   () => {
     // @covers background-task.sandbox-local-spawn
     // @level integration
-    it("confines a spawned task's writes while leaving reads alone", async () => {
-      const harness = createHarness({ announceBeforeLoad: enabledPolicy() });
+    it("confines a spawned task's writes while Main is off and Background tasks is on", async () => {
+      const harness = createHarness({ announceBeforeLoad: { ...disabledPolicy(), background: enabledPolicy() } });
 
       const id = taskIdIn(await harness.execute("bg_task_spawn", {
         command: probeCommand(),
@@ -308,6 +308,7 @@ describe.skipIf(!support.supported)(
       expect(existsSync(outsideProbe)).toBe(false);
       expectDenialsHeld();
       expect(meta.launchArgv?.[0]).toBe(support.executable);
+      expect(meta.sandbox).toMatchObject({ confinement: "confined", policySource: "background", backend: support.backend, changesAffectTask: false });
     });
 
     // @covers background-task.sandbox-local-spawn
@@ -406,8 +407,26 @@ describe.skipIf(!support.supported)(
         callback: false,
       }));
       await waitForMeta(id, () => existsSync(marker));
-      const childPid = Number(readFileSync(marker, "utf8").trim());
-      expect(processAlive(childPid)).toBe(true);
+      // The shell creates the file with its redirect before `printf` writes the pid to
+      // it, so an existing marker can still be empty, and the pid it names is not
+      // necessarily resolvable on the first look. Wait for a pid that really is alive
+      // instead of sampling once.
+      const readChildPid = () => {
+        try {
+          const pid = Number(readFileSync(marker, "utf8").trim());
+          return Number.isInteger(pid) && pid > 1 ? pid : undefined;
+        } catch {
+          return undefined;
+        }
+      };
+      await waitForCondition(
+        () => {
+          const pid = readChildPid();
+          return pid !== undefined && processAlive(pid);
+        },
+        () => `child.pid ${JSON.stringify(existsSync(marker) ? readFileSync(marker, "utf8") : null)} never named a live process`,
+      );
+      const childPid = readChildPid()!;
       // The kernel's group for the child, read before the stop: a vanished group only
       // proves the child stopped if it is the group the child really belonged to.
       const childPgid = processGroupOf(childPid);

@@ -249,7 +249,7 @@ describe("subagent_list health surfacing", () => {
         const out = buildSubagentList({
             metas,
             params: { status: ["orphaned", "lost"] },
-            parentPid: 41001,
+            cwd: "/repo",
             now: NOW,
             statusOf: (m) => m.status,
             usageById: () => undefined,
@@ -273,7 +273,7 @@ describe("subagent_list health surfacing", () => {
         });
         assert.equal(
             row,
-            `• worker sa_quiet  [running]  xai/grok-4.5  1m 00s\n    prompt for sa_quiet`,
+            `• worker sa_quiet  [running]  session_id=sa_quiet  xai/grok-4.5  1m 00s\n    prompt for sa_quiet`,
         );
         assert.doesNotMatch(row, /health:| · stale| · model/);
     });
@@ -324,7 +324,7 @@ describe("subagent_list health surfacing", () => {
         const out = buildSubagentList({
             metas,
             params: {},
-            parentPid: 41001,
+            cwd: "/repo",
             now: NOW,
             statusOf: (m) => m.status,
             usageById: () => undefined,

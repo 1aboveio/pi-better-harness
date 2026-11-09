@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { resolveAgent } from "../src/cli-args.ts";
+import { parseManagedStartupArgs, resolveAgent } from "../src/cli-args.ts";
+
+test("managed startup parses manifest and state paths literally in both option forms", () => {
+  const manifest = "/managed/quoted ' runtime/runtime.json";
+  const values = parseManagedStartupArgs(["--agent=pi", `--desired-runtime=${manifest}`, "--server-dir", "/custom state", "--operation-id", "observer", "--require-capability", "native-client-v1"]);
+  assert.equal(values["desired-runtime"], manifest);
+  assert.equal(values["server-dir"], "/custom state");
+  assert.equal(values["operation-id"], "observer");
+  assert.deepEqual(values["require-capability"], ["native-client-v1"]);
+  assert.equal(parseManagedStartupArgs(["--runtime", manifest]).runtime, manifest);
+  assert.throws(() => parseManagedStartupArgs(["--runtime"]), /argument/);
+  assert.throws(() => parseManagedStartupArgs(["--unrecognised"]), /Unknown option/);
+});
 
 test("resolveAgent accepts the = form and the space form", () => {
   assert.equal(resolveAgent(["--agent=codex"]), "codex");

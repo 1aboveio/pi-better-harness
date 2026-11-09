@@ -1,0 +1,27 @@
+No skill catalog saves [] to overrides.skills; the picker is no longer a role inheritance.
+
+Agents / Payments Developer
+[Settings]   Instructions   Files
+Tab / Shift+Tab switch  ·  ↑↓ select / scroll  ·  Enter change  ·  Esc list
+
+    Model     openai/gpt-6.1-sol                                              inherited
+    Effort    high                                                            inherited
+  > Skills    no skill catalog                                                override
+
+  Model and effort are session edits. Skills save to the definition.
+
+  ID       agent.worker
+  Scope    user
+  Role     role.work
+  Tier     balanced
+  Actual   not resolved
+
+  Launch resolution
+  The catalog definition has no blocking diagnostic, but that is not launchability. Inject model a
+  vailability and effort support before launching. No actual model was selected here.
+
+Showing 1-15 of 15 lines
+
+Ctrl+S Save defaults
+
+Skills saved (user): agent.worker · none (--no-skills)

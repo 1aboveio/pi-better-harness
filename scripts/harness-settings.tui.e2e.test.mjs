@@ -90,6 +90,8 @@ export default function(pi){
     wait(pane => pane.includes("Callback default saved"));
     assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.callbacks.mode, "steer");
     key("Down");
+    wait(pane => /Sticky navigator\s+On/.test(pane));
+    key("Down");
     wait(pane => /Tool animation\s+Shimmer/.test(pane));
     key("Space");
     wait(pane => /Tool animation\s+Off/.test(pane));
@@ -142,6 +144,7 @@ export default function(pi){
     key("Down");
     key("Down");
     key("Down");
+    key("Down");
     key("Enter");
     wait(pane => pane.includes("Goal settings") && pane.includes("Automatic continuation"));
     key("Escape");
@@ -159,7 +162,7 @@ export default function(pi){
     wait(pane => pane.includes("Harness settings") && pane.includes("Steer active run") && pane.includes("User default") && /Tool output\s+Minimal/.test(pane));
     key("Enter");
     wait(pane => pane.includes("Wait until idle") && pane.includes("Session setting saved"));
-    key("Down"); key("Down"); key("Space");
+    key("Down"); key("Down"); key("Down"); key("Space");
     wait(pane => /Tool output\s+Normal/.test(pane) && pane.includes("Setting saved"));
     assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.toolOutput.enabled, false);
     key("Escape");

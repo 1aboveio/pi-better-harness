@@ -60,8 +60,9 @@ function meta(id, overrides = {}) {
 }
 
 function writeSessionFile(name, mtimeMs) {
-    mkdirSync(sessionsDir(), { recursive: true });
-    const path = join(sessionsDir(), name);
+    const legacySessionDir = join(baseDir(), "sessions");
+    mkdirSync(legacySessionDir, { recursive: true });
+    const path = join(legacySessionDir, name);
     writeFileSync(path, "session\n");
     const seconds = mtimeMs / 1000;
     utimesSync(path, seconds, seconds);

@@ -1,6 +1,6 @@
 {
   "name": "pi-better-background-tasks",
-  "version": "0.9.1",
+  "version": "0.14.2",
   "description": "Pi extension for durable background shell tasks, watchers, logs, and status inspection.",
   "license": "MIT",
   "type": "module",
@@ -44,6 +44,8 @@
   },
   "files": [
     "src/**/*.ts",
+    "src/supervisor/**/*.mjs",
+    "src/supervisor/**/*.js",
     "!src/**/*.test.ts",
     "!src/test-support/**",
     "!src/shared-ssh-core/test-support/**",

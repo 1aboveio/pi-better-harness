@@ -24,6 +24,7 @@ import { resolveRoleAssignment, type RoleAssignment } from "./role-assignment.ts
 import { configureTierPolicy, DEFAULT_TIER_POLICY, type TierPolicy, type TierSpec } from "./tier-policy.ts";
 import { canonicalAgentId, canonicalRoleId, shortRoleName, type Diagnostic, type ThinkingLevel } from "./catalog-schema.ts";
 import { withAgentSessionSettings, type AgentSessionOverrides } from "./agent-session-settings.ts";
+import { currentSandboxPermissions } from "./permission-policy.ts";
 
 export interface CatalogHost {
     cwd: string;
@@ -84,6 +85,8 @@ export interface CatalogRunRecord {
         model: { value: string | null; source: string; explicit: boolean };
         effort: { value: string | null; source: string; explicit: boolean };
         tier: { value: string | null; source: string; explicit: boolean };
+        /** Absent exposure is discovery; [] is none; paths are exactly those skills. */
+        skills: { value: string[] | null; source: string; explicit: boolean };
     };
     modelSelection: ModelSelection;
     effortSelection: EffortSelection;
@@ -161,7 +164,7 @@ export function loadLaunchSnapshot(host: CatalogHost): CatalogSnapshot {
     }), host.getSessionSettings?.() ?? host.sessionSettings);
 }
 
-export function createLaunchEnricher(): LaunchEnricher {
+export function createLaunchEnricher(pi?: unknown): LaunchEnricher {
     let cache: { key: string; rows: Map<string, CatalogResolutionAttachment> } | undefined;
     return ({ inspection, snapshotDigest }) => {
         const host = notedHost.current;
@@ -207,6 +210,7 @@ export function createLaunchEnricher(): LaunchEnricher {
                     config,
                     model: enrichment.actualModel,
                     cwd: host.cwd,
+                    sandboxPermissions: currentSandboxPermissions(pi)?.subagentPermissions,
                 }),
             },
         };
@@ -220,12 +224,16 @@ export async function clarifyCatalogRequest(
     const normalized = jobs.map((job, index) => ({
         job: { ...job, catalogJobIndex: index },
         index,
-        agent: agentIdOf(job),
-        roles: roleIdsOf(job),
+        continuation: job.session_id !== undefined || job.session_name !== undefined,
+        agent: job.session_id !== undefined || job.session_name !== undefined ? undefined : agentIdOf(job),
+        roles: job.session_id !== undefined || job.session_name !== undefined ? [] : roleIdsOf(job),
     }));
     const clean: CatalogJobFields[] = [];
     const pending: { job: CatalogJobFields; index: number; agent?: string; roles: string[] }[] = [];
     for (const item of normalized) {
+        // Saved conversations keep their launch recipe. Repeated selectors are
+        // checked against that recipe at admission, never clarified or expanded.
+        if (item.continuation) { clean.push(item.job); continue; }
         if (item.roles.length > 1 || (item.agent && item.roles.length > 0)) pending.push(item);
         else clean.push(withSelector(item.job, { agent: item.agent, role: item.roles[0] }));
     }
@@ -373,6 +381,7 @@ export async function prepareCatalogJob(snapshot: CatalogSnapshot, job: CatalogJ
             model: field(resolved.effective.model),
             effort: field(resolved.effective.effort),
             tier: field(resolved.effective.tier),
+            skills: skillField(resolved.effective.skills),
         },
         modelSelection: decision.modelSelection,
         effortSelection: decision.effortSelection,
@@ -646,6 +655,11 @@ function text(value: unknown): string | undefined {
 
 function field(value: { value: string | null; source: string; explicit: boolean }): { value: string | null; source: string; explicit: boolean } {
     return { value: value.value, source: value.source, explicit: value.explicit };
+}
+
+/** The catalog's skill exposure, frozen on the run record like model and effort. */
+function skillField(value: EffectiveDefinition["skills"]): CatalogRunRecord["effective"]["skills"] {
+    return { value: value.value ? [...value.value] : null, source: value.source, explicit: value.explicit };
 }
 
 function origin(value: EffectiveDefinition["source"]): CatalogRunRecord["source"] {

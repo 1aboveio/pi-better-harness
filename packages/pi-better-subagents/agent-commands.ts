@@ -9,8 +9,9 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { presentCatalog, presentCatalogEntry, type LaunchEnricher, type OperationView } from "./agent-inspection.ts";
+import { presentCatalog, presentCatalogEntry, type LaunchEnricher, type OperationView, type ReadSkillDefaults } from "./agent-inspection.ts";
 import { createCatalogComponent } from "./catalog-ui.ts";
+import type { ScopedModelLike } from "./catalog-editor.ts";
 import {
     CATALOG_SCHEMA_VERSION,
     DiagnosticCodes,
@@ -30,6 +31,8 @@ import {
     loadCatalog,
     projectCatalogPaths,
     refreshCatalog,
+    resetRuntimeToBundled,
+    resetUserDefinition,
     saveDefinition,
     userCatalogPaths,
     type CatalogSnapshot,
@@ -48,6 +51,8 @@ import {
 } from "./codex-import.ts";
 import { resolveRoleAssignment } from "./role-assignment.ts";
 import { saveAgentSessionDefaults, withAgentSessionSettings, type AgentSessionOverrides, type AgentSessionSettings } from "./agent-session-settings.ts";
+import { saveSkillExposure } from "./catalog-skill-edits.ts";
+import type { DiscoveredSkill } from "./skill-picker.ts";
 
 const MODEL_PATTERN = /^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 const TIER_PATTERN = /^[a-z][a-z0-9-]{0,32}$/;
@@ -69,6 +74,12 @@ export interface AgentCommandDeps {
     now?: () => string;
     /** Resolution unit injects availability, actual model/effort, and launchability. */
     enrich?: LaunchEnricher;
+    /** Live session/config default skill choice; absent keeps the legacy config read. */
+    readSkillDefaults?: ReadSkillDefaults;
+    /** Read loaded Pi skill metadata for the checkbox picker. */
+    discoverSkills?: (ctx: ExtensionCommandContext) => readonly DiscoveredSkill[];
+    /** Snapshot captured for this invocation. */
+    discoveredSkills?: readonly DiscoveredSkill[];
     sessionSettings?: AgentSessionSettings;
     /** Available foreground registry models, as provider/id. */
     editableModels?: () => readonly string[];
@@ -87,7 +98,7 @@ export interface AgentCommandUi {
     editor(title: string, prefill?: string): Promise<string | undefined>;
     notify(message: string, type?: "info" | "warning" | "error"): void;
     setWidget?(key: string, content: string[] | undefined): void;
-    custom?<T>(factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: unknown, done: (value: T) => void) => unknown, options?: { overlay: boolean }): Promise<T>;
+    custom?<T>(factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: unknown, done: (value: T) => void) => unknown, options?: { overlay: boolean; overlayOptions?: import("@earendil-works/pi-tui").OverlayOptions }): Promise<T>;
 }
 
 export interface AgentCommandHost {
@@ -95,6 +106,11 @@ export interface AgentCommandHost {
     hasUI: boolean;
     mode?: "tui" | "rpc" | "json" | "print";
     isProjectTrusted(): boolean;
+    /**
+     * Session model scope from `ctx.scopedModels`. Empty or absent means no
+     * scope, which Pi treats as "all available models are usable".
+     */
+    scopedModels?: readonly ScopedModelLike[];
     ui: AgentCommandUi;
 }
 
@@ -145,13 +161,24 @@ export function registerAgentCommands(pi: Pick<ExtensionAPI, "registerCommand">,
 /** Slash commands and settings shortcuts must resolve against the same live context. */
 export function executeAgentsCommandContext(args: string, ctx: ExtensionCommandContext, deps: AgentCommandDeps = {}): Promise<AgentCommandResult> {
     deps.propagateCommandContext?.(ctx);
+    const discoveredSkills = deps.discoverSkills?.(ctx) ?? deps.discoveredSkills;
     return executeAgentsCommand(args, {
         cwd: ctx.cwd,
         hasUI: ctx.hasUI,
         mode: ctx.mode,
         isProjectTrusted: () => ctx.isProjectTrusted(),
+        scopedModels: scopedModelsFromContext(ctx),
         ui: ctx.ui,
-    }, deps);
+    }, discoveredSkills ? { ...deps, discoveredSkills } : deps);
+}
+
+/**
+ * Older Pi versions do not expose `ctx.scopedModels`, so they retain the
+ * unscoped picker. Current hosts use an empty array when no scope is configured.
+ */
+function scopedModelsFromContext(ctx: ExtensionCommandContext): readonly ScopedModelLike[] {
+    const scoped = (ctx as unknown as { scopedModels?: unknown }).scopedModels;
+    return Array.isArray(scoped) ? scoped as readonly ScopedModelLike[] : [];
 }
 
 export async function executeAgentsCommand(args: string, host: AgentCommandHost, deps: AgentCommandDeps = {}): Promise<AgentCommandResult> {
@@ -213,7 +240,7 @@ export function parseCommandArgs(input: string): ParsedArgs {
 
 async function runList(parsed: ParsedArgs, loc: CatalogLocation, deps: AgentCommandDeps): Promise<AgentCommandResult> {
     if (parsed.positionals.length > 1) return result("error", "list", false, "list does not take extra arguments. Use /agents show <id> to inspect one definition.");
-    const listed = presentCatalog(readCatalog(loc), deps.enrich);
+    const listed = presentCatalog(readCatalog(loc), deps.enrich, deps.readSkillDefaults);
     return {
         ...result("ok", "list", false, `Listed from a fresh catalog read. File edits show up on the next list or launch; /agents reload is not required for that.\n${listed.text}`),
         diagnostics: listed.diagnostics,
@@ -223,7 +250,7 @@ async function runList(parsed: ParsedArgs, loc: CatalogLocation, deps: AgentComm
 
 async function runReload(parsed: ParsedArgs, loc: CatalogLocation, deps: AgentCommandDeps): Promise<AgentCommandResult> {
     if (parsed.positionals.length > 1) return result("error", "reload", false, "reload does not take extra arguments.");
-    const listed = presentCatalog(withAgentSessionSettings(refreshCatalog(loc), loc.sessionSettings), deps.enrich);
+    const listed = presentCatalog(withAgentSessionSettings(refreshCatalog(loc), loc.sessionSettings), deps.enrich, deps.readSkillDefaults);
     return {
         ...result("ok", "reload", false, `Reloaded revision ${listed.revision} for inspection. The next launch reads the files again on its own; this command is not a prerequisite.\n${listed.text}`),
         diagnostics: listed.diagnostics,
@@ -245,7 +272,7 @@ async function runShow(
             return clarification(command, `${command} needs an id. UI is unavailable, so none was selected. Run /agents list and pass the id. Nothing was written.`);
         }
         if (host.mode === "tui" && host.ui.custom) {
-            const listed = presentCatalog(readCatalog(loc), deps.enrich);
+            const listed = presentCatalog(readCatalog(loc), deps.enrich, deps.readSkillDefaults);
             return { ...result("ok", command, false, listed.text), diagnostics: listed.diagnostics, data: listed };
         }
         const ids = listCatalog(readCatalog(loc)).map((entry) => entry.id);
@@ -254,7 +281,7 @@ async function runShow(
         if (!selected) return clarification(command, "Inspect was dismissed. Nothing was written.");
         id = selected;
     }
-    const view = presentCatalogEntry(readCatalog(loc), id, deps.enrich);
+    const view = presentCatalogEntry(readCatalog(loc), id, deps.enrich, deps.readSkillDefaults);
     return {
         ok: view.found,
         status: view.found ? "ok" : "error",
@@ -357,7 +384,7 @@ async function runCreate(
     if (!saved.ok || !saved.path) {
         return { ...result("error", "create", false, saved.diagnostics.map((item) => item.message).join("\n") || "Create did not write a file."), diagnostics: saved.diagnostics };
     }
-    const view = presentCatalogEntry(readCatalog(loc), id, deps.enrich);
+    const view = presentCatalogEntry(readCatalog(loc), id, deps.enrich, deps.readSkillDefaults);
     return {
         ok: true,
         status: "ok",
@@ -507,7 +534,7 @@ async function runImport(
     if (!saved.ok || !saved.path) {
         return { ...result("error", "import-codex", false, saved.diagnostics.map((item) => item.message).join("\n") || "Import did not write a file."), diagnostics: [...parsedSource.diagnostics, ...built.diagnostics, ...saved.diagnostics] };
     }
-    const view = presentCatalogEntry(readCatalog(loc), built.definition.id, deps.enrich);
+    const view = presentCatalogEntry(readCatalog(loc), built.definition.id, deps.enrich, deps.readSkillDefaults);
     const launchNote = view.catalogLaunchable
         ? "Catalog validation passed. Definition validity is not launchability."
         : "The file was saved and is not launchable.";
@@ -724,12 +751,24 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
         const entries = catalog ?? { entries: [view!], diagnostics: commandResult.diagnostics, revision: "", text: "" };
         try {
             host.ui.setWidget?.("agents-catalog", undefined);
+            let viewportHeight = 30;
             await host.ui.custom<void>((tui, theme, _keys, done) =>
                 createCatalogComponent(entries, theme, () => tui.requestRender(), () => done(), view?.id, deps.sessionSettings ? {
-                    get: () => presentCatalog(readCatalog(location(host, deps)), deps.enrich),
+                    get: () => presentCatalog(readCatalog(location(host, deps)), deps.enrich, deps.readSkillDefaults),
                     models: () => deps.editableModels?.() ?? [],
+                    scopedModels: () => host.scopedModels ?? [],
                     settings: () => deps.sessionSettings!.snapshot(),
                     change: (id, key, value) => deps.sessionSettings!.change(id, key, value),
+                    changeSkills(entry, edit) {
+                        const result = saveSkillExposure({ ...location(host, deps), entry }, edit);
+                        if (result.ok && result.path) {
+                            commandResult.wrote = true;
+                            commandResult.path = result.path;
+                            commandResult.scope = result.scope;
+                        }
+                        return { ok: result.ok, message: result.message };
+                    },
+                    discoverSkills: () => deps.discoveredSkills ?? [],
                     save(id) {
                         const loc = location(host, deps);
                         const saved = saveAgentSessionDefaults(loadCatalog(loc), id, deps.sessionSettings!.snapshot(), loc);
@@ -740,10 +779,47 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
                         }
                         return { ok: saved.ok, message: saved.ok ? `Defaults saved (${saved.scope}): ${id}.` : saved.diagnostics.map((item) => item.message).join(" ") };
                     },
-                } : undefined), { overlay: true });
+                    resetToBundled(entry) {
+                        const source = entry.winningSource;
+                        if (!source) return { ok: false, message: "The definition source is unavailable. Reopen its settings." };
+                        const reset = resetRuntimeToBundled({ ...location(host, deps), id: entry.id, expectedPath: source.path, expectedDigest: source.contentDigest });
+                        if (reset.ok) {
+                            commandResult.wrote = true;
+                            commandResult.path = reset.path;
+                            commandResult.scope = "user";
+                            try { deps.sessionSettings!.reset(entry.id); }
+                            catch (error) {
+                                return { ok: false, message: `Saved defaults reset for ${entry.id}, but current-session overrides remain active: ${error instanceof Error ? error.message : String(error)}. Retry Reset to bundled to clear them.` };
+                            }
+                        }
+                        return { ok: reset.ok, message: reset.ok
+                            ? `Bundled model/effort restored: ${entry.id}. Role instructions unchanged.`
+                            : reset.diagnostics.map(item => item.message).join(" ") };
+                    },
+                    resetDefinition(entry) {
+                        if (entry.identity.scope === "bundled") return { ok: true, message: `Already using bundled instructions: ${entry.id}. Model/effort unchanged.` };
+                        const source = entry.winningSource;
+                        if (!source) return { ok: false, message: "The definition source is unavailable. Reopen its settings." };
+                        const reset = resetUserDefinition({ ...location(host, deps), id: entry.id, expectedPath: source.path, expectedDigest: source.contentDigest });
+                        if (reset.ok) {
+                            commandResult.wrote = true;
+                            commandResult.path = reset.path;
+                            commandResult.scope = "user";
+                        }
+                        return { ok: reset.ok, message: reset.ok
+                            ? `Bundled instructions restored: ${entry.id}. Model/effort kept. Backup: ${reset.backupPath}.`
+                            : reset.diagnostics.map(item => item.message).join(" ") };
+                    },
+                } : undefined, () => viewportHeight), {
+                    overlay: true,
+                    overlayOptions: {
+                        anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0,
+                        visible: (_width, height) => { viewportHeight = height; return true; },
+                    },
+                });
             if (deps.sessionSettings) {
                 const current = readCatalog(location(host, deps));
-                const refreshed = view ? presentCatalogEntry(current, view.id, deps.enrich) : presentCatalog(current, deps.enrich);
+                const refreshed = view ? presentCatalogEntry(current, view.id, deps.enrich, deps.readSkillDefaults) : presentCatalog(current, deps.enrich, deps.readSkillDefaults);
                 commandResult.data = refreshed;
                 commandResult.message = refreshed.text;
             }

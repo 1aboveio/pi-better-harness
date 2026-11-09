@@ -69,7 +69,7 @@ function hostArgs(args) {
 
 function run(argv) {
   return new Promise((resolve) => {
-    execFile(BIN, argv, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 15 * 60_000 }, (error, stdout, stderr) => {
+    execFile(BIN, argv, { env: { ...process.env, PI_SERVER_AGENT: "codex" }, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 15 * 60_000 }, (error, stdout, stderr) => {
       // Progress goes to stderr; show it only when the command failed, so a successful result stays one JSON document.
       const text = (error ? [stdout.trim(), stderr.trim() && `[stderr]\n${stderr.trim()}`] : [stdout.trim() || stderr.trim()]).filter(Boolean).join("\n");
       resolve({ isError: Boolean(error), text: text || (error ? error.message : "ok") });

@@ -18,14 +18,17 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   readlinkSync,
+  readSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -35,6 +38,34 @@ import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { exclusionReason } from "./exclusions.ts";
 
 export const BUNDLE_FORMAT_VERSION = 1;
+
+// Match the existing 1 GiB git-output bound; compressed input must not expand beyond it.
+const MAX_BUNDLE_BYTES = 1024 * 1024 * 1024;
+
+// Keep the public bundle APIs synchronous, but stream gzip I/O in a Node child so
+// neither compression nor decompression needs to hold the whole archive in memory.
+const GZIP_SCRIPT = `
+import { createReadStream, createWriteStream } from "node:fs";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { createGzip, createGunzip } from "node:zlib";
+const [mode, source, target, limit] = process.argv.slice(1);
+let bytes = 0;
+const bound = new Transform({
+  transform(chunk, encoding, callback) {
+    bytes += chunk.length;
+    if (bytes > Number(limit)) callback(new Error("Bundle exceeds uncompressed byte limit (" + limit + ")"));
+    else callback(null, chunk);
+  }
+});
+const codec = mode === "gzip" ? createGzip() : createGunzip();
+try {
+  await pipeline(createReadStream(source), ...(mode === "gzip" ? [bound, codec] : [codec, bound]), createWriteStream(target, { flags: "wx", mode: 0o600 }));
+} catch (error) {
+  process.stderr.write(error.message);
+  process.exitCode = 1;
+}
+`;
 
 export type BundleFileRole = "git-bundle" | "tracked-patch" | "untracked" | "session" | "state";
 
@@ -62,6 +93,8 @@ export interface BundleManifest {
   session: { id: string; name?: string; model?: string; createdAt?: string; metadata?: Record<string, unknown> };
   /** Logical-session ownership at export time; the importer takes epoch + 1. */
   ownership: { epoch: number; from: string; moveId: string };
+  /** False means only session/state files; omission means a legacy full-workspace bundle. */
+  workspaceIncluded?: boolean;
   repo: {
     remote?: string;
     branch?: string;
@@ -81,9 +114,13 @@ export interface BundleManifest {
 }
 
 export interface CreateBundleOptions {
-  /** Top-level directory of the git work tree. */
+  /** Top-level directory of the git work tree, or any cwd when includeWorkspace is false. */
   cwd: string;
   outFile: string;
+  /** Transfer encoding only; defaults to plain tar for older receivers. The filename need not change. */
+  compression?: "gzip" | "none";
+  /** Defaults to true. False carries only session/state and never calls git. */
+  includeWorkspace?: boolean;
   agent: BundleManifest["agent"];
   session: BundleManifest["session"];
   ownership: BundleManifest["ownership"];
@@ -127,7 +164,19 @@ function splitNul(buffer: Buffer): string[] {
 }
 
 export function sha256File(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+  const hash = createHash("sha256");
+  const fd = openSync(path, "r");
+  const buffer = Buffer.alloc(64 * 1024);
+  try {
+    for (;;) {
+      const bytes = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytes === 0) break;
+      hash.update(buffer.subarray(0, bytes));
+    }
+    return hash.digest("hex");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function sha256Of(data: string | Buffer): string {
@@ -210,9 +259,8 @@ function isBsdTar(): boolean {
   return execFileSync("tar", ["--version"], { encoding: "utf8" }).includes("bsdtar");
 }
 
-/** Package the session and its workspace into `outFile`. The work tree is only read, never changed. */
-export function createBundle(options: CreateBundleOptions): BundleManifest {
-  const cwd = resolve(options.cwd);
+/** Stage workspace data without touching the source worktree. Only full-workspace bundles call this. */
+function stageWorkspace(cwd: string, scratch: string, files: BundleFile[], requestedBase?: string): Pick<BundleManifest, "repo" | "symlinks" | "excluded" | "worktree"> {
   const root = gitText(cwd, ["rev-parse", "--show-toplevel"], true);
   if (!root) throw new BundleError(`${cwd} is not inside a git work tree; a session can only move with a git workspace`);
   if (resolve(root) !== resolve(cwd) && !existsSync(join(cwd, ".git"))) {
@@ -222,54 +270,85 @@ export function createBundle(options: CreateBundleOptions): BundleManifest {
   if (!head) throw new BundleError(`${cwd} has no commits yet; commit once so the history can travel`);
   const branch = gitText(cwd, ["symbolic-ref", "--short", "-q", "HEAD"], true) || undefined;
   const remote = gitText(cwd, ["remote", "get-url", "origin"], true) || undefined;
-  const baseRef = detectBase(cwd, branch, options.baseRef);
+  const baseRef = detectBase(cwd, branch, requestedBase);
   const baseSha = baseRef ? gitText(cwd, ["rev-parse", `${baseRef}^{commit}`]) : undefined;
+  const excluded = new Map<string, "credential" | "generated">();
 
+  // History: the branch (or detached HEAD) and the base ref, as a git bundle.
+  const gitBundle = join(scratch, "git.bundle.tmp");
+  const refs = [branch ? `refs/heads/${branch}` : "HEAD", ...(baseRef ? [baseRef] : [])];
+  git(cwd, ["bundle", "create", gitBundle, ...refs]);
+  stageFile(scratch, "git.bundle", gitBundle, files, "git-bundle");
+  rmSync(gitBundle);
+
+  // Dirty tracked changes (staged and unstaged) against HEAD, minus excluded paths.
+  const changed = splitNul(git(cwd, ["diff", "-z", "--name-only", "--no-renames", "HEAD"]));
+  const patchPaths: string[] = [];
+  for (const path of changed) {
+    const reason = exclusionReason(path);
+    if (reason) excluded.set(path, reason);
+    else patchPaths.push(path);
+  }
+  if (patchPaths.length > 0) {
+    const patch = git(cwd, ["diff", "--binary", "--no-renames", "--no-ext-diff", "HEAD", "--", ...patchPaths]);
+    stageFile(scratch, "tracked.patch", patch, files, "tracked-patch");
+  }
+
+  // Untracked, non-ignored files, minus excluded paths.
+  const symlinks: BundleManifest["symlinks"] = [];
+  for (const path of splitNul(git(cwd, ["ls-files", "-z", "--others", "--exclude-standard"])).sort()) {
+    const reason = exclusionReason(path);
+    if (reason) {
+      excluded.set(path, reason);
+      continue;
+    }
+    const full = join(cwd, path);
+    const info = lstatSync(full);
+    if (info.isSymbolicLink()) {
+      // Fail here rather than ship a bundle whose link restore would refuse.
+      const link = { path, target: readlinkSync(full) };
+      assertSafeSymlinkTarget(link);
+      symlinks.push(link);
+    } else if (info.isFile()) {
+      stageFile(scratch, `untracked/${path}`, full, files, "untracked");
+      if (info.mode & 0o111) chmodSync(join(scratch, "untracked", path), info.mode & 0o777);
+    }
+  }
+  return {
+    repo: { ...(remote ? { remote } : {}), ...(branch ? { branch } : {}), head, ...(baseRef ? { baseRef, baseSha } : {}) },
+    symlinks,
+    excluded: [...excluded].map(([path, reason]) => ({ path, reason })).sort((a, b) => a.path.localeCompare(b.path)),
+    worktree: digestWorktree(cwd),
+  };
+}
+
+function gzipFile(mode: "gzip" | "gunzip", source: string, target: string, limit: number): void {
+  try {
+    execFileSync(process.execPath, ["--input-type=module", "-e", GZIP_SCRIPT, mode, source, target, String(limit)], {
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 64 * 1024,
+    });
+  } catch (error) {
+    const stderr = (error as { stderr?: Buffer }).stderr?.toString().trim();
+    throw new BundleError(`Bundle gzip ${mode === "gzip" ? "compression" : "decompression"} failed${stderr ? `: ${stderr}` : ""}`);
+  }
+}
+
+/** Package session/state and, by default, its workspace. Compression never alters session content. */
+export function createBundle(options: CreateBundleOptions): BundleManifest {
+  if (options.compression !== undefined && options.compression !== "gzip" && options.compression !== "none") {
+    throw new BundleError("Bundle compression must be gzip or none");
+  }
+  if (options.includeWorkspace !== undefined && typeof options.includeWorkspace !== "boolean") {
+    throw new BundleError("Bundle includeWorkspace must be a boolean");
+  }
+  const cwd = resolve(options.cwd);
   const scratch = mkdtempSync(join(dirname(resolve(options.outFile)), ".bundle-stage-"));
   try {
     const files: BundleFile[] = [];
-    const excluded = new Map<string, "credential" | "generated">();
-
-    // History: the branch (or detached HEAD) and the base ref, as a git bundle.
-    const gitBundle = join(scratch, "git.bundle.tmp");
-    const refs = [branch ? `refs/heads/${branch}` : "HEAD", ...(baseRef ? [baseRef] : [])];
-    git(cwd, ["bundle", "create", gitBundle, ...refs]);
-    stageFile(scratch, "git.bundle", gitBundle, files, "git-bundle");
-    rmSync(gitBundle);
-
-    // Dirty tracked changes (staged and unstaged) against HEAD, minus excluded paths.
-    const changed = splitNul(git(cwd, ["diff", "-z", "--name-only", "--no-renames", "HEAD"]));
-    const patchPaths: string[] = [];
-    for (const path of changed) {
-      const reason = exclusionReason(path);
-      if (reason) excluded.set(path, reason);
-      else patchPaths.push(path);
-    }
-    if (patchPaths.length > 0) {
-      const patch = git(cwd, ["diff", "--binary", "--no-renames", "--no-ext-diff", "HEAD", "--", ...patchPaths]);
-      stageFile(scratch, "tracked.patch", patch, files, "tracked-patch");
-    }
-
-    // Untracked, non-ignored files, minus excluded paths.
-    const symlinks: BundleManifest["symlinks"] = [];
-    for (const path of splitNul(git(cwd, ["ls-files", "-z", "--others", "--exclude-standard"])).sort()) {
-      const reason = exclusionReason(path);
-      if (reason) {
-        excluded.set(path, reason);
-        continue;
-      }
-      const full = join(cwd, path);
-      const info = lstatSync(full);
-      if (info.isSymbolicLink()) {
-        // Restore refuses absolute, escaping and .git-bound links, so fail here rather than ship a bundle that cannot restore.
-        const link = { path, target: readlinkSync(full) };
-        assertSafeSymlinkTarget(link);
-        symlinks.push(link);
-      } else if (info.isFile()) {
-        stageFile(scratch, `untracked/${path}`, full, files, "untracked");
-        if (info.mode & 0o111) chmodSync(join(scratch, "untracked", path), info.mode & 0o777);
-      }
-    }
+    const workspace = options.includeWorkspace === false
+      ? { repo: { head: "" }, symlinks: [], excluded: [], worktree: [] }
+      : stageWorkspace(cwd, scratch, files, options.baseRef);
 
     for (const file of options.sessionFiles ?? []) {
       assertPlainName(file.name);
@@ -280,12 +359,11 @@ export function createBundle(options: CreateBundleOptions): BundleManifest {
       stageFile(scratch, `state/${file.name}`, typeof file.content === "string" ? Buffer.from(file.content) : file.content, files, "state");
     }
 
-    const worktree = digestWorktree(cwd);
     const totals = {
       files: files.length,
       bytes: files.reduce((sum, file) => sum + file.size, 0),
-      worktreeFiles: worktree.length,
-      worktreeBytes: worktree.reduce((sum, entry) => sum + (entry.mode === "symlink" ? 0 : statSync(join(cwd, entry.path)).size), 0),
+      worktreeFiles: workspace.worktree.length,
+      worktreeBytes: workspace.worktree.reduce((sum, entry) => sum + (entry.mode === "symlink" ? 0 : statSync(join(cwd, entry.path)).size), 0),
     };
     const manifest: BundleManifest = {
       formatVersion: BUNDLE_FORMAT_VERSION,
@@ -293,18 +371,22 @@ export function createBundle(options: CreateBundleOptions): BundleManifest {
       agent: options.agent,
       session: options.session,
       ownership: options.ownership,
-      repo: { ...(remote ? { remote } : {}), ...(branch ? { branch } : {}), head, ...(baseRef ? { baseRef, baseSha } : {}) },
+      ...(options.includeWorkspace === false ? { workspaceIncluded: false } : {}),
+      ...workspace,
       files,
-      symlinks,
-      excluded: [...excluded].map(([path, reason]) => ({ path, reason })).sort((a, b) => a.path.localeCompare(b.path)),
-      worktree,
       totals,
     };
     writeFileSync(join(scratch, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 
-    const members = ["manifest.json", "git.bundle", ...["tracked.patch", "untracked", "session", "state"].filter((m) => existsSync(join(scratch, m)))];
+    const members = ["manifest.json", ...["git.bundle", "tracked.patch", "untracked", "session", "state"].filter((m) => existsSync(join(scratch, m)))];
+    const archive = options.compression === "gzip" ? join(scratch, "payload.tar") : resolve(options.outFile);
     // macOS bsdtar would otherwise embed extended attributes that GNU tar warns about on the target.
-    tar(["-cf", resolve(options.outFile), ...(isBsdTar() ? ["--no-xattrs"] : []), "-C", scratch, ...members]);
+    tar(["-cf", archive, ...(isBsdTar() ? ["--no-xattrs"] : []), "-C", scratch, ...members]);
+    if (options.compression === "gzip") {
+      const compressed = join(scratch, "payload.tar.gz");
+      gzipFile("gzip", archive, compressed, MAX_BUNDLE_BYTES);
+      copyFileSync(compressed, resolve(options.outFile));
+    }
     return manifest;
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -323,13 +405,72 @@ export interface ExtractedBundle {
   dir: string;
 }
 
+export interface VerifyBundleOptions {
+  /** Limit for decoded tar bytes, including headers; may lower but not raise the 1 GiB bound. */
+  maxUncompressedBytes?: number;
+}
+
+/** Detect gzip by content, not filename, and finish bounded decompression before tar sees it. */
+export function verifyBundle(archive: string, workDir: string, options: VerifyBundleOptions = {}): ExtractedBundle {
+  const limit = options.maxUncompressedBytes ?? MAX_BUNDLE_BYTES;
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_BUNDLE_BYTES) {
+    throw new BundleError(`Bundle uncompressed byte limit must be an integer between 1 and ${MAX_BUNDLE_BYTES}`);
+  }
+  if (statSync(archive).size > MAX_BUNDLE_BYTES) throw new BundleError("Bundle exceeds archive byte limit");
+  const fd = openSync(archive, "r");
+  const magic = Buffer.alloc(2);
+  try {
+    readSync(fd, magic, 0, magic.length, 0);
+  } finally {
+    closeSync(fd);
+  }
+  if (magic[0] !== 0x1f || magic[1] !== 0x8b) {
+    if (statSync(archive).size > limit) throw new BundleError("Bundle exceeds uncompressed byte limit");
+    return verifyTarBundle(archive, workDir);
+  }
+  mkdirSync(workDir, { recursive: true });
+  const scratch = mkdtempSync(join(workDir, ".bundle-inflate-"));
+  try {
+    const plain = join(scratch, "payload.tar");
+    gzipFile("gunzip", resolve(archive), plain, limit);
+    return verifyTarBundle(plain, workDir);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+// System tar autodetects other compression formats too. Require a tar header so
+// it cannot perform a second, unbounded decompression after our gzip byte check.
+function assertPlainTar(archive: string): void {
+  const fd = openSync(archive, "r");
+  const header = Buffer.alloc(512);
+  let bytes: number;
+  try {
+    bytes = readSync(fd, header, 0, header.length, 0);
+  } finally {
+    closeSync(fd);
+  }
+  if (bytes === 512 && header.every((byte) => byte === 0)) return;
+  const checksum = header.toString("ascii", 148, 156).replace(/\0.*$/, "").trim();
+  let unsigned = 0;
+  let signed = 0;
+  for (let i = 0; i < header.length; i++) {
+    const byte = i >= 148 && i < 156 ? 32 : header[i]!;
+    unsigned += byte;
+    signed += byte > 127 ? byte - 256 : byte;
+  }
+  const expected = Number.parseInt(checksum, 8);
+  if (bytes !== 512 || !/^[0-7]+$/.test(checksum) || (expected !== unsigned && expected !== signed)) {
+    throw new BundleError("Bundle payload is not a plain tar archive");
+  }
+}
+
 /**
- * Unpack `archive` into a fresh directory under `workDir` and check it against its
- * manifest: every member listed, every checksum and size equal, nothing extra, and
- * no member that could escape the directory. Throws BundleError on any mismatch.
+ * Unpack a plain tar into a fresh directory and check every member, checksum and
+ * size against its manifest, retaining the same path and workspace safety checks.
  */
-export function verifyBundle(archive: string, workDir: string): ExtractedBundle {
-  const listing = execFileSync("tar", ["-tvf", archive], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, env: { ...process.env, COPYFILE_DISABLE: "1" } });
+function verifyTarBundle(archive: string, workDir: string): ExtractedBundle {
+  assertPlainTar(archive);  const listing = execFileSync("tar", ["-tvf", archive], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, env: { ...process.env, COPYFILE_DISABLE: "1" } });
   for (const line of listing.split("\n").filter(Boolean)) {
     if (line[0] !== "-" && line[0] !== "d") throw new BundleError(`Bundle has a member that is not a plain file or directory: ${line}`);
   }
@@ -353,6 +494,7 @@ export function verifyBundle(archive: string, workDir: string): ExtractedBundle 
     if (manifest.formatVersion !== BUNDLE_FORMAT_VERSION) {
       throw new BundleError(`Unsupported bundle format ${String(manifest.formatVersion)}; this build reads format ${BUNDLE_FORMAT_VERSION}`);
     }
+    assertWorkspaceIncluded(manifest);
     const listed = new Set<string>();
     let bytes = 0;
     for (const file of manifest.files) {
@@ -378,6 +520,27 @@ export function verifyBundle(archive: string, workDir: string): ExtractedBundle 
     rmSync(dir, { recursive: true, force: true });
     throw error;
   }
+}
+
+function assertWorkspaceIncluded(manifest: BundleManifest): void {
+  if (Object.hasOwn(manifest, "workspaceIncluded") && typeof manifest.workspaceIncluded !== "boolean") {
+    throw new BundleError("Manifest workspaceIncluded must be a boolean");
+  }
+  if (manifest.workspaceIncluded !== false) return;
+  if (
+    !manifest.repo || manifest.repo.head !== "" || Object.keys(manifest.repo).some((key) => key !== "head") ||
+    !Array.isArray(manifest.worktree) || manifest.worktree.length !== 0 ||
+    !Array.isArray(manifest.symlinks) || manifest.symlinks.length !== 0 ||
+    !Array.isArray(manifest.excluded) || manifest.excluded.length !== 0 ||
+    !manifest.totals || manifest.totals.worktreeFiles !== 0 || manifest.totals.worktreeBytes !== 0 ||
+    !Array.isArray(manifest.files) || manifest.files.some((file) =>
+      !file || (file.role !== "session" && file.role !== "state") ||
+      typeof file.path !== "string" || !file.path.startsWith(`${file.role}/`) ||
+      !/^[^/\\\\]+$/.test(file.path.slice(file.role.length + 1)))
+  ) {
+    throw new BundleError("Session-only bundle must not contain workspace data");
+  }
+  for (const file of manifest.files) assertPlainName(file.path.slice(file.role.length + 1));
 }
 
 /** Bundle paths and link targets use POSIX semantics, as the restoring filesystem does: '/' is the only separator. */
@@ -536,6 +699,8 @@ export interface MaterializeResult {
  */
 export function materializeWorkspace(extracted: ExtractedBundle, destDir: string): MaterializeResult {
   const { manifest, dir } = extracted;
+  assertWorkspaceIncluded(manifest);
+  if (manifest.workspaceIncluded === false) throw new BundleError("Cannot materialize a session-only bundle as a workspace");
   const dest = resolve(destDir);
   assertSafeWorkspaceEntries(manifest);
   if (existsSync(dest) && readdirSync(dest).length > 0) throw new BundleError(`Destination ${dest} already exists and is not empty`);

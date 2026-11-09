@@ -4,16 +4,10 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      windows_only:
-        description: Run only the Windows compatibility checks
-        type: boolean
-        default: false
 
 jobs:
   node24-sandbox:
     name: node24-sandbox
-    if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -40,6 +34,10 @@ jobs:
         run: |
           node --import tsx --import ./packages/pi-better-subagents/tests/isolate-registry.mjs --test packages/pi-better-subagents/tests/task_runtime.test.mjs
           node --import tsx --test packages/task-sandbox/apply-patch.test.ts
+      - name: Prove sandboxed worker parking and resumption
+        env:
+          PI_WORKER_KERNEL_REQUIRE: "1"
+        run: node --import tsx --test packages/pi-better-subagents/tests/worker-waits-kernel.test.mjs
 
   windows-verify:
     name: windows-verify
@@ -90,10 +88,44 @@ jobs:
         run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts
         working-directory: packages/pi-better-background-tasks
 
-  # Exercise affected extensions against the minimum and current Pi 1.x SDKs.
+  # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
   pi-1x-compat:
-    name: pi-1x-compat (${{ matrix.pi-version }})
-    if: ${{ !inputs.windows_only }}
+    name: pi-1x-compat
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision private runtime test Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+
+      - name: Export private runtime test Node
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "PI_TEST_PRIVATE_RUNTIME_NODE=" + process.execPath + "\n")'
+
+      - name: Restore host Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install pinned Codex test dependency
+        run: |
+          npm install --global @openai/codex@0.159.2
+          test "$(codex --version)" = "codex-cli 0.159.2"
+
+      - name: pi-better-server suite on supported native Pi 1.2
+        run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.2.0 "$RUNNER_TEMP/pi-compat"
+
+  # Exercise affected extensions against the minimum and current Pi 1.x SDKs.
+  # Kept separate from pi-1x-compat: this matrix moves independently of the
+  # Server lane, which keeps its native Pi 1.2 run and pinned Codex prerequisite.
+  pi-1x-compat-extensions:
+    name: pi-1x-compat-extensions (${{ matrix.pi-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -146,14 +178,23 @@ jobs:
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-sdk-compat-agent
         run: npm test -w pi-better-background-tasks -w navigator -w ssh-core -w pi-better-ssh
 
-  ci:
-    name: ci
-    if: ${{ !inputs.windows_only }}
+  workspace-ci:
+    name: workspace-ci
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Provision private runtime test Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+
+      - name: Export private runtime test Node
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "PI_TEST_PRIVATE_RUNTIME_NODE=" + process.execPath + "\n")'
+
+      - name: Restore host Node 22
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
@@ -176,10 +217,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
+      - name: Root script tests
         env:
           PI_NAVIGATOR_EVIDENCE_DIR: ${{ runner.temp }}/navigator-golden
-        run: npm test
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 scripts/*.test.mjs
+
+      - name: Workspace tests (Server runs in isolated shards)
+        run: node scripts/test-ci-workspaces.mjs
 
       - name: Upload navigator golden-path evidence
         if: always()
@@ -204,26 +248,38 @@ jobs:
             extensions/background-tasks/index.ts \
             extensions/ssh/index.ts \
             extensions/goal/index.ts \
-            extensions/plan/index.ts \
+            extensions/model-router/index.ts \
             extensions/execution-policy.ts \
+            extensions/minimal-output/index.ts \
+            extensions/tool-call-guard/index.ts \
+            extensions/tool-call-guard/waits.ts \
+            extensions/settings/index.ts \
             node_modules/pi-better-sandbox/index.ts \
             node_modules/pi-better-sandbox/shared-sandbox-core.ts \
             node_modules/pi-better-sandbox/shared-sandbox-diagnostics.ts \
             node_modules/pi-better-sandbox/diagnostics-command.ts \
             node_modules/pi-better-sandbox/shared-task-sandbox.ts \
             node_modules/pi-better-sandbox/shared-task-files.ts \
+            node_modules/pi-better-sandbox/shared-task-exec.ts \
+            node_modules/pi-better-sandbox/shared-task-application.ts \
             node_modules/pi-better-subagents/index.ts \
             node_modules/pi-better-subagents/shared-navigator.ts \
             node_modules/pi-better-subagents/shared-sandbox-core.ts \
             node_modules/pi-better-subagents/shared-sandbox-diagnostics.ts \
             node_modules/pi-better-subagents/shared-task-sandbox.ts \
             node_modules/pi-better-subagents/shared-task-files.ts \
+            node_modules/pi-better-subagents/shared-task-exec.ts \
+            node_modules/pi-better-subagents/shared-task-application.ts \
             node_modules/pi-better-subagents/task-runtime.mjs \
             node_modules/pi-better-subagents/task-guard.ts \
             node_modules/pi-better-subagents/task-policy.ts \
             node_modules/pi-better-subagents/shared-failure-observations.ts \
             node_modules/pi-better-subagents/shared-callback-batcher.ts \
             node_modules/pi-better-subagents/shared-execution-policy.ts \
+            node_modules/pi-better-subagents/shared-worktree-context.ts \
+            node_modules/pi-better-subagents/shared-operation-coordinator/index.ts \
+            node_modules/pi-better-subagents/child-operations.ts \
+            node_modules/pi-better-subagents/worker-waits.ts \
             node_modules/pi-better-background-tasks/src/index.ts \
             node_modules/pi-better-background-tasks/src/shared-navigator.ts \
             node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
@@ -231,11 +287,18 @@ jobs:
             node_modules/pi-better-background-tasks/src/shared-failure-observations.ts \
             node_modules/pi-better-background-tasks/src/shared-callback-batcher.ts \
             node_modules/pi-better-background-tasks/src/shared-execution-policy.ts \
+            node_modules/pi-better-background-tasks/src/shared-operation-coordinator/index.ts \
+            node_modules/pi-better-background-tasks/src/observed-waits.ts \
+            node_modules/pi-better-background-tasks/src/supervisor/generated/runner.mjs \
+            node_modules/pi-better-background-tasks/src/supervisor/generated/store.mjs \
             node_modules/pi-better-ssh/src/index.ts \
             node_modules/pi-better-ssh/src/shared-ssh-core/index.ts \
+            node_modules/pi-better-model-router/src/index.ts \
+            node_modules/pi-better-model-router/node_modules/pi-ollama-cloud/index.ts \
             node_modules/pi-better-goal/src/index.ts \
-            node_modules/pi-better-plan/src/index.ts \
-            node_modules/pi-better-plan/src/shared-execution-policy.ts
+            extensions/task-context/index.ts \
+            extensions/project-context/index.ts \
+            extensions/worktree-context.ts
           do
             node -e 'const d = require(process.argv[1]); const pack = Array.isArray(d) ? d[0] : Object.values(d)[0]; if (!pack.files.some((file) => file.path === process.argv[2])) throw new Error(`missing bundled extension: ${process.argv[2]}`);' /tmp/pi-harness-pack.json "$path"
           done
@@ -253,9 +316,73 @@ jobs:
           node --import tsx --import ./packages/pi-better-subagents/tests/isolate-registry.mjs --test packages/pi-better-subagents/tests/codemode_batch.test.mjs
           node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/goal-retry-runtime.test.mjs
 
+  server-tests:
+    name: server-tests (${{ matrix.shard }}/2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision private runtime test Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+
+      - name: Export private runtime test Node
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "PI_TEST_PRIVATE_RUNTIME_NODE=" + process.execPath + "\n")'
+
+      - name: Restore host Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install TUI and sandbox test dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes tmux bubblewrap
+          if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / -- /bin/true
+          npm install --global @openai/codex@0.159.2
+          test "$(codex --version)" = "codex-cli 0.159.2"
+
+      - name: Synchronize Server test dependencies
+        run: npm run pretest -w packages/pi-better-server
+
+      - name: Server test shard
+        working-directory: packages/pi-better-server
+        env:
+          TEST_SHARD: ${{ matrix.shard }}
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$TEST_SHARD/2" test/*.test.ts
+
+  # Keep the existing required check name, and fail on failed, cancelled, or skipped lanes.
+  ci:
+    name: ci
+    if: always()
+    needs: [workspace-ci, server-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every test lane
+        env:
+          WORKSPACE_RESULT: ${{ needs.workspace-ci.result }}
+          SERVER_RESULT: ${{ needs.server-tests.result }}
+        run: |
+          test "$WORKSPACE_RESULT" = success
+          test "$SERVER_RESULT" = success
+
   macos-sandbox:
     name: macos-sandbox
-    if: ${{ !inputs.windows_only }}
     runs-on: macos-latest
     env:
       # Turns "no backend, so skip" into a hard failure on the lane whose whole
@@ -314,7 +441,6 @@ jobs:
 
   linux-sandbox:
     name: linux-sandbox
-    if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     env:
       # Same contract as the macOS lane: a runner that has lost bubblewrap must

@@ -2,11 +2,16 @@
 // @level unit
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
     SUBAGENT_LIST_DEFAULT_LIMIT,
     SUBAGENT_LIST_MAX_LIMIT,
     buildSubagentList,
+    listFolderScopeKey,
 } from "../list.mjs";
+import { isWithinWorkspace, normalizeWorkspacePath } from "../workspace-scope.ts";
 
 const PARENT = 41001;
 const OTHER_PARENT = 41002;
@@ -33,7 +38,7 @@ function build(metas, params = {}, extra = {}) {
     return buildSubagentList({
         metas,
         params,
-        parentPid: PARENT,
+        cwd: "/repo",
         now: BASE + 60_000,
         usageById: () => ({ input: 0, output: 0, cacheRead: 0, costUSD: 0, total: 0 }),
         ...extra,
@@ -49,21 +54,22 @@ function rowIds(output) {
 }
 
 describe("subagent_list helper", () => {
-    it("defaults to current-parent runs, newest first, capped at the default row limit", () => {
+    it("defaults to the newest runs in the calling folder across foreground sessions, capped at the default limit", () => {
         const metas = [];
         for (let i = 0; i < 25; i++) {
             metas.push(meta(`sa_owned_${String(i).padStart(2, "0")}`, { startedAt: BASE + i }));
         }
-        metas.push(meta("sa_foreign_newest", { spawnPid: OTHER_PARENT, startedAt: BASE + 1000 }));
+        metas.push(meta("sa_peer_newest", { spawnPid: OTHER_PARENT, startedAt: BASE + 1000 }));
+        metas.push(meta("sa_elsewhere_newest", { cwd: "/elsewhere", startedAt: BASE + 2000 }));
 
         const output = build(metas);
         const ids = rowIds(output);
 
         assert.equal(rowLines(output).length, SUBAGENT_LIST_DEFAULT_LIMIT);
-        assert.equal(ids[0], "sa_owned_24");
-        assert.equal(ids.at(-1), "sa_owned_15");
-        assert.ok(!ids.includes("sa_owned_14"));
-        assert.ok(!ids.includes("sa_foreign_newest"));
+        assert.equal(ids[0], "sa_peer_newest", "a run from another foreground in the same folder is a local peer");
+        assert.equal(ids[1], "sa_owned_24");
+        assert.ok(!ids.includes("sa_owned_15"));
+        assert.ok(!ids.includes("sa_elsewhere_newest"));
     });
 
     it("honors an explicit limit", () => {
@@ -83,16 +89,45 @@ describe("subagent_list helper", () => {
         assert.ok(output.includes(`Showing ${SUBAGENT_LIST_MAX_LIMIT} of ${SUBAGENT_LIST_MAX_LIMIT + 5} matching subagent runs`));
     });
 
-    it("keeps all:true machine-global scope while still respecting limit", () => {
+    it("keeps all:true machine-global regardless of folder", () => {
         const metas = [
             meta("sa_owned_old", { startedAt: BASE + 1 }),
-            meta("sa_foreign_new", { spawnPid: OTHER_PARENT, startedAt: BASE + 4 }),
+            meta("sa_elsewhere_new", { cwd: "/tmp", startedAt: BASE + 4 }),
             meta("sa_owned_new", { startedAt: BASE + 3 }),
-            meta("sa_foreign_mid", { spawnPid: OTHER_PARENT, startedAt: BASE + 2 }),
+            meta("sa_sibling_prefix", { cwd: "/repo-other", startedAt: BASE + 2 }),
         ];
 
         assert.deepEqual(rowIds(build(metas, { limit: 3 })), ["sa_owned_new", "sa_owned_old"]);
-        assert.deepEqual(rowIds(build(metas, { all: true, limit: 3 })), ["sa_foreign_new", "sa_owned_new", "sa_foreign_mid"]);
+        assert.deepEqual(rowIds(build(metas, { all: true, limit: 3 })), ["sa_elsewhere_new", "sa_owned_new", "sa_sibling_prefix"]);
+    });
+
+    it("includes a nested workspace but not a sibling that shares the folder-name prefix", () => {
+        const metas = [
+            meta("sa_root", { startedAt: BASE + 4 }),
+            meta("sa_nested", { cwd: "/repo/packages/app", startedAt: BASE + 3 }),
+            meta("sa_sibling_prefix", { cwd: "/repo-other", startedAt: BASE + 2 }),
+            meta("sa_parent_escape", { cwd: "/repo/../elsewhere", startedAt: BASE + 1 }),
+        ];
+
+        assert.deepEqual(rowIds(build(metas)), ["sa_root", "sa_nested"]);
+    });
+
+    it("excludes a record that names no workspace, but all:true still reports it", () => {
+        const metas = [meta("sa_no_cwd", { cwd: undefined }), meta("sa_known", { startedAt: BASE + 1 })];
+
+        assert.deepEqual(rowIds(build(metas)), ["sa_known"]);
+        assert.deepEqual(rowIds(build(metas, { all: true })), ["sa_known", "sa_no_cwd"]);
+    });
+
+    it("keeps durable completed records that carry only a workspace (no origin or spawn pid)", () => {
+        const archived = {
+            ...meta("sa_archived", { startedAt: BASE + 2 }),
+            spawnPid: undefined,
+            callbackOrigin: undefined,
+        };
+        const output = build([archived, meta("sa_live", { startedAt: BASE + 1 })]);
+
+        assert.deepEqual(rowIds(output), ["sa_archived", "sa_live"]);
     });
 
     it("filters by effective status, including transient exited", () => {
@@ -143,8 +178,9 @@ describe("subagent_list helper", () => {
         assert.equal(output, "No subagent runs match filters.");
     });
 
-    it("preserves the existing run row format", () => {
+    it("shows the conversation session id separately from the attempt id", () => {
         const run = meta("sa_format", {
+            sessionId: "sa_original_conversation",
             name: "reviewer",
             model: "xai/grok-4.5",
             promptPreview: "hello   world\nfrom prompt",
@@ -158,7 +194,7 @@ describe("subagent_list helper", () => {
 
         assert.equal(
             output,
-            "• reviewer sa_format  [completed]  xai/grok-4.5  45s\n    hello world from prompt",
+            "• reviewer sa_format  [completed]  session_id=sa_original_conversation  xai/grok-4.5  45s\n    hello world from prompt",
         );
         assert.doesNotMatch(output, /tok|\$/);
     });
@@ -188,5 +224,39 @@ describe("subagent_list helper", () => {
             1,
             "only batch-launched rows should carry batch info",
         );
+    });
+});
+
+describe("workspace scope helper", () => {
+    it("compares canonical directories, not string prefixes", () => {
+        assert.equal(isWithinWorkspace("/repo", "/repo"), true);
+        assert.equal(isWithinWorkspace("/repo/packages/app", "/repo"), true);
+        assert.equal(isWithinWorkspace("/repo-other", "/repo"), false);
+        assert.equal(isWithinWorkspace("/repo/../elsewhere", "/repo"), false);
+        assert.equal(isWithinWorkspace("", "/repo"), false);
+        assert.equal(isWithinWorkspace("/repo", ""), false);
+    });
+
+    it("resolves existing symlinked workspace directories through realpath", () => {
+        const base = mkdtempSync(join(tmpdir(), "subagent-workspace-scope-"));
+        try {
+            const real = join(base, "real");
+            mkdirSync(join(real, "nested"), { recursive: true });
+            const link = join(base, "link");
+            symlinkSync(real, link);
+
+            assert.equal(normalizeWorkspacePath(link), normalizeWorkspacePath(real));
+            assert.equal(isWithinWorkspace(link, real), true, "a symlink to the workspace is the workspace");
+            assert.equal(isWithinWorkspace(join(link, "nested"), real), true);
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    it("binds a list cursor to the normalized folder, not to a spelling", () => {
+        assert.equal(listFolderScopeKey(false, "/repo/"), listFolderScopeKey(false, "/repo/./"));
+        assert.notEqual(listFolderScopeKey(false, "/repo"), listFolderScopeKey(false, "/repo-other"));
+        assert.equal(listFolderScopeKey(true, "/repo"), "all");
+        assert.equal(listFolderScopeKey(true, "/repo-other"), "all");
     });
 });

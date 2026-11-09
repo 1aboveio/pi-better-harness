@@ -2,6 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import { createRenderScheduler, type RenderScheduler } from "./shared-render-scheduler.ts";
+import { setNavigatorPanel } from "./shared-navigator-panels.ts";
 
 export default function navigatorExtension(): void {
   // Internal shared package. Pi may scan its symlink in the extension directory
@@ -175,18 +176,15 @@ export function isNavigatorUiAvailable(ctx: ExtensionContext | undefined): boole
 }
 
 export function navigatorFooterHint(_count: number): string | null {
-  // Retain the compatibility helper so refresh/reload clears any old badge.
+  // Retain the compatibility helper without publishing a badge.
   return null;
 }
 
 export function applyNavigatorFooter(ui: { setStatus(key: string, value: string | undefined): void }, count: number): string | null {
-  const hint = navigatorFooterHint(count);
-  ui.setStatus(NAVIGATOR_STATUS_KEY, hint ?? undefined);
-  return hint;
+  return navigatorFooterHint(count);
 }
 
 export function applyCloseConfirmFooter(ui: { setStatus(key: string, value: string | undefined): void }, hint: string | null | undefined): string | null {
-  ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, hint ?? undefined);
   return hint ?? null;
 }
 
@@ -198,7 +196,7 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
     ...deps,
     createTranscriptComponent: deps.createTranscriptComponent ?? s.deps?.createTranscriptComponent,
   };
-  try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
+  try { setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   s.mainListWidgetInstalled = false;
   s.mainListRequestRender = undefined;
   s.mainListDeadlineScheduler?.dispose();
@@ -218,10 +216,7 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   const activeCtx = ctx ?? s.uiCtx;
   s.uiCtx = undefined;
   if (activeCtx && isNavigatorUiAvailable(activeCtx)) {
-    const ui = activeCtx.ui;
-    try { applyNavigatorFooter(ui as any, 0); } catch { /* ignore */ }
-    try { applyCloseConfirmFooter(ui as any, null); } catch { /* ignore */ }
-    try { (ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
+    try { setNavigatorPanel(activeCtx, MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   }
   s.lastHint = undefined;
   s.lastMainListLines = undefined;
@@ -241,12 +236,6 @@ export function refreshBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   const activeCtx = isNavigatorUiAvailable(ctx) ? ctx : s.uiCtx;
   if (!isNavigatorUiAvailable(activeCtx)) return;
   try {
-    const count = visibleCount();
-    const hint = navigatorFooterHint(count);
-    if (hint !== s.lastHint) {
-      applyNavigatorFooter(activeCtx!.ui as any, count);
-      s.lastHint = hint;
-    }
     refreshMainListWidget();
   } catch { /* ignore */ }
 }
@@ -271,7 +260,6 @@ function clearMainListCloseArm(): void {
   s.mainListCloseArmTimer = undefined;
   if (!s.mainListCloseArm) return;
   s.mainListCloseArm = undefined;
-  try { applyCloseConfirmFooter((s.uiCtx as any).ui, null); } catch { /* ignore */ }
 }
 
 function refreshMainListWidget(): void {
@@ -293,6 +281,7 @@ function refreshMainListWidget(): void {
   const nextSignature = rows.length ? mainListSignature(rows, {
     selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
     focused: s.mainListFocused === true,
+    closeHint: closeHintFor(rows.find((row) => row.navigatorId === s.mainListCloseArm?.id)),
   }) : undefined;
   const changed = nextSignature !== s.lastMainListSignature;
   s.lastMainListSignature = nextSignature;
@@ -302,7 +291,7 @@ function refreshMainListWidget(): void {
   })] : undefined;
   if (!rows.length) {
     if (!s.mainListWidgetInstalled) return;
-    try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
+    try { setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
     s.mainListWidgetInstalled = false;
     s.mainListRequestRender = undefined;
     s.lastMainListSignature = undefined;
@@ -310,7 +299,7 @@ function refreshMainListWidget(): void {
   }
   if (!s.mainListWidgetInstalled) {
     try {
-      (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, (tui: { requestRender?(): void }, theme: unknown) => createMainListWidget(tui, theme, deps), { placement: "aboveEditor" });
+      setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, (tui: { requestRender?(): void }, theme: unknown) => createMainListWidget(tui, theme, deps), { placement: "aboveEditor" });
       s.mainListWidgetInstalled = true;
     } catch { /* ignore */ }
   }
@@ -328,28 +317,118 @@ function themeFgFromTheme(theme: unknown): (color: string, value: string) => str
   return (color, value) => maybeTheme?.fg ? maybeTheme.fg(color, value) : value;
 }
 
-function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, deps: HostDeps): Component & { dispose?(): void } {
+// Structural typing keeps keyboard-only Pi hosts (no mouse API) loading this widget unchanged.
+type WidgetMouseEvent = {
+  type: string;
+  button: string;
+  /** Coordinates local to this component, zero-based. */
+  x: number;
+  y: number;
+  width: number;
+  shift?: boolean;
+  alt?: boolean;
+  ctrl?: boolean;
+};
+
+type WidgetMouseResult = { handled: true; render: boolean };
+
+type MainListWidget = Component & {
+  dispose?(): void;
+  handleMouse(event: WidgetMouseEvent): WidgetMouseResult | undefined;
+};
+
+const BACK_TO_MAIN = "← main (Esc)";
+const BACK_TARGET = "back-to-main";
+
+function highlightPointerTarget(theme: unknown, line: string, width: number): string {
+  const colors = theme as { bg?(color: string, value: string): string } | undefined;
+  return colors?.bg?.("selectedBg", line + " ".repeat(Math.max(0, width - visibleWidth(line))))
+    ?? themeFgFromTheme(theme)("accent", line);
+}
+
+function createPointerNavigation(targetAt: (event: WidgetMouseEvent) => string | undefined, activate: (target: string) => boolean) {
+  let hovered: string | undefined;
+  let pressed: { target: string; y: number } | undefined;
+  return {
+    get hovered() { return hovered; },
+    reset() { hovered = undefined; pressed = undefined; },
+    handleMouse(event: WidgetMouseEvent): WidgetMouseResult | undefined {
+      if (event.type === "move" || event.type === "leave") {
+        const target = event.type === "leave" ? undefined : targetAt(event);
+        const changed = hovered !== target;
+        hovered = target;
+        return changed || target ? { handled: true, render: changed } : undefined;
+      }
+      if (event.button !== "left" || event.shift || event.alt || event.ctrl) {
+        pressed = undefined;
+        return undefined;
+      }
+      if (event.type === "press") {
+        const target = targetAt(event);
+        pressed = target ? { target, y: event.y } : undefined;
+        return target ? { handled: true, render: false } : undefined;
+      }
+      if (event.type !== "click") return undefined;
+      const claim = pressed;
+      pressed = undefined;
+      if (!claim || claim.y !== event.y || targetAt(event) !== claim.target || !activate(claim.target)) return undefined;
+      return { handled: true, render: true };
+    },
+  };
+}
+
+function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, deps: HostDeps): MainListWidget {
   const requestRender = () => tui.requestRender?.();
   state().mainListRequestRender = requestRender;
+  // navigatorId per rendered line, so a pointer row resolves by structure, never by row text.
+  let lineOwners: Array<string | undefined> = [];
+  let lineWidth = MAIN_LIST_FALLBACK_WIDTH;
+  const rowAt = (event: WidgetMouseEvent): string | undefined => {
+    const width = Number.isFinite(event.width) && event.width > 0 ? Math.floor(event.width) : lineWidth;
+    if (!Number.isFinite(event.x) || event.x < 0 || event.x >= width) return undefined;
+    if (!Number.isInteger(event.y) || event.y < 0 || event.y >= lineOwners.length) return undefined;
+    const id = lineOwners[event.y];
+    return id && listRows().some((row) => row.navigatorId === id) ? id : undefined;
+  };
+  const pointer = createPointerNavigation(rowAt, openNavigatorRow);
   return {
     render(width: number): string[] {
       const rows = listRows();
       syncMainListSelection(rows);
       if (!rows.length) {
         state().lastMainListLines = undefined;
+        lineOwners = [];
+        pointer.reset();
         return [];
       }
-      const lines = ["", ...buildMainListLines(rows, renderWidth(width), deps.truncate, themeFgFromTheme(theme), {
+      const layout = buildMainListLayout(rows, renderWidth(width), deps.truncate, themeFgFromTheme(theme), {
         selectedId: state().mainListFocused ? state().mainListSelectedId : undefined,
         focused: state().mainListFocused === true,
-      })];
+      });
+      const armedRow = rows.find((row) => row.navigatorId === state().mainListCloseArm?.id);
+      const hint = closeHintFor(armedRow);
+      if (hint) { layout.lines.push(deps.truncate(`   ${hint}`, renderWidth(width))); layout.owners.push(undefined); }
+      lineWidth = renderWidth(width);
+      // The leading gap line belongs to the widget too, so its slot stays ownerless.
+      lineOwners = [undefined, ...layout.owners];
+      const lines = ["", ...layout.lines].map((line, index) =>
+        pointer.hovered && lineOwners[index] === pointer.hovered ? highlightPointerTarget(theme, line, lineWidth) : line);
       state().lastMainListLines = lines;
       return lines;
     },
-    invalidate() { state().lastMainListLines = undefined; },
+    handleMouse(event: WidgetMouseEvent): WidgetMouseResult | undefined {
+      return pointer.handleMouse(event);
+    },
+    invalidate() {
+      state().lastMainListLines = undefined;
+      lineOwners = [];
+      pointer.reset();
+    },
     dispose() {
       const s = state();
       if (s.mainListRequestRender === requestRender) s.mainListRequestRender = undefined;
+      lineOwners = [];
+      pointer.reset();
     },
   };
 }
@@ -454,7 +533,26 @@ function buildMainListLines(
   fg: (color: string, value: string) => string,
   options: { selectedId?: string; focused?: boolean } = {},
 ): string[] {
+  return buildMainListLayout(rows, width, truncate, fg, options).lines;
+}
+
+/**
+ * The list's lines plus the navigatorId each line shows, so pointer input maps a rendered row to its
+ * stable row identity. Headers, separators and the shortcut line keep an undefined owner.
+ */
+function buildMainListLayout(
+  rows: InternalRow[],
+  width: number,
+  truncate: (s: string, width: number) => string,
+  fg: (color: string, value: string) => string,
+  options: { selectedId?: string; focused?: boolean } = {},
+): { lines: string[]; owners: Array<string | undefined> } {
   const lines: string[] = [];
+  const owners: Array<string | undefined> = [];
+  const push = (line: string, owner?: string) => {
+    lines.push(line);
+    owners.push(owner);
+  };
   const grouped = new Map<string, InternalRow[]>();
   for (const row of rows) {
     const existing = grouped.get(row.providerLabel) ?? [];
@@ -466,16 +564,16 @@ function buildMainListLines(
   for (let i = 0; i < orderedLabels.length; i += 1) {
     const label = orderedLabels[i]!;
     const group = grouped.get(label)!;
-    if (i > 0) lines.push("");
-    lines.push(providerGroupLabel(label, fg));
+    if (i > 0) push("");
+    push(providerGroupLabel(label, fg));
     for (const row of group) {
       const selected = options.focused && row.navigatorId === options.selectedId;
-      lines.push(formatMainListRow(row, selected === true, fg, width));
+      push(formatMainListRow(row, selected === true, fg, width), row.navigatorId);
     }
   }
-  lines.push("");
-  lines.push(shortcutsLine(options.focused === true, fg));
-  return lines.map((line) => safeTruncate(line, width, truncate));
+  push("");
+  push(shortcutsLine(options.focused === true, fg));
+  return { lines: lines.map((line) => safeTruncate(line, width, truncate)), owners };
 }
 
 function shortcutsLine(focused: boolean, fg: (color: string, value: string) => string): string {
@@ -524,9 +622,10 @@ function statusIndicator(row: InternalRow, now = Date.now()): { glyph: string; c
   return { glyph: RUNNING_DOT_GLYPH, color: "accent" };
 }
 
-function mainListSignature(rows: InternalRow[], options: { selectedId?: string; focused?: boolean } = {}): string {
+function mainListSignature(rows: InternalRow[], options: { selectedId?: string; focused?: boolean; closeHint?: string | null } = {}): string {
   return JSON.stringify({
     focused: options.focused === true,
+    closeHint: options.closeHint ?? null,
     selectedId: options.focused === true ? options.selectedId ?? null : null,
     rows: rows.map((row) => ({
       navigatorId: row.navigatorId,
@@ -757,13 +856,26 @@ function handleMainListCloseKey(): void {
   }
   clearMainListCloseArm();
   s.mainListCloseArm = { id: row.navigatorId, armedAt: now };
-  try { applyCloseConfirmFooter((s.uiCtx as any).ui, closeHintFor(row)); } catch { /* ignore */ }
   s.mainListCloseArmTimer = setTimeout(() => {
     clearMainListCloseArm();
     refreshMainListWidget();
   }, CLOSE_ARM_MS);
   s.mainListCloseArmTimer.unref?.();
   refreshMainListWidget();
+}
+
+/**
+ * Open the shared detail overlay on the row a pointer chose. Setting the selection first keeps the
+ * keyboard path identical: Enter, x and the overlay's own keys then act on the clicked row.
+ */
+function openNavigatorRow(navigatorId: string): boolean {
+  const rows = listRows();
+  if (!rows.some((row) => row.navigatorId === navigatorId)) return false;
+  clearMainListCloseArm();
+  state().mainListSelectedId = navigatorId;
+  refreshMainListWidget();
+  openNavigator();
+  return true;
 }
 
 function openNavigator(): void {
@@ -861,6 +973,22 @@ function createOverlayComponent(
   let closed = false;
   let transcriptDetail: BackgroundWorkDetail | null = null;
   let transcriptComponent: Component | null = null;
+  let pointerTargets: Array<string | undefined> = [];
+  let pointerWidth = 0;
+  const pointer = createPointerNavigation((event) => {
+    if (closed || !Number.isInteger(event.y) || !Number.isFinite(event.x) || event.x < 0 || event.x >= pointerWidth) return undefined;
+    const target = pointerTargets[event.y];
+    if (target === BACK_TARGET) return event.x >= 3 && event.x < 3 + visibleWidth(BACK_TO_MAIN) ? target : undefined;
+    return target && listRows().some((row) => row.navigatorId === target) ? target : undefined;
+  }, (target) => {
+    if (target === BACK_TARGET) { backToMain(); return true; }
+    refreshRows();
+    const index = overlayState.rows.findIndex((row) => row.navigatorId === target);
+    if (index < 0) return false;
+    selectOverlayRow(index);
+    openDetail();
+    return true;
+  });
 
   const fg = (color: string, value: string) => theme?.fg ? theme.fg(color, value) : value;
 
@@ -898,7 +1026,6 @@ function createOverlayComponent(
     closeArmTimer = undefined;
     if (closeArm) {
       closeArm = undefined;
-      try { applyCloseConfirmFooter((state().uiCtx as any).ui, null); } catch { /* ignore */ }
     }
   }
 
@@ -939,6 +1066,11 @@ function createOverlayComponent(
     try { done(null); } catch { /* ignore */ }
   }
 
+  function backToMain(): void {
+    unfocusMainList();
+    close();
+  }
+
   function handleCloseKey(): void {
     const row = selectedRow();
     if (!row || row.parentRow) return;
@@ -967,11 +1099,9 @@ function createOverlayComponent(
     }
     clearCloseArm();
     closeArm = { id: row.navigatorId, armedAt: now };
-    try { applyCloseConfirmFooter((state().uiCtx as any).ui, closeHintFor(row)); } catch { /* ignore */ }
     closeArmTimer = setTimeout(() => {
       closeArmTimer = undefined;
       closeArm = undefined;
-      try { applyCloseConfirmFooter((state().uiCtx as any).ui, null); } catch { /* ignore */ }
       requestRender();
     }, CLOSE_ARM_MS);
     closeArmTimer.unref?.();
@@ -1004,14 +1134,20 @@ function createOverlayComponent(
     render(width: number) {
       closeIfEditorReplaced();
       refreshRows();
-      const railLines = buildMainListLines(overlayState.rows, width, deps.truncate, fg, {
+      const rail = buildMainListLayout(overlayState.rows, width, deps.truncate, fg, {
         selectedId: selectedRow()?.navigatorId,
         focused: true,
       });
+      const armedRow = overlayState.rows.find((row) => row.navigatorId === closeArm?.id);
+      const hint = closeHintFor(armedRow);
+      if (hint) { rail.lines.push(deps.truncate(`   ${hint}`, renderWidth(width))); rail.owners.push(undefined); }
+      const railLines = rail.lines;
       const editorLines = renderEditorLines(width);
       const bottomLines = [...railLines, ...editorLines];
       const overlayRows = state().detailOverlayRows;
       const detailRows = overlayRows === undefined ? undefined : Math.max(1, overlayRows - bottomLines.length);
+      const backControl = pointer.hovered === BACK_TARGET
+        ? highlightPointerTarget(theme, BACK_TO_MAIN, visibleWidth(BACK_TO_MAIN)) : undefined;
       let contentLines: string[];
       if (detail?.transcript && deps.createTranscriptComponent) {
         if (transcriptDetail !== detail || !transcriptComponent) {
@@ -1024,18 +1160,30 @@ function createOverlayComponent(
           width,
           deps.truncate,
           fg,
-          { minRows: detailRows, maxRows: detailRows, bottomFooter: false, logTailRows },
+          { minRows: detailRows, maxRows: detailRows, bottomFooter: false, logTailRows, backControl },
         );
       } else {
         transcriptDetail = null;
         transcriptComponent = null;
-        contentLines = buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows, maxRows: detailRows, bottomFooter: false });
+        contentLines = buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows, maxRows: detailRows, bottomFooter: false, backControl });
       }
-      if (overlayRows === undefined || detailRows === undefined) return [...contentLines, ...bottomLines];
-      const fittedContent = contentLines.slice(0, detailRows);
-      while (fittedContent.length < detailRows) fittedContent.push("");
-      // A terminal shorter than rail + editor keeps the bottom rows (the input frame) and drops the top.
-      return [...fittedContent, ...bottomLines].slice(-Math.max(1, overlayRows));
+      const fittedContent = detailRows === undefined ? contentLines : contentLines.slice(0, detailRows);
+      if (detailRows !== undefined) while (fittedContent.length < detailRows) fittedContent.push("");
+      const contentTargets = fittedContent.map((_, index) => index === 1 ? BACK_TARGET : undefined);
+      const allLines = [...fittedContent, ...bottomLines];
+      const allTargets = [...contentTargets, ...rail.owners, ...editorLines.map(() => undefined)];
+      // Match hit targets to the same viewport clipping as the visible lines.
+      const start = overlayRows === undefined ? 0 : Math.max(0, allLines.length - Math.max(1, overlayRows));
+      pointerTargets = allTargets.slice(start);
+      pointerWidth = renderWidth(width);
+      return allLines.slice(start).map((line, index) => {
+        if (!pointer.hovered || pointerTargets[index] !== pointer.hovered) return line;
+        if (pointer.hovered === BACK_TARGET) return line;
+        return highlightPointerTarget(theme, line, width);
+      });
+    },
+    handleMouse(event: WidgetMouseEvent): WidgetMouseResult | undefined {
+      return pointer.handleMouse(event);
     },
     handleInput(data: string) {
       if (closed) return;
@@ -1054,7 +1202,7 @@ function createOverlayComponent(
       else if (deps.matchKey(data, "left")) {
         const mainIdx = overlayState.rows.findIndex((row) => row.parentRow && row.id === "main");
         if (mainIdx >= 0) selectOverlayRow(mainIdx);
-        close();
+        backToMain();
       }
       else if (deps.matchKey(data, "enter")) {
         const row = selectedRow();
@@ -1082,8 +1230,7 @@ function createOverlayComponent(
         requestRender();
       }
       else if (deps.matchKey(data, "escape")) {
-        unfocusMainList();
-        close();
+        backToMain();
       }
     },
     /** Show another row's detail in this overlay (the main list moved while it was unfocused). */
@@ -1098,8 +1245,10 @@ function createOverlayComponent(
     },
     /** Close the overlay (done), e.g. when the navigator is disposed. */
     dismiss() { close(); },
-    invalidate() { transcriptComponent?.invalidate(); },
+    invalidate() { pointer.reset(); pointerTargets = []; transcriptComponent?.invalidate(); },
     dispose() {
+      pointer.reset();
+      pointerTargets = [];
       clearCloseArm();
       detailScheduler.dispose();
     },
@@ -1136,14 +1285,14 @@ function buildTranscriptDetailLines(
   width: number,
   truncate: (s: string, width: number) => string,
   fg: (color: string, value: string) => string,
-  options: { minRows?: number; maxRows?: number; bottomFooter?: boolean; logTailRows?: number } = {},
+  options: { minRows?: number; maxRows?: number; bottomFooter?: boolean; logTailRows?: number; backControl?: string } = {},
 ): string[] {
-  const actions = [...(detail.footerActions ?? ["x close"]), "Esc close"].join(" · ");
+  const actions = [...(detail.footerActions ?? ["x close"])].join(" · ");
   const tailRows = options.logTailRows ?? DEFAULT_LOG_TAIL_ROWS;
   let shownTranscriptLines = transcriptLines.length ? transcriptLines.slice(-tailRows) : ["   (no transcript yet)"];
   const lines: string[] = [
     fg("accent", rule(detail.title, width)),
-    dim(`   ← main · ${actions}`, fg),
+    `   ${options.backControl ?? fg("accent", BACK_TO_MAIN)}${dim(` · ${actions}`, fg)}`,
     "",
     `   status   ${fg(toneColor(detail.statusTone, detail.status), detail.status)}`,
   ];
@@ -1167,7 +1316,7 @@ function buildTranscriptDetailLines(
   lines.push(...shownTranscriptLines);
   lines.push("");
   if (options.bottomFooter === false) return lines.map((line) => safeTruncate(line, width, truncate));
-  const footerLines = [dim(`   ← main · ${actions}`, fg), dim(rule("", width), fg)];
+  const footerLines = [dim(`   ${BACK_TO_MAIN} · ${actions}`, fg), dim(rule("", width), fg)];
   padBeforeFooter(lines, footerLines.length, options.minRows);
   lines.push(...footerLines);
   return lines.map((line) => safeTruncate(line, width, truncate));
@@ -1223,10 +1372,10 @@ function buildDetailLines(
   width: number,
   truncate: (s: string, width: number) => string,
   fg: (color: string, value: string) => string,
-  options: { expandedSections?: Set<string>; logTailRows?: number; minRows?: number; maxRows?: number; bottomFooter?: boolean } = {},
+  options: { expandedSections?: Set<string>; logTailRows?: number; minRows?: number; maxRows?: number; bottomFooter?: boolean; backControl?: string } = {},
 ): string[] {
   if (!detail) {
-    const lines = [rule("Work unavailable", width), dim("   ← back · Esc close", fg), ""];
+    const lines = [rule("Work unavailable", width), `   ${options.backControl ?? fg("accent", BACK_TO_MAIN)}`, ""];
     if (options.bottomFooter === false) return lines.map((line) => safeTruncate(line, width, truncate));
     const footerLines = [dim(rule("", width), fg)];
     padBeforeFooter(lines, footerLines.length, options.minRows);
@@ -1239,8 +1388,8 @@ function buildDetailLines(
   const foldedAction = toggleableSectionId
     ? (options.expandedSections?.has(toggleableSectionId) ? "Enter collapse" : "Enter expand")
     : null;
-  const actions = [foldedAction, ...(detail.footerActions?.length ? detail.footerActions : ["x close"]), "l 10/25", "Esc close"].filter(Boolean).join(" · ");
-  lines.push(dim(`   ← back · ${actions}`, fg));
+  const actions = [foldedAction, ...(detail.footerActions?.length ? detail.footerActions : ["x close"]), "l 10/25"].filter(Boolean).join(" · ");
+  lines.push(`   ${options.backControl ?? fg("accent", BACK_TO_MAIN)}${dim(` · ${actions}`, fg)}`);
   lines.push("");
   lines.push(`   status   ${fg(toneColor(detail.statusTone, detail.status), detail.status)}`);
   if (detail.subtitle) lines.push(`   summary  ${detail.subtitle}`);
@@ -1296,7 +1445,7 @@ function buildDetailLines(
   }
   lines.push("");
   if (options.bottomFooter === false) return lines.map((line) => safeTruncate(line, width, truncate));
-  const footerLines = [dim(`   ← back · ${actions}`, fg), dim(rule("", width), fg)];
+  const footerLines = [dim(`   ${BACK_TO_MAIN} · ${actions}`, fg), dim(rule("", width), fg)];
   padBeforeFooter(lines, footerLines.length, options.minRows);
   lines.push(...footerLines);
   return lines.map((line) => safeTruncate(line, width, truncate));

@@ -90,6 +90,49 @@ export function planTaskTools(options: {
     return plan;
 }
 
+/** One effective child tool list and what the plan refused, split by who asked for it. */
+export interface EffectiveTaskToolSelection {
+    /** The child tool list: refused names are absent, so policy, preflight and recipe agree. */
+    tools: string[];
+    /** Requested names the plan refuses, each with an actionable reason. */
+    refused: { name: string; reason: string }[];
+    /** Refused names this attempt requires (explicit request or frozen recipe): the launch must fail. */
+    required: { name: string; reason: string }[];
+    /** Refused names that only came from the default/inherited loadout: dropped with a warning. */
+    dropped: { name: string; reason: string }[];
+}
+
+/**
+ * The single effective tool selection every downstream authority reads (ADR 0009).
+ *
+ * A refused tool never reaches the task policy, the child preflight, the worker
+ * bridge or the frozen launch recipe: the child cannot register it, so listing it
+ * only makes the parent announce a tool the child then dies without (#669).
+ *
+ * Who asked matters. A name this attempt requires - an explicit `tools` request,
+ * or a continuation's frozen loadout - stops the launch, because silently
+ * narrowing it would change what the caller (or the saved conversation) asked
+ * for. An inherited default is dropped from the child instead, with the reason.
+ */
+export function selectEffectiveTaskTools(options: {
+    /** Candidate loadout after the confinement adjustments. */
+    tools: readonly string[];
+    plan: TaskToolPlan;
+    /** Names this attempt requires; absent means the whole loadout is implicit. */
+    required?: ReadonlySet<string>;
+}): EffectiveTaskToolSelection {
+    const refused = options.plan.refused.filter((tool) => options.tools.includes(tool.name));
+    const refusedNames = new Set(refused.map((tool) => tool.name));
+    const required = refused.filter((tool) => options.required?.has(tool.name) === true);
+    const requiredNames = new Set(required.map((tool) => tool.name));
+    return {
+        tools: options.tools.filter((name) => !refusedNames.has(name)),
+        refused,
+        required,
+        dropped: refused.filter((tool) => !requiredNames.has(tool.name)),
+    };
+}
+
 /** "apply_patch (guarded) · web_fetch, web_search (trusted)" for the launch Runtime line. */
 export function describeTaskTools(plan: TaskToolPlan): string | undefined {
     const parts = [

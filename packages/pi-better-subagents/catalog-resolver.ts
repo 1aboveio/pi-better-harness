@@ -45,6 +45,11 @@ export interface EffectiveDefinition {
     model: FieldValue<string>;
     effort: FieldValue<ThinkingLevel>;
     tier: FieldValue<string>;
+    /**
+     * Skill exposure for a launch of this definition. Absent means the child
+     * discovers the user catalog; `[]` means no skills; paths mean exactly those.
+     */
+    skills: FieldValue<readonly string[]>;
     launchable: boolean;
     diagnostics: readonly Diagnostic[];
     source?: DefinitionOrigin;
@@ -101,6 +106,7 @@ export interface CatalogInspection {
         effort: FieldValue<ThinkingLevel>;
         tier: FieldValue<string>;
     };
+    skills?: FieldValue<readonly string[]>;
     validation: readonly Diagnostic[];
     launchable: boolean;
     restrictions: readonly ExecutionRestriction[];
@@ -203,6 +209,7 @@ export function inspectCatalog(snapshot: CatalogSnapshot, id: string): CatalogIn
         instructionMode: effective?.instructionMode,
         instructions: effective?.instructions,
         fields: effective ? { model: effective.model, effort: effective.effort, tier: effective.tier } : undefined,
+        skills: effective?.skills,
         validation: resolved.diagnostics,
         launchable: resolved.launchable,
         restrictions: effective?.restrictions ?? entry.definition?.executionRestrictions ?? [],
@@ -224,7 +231,7 @@ function resolveRole(snapshot: CatalogSnapshot, roleId: string): Resolution {
         return blockedEntry(snapshot, entry, entry.diagnostics);
     }
     const definition = entry.definition;
-    const preferences = sessionPreferences(definition, snapshot.sessionSettings);
+    const preferences = sessionPreferences(definition, snapshot.sessionSettings, snapshot.savedSettings);
     const launchable = entry.schemaLaunchable;
     const diagnostics = launchable
         ? [...entry.diagnostics]
@@ -250,6 +257,7 @@ function resolveRole(snapshot: CatalogSnapshot, roleId: string): Resolution {
             model: fieldFromRole(preferences.model),
             effort: fieldFromRole(preferences.effort),
             tier: fieldFromRole(preferences.tier),
+            skills: fieldFromRole(preferences.skills),
             launchable,
             diagnostics,
             source: originOf(entry),
@@ -334,8 +342,8 @@ function baseEffective(
     } | undefined,
 ): EffectiveDefinition {
     const mode = agent.instructionMode;
-    const overrides = sessionPreferences(agent, snapshot.sessionSettings);
-    const defaults = inheritance ? sessionPreferences(inheritance.role, snapshot.sessionSettings) : {};
+    const overrides = sessionPreferences(agent, snapshot.sessionSettings, snapshot.savedSettings);
+    const defaults = inheritance ? sessionPreferences(inheritance.role, snapshot.sessionSettings, snapshot.savedSettings) : {};
     const instructions = inheritance
         ? combineInstructions(inheritance.role.body, agent.body, mode)
         : agent.body;
@@ -350,6 +358,7 @@ function baseEffective(
         model: inheritance ? inheritField(overrides, defaults, "model") : absentField(),
         effort: inheritance ? inheritField(overrides, defaults, "effort") : absentField(),
         tier: inheritance ? inheritField(overrides, defaults, "tier") : absentField(),
+        skills: inheritance ? inheritSkillPaths(overrides.skills, defaults.skills) : absentField(),
         launchable: inheritance?.launchable ?? false,
         diagnostics,
         source: originOf(entry),
@@ -388,6 +397,24 @@ function inheritField<K extends PreferenceKey>(
             source: "role-default",
             explicit: false,
         };
+    }
+    return absentField();
+}
+
+/**
+ * Skill exposure inherits exactly like a preference: an agent override wins —
+ * including an explicit null, which suppresses the role's list — and otherwise
+ * the role default applies. `[]` is a real value ("no skills"), not absence.
+ */
+function inheritSkillPaths(
+    override: readonly string[] | null | undefined,
+    roleDefault: readonly string[] | null | undefined,
+): FieldValue<readonly string[]> {
+    if (override !== undefined) {
+        return { value: override === null ? null : [...override], source: "agent-override", explicit: true };
+    }
+    if (roleDefault !== undefined && roleDefault !== null) {
+        return { value: [...roleDefault], source: "role-default", explicit: false };
     }
     return absentField();
 }
@@ -448,6 +475,7 @@ function blockedEntry(snapshot: CatalogSnapshot, entry: CatalogEntry, diagnostic
             model: absentField(),
             effort: absentField(),
             tier: absentField(),
+            skills: absentField(),
             launchable: false,
             diagnostics: withSummary,
             source: originOf(entry),

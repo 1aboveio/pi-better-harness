@@ -72,10 +72,17 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   sendKey("Enter");
   waitForScreen((screen) => screen.includes("goal active") && screen.includes("working through step"), 15_000);
   sendKey("Escape");
-  waitForScreen((screen) => screen.includes('goal paused · say "go" or /goal resume'));
+  const paused = waitForScreen((screen) => screen.includes("goal paused"));
+  assert.doesNotMatch(paused, /goal paused ·|goal held:|waiting: no progress/,
+    "the paused widget remains visible without Goal footer text");
   assert.equal(modelCalls().length, 1, "only the first continuation reached the model");
   assert.equal(modelCalls()[0].tools.includes("goal_resume"), false, "a running goal hides goal_resume");
 
+  // Pi queues a prompt submitted while the aborted turn is still streaming and
+  // drains it as a continuation of that run, which never re-runs
+  // before_agent_start. Wait for the pause turn to settle so the question is a
+  // fresh prompt turn that receives the paused-goal instruction.
+  waitForFile(join(fixtures, "pause-settled"));
   sendLiteral("why is that step needed?");
   sendKey("Enter");
   waitForScreen((screen) => screen.includes("Because the widget needs it."));
@@ -153,7 +160,7 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   waitForScreen((screen) => !screen.includes("Goal settings") && screen.includes("goal active"));
   const beforeIdlePause = modelCalls().length;
   sendKey("Escape");
-  waitForScreen((screen) => screen.includes('goal paused · say "go" or /goal resume'));
+  waitForScreen((screen) => screen.includes("goal paused"));
   sendLiteral("why is that step needed?");
   sendKey("Enter");
   waitForScreen((screen) => modelCalls().length === beforeIdlePause + 1 && screen.includes("Because the widget needs it."));
@@ -277,6 +284,7 @@ export default function (pi) {
   pi.on("agent_settled", () => {
     if (lastKind === "idle-continuation") writeFileSync(${JSON.stringify(join(fixtures, "idle-settled"))}, "settled");
     if (lastKind === "off-slow-continuation") writeFileSync(${JSON.stringify(join(fixtures, "off-stream-settled"))}, "settled");
+    if (lastKind === "slow-continuation") writeFileSync(${JSON.stringify(join(fixtures, "pause-settled"))}, "settled");
   });
   pi.registerProvider("scripted", {
     baseUrl: "http://localhost:0",

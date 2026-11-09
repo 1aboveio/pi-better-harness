@@ -5,6 +5,8 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+// @ts-expect-error The shared npm pack parser is a JavaScript build helper.
+import { selectPackedResult } from "../../../scripts/stage-harness-dependencies.mjs";
 import { failedResult, FakeRemoteRunner, successfulResult } from "../../ssh-core/test-support/index.js";
 import sshExtension, {
   registerRemoteBashTool as registerRemoteBashToolProduction,
@@ -132,7 +134,7 @@ describe("pi-better-ssh extension", () => {
         customType: "pi-better-ssh-profile",
         data: { version: 1, active: { host: "deploy", workdir: "/srv/app", env: { APP_ENV: "staging" } } },
       });
-      expect(harness.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux down)"]);
+      expect(harness.statuses).toEqual([]);
 
       const status = await harness.execute("ssh_profile", { action: "status" });
       expect(status.details).toMatchObject({
@@ -152,14 +154,14 @@ describe("pi-better-ssh extension", () => {
       });
       expect(runner.runCalls[5]?.command).toContain("APP_ENV");
       expect(runner.runCalls[5]?.command).toContain("staging");
-      expect(harness.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux up)"]);
+      expect(harness.statuses).toEqual([]);
 
       const stopped = await harness.execute("ssh_mux", { action: "stop" });
       expect(stopped.details).toMatchObject({
         scope: "target",
         masters: [{ target: "deploy", state: "stopped" }],
       });
-      expect(harness.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux down)"]);
+      expect(harness.statuses).toEqual([]);
 
       const reloadRunner = new FakeRemoteRunner([
         failedResult(255, "Control socket missing"),
@@ -177,14 +179,14 @@ describe("pi-better-ssh extension", () => {
       expect(restored.details).toMatchObject({
         active: { host: "deploy", workdir: "/srv/app", env: { APP_ENV: "staging" } },
       });
-      expect(reloaded.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux down)"]);
+      expect(reloaded.statuses).toEqual([]);
       await reloaded.shutdown();
-      expect(reloaded.statuses.at(-1)).toEqual(["pi-better-ssh", undefined]);
+      expect(reloaded.statuses).toEqual([]);
 
       const cleared = await reloaded.execute("ssh_profile", { action: "clear" });
       expect(cleared.details).toEqual({ action: "clear", active: null });
       expect(entries.at(-1)?.data).toEqual({ version: 1, active: null });
-      expect(reloaded.statuses.at(-1)).toEqual(["pi-better-ssh", undefined]);
+      expect(reloaded.statuses).toEqual([]);
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
@@ -365,13 +367,11 @@ describe("pi-better-ssh extension", () => {
     const packageRoot = fileURLToPath(new URL("../", import.meta.url));
     const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
     try {
-      const packOutput = JSON.parse(execFileSync(process.execPath, [resolveNpmCli(),
+      const packOutput = execFileSync(process.execPath, [resolveNpmCli(),
         "pack", "--ignore-scripts", "--json", "--pack-destination", directory,
         "--cache", join(directory, "npm-cache"),
-      ], { cwd: packageRoot, encoding: "utf8" }));
-      const packed = Array.isArray(packOutput) ? packOutput[0]
-        : packOutput.filename ? packOutput
-        : Object.values(packOutput).find((value: any) => value?.filename);
+      ], { cwd: packageRoot, encoding: "utf8" });
+      const packed = selectPackedResult(packOutput);
       expect(packed?.filename).toBeTypeOf("string");
       execFileSync("tar", ["-xzf", packed.filename], { cwd: directory });
       const manifest = JSON.parse(readFileSync(join(directory, "package/package.json"), "utf8"));

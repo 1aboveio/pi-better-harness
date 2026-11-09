@@ -3,6 +3,13 @@ import { parse } from "yaml";
 
 export const WORKFLOW_ENTRY_TYPE = "pi-better-workflow";
 
+/**
+ * Coordinators whose runs the resolve-issues scheduler drives, so only its next-actions scheduler can
+ * declare the run finished. Other coordinators (a release workflow, say) ship no scheduler, and their
+ * completion gates keep the fail-open behavior that avoids deadlocking them.
+ */
+export const ISSUE_WORKFLOW_SKILLS: ReadonlySet<string> = new Set(["rush-issues", "resolve-issues"]);
+
 export interface WorkflowOwner {
   name: string;
   path: string;

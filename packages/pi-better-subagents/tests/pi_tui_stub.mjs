@@ -1,6 +1,7 @@
 /** Stub of the public pi-tui surface used by extension-level tests. */
 export class Input {}
 export class SelectList {}
+export function wrapTextWithAnsi(text) { return [text]; }
 export const Key = {
     left: "left",
     x: "x",

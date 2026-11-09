@@ -1,6 +1,6 @@
 # Native agent catalog (`pi-agent/v1`)
 
-Portable role and named-agent definitions for `pi-better-subagents`. This is the local contract for DEV-23 / GitHub #289. It is not an Agentier importer, a Codex runtime, or a second launch path.
+Portable role and named-agent definitions for `pi-better-subagents`. This is the local contract for DEV-23 / GitHub #289. It is not an Agentier importer or a second launch path. The [shared worker catalog](worker-catalog.md) exposes these definitions to skills on Pi and Codex through host-specific planning, without launching workers itself.
 
 Normative behavior is DEV-23 and the accepted ADR `docs/adr/0003-native-agent-catalog-live-inheritance.md`. Field names below are the engineering schema those decisions require.
 
@@ -63,8 +63,17 @@ People type and read a role by its short name: `developer` is `role.developer`. 
 | `model` | `provider/model`. No `@effort` suffix. |
 | `effort` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
 | `tier` | Catalog-policy label (`balanced`, `efficient`, `frontier`, or another short label). Not a benchmark claim. |
+| `skills` | Skill exposure for a launch: a list of absolute `SKILL.md` or skill-directory paths, or `[]` for no skills. Absent keeps user-catalog discovery. |
 
 A missing key inherits. A present key, including `null`, is an explicit value and does not inherit. Removing an override means deleting the key. Writers must not copy effective inherited values back into `overrides`. Agents must not store a `defaults` object; that mapping is kept only so it is not discarded, and it is not promoted into overrides.
+
+Model, effort, and tier choose which model runs. `skills` is the one launch value
+here that changes what the child can see: `[]` becomes `--no-skills`, and paths
+become `--no-skills --skill <path>…`. It is reproduced exactly like model and
+effort, and it grants nothing — a list narrows prompt exposure and cannot add a
+tool, an extension, or a permission. See
+[skill exposure](usage.md#skill-exposure) for the launch-level precedence, which
+puts an explicit `skills` option above the catalog.
 
 These preferences do not grant tools, sandbox behavior, extension loading, or nested delegation. Launch keeps the existing subagent controls. A role name or a prompt that says "read-only" is not enforcement.
 
@@ -74,7 +83,15 @@ Credential-like keys (`token`, `apiKey`, `password`, `connectionString`, and sim
 
 ## Sources
 
-Precedence is project, then personal, then bundled. The higher source replaces the whole definition. Omitted agent fields inherit from the effective role, not from the shadowed agent.
+For external consumers, the repo-root `agent-catalog.yaml` publishes the shared
+definitions through a [Git subscription contract](catalog-subscription.md).
+This publication mechanism does not change local source precedence below.
+
+Markdown definition precedence is project, then personal, then bundled. The higher source replaces the whole definition. Omitted agent fields inherit from the effective role, not from the shadowed agent.
+
+Model and effort choices saved through `/agents` live separately in the catalog's `settings.json` (`version: 1`, with a `defaults` map keyed by role/agent id). They override only those fields, without shadowing the Markdown prompt. Branch edits win over saved preferences; trusted project preferences win over user preferences. User preferences do not override project-owned definitions. Existing Markdown overrides stay whole definitions until explicitly archived through **Reset to bundled** in Instructions. See [catalog operations](agent-catalog-operations.md#model-and-effort-edits).
+
+Skill exposure is a definition value, not a `settings.json` preference. `/agents` edits `defaults.skills` or `overrides.skills` through the normal definition save path: user and trusted project definitions are updated in place, and editing a bundled definition writes a personal whole-definition override with the bundled prompt unchanged. See [skill exposure edits](agent-catalog-operations.md#skill-exposure-edits).
 
 | Scope | Path |
 | --- | --- |
@@ -90,7 +107,7 @@ Role references use the same precedence. A missing or unusable role leaves the a
 
 ## Snapshots
 
-`loadCatalog` / `refreshCatalog` read the disk every time and return a new frozen snapshot. `digest` / `revision` is a sha256 of the canonical entries, unused sources, and snapshot diagnostics. `loadedAt` is not part of the digest. Callers must reuse one snapshot for every job in a batch. Later file edits do not mutate a snapshot already taken. `/agents reload` is an inspection operation owned by the operations unit; it is not required for the next `loadCatalog` to see edits.
+`loadCatalog` / `refreshCatalog` read the disk every time and return a new frozen snapshot. `digest` / `revision` is a sha256 of the canonical entries, unused sources, saved preferences and their sources, and snapshot diagnostics. `loadedAt` is not part of the digest. Callers must reuse one snapshot for every job in a batch. Later file edits do not mutate a snapshot already taken. `/agents reload` is an inspection operation owned by the operations unit; it is not required for the next `loadCatalog` to see edits.
 
 File diagnostics for an id live on that catalog entry. `snapshot.diagnostics` carries directory, trust, duplicate, and no-id failures. `resolveSelection`, `listCatalog`, and `inspectCatalog` are the launchability view; `schemaLaunchable` does not yet know whether an agent's role exists.
 
@@ -100,18 +117,20 @@ Model availability, same-tier fallback, and nearest-effort adjustment are not de
 
 | Role | Stored id | Name | Model | Effort | Tier |
 | --- | --- | --- | --- | --- | --- |
-| `researcher` | `role.researcher` | Researcher | `openai/gpt-6.1-sol` | medium | balanced |
+| `researcher` | `role.researcher` | Researcher | `openai/gpt-6.1-terra` | medium | balanced |
 | `explorer` | `role.explorer` | Explorer | `openai/gpt-6-luna` | medium | efficient |
 | `product-manager` | `role.product-manager` | Product Manager | `openai/gpt-6.1-sol` | medium | balanced |
 | `developer` | `role.developer` | Developer | `openai/gpt-6.1-sol` | high | balanced |
 | `reviewer` | `role.reviewer` | Reviewer | `openai/gpt-6-astra` | medium | frontier |
 | `architect` | `role.architect` | Architect | `openai/gpt-6-astra` | high | frontier |
+| `writer` | `role.writer` | Writer | `openai/gpt-6.1-terra` | medium | unset |
 
 Bundled descriptions are routing boundaries for coordinator mode. Researcher owns
 external and documentary evidence; Explorer maps repository code paths; Product
 Manager owns user-visible requirements; Architect owns technical boundaries;
 Developer owns implementation and focused tests; Reviewer owns independent change
-review. Each role's instruction body names excluded work and the neighboring role
+review; Writer owns drafting, editing, and polishing written content. Writer has
+no configured fallback tier. Each role's instruction body names excluded work and the neighboring role
 that owns it. Project and personal definitions may replace these bundled roles, so
 coordinators inspect the current effective descriptions rather than assuming this
 table is unchanged.
@@ -141,7 +160,7 @@ DEV-39 owns Agentier adaptation, migration, remote model policy, credentials, an
 | `id` | Stable identity, distinct from `name`, filename, and run id. |
 | `roleId` | Exactly one live base role. Membership lists are not parents. |
 | `instructions.mode` + body | `add` appends; `replace` swaps instruction text only. |
-| Missing override vs `overrides.<field>` | Absence inherits the current role. Presence, including null, is explicit. Deleting the key removes the override. |
+| Missing override vs `overrides.<field>` | Absence inherits the current role. Presence, including null, is explicit. Deleting the key removes the override. An explicit `skills: null` on an agent suppresses the role's skill list, so the launch falls back to the config default and then discovery. |
 | Role `defaults` | Live source for the next resolution. Not copied onto the agent at save time. |
 | `provenance` | Import origin of an independent copy. Not a subscription to the external file. |
 | `executionRestrictions` | Required restrictions stay visible and blocking until a real host control exists. |

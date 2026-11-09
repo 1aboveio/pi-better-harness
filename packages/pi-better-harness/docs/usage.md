@@ -1,6 +1,6 @@
 # pi-better-harness
 
-Meta package for the core Pi Better Harness extensions.
+Harness-owned task context and Todo, alongside the core Pi Better Harness extensions.
 
 Use it to manage the tools used most often in Pi:
 
@@ -8,14 +8,14 @@ Use it to manage the tools used most often in Pi:
 - `pi-better-subagents` for detached subagent runs and completion callbacks
 - `pi-better-background-tasks` for durable shell tasks and command watchers
 - `pi-better-ssh` for safe synchronous remote commands over reusable SSH connections
-- `pi-better-goal` for current-goal tracking and background-aware continuation
-- `pi-better-plan` for persistent structured plans and explicit checklist progress
+- `pi-better-goal` for explicit triggers and background-aware continuation
+- Harness Outcome & Todo for persistent outcomes, optional checklists, and context reminders
 
 `pi-better-read-aloud` is intentionally not included yet.
 
 ## Install
 
-Install every harness extension as a standalone Pi package:
+Install the component packages and the Harness-owned runtime:
 
 ```sh
 npx pi-better-harness install
@@ -27,7 +27,55 @@ Use project-local Pi settings:
 npx pi-better-harness install --local
 ```
 
-For backward-compatible bundled loading, use `pi install npm:pi-better-harness`.
+The installer keeps component identities, loads only Harness-owned extensions from
+its bundle, and removes a retired Plan registration in the selected scope.
+Alternatively, load the complete bundle with `pi install npm:pi-better-harness`.
+
+Normal bundle installs and updates mask a separately installed `pi-better-plan`
+whenever Harness is loaded, even with Outcome & Todo hooks off. Its tools, `/plan`,
+widget, and prompt hooks are not registered with the session. Both load orders
+are covered; its factory listeners are cleaned up before Todo starts. The old
+registration and cached files can remain, but settings and saved histories are
+untouched. Removing or excluding Harness allows the standalone package to load
+again. The explicit installer removes the selected registration instead.
+
+## Outcome & Todo
+
+In `/harness-settings`, **Outcome & Todo display** (`outcome-todo-display`)
+defaults to **On**, independently of **Outcome & Todo hooks** (legacy id
+`outcome-todo`), which defaults to **Off**. Saved outcomes and checklists render
+with hooks off. If state is missing, Harness creates no placeholder, state, or
+settings. Turning display off leaves hooks active. Saved v1 `enabled` remains
+the hooks authority; the new optional display preference defaults to true.
+
+The compact widget has one Todo heading, a caret after Todo, and the completion
+count on the left. Matching Goal status and its existing active-time clock appear
+on the right. The outcome appears as a single muted, truncated subtitle. The
+collapsed view shows up to five relevant rows; the expanded view shows all rows.
+Click to toggle. `/todo` shows the full objective, acceptance criteria, boundaries,
+and plan; `/todo expand`, `/todo collapse`, `/todo hide`, and `/todo show` control
+its display. These commands remain available with hooks off for explicit user
+control. An outcome can exist without a checklist. A finished or cleared checklist
+does not complete or remove the outcome.
+
+Hooks enable `update_todo`, `get_todo`, capture, matching Goal lifecycle bridge
+writes, reminders, and automated cleanup. While hooks are enabled and a task is
+active, Harness includes a short outcome reminder and current Todo focus before
+each model call. No hook file or postinstall setup is required. Turning hooks off
+does not delete saved state. Enabling hooks never starts or resumes work. `/goal`
+and skills cannot enable them on their own.
+
+Click a subagent or background-task row to open its existing navigator details.
+Enter and keyboard controls remain available, and editor input stays passive.
+Harness packages do not write to Pi's status bar. Goal holds and resume
+instructions remain available through `/goal`; permission checks are unchanged.
+
+Skills use this optional interface only when its tools are available. Workflow task
+plans retain their own schema, revision checks, and source requirements. When the
+interface is off, workflows continue using their own records and text display.
+Use `newTask: true` with an outcome when switching to unrelated work; omit it for
+corrections to the current task. Session state follows the active branch and survives
+compaction and reload. Existing Plan histories remain readable as Todo.
 
 ## Ordinary Startup
 
@@ -43,6 +91,27 @@ resume, fork, and reload. It ships no launcher. See
 [the sandbox package](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme)
 for the full policy.
 
+## Linked Worktrees
+
+When the working directory is inside a linked Git worktree (`git worktree add`),
+the worktree is the project context root. Pi sends the global `AGENTS.md` from the
+agent directory and context files at or below the worktree root, and leaves out
+files loaded from the main checkout or from any ancestor above the worktree. A
+worktree without its own context file therefore starts without the main checkout's
+file instead of inheriting it.
+
+Ordinary repositories keep every ancestor context file. `--no-context-files` still
+loads nothing, because the extension filters the loaded list and adds no rules of
+its own. Subagents keep the same boundary, including a worker launched inside a
+worktree.
+
+The boundary follows where Pi selected a file, not what a filename symlink points
+at: a worktree `AGENTS.md` that links to the main checkout stays local, an
+inherited main `AGENTS.md` that links into the worktree stays out, and the global
+file survives even when it links outside the agent directory. This needs a Pi host
+that rebuilds the prompt from `systemPromptOptions` after the hook (Pi 1.x). An
+older host keeps the prompt it loaded and stays unchanged.
+
 ## Included Tools
 
 After installation, Pi can use these model-callable tools:
@@ -54,13 +123,13 @@ After installation, Pi can use these model-callable tools:
 | `pi-better-background-tasks` | `bg_task_spawn`, `bg_task_watch`, `bg_task_list`, `bg_task_status`, `bg_task_log`, `bg_task_stop`, `bg_task`, `bg_status` |
 | `pi-better-ssh` | `remote_bash`, `ssh_profile`, `ssh_mux` |
 | `pi-better-goal` | `get_goal`, `update_goal`, `get_background_activity` |
-| `pi-better-plan` | `update_plan`, `get_plan` |
+| Harness Outcome & Todo (when hooks are enabled) | `update_todo`, `get_todo` |
 
 The goal extension also provides the `/goal` and `/better-activity` commands.
 
 ## Coordinated Execution
 
-For substantial work, use `pi-better-plan` as the foreground coordinator's milestone ledger. Identify ready, authorized independent units, including separate per-host migrations, and start them concurrently within resource constraints before waiting. Serialize only for real dependencies, shared writes, resource or capacity limits, or explicit rollout or availability requirements; record the reason.
+For substantial work, an enabled Harness Todo can serve as the foreground coordinator's milestone ledger. It is optional: when disabled, use the workflow's own records or ordinary task tracking. Identify ready, authorized independent units, including separate per-host migrations, and start them concurrently within resource constraints before waiting. Serialize only for real dependencies, shared writes, resource or capacity limits, or explicit rollout or availability requirements; record the reason.
 
 Use foreground tools for small, tightly coupled, or interactive work. Use `subagent_spawn` or `subagent_spawn_batch` only as permitted by the active `manual`, `adaptive`, or `coordinator` delegation mode. Manual forbids proactive subagents, not parallel foreground or background execution; an explicit user request or active workflow requirement may still authorize delegation. Use `bg_task_spawn` or `bg_task_watch` for independent long-running commands or waits. Continue unblocked foreground work after launch instead of polling workers.
 
@@ -102,7 +171,6 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
-pi install npm:pi-better-plan
 ```
 
 ## Update Or Remove

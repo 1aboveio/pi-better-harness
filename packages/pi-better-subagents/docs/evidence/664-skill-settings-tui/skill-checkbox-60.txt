@@ -1,0 +1,15 @@
+# Checkbox picker · discovered skills and checked saved paths
+# width: 60
+
+  Selected skills
+  Up/Down Move · Space Toggle · Enter Apply · Esc Cancel
+
+  Search >                                                  
+> [x] better-review                                         
+    Review the change before handoff.
+  [x] test-quality
+    Write tests that catch real bugs.
+  ✓ Apply selection (2 checked)
+  + Add skill path…
+  2 checked
+  0 checked applies No skill catalog, not discovery.

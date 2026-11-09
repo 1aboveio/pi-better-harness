@@ -17,6 +17,24 @@ It ships one extension that:
 
 Goal state is stored as `pi-better-goal` custom entries in the Pi session. Existing `pi-codex-goal` entries are read for compatibility, but new state is written by this package.
 
+## Optional Harness-Owned Outcome & Todo
+
+An installed `pi-better-harness` may own the session's structured outcome and
+checklist through its optional **Outcome & Todo** runtime. Goal continues to own
+its trigger, clocks, pause and permission holds, workflow gates, background
+wakes, and continuation policy. It bridges Goal lifecycle changes to Harness
+with synchronous `pi-better-harness:task-context` requests. While a Harness
+runtime is present, Goal suppresses its own active-objective prompt text so the
+same business outcome is not stated twice; workflow, permission, held-state, and
+background-completion guidance remain. Standalone Goal behavior is unchanged when
+Harness is absent.
+
+`/goal` does not install, enable, or configure Outcome & Todo, and enabling the
+Harness runtime does not enable it. Install Harness and enable **Outcome & Todo**
+in `/harness-settings`. The Goal snapshot keeps the raw original trigger so
+`/goal resume` can re-enter a bound command or skill; that trigger is not the
+authoritative business outcome when Harness owns one.
+
 ## Commands And Tools
 
 ```text
@@ -74,9 +92,6 @@ A paused goal stays paused while you talk. Your messages are ordinary
 conversation: the agent answers questions and discusses options, but the
 goal's work loop does not restart. Anything else that aborts the running turn,
 such as `/compact` while streaming or switching sessions, pauses the same way.
-With conversational resume enabled, the status line shows
-`goal paused · say "go" or /goal resume`; when disabled it shows
-`goal paused · /goal resume`.
 
 To resume an `escape` pause, say so plainly ("go", "continue", "ok do it",
 "approved, proceed"), or answer a decision the agent explicitly asked you for.
@@ -88,8 +103,7 @@ about...", "let me think", or discussion. `goal_resume` resumes exactly as
 instead; use `/goal resume` there.
 
 To stop the loop until you say otherwise, use `/goal pause`. Only you can undo
-it, with `/goal resume` or `alt+g`: the agent's `goal_resume` refuses it, and
-its status line reads `goal paused · /goal resume`. A goal paused because its
+it, with `/goal resume` or `alt+g`: the agent's `goal_resume` refuses it. A goal paused because its
 bound command or workflow is unavailable follows the same rule. A later
 `escape` never softens an explicit pause. Pi's built-in commands (`/settings`, `/model`, `/session`,
 and so on) and extension commands never change goal state; note that Pi only
@@ -121,7 +135,7 @@ Use `on` to enable any control again.
 - `conversational-resume` controls the model's `goal_resume` after an Escape
   pause. Turning it off removes the tool from the active tool list, refuses
   stale/direct calls, and removes the conversational resume invitation from
-  the prompt and status. The agent can still answer ordinary conversation,
+  the prompt. The agent can still answer ordinary conversation,
   but a message such as "go" cannot resume the goal. Turning it on offers the
   tool again for an Escape-paused goal; it does not resume it by itself and
   never makes an explicit `/goal pause` agent-resumable.
@@ -172,8 +186,7 @@ callback batches are follow-ups that wait for the entire run. When a question
 that started while background work was running is answered, the extension
 steers one hidden message into the same turn listing the work that finished
 while the question was pending, so the agent harvests it together with the
-answer instead of after the rest of the run. While the question is open the
-status area shows `N background done; waiting on your answer`. When background
+answer instead of after the rest of the run. When background
 work is running at the start of a turn, the prompt context also tells the
 agent to harvest finished results before asking and to ask only when the
 answer is needed.
@@ -201,8 +214,8 @@ Goal.
 
 Setting or clearing a goal while the agent is streaming avoids chat `notify`
 lines and confirm dialogs (both reflow the main-screen dock and can stack
-`Working...` / bash `Elapsed` frames into scrollback). Mid-stream feedback goes
-to the footer status instead, and height transitions force a full TUI redraw so
+`Working...` / bash `Elapsed` frames into scrollback). Mid-stream non-error feedback
+is suppressed, and height transitions force a full TUI redraw so
 differential paints stay aligned.
 
 Use `/goal settings auto-continue off` to disable automatic wakes persistently,
@@ -228,8 +241,8 @@ counts as a no-progress retry. By default, the original turn plus ten
 identical retries are allowed. Retries back off linearly: each identical
 outcome waits one more grace period than the last (60s, 120s, 180s, and so on
 with the default grace period). The next identical outcome keeps the goal
-active but holds further automatic continuations and reports `waiting: no
-progress` in the status area. It never marks the goal complete.
+active but holds further automatic continuations and sends a warning notification.
+It never marks the goal complete.
 
 Any changed result, an interactive user input, `/goal resume`, or a
 background active-to-idle transition resets the retry ledger **before the
@@ -265,6 +278,10 @@ Configure the base delay with `PI_BETTER_GOAL_IDLE_CONTINUATION_DELAY_MS`.
 Calculated delays saturate at Node's timer limit, 2,147,483,647 ms, so a large
 base or multiplier cannot overflow into an immediate retry. A zero base keeps
 immediate continuations enabled.
+
+The workflow completion gate gives each scheduler check 20 seconds and the
+live tree sync four minutes. A check that does not answer in time is a failure,
+so an issue-workflow run cannot complete on a timeout.
 
 These are outer Goal continuations, not model-request retries. Pi completes its
 own network retry loop before Goal evaluates a settled turn. Goal does not
@@ -360,6 +377,19 @@ The extension emits these events on `pi.events`:
 - `pi-better-goal:ready` with `{ version }`
 - `pi-better-goal:activity` with an `ActivitySnapshot`
 - `pi-better-goal:terminal-attention` when terminal or unhealthy background work needs attention
+- `pi-better-harness:task-context` with a synchronous mutable request
+
+`pi-better-harness:task-context` carries
+`{ action: "inspect" | "start" | "pause" | "resume" | "complete", goalId?, objective? }`.
+Goal emits it after persisting a Goal set or before clearing a Goal: a new goal id
+starts, a completed or paused goal reports that state, a non-active to active
+transition resumes, and `clear` pauses the current outcome rather than deleting or
+completing it. `objective` is present only on `start` and is the raw original
+Goal trigger. A Harness runtime that owns task context sets `request.enabled` to a
+boolean whenever it is installed, even when Outcome & Todo is off. Goal then
+omits its duplicated active-objective text. Without Harness, `enabled` remains
+undefined and standalone Goal prompts are unchanged. `inspect` is sent before a
+turn's prompt is assembled so Goal can detect that runtime.
 
 Other extensions can register providers by emitting `pi-better-goal:register-provider` with:
 

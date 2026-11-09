@@ -23,6 +23,13 @@ export type DiagnosticSeverity = "error" | "warning" | "info";
 
 export const PREFERENCE_KEYS = ["model", "effort", "tier"] as const satisfies readonly PreferenceKey[];
 
+/**
+ * Every key `defaults` (roles) and `overrides` (agents) may carry. `skills` is
+ * added here but is not a `PreferenceKey`: model resolution consumes preferences,
+ * while skill exposure is reproduced by the launcher from the definition.
+ */
+export const DEFINITION_PREFERENCE_KEYS = [...PREFERENCE_KEYS, "skills"] as const;
+
 /** Closed set of thinking levels shared with the existing subagent parser. */
 export const EFFORT_LEVELS = THINKING_LEVELS;
 
@@ -72,12 +79,13 @@ export const PARSER_LIMITS = {
  * runtime already uses. Tiers are catalog policy, not benchmark rankings.
  */
 export const APPROVED_ROLE_DEFAULTS = [
-    { id: "role.researcher", name: "Researcher", model: "openai/gpt-6.1-sol", effort: "medium", tier: "balanced" },
+    { id: "role.researcher", name: "Researcher", model: "openai/gpt-6.1-terra", effort: "medium", tier: "balanced" },
     { id: "role.explorer", name: "Explorer", model: "openai/gpt-6-luna", effort: "medium", tier: "efficient" },
     { id: "role.product-manager", name: "Product Manager", model: "openai/gpt-6.1-sol", effort: "medium", tier: "balanced" },
     { id: "role.developer", name: "Developer", model: "openai/gpt-6.1-sol", effort: "high", tier: "balanced" },
     { id: "role.reviewer", name: "Reviewer", model: "openai/gpt-6-astra", effort: "medium", tier: "frontier" },
     { id: "role.architect", name: "Architect", model: "openai/gpt-6-astra", effort: "high", tier: "frontier" },
+    { id: "role.writer", name: "Writer", model: "openai/gpt-6.1-terra", effort: "medium", tier: undefined },
 ] as const;
 
 export const DiagnosticCodes = {
@@ -134,11 +142,20 @@ export interface Diagnostic {
     structural: boolean;
 }
 
-/** Model, effort, and tier only. Absence inherits; null is an explicit value. */
+/**
+ * Model, effort, tier, and skill exposure. Absence inherits; null is an explicit value.
+ *
+ * `skills` is the one launch value here that changes what the child can see
+ * rather than how the model is chosen. It stays a definition-owned preference
+ * because the launcher reproduces it exactly (`--no-skills` plus `--skill`), the
+ * same way it reproduces model and effort, and because it grants nothing: a
+ * skill list narrows prompt exposure and cannot add a tool or a permission.
+ */
 export interface PortablePreferences {
     model?: string | null;
     effort?: ThinkingLevel | null;
     tier?: string | null;
+    skills?: string[] | null;
 }
 
 export interface Provenance {
@@ -212,6 +229,8 @@ export interface SerializeResult {
 const ID_PATTERN = /^(role|agent)\.[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const MODEL_PATTERN = /^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 const TIER_PATTERN = /^[a-z][a-z0-9-]{0,32}$/;
+/** POSIX absolute, or a Windows drive/UNC path. */
+const ABSOLUTE_PATH = /^(?:\/|[A-Za-z]:[\\/]|\\\\)/;
 const SECRET_KEY = /^(api[_-]?key|apikey|secret|password|passwd|token|access[_-]?token|refresh[_-]?token|credential|credentials|authorization|auth|databaseurl|connectionstring|dsn)$/i;
 const MULTI_ROLE_KEYS = new Set(["roleIds", "baseRoles", "baseRole", "inherits", "roles"]);
 const KNOWN_TOP_LEVEL = new Set([
@@ -309,7 +328,7 @@ export function removeAgentOverride(agent: AgentDefinition, key: PreferenceKey):
 
 export function updateAgentOverrides(
     agent: AgentDefinition,
-    patch: { set?: Partial<PortablePreferences>; remove?: readonly PreferenceKey[] },
+    patch: { set?: Partial<PortablePreferences>; remove?: readonly (PreferenceKey | "skills")[] },
 ): AgentDefinition {
     const remove = patch.remove ?? [];
     const set = patch.set ?? {};
@@ -323,7 +342,61 @@ export function updateAgentOverrides(
     if (Object.prototype.hasOwnProperty.call(set, "model") && set.model !== undefined) overrides.model = set.model;
     if (Object.prototype.hasOwnProperty.call(set, "effort") && set.effort !== undefined) overrides.effort = set.effort;
     if (Object.prototype.hasOwnProperty.call(set, "tier") && set.tier !== undefined) overrides.tier = set.tier;
+    // Skill exposure is a definition value, not a resolution preference, so it
+    // rides the same patch path without joining the model/effort resolution.
+    if (Object.prototype.hasOwnProperty.call(set, "skills") && set.skills !== undefined) overrides.skills = set.skills;
     return { ...agent, overrides };
+}
+
+/**
+ * One `/agents` skill edit. `inherit` removes the definition's own key,
+ * `none` writes `[]`, and `explicit` writes the absolute paths.
+ *
+ * `explicit` with no paths is rejected on purpose: an empty selected list must
+ * not become `[]` (which means "none") or absence (which means discovery).
+ */
+export type SkillExposureEdit =
+    | { mode: "inherit" }
+    | { mode: "none" }
+    | { mode: "explicit"; paths: readonly string[] };
+
+/** The definition's own skill value: undefined inherits, null suppresses, `[]` is none. */
+export function definitionSkillPreference(definition: CatalogDefinition): string[] | null | undefined {
+    const preferences = definition.kind === "role" ? definition.defaults : definition.overrides;
+    if (!Object.prototype.hasOwnProperty.call(preferences, "skills")) return undefined;
+    return preferences.skills === null || preferences.skills === undefined ? null : [...preferences.skills];
+}
+
+/** Absolute definition paths, with the empty selection rejected rather than stored as "none". */
+export function definitionSkillPaths(paths: readonly string[]): string[] {
+    if (paths.length === 0) {
+        throw new Error("Selected skills needs at least one absolute path. Choose No skill catalog for none.");
+    }
+    return paths.map((entry, index) => {
+        if (typeof entry !== "string" || entry.trim() === "") {
+            throw new Error(`Selected skills[${index}] must be a non-empty absolute path.`);
+        }
+        const path = entry.trim();
+        if (!ABSOLUTE_PATH.test(path)) {
+            throw new Error(`Selected skills[${index}] must be absolute: ${path}. A definition has no workspace of its own.`);
+        }
+        return path;
+    });
+}
+
+/** Apply one edit without flattening inherited values or touching other fields. */
+export function applySkillExposure<T extends CatalogDefinition>(definition: T, edit: SkillExposureEdit): T {
+    const paths = edit.mode === "explicit" ? definitionSkillPaths(edit.paths) : undefined;
+    const apply = (preferences: PortablePreferences): PortablePreferences => {
+        const next = { ...preferences };
+        if (edit.mode === "inherit") delete next.skills;
+        else if (edit.mode === "none") next.skills = [];
+        else next.skills = [...paths!];
+        return next;
+    };
+    return definition.kind === "role"
+        ? { ...definition, defaults: apply(definition.defaults) }
+        : { ...definition, overrides: apply(definition.overrides) };
 }
 
 export function parseDefinition(markdown: string, sourcePath?: string): ParseResult {
@@ -756,6 +829,23 @@ function readInstructionMode(
     return mode;
 }
 
+/**
+ * Skill paths in a definition are literal and absolute: a catalog file has no
+ * workspace of its own, so a relative path would resolve differently depending
+ * on who launches it. Returns undefined for anything that is not such a list.
+ */
+function readSkillPaths(value: unknown): string[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const paths: string[] = [];
+    for (const entry of value) {
+        if (typeof entry !== "string") return undefined;
+        const path = entry.trim();
+        if (path === "" || !ABSOLUTE_PATH.test(path)) return undefined;
+        paths.push(path);
+    }
+    return paths;
+}
+
 function readPreferences(
     value: unknown,
     field: "defaults" | "overrides",
@@ -767,7 +857,7 @@ function readPreferences(
 ): PortablePreferences | undefined {
     if (value === undefined) return {};
     if (!isPlainObject(value)) {
-        diagnostics.push(problem(DiagnosticCodes.invalidField, `${field} must be a mapping of model, effort, and tier.`, {
+        diagnostics.push(problem(DiagnosticCodes.invalidField, `${field} must be a mapping of model, effort, tier, and skills.`, {
             path: sourcePath,
             field,
             id,
@@ -778,7 +868,7 @@ function readPreferences(
     }
     const preferences: PortablePreferences = {};
     for (const key of Object.keys(value)) {
-        if (!isPreferenceKey(key)) {
+        if (!isPreferenceKey(key) && key !== "skills") {
             const target = `${field}.${key}`;
             extensions[target] = value[key];
             if (EXECUTION_KEY_SET.has(key)) {
@@ -792,11 +882,11 @@ function readPreferences(
                 });
                 diagnostics.push(problem(
                     DiagnosticCodes.unsupportedExecutionRestriction,
-                    `${target} is a host execution control, not a portable preference. It was preserved and blocks launch. Model, effort, and tier are the only preference fields.`,
+                    `${target} is a host execution control, not a portable preference. It was preserved and blocks launch. Model, effort, tier, and skills are the only preference fields.`,
                     { path: sourcePath, field: target, id, blocking: true, structural: false },
                 ));
             } else {
-                diagnostics.push(problem(DiagnosticCodes.cosmeticMetadata, `Unknown ${target} was preserved and is not a model, effort, or tier preference.`, {
+                diagnostics.push(problem(DiagnosticCodes.cosmeticMetadata, `Unknown ${target} was preserved and is not a model, effort, tier, or skills preference.`, {
                     path: sourcePath,
                     field: target,
                     id,
@@ -810,6 +900,19 @@ function readPreferences(
         const item = value[key];
         if (item === null) {
             preferences[key] = null;
+            continue;
+        }
+        if (key === "skills") {
+            const paths = readSkillPaths(item);
+            if (!paths) {
+                diagnostics.push(problem(
+                    DiagnosticCodes.invalidField,
+                    `${field}.skills must be a list of absolute paths to a SKILL.md file or a skill directory; [] loads no skills. Skill paths stay literal so a frozen launch recipe replays the same files.`,
+                    { path: sourcePath, field: `${field}.skills`, id, blocking: true, structural: true },
+                ));
+                continue;
+            }
+            preferences.skills = paths;
             continue;
         }
         if (key === "model") {
@@ -1395,7 +1498,7 @@ function walkNode(node: Node | Pair | null, depth: number, state: { nodes: numbe
 
 function preferenceMapping(preferences: PortablePreferences): Record<string, unknown> {
     const mapping: Record<string, unknown> = {};
-    for (const key of PREFERENCE_KEYS) {
+    for (const key of DEFINITION_PREFERENCE_KEYS) {
         if (Object.prototype.hasOwnProperty.call(preferences, key) && preferences[key] !== undefined) {
             mapping[key] = preferences[key];
         }
@@ -1404,7 +1507,7 @@ function preferenceMapping(preferences: PortablePreferences): Record<string, unk
 }
 
 function hasPreference(preferences: PortablePreferences): boolean {
-    return PREFERENCE_KEYS.some((key) => preferences[key] !== undefined);
+    return DEFINITION_PREFERENCE_KEYS.some((key) => preferences[key] !== undefined);
 }
 
 function compactDefinition<T extends CatalogDefinition>(definition: T): T {

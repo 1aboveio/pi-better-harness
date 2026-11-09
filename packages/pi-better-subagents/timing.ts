@@ -26,6 +26,13 @@
  * tool call does not count toward the stuck window, so a child in the middle
  * of a 20-minute test run is not stuck. A caller that needs to bound a
  * possibly hung command can opt into a ceiling.
+ *
+ * Because silence inside a running call is waiting, not being stuck, the
+ * parent also records the call it last saw open in the durable timing record
+ * (`inFlight`). A later parent (after `/reload`, or after a log rewrite) that
+ * can only read a bounded window may not see the call's start; the record is
+ * the still-alive evidence that keeps a silent build from being reported as
+ * stuck or stopped mid-call (#620).
  */
 
 import { createHash } from "node:crypto";
@@ -63,6 +70,13 @@ export interface RunTiming {
     stuckAnchorAt?: number;
     /** Latest progress seen by the parent (floor for a reload whose log read is bounded). */
     lastProgressAt?: number;
+    /**
+     * Tool call the parent last observed open, so a bounded reload read cannot
+     * turn a child that is waiting on a command into "no progress" (#620).
+     * `since` is when the open set became non-empty, which is also the pause
+     * start used once its result arrives.
+     */
+    inFlight?: { id: string; since: number };
     /** Set when the harness stopped the run. */
     stopReason?: TimingStopReason;
     stoppedAt?: number;
@@ -189,7 +203,7 @@ export interface ProgressState {
     /** Latest event timestamp seen (message provenance only). */
     lastEventAt?: number;
     /** Tool calls started and not yet finished. */
-    open: Map<string, { name: string; command?: string; novel: boolean }>;
+    open: Map<string, { name: string; command?: string; novel: boolean; seeded?: boolean }>;
     /** Hashes of tool name + normalized arguments already seen in this run (bounded, oldest evicted). */
     seen: Set<string>;
     /** When the open set last went from empty to non-empty. */
@@ -199,8 +213,20 @@ export interface ProgressState {
     lastToolFailed: boolean;
 }
 
-export function emptyProgress(startedAt: number): ProgressState {
-    return { startedAt, open: new Map(), seen: new Set(), pausedMs: 0, lastToolFailed: false };
+/**
+ * Progress state for a run. `inFlight` seeds the open set from the durable
+ * record: the parent knows the child is waiting on that call even when the
+ * bounded log read no longer contains its start. A seeded entry carries no
+ * arguments, so its result is never mistaken for progress; the call's own
+ * result, or a later call's start, supersedes it.
+ */
+export function emptyProgress(startedAt: number, inFlight?: { id?: string; since?: number }): ProgressState {
+    const state: ProgressState = { startedAt, open: new Map(), seen: new Set(), pausedMs: 0, lastToolFailed: false };
+    if (typeof inFlight?.id === "string" && inFlight.id !== "" && typeof inFlight.since === "number" && Number.isFinite(inFlight.since)) {
+        state.open.set(inFlight.id, { name: "", novel: false, seeded: true });
+        state.inFlightSince = Math.max(startedAt, inFlight.since);
+    }
+    return state;
 }
 
 
@@ -267,8 +293,23 @@ export function foldProgress(state: ProgressState, event: Record<string, unknown
         const id = typeof event.toolCallId === "string" ? event.toolCallId : undefined;
         if (!id) return;
         const args = event.args as { command?: unknown } | undefined;
-        if (state.open.size === 0) state.inFlightSince = state.lastEventAt ?? state.startedAt;
         const name = String(event.toolName ?? "");
+        // A different call starting means the seeded call finished while the log window
+        // was lost: its wait is a pause, not progress. A seed for this same id is
+        // replaced by the real event below.
+        const seedSince = state.inFlightSince;
+        let supersededSeed = false;
+        for (const [openId, call] of state.open) {
+            if (call.seeded && openId !== id) {
+                state.open.delete(openId);
+                supersededSeed = true;
+            }
+        }
+        if (supersededSeed && state.open.size === 0 && seedSince !== undefined) {
+            state.pausedMs += Math.max(0, (state.lastEventAt ?? state.startedAt) - seedSince);
+            state.inFlightSince = undefined;
+        }
+        if (state.open.size === 0) state.inFlightSince = state.lastEventAt ?? state.startedAt;
         state.open.set(id, { name, command: typeof args?.command === "string" ? args.command : undefined, novel: remember(state, callKey(name, event.args)) });
         return;
     }

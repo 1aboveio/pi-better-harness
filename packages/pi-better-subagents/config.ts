@@ -6,14 +6,17 @@
  *
  * `defaultModel: null` / absent → inherit the foreground model.
  * `defaultTools` absent → the built-in SAFE_DEFAULT_TOOLS.
+ * `defaultSkills` absent → the child discovers the user-level skills catalog.
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { SELF_SPEC } from "./extensions.ts";
+import { installedPackage } from "./child-dependencies.mjs";
 import { isDelegationMode, type DelegationMode } from "./delegation.ts";
+import { normalizeSkillExposure } from "./skills.ts";
 import type { TimingSettings } from "./timing.ts";
 import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.ts";
 
@@ -22,6 +25,12 @@ export interface SubagentConfig extends TimingSettings {
     delegationMode?: DelegationMode | null;
     defaultModel?: string | null;
     defaultTools?: string | null;
+    /**
+     * Skill exposure when neither the launch nor a catalog role/agent chooses
+     * one: absent/null keeps discovery, `[]` loads no skills, and absolute
+     * paths load exactly those skills. See `skills.ts`.
+     */
+    defaultSkills?: string[] | null;
     /** Default concurrency cap; /subagents cap overrides it for the current session. */
     maxConcurrent?: number | null;
     /**
@@ -33,6 +42,7 @@ export interface SubagentConfig extends TimingSettings {
     /**
      * Provider → extension package(s) that authenticate it. Model auth is not
      * tool-shaped: `xai/grok-4.5` needs pi-xai-oauth loaded whatever the tools.
+     * A built-in entry covers `ollama-cloud`; an entry here replaces it.
      */
     providerExtensions?: Record<string, string | string[]> | null;
     /**
@@ -73,7 +83,7 @@ export interface SubagentConfig extends TimingSettings {
 }
 
 /** Concurrency cap when config.json sets none. */
-export const DEFAULT_MAX_CONCURRENT = 4;
+export const DEFAULT_MAX_CONCURRENT = 6;
 
 export function isConcurrencyCap(value: unknown): value is number {
     return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
@@ -84,7 +94,7 @@ export function normalizeConcurrencyCap(value: unknown): number {
 }
 
 /** Built-in default tool set when config.json sets nothing. */
-export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetch";
+export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetch, codemode";
 /** Safe default for a hermetic (clean) child where extension tools don't exist. */
 export const SAFE_CLEAN_TOOLS = "read, bash";
 
@@ -181,10 +191,34 @@ export function writeDelegationMode(mode: DelegationMode, path = configPath()): 
 }
 
 /** Save human-facing defaults together, preserving unrelated configuration. */
-export function writeSubagentSettings(settings: { delegationMode: DelegationMode; maxConcurrent: number }, path = configPath()): void {
+export function writeSubagentSettings(
+    settings: {
+        delegationMode: DelegationMode;
+        maxConcurrent: number;
+        /** Omit to preserve the saved value; `null` explicitly records discovery. */
+        defaultSkills?: string[] | null;
+    },
+    path = configPath(),
+): void {
     if (!isDelegationMode(settings.delegationMode)) throw new Error("Invalid delegation mode.");
     if (!isConcurrencyCap(settings.maxConcurrent)) throw new Error("Concurrent subagents must be a positive whole number.");
-    writeConfigSettings(settings, path);
+    const next: { delegationMode: DelegationMode; maxConcurrent: number; defaultSkills?: string[] | null } = {
+        delegationMode: settings.delegationMode,
+        maxConcurrent: settings.maxConcurrent,
+    };
+    if (Object.hasOwn(settings, "defaultSkills")) {
+        if (settings.defaultSkills === null) {
+            next.defaultSkills = null;
+        } else {
+            const skills = normalizeSkillExposure(settings.defaultSkills, "defaultSkills");
+            if (skills === undefined) throw new Error("defaultSkills must be an array of paths or null for discovery.");
+            if (skills.some((entry) => !isAbsolute(entry))) {
+                throw new Error("defaultSkills paths must be absolute so every child resolves the same files.");
+            }
+            next.defaultSkills = skills;
+        }
+    }
+    writeConfigSettings(next, path);
 }
 
 function writeConfigSettings(settings: Partial<SubagentConfig>, path: string): void {
@@ -221,10 +255,13 @@ function piAgentDir(): string {
  * a missing dependency instead of silently launching a child without it.
  * (`-e` accepts either a package directory or an entrypoint file — verified.)
  */
-export function resolveExtensionPath(spec: string): string | undefined {
+export function resolveExtensionPath(spec: string, declaringRoot?: string): string | undefined {
     if (spec === SELF_SPEC) return selfDir();
     const path = spec.startsWith("npm:")
-        ? join(piAgentDir(), "npm", "node_modules", spec.slice(4))
-        : spec;
-    return existsSync(path) ? path : undefined;
+        ? (declaringRoot && installedPackage(spec.slice(4), [declaringRoot])) ?? (existsSync(join(piAgentDir(), "npm", "node_modules", spec.slice(4)))
+            ? join(piAgentDir(), "npm", "node_modules", spec.slice(4))
+            : installedPackage(spec.slice(4), [declaringRoot, join(piAgentDir(), "npm"), selfDir(),
+                join(piAgentDir(), "npm", "node_modules", "pi-better-harness")]))
+        : declaringRoot && !spec.startsWith("/") ? join(declaringRoot, spec) : spec;
+    return path && existsSync(path) ? path : undefined;
 }

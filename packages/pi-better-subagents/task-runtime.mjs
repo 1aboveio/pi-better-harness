@@ -1,4 +1,5 @@
 /** Trusted native entry point. Any failure before/inside guard installation is fatal. */
+import preflight from "./child-preflight.mjs";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join } from "node:path";
@@ -29,9 +30,12 @@ try {
   const guard = await load.import(fileURLToPath(new URL("./task-guard.ts", import.meta.url)), { default: true });
   if (typeof guard !== "function") throw new Error("Task guard has no extension factory.");
   const { main } = await import(pathToFileURL(join(dirname(sdkEntry), "main.js")).href);
-  await main(args, {
-    extensionFactories: [{ name: "task-sandbox", factory: async (pi) => {
-      try { await guard(pi, policy, fail); } catch (error) { fail(error); }
+  // SDK tool names belong to the first extension registering them. Reserve a
+  // source before provider/trusted packages, but keep activation in the final guard.
+  const ownerPath = fileURLToPath(new URL("./task-tool-owner.ts", import.meta.url));
+  await main(["--extension", ownerPath, ...args], {
+    extensionFactories: [...(process.env.PI_SUBAGENT_PREFLIGHT ? [{ name: "subagent-preflight", factory: preflight }] : []), { name: "task-sandbox", factory: async (pi) => {
+      try { await guard(pi, policy, fail, true); } catch (error) { fail(error); }
     } }],
   });
 } catch (error) {

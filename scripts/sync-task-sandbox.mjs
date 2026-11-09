@@ -7,6 +7,7 @@ const files = {
   "index.ts": "shared-task-sandbox.ts", "files.ts": "shared-task-files.ts",
   "apply-patch.ts": "shared-task-apply-patch.ts", "tools.ts": "shared-task-tools.ts",
   "process-list.ts": "shared-task-process-list.ts",
+  "exec.ts": "shared-task-exec.ts", "application.ts": "shared-task-application.ts",
 };
 const consumers = ["pi-better-sandbox", "pi-better-subagents"];
 export function taskSandboxCopies(root = resolve(import.meta.dirname, "..")) {
@@ -18,7 +19,9 @@ export function taskSandboxCopies(root = resolve(import.meta.dirname, "..")) {
         .replaceAll('"./files.ts"', '"./shared-task-files.ts"')
         .replaceAll('"./apply-patch.ts"', '"./shared-task-apply-patch.ts"')
         .replaceAll('"./tools.ts"', '"./shared-task-tools.ts"')
-        .replaceAll('"./process-list.ts"', '"./shared-task-process-list.ts"');
+        .replaceAll('"./process-list.ts"', '"./shared-task-process-list.ts"')
+        .replaceAll('"./exec.ts"', '"./shared-task-exec.ts"')
+        .replaceAll('"./application.ts"', '"./shared-task-application.ts"');
     return consumers.map((consumer) => ({ path: resolve(root, "packages", consumer, target), content }));
   });
 }

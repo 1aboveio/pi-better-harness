@@ -37,29 +37,18 @@ export const DETAIL_TICK_MS = 1000;
 /** Two-press Close confirmation window (ms). Exclusive at the boundary. */
 export const CLOSE_ARM_MS = 3000;
 
-/** Footer status key for the `← subagents · N` hint (default footer mechanism). */
+/** Legacy status keys retained for compatibility. */
 export const NAVIGATOR_STATUS_KEY = "subagents-nav";
 
-/** Footer status key for the Close confirmation hint (coexists with count hint). */
 export const CLOSE_CONFIRM_STATUS_KEY = "subagents-close";
 
-/**
- * Footer hint text: `← subagents · N` while at least one visible
- * current-parent run exists, null when none (caller clears the status).
- */
+/** Legacy footer helpers no longer write status. */
 export function navigatorFooterHint(count) {
-    return count > 0 ? `← subagents · ${count}` : null;
+    return null;
 }
 
-/**
- * Publish the footer hint through pi's default footer status mechanism.
- * Sets `← subagents · N` for count ≥ 1, clears the status at 0. Returns the
- * hint (or null) so callers can dirty-check. NEVER touches the footer itself.
- */
 export function applyNavigatorFooter(ui, count) {
-    const hint = navigatorFooterHint(count);
-    ui.setStatus(NAVIGATOR_STATUS_KEY, hint ?? undefined);
-    return hint;
+    return navigatorFooterHint(count);
 }
 
 // ---------------------------------------------------------------------------
@@ -79,13 +68,8 @@ export function closeConfirmHint(row) {
     return stoppable ? `x again to stop ${label}` : `x again to dismiss ${label}`;
 }
 
-/**
- * Publish/clear the Close confirmation hint through pi's default footer status
- * mechanism (a dedicated key so it coexists with `← subagents · N`).
- * Pass null/undefined to clear.
- */
+/** Preserve the hint for compatibility without writing status. */
 export function applyCloseConfirmFooter(ui, hint) {
-    ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, hint ?? undefined);
     return hint ?? null;
 }
 
@@ -193,10 +177,19 @@ export function isNavigatorUiAvailable(ctx) {
  * @param {(m: object) => object|undefined} [deps.healthFor] - #66 HealthObservation
  * @param {number} [deps.now]
  */
+export function pendingNavigatorPark(meta) {
+    const park = meta?.park;
+    return park?.version === 1 && ["parking", "waiting", "ready", "resuming", "held"].includes(park.phase) ? park : undefined;
+}
+
+function navigatorDisplayStatus(meta, status) {
+    return status === "running" || status === "orphaned" ? status : pendingNavigatorPark(meta)?.phase ?? status;
+}
+
 export function buildNavigatorRows(metas, deps) {
     const now = deps.now ?? Date.now();
     return metas.map((m) => {
-        const status = deps.effectiveStatus(m);
+        const status = navigatorDisplayStatus(m, deps.effectiveStatus(m));
         const health = typeof deps.healthFor === "function" ? deps.healthFor(m) : undefined;
         const effort = typeof deps.effortFor === "function" ? deps.effortFor(m) : (m.effort ?? m.modelEffort);
         const tool = typeof deps.toolFor === "function" ? (deps.toolFor(m) || "") : "";
@@ -390,7 +383,7 @@ export function buildNavigatorDetail(id, deps) {
     const now = deps.now ?? Date.now();
     const parsed = deps.parseRun(id);
     const toolCalls = parsed.toolCalls ?? [];
-    const status = deps.effectiveStatus(meta);
+    const status = navigatorDisplayStatus(meta, deps.effectiveStatus(meta));
     const running = status === "running" || status === "orphaned";
     const health = typeof deps.healthFor === "function" ? deps.healthFor(meta) : undefined;
     const effortRaw = typeof deps.effortFor === "function"
@@ -400,6 +393,8 @@ export function buildNavigatorDetail(id, deps) {
         id: meta.id,
         name: meta.name,
         role: meta.catalog?.roleName || (meta.catalog?.roleId ? String(meta.catalog.roleId).replace(/^role\./, "") : undefined) || undefined,
+        park: pendingNavigatorPark(meta),
+        attemptStatus: deps.effectiveStatus(meta),
         status,
         model: deps.shortModel(meta.model),
         effort: effortRaw ? String(effortRaw) : undefined,

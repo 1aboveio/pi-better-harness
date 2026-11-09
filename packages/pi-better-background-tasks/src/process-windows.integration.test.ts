@@ -28,6 +28,29 @@ windowsDescribe("Windows process integration", () => {
     expect(readFileSync(meta.logPath, "utf8")).toMatch(/spawn error .*code=ENOENT/i);
   });
 
+  it("runs the gated shell path through the Windows log redirect (#619)", async () => {
+    delete process.env.PI_BETTER_BACKGROUND_TASKS_SHELL;
+    // A semicolon chain is the reported shape: the summary command would make the shell
+    // exit 0. The gate script, its command variable and its stderr marker all have to
+    // survive the Windows redirect trampoline for the verdict to be truthful here.
+    const meta = spawnTask(pi, {
+      command: "false; echo summary ok",
+      require_successful_steps: true,
+      callback: false,
+    }, process.cwd());
+    taskIds.push(meta.id);
+
+    const terminal = await waitForMeta(meta.id, (value) => value?.status !== "running", 30_000);
+
+    expect(terminal).toMatchObject({ status: "failed", lastExitCode: 1 });
+    expect(terminal?.stepGateFailure).toMatchObject({ stepExitCode: 1 });
+    const log = readFileSync(meta.logPath, "utf8");
+    expect(log).toContain("--- step gate [");
+    expect(log).toContain("first failing step exit=1");
+    // bash errexit stopped at the failing step; the masking summary never ran.
+    expect(log).not.toContain("summary ok");
+  }, 30_000);
+
   it("delivers POSIX-looking raw argv without MSYS2 rewriting", async () => {
     delete process.env.PI_BETTER_BACKGROUND_TASKS_SHELL;
     expect(resolveDefaultShell()).not.toBe("/bin/bash");

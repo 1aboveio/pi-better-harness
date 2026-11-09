@@ -1,9 +1,19 @@
 {
   "name": "pi-better-subagents",
-  "version": "0.19.1",
+  "version": "0.28.1",
   "description": "Pi extension for detached, sandboxed subagent runs that keep the foreground session free.",
   "license": "MIT",
   "type": "module",
+  "bin": {
+    "pi-agent-catalog": "./agent-catalog.mjs"
+  },
+  "exports": {
+    "./catalog": "./worker-catalog.ts",
+    "./catalog-store": "./catalog-store.ts",
+    "./catalog-resolver": "./catalog-resolver.ts",
+    "./model-resolution-core": "./model-resolution-core.ts",
+    "./*": "./*"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -44,6 +54,7 @@
   "files": [
     "*.ts",
     "*.mjs",
+    "shared-operation-coordinator/**/*.ts",
     "config.json",
     "README.md",
     "roles/**/*.md",
@@ -51,6 +62,7 @@
     "docs/agent-catalog.md",
     "docs/agent-catalog-operations.md",
     "docs/agent-model-resolution.md",
+    "docs/worker-catalog.md",
     "docs/agent-catalog-lifecycle.md",
     "docs/agent-catalog-acceptance.md",
     "docs/failure-observations.md"
@@ -62,7 +74,9 @@
   },
   "dependencies": {
     "proper-lockfile": "^4.1.2",
+    "shell-quote": "1.12.0",
     "smol-toml": "1.9.0",
+    "tsx": "^4.22.3",
     "yaml": "^2.9.1"
   }
 }

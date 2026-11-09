@@ -16,7 +16,7 @@ function selectedRow(text) {
 }
 
 function permissionRows(text) {
-    return text.split("\n").filter((line) => /^(?:> |  )(?:Sandbox\s+(?:Off|On)|Project files\s|Outside project\s|Stored credentials\s|Run commands & applications\s|Network access\s|Process access\s|  (?:[>v] )?\[[ x-]\]|      \[[ x]\])/.test(line))
+    return text.split("\n").filter((line) => /^(?:> |  )(?:Sandbox\s+(?:Off|On)|Project files\s|Outside project\s|Stored credentials\s|Run applications\s|Shell scripts\s|Command time limit\s|Network access\s|Process access\s|  (?:[>v] )?\[[ x-]\]|      \[[ x]\])/.test(line))
         .map((line) => line.slice(2).trimEnd());
 }
 
@@ -148,18 +148,25 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         tmux("new-session", "-d", "-s", "permissions", "-x", "100", "-y", "36", command);
         wait(/sandbox/);
         literal("/sandbox"); key("Enter");
-        let text = wait(/Sandbox permissions\s+Main\s+Subagents/);
+        let text = wait(/Sandbox permissions\s+Main\s+Subagents\s+Background tasks/);
         assert.doesNotMatch(text, /Save as defaults/);
         assert.match(text, /ctrl\+s Save default/);
-        assert.match(text, /Sandbox\s+Off\s+On/);
+        assert.match(text, /Sandbox\s+Off\s+Off\s+Off/);
         const focused = tmux("capture-pane", "-t", "permissions", "-e", "-p").split("\n")
             .find((line) => line.replace(/\x1b\[[0-9;]*m/g, "").startsWith("> Sandbox"));
         assert.ok(focused, "selected row is visible in the real terminal");
         assert.match(focused, /\x1b\[[0-9;]*48;[0-9;]*m/, "selected row uses a colored background");
         assert.match(focused, /\x1b\[(?:\d+;)*1(?:;\d+)*m/, "selected row is bold");
         assert.match(focused, /\x1b\[(?:\d+;)*7(?:;\d+)*m/, "active cell has inverse styling");
-        assert.match(text, /Project files\s+-\s+Write & delete/);
-        assert.match(text, /Stored credentials\s+-\s+Write & delete/);
+        assert.match(text, /Project files\s+-\s+-\s+-/);
+        assert.match(text, /Stored credentials\s+-\s+-\s+-/);
+        assert.match(text, /Run applications\s+-\s+-\s+-/);
+        assert.match(text, /Shell scripts\s+-\s+-\s+-/);
+        assert.match(text, /Command time limit\s+-\s+-\s+-/);
+        key("Right"); key("Space"); wait(/Sandbox\s+Off\s+On\s+Off/);
+        key("Left");
+        wait(/Project files\s+-\s+Write & delete/);
+        wait(/Stored credentials\s+-\s+Write & delete/);
         key("Space"); wait(/Sandbox\s+On\s+On/);
         key("Down"); key("Space"); wait(/Project files\s+Off\s+Write & delete/);
         key("Up"); key("Space"); wait(/Project files\s+-\s+Write & delete/);
@@ -172,11 +179,15 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         wait(/rename-based saves fail outside the project/);
         key("Space");
         wait(/Outside project\s+-\s+Write & delete/);
-        for (let i = 0; i < 4; i++) key("Down");
+        for (let i = 0; i < 6; i++) key("Down");
         wait(/Process access\s+-\s+Read/);
         key("Space"); wait(/Process access\s+-\s+Off/);
         key("Space"); wait(/Process access\s+-\s+Read/);
-        for (let i = 0; i < 4; i++) key("Up");
+        for (let i = 0; i < 6; i++) key("Up");
+        key("Right"); key("Up"); key("Up");
+        key("Space"); wait(/Sandbox\s+Off\s+On\s+On/);
+        for (let i = 0; i < 7; i++) key("Down");
+        key("Space"); wait(/Network access\s+-\s+On\s+Off/);
         // The guarded adapter stays a direct row; trusted tools start folded by package.
         wait(/Subagents · Tools[\s\S]*\[x\] apply_patch\s+harness adapter[\s\S]*Trusted \(runs outside the file rules\)[\s\S]*\[x\].*@juicesharp\/rpiv-web-tools\s+2\/2/);
         const defaultsPath = join(fixture, "agent/settings.json");
@@ -188,6 +199,8 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         literal("/reload"); key("Enter"); wait(/Reloaded/);
         literal("/sandbox"); key("Enter");
         wait(/Outside project\s+-\s+Write & delete/);
+        wait(/Sandbox\s+Off\s+On\s+On/);
+        wait(/Network access\s+-\s+On\s+Off/);
         assert.equal(savedDefaults(), undefined, "reload restores the session without writing defaults");
         key("Space"); wait(/Project files\s+Off\s+Write & delete/);
         key("Space"); wait(/Sandbox\s+Off\s+On/);
@@ -200,13 +213,19 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         assert.equal(saved.permissions.subagents.storedCredentials, "read-write");
         assert.equal(saved.permissions.subagents.processAccess, "read");
         assert.equal(saved.permissions.main.processAccess, "read");
+        assert.equal(saved.permissions.main.shell, true);
+        assert.equal(saved.permissions.main.commandTimeoutSeconds, null);
+        assert.equal(saved.permissions.background.enabled, true);
+        assert.equal(saved.permissions.background.network, false);
+        assert.equal(saved.permissions.background.outsideProject, "read");
         assert.equal(saved.permissions.subagentTools.applyPatch, true);
         key("Space"); wait(/Project files\s+Off\s+Write & delete/); // Session-only Main on.
         key("Escape");
         wait(/^(?![\s\S]*Sandbox permissions\s+Main)/);
         literal("/new"); key("Enter"); wait(/New session/);
         literal("/sandbox"); key("Enter");
-        wait(/Sandbox\s+Off\s+On/);
+        wait(/Sandbox\s+Off\s+On\s+On/);
+        wait(/Network access\s+-\s+On\s+Off/);
         wait(/Outside project\s+-\s+Write & delete/);
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
@@ -258,7 +277,7 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
         tmux("new-session", "-d", "-s", "permissions", "-x", "130", "-y", "50", command);
         wait(/sandbox/);
         literal("/sandbox"); key("Enter");
-        let text = waitSelected(/^Sandbox\s+Off\s+On\s*$/, (frame) => /Subagents · Tools[\s\S]*ctrl\+s Save default/.test(frame));
+        let text = waitSelected(/^Sandbox\s+Off\s+Off\s+Off\s*$/, (frame) => /Subagents · Tools[\s\S]*ctrl\+s Save default/.test(frame));
         assert.match(text, /\[ \].*fixture-alpha.*0\/1/);
         assert.match(text, /\[ \].*fixture-beta.*0\/1/);
         assert.match(text, /> \[ \] atlas \([^\n]*fixture-alpha\) 0\/2/);
@@ -295,7 +314,7 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
         key("Escape"); wait(/^(?![\s\S]*Sandbox permissions\s+Main)/);
         literal("/reload"); key("Enter"); wait(/Reloaded/);
         literal("/sandbox"); key("Enter");
-        text = waitSelected(/^Sandbox\s+Off\s+On\s*$/, (frame) => /Subagents · Tools[\s\S]*ctrl\+s Save default/.test(frame));
+        text = waitSelected(/^Sandbox\s+Off\s+Off\s+Off\s*$/, (frame) => /Subagents · Tools[\s\S]*ctrl\+s Save default/.test(frame));
         assert.match(text, /atlas \([^\n]*fixture-alpha\).*2\/2/);
         assert.match(text, /atlas \([^\n]*fixture-beta\).*0\/1/);
         assert.doesNotMatch(text, /mcp__atlas__read/, "fold state is not persisted");
