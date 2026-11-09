@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
 import { recordFailure } from "./failures.js";
-import { getCallbackBatcher } from "./shared-callback-batcher.js";
+import { CALLBACK_SETTINGS_ENTRY, getCallbackBatcher } from "./shared-callback-batcher.js";
 import { metaPathFor, readMeta, taskDir, writeMeta } from "./registry.js";
 import { defaultSupervisorDirectory } from "./supervisor/index.js";
 import { currentProcessStartToken } from "./process-identity.js";
@@ -801,7 +801,7 @@ describe("extension e2e", () => {
           id,
           sidecar: readJson(join(defaultSupervisorDirectory(), "observed", `${id}.json`)),
           host: readJson(join(defaultSupervisorDirectory(), "observed", "host.json")),
-          branchIds: harness.ctx.sessionManager.getBranch().map((entry) => entry.id),
+          branchIds: harness.ctx.sessionManager.getBranch().flatMap((entry) => "id" in entry ? [entry.id] : []),
           messages: harness.messages.length,
         }, null, 2));
       }
@@ -884,7 +884,12 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
     },
     sessionManager: {
       getSessionId: () => sessionId,
-      getBranch: () => branchIds.map((id) => ({ id })),
+      // The callback preference entry pins delivery to "hold" so a busy foreground
+      // never steers; the branch ids that follow are the durable owner's anchor.
+      getBranch: () => [{
+        type: "custom", customType: CALLBACK_SETTINGS_ENTRY,
+        data: { version: 1, mode: "hold" },
+      }, ...branchIds.map((id) => ({ id }))],
     },
   };
   const pi = {

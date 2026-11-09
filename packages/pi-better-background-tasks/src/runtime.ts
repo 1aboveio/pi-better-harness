@@ -10,7 +10,7 @@ import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.j
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
 import { assertBackgroundExecutionAllowed, backgroundExecutionLimits, confineCommandSpec, isCommandTimeoutSeconds, resolveForegroundSandboxPlan, sandboxProvenance } from "./sandbox.js";
 import { takeRecoverySnapshot } from "./shared-sandbox-core.js";
-import { failurePath, readTaskIntent, recordExitFailure, recordFailure, recoverDeclaredOperation, recoverFailure, resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention, terminalFailureAttention } from "./failures.js";
+import { failurePath, readTaskIntent, recordExitFailure, recordFailure, recoverDeclaredOperation, recoverFailure, createFailureAttention, defaultAttention, terminalFailureAttention } from "./failures.js";
 import { markFailureAttentionDelivered } from "./shared-failure-observations.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { formatCallbackFacts } from "./output.js";
@@ -29,6 +29,89 @@ import type {
 import { observeTaskStallAttention } from "./stall-attention.js";
 import { isTerminalStatus } from "./types.js";
 
+export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefined;
+
+/** Structured intent (#325), declared by the launching agent and shared by spawns and watchers. */
+export interface TaskIntentParams {
+  /** Stable id shared by modified retries of one operation. */
+  operation_id?: string | null;
+  /** Non-zero exit codes declared intentional before launch. */
+  expected_exit_codes?: number[] | null;
+}
+
+export interface SpawnTaskParams extends CommandSpec, TaskIntentParams {
+  name?: string;
+  /**
+   * Batch identity assigned by the batch launcher, never declared by a caller.
+   * Absent for a single spawn; carried into the persisted metadata so batch
+   * membership survives a reload instead of living only in the launch result.
+   */
+  batchId?: string;
+  /** Batch label from the same launch, when the operator gave one. */
+  batchName?: string;
+  callback?: boolean;
+  timeout_seconds?: number;
+  max_log_bytes?: number;
+  /**
+   * Opt-in step gate (#619): run the command under bash errexit, so the first
+   * unhandled failing step ends the task with that step's exit code and a later
+   * command cannot mask it.
+   */
+  require_successful_steps?: boolean;
+  ssh?: SshConnectionParams;
+  remote?: RemoteTaskParams;
+}
+
+export interface WatchTaskParams extends CommandSpec, TaskIntentParams {
+  name?: string;
+  callback?: boolean;
+  interval_seconds?: number;
+  timeout_seconds?: number;
+  max_log_bytes?: number;
+  success_when: Condition;
+  failure_when?: Condition;
+  /**
+   * Rejected (#619): a watch check is one polled command whose own exit code is the
+   * outcome, so the step gate cannot apply. Accepted in the shared schema only where
+   * the same wrapper also spawns.
+   */
+  require_successful_steps?: boolean;
+  /** Consecutive blind checks before the watch is flagged (#359). Default 3; 0 turns it off. */
+  blind_checks?: number;
+  ssh?: SshConnectionParams;
+  remote?: RemoteTaskParams;
+}
+
+type WatchPollRunner = (timeoutMs?: number) => Promise<CommandResult>;
+
+export interface TaskRuntimeDependencies {
+  remoteRunner?: RemoteRunner;
+  /**
+   * Embedding/test seam for a local watch's poll command. Production polls run
+   * the persisted command through `runCommandOnce`; a remote watch keeps using
+   * its SSH runner instead.
+   */
+  watchPollRunner?: WatchPollRunner;
+}
+
+export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
+/** Consecutive blind checks (exit 0, stderr, no condition matched) before a watch is flagged (#359). */
+export const DEFAULT_BLIND_CHECKS = 3;
+/** How long bg_task_watch waits for the first check before returning (#359). */
+export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;
+/** How to fix a false alarm: some tools write progress or warnings to stderr on success. */
+export const BLIND_CHECK_HINT = "If the stderr is expected (progress or warnings), redirect it (2>/dev/null) or set blind_checks:0.";
+/**
+ * Why the launch stopped waiting before the first check finished (#359): the bounded wait
+ * ran out, the tool call was aborted (Esc), or the session shut down.
+ */
+export type FirstCheckWaitEnd = "timeout" | "aborted" | "suspended";
+/** A first check's outcome, or why it is not known yet; undefined when the watch ended without one. */
+export type FirstCheckOutcome = FirstWatchCheck | { pending: FirstCheckWaitEnd; waitedMs: number } | undefined;
+
+/** Each cached extension factory owns its scheduling and suspension state. */
+export function createBackgroundTaskRuntime(attention = createFailureAttention()) {
+const { resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention } = attention;
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const remoteSessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const processTimeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -49,22 +132,7 @@ const HANDOFF_LOST_GRACE_MS = 5_000;
 let scheduledWorkSuspended = false;
 const REMOTE_SESSION_POLL_MS = 100;
 
-export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
-/** Consecutive blind checks (exit 0, stderr, no condition matched) before a watch is flagged (#359). */
-export const DEFAULT_BLIND_CHECKS = 3;
-/** How long bg_task_watch waits for the first check before returning (#359). */
-export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;
 const BLIND_OPERATION = "watch-blind";
-/** How to fix a false alarm: some tools write progress or warnings to stderr on success. */
-export const BLIND_CHECK_HINT = "If the stderr is expected (progress or warnings), redirect it (2>/dev/null) or set blind_checks:0.";
-
-/**
- * Why the launch stopped waiting before the first check finished (#359): the bounded wait
- * ran out, the tool call was aborted (Esc), or the session shut down.
- */
-export type FirstCheckWaitEnd = "timeout" | "aborted" | "suspended";
-/** A first check's outcome, or why it is not known yet; undefined when the watch ended without one. */
-export type FirstCheckOutcome = FirstWatchCheck | { pending: FirstCheckWaitEnd; waitedMs: number } | undefined;
 
 /** In-flight first checks of watches launched by this instance, keyed by task id. */
 const firstCheckWaiters = new Map<string, { promise: Promise<FirstWatchCheck | "suspended" | undefined>; resolve: (check: FirstWatchCheck | "suspended" | undefined) => void }>();
@@ -74,7 +142,7 @@ const firstCheckWaiters = new Map<string, { promise: Promise<FirstWatchCheck | "
  * outcome when the wait ends first, and undefined when this instance did not launch the watch
  * or the watch ended without a check.
  */
-export async function awaitFirstWatchCheck(id: string, timeoutMs = FIRST_WATCH_CHECK_WAIT_MS, signal?: AbortSignal): Promise<FirstCheckOutcome> {
+async function awaitFirstWatchCheck(id: string, timeoutMs = FIRST_WATCH_CHECK_WAIT_MS, signal?: AbortSignal): Promise<FirstCheckOutcome> {
   const waiter = firstCheckWaiters.get(id);
   if (!waiter) return undefined;
   const started = Date.now();
@@ -132,7 +200,7 @@ function settleFirstCheck(id: string, check: FirstWatchCheck | "suspended" | und
  * is recorded as terminal and its callback is delivered when its session resumes;
  * after Pi quits, a resumed task whose process is gone is marked lost instead.
  */
-export function suspendScheduledWork(): void {
+function suspendScheduledWork(): void {
   scheduledWorkSuspended = true;
   for (const timer of watcherTimers.values()) clearTimeout(timer);
   for (const timer of remoteSessionTimers.values()) clearTimeout(timer);
@@ -150,75 +218,11 @@ export function suspendScheduledWork(): void {
 }
 
 /** Allow scheduling again; called at session_start before running tasks are resumed. */
-export function resumeScheduledWork(): void {
+function resumeScheduledWork(): void {
   scheduledWorkSuspended = false;
   resumeFailureAttention();
 }
 
-
-
-export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefined;
-
-/** Structured intent (#325), declared by the launching agent and shared by spawns and watchers. */
-export interface TaskIntentParams {
-  /** Stable id shared by modified retries of one operation. */
-  operation_id?: string | null;
-  /** Non-zero exit codes declared intentional before launch. */
-  expected_exit_codes?: number[] | null;
-}
-
-export interface SpawnTaskParams extends CommandSpec, TaskIntentParams {
-  name?: string;
-  /**
-   * Batch identity assigned by the batch launcher, never declared by a caller.
-   * Absent for a single spawn; carried into the persisted metadata so batch
-   * membership survives a reload instead of living only in the launch result.
-   */
-  batchId?: string;
-  /** Batch label from the same launch, when the operator gave one. */
-  batchName?: string;
-  callback?: boolean;
-  timeout_seconds?: number;
-  max_log_bytes?: number;
-  /**
-   * Opt-in step gate (#619): run the command under bash errexit, so the first
-   * unhandled failing step ends the task with that step's exit code and a later
-   * command cannot mask it.
-   */
-  require_successful_steps?: boolean;
-  ssh?: SshConnectionParams;
-  remote?: RemoteTaskParams;
-}
-
-export interface WatchTaskParams extends CommandSpec, TaskIntentParams {
-  name?: string;
-  callback?: boolean;
-  interval_seconds?: number;
-  timeout_seconds?: number;
-  max_log_bytes?: number;
-  success_when: Condition;
-  failure_when?: Condition;
-  /**
-   * Rejected (#619): a watch check is one polled command whose own exit code is the
-   * outcome, so the step gate cannot apply. Accepted in the shared schema only where
-   * the same wrapper also spawns.
-   */
-  require_successful_steps?: boolean;
-  /** Consecutive blind checks before the watch is flagged (#359). Default 3; 0 turns it off. */
-  blind_checks?: number;
-  ssh?: SshConnectionParams;
-  remote?: RemoteTaskParams;
-}
-
-export interface TaskRuntimeDependencies {
-  remoteRunner?: RemoteRunner;
-  /**
-   * Embedding/test seam for a local watch's poll command. Production polls run
-   * the persisted command through `runCommandOnce`; a remote watch keeps using
-   * its SSH runner instead.
-   */
-  watchPollRunner?: WatchPollRunner;
-}
 
 /**
  * Persist the launch-time per-command cap with the task metadata. Reload and
@@ -286,9 +290,7 @@ function invalidPersistedCommandCap(meta: BackgroundTaskMeta): string | undefine
   return `Persisted command time limit ${JSON.stringify(meta.commandTimeoutSeconds)} is invalid; the task was not resumed with an unlimited command.`;
 }
 
-type WatchPollRunner = (timeoutMs?: number) => Promise<CommandResult>;
-
-export function spawnTask(
+function spawnTask(
   pi: ExtensionAPI,
   params: SpawnTaskParams,
   defaultCwd: string,
@@ -601,7 +603,7 @@ function failRemoteTask(
   finalize(meta, { status: "failed", reason }, pi, getActiveSession);
 }
 
-export function startWatchTask(
+function startWatchTask(
   pi: ExtensionAPI,
   params: WatchTaskParams,
   defaultCwd: string,
@@ -698,7 +700,7 @@ function resolveWatchTimeoutSeconds(timeoutSeconds: number | undefined): number 
   return timeoutSeconds;
 }
 
-export function resumeRunningTask(
+function resumeRunningTask(
   pi: ExtensionAPI,
   meta: BackgroundTaskMeta,
   getActiveSession?: ActiveSessionProvider,
@@ -859,7 +861,7 @@ function resolvePersistedRemoteTask(
   }, remoteRunner);
 }
 
-export async function stopTask(
+async function stopTask(
   pi: ExtensionAPI,
   id: string,
   getActiveSession?: ActiveSessionProvider,
@@ -1608,3 +1610,11 @@ function observeWatchOutcome(meta: BackgroundTaskMeta, result: CommandResult): v
   }
   if (prior !== fingerprint) meta.lastProgressAt = meta.lastCheckedAt ?? Date.now();
 }
+
+return { awaitFirstWatchCheck, suspendScheduledWork, resumeScheduledWork, spawnTask, startWatchTask, resumeRunningTask, stopTask };
+}
+
+export type BackgroundTaskRuntime = ReturnType<typeof createBackgroundTaskRuntime>;
+const defaultRuntime = createBackgroundTaskRuntime(defaultAttention);
+/** Compatibility for callers using the original singleton API. */
+export const { awaitFirstWatchCheck, suspendScheduledWork, resumeScheduledWork, spawnTask, startWatchTask, resumeRunningTask, stopTask } = defaultRuntime;

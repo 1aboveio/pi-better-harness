@@ -3,7 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readTaskIntent } from "./failures.js";
 import { validateCommandSpec } from "./process.js";
 import { resolveSshCommand } from "./shared-ssh-core/index.js";
-import { spawnTask, type ActiveSessionProvider, type SpawnTaskParams, type TaskRuntimeDependencies } from "./runtime.js";
+import { spawnTask, type ActiveSessionProvider, type BackgroundTaskRuntime, type SpawnTaskParams, type TaskRuntimeDependencies } from "./runtime.js";
 import type { BackgroundTaskCallbackOrigin } from "./types.js";
 
 export interface SpawnBatchParams {
@@ -31,7 +31,10 @@ export function spawnTaskBatch(
   callbackOrigin?: BackgroundTaskCallbackOrigin,
   getActiveSession?: ActiveSessionProvider,
   dependencies: TaskRuntimeDependencies = {},
+  runtime: Pick<BackgroundTaskRuntime, "spawnTask"> = { spawnTask },
 ): SpawnBatchResult {
+  // Jobs launch through the owning factory's runtime, never the default singleton.
+  const spawnOne = runtime.spawnTask;
   if (!Array.isArray(params.jobs) || params.jobs.length < 1 || params.jobs.length > 100) {
     throw new Error("jobs must contain between 1 and 100 background tasks.");
   }
@@ -72,7 +75,7 @@ export function spawnTaskBatch(
   };
   for (const [index, job] of jobs.entries()) {
     try {
-      const meta = spawnTask(pi, { ...job, batchId: result.batchId, batchName: result.batchName }, defaultCwd, callbackOrigin, getActiveSession, dependencies);
+      const meta = spawnOne(pi, { ...job, batchId: result.batchId, batchName: result.batchName }, defaultCwd, callbackOrigin, getActiveSession, dependencies);
       result.launched.push({ job: index + 1, id: meta.id, ...(meta.name !== undefined ? { name: meta.name } : {}) });
     } catch (error) {
       result.failed.push({ job: index + 1, ...(job.name !== undefined ? { name: job.name } : {}), error: errorMessage(error) });

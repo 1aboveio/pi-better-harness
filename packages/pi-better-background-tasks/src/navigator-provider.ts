@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_LOG_TAIL_ROWS as NAVIGATOR_DETAIL_ROWS,
+  disposeBackgroundWorkNavigator,
+  isNavigatorUiAvailable,
   ensureBackgroundWorkNavigator,
   refreshBackgroundWorkNavigator,
   registerBackgroundWorkProvider,
@@ -15,16 +17,25 @@ import { failurePath, failureView } from "./failures.js";
 import { readLog } from "./logs.js";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.js";
 import { getObservedWaitHost, type DurableTaskProjection } from "./observed-waits.js";
-import { stopTask } from "./runtime.js";
+import { stopTask, type BackgroundTaskRuntime } from "./runtime.js";
 import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
 
-let unregister: (() => void) | undefined;
-let piRef: ExtensionAPI | undefined;
-let activeNavigatorOrigin: BackgroundTaskCallbackOrigin | undefined;
 const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 
-export function ensureBackgroundTasksNavigatorProvider(pi: ExtensionAPI): void {
+export function createBackgroundTasksNavigator(runtime: Pick<BackgroundTaskRuntime, "stopTask"> = { stopTask }) {
+const owner = Symbol("background-tasks navigator factory");
+let unregister: (() => void) | undefined;
+let navigatorContext: ExtensionContext | undefined;
+let piRef: ExtensionAPI | undefined;
+let activeNavigatorOrigin: BackgroundTaskCallbackOrigin | undefined;
+function ensureBackgroundTasksNavigatorProvider(pi: ExtensionAPI): void {
+  // Provider registration is deferred until an actual TUI session owns it, so a
+  // headless child sharing the cached module cannot replace the parent's provider.
+  if (!navigatorContext) {
+    piRef = pi;
+    return;
+  }
   // A reloaded or replaced extension instance gets a fresh host. Re-register so
   // the provider's durable-change subscription targets that host, not the one
   // captured by the previous instance.
@@ -37,22 +48,33 @@ export function ensureBackgroundTasksNavigatorProvider(pi: ExtensionAPI): void {
   unregister = registerBackgroundWorkProvider(provider);
 }
 
-export function ensureBackgroundTasksNavigator(ctx: ExtensionContext): void {
+function ensureBackgroundTasksNavigator(ctx: ExtensionContext): void {
+  if (!isNavigatorUiAvailable(ctx)) return;
+  navigatorContext = ctx;
+  if (piRef) ensureBackgroundTasksNavigatorProvider(piRef);
   activeNavigatorOrigin = getNavigatorOrigin(ctx);
   ensureBackgroundWorkNavigator(ctx, {
     createDefaultEditor: (tui, theme, keybindings) => new CustomEditor(tui as never, theme as never, keybindings as never),
     isOpenTrigger: (data) => matchesKey(data, Key.left),
     matchKey: (data, keyId) => matchesKey(data, keyId as Parameters<typeof matchesKey>[1]),
     truncate: truncateToWidth,
-  });
+  }, owner);
 }
 
-export function clearBackgroundTasksNavigatorSession(): void {
+function clearBackgroundTasksNavigatorSession(): void {
   activeNavigatorOrigin = undefined;
+  unregister?.();
+  unregister = undefined;
+  if (navigatorContext) disposeBackgroundWorkNavigator(navigatorContext, owner);
+  navigatorContext = undefined;
 }
 
-export function refreshBackgroundTasksNavigator(ctx?: ExtensionContext): void {
-  refreshBackgroundWorkNavigator(ctx);
+function refreshBackgroundTasksNavigator(ctx?: ExtensionContext): void {
+  // This factory owns no navigator until a TUI session installs it; a refresh from
+  // a non-TUI tool context then repaints the stored owner context (main #332).
+  const ownerCtx = navigatorContext;
+  if (!ownerCtx) return;
+  refreshBackgroundWorkNavigator(ctx && isNavigatorUiAvailable(ctx) ? ctx : ownerCtx);
 }
 
 const provider: BackgroundWorkProvider = {
@@ -92,7 +114,7 @@ const provider: BackgroundWorkProvider = {
     const meta = readMeta(id);
     if (!meta) return { action: "missing", providerId: "background-tasks", id };
     if (meta.status === "running") {
-      void stopTask(piRef as ExtensionAPI, id);
+      void runtime.stopTask(piRef as ExtensionAPI, id);
       return { action: "stopped", providerId: "background-tasks", id, status: "stopping" };
     }
     meta.dismissedAt = Date.now();
@@ -287,6 +309,11 @@ function belongsToActiveNavigatorSession(meta: BackgroundTaskMeta): boolean {
   if (active.sessionId) return false;
   return meta.cwd === active.cwd;
 }
+
+return { ensureBackgroundTasksNavigatorProvider, ensureBackgroundTasksNavigator, clearBackgroundTasksNavigatorSession, refreshBackgroundTasksNavigator };
+}
+const defaultNavigator = createBackgroundTasksNavigator();
+export const { ensureBackgroundTasksNavigatorProvider, ensureBackgroundTasksNavigator, clearBackgroundTasksNavigatorSession, refreshBackgroundTasksNavigator } = defaultNavigator;
 
 function isExpiredTerminalNavigatorRow(meta: BackgroundTaskMeta, now: number): boolean {
   if (meta.status === "running") return false;
