@@ -88,6 +88,7 @@ export class CustomEditor {}
 export const Key = { left: "left" };
 export class Input {}
 export class SelectList {}
+export function wrapTextWithAnsi(text) { return [text]; }
 export function matchesKey() { return false; }
 export function visibleWidth(s) { return String(s ?? "").length; }
 export function truncateToWidth(s) { return s; }
@@ -153,6 +154,12 @@ function assertCheckoutNodeModulesUntouched() {
 function clearRuns() {
     const registryDir = join(RUNTIME, "pi-better-subagents");
     rmSync(registryDir, { recursive: true, force: true });
+    // Completed attempts also publish a durable record under the isolated
+    // PI_SUBAGENT_DURABLE_DIR; clear it with the volatile registry so one test's
+    // archived records do not leak into the next test's run counts.
+    if (process.env.PI_SUBAGENT_DURABLE_DIR) {
+        rmSync(process.env.PI_SUBAGENT_DURABLE_DIR, { recursive: true, force: true });
+    }
 }
 
 function writeRunningMeta({ writeMeta, nextRunId }, name) {
@@ -196,7 +203,10 @@ if [[ "$sess" == */"$id" ]]; then
   printf '%s\\n' '{"type":"agent_settled"}' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}'
   exit 0
 fi
-base=$(dirname "$sess")
+// The fake child reports into the VOLATILE registry, which is no longer derived
+// from the session dir: native sessions now live in the durable Pi agent
+// directory. The test hands the child the registry root explicitly.
+base="$PI_SUBAGENTS_TEST_REGISTRY"
 log="$base/runs/$id/output.log"
 mkdir -p "$(dirname "$log")"
 printf '%s\\n' "\${original_args[@]}" > "$base/runs/$id/argv.txt"
@@ -314,6 +324,7 @@ describe("subagent_spawn_batch end-to-end", () => {
         process.env.PATH = `${binDir}:${origPath}`;
         mod = await import("../index.ts");
         registry = await import("../registry.ts");
+        process.env.PI_SUBAGENTS_TEST_REGISTRY = registry.baseDir();
         capacity = await import("../capacity.mjs");
         config = await import("../config.ts");
         assertCheckoutNodeModulesUntouched();
@@ -328,6 +339,8 @@ describe("subagent_spawn_batch end-to-end", () => {
         clearRuns();
         capacity._resetSharedCapacityGateForTests();
         config.setConfigForTests(undefined);
+        // Capacity scenarios use four slots; fallback tests override this fixture.
+        config.setConfigForTests({ ...config.loadConfig(), maxConcurrent: 4 });
     });
 
     after(async () => {
@@ -367,7 +380,7 @@ describe("subagent_spawn_batch end-to-end", () => {
             "tc1",
             {
                 batchName: "reviewers",
-                shared: { model: "test/model", tools: "read,bash", sandbox: false },
+                shared: { model: "test/model", tools: "read,bash" },
                 jobs: [
                     { prompt: "say hello" },
                     { prompt: "say world" },
@@ -402,6 +415,8 @@ describe("subagent_spawn_batch end-to-end", () => {
             assert.equal(meta.batchName, "reviewers");
             assert.equal(meta.status, "running");
             assert.equal(meta.model, "test/model");
+            assert.equal(meta.taskRuntime, false);
+            assert.equal(meta.sandbox, undefined);
         }
     });
 
@@ -569,7 +584,7 @@ describe("subagent_spawn_batch end-to-end", () => {
     });
 
     for (const configuredCap of [2, undefined]) {
-        const expectedCap = configuredCap ?? 4;
+        const expectedCap = configuredCap ?? 6;
         it(`reset restores configured mode and ${configuredCap === undefined ? "fallback" : "configured"} cap ${expectedCap} for both tools`, async () => {
             config.setConfigForTests({ delegationMode: "manual", maxConcurrent: configuredCap });
             const h = sessionHarness(mod);
@@ -888,17 +903,33 @@ describe("subagent_spawn_batch end-to-end", () => {
         assert.doesNotMatch(batch.content[0].text, /→ sa_[a-z0-9_]+/);
     });
 
-    it("single subagent_spawn still works and leaves batch fields empty", async () => {
+    it("explicit true without published settings rejects an unsupported runtime instead of launching unconfined", async () => {
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+        await assert.rejects(tools.subagent_spawn.execute("explicit-single", {
+            prompt: "probe", model: "test/model", sandbox: true,
+        }, null, null, ctx), /Task sandbox requires a supported active Pi SDK/);
+        const batch = await tools.subagent_spawn_batch.execute("explicit-batch", {
+            shared: { model: "test/model", sandbox: true }, jobs: [{ prompt: "probe" }],
+        }, null, null, ctx);
+        assert.match(JSON.stringify(batch), /Task sandbox requires a supported active Pi SDK/);
+        assert.doesNotMatch(batch.content[0].text, /→ sa_[a-z0-9_]+/);
+        assert.ok(registry.listMetas().every((meta) => meta.status !== "running"));
+    });
+
+    it("single subagent_spawn defaults unconfined without published settings and leaves batch fields empty", async () => {
         const { tools } = loadExtension(mod);
         const ctx = makeCtx();
 
-        const res = await tools.subagent_spawn.execute("tc", { prompt: "solo", tools: "read,bash", sandbox: false }, null, null, ctx);
+        const res = await tools.subagent_spawn.execute("tc", { prompt: "solo", tools: "read,bash" }, null, null, ctx);
         const text = res.content[0].text;
         const match = text.match(/id=(sa_[a-z0-9_]+)/);
         assert.ok(match);
         const meta = registry.readMeta(match[1]);
         assert.equal(meta.batchId, undefined);
         assert.equal(meta.batchName, undefined);
+        assert.equal(meta.taskRuntime, false);
+        assert.equal(meta.sandbox, undefined);
     });
 
     it("parses model@effort and records the resolved effort for the navigator", async () => {
@@ -943,6 +974,121 @@ describe("subagent_spawn_batch end-to-end", () => {
             /thinking must be one of: off, minimal, low, medium, high, xhigh, max/,
         );
         assert.equal(registry.listMetas().length, 0);
+    });
+
+    /**
+     * Skill exposure through the REAL launch path (#664).
+     *
+     * The fake child records the argv it received, so these assertions read what
+     * pi would actually be asked to do rather than what the recipe claims. A
+     * launch that keeps discovery must add no flag at all: that is what makes
+     * every existing launch byte-identical.
+     */
+    async function spawnAndReadArgv(tools, ctx, params) {
+        const res = await tools.subagent_spawn.execute("tc-skills", {
+            prompt: "probe skills", tools: "read,bash", sandbox: false, ...params,
+        }, null, null, ctx);
+        const id = res.content[0].text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
+        assert.ok(id, `launch must return a run id, got: ${res.content[0].text}`);
+        const meta = await waitForFinished(registry.readMeta, id);
+        const argv = readFileSync(join(RUNTIME, "pi-better-subagents", "runs", id, "argv.txt"), "utf8")
+            .trim().split("\n");
+        return { id, meta, argv, text: res.content[0].text };
+    }
+
+    it("leaves a discovery launch with no skill flag and records the default source", async () => {
+        const { tools } = loadExtension(mod);
+        const { meta, argv } = await spawnAndReadArgv(tools, makeCtx(), {});
+        assert.equal(argv.includes("--no-skills"), false, "an opting-out-free launch must not change argv");
+        assert.equal(argv.includes("--skill"), false);
+        assert.equal(meta.skills, undefined, "discovery is recorded by absence");
+        assert.equal(meta.skillsSource, "default");
+        assert.equal(meta.recipe.skills, undefined);
+    });
+
+    it("launches with --no-skills for an empty list and freezes none in the recipe", async () => {
+        const { tools } = loadExtension(mod);
+        const { meta, argv, text } = await spawnAndReadArgv(tools, makeCtx(), { skills: [] });
+        assert.equal(argv.filter((arg) => arg === "--no-skills").length, 1);
+        assert.equal(argv.includes("--skill"), false, "no explicit path means no --skill");
+        assert.deepEqual(meta.skills, []);
+        assert.equal(meta.skillsSource, "launch");
+        assert.deepEqual(meta.recipe.skills, [], "[] must survive in the recipe, not collapse to absent");
+        assert.match(text, /Skills: none \(--no-skills\) · source launch/);
+    });
+
+    it("loads exactly the explicit skills, resolving a relative path against the workspace", async () => {
+        const { tools } = loadExtension(mod);
+        const absolute = join(RUNTIME, "skills", "review", "SKILL.md");
+        const relative = "skills/test-quality/SKILL.md";
+        const { meta, argv } = await spawnAndReadArgv(tools, makeCtx(), { skills: [absolute, relative] });
+        const pairs = argv.flatMap((arg, index) => arg === "--skill" ? [[argv[index + 1]]] : []);
+        assert.deepEqual(pairs.flat(), [absolute, join(RUNTIME, relative)],
+            "each --skill carries one absolute path, resolved against the child workspace");
+        assert.equal(argv.includes("--no-skills"), true, "explicit paths always disable discovery first");
+        assert.deepEqual(meta.skills, [absolute, join(RUNTIME, relative)]);
+        assert.deepEqual(meta.recipe.skills, meta.skills, "the recipe freezes what the child received");
+    });
+
+    it("falls back to config defaultSkills, and a launch choice still wins", async () => {
+        const { tools } = loadExtension(mod);
+        const configured = join(RUNTIME, "skills", "from-config", "SKILL.md");
+        const override = join(RUNTIME, "skills", "from-launch", "SKILL.md");
+        const original = config.loadConfig();
+        config.setConfigForTests({ ...original, defaultSkills: [configured] });
+        try {
+            const inherited = await spawnAndReadArgv(tools, makeCtx(), {});
+            assert.deepEqual(inherited.meta.skills, [configured]);
+            assert.equal(inherited.meta.skillsSource, "config");
+            assert.equal(inherited.argv.includes("--no-skills"), true);
+
+            const overridden = await spawnAndReadArgv(tools, makeCtx(), { skills: [override] });
+            assert.deepEqual(overridden.meta.skills, [override], "the launch value, not the config default");
+            assert.equal(overridden.meta.skillsSource, "launch");
+        } finally {
+            config.setConfigForTests(original);
+        }
+    });
+
+    it("rejects a malformed skills value before any run is recorded", async () => {
+        const { tools } = loadExtension(mod);
+        const before = registry.listMetas().length;
+        await assert.rejects(
+            () => tools.subagent_spawn.execute("tc-bad-skills", {
+                prompt: "probe", tools: "read,bash", sandbox: false, skills: "review",
+            }, null, null, makeCtx()),
+            /skills must be an array of absolute paths/,
+        );
+        assert.equal(registry.listMetas().length, before, "a caller mistake launches nothing");
+    });
+
+    it("applies shared skills to every job and lets one job choose its own", async () => {
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+        const sharedPath = join(RUNTIME, "skills", "shared", "SKILL.md");
+        const jobPath = join(RUNTIME, "skills", "job", "SKILL.md");
+        const res = await tools.subagent_spawn_batch.execute("tc-skills-batch", {
+            shared: { tools: "read,bash", sandbox: false, skills: [sharedPath] },
+            jobs: [{ prompt: "uses shared" }, { prompt: "uses own", skills: [jobPath] }, { prompt: "uses none", skills: [] }],
+        }, null, null, ctx);
+        const ids = res.details.launched.map((row) => row.id);
+        assert.equal(ids.length, 3, res.content[0].text);
+        const stored = ids.map((id) => registry.readMeta(id));
+        assert.deepEqual(stored.map((meta) => meta.skills), [[sharedPath], [jobPath], []]);
+        assert.deepEqual(stored.map((meta) => meta.skillsSource), ["launch", "launch", "launch"]);
+    });
+
+    it("rejects a batch job with a malformed skills value before launching any job", async () => {
+        const { tools } = loadExtension(mod);
+        const before = registry.listMetas().length;
+        await assert.rejects(
+            () => tools.subagent_spawn_batch.execute("tc-bad-skills-batch", {
+                shared: { tools: "read,bash", sandbox: false },
+                jobs: [{ prompt: "fine" }, { prompt: "bad", skills: [""] }],
+            }, null, null, makeCtx()),
+            /job 2 \(2\) skills\[0\] must be a non-empty path/,
+        );
+        assert.equal(registry.listMetas().length, before, "a bad job must not leave a half-launched batch");
     });
 
     it("batch-launched run ids work with subagent_output", async () => {

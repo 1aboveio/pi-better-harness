@@ -13,7 +13,22 @@ core extensions:
 | `pi-better-background-tasks` | Run durable shell tasks and command watchers without blocking the current turn. |
 | `pi-better-ssh` | Run short synchronous remote commands over reusable SSH connections. |
 | `pi-better-goal` | Track the current objective and keep Pi aware of active background work. |
-| `pi-better-plan` | Keep structured execution plans and explicit checklist progress visible. |
+| `pi-better-model-router` | Route between DeepSeek and Ollama Cloud by estimated price. |
+| Harness Outcome & Todo | Display saved session context and checklist progress by default; hooks are opt-in in `/harness-settings`. |
+
+The bundle includes `pi-better-model-router` 0.1.2 and its Ollama Cloud provider.
+Select `router/deepseek-flash-auto` in `/model` to use it; DeepSeek is the default
+tie preference. Installation does not change the default selected model. The router
+requires Pi's `registerVirtualModel` API and is tested with Pi 1.4.0. On older
+hosts without that API, the bundle skips the router and shows an upgrade notice.
+
+Isolated subagents resolve the selected model's declared extension dependencies,
+including the router's DeepSeek and Ollama Cloud candidates. The launcher follows
+package `pi.childDependencies` and `pi.childRequirements` declarations recursively
+and checks the resulting model and tool requirements inside the child before its
+first request. Missing dependencies, dependency cycles, and configuration changes
+fail the launch checks with an explanation. These checks establish registration
+and configured authentication; provider connectivity still requires a live request.
 
 `pi-better-read-aloud` lives in this repo but is intentionally not part of the
 meta package.
@@ -34,7 +49,7 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
-pi install npm:pi-better-plan
+pi install npm:pi-better-model-router
 ```
 
 For a temporary one-off run without changing Pi settings:
@@ -56,16 +71,15 @@ The package workspaces are:
 | `packages/pi-better-sandbox` | `pi-better-sandbox` | yes | yes |
 | `packages/pi-better-ssh` | `pi-better-ssh` | yes | yes |
 | `packages/pi-better-goal` | `pi-better-goal` | yes | yes |
-| `packages/pi-better-plan` | `pi-better-plan` | yes | yes |
-| `packages/pi-better-server` | `pi-better-server` (`publishConfig.access` is `public`) | no, not in the publish workflow | no |
+| `packages/pi-better-plan` | retired private archive | no | no |
+| `packages/pi-better-server` | `pi-better-server` | yes | no |
 | `packages/pi-better-read-aloud` | not configured for publishing | no | no |
+| `packages/pi-better-model-router` | `pi-better-model-router` | yes | yes |
 | `packages/navigator` | internal workspace | no | no |
 | `packages/sandbox-core` | internal workspace, vendored into consumers | no | no |
 | `packages/sandbox-diagnostics` | internal workspace, vendored into sandbox consumers | no | no |
 
-All publish-configured packages carry the `pi-package` npm keyword. The bundle is
-the recommended install for most users, and the component packages remain
-available for people who want only one extension.
+All publish-configured packages carry the `pi-package` npm keyword. Use `npx pi-better-harness install` to keep all six component identities, including the router, while loading the filtered Harness-owned extensions, or install the bundle directly. The installer removes an old Plan registration only in the selected scope.
 
 ## Development
 
@@ -97,6 +111,34 @@ PI_MINIMAL_OUTPUT_HOST_CLI=/absolute/path/to/pi-coding-agent/dist/bundle/cli.js 
 ```
 
 The bundled-host case reports a skip when the selected SDK has no bundled CLI.
+
+### Outcome & Todo release contract
+
+In `/harness-settings`, **Outcome & Todo display** (`outcome-todo-display`)
+defaults On; **Outcome & Todo hooks** (legacy id `outcome-todo`) defaults Off.
+Saved v1 `enabled` remains the hooks authority, and the new optional display
+preference defaults to true. Saved state renders with hooks off; missing state
+creates no placeholder, state, or settings. Display off leaves hooks active.
+Hooks control the Todo tools, capture, matching Goal lifecycle bridge writes,
+reminders, and automated cleanup; `/todo` commands remain available for explicit
+user control with hooks off.
+
+The compact widget has one Todo heading with the caret after Todo, the completion
+count on the left, and matching Goal status and its existing active-time clock on
+the right. Its outcome is one muted, truncated subtitle. Collapsed view shows up
+to five relevant rows, expanded view all rows, and clicks toggle the view. `/todo`
+shows the full objective, acceptance criteria, boundaries, and plan. Subagent and
+background-task rows open their existing navigator details on click; Enter and
+keyboard controls remain, and editor input stays passive. Harness packages do not
+write to Pi's status bar, including Goal holds, SSH profiles, navigator hints, and
+remote connection state. Commands and widgets retain their state displays;
+permission checks and pause/resume rules are unchanged.
+
+Goal retains its raw trigger and separate lifecycle. On bridge `inspect`, optional
+`display: true` means Harness actually displays the requested `goalId`; only then
+is the standalone Goal clock suppressed. `enabled` remains the hook and prompt
+authority. Standalone Goal and hidden or unmatched fallback remain available. See
+[ADR 0018](adr/0018-harness-outcome-todo.md) for the contract and history.
 
 ### Harness settings verification
 
@@ -279,7 +321,7 @@ pi install ./packages/pi-better-subagents
 pi install ./packages/pi-better-background-tasks
 pi install ./packages/pi-better-ssh
 pi install ./packages/pi-better-goal
-pi install ./packages/pi-better-plan
+pi install ./packages/pi-better-model-router
 ```
 
 ## Release Checklist
@@ -331,6 +373,19 @@ request. After CI passes and the PR is merged, dispatch
 The workflow reads the version from that package's manifest, publishes only its
 workspace, and creates a package-scoped tag and GitHub release such as
 `pi-better-goal@0.1.15`.
+
+Monitor a dispatched GitHub run with the state-based helper in a background task:
+
+```sh
+node scripts/watch-github-run.mjs --repo 1aboveio/pi-better-harness --run <run-id>
+```
+
+It emits the active steps only when provider state changes, keeps polling while
+that state stays the same, and exits with an error for failed runs or unreadable
+provider state. It omits terminal redraws and display clocks, so repeated status
+refreshes cannot keep resetting the background task's progress clock. The normal
+quiet and suspected-stall observations remain available while a phase is unchanged.
+A suspected stall is an observation to inspect, not proof that CI is hung.
 
 Confirm that package is visible:
 
@@ -416,10 +471,14 @@ deprecate the unattested one — not to relax the check.
 
 ### npm version skew between CI and publish
 
-`publish.yml` runs `npm install --global npm@latest` before `npm run verify`,
-while `ci.yml` uses the runner image's bundled npm. The two lanes therefore run
-different npm majors, and a change in npm's own output can pass CI and still
-break the release.
+`publish.yml` runs only from `main` and pins Node 24.14.1 and npm 11.19.0.
+The Node pin matches the managed-runtime tests; the npm pin supports trusted
+publishing without depending on a changing `npm@latest`. CI's host-side lane
+still uses Node 22.
+
+When updating either pin, verify the release workflow as well as ordinary CI.
+The lanes have historically used different npm majors, and a change in npm's
+output can pass CI and still break a release.
 
 This has happened once: npm 12 changed `npm pack --json` from an array of packed
 results to an object keyed by package name, which broke four pack assertions that

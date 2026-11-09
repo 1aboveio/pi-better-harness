@@ -23,7 +23,7 @@ register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 const HERMETIC_TMPDIR = mkdtempSync(join(tmpdir(), "subagent-timing-"));
 process.env.TMPDIR = HERMETIC_TMPDIR;
 
-const { default: betterSubagents, progressCacheIdsForTests } = await import("../index.ts");
+const { default: betterSubagents, progressCacheIdsForTests, isHealthTickerActive, forgetProgressCacheForTests } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, runDir } = await import("../registry.ts");
 const { killProcessTree } = await import("../spawn.ts");
@@ -172,6 +172,7 @@ describe("harness timing: launch", () => {
             });
             assert.ok(log, "the fake child recorded its arguments");
             assert.match(log, /--extension \S*child-steer\.ts/);
+            assert.match(log, /--extension \S*child-ownership\.ts/, "single clean launches carry ownership enforcement");
             assert.ok(log.includes(`"steerFile":"${steerPath(run.id)}"`), "the child learns where its steer requests appear");
             await reap(run);
         } finally { h.shutdown(); }
@@ -207,8 +208,98 @@ describe("harness timing: launch", () => {
             assert.equal(one.timing.ceilingAt, undefined, "max_minutes 0 disables the ceiling");
             assert.equal(two.timing.deadlineAt - two.startedAt, 3 * 60_000);
             assert.equal(two.timing.graceMs, 60_000);
-            for (const meta of metas) await reap({ id: meta.id, pid: meta.pid });
+            for (const meta of metas) {
+                assert.ok(await waitFor(() => readFileSync(meta.logPath, "utf8").includes("child-ownership.ts")), "each batch launch carries ownership enforcement");
+                await reap({ id: meta.id, pid: meta.pid });
+            }
         } finally { h.shutdown(); }
+    });
+});
+
+describe("shared supervision watcher", () => {
+    const WAIT_SCRIPT = "#!/bin/sh\nd=$(dirname \"$PI_SUBAGENT_STEER_FILE\")\necho launched --extension\nwhile [ ! -f \"$d/done\" ]; do sleep 0.05; done\necho '{\"type\":\"agent_end\"}'\nexit 0\n";
+    const finish = async (run) => {
+        writeFileSync(join(runDir(run.id), "done"), "");
+        assert.equal(await waitFor(() => readMeta(run.id)?.status === "completed"), true);
+    };
+
+    it("shares one timer across sequential launches and reload, stops on the last exit, and restarts for later work", async () => {
+        await withFakeClock(async () => {
+            writeFakePi(WAIT_SCRIPT);
+            const intervals = mock.method(globalThis, "setInterval");
+            const watcherStarts = () => intervals.mock.calls.filter((call) => call.arguments[1] === HEALTH_TICK_MS).length;
+            const h = makeHarness();
+            h.ctx.isIdle = () => true;
+            const runs = [];
+            try {
+                assert.equal(isHealthTickerActive(), false);
+                const first = await spawnRun(h);
+                runs.push(first);
+                const second = await spawnRun(h);
+                runs.push(second);
+                await h.handlers.get("session_start")({}, h.ctx);
+                assert.equal(watcherStarts(), 1, "overlapping launches and reattachment must reuse the timer");
+                await finish(first);
+                assert.equal(isHealthTickerActive(), true, "the remaining worker still needs supervision");
+                await finish(second);
+                assert.equal(isHealthTickerActive(), false, "the final exit stops supervision without another tick");
+                assert.ok(readMeta(second.id).completionCallbackPendingAt, "callback delivery is independent of supervision");
+                assert.equal(await getCallbackBatcher(h.pi).flush(), true);
+                assert.ok(readMeta(second.id).completionCallbackSentAt);
+                await h.handlers.get("session_start")({}, h.ctx);
+                assert.equal(isHealthTickerActive(), false, "terminal history must not restart the watcher");
+                const later = await spawnRun(h);
+                runs.push(later);
+                assert.equal(watcherStarts(), 2, "a later launch starts a new watcher");
+                await h.tools.get("subagent_stop").execute("stop", { id: later.id }, undefined, undefined, h.ctx);
+                assert.equal(isHealthTickerActive(), false, "stopping the last worker also stops supervision immediately");
+            } finally {
+                for (const run of runs) await reap(run);
+                h.shutdown();
+                intervals.mock.restore();
+                writeFakePi(IDLE_SCRIPT);
+            }
+        });
+    });
+
+    it("shares the watcher with batch launches and preserves it across a partial launch failure", async () => {
+        await withFakeClock(async () => {
+            writeFakePi(WAIT_SCRIPT);
+            const intervals = mock.method(globalThis, "setInterval");
+            const h = makeHarness();
+            const runs = [];
+            try {
+                const first = await spawnRun(h, { callback: false });
+                runs.push(first);
+                const result = await h.tools.get("subagent_spawn_batch").execute("batch", {
+                    shared: { clean: true, sandbox: false, callback: false, tools: "read,bash", cwd: tmpdir() },
+                    jobs: [{ prompt: "batch worker" }, { prompt: "failed worker", cwd: join(binDir, "missing-directory") }],
+                }, undefined, undefined, h.ctx);
+                const ids = [...new Set([...result.content[0].text.matchAll(/(sa_[a-z0-9]+_[a-z0-9]+)/g)].map((m) => m[1]))];
+                const launched = ids.map((id) => readMeta(id)).filter(Boolean);
+                for (const meta of launched) {
+                    const run = { id: meta.id, pid: meta.pid };
+                    runs.push(run);
+                    liveRuns.push(run);
+                }
+                assert.equal(launched.length, 1, "one batch worker launches despite the other spawn failing");
+                assert.match(result.content[0].text, /Failed/i);
+                assert.equal(intervals.mock.calls.filter((call) => call.arguments[1] === HEALTH_TICK_MS).length, 1);
+                await finish(first);
+                assert.equal(isHealthTickerActive(), true, "the batch worker retains the shared watcher");
+                await finish(runs[1]);
+                assert.equal(isHealthTickerActive(), false);
+                await assert.rejects(() => h.tools.get("subagent_spawn").execute("failed", {
+                    prompt: "no launch", clean: true, sandbox: false, cwd: join(binDir, "missing-directory"),
+                }, undefined, undefined, h.ctx), /Failed to spawn/);
+                assert.equal(isHealthTickerActive(), false, "a failed launch must not create a watcher");
+            } finally {
+                for (const run of runs) await reap(run);
+                h.shutdown();
+                intervals.mock.restore();
+                writeFakePi(IDLE_SCRIPT);
+            }
+        });
     });
 });
 
@@ -253,7 +344,7 @@ describe("harness timing: soft deadline", () => {
                 assert.match(result, /Timing: stopped: deadline/);
                 const list = (await h.tools.get("subagent_list").execute("x", {}, undefined, undefined, h.ctx)).content[0].text;
                 assert.match(list, new RegExp(`${run.id}.*stopped: deadline`));
-                const output = (await h.tools.get("subagent_output").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text;
+                const output = (await h.tools.get("subagent_output").execute("x", { id: run.id, max_bytes: 2048 }, undefined, undefined, h.ctx)).content[0].text;
                 assert.match(output, /Timing: stopped: deadline/);
                 await tick();
                 assert.equal(wakes(h, "deadline").length, 1);
@@ -550,6 +641,76 @@ describe("harness timing: stuck wake", () => {
                 assert.equal(wakes(h, "stuck").length, 2, "a new stuck spell after progress wakes again");
                 await reap(run);
             } finally { h.shutdown(); }
+        });
+    });
+});
+
+describe("harness timing: a reload whose bounded log read lost the running call (#620)", () => {
+    // A child log past the 32 MiB read window. The window's leading partial line is
+    // dropped, so nothing before it — including a running call's start — is visible.
+    const LOST_WINDOW = "x".repeat(33 * 1024 * 1024) + "\n";
+    const startCall = (id) => ({ type: "tool_execution_start", toolCallId: id, toolName: "bash", args: { command: "pnpm build" } });
+    const endCall = (id) => ({ type: "message_end", message: { role: "toolResult", toolCallId: id, toolName: "bash", isError: false, timestamp: Date.now(), content: [] } });
+
+    it("still treats the silent command as waiting, not stuck, and resumes detection once it ends", async () => {
+        await withFakeClock(async () => {
+            const first = makeHarness();
+            const run = await spawnRun(first, { deadline_minutes: 0, max_minutes: 0, stuck_minutes: 0.002 });
+            let second;
+            try {
+                appendEvents(run.id, [startCall("long-build")]);
+                await tick();
+                assert.equal(readMeta(run.id).timing.inFlight?.id, "long-build", "the parent records the running call durably");
+                appendFileSync(join(runDir(run.id), "output.log"), LOST_WINDOW);
+                forgetProgressCacheForTests();
+                second = makeHarness();
+                await second.handlers.get("session_start")({}, second.ctx);
+                await sleep(200);
+                await tick();
+                assert.equal(wakes(second, "stuck").length, 0, "a rebuild from the log tail is not evidence of no progress");
+                assert.equal(readMeta(run.id).status, "running");
+                appendEvents(run.id, [endCall("long-build")]);
+                await tick();
+                assert.equal(readMeta(run.id).timing.inFlight, undefined, "the record is cleared by the call's own result");
+                assert.equal(wakes(second, "stuck").length, 0, "the call's own duration is a pause, not silence");
+                await sleep(200);
+                await tick();
+                await waitFor(() => wakes(second, "stuck").length === 1);
+                assert.equal(wakes(second, "stuck").length, 1, "a full window of real silence after the call still wakes the parent");
+            } finally {
+                second?.shutdown();
+                await reap(run);
+                first.shutdown();
+            }
+        });
+    });
+
+    it("keeps the deadline hold for a running call whose start the rebuilt log window lost", async () => {
+        await withFakeClock(async () => {
+            const first = makeHarness();
+            const run = await spawnRun(first, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0 });
+            let second;
+            try {
+                appendEvents(run.id, [startCall("long-build")]);
+                await tick();
+                await untilSteerRequested(run.id);
+                assert.equal(readMeta(run.id).timing.inFlight?.id, "long-build", "the call is recorded before the deadline");
+                rewindTiming(run.id, (timing) => ({ steerRequestedAt: timing.steerRequestedAt - 11 * MINUTE }));
+                appendFileSync(join(runDir(run.id), "output.log"), LOST_WINDOW);
+                forgetProgressCacheForTests();
+                second = makeHarness();
+                await second.handlers.get("session_start")({}, second.ctx);
+                await tick();
+                const meta = readMeta(run.id);
+                assert.equal(meta.status, "running", "the steer still waits behind the running call");
+                assert.equal(meta.timing.stopReason, undefined, "not stopped mid-call");
+                const result = (await second.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, second.ctx)).content[0].text;
+                assert.match(result, /once the message reaches it/);
+            } finally {
+                second?.shutdown();
+                await reap(run);
+                first.shutdown();
+            }
         });
     });
 });

@@ -12,9 +12,12 @@ test("permission storage migrates activation and round-trips inactive values", (
     const root = mkdtempSync(join(tmpdir(), "sandbox-permission-settings-"));
     const seams = { agentDir: () => root };
     try {
-        assert.deepEqual(readPermissionSettings(seams), defaultSandboxPermissions());
+        const fresh = readPermissionSettings(seams);
+        assert.deepEqual([fresh.main.enabled, fresh.subagents.enabled, fresh.background.enabled], [false, false, false]);
+        assert.deepEqual(fresh, defaultSandboxPermissions());
         writeSandboxDefault("on", seams);
         assert.equal(readPermissionSettings(seams).main.enabled, true);
+        assert.equal(readPermissionSettings(seams).background.enabled, true);
         const settings = defaultSandboxPermissions();
         settings.main.outsideProject = "off";
         settings.subagents.network = false;
@@ -32,6 +35,97 @@ test("permission storage migrates activation and round-trips inactive values", (
         assert.throws(() => readPermissionSettings(seams), /Unsupported/);
     } finally {
         rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("v1 settings add shell and command timeout without changing the storage envelope", () => {
+    const root = mkdtempSync(join(tmpdir(), "sandbox-command-settings-"));
+    const seams = { agentDir: () => root };
+    try {
+        const settings = defaultSandboxPermissions();
+        settings.main.enabled = true;
+        settings.main.shell = false;
+        settings.main.commandTimeoutSeconds = 600;
+        settings.background.commandTimeoutSeconds = 1800;
+        writePermissionSettings(settings, seams);
+        assert.deepEqual(readPermissionSettings(seams), settings);
+        const stored = JSON.parse(readFileSync(permissionSettingsPath(seams), "utf8"));
+        assert.equal(stored.piBetterHarness.sandboxPermissions.version, 1);
+        assert.equal(stored.piBetterHarness.sandboxPermissions.permissions.main.shell, false);
+        assert.equal(stored.piBetterHarness.sandboxPermissions.permissions.main.commandTimeoutSeconds, 600);
+        assert.equal(stored.piBetterHarness.sandboxPermissions.permissions.background.commandTimeoutSeconds, 1800);
+
+        // A file written before Shell scripts and Command time limit existed.
+        const legacy = defaultSandboxPermissions();
+        const strip = ({ shell: _shell, commandTimeoutSeconds: _timeout, ...profile }: typeof legacy.main) => profile;
+        writeFileSync(permissionSettingsPath(seams), JSON.stringify({ piBetterHarness: { sandboxPermissions: {
+            version: 1, permissions: { ...legacy, main: strip(legacy.main), subagents: strip(legacy.subagents),
+                background: strip(legacy.background) },
+        } } }));
+        const migrated = readPermissionSettings(seams);
+        assert.equal(migrated.main.shell, true);
+        assert.equal(migrated.main.commandTimeoutSeconds, null);
+        assert.equal(migrated.background.shell, true);
+        assert.equal(migrated.background.commandTimeoutSeconds, null);
+        writePermissionSettings(migrated, seams);
+        const normalized = JSON.parse(readFileSync(permissionSettingsPath(seams), "utf8"));
+        assert.equal(normalized.piBetterHarness.sandboxPermissions.version, 1);
+        assert.equal(normalized.piBetterHarness.sandboxPermissions.permissions.main.shell, true);
+        assert.equal(normalized.piBetterHarness.sandboxPermissions.permissions.main.commandTimeoutSeconds, null);
+
+        for (const main of [
+            { ...legacy.main, shell: "yes" },
+            { ...legacy.main, commandTimeoutSeconds: 0 },
+            { ...legacy.main, commandTimeoutSeconds: 2147484 },
+            { ...legacy.main, commandTimeoutSeconds: "60" },
+        ]) {
+            writeFileSync(permissionSettingsPath(seams), JSON.stringify({ piBetterHarness: { sandboxPermissions: {
+                version: 1, permissions: { ...legacy, main },
+            } } }));
+            assert.throws(() => readPermissionSettings(seams), /explicit permission values/);
+        }
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("old global and legacy files migrate Background from Main and save it independently", () => {
+    for (const location of ["global", "legacy"] as const) {
+        const root = mkdtempSync(join(tmpdir(), "sandbox-background-migration-"));
+        const seams = { agentDir: () => root };
+        try {
+            const settings = defaultSandboxPermissions();
+            Object.assign(settings.main, { enabled: true, projectFiles: "read", outsideProject: "off",
+                storedCredentials: "off", commands: false, network: false, processAccess: "off" });
+            Object.assign(settings.subagents, { enabled: true, outsideProject: "off", storedCredentials: "off" });
+            const { background: _background, ...permissions } = settings;
+            const old = { version: 1, permissions };
+            mkdirSync(join(root, "extensions"));
+            const source = location === "global" ? permissionSettingsPath(seams)
+                : join(root, "extensions", "pi-better-sandbox-permissions.json");
+            const original = JSON.stringify(location === "global" ? { piBetterHarness: { sandboxPermissions: old } } : old);
+            writeFileSync(source, original);
+            const migrated = readPermissionSettings(seams);
+            assert.deepEqual(migrated.background, settings.main);
+            assert.deepEqual(migrated.subagents, settings.subagents);
+            assert.equal(readFileSync(source, "utf8"), original, "reading leaves the original profile untouched");
+            migrated.main.enabled = false;
+            migrated.main.network = true;
+            migrated.background.projectFiles = "off";
+            writePermissionSettings(migrated, seams);
+            const restored = readPermissionSettings(seams);
+            assert.deepEqual(restored, migrated);
+            assert.equal(restored.background.enabled, true);
+            assert.equal(restored.background.network, false);
+            assert.equal(restored.background.projectFiles, "off");
+            if (location === "legacy") assert.equal(readFileSync(source, "utf8"), original);
+            const stored = JSON.parse(readFileSync(permissionSettingsPath(seams), "utf8"));
+            stored.piBetterHarness.sandboxPermissions.permissions.background = null;
+            writeFileSync(permissionSettingsPath(seams), JSON.stringify(stored));
+            assert.throws(() => readPermissionSettings(seams), /Background tasks profile/);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
     }
 });
 
@@ -106,6 +200,7 @@ test("legacy permissions migrate without altering either legacy data or unrelate
         mkdirSync(join(root, "extensions"));
         const permissions = defaultSandboxPermissions();
         permissions.main.network = false;
+        permissions.subagents.enabled = true;
         const legacy = JSON.stringify({ version: 1, permissions });
         writeFileSync(legacyPath, legacy);
         const other = { theme: "light", piBetterHarness: { sandbox: { version: 1, default: "on" }, goal: { enabled: true } } };
@@ -141,7 +236,7 @@ test("invalid legacy permissions are not migrated or overwritten", () => {
     }
 });
 
-test("legacy activation feeds Main only when no permission profile exists", () => {
+test("legacy activation feeds Main and Background tasks only when no permission profile exists", () => {
     const root = mkdtempSync(join(tmpdir(), "sandbox-legacy-activation-"));
     const seams = { agentDir: () => root };
     try {
@@ -152,6 +247,7 @@ test("legacy activation feeds Main only when no permission profile exists", () =
         const permissions = readPermissionSettings(seams);
         const expected = defaultSandboxPermissions();
         expected.main.enabled = true;
+        expected.background.enabled = true;
         assert.deepEqual(permissions, expected);
         assert.deepEqual(JSON.parse(readFileSync(permissionSettingsPath(seams), "utf8")), {
             piBetterHarness: { sandbox: { version: 1, default: "on" } },

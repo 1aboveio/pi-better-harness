@@ -105,8 +105,16 @@ describe("agent operations", () => {
             const ui = scripted([]);
             let rendered;
             ui.custom = async (factory, options) => {
-                assert.deepEqual(options, { overlay: true });
+                assert.equal(options.overlay, true);
+                assert.equal(options.overlayOptions.width, "100%");
+                assert.equal(options.overlayOptions.maxHeight, "100%");
+                assert.equal(options.overlayOptions.anchor, "top-left");
+                assert.equal(options.overlayOptions.margin, 0);
                 rendered = factory({ requestRender() {} }, { fg: (_tone, text) => text }, {}, () => {});
+                options.overlayOptions.visible(100, 40);
+                assert.equal(rendered.render(100).length, 40);
+                options.overlayOptions.visible(40, 24);
+                assert.equal(rendered.render(40).length, 24);
             };
             ui.setWidget = (key, value) => {
                 assert.equal(key, "agents-catalog");

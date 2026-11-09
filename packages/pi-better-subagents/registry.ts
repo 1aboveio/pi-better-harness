@@ -13,14 +13,23 @@
  */
 
 import type { RunTiming } from "./timing.ts";
+import type { SkillExposureSource } from "./skills.ts";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { processExists } from "./spawn.ts";
 import type { LifecycleClassification } from "./lifecycle.ts";
+import {
+    archiveCompletedAttempt,
+    durableSessionsDir,
+    listArchivedAttempts,
+    readArchivedAttempt,
+    recordArchiveStatusTombstone,
+} from "./session-store.ts";
+import { failureIdentity, observeFailures, readFailureState } from "./shared-failure-observations.ts";
 
 /**
  * Terminal + live statuses as recorded on disk. `orphaned` is durable and
@@ -75,6 +84,59 @@ export function canExitFinalize(status: RunStatus): boolean {
     return status === "running" || status === "orphaned" || status === "lost";
 }
 
+/**
+ * Effective launch recipe captured at spawn, sufficient to reconstruct a
+ * continuation attempt. Attempt identity and conversation identity are
+ * separate: `attemptId` is this record's run id, `sessionId` is the native
+ * conversation shared by every attempt of the same owner.
+ *
+ * The recipe freezes what was actually launched (resolved tools, exclusions,
+ * clean/nesting/approval intent, confinement, effective model and effort), not
+ * the configuration that happened to be set later. A continuation re-applies
+ * current mandatory human permissions and never re-resolves the catalog.
+ */
+export interface LaunchRecipe {
+    version: 1;
+    /** Attempt that first recorded this recipe. */
+    attemptId: string;
+    /** Native conversation identity shared by every continuation attempt. */
+    sessionId: string;
+    /** Directory holding the saved conversation JSONL. */
+    sessionDir: string;
+    /** Canonical workspace the attempt ran in. */
+    cwd: string;
+    model?: string;
+    effort?: string;
+    /** Effective tool allowlist (already adjusted for confinement). */
+    tools: string;
+    excludeTools?: string;
+    /**
+     * Effective skill exposure: absent means discovery of the user catalog,
+     * `[]` means none, and paths mean exactly those skills. Recipes written
+     * before skill controls existed have no key and keep discovery.
+     */
+    skills?: string[];
+    clean: boolean;
+    allowNested: boolean;
+    approve: boolean;
+    sandbox: boolean;
+    /** Confinement root when the attempt was sandboxed. */
+    sandboxDir?: string;
+    gitCloneWorkspace: boolean;
+    callback: boolean;
+    name?: string;
+    agent?: string;
+    role?: string | readonly string[];
+    alias?: string;
+    catalog?: CatalogLaunchSnapshot;
+    /** Resolved extension arguments; a changed implementation requires explicit replacement. */
+    extensionArgs?: string[];
+    /** Provider/tool runtime arguments, excluding permission-dependent trusted tools. */
+    baseExtensionArgs?: string[];
+    /** Initial trusted implementations survive revocation so re-grants cannot replace them. */
+    trustedExtensions?: { name: string; package: string; loadPath: string }[];
+}
+
 export interface RunMeta {
     id: string;
     name?: string;
@@ -121,9 +183,25 @@ export interface RunMeta {
      * diagnostic: it explains a `lost` record nobody's session reported.
      */
     adoptedFromLostParentAt?: number;
+    /**
+     * When a session shutdown ended this extension instance's direct supervision
+     * of the run while its detached child was left running (#625). The child is
+     * never signalled for a reload/quit: a later session of the same pi process
+     * re-adopts the record, and because the instance that held the in-memory
+     * exit observer is gone, that session finalizes the run from the child's own
+     * coherent log when its process later disappears. Additive and diagnostic;
+     * terminal records keep the marker as history.
+     */
+    supervisionInterruptedAt?: number;
+    /** Pi's `session_shutdown` reason that interrupted supervision (`reload`, `quit`, …). */
+    supervisionInterruptedReason?: string;
     model?: string;
     /** Reasoning effort passed to the child via Pi's --thinking option. */
     effort?: string;
+    /** Effective skill exposure when it is not discovery; absent means discovery. */
+    skills?: string[];
+    /** Which layer chose that exposure: launch, catalog, config, default, or a replayed recipe. */
+    skillsSource?: SkillExposureSource;
     cwd: string;
     /** First ~200 chars of the task prompt, for listings. */
     promptPreview: string;
@@ -135,8 +213,23 @@ export interface RunMeta {
     /** Named lifecycle quality from exit/stream validation. */
     lifecycleClassification?: LifecycleClassification;
     logPath: string;
-    /** Child subagent session id. */
+    /**
+     * Native child conversation id. A fresh launch uses the attempt id; a
+     * continuation keeps the prior run's session id, so attempt identity
+     * (`id`) and conversation identity diverge. Retention and session cleanup
+     * protect conversations by this field, not by run id.
+     */
     sessionId: string;
+    /**
+     * First attempt of this conversation's lineage. Every attempt records it,
+     * so retention, cleanup protection, and ownership resolve one owner even
+     * after the attempt that created the conversation is gone.
+     */
+    rootRunId?: string;
+    /** Attempt this run continued, when it was launched by subagent_resume. */
+    resumedFrom?: string;
+    /** Effective launch recipe, frozen at launch for continuation. */
+    recipe?: LaunchRecipe;
     /** Foreground session that is allowed to receive unsolicited callbacks. */
     callbackOrigin?: RunCallbackOrigin;
     /** Durable ordinary-completion callback recovery and successful-handoff markers. */
@@ -168,14 +261,20 @@ export interface RunMeta {
      * `subagent_list` keep working for dismissed runs).
      */
     dismissedAt?: number;
-    /**
-     * Optional catalog launch snapshot. Additive: metadata written before the
-     * catalog has no `catalog` key and still parses. The first launch
-     * publication freezes `name` and `catalog` together, including when
-     * catalog is absent or null. Later status, result, and stop writes keep
-     * that whole snapshot and must not fill a missing catalog.
-     */
     catalog?: CatalogLaunchSnapshot;
+    /**
+     * Durable park disposition for a worker attempt that ended while waiting on
+     * an observed dependency. Additive: a record without it is an ordinary run.
+     * The attempt status stays `completed`; this field is what distinguishes
+     * "this attempt finished" from "the assignment finished" (ADR 0020).
+     */
+    park?: ParkRecord;
+    /**
+     * Supervised-operation binding for this attempt. Additive. Records only
+     * references (bridge run id, conversation id, authority reference) and the
+     * captured worker policy — never the per-run bridge token.
+     */
+    operations?: RunOperationsBinding;
     /**
      * Harness-owned timing policy and one-shot markers (soft deadline, grace,
      * hard ceiling, stuck window). Written at launch so /reload keeps it.
@@ -184,12 +283,19 @@ export interface RunMeta {
     timing?: RunTiming;
 }
 
-/** Root runtime dir, deliberately OUTSIDE any repo. */
+/** Root of the VOLATILE runtime registry, deliberately OUTSIDE any repo. */
 export function baseDir(): string {
     return join(realpathSync(tmpdir()), "pi-better-subagents");
 }
+/**
+ * `--session-dir` for NEW child launches: the durable Pi agent directory
+ * (`<agent dir>/subagents/sessions`), not the volatile registry. Saved
+ * conversations are ordinary Pi session files, so changing TMPDIR or a restart
+ * must not move them. Recipes recorded before this layout keep pointing at the
+ * old temporary directory and are read exactly as recorded.
+ */
 export function sessionsDir(): string {
-    return join(baseDir(), "sessions");
+    return durableSessionsDir();
 }
 export function taskWorkspaceDir(id: string): string {
     if (!/^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id)) throw new Error("Invalid task workspace run ID.");
@@ -208,6 +314,194 @@ export function promptPathFor(id: string): string {
 function metaPathFor(id: string): string {
     return join(runDir(id), "meta.json");
 }
+
+// ---- park disposition and supervised-operations binding -------------------
+
+/**
+ * Phase of a parked assignment's wait, mirrored from the coordinator record for
+ * display, resume decisions and cleanup protection. `consumed`/`cancelled` are
+ * terminal; `held` needs its owner.
+ */
+export type ParkPhase =
+    | "parking"
+    | "waiting"
+    | "ready"
+    | "resuming"
+    | "held"
+    | "consumed"
+    | "cancelled";
+
+/** Proof that the wait tool result is the persisted end of the saved conversation. */
+export interface ParkCheckpointIdentity {
+    sessionId: string;
+    sessionFile: string;
+    toolCallId: string;
+    entryId: string;
+    prefixBytes: number;
+    prefixSha256: string;
+}
+
+/**
+ * Durable park disposition of one attempt: which wait generation it parked on,
+ * the verified native checkpoint, and what happened afterwards. Written only by
+ * the parent after the checkpoint was verified and the coordinator admitted it,
+ * so an attempt cannot claim a park it did not prove.
+ */
+export interface ParkRecord {
+    version: 1;
+    waitId: string;
+    generation: number;
+    phase: ParkPhase;
+    /** Attempt that parked (this run id). */
+    attemptId: string;
+    /** Foreground owner binding recorded for admission, when known. */
+    ownerSessionId?: string;
+    ownerWorkspace?: string;
+    ownerBranchId?: string | null;
+    ownerGoalId?: string | null;
+    /** The next reasoning step the worker recorded when it parked. */
+    continuationNote?: string;
+    /** Verified saved-conversation checkpoint. */
+    checkpoint?: ParkCheckpointIdentity;
+    parkedAt: number;
+    updatedAt: number;
+    /** Why the wait is held instead of continuing. */
+    heldReason?: string;
+    /** Continuation attempt admitted for this wait generation. */
+    resumedAt?: number;
+    resumedBy?: string;
+    /** Launch token persisted with the attempt id BEFORE the child is spawned. */
+    resumeLaunchToken?: string;
+    /**
+     * Store-issued resume claim identity persisted with the attempt, so a proven
+     * failed exit can hold the generation with exact claim identity (the claim
+     * token is the same value the durable claim row already stores).
+     */
+    resumeClaimId?: string;
+    resumeClaimToken?: string;
+    cancelledAt?: number;
+    cancelReason?: string;
+}
+
+/** References for a run whose child may use supervised operations. */
+export interface RunOperationsBinding {
+    version: 1;
+    /** Bridge run id; equals the attempt id. */
+    bridgeRunId: string;
+    conversationId: string;
+    authorityReference: string;
+    /** Foreground branch/goal binding recorded for resume admission. */
+    branchId?: string | null;
+    goalId?: string | null;
+    /**
+     * Workspace the worker conversation was registered under (the sandbox or clone
+     * the child ran in). Background ownership uses this, not the foreground cwd.
+     */
+    workspace?: string;
+    /**
+     * Launch token persisted with the resume attempt BEFORE spawn, so a crash
+     * between publication and the child's own publication is reconciled instead
+     * of relaunched. Never a credential.
+     */
+    resumeLaunchToken?: string;
+    /** Worker policy captured at launch; Background intersects it, never the child. */
+    policy: {
+        version: 1;
+        sandbox: unknown;
+        tools: readonly string[];
+        clean: boolean;
+        deadlineAt: number | null;
+    };
+    /** Tools the child bridge exposes. */
+    tools: readonly string[];
+}
+
+export function parkRecordPath(id: string): string {
+    return join(runDir(id), "park.json");
+}
+
+/** Verify the shape before trusting a record read from disk. */
+function parseParkRecord(value: unknown): ParkRecord | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Partial<ParkRecord>;
+    if (record.version !== 1) return undefined;
+    if (typeof record.waitId !== "string" || !record.waitId) return undefined;
+    if (!Number.isSafeInteger(record.generation) || (record.generation ?? 0) < 1) return undefined;
+    if (typeof record.attemptId !== "string" || !record.attemptId) return undefined;
+    if (typeof record.parkedAt !== "number" || !Number.isFinite(record.parkedAt)) return undefined;
+    const phases: readonly ParkPhase[] = ["parking", "waiting", "ready", "resuming", "held", "consumed", "cancelled"];
+    if (!phases.includes(record.phase as ParkPhase)) return undefined;
+    return record as ParkRecord;
+}
+
+/**
+ * Write the park disposition atomically and mirror it into the run's metadata.
+ * The mirror keeps listings, the Goal provider and cleanup from needing a second
+ * read; the file remains the authoritative copy for this attempt.
+ */
+export function writeParkRecord(id: string, record: ParkRecord): void {
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid run ID.");
+    mkdirSync(runDir(id), { recursive: true });
+    const path = parkRecordPath(id);
+    const temp = join(dirname(path), `.park.${randomBytes(6).toString("hex")}.tmp`);
+    writeFileSync(temp, JSON.stringify(record), { mode: 0o600, flag: "wx" });
+    renameSync(temp, path);
+    const meta = readMeta(id);
+    if (meta && (meta.park?.phase !== record.phase
+        || meta.park?.heldReason !== record.heldReason
+        || meta.park?.resumedBy !== record.resumedBy)) {
+        meta.park = record;
+        writeMeta(meta);
+    }
+}
+
+/** Read the attempt's park disposition; absent for an ordinary run. */
+export function readParkRecord(id: string): ParkRecord | undefined {
+    try {
+        return parseParkRecord(JSON.parse(readFileSync(parkRecordPath(id), "utf-8")));
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+        // The volatile run directory may already be reclaimed; the durable
+        // completed-attempt record carries the park snapshot taken at finalization.
+        return readMeta(id)?.park;
+    }
+}
+
+/** Merge one phase/reason change into the park disposition. */
+export function updateParkRecord(
+    id: string,
+    patch: Partial<Omit<ParkRecord, "version" | "waitId" | "generation" | "attemptId" | "parkedAt">>,
+): ParkRecord | undefined {
+    const current = readParkRecord(id);
+    if (!current) return undefined;
+    const next: ParkRecord = { ...current, ...patch, updatedAt: Date.now() };
+    writeParkRecord(id, next);
+    return next;
+}
+
+/** A park still owns a pending continuation: `parking`, `waiting`, `ready`, `resuming` or `held`. */
+export function isPendingPark(record: Pick<ParkRecord, "phase">): boolean {
+    return record.phase !== "consumed" && record.phase !== "cancelled";
+}
+
+/**
+ * Runs whose park disposition can still resume. Used by cleanup protection and
+ * by resume reconciliation; a consumed or cancelled park is not included.
+ */
+export function listPendingParkedRuns(metas: readonly RunMeta[] = listMetas()): RunMeta[] {
+    return metas.filter((meta) => {
+        const record = meta.park ?? readParkRecord(meta.id);
+        return record !== undefined && isPendingPark(record);
+    });
+}
+
+/**
+ * How long a launch attempt that never produced a child is kept before a sweep
+ * reclaims it. Launch preparation takes seconds; the grace only exists so a
+ * paused or unusually slow launch in another process is never reclaimed under
+ * it. A record this old has no metadata and no log, so it can never become a run.
+ */
+export const ABANDONED_LAUNCH_GRACE_MS = 60 * 60 * 1000;
 
 /**
  * Parent-authored provenance for a run launched on the trusted task runtime (#325).
@@ -475,7 +769,7 @@ let ownStartCache: string | undefined;
 const foreignStartCache = new Map<number, { token: string | undefined; at: number }>();
 
 /** Best-effort process start identity. Unavailable does not prove the pid is dead. */
-function readStartToken(pid: number): string | undefined {
+export function processStartToken(pid: number): string | undefined {
     if (process.platform === "linux") {
         try {
             const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
@@ -503,7 +797,7 @@ function readStartToken(pid: number): string | undefined {
 
 function ownStartToken(): string | undefined {
     if (ownStartKnown) return ownStartCache;
-    ownStartCache = readStartToken(process.pid);
+    ownStartCache = processStartToken(process.pid);
     ownStartKnown = true;
     return ownStartCache;
 }
@@ -512,7 +806,7 @@ function cachedStartToken(pid: number): string | undefined {
     const now = Date.now();
     const hit = foreignStartCache.get(pid);
     if (hit && now - hit.at < 200) return hit.token;
-    const token = readStartToken(pid);
+    const token = processStartToken(pid);
     foreignStartCache.set(pid, { token, at: now });
     return token;
 }
@@ -880,6 +1174,54 @@ export function nextRunId(): string {
     return `sa_${Date.now().toString(36)}_${seq}`;
 }
 
+/** Failure-journal operation for durable archive publication. */
+const ARCHIVE_OPERATION = "durable-archive";
+
+/**
+ * Journal the outcome of publishing one attempt's compact durable record in the
+ * run's existing failures journal (`failures.jsonl`, read by the output and
+ * result payloads). `undefined` reports a verified recovery.
+ *
+ * While publication keeps failing, the volatile run directory still holds the
+ * only copy of the recipe, so both sweeps retain it; this incident is what makes
+ * that state visible instead of silent. Best-effort: journaling never throws
+ * into finalization or a sweep, and an untouched run keeps no journal.
+ */
+export function observeArchivePublication(id: string, error?: unknown): void {
+    try {
+        if (!/^[A-Za-z0-9_-]+$/.test(id)) return;
+        const path = join(runDir(id), "failures.jsonl");
+        const key = failureIdentity(ARCHIVE_OPERATION);
+        const open = readFailureState(path).observations[key];
+        const at = Date.now();
+        if (error === undefined) {
+            if (!open || open.status !== "unresolved") return;
+            observeFailures(path, [{
+                id: `archive-published:${id}:${at}`,
+                operation: ARCHIVE_OPERATION,
+                kind: "recovered",
+                at,
+                incidents: [open.id],
+                summary: "the compact durable continuation record was published",
+            }]);
+            return;
+        }
+        // One open incident per run: repeated sweeps retry the same publication and
+        // must not fill the journal with the same failure.
+        if (open && open.status === "unresolved") return;
+        const detail = error instanceof Error ? error.message : String(error);
+        observeFailures(path, [{
+            id: `archive-failed:${id}:${at}`,
+            operation: ARCHIVE_OPERATION,
+            kind: "failure",
+            at,
+            category: "storage",
+            summary: `durable continuation record could not be published (${detail}); this attempt's log and recipe are retained until it is`,
+            evidence: `compact record for ${id}`,
+        }]);
+    } catch { /* the journal is best-effort; retaining the run is the safety net */ }
+}
+
 export function writeMeta(meta: RunMeta): void {
     mkdirSync(runDir(meta.id), { recursive: true });
     withRunMetaLock(meta.id, (owns) => {
@@ -888,6 +1230,18 @@ export function writeMeta(meta: RunMeta): void {
         writeMetaFile(meta);
         metaCache.set(meta.id, meta);
         indexMeta(meta);
+        // Publish the compact durable continuation record in the same critical
+        // section, so a completed attempt is never visible only in volatile
+        // storage. Best-effort: a durable write failure must not break a launch
+        // or finalization (the volatile record still exists). It is journaled
+        // instead, and both sweeps retain the run until publication succeeds.
+        if (meta.status === "completed") {
+            try {
+                if (archiveCompletedAttempt(meta)) observeArchivePublication(meta.id);
+            } catch (error) {
+                observeArchivePublication(meta.id, error);
+            }
+        }
         owns();
     });
     for (const listener of metaChangedListeners) {
@@ -906,9 +1260,15 @@ export function readMeta(id: string): RunMeta | undefined {
         const meta = JSON.parse(readFileSync(metaPathFor(id), "utf-8")) as RunMeta;
         metaCache.set(id, meta);
         return meta;
-    } catch {
+    } catch (error) {
         metaCache.delete(id);
-        return undefined;
+        // Only a MISSING volatile record falls back to the durable copy. An
+        // unreadable or corrupt `meta.json` stays authoritative and is reported
+        // as absent: a possibly stale archive must never replace it.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+        const archived = readArchivedAttempt(id);
+        if (archived) metaCache.set(id, archived);
+        return archived;
     }
 }
 
@@ -920,10 +1280,27 @@ export function readMeta(id: string): RunMeta | undefined {
  * in place, so a purged run does not free its display label for reuse.
  * Deleting the whole registry root is what clears them.
  */
-export function removeMetaArtifacts(meta: RunMeta): boolean {
+export interface RemoveMetaArtifactsOptions {
+    /**
+     * Keep the run's owned clone workspace. A conversation whose saved session
+     * and recipe are durable still needs the workspace later attempts run in;
+     * only its volatile log, metadata, and task scratch are reclaimed.
+     */
+    keepWorkspace?: boolean;
+}
+
+export function removeMetaArtifacts(meta: RunMeta, options: RemoveMetaArtifactsOptions = {}): boolean {
     try {
+        // A newer failed/killed attempt's volatile record is about to be the only
+        // evidence that the conversation's newest attempt did not complete. Leave
+        // a durable marker first, or an older completed archive would become the
+        // conversation's visible last word and could be continued as if this
+        // attempt had never happened. A marker that cannot be published retains
+        // the run (the throw below): the unsafe direction is deleting both.
+        recordArchiveStatusTombstone(meta);
         removeRunDirectory(meta.id);
-        if (meta.taskRuntime && /^sa_[a-z0-9]+_[a-z0-9]+$/i.test(meta.id) && meta.cwd === taskWorkspaceDir(meta.id)) {
+        if (!options.keepWorkspace
+            && meta.taskRuntime && /^sa_[a-z0-9]+_[a-z0-9]+$/i.test(meta.id) && meta.cwd === taskWorkspaceDir(meta.id)) {
             rmSync(taskWorkspaceDir(meta.id), { recursive: true, force: true });
         }
         if (meta.taskRuntime && meta.taskScratch && dirname(meta.taskScratch) === realpathSync(tmpdir()) && /^pi-task-scratch-[a-z0-9]{6}$/i.test(basename(meta.taskScratch))) {
@@ -942,25 +1319,45 @@ export function removeMetaArtifacts(meta: RunMeta): boolean {
     }
 }
 
-/** All runs, newest first. */
+/**
+ * All runs, newest first: the volatile registry plus durable archived attempts
+ * whose raw log/run directory was already reclaimed. The volatile record wins
+ * whenever both exist, so a reclaimed log never hides the live one.
+ */
 export function listMetas(): RunMeta[] {
-    let ids: string[];
+    let ids: string[] = [];
     try {
         registryIo.fullDirectoryReads += 1;
         ids = readdirSync(join(baseDir(), "runs"));
     } catch {
-        return [];
+        ids = [];
     }
-    return ids
-        .map(readMetaForSweep)
-        .filter((m): m is RunMeta => m !== undefined)
-        .sort((a, b) => b.startedAt - a.startedAt);
+    const seen = new Set<string>();
+    const metas: RunMeta[] = [];
+    for (const id of ids) {
+        seen.add(id); // A corrupt volatile record must not be hidden by an older archive.
+        const meta = readMetaForSweep(id);
+        if (!meta) continue;
+        metas.push(meta);
+    }
+    for (const meta of listArchivedAttempts()) {
+        if (seen.has(meta.id)) continue;
+        seen.add(meta.id);
+        metas.push(meta);
+    }
+    return metas.sort((a, b) => b.startedAt - a.startedAt);
 }
 
 export interface RunRecordIndex {
     metas: RunMeta[];
     /** Run directories whose metadata is missing, unreadable, or corrupt. */
     unreadable: Array<{ id: string; detail: string }>;
+    /**
+     * Launch attempts that never produced a supervised run (no metadata, no
+     * log). They are not runs, cannot be read or finalized, and are reclaimed
+     * by the launch-debris sweep or an explicit `subagent_stop`.
+     */
+    abandoned: string[];
     /** The runs directory itself could not be read (not "no runs"). */
     indexError?: string;
 }
@@ -973,6 +1370,187 @@ export function runMetaShapeProblem(meta: unknown, id: string): string | undefin
     if (typeof value.status !== "string" || !value.status) return "missing status";
     if (typeof value.startedAt !== "number" || !Number.isFinite(value.startedAt)) return "missing startedAt";
     return undefined;
+}
+
+/** A run directory a launch created but never turned into a supervised run. */
+export interface AbandonedLaunchRecord {
+    id: string;
+    /** Directory mtime (ms), used as the launch attempt's age. */
+    mtimeMs: number;
+}
+
+/**
+ * Durable claim a launch writes into its run directory before it prepares
+ * anything (#623). It states WHO owns the attempt while no metadata exists, so a
+ * concurrent purge can tell a live launch from the debris of a dead one.
+ *
+ * It is a plain file rather than the metadata lock because the claim must cover
+ * the whole preparation (workspace, sandbox control dir, session dir, spawn and
+ * metadata publication), not only the metadata write. It is removed at the same
+ * moment `meta.json` becomes the record of the run, and it is never a second
+ * registry: nothing reads it as run evidence.
+ */
+export interface LaunchAttemptClaim {
+    version: 1;
+    id: string;
+    pid: number;
+    /** Start-identity token of the claiming pi; only equality is meaningful. */
+    start?: string;
+    at: number;
+}
+
+function launchAttemptClaimPath(id: string): string {
+    return join(runDir(id), ".launch-attempt.json");
+}
+
+/** Claim this run directory for a launch in progress. The directory must exist. */
+export function recordLaunchAttempt(id: string): void {
+    const claim: LaunchAttemptClaim = { version: 1, id, pid: process.pid, at: Date.now() };
+    const start = processStartToken(process.pid);
+    if (start) claim.start = start;
+    writeFileSync(launchAttemptClaimPath(id), JSON.stringify(claim), { mode: 0o600 });
+}
+
+/** Drop the claim once `meta.json` is the run's record. Best effort. */
+export function clearLaunchAttempt(id: string): void {
+    try {
+        unlinkSync(launchAttemptClaimPath(id));
+    } catch { /* no claim, or the attempt's directory is already gone */ }
+}
+
+/**
+ * Whether a launch claim is still owned by a live process. Conservative for one
+ * direction only: an unreadable, malformed, or token-less claim counts as live,
+ * so the attempt's artifacts are preserved. A dead pid, or a pid whose start
+ * token no longer matches (recycled), is a dead attempt.
+ */
+function launchAttemptClaimIsLive(id: string): boolean {
+    let raw: string;
+    try {
+        raw = readFileSync(launchAttemptClaimPath(id), "utf-8");
+    } catch (error) {
+        return errnoOf(error) !== "ENOENT";
+    }
+    let parsed: Partial<LaunchAttemptClaim> | undefined;
+    try {
+        parsed = JSON.parse(raw) as Partial<LaunchAttemptClaim>;
+    } catch {
+        return true;
+    }
+    if (!parsed || typeof parsed !== "object") return true;
+    const pid = parsed.pid;
+    if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return true;
+    if (!processExists(pid)) return false;
+    const start = parsed.start;
+    if (typeof start !== "string" || start.length === 0) return true;
+    const current = cachedStartToken(pid);
+    // An unavailable token does not prove the pid is dead, so the claim stays live.
+    return current === undefined || current === start;
+}
+
+/**
+ * True when a launch is preparing this run id right now, so its directory must
+ * not be treated as debris. Unreadable state counts as in progress.
+ */
+export function launchAttemptInProgress(id: string): boolean {
+    if (!/^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id)) return false;
+    return launchAttemptClaimIsLive(id);
+}
+
+/**
+ * Read one run directory as an abandoned launch attempt, or `undefined`.
+ *
+ * A launch creates the directory, claims it, writes `prompt.md`, and prepares
+ * the sandbox `control/` dir before the child starts and `meta.json` is
+ * committed. When that preparation throws, or pi dies in that window, only
+ * those artifacts remain: no metadata (nothing was committed) and no
+ * `output.log` (the log is created at spawn and removed when the spawn itself
+ * fails). Such a directory was never a run: it has no owner, no status, no log
+ * and no result, and it can never gain any, so it must not be reported as
+ * unreadable run evidence forever.
+ *
+ * The rule is deliberately narrow in the other direction too. A live launch
+ * claim means the attempt is still being prepared and is never debris; a
+ * directory WITH a log is not debris either, because a child may have started
+ * and its output is real evidence; and a directory without the launch artifacts
+ * is left to the age sweep rather than guessed at.
+ */
+export function abandonedLaunchRecord(id: string): AbandonedLaunchRecord | undefined {
+    if (!/^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id)) return undefined;
+    let mtimeMs: number;
+    try {
+        mtimeMs = statSync(runDir(id)).mtimeMs;
+    } catch {
+        return undefined;
+    }
+    // Metadata absence is the claim of debris, so it is re-established as late as
+    // possible: the launch shape first, then every piece of run evidence.
+    if (!existsSync(promptPathFor(id)) && !existsSync(join(runDir(id), "control"))) return undefined;
+    if (launchAttemptClaimIsLive(id)) return undefined;
+    try {
+        statSync(metaPathFor(id));
+        return undefined;
+    } catch (error) {
+        if (errnoOf(error) !== "ENOENT") return undefined;
+    }
+    try {
+        statSync(logPathFor(id));
+        return undefined;
+    } catch (error) {
+        if (errnoOf(error) !== "ENOENT") return undefined;
+    }
+    return { id, mtimeMs };
+}
+
+export type AbandonedLaunchPurge =
+    /** The attempt's artifacts were removed. */
+    | "purged"
+    /** Not launch debris (a run record, a live launch, or something else entirely). */
+    | "not-debris"
+    /** It looked like debris, but a writer or an unavailable lock made removal unsafe. */
+    | "retained";
+
+/**
+ * Reclaim one abandoned launch attempt: its run directory, the per-run session
+ * directory a confined launch prepared, and the clone workspace it owned. Only
+ * paths named by the attempt's own id are removed (shared sessions and a
+ * caller-chosen `sandbox_dir` are never touched), exactly like a failed launch.
+ *
+ * Classification runs again inside the same per-run lock `writeMeta` publishes
+ * under, and the removal happens there, so a launch that commits metadata while
+ * the purger waits is preserved instead of deleted. A held or unavailable lock
+ * is a live writer, so it is preserved too. This closes the race the earlier
+ * shape-only rule lost (#623 review R1): no deletion of a live attempt's
+ * metadata or log, and no orphaned child left behind by a purge.
+ */
+export function purgeAbandonedLaunch(id: string): AbandonedLaunchPurge {
+    if (!abandonedLaunchRecord(id)) return "not-debris";
+    let outcome: AbandonedLaunchPurge = "retained";
+    try {
+        withRunMetaLock(id, (owns) => {
+            if (!owns()) throw new MetadataLockLost();
+            // Re-establish the negative evidence under the publication exclusion.
+            if (!abandonedLaunchRecord(id)) {
+                outcome = "not-debris";
+                return;
+            }
+            discardFailedLaunch(id, { sessionDir: join(sessionsDir(), id), workspaceDir: taskWorkspaceDir(id) });
+            outcome = "purged";
+        });
+    } catch {
+        // A live writer (or an unreadable run directory) is never safe to delete.
+        // A directory that disappeared meanwhile is no longer debris.
+        return abandonedLaunchRecord(id) ? "retained" : "not-debris";
+    }
+    if (outcome === "purged") {
+        try {
+            statSync(runDir(id));
+            outcome = "retained";
+        } catch (error) {
+            if (errnoOf(error) !== "ENOENT") outcome = "retained";
+        }
+    }
+    return outcome;
 }
 
 /**
@@ -992,7 +1570,8 @@ export function inspectRunMeta(id: string): { kind: "ok"; meta: RunMeta } | { ki
                 statSync(runDir(id));
                 return { kind: "unreadable", detail: "metadata file is missing; the run directory and its evidence are retained" };
             } catch {
-                return { kind: "missing" };
+                const archived = readArchivedAttempt(id);
+                return archived ? { kind: "ok", meta: archived } : { kind: "missing" };
             }
         }
         return { kind: "unreadable", detail: error instanceof Error ? error.message : String(error) };
@@ -1015,17 +1594,17 @@ export function inspectRunMeta(id: string): { kind: "ok"; meta: RunMeta } | { ki
 
 /** Every run directory, counting unreadable records instead of dropping them. */
 export function listRunRecords(): RunRecordIndex {
-    let ids: string[];
+    let ids: string[] = [];
     try {
         registryIo.fullDirectoryReads += 1;
         ids = readdirSync(join(baseDir(), "runs"));
     } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code === "ENOENT") return { metas: [], unreadable: [] };
-        return { metas: [], unreadable: [], indexError: error instanceof Error ? error.message : String(error) };
+        if (code !== "ENOENT") return { metas: [], unreadable: [], abandoned: [], indexError: error instanceof Error ? error.message : String(error) };
     }
     const metas: RunMeta[] = [];
     const unreadable: Array<{ id: string; detail: string }> = [];
+    const abandoned: string[] = [];
     for (const id of ids) {
         const cached = metaCache.get(id);
         if (cached && cached.status !== "running" && cached.status !== "orphaned") {
@@ -1034,10 +1613,17 @@ export function listRunRecords(): RunRecordIndex {
         }
         const inspected = inspectRunMeta(id);
         if (inspected.kind === "ok") metas.push(inspected.meta);
-        else if (inspected.kind === "unreadable") unreadable.push({ id, detail: inspected.detail });
+        else if (inspected.kind === "unreadable") {
+            if (abandonedLaunchRecord(id)) abandoned.push(id);
+            else unreadable.push({ id, detail: inspected.detail });
+        }
+    }
+    const volatileIds = new Set(ids);
+    for (const archived of listArchivedAttempts()) {
+        if (!volatileIds.has(archived.id)) metas.push(archived);
     }
     metas.sort((a, b) => b.startedAt - a.startedAt);
-    return { metas, unreadable };
+    return { metas, unreadable, abandoned };
 }
 
 export function listMetasForParent(parentPid: number): RunMeta[] {

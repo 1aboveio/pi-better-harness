@@ -7,6 +7,8 @@ import { createFailureAttention } from "./failures.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir } from "./registry.js";
 import { registerBackgroundWorkProvider, disposeBackgroundWorkNavigator, type BackgroundWorkProvider } from "./shared-navigator.ts";
+import { registerTools } from "./tools.js";
+import type { BackgroundTaskMeta } from "./types.js";
 
 // Deliberately import once: SDK extension factories share this cached module.
 function host() {
@@ -49,13 +51,17 @@ describe("cached extension factory lifecycle", () => {
     await child.emit("session_shutdown", childCtx);
     expect(state.providers.get("background-tasks")).toBe(provider);
     expect(state.uiCtx).toBe(parentCtx);
+    // The parent still launches, and its launch is projected into the row rail the
+    // child's teardown must not have detached (#460).
     const result = await parent.tools.get("bg_task_watch").execute("watch", {
       command: "printf ready", callback: false, success_when: { type: "exit_code", equals: 0 },
     }, undefined, undefined, parentCtx);
-    expect(result.content[0].text).toContain("succeeded");
+    expect(result.content[0].text).toContain("First check: exit=0");
+    const id = result.content[0].text.match(/bgs_[0-9a-f]{20}/)?.[0];
+    expect(id).toBeDefined();
+    ids.push(id!);
     const rows = provider.listRows(Date.now());
-    expect(rows).toHaveLength(1);
-    ids.push(rows[0].id);
+    expect(rows.map((row: { id: string }) => row.id)).toContain(id);
     await parent.emit("session_shutdown", parentCtx);
     expect(state.providers.has("background-tasks")).toBe(false);
     expect(state.uiCtx).toBeUndefined();
@@ -65,21 +71,28 @@ describe("cached extension factory lifecycle", () => {
     const parent = host(), child = host();
     extension(parent.pi);
     extension(child.pi);
-    const parentCtx = ctx("callback-parent"), childCtx = ctx("callback-child");
+    const parentCtx = ctx("callback-parent", ui()), childCtx = ctx("callback-child");
     await parent.emit("session_start", parentCtx);
     await child.emit("session_start", childCtx);
     const result = await parent.tools.get("bg_task_spawn").execute("spawn", {
-      command: "sleep 0.1; printf complete", callback: true,
+      name: "callback-parent-task", shell: false,
+      argv: [process.execPath, "-e", "setTimeout(() => {}, 50)"], callback: true,
     }, undefined, undefined, parentCtx);
-    const id = result.content[0].text.match(/bg_[A-Za-z0-9_]+/)?.[0];
+    const id = result.content[0].text.match(/bgs_[0-9a-f]{20}/)?.[0];
     expect(id).toBeDefined();
     ids.push(id!);
     await child.emit("session_shutdown", childCtx);
-    await vi.waitFor(() => expect(readMeta(id!)?.status).toBe("succeeded"));
+    // The durable host reconciles the terminal outcome; the child's shutdown must
+    // not have taken the parent's delivery path with it.
+    await vi.waitFor(() => {
+      const status = parent.tools.get("bg_task_status");
+      return status.execute("status", { id }, undefined, undefined, parentCtx)
+        .then((reply: { content: Array<{ text: string }> }) => expect(reply.content[0].text).toContain("succeeded"));
+    }, { timeout: 20_000, interval: 100 });
+    await getCallbackBatcher(parent.pi).flush();
     await getCallbackBatcher(parent.pi).flush();
     expect(parent.pi.sendMessage).toHaveBeenCalledTimes(1);
-    expect(readMeta(id!)?.callbackSentAt).toBeTypeOf("number");
-    expect(readMeta(id!)?.callbackSuppressedAt).toBeUndefined();
+    expect(String((parent.pi.sendMessage as unknown as { mock: { calls: Array<[{ content: string }]> } }).mock.calls[0]?.[0]?.content)).toContain(id);
     await parent.emit("session_shutdown", parentCtx);
   });
 
@@ -110,6 +123,46 @@ describe("cached extension factory lifecycle", () => {
     expect(first).toMatchObject({ exitCode: 0 });
     expect(readMeta(task.id)?.status).toBe("succeeded");
     parent.suspendScheduledWork();
+  });
+
+  it("batch launches use the factory runtime instead of the default singleton", async () => {
+    const { pi, tools } = host();
+    const spawned: Array<{ id: string; name?: string; batchId?: string }> = [];
+    const spawnTask = vi.fn((_pi: ExtensionAPI, params: { name?: string; batchId?: string }) => {
+      const meta = {
+        id: `bg_injected_${spawned.length + 1}`, kind: "process", status: "running",
+        startedAt: Date.now(), logPath: "/dev/null", cwd: process.cwd(),
+        name: params.name, batchId: params.batchId,
+      } as unknown as BackgroundTaskMeta;
+      spawned.push({ id: meta.id, name: meta.name, batchId: meta.batchId });
+      return meta;
+    });
+    const runtime = {
+      awaitFirstWatchCheck: vi.fn(), resumeRunningTask: vi.fn(), spawnTask,
+      startWatchTask: vi.fn(), stopTask: vi.fn(),
+    };
+    registerTools(pi, runtime, vi.fn());
+
+    const result = await tools.get("bg_task_spawn_batch").execute("batch", {
+      batchName: "factory batch",
+      shared: { shell: false },
+      jobs: [
+        { name: "one", argv: [process.execPath, "-e", "true"] },
+        { name: "two", argv: [process.execPath, "-e", "true"] },
+      ],
+    }, undefined, undefined, ctx("batch-factory", ui()));
+
+    expect(spawnTask).toHaveBeenCalledTimes(2);
+    expect(spawned.map(({ id, name }) => ({ id, name }))).toEqual([
+      { id: "bg_injected_1", name: "one" },
+      { id: "bg_injected_2", name: "two" },
+    ]);
+    expect(new Set(spawned.map((job) => job.batchId)).size).toBe(1);
+    expect(result.content[0].text).toContain("bg_injected_1");
+    expect(result.content[0].text).toContain("bg_injected_2");
+    // A real singleton launch would have written registry metadata or returned a
+    // different id; the injected runtime owns both jobs instead.
+    expect(readMeta("bg_injected_1")).toBeUndefined();
   });
 
   it("failure attention retry timers are scoped and suspension clears only its own timers", () => {

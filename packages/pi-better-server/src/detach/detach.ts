@@ -6,7 +6,8 @@
 import { existsSync, readdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DaemonClient } from "../client.ts";
-import { moveSession, type MoveResult } from "../move/orchestrate.ts";
+import { assertExistingDirectory } from "../core/adapter.ts";
+import { assertTransferCapabilities, moveSession, type MoveResult } from "../move/orchestrate.ts";
 import { checkProviderAuth } from "../move/auth.ts";
 import { assertChecks, connectChecked, estimateBundleBytes, isGithubRemote, repoRemoteOf, runChecks, type CheckResult } from "../move/preflight.ts";
 import { resolveSession } from "../remote/sessions.ts";
@@ -19,9 +20,13 @@ export interface DetachOptions {
   /** Name the user gave for the destination (ssh alias); recorded for `return` and notices. */
   host: string;
   connect: () => Promise<DaemonClient>;
+  /** Include prompt preflight, bash, background work and pending input/dialogs, not just model streaming. */
   isBusy: () => boolean;
   stateDir?: string;
   toCwd?: string;
+  copy?: boolean;
+  includeWorkspace?: boolean;
+  compression?: "gzip" | "none";
   waitMs?: number;
   onProgress?: (message: string) => void;
 }
@@ -31,12 +36,15 @@ export async function detachSession(options: DetachOptions): Promise<MoveResult>
   const stateDir = options.stateDir ?? localStateDir();
   const client = await connectChecked(options.connect, host);
   try {
-    const repoRemote = repoRemoteOf(session.cwd);
+    assertTransferCapabilities(client.server, options);
+    if (options.includeWorkspace === false && (!options.toCwd || !options.toCwd.startsWith("/"))) throw new Error("Session-only transfer requires an existing absolute destination directory (toCwd)");
+    const repoRemote = options.includeWorkspace === false ? undefined : repoRemoteOf(session.cwd);
     const preflight = await client.call({
       type: "move_preflight",
       ...(session.model ? { model: session.model } : {}),
       ...(repoRemote ? { repoRemote, requireGh: isGithubRemote(repoRemote) } : {}),
-      bytes: estimateBundleBytes(session.cwd),
+      ...(options.includeWorkspace !== undefined ? { includeWorkspace: options.includeWorkspace } : {}),
+      ...(options.includeWorkspace === false ? {} : { bytes: estimateBundleBytes(session.cwd) }),
       ...(options.toCwd ? { dir: options.toCwd } : {}),
     });
     assertChecks((preflight.data as { checks: CheckResult[] }).checks);
@@ -44,6 +52,9 @@ export async function detachSession(options: DetachOptions): Promise<MoveResult>
     const source = new LocalSource({ session, stateDir, isBusy: options.isBusy, host });
     return await moveSession(source, client, {
       sessionId: session.sessionId,
+      ...(options.copy !== undefined ? { copy: options.copy } : {}),
+      ...(options.includeWorkspace !== undefined ? { includeWorkspace: options.includeWorkspace } : {}),
+      ...(options.compression !== undefined ? { compression: options.compression } : {}),
       ...(options.toCwd ? { toCwd: options.toCwd } : {}),
       ...(options.waitMs !== undefined ? { waitMs: options.waitMs } : {}),
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
@@ -59,14 +70,20 @@ export interface ReturnOptions {
   host?: string;
   connect: () => Promise<DaemonClient>;
   stateDir?: string;
-  /** Where to rebuild the workspace. Default: where it lived before it was detached when that is free, else a new `<name>-returned` beside it; without a record, ./<name>. */
+  /** Known custom local transcript storage, outside normal SDK discovery. */
+  sessionDirs?: readonly string[];
+  sessionFiles?: readonly string[];
+  /** Existing absolute directory for session-only; new/empty workspace directory otherwise. */
   toCwd?: string;
+  copy?: boolean;
+  includeWorkspace?: boolean;
+  compression?: "gzip" | "none";
   waitMs?: number;
   onProgress?: (message: string) => void;
 }
 
 export interface ReturnResult extends MoveResult {
-  sessionFile?: string;
+  sessionFile: string;
 }
 
 /**
@@ -90,21 +107,23 @@ export async function returnSession(options: ReturnOptions): Promise<ReturnResul
   const stateDir = options.stateDir ?? localStateDir();
   const client = await connectChecked(options.connect, options.host);
   try {
+    assertTransferCapabilities(client.server, options);
+    if (options.includeWorkspace === false) assertExistingDirectory(options.toCwd);
     const summary = await resolveSession(client, options.ref);
-    const described = await client.call({ type: "move_preflight", sessionId: summary.sessionId });
-    const info = (described.data as { session: { cwdName: string; model?: string; repoRemote?: string; bytes: number } }).session;
+    const described = await client.call({ type: "move_preflight", sessionId: summary.sessionId, ...(options.includeWorkspace !== undefined ? { includeWorkspace: options.includeWorkspace } : {}) });
+    const info = (described.data as { session: { cwdName: string; model?: string; repoRemote?: string; bytes?: number } }).session;
     const dest = resolve(options.toCwd ?? defaultReturnDir(readLocalRecord(stateDir, summary.sessionId)?.cwd, join(process.cwd(), info.cwdName), options.onProgress));
 
     const checks: CheckResult[] = [];
-    if (existsSync(dest) && readdirSync(dest).length > 0) {
+    if (options.includeWorkspace !== false && existsSync(dest) && readdirSync(dest).length > 0) {
       checks.push({ name: "workspace", ok: false, detail: `${dest} already exists and is not empty; pass --to-cwd <empty dir>` });
     }
     checks.push(
       ...(await runChecks(
         {
           ...(info.model ? { model: info.model } : {}),
-          ...(info.repoRemote ? { repoRemote: info.repoRemote, requireGh: isGithubRemote(info.repoRemote) } : {}),
-          bytes: info.bytes,
+          ...(options.includeWorkspace !== false && info.repoRemote ? { repoRemote: info.repoRemote, requireGh: isGithubRemote(info.repoRemote) } : {}),
+          ...(options.includeWorkspace === false || info.bytes === undefined ? {} : { bytes: info.bytes }),
           dir: dest,
         },
         { serverDir: stateDir, providerAuth: (provider) => checkProviderAuth(provider, process.cwd()) },
@@ -113,8 +132,12 @@ export async function returnSession(options: ReturnOptions): Promise<ReturnResul
     assertChecks(checks);
     options.onProgress?.("preflight passed");
 
-    const result = await moveSession(client, new LocalSink({ stateDir, cwd: dest }), {
+    const result = await moveSession(client, new LocalSink({ stateDir, cwd: dest, sessionDirs: options.sessionDirs, sessionFiles: options.sessionFiles }), {
       sessionId: summary.sessionId,
+      toCwd: dest,
+      ...(options.copy !== undefined ? { copy: options.copy } : {}),
+      ...(options.includeWorkspace !== undefined ? { includeWorkspace: options.includeWorkspace } : {}),
+      ...(options.compression !== undefined ? { compression: options.compression } : {}),
       ...(options.waitMs !== undefined ? { waitMs: options.waitMs } : {}),
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
     });

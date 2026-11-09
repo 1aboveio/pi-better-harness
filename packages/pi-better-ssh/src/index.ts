@@ -21,8 +21,6 @@ import { executeRemoteBash, resolveRemoteBashConnection } from "./remote-bash.js
 import type { RemoteBashDependencies, RemoteBashResult } from "./remote-bash.js";
 import { resolveSshCommand } from "./shared-ssh-core/index.js";
 
-const STATUS_KEY = "pi-better-ssh";
-
 const RemoteBashParams = Type.Object({
   command: Type.String({ description: "Bash command string to execute remotely." }),
   host: Type.Optional(Type.String({ description: "SSH Host alias or user@host target. Optional when an active SSH profile supplies the host." })),
@@ -114,11 +112,7 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
     ...dependencies,
     muxRegistry,
     getActiveProfile: () => activeProfile,
-    onResult: (result, params, ctx) => {
-      if (activeProfile && params.host === undefined) {
-        setFooter(ctx, activeProfile, result.mux.state);
-      }
-    },
+    onResult: () => {},
   });
 
   const resolveMuxTarget = (params: {
@@ -158,22 +152,11 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
     }
   };
 
-  const setFooter = (ctx: ExtensionContext, profile: SshProfile | undefined, muxState?: "up" | "down"): void => {
-    try {
-      ctx.ui.setStatus(STATUS_KEY, profile ? formatSshProfileChip(profile, muxState ?? "down") : undefined);
-    } catch {
-      // Footer status is best-effort in non-interactive and partial harness contexts.
-    }
-  };
-
-  const refreshFooter = async (ctx: ExtensionContext) => {
+  const refreshMux = async (ctx: ExtensionContext) => {
     if (!activeProfile) {
-      setFooter(ctx, undefined);
       return undefined;
     }
-    const mux = await queryMux(activeProfile, ctx.sessionManager.getSessionId());
-    setFooter(ctx, activeProfile, mux.state);
-    return mux;
+    return queryMux(activeProfile, ctx.sessionManager.getSessionId());
   };
 
   pi.registerTool({
@@ -192,19 +175,18 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
         const aliases = listSshHostAliases(dependencies.sshConfigPath);
         activeProfile = createSshProfile(params, aliases, dependencies.sshConfigPath);
         pi.appendEntry(SSH_PROFILE_ENTRY_TYPE, profileStateEntry(activeProfile));
-        const mux = await refreshFooter(ctx);
+        const mux = await refreshMux(ctx);
         const details = { action: "use" as const, active: activeProfile, mux };
         return { content: [{ type: "text" as const, text: `Active SSH profile: ${formatSshProfileChip(activeProfile, mux?.state ?? "down")}` }], details };
       }
       if (params.action === "clear") {
         activeProfile = undefined;
         pi.appendEntry(SSH_PROFILE_ENTRY_TYPE, profileStateEntry(undefined));
-        setFooter(ctx, undefined);
         const details = { action: "clear" as const, active: null };
         return { content: [{ type: "text" as const, text: "Active SSH profile cleared." }], details };
       }
 
-      const mux = activeProfile ? await refreshFooter(ctx) : undefined;
+      const mux = activeProfile ? await refreshMux(ctx) : undefined;
       const details = { action: "status" as const, active: activeProfile ?? null, ...(mux ? { mux } : {}) };
       return {
         content: [{
@@ -235,12 +217,6 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
           ? await muxRegistry.statusAll(sessionScope)
           : await muxRegistry.stopAll(sessionScope);
         const masters = results.map(muxResultDetails);
-        if (activeProfile) {
-          const activeTarget = resolveMuxTarget({ host: activeProfile.host }).identity.target;
-          const activeMux = masters.find((master) => master.target === activeTarget);
-          if (params.action === "stop") setFooter(ctx, activeProfile, "down");
-          else if (activeMux) setFooter(ctx, activeProfile, activeMux.state === "up" ? "up" : "down");
-        }
         const details = { action: params.action, scope: "all" as const, masters };
         return { content: [{ type: "text" as const, text: formatMuxResults(masters) }], details };
       }
@@ -250,12 +226,6 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
         ? await muxRegistry.statusTarget(resolved, sessionScope)
         : await muxRegistry.stopTarget(resolved, sessionScope);
       const masters = [muxResultDetails(result)];
-      if (activeProfile) {
-        const activeTarget = resolveMuxTarget({ host: activeProfile.host }).identity.target;
-        if (resolved.identity.target === activeTarget) {
-          setFooter(ctx, activeProfile, result.state === "up" ? "up" : "down");
-        }
-      }
       const details = { action: params.action, scope: "target" as const, masters };
       return { content: [{ type: "text" as const, text: formatMuxResults(masters) }], details };
     },
@@ -263,11 +233,10 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
 
   const restore = async (ctx: ExtensionContext): Promise<void> => {
     activeProfile = restoreSshProfile(ctx.sessionManager.getBranch());
-    await refreshFooter(ctx);
+    await refreshMux(ctx);
   };
   pi.on("session_start", async (_event, ctx) => restore(ctx));
   pi.on("session_tree", async (_event, ctx) => restore(ctx));
-  pi.on("session_shutdown", async (_event, ctx) => setFooter(ctx, undefined));
 }
 
 export default function sshExtension(pi: ExtensionAPI): void {

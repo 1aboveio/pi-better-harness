@@ -134,7 +134,14 @@ export const OUTPUT_PAGE_DEFAULTS = {
 
 export type OutputBudgetSurface = keyof typeof OUTPUT_BUDGET_BYTES;
 
-export type PageReset = "stale-cursor" | "source-replaced" | "compacted";
+/**
+ * Why a supplied cursor was not followed. `cursor-corrupt` means the payload
+ * itself failed its integrity check — a hand-copied character, not evidence
+ * that the source changed or that the cursor belongs to another scope (#617).
+ * A corrupt cursor only resumes from an offset a witness recomputed from the
+ * current source proves; otherwise the page restarts at byte 0.
+ */
+export type PageReset = "stale-cursor" | "source-replaced" | "compacted" | "cursor-corrupt";
 export type EvidenceGapKind = "capture" | "retention" | "read";
 export type StatusChange = "none" | "failure" | "content" | "reset";
 export type EnvelopeSectionName =
@@ -190,6 +197,12 @@ export interface PageResult {
   appendReady?: boolean;
   /** Bytes of a trailing, still-incomplete UTF-8 sequence withheld until the writer completes it. */
   pendingBytes?: number;
+  /**
+   * `backward` marks an end-anchored page: the text ends at the cursor's upper
+   * bound, `omittedBytes` counts earlier bytes not shown, and `nextCursor`
+   * continues toward the start of the file.
+   */
+  direction?: "backward";
 }
 
 export interface FilePageRequest extends PageRequest {
@@ -204,6 +217,14 @@ export interface FilePageRequest extends PageRequest {
   captureGaps?: Array<{ bytes: number; detail?: string }>;
   /** Pin pagination to this many leading bytes; defaults to the size at first read. */
   snapshotBytes?: number;
+  /**
+   * Start an uncursored read from the newest retained byte instead of byte 0
+   * (issue #618). The first page is end-anchored and `nextCursor` then pages
+   * toward the oldest byte; reaching the start hands back an append-ready
+   * cursor. A backward cursor keeps this direction on its own, so the request
+   * flag is only needed to start such a pager.
+   */
+  direction?: "backward";
 }
 
 export interface VerbatimPage {
@@ -223,6 +244,8 @@ export interface VerbatimPage {
   endByte?: number;
   appendReady?: boolean;
   pendingBytes?: number;
+  /** `backward` marks an end-anchored page whose `nextCursor` reads earlier bytes. */
+  direction?: "backward";
   /** Where `nextCursor` is accepted when that is not the tool that returned it. */
   via?: string;
 }
@@ -285,10 +308,15 @@ interface CursorPayload {
   i?: string;
   h?: string;
   hl?: number;
+  /** Position witness: the byte window before the offset (`k: "f"`), or the source snapshot (`k: "t"`). */
   w?: string;
   c?: string;
   f?: string;
   a?: 1;
+  /** End-anchored page: `o` is the page's upper bound and `nextCursor` reads earlier bytes. */
+  b?: 1;
+  /** Integrity tag over every other field; see `cursorIntegrityTag`. */
+  x?: string;
 }
 
 function positiveInt(value: unknown): number | undefined {
@@ -437,10 +465,44 @@ function resourceTag(resource: string): string {
   return hashBytes(encoder.encode(resource)).slice(0, 16);
 }
 
-function encodeCursor(payload: CursorPayload): string {
-  return CURSOR_PREFIX + Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+/**
+ * Cursors that carry an offset are tagged, so a hand-copied cursor can be
+ * recognised as damaged. Status cursors are not: they hold no offset, a
+ * damaged one already falls back to the current facts, and their payload sits
+ * in 1 KiB status responses where every cursor byte competes with decision
+ * facts (`remote setup: …` was clipped once the cursor grew).
+ */
+function isTaggedCursorKind(kind: CursorPayload["k"]): boolean {
+  return kind !== "s";
 }
 
+function encodeCursor(payload: CursorPayload): string {
+  const tagged = isTaggedCursorKind(payload.k) ? { ...payload, x: cursorIntegrityTag(payload) } : payload;
+  return CURSOR_PREFIX + Buffer.from(JSON.stringify(tagged), "utf8").toString("base64url");
+}
+
+/**
+ * Integrity tag over every payload field except the tag itself.
+ *
+ * Cursors are re-typed by the model. One mistyped base64url character used to
+ * decode into a payload that still parsed: when the changed field was the
+ * source digest the pager reported `source-replaced`, restarted at byte 0 and
+ * minted the same cursor again — the caller could never reach the rest of the
+ * text (#617). The tag makes a near-miss detectable as corruption instead of
+ * being read as a different source.
+ */
+function cursorIntegrityTag(payload: CursorPayload): string {
+  const { x: _ignored, ...rest } = payload;
+  // 36 bits: enough to catch an accidental edit, and short enough that the
+  // cursor stays a small thing to copy.
+  return shortHash(encoder.encode(JSON.stringify(rest))).slice(0, 6);
+}
+
+/**
+ * Structural decode only: a corrupted payload still reports its kind and
+ * resource so it can be classified and, where the offset is still meaningful,
+ * resumed. `cursorIntegrityOk` is the separate integrity verdict.
+ */
 function decodeCursor(cursor: string | undefined): CursorPayload | undefined {
   if (!cursor || !cursor.startsWith(CURSOR_PREFIX)) return undefined;
   try {
@@ -450,6 +512,39 @@ function decodeCursor(cursor: string | undefined): CursorPayload | undefined {
     return undefined;
   }
   return undefined;
+}
+
+/** False when any payload field was altered after the cursor was minted. */
+function cursorIntegrityOk(parsed: CursorPayload): boolean {
+  if (!isTaggedCursorKind(parsed.k)) return true;
+  return typeof parsed.x === "string" && parsed.x === cursorIntegrityTag(parsed);
+}
+
+/**
+ * Digest of one source snapshot at one offset. A text cursor carries it in `v`
+ * and, recomputed against the current text, it answers both questions a
+ * continuation needs: is this still the same source, and is this still its
+ * offset? A changed source or a shifted offset changes it (#617).
+ */
+function textSnapshotDigest(revision: string, offset: number): string {
+  return shortHash(encoder.encode(`t\0${revision}\0${offset}`));
+}
+
+/**
+ * Second, independent witness of the same fact, stored in `w`: the snapshot,
+ * its length, and the offset. Both witnesses are recomputed from the current
+ * text, so damage to either one alone still leaves a usable cursor — the
+ * reported one-character miscopy keeps the page advancing instead of replaying
+ * page 1 forever, while a genuinely replaced or shifted source fails both.
+ */
+function textOffsetWitness(revision: string, offset: number, length: number): string {
+  return shortHash(encoder.encode(`t\0${revision}\0${length}\0${offset}`)).slice(0, 6);
+}
+
+/** Decoded page offset, or NaN when the field did not survive decoding. */
+function cursorOffset(parsed: CursorPayload): number {
+  const o = parsed.o;
+  return typeof o === "number" && Number.isFinite(o) ? Math.floor(o) : Number.NaN;
 }
 
 export function cursorKind(cursor: string | undefined): "t" | "f" | "s" | "l" | undefined {
@@ -490,6 +585,14 @@ function emptyPage(overrides: Partial<PageResult> & Pick<PageResult, "revision" 
  * Page exact UTF-8 text. Consecutive pages concatenate to the original string.
  * Cursors are caller-owned: the same cursor plus maxBytes always yields the
  * same page, and two callers do not share consumption.
+ *
+ * A cursor that fails its integrity check is reported as `cursor-corrupt`,
+ * never as a replaced source, and never replays page 1 blindly: it resumes at
+ * its decoded offset only when a witness recomputed from the current text
+ * proves that offset still belongs to the same snapshot. Otherwise — a
+ * replaced, grown, or shifted source, a damaged offset, or a cursor from
+ * before the witnesses existed — the page restarts at byte 0, so no unread
+ * text is skipped (#617).
  */
 export function pageVerbatimText(text: string, request: PageRequest = {}): PageResult {
   const maxBytes = pagerBudget(request.maxBytes, OUTPUT_BUDGET_BYTES.answer);
@@ -500,20 +603,43 @@ export function pageVerbatimText(text: string, request: PageRequest = {}): PageR
   let reset: PageReset | undefined;
   const parsed = decodeCursor(request.cursor);
   if (request.cursor) {
-    if (!parsed || parsed.k !== "t" || (parsed.r ?? undefined) !== resource) {
+    if (!parsed || parsed.k !== "t") {
       reset = "stale-cursor";
-    } else if (parsed.v !== revision) {
-      reset = "source-replaced";
+    } else if (!cursorIntegrityOk(parsed) || parsed.w === undefined) {
+      // A payload without its position witness (a cursor minted before this
+      // format) is treated the same as a damaged one: its offset is unproven.
+      reset = "cursor-corrupt";
+      if ((parsed.r ?? undefined) === resource) {
+        const decoded = cursorOffset(parsed);
+        const inside = Number.isFinite(decoded) && decoded >= 0 && decoded <= encoded.length;
+        // Two independent witnesses of "this snapshot at this offset": either
+        // one surviving a single damaged field keeps a static-source cursor
+        // moving instead of looping on page 1.
+        const witnessed = inside && (
+          parsed.v === textSnapshotDigest(revision, decoded)
+          || (parsed.w !== undefined && parsed.w === textOffsetWitness(revision, decoded, encoded.length))
+        );
+        if (witnessed) offset = decoded;
+      }
+    } else if ((parsed.r ?? undefined) !== resource) {
+      reset = "stale-cursor";
     } else {
       offset = Math.min(encoded.length, Math.max(0, Math.floor(parsed.o ?? 0)));
+      if (parsed.v !== textSnapshotDigest(revision, offset)) {
+        // Same cursor, different text: restart at byte 0 rather than serving
+        // bytes from a position that no longer means what it did.
+        reset = "source-replaced";
+        offset = 0;
+      }
     }
   }
   const mint = (o: number): string => encodeCursor({
     k: "t",
     ...(resource !== undefined ? { r: resource } : {}),
-    v: revision,
+    v: textSnapshotDigest(revision, o),
     o,
     n: encoded.length,
+    w: textOffsetWitness(revision, o, encoded.length),
   });
   const make = (start: number, end: number): PageResult => ({
     text: decoder.decode(encoded.subarray(start, end)),
@@ -598,6 +724,35 @@ function fileReadError(
 }
 
 /**
+ * Start byte of an end-anchored page inside `window` (the bytes immediately
+ * before its upper bound). A backward page starts just after the first newline
+ * that keeps at least half the window, so consecutive pages concatenate; when
+ * no such newline exists (one oversized line) it starts on the next whole code
+ * point and the page begins mid-line rather than stalling.
+ */
+function backwardPageStart(window: Buffer): number {
+  let start = 0;
+  while (start < window.length && isContinuation(window[start]!)) start += 1;
+  const floor = Math.ceil(window.length / 2);
+  for (let i = start; i < floor; i += 1) {
+    if (window[i] === NEWLINE) return i + 1;
+  }
+  return start;
+}
+
+/**
+ * Largest boundary <= `end` that does not split a UTF-8 sequence, looking only
+ * at the bytes retained up to `end`. Used for the newest retained byte, which
+ * a writer can leave inside a code point it has not finished emitting.
+ */
+function completeCodePointEnd(fd: number, end: number): number {
+  if (end <= 0) return 0;
+  const from = Math.max(0, end - 4);
+  const tail = readAt(fd, from, end - from);
+  return from + utf8SafeEnd(tail, 0, tail.length);
+}
+
+/**
  * Page retained file bytes without skipping unread ranges. Snapshot high-water
  * marks keep a page stable while the file appends. Cursors bind the resource
  * (task/run plus session scope), the file object's identity, the consumer
@@ -639,32 +794,46 @@ export function pageRetainedFile(path: string, request: FilePageRequest = {}): P
     let appendReady = false;
 
     if (request.cursor) {
-      if (!parsed || parsed.k !== "f" || parsed.r !== resource) {
+      if (!parsed || parsed.k !== "f") {
         reset = "stale-cursor";
-      } else if (parsed.i !== identity) {
-        reset = "source-replaced";
       } else {
-        const o = Math.max(0, Math.floor(parsed.o ?? 0));
-        const n = Math.max(0, Math.floor(parsed.n ?? 0));
-        const headLength = Math.max(0, Math.floor(parsed.hl ?? 0));
-        const generationChanged = generation !== undefined && parsed.g !== generation;
-        const bytesIntact = o <= n
-          && n <= size
-          && headLength <= size
-          && (!parsed.h || shortHash(head.subarray(0, headLength)) === parsed.h)
-          && (o === 0 || windowHash(o) === parsed.w);
-        if (generationChanged) {
-          // The consumer declared a compaction/replacement of this file.
-          reset = "compacted";
-        } else if (!bytesIntact) {
-          // Same file object as far as stat can tell, but the bytes behind the
-          // cursor changed without a declared compaction: rewritten in place,
-          // or deleted and recreated on a reused inode with coarse timestamps.
-          reset = "source-replaced";
+        // A hand-copied cursor is never reported as a replaced source: that was
+        // a false claim, and the restart replayed page 1 forever (#617). A
+        // damaged payload is also never resumed: its offset *and* its direction
+        // come from a payload that failed its integrity check, so the pass
+        // restarts at its own anchor (byte 0 forward, the newest byte backward)
+        // instead of continuing somewhere the caller never reached (#617 R1).
+        const corrupt = !cursorIntegrityOk(parsed);
+        const reason = (clean: PageReset): PageReset => (corrupt ? "cursor-corrupt" : clean);
+        if (parsed.r !== resource) {
+          reset = reason("stale-cursor");
+        } else if (parsed.i !== identity) {
+          reset = reason("source-replaced");
+        } else if (corrupt) {
+          reset = "cursor-corrupt";
         } else {
-          offset = o;
-          snapshot = n;
-          appendReady = parsed.a === 1;
+          const o = Math.max(0, Math.floor(parsed.o ?? 0));
+          const n = Math.max(0, Math.floor(parsed.n ?? 0));
+          const headLength = Math.max(0, Math.floor(parsed.hl ?? 0));
+          const generationChanged = generation !== undefined && parsed.g !== generation;
+          const bytesIntact = o <= n
+            && n <= size
+            && headLength <= size
+            && (!parsed.h || shortHash(head.subarray(0, headLength)) === parsed.h)
+            && (o === 0 || windowHash(o) === parsed.w);
+          if (generationChanged) {
+            // The consumer declared a compaction/replacement of this file.
+            reset = "compacted";
+          } else if (!bytesIntact) {
+            // Same file object as far as stat can tell, but the bytes behind the
+            // cursor changed without a declared compaction: rewritten in place,
+            // or deleted and recreated on a reused inode with coarse timestamps.
+            reset = "source-replaced";
+          } else {
+            offset = o;
+            snapshot = n;
+            appendReady = parsed.a === 1;
+          }
         }
       }
     }
@@ -673,7 +842,7 @@ export function pageRetainedFile(path: string, request: FilePageRequest = {}): P
       snapshot = Math.max(snapshot, initialSnapshot());
     }
 
-    const mint = (o: number, n: number, append: boolean): string => {
+    const mint = (o: number, n: number, append: boolean, back = false): string => {
       const window = windowHash(o);
       return encodeCursor({
         k: "f",
@@ -686,12 +855,87 @@ export function pageRetainedFile(path: string, request: FilePageRequest = {}): P
         hl: head.length,
         ...(window ? { w: window } : {}),
         ...(append ? { a: 1 } : {}),
+        ...(back ? { b: 1 as const } : {}),
       });
     };
     const base = {
       gaps: suppliedGaps,
       ...(reset ? { reset } : {}),
     };
+
+    // A backward cursor keeps its own direction (even after a reset, which
+    // restarts at the newest bytes); the request flag starts one.
+    const backward = parsed?.k === "f" ? parsed.b === 1 : request.direction === "backward";
+    if (backward) {
+      if (!request.cursor || reset) offset = snapshot;
+      if (offset > snapshot) offset = snapshot;
+      const mintBackward = (o: number): string => mint(o, snapshot, false, true);
+      const revision = fileRevision(generation, identity, snapshot);
+      // The newest retained byte can stop inside a code point the writer has not
+      // finished. Withhold that suffix like the forward pager does, and anchor
+      // the append cursor at its first byte, so the whole character arrives once
+      // the writer completes it. Every other page starts where a previous page
+      // already aligned.
+      const snapshotEnd = completeCodePointEnd(opened, snapshot);
+      if (offset <= 0) {
+        // Nothing earlier is retained: hand back the forward append-ready cursor.
+        return emptyPage({
+          revision,
+          cursor: mintBackward(0),
+          nextCursor: mint(snapshotEnd, snapshotEnd, true),
+          totalBytes: snapshot,
+          startByte: 0,
+          endByte: 0,
+          appendReady: true,
+          direction: "backward",
+          ...(snapshotEnd < snapshot ? { pendingBytes: snapshot - snapshotEnd } : {}),
+          ...base,
+        });
+      }
+      const from = Math.max(0, offset - maxBytes);
+      const window = readAt(opened, from, offset - from);
+      const withheldFrom = offset === snapshot ? snapshotEnd : offset;
+      const pendingBytes = offset - withheldFrom;
+      // Byte 0 is always a valid page start; otherwise start at the first line
+      // boundary that keeps as much of the window as possible.
+      const reachedStart = from === 0;
+      const start = reachedStart ? 0 : from + backwardPageStart(window.subarray(0, withheldFrom - from));
+      if (!reachedStart && start >= withheldFrom) {
+        // Budget is smaller than the next code point behind the cursor: stay put.
+        const here = mintBackward(offset);
+        return emptyPage({
+          revision,
+          cursor: here,
+          nextCursor: here,
+          hasMore: true,
+          omittedBytes: offset,
+          totalBytes: snapshot,
+          startByte: offset,
+          endByte: offset,
+          direction: "backward",
+          ...(pendingBytes > 0 ? { pendingBytes } : {}),
+          ...base,
+        });
+      }
+      return {
+        text: decoder.decode(window.subarray(start - from, withheldFrom - from)),
+        revision,
+        cursor: mintBackward(offset),
+        // Reaching the oldest byte hands the whole pass back to forward polling:
+        // the append cursor sits on the newest complete code point, so a withheld
+        // character is returned whole rather than skipped.
+        nextCursor: reachedStart ? mint(snapshotEnd, snapshotEnd, true) : mintBackward(start),
+        hasMore: !reachedStart,
+        omittedBytes: start,
+        totalBytes: snapshot,
+        startByte: start,
+        endByte: withheldFrom,
+        ...(reachedStart ? { appendReady: true } : {}),
+        ...(pendingBytes > 0 ? { pendingBytes } : {}),
+        direction: "backward",
+        ...base,
+      };
+    }
 
     if (offset > snapshot) offset = snapshot;
     if (offset >= snapshot) {
@@ -1087,7 +1331,9 @@ function formatContinuation(info: {
       ? `omittedRows=${page.omittedRows}`
       : `omittedBytes=${page.omittedBytes}`;
     const cursor = page.nextCursor ? ` nextCursor=${page.nextCursor}${page.via ? ` (${page.via})` : ""}` : "";
-    lines.push(`hasMore=${page.hasMore} ${amount}${cursor}`);
+    // End-anchored pages count earlier bytes and continue toward the start.
+    const direction = page.direction === "backward" ? " (newest-first page; nextCursor reads earlier bytes)" : "";
+    lines.push(`hasMore=${page.hasMore} ${amount}${cursor}${direction}`);
   } else if (page?.appendReady && page.nextCursor) {
     lines.push(`end nextCursor=${page.nextCursor} (reuse to read only bytes appended later)`);
   }

@@ -66,7 +66,16 @@ function isGoalStatus(value: unknown): value is GoalStatus {
 }
 
 function isPauseReason(value: unknown): value is GoalPauseReason {
-  return value === "interrupt" || value === "permission-blocker" || value === "handback";
+  return value === "interrupt" || value === "handback";
+}
+
+/**
+ * Goals persisted by older releases can carry `permission-blocker`. Reports no
+ * longer pause a goal, so such a goal resumes like `/goal pause` (human-only
+ * `/goal resume` or alt+g); loading grants no permission and rewrites nothing.
+ */
+function normalizedPauseReason(value: unknown): GoalPauseReason | undefined {
+  return isPauseReason(value) ? value : undefined;
 }
 
 function isGoalLike(value: unknown): value is GoalLike {
@@ -119,12 +128,13 @@ function normalizeGoal(goal: GoalLike): GoalSnapshot {
   const now = unixSeconds();
   const createdAt = typeof goal.createdAt === "number" ? goal.createdAt : now;
   const updatedAt = typeof goal.updatedAt === "number" ? goal.updatedAt : createdAt;
+  const pauseReason = goal.status === "paused" ? normalizedPauseReason(goal.pauseReason) : undefined;
   return {
     goalId: goal.goalId,
     objective: goal.objective,
     ...(isCommandBinding(goal.command) ? { command: goal.command } : {}),
     status: goal.status,
-    ...(goal.status === "paused" && isPauseReason(goal.pauseReason) ? { pauseReason: goal.pauseReason } : {}),
+    ...(pauseReason ? { pauseReason } : {}),
     tokenBudget: typeof goal.tokenBudget === "number" ? goal.tokenBudget : null,
     usage: {
       tokensUsed: typeof goal.usage?.tokensUsed === "number" ? goal.usage.tokensUsed : 0,

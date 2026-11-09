@@ -11,7 +11,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import extension, { toolContext } from "./extension-fixture.js";
 import { currentContinuationState, currentGoalSnapshot } from "../src/goal-state.js";
 import { currentWorkflowOwner } from "../src/workflow.js";
-import { runScheduler, schedulerWaitUntil, waitUntil } from "../src/workflow-gates.js";
+import { completionGate, runScheduler, schedulerWaitUntil, waitUntil } from "../src/workflow-gates.js";
 
 /** Stands in for resolve-issues' next-actions.mjs: prints the run's stub.json stdout and exits with its status. */
 const STUB_SCHEDULER = `#!/usr/bin/env node
@@ -81,7 +81,7 @@ function setup(t: TestContext, skill = "rush-issues") {
     await commands.get("goal")?.handler(`/skill:${skill} #1`, ctx);
     bindPlan();
   };
-  return { ctx, entries, handlers, commands, userMessages, notices, scheduler, plan, startGoal, run, text, runDir, skillDir };
+  return { ctx, entries, handlers, commands, userMessages, notices, scheduler, plan, bindPlan, startGoal, run, text, runDir, skillDir };
 }
 
 function setupRealScheduler(t: TestContext) {
@@ -187,6 +187,55 @@ for (const tool of ["update_goal", "release_workflow"]) {
   }
 }
 
+test("real scheduler: a malformed task plan refuses completion instead of allowing it", async (t) => {
+  const h = setupRealScheduler(t);
+  await h.startGoal();
+  h.plan([{ id: "2", status: "succeeded" }]);
+  h.tree();
+  h.cli("--sync");
+  writeFileSync(join(h.runDir, "task-plan.json"), "{ not json");
+  const before = runFiles(h.runDir);
+  const result = await h.run("update_goal", { status: "complete" });
+  assert.equal(currentGoalSnapshot(h.ctx)?.status, "active");
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+  assert.match(h.text(result), /could not be checked \(the scheduler failed \(next-actions: cannot read .*task-plan\.json/);
+  assert.doesNotMatch(h.text(result), /Warning:/);
+  assert.equal(h.calls(), 1, "the malformed plan never reaches a live fetch");
+  assert.deepEqual(runFiles(h.runDir), before, "a refused completion leaves the run files alone");
+});
+
+for (const scenario of ["deleted", "unreadable"] as const)
+test(`real scheduler: a ${scenario} bound plan refuses completion`, async (t) => {
+  const h = setupRealScheduler(t);
+  await h.startGoal();
+  h.plan([{ id: "2", status: "succeeded" }]);
+  h.tree();
+  h.cli("--sync");
+  const path = join(h.runDir, "task-plan.json");
+  rmSync(path);
+  if (scenario === "unreadable") mkdirSync(path); // A directory cannot be read as plan JSON on supported hosts.
+  const result = await h.run("update_goal", { status: "complete" });
+  assert.equal(currentGoalSnapshot(h.ctx)?.status, "active");
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+  assert.match(h.text(result), /Goal not marked complete/);
+  assert.doesNotMatch(h.text(result), /Warning:/);
+  assert.equal(h.calls(), 1, "an unavailable plan must not reach a live fetch");
+});
+
+test("resolve-issues retains its Goal and owner when completion cannot be verified", async (t) => {
+  const h = setup(t, "resolve-issues");
+  await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+  await h.commands.get("goal")?.handler("/skill:resolve-issues #1", h.ctx);
+  const unbound = await h.run("update_goal", { status: "complete" });
+  assert.match(h.text(unbound), /no task plan is bound/);
+  h.bindPlan();
+  writeFileSync(join(h.runDir, "stub.json"), JSON.stringify({ exit: 2, stderr: "cannot read plan" }));
+  const failed = await h.run("update_goal", { status: "complete" });
+  assert.match(h.text(failed), /could not be checked/);
+  assert.equal(currentGoalSnapshot(h.ctx)?.status, "active");
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "resolve-issues");
+});
+
 test("real scheduler: cached due work and heartbeat probes never fetch GitHub", async (t) => {
   const h = setupRealScheduler(t);
   await h.startGoal();
@@ -273,30 +322,76 @@ test("update_goal complete is refused when the scheduler prints nothing due, bec
   assert.match(h.text(result), /workers are still running; the scheduler has not reported finish/);
 });
 
-test("update_goal fails open with a warning when the scheduler errors, is missing, or the plan is unbound", async (t) => {
+test("update_goal complete is refused when the scheduler errors or prints invalid output", async (t) => {
   const failing = setup(t);
   await failing.startGoal();
   writeFileSync(join(failing.runDir, "stub.json"), JSON.stringify({ exit: 2, stderr: "next-actions: plan is corrupt" }));
   const errored = await failing.run("update_goal", { status: "complete" });
-  assert.equal(currentGoalSnapshot(failing.ctx)?.status, "complete");
-  assert.match(failing.text(errored), /Goal marked complete\. Warning: could not check the rush-issues run \(the scheduler failed \(next-actions: plan is corrupt\)\)/);
+  assert.equal(currentGoalSnapshot(failing.ctx)?.status, "active");
+  assert.equal((errored.details as { ok: boolean }).ok, false);
+  assert.equal(currentWorkflowOwner(failing.entries)?.name, "rush-issues", "a refused completion keeps the workflow bound");
+  const message = failing.text(errored);
+  assert.match(message, /Goal not marked complete: the rush-issues run could not be checked \(the scheduler failed \(next-actions: plan is corrupt\)\)/);
+  assert.match(message, /Fix the scheduler, or rebind the run with \/skill:rush-issues if its plan moved, then call update_goal again/);
+  assert.doesNotMatch(message, /Goal marked complete/);
 
   const garbled = setup(t);
   await garbled.startGoal();
   writeFileSync(join(garbled.runDir, "stub.json"), JSON.stringify({ exit: 0, stdout: "not json" }));
-  assert.match(garbled.text(await garbled.run("update_goal", { status: "complete" })), /Warning: .*not JSON/);
+  assert.equal(currentGoalSnapshot(garbled.ctx)?.status, "active");
+  assert.match(garbled.text(await garbled.run("update_goal", { status: "complete" })), /could not be checked \(the scheduler printed output that is not JSON\)/);
 
-  const missing = setup(t);
-  await missing.startGoal();
-  rmSync(join(missing.runDir, "..", "..", "..", "skills", "rush-issues", "scripts"), { recursive: true, force: true });
-  assert.match(missing.text(await missing.run("update_goal", { status: "complete" })), /Warning: rush-issues ships no scheduler/);
-  assert.equal(currentGoalSnapshot(missing.ctx)?.status, "complete");
+  const malformed = setup(t);
+  await malformed.startGoal();
+  writeFileSync(join(malformed.runDir, "stub.json"), JSON.stringify({ exit: 1, stdout: { due: [FINISH, { unit: "261", detail: "no action here" }] } }));
+  const dropped = await malformed.run("update_goal", { status: "complete" });
+  assert.equal(currentGoalSnapshot(malformed.ctx)?.status, "active", "a malformed due entry invalidates the answer, so finish cannot pass");
+  assert.equal(currentWorkflowOwner(malformed.entries)?.name, "rush-issues");
+  assert.match(malformed.text(dropped), /due entry without an action/);
+});
 
+test("update_goal complete is refused when no plan is bound or the issue workflow's scheduler is missing", async (t) => {
   const unbound = setup(t);
   await unbound.handlers.get("session_start")?.({ reason: "startup" }, unbound.ctx);
   await unbound.commands.get("goal")?.handler("/skill:rush-issues #1", unbound.ctx);
-  assert.match(unbound.text(await unbound.run("update_goal", { status: "complete" })), /Warning: no task plan is bound for rush-issues/);
-  assert.equal(currentGoalSnapshot(unbound.ctx)?.status, "complete");
+  const unboundResult = await unbound.run("update_goal", { status: "complete" });
+  assert.equal(currentGoalSnapshot(unbound.ctx)?.status, "active");
+  assert.equal(currentWorkflowOwner(unbound.entries)?.name, "rush-issues");
+  assert.match(unbound.text(unboundResult), /Goal not marked complete: no task plan is bound for rush-issues yet/);
+  assert.match(unbound.text(unboundResult), /Bind the run's task plan with update_todo\(\{workflow:\{path,revision\}\}\), or rebind the run with \/skill:rush-issues/);
+
+  const missing = setup(t);
+  await missing.startGoal();
+  rmSync(join(missing.skillDir, "scripts"), { recursive: true, force: true });
+  const missingResult = await missing.run("update_goal", { status: "complete" });
+  assert.equal(currentGoalSnapshot(missing.ctx)?.status, "active");
+  assert.equal(currentWorkflowOwner(missing.entries)?.name, "rush-issues");
+  assert.match(missing.text(missingResult), /Goal not marked complete: rush-issues ships no scheduler/);
+  assert.match(missing.text(missingResult), /Restore the run's scheduler or rebind the run with \/skill:rush-issues/);
+});
+
+test("completion gate refuses a scheduler timeout", async (t) => {
+  const h = setup(t);
+  await h.startGoal();
+  writeFileSync(join(h.skillDir, "scripts", "next-actions.mjs"), "setTimeout(() => {}, 30_000);\n");
+  const owner = currentWorkflowOwner(h.entries)!;
+  const result = await completionGate(h.entries, owner, { timeoutMs: 150 });
+  assert.equal(result.allow, false);
+  if (result.allow) assert.fail("a timed-out scheduler must not allow completion");
+  assert.equal(currentGoalSnapshot(h.ctx)?.status, "active");
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+  assert.match(result.message, /the scheduler timed out after 150 ms/);
+});
+
+test("a coordinator with no scheduler keeps the fail-open completion warning", async (t) => {
+  const h = setup(t, "fixture");
+  await h.handlers.get("session_start")?.({ reason: "startup" }, h.ctx);
+  await h.commands.get("goal")?.handler("/skill:fixture #9", h.ctx);
+  rmSync(join(h.skillDir, "scripts"), { recursive: true, force: true });
+  h.bindPlan();
+  const result = await h.run("update_goal", { status: "complete" });
+  assert.equal(currentGoalSnapshot(h.ctx)?.status, "complete");
+  assert.match(h.text(result), /Goal marked complete\. Warning: fixture ships no scheduler, so the run was not checked\./);
 });
 
 test("an unrelated goal is never gated", async (t) => {
@@ -383,7 +478,10 @@ test("auto-bind skips other skills, synthetic input, and completed goals are rep
   assert.equal(currentGoalSnapshot(h.ctx), null);
   await h.handlers.get("input")?.({ source: "interactive", text: "/skill:rush-issues #1" }, h.ctx);
   const first = currentGoalSnapshot(h.ctx);
+  h.bindPlan();
+  h.scheduler([FINISH]);
   await h.run("update_goal", { status: "complete" });
+  assert.equal(currentGoalSnapshot(h.ctx)?.status, "complete");
   await h.handlers.get("input")?.({ source: "interactive", text: "/skill:rush-issues #2" }, h.ctx);
   assert.notEqual(currentGoalSnapshot(h.ctx)?.goalId, first?.goalId);
   assert.equal(currentGoalSnapshot(h.ctx)?.status, "active");

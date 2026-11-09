@@ -7,12 +7,14 @@
  *
  * No agent imports here. The Pi adapter is src/move/pi-adapter.ts.
  */
+import { statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import type { BundleManifest, CreateBundleOptions } from "./bundle.ts";
 import type { MoveCommand } from "../protocol.ts";
 import type { OwnershipStore } from "./ownership.ts";
 
 /** What the adapter hands the core to bundle a session. The core adds `outFile` and `ownership`. */
-export type SessionBundleSpec = Pick<CreateBundleOptions, "cwd" | "agent" | "session" | "sessionFiles" | "stateFiles" | "baseRef">;
+export type SessionBundleSpec = Pick<CreateBundleOptions, "cwd" | "agent" | "session" | "sessionFiles" | "stateFiles" | "baseRef" | "includeWorkspace" | "compression">;
 
 export interface MovePreflightContext {
   side: "source" | "target";
@@ -24,6 +26,8 @@ export interface MovePreflightContext {
 
 export interface ImportRequest {
   sessionId: string;
+  /** Original logical id in the bundle; different only for an explicit copy. */
+  sourceSessionId?: string;
   moveId: string;
   manifest: BundleManifest;
   /** Directory holding the verified bundle members (`session/<name>`, `state/<name>`). Removed by the core afterwards. */
@@ -50,7 +54,7 @@ export interface AgentMoveAdapter {
 
   // ---- source side ----
   hasSession(sessionId: string): boolean;
-  /** True while a turn is running or starting; the core waits for false before fencing. */
+  /** True while execution, prompt preflight, bash or background work is active. Pending inputs/dialogs must also refuse transfer. */
   isBusy(sessionId: string): boolean;
   /** Stop serving the session without forgetting it (it is fenced). */
   stop(sessionId: string): Promise<void>;
@@ -62,14 +66,14 @@ export interface AgentMoveAdapter {
   resume(sessionId: string): Promise<void>;
 
   // ---- target side ----
-  /** Throw if a live session with this id already runs here and cannot be replaced. */
+  /** Throw for any existing session except a known, safely retired tombstone. */
   assertCanImport(sessionId: string): void;
   /** Throw if this bundle cannot be read by this daemon (agent kind, version). */
   checkBundle(manifest: BundleManifest): void;
   /** Capture what `restore` needs to undo `importSession`. */
   snapshot(sessionId: string): unknown;
   /** Register the session on this daemon, running. May throw; the core then calls `restore` if ownership was acquired. */
-  importSession(request: ImportRequest): Promise<void>;
+  importSession(request: ImportRequest): Promise<void | { sessionFile?: string }>;
   /** Undo a failed `importSession`. */
   restore(sessionId: string, snapshot: unknown): Promise<void>;
 
@@ -78,4 +82,28 @@ export interface AgentMoveAdapter {
 
   /** Optional checks run before the source fences and before the target accepts a bundle. #477 supplies the Pi checks. */
   preflight?(context: MovePreflightContext): void | Promise<void>;
+}
+
+/** Session-only transfers may use a populated workspace, but never create one. */
+export function assertExistingDirectory(cwd: string | undefined): asserts cwd is string {
+  if (!cwd || !isAbsolute(cwd)) throw new Error("Session-only transfer requires an existing absolute destination directory (toCwd)");
+  if (!statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`Session-only destination ${cwd} must be an existing directory`);
+}
+
+/** Only the parsed header changes. Conversation entries and their parent ids stay intact. */
+export function rewriteSessionTranscript(transcript: string, sourceId: string, destinationId: string, cwd: string): string {
+  const newline = transcript.indexOf("\n");
+  const first = newline === -1 ? transcript : transcript.slice(0, newline);
+  let header: Record<string, unknown>;
+  try {
+    header = JSON.parse(first);
+  } catch {
+    throw new Error("Invalid session transcript header");
+  }
+  if (!header || header.type !== "session" || (header.id !== sourceId && !(header.id === undefined && sourceId === destinationId))) {
+    throw new Error(`Transcript header must identify source session ${sourceId}`);
+  }
+  // A transferred transcript is self-contained; a source-host parent path would dangle.
+  const { parentSessionFile: _parentFile, parentSession: _parent, ...rest } = header;
+  return `${JSON.stringify({ ...rest, id: destinationId, cwd })}${newline === -1 ? "" : transcript.slice(newline)}`;
 }

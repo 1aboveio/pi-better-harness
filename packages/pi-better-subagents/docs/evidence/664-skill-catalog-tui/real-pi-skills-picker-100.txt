@@ -1,0 +1,7 @@
+Agents / skills
+
+inherit · discovery
+
+→ Inherit                         Remove this override; use the base role's list.
+  No skill catalog                Load no skills (--no-skills).
+  Selected skills…                One or more absolute SKILL.md or skill-directory paths.

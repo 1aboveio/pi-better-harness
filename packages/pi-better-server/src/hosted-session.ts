@@ -1,9 +1,14 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentSession, AgentSessionEvent, RpcCommand, RpcResponse, RpcSessionState } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import type { EventLog, LoggedEvent, Replay } from "./event-log.ts";
 import { UNSUPPORTED_SESSION_COMMANDS } from "./protocol.ts";
+import { assertHostedAdmission, fenceHostedSession, reloadHostedSession } from "./maintenance.ts";
+import type { SessionActivity } from "./session-activity.ts";
 import { UiBridge, type PendingDialog } from "./ui-bridge.ts";
 
 type Listener = (logged: LoggedEvent) => void;
+type CommandWork = { kind: string; dialogs: number };
 
 function ok(id: string | undefined, command: string, data?: unknown): RpcResponse {
   return { ...(id !== undefined ? { id } : {}), type: "response", command, success: true, ...(data !== undefined ? { data } : {}) } as RpcResponse;
@@ -27,6 +32,15 @@ function fail(id: string | undefined, command: string, error: string): RpcRespon
   return { ...(id !== undefined ? { id } : {}), type: "response", command, success: false, error };
 }
 
+/** Model metadata crosses hosts; headers, endpoint URLs and auth must not. */
+function clientModel(model: AgentSession["model"]) {
+  return model ? {
+    id: model.id, provider: model.provider, name: model.name, api: model.api,
+    reasoning: model.reasoning, input: model.input, cost: model.cost,
+    contextWindow: model.contextWindow, maxTokens: model.maxTokens,
+  } : undefined;
+}
+
 /**
  * One live Pi `AgentSession` plus the Pi RPC command dispatcher for it.
  * The dispatcher mirrors Pi's own `runRpcMode` handler for the commands that
@@ -34,10 +48,20 @@ function fail(id: string | undefined, command: string, error: string): RpcRespon
  * difference: `steer` on an idle session starts the next turn.
  */
 export class HostedSession {
+  readonly generation = randomUUID();
+  private activeMessage: unknown;
+  private readonly activeTools = new Map<string, unknown>();
   private readonly listeners = new Set<Listener>();
   private readonly unsubscribe: () => void;
   readonly session: AgentSession;
-  private readonly onActivity: () => void;
+  private readonly onActivity: (kind?: "work" | "metadata") => void;
+  private readonly activity: SessionActivity | undefined;
+  private disposed = false;
+  private runtimeReleased = false;
+  private operations = 0;
+  private readonly commandsInFlight = new Set<CommandWork>();
+  private readonly workContext = new AsyncLocalStorage<CommandWork>();
+  private readonly dialogWork = new Map<string, { command?: CommandWork; toolCallId?: string }>();
   /**
    * Prompts handed to Pi that have not settled yet. Pi sets `isStreaming` only after its
    * preflight awaits, so this covers the starting window that `isStreaming` misses.
@@ -54,32 +78,129 @@ export class HostedSession {
   private readonly ui: UiBridge;
   private controller: unknown;
 
-  constructor(session: AgentSession, log: EventLog, onActivity: () => void) {
+  constructor(session: AgentSession, log: EventLog, onActivity: (kind?: "work" | "metadata") => void, activity?: SessionActivity) {
     this.session = session;
     this.log = log;
     this.onActivity = onActivity;
-    this.ui = new UiBridge((event) => this.publish(event));
+    this.activity = activity;
+    this.ui = new UiBridge((event) => {
+      const request = event as { type?: string; method?: string; id?: string };
+      if (request.id && request.type === "extension_ui_request" && ["input", "confirm", "select", "editor"].includes(request.method ?? "")) {
+        const work = this.workContext.getStore();
+        this.dialogWork.set(request.id, { command: work, toolCallId: this.activity?.toolCallId });
+        if (work) work.dialogs++;
+      } else if (request.id && request.type === "extension_ui_resolved") {
+        const work = this.dialogWork.get(request.id)?.command;
+        if (work) work.dialogs--;
+        this.dialogWork.delete(request.id);
+      }
+      this.publish(event);
+      this.onActivity("work");
+    });
     this.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+      if (event.type === "message_start" || event.type === "message_update") this.activeMessage = event.message;
+      if (event.type === "message_end") this.activeMessage = undefined;
+      if (event.type === "tool_execution_start" || event.type === "tool_execution_update") this.activeTools.set(event.toolCallId, event);
+      if (event.type === "tool_execution_end") this.activeTools.delete(event.toolCallId);
       this.publish(event);
       if (event.type === "agent_start") this.runIdle = session.waitForIdle().catch(() => undefined);
       if (event.type === "agent_end") for (const release of [...this.releaseOnAgentEnd]) release();
-      if (event.type === "agent_end" || event.type === "turn_end") this.onActivity();
+      this.onActivity("work");
     });
   }
 
   /** Give extensions a UI whose dialogs the daemon routes to the controller (or holds as needs-input). */
   async bindUi(): Promise<void> {
     await this.session.bindExtensions({ uiContext: this.ui.context(), mode: "rpc" });
+    this.activity?.attach(this.session, () => this.onActivity("work"));
+    await this.refreshActivity();
   }
 
   get isStreaming(): boolean {
     return this.session.isStreaming;
   }
 
+  private rpcState(): RpcSessionState {
+    const session = this.session;
+    return {
+      model: session.model, thinkingLevel: session.thinkingLevel,
+      isStreaming: session.isStreaming, isCompacting: session.isCompacting,
+      steeringMode: session.steeringMode, followUpMode: session.followUpMode,
+      sessionFile: session.sessionFile, sessionId: session.sessionId,
+      sessionName: session.sessionName, autoCompactionEnabled: session.autoCompactionEnabled,
+      messageCount: session.messages.length, pendingMessageCount: session.pendingMessageCount,
+    };
+  }
+
+  /** A single JS-turn snapshot plus cursor; the native client subscribes after this cursor. */
+  async clientSnapshot(): Promise<Record<string, unknown>> {
+    if (this.disposed) throw new Error("Session runtime is closed; explicitly reopen the session");
+    this.operations++;
+    try { return await this.readClientSnapshot(); }
+    finally { this.operations--; }
+  }
+
+  private async readClientSnapshot(): Promise<Record<string, unknown>> {
+    const session = this.session;
+    const models = await session.modelRuntime.getAvailable();
+    const manager = session.sessionManager;
+    const commands = session.extensionRunner.getRegisteredCommands().map((entry) => ({ name: entry.invocationName, description: entry.description }));
+    const snapshot = {
+      generation: this.generation, lastSeq: this.lastSeq,
+      sessionId: session.sessionId, cwd: manager.getCwd(), name: session.sessionName,
+      sessionFile: session.sessionFile, state: { ...this.rpcState(), model: clientModel(session.model), lastSeq: this.lastSeq, hasController: this.hasController, needsInput: this.needsInput, steering: session.getSteeringMessages(), followUp: session.getFollowUpMessages() },
+      messages: session.messages, entries: manager.getEntries(), leafId: manager.getLeafId(),
+      tools: session.getAllTools().map((tool) => ({ name: tool.name, description: tool.description, parameters: session.getToolDefinition(tool.name)?.parameters })),
+      commands, models: models.map(clientModel), contextUsage: session.getContextUsage(), stats: session.getSessionStats(),
+      activeMessage: this.activeMessage, activeTools: [...this.activeTools.values()],
+    };
+    // Detach mutable message/entry arrays before yielding back to another model event.
+    return JSON.parse(JSON.stringify(snapshot));
+  }
+
   /** A turn is starting or running: queue steers for it instead of starting another one. */
   get turnActive(): boolean {
     return this.promptsInFlight > 0 || this.session.isStreaming;
   }
+
+  /** Waiting for human input is idle, even when Pi still considers its turn streaming. */
+  get executionActive(): boolean {
+    const dialogs = [...this.dialogWork.values()];
+    const modelBlocked = dialogs.some((work) => work.toolCallId || !work.command || ["prompt", "steer", "follow_up"].includes(work.command.kind));
+    const compactBlocked = dialogs.some((work) => !work.toolCallId && (!work.command || work.command.kind === "compact"));
+    const bashBlocked = dialogs.some((work) => !work.toolCallId && (!work.command || work.command.kind === "bash"));
+    const blockedTools = new Set(dialogs.map((work) => work.toolCallId));
+    const runningTool = [...this.activeTools.keys()].some((id) => !blockedTools.has(id));
+    return (this.activity?.busy ?? false) || runningTool || [...this.commandsInFlight].some((work) => work.dialogs === 0) ||
+      (this.turnActive && !modelBlocked) || (this.session.isCompacting && !compactBlocked) ||
+      (this.session.isBashRunning && !bashBlocked);
+  }
+
+  get activityChecking(): boolean { return this.activity?.checking ?? false; }
+  get operationsActive(): boolean { return this.operations > 0; }
+  get isDisposed(): boolean { return this.disposed; }
+
+  refreshActivity(): Promise<void> { return this.activity?.refresh() ?? Promise.resolve(); }
+
+  /** Keep subscriptions and controller leases while the host admission fence excludes execution. */
+  async reload(): Promise<void> {
+    if (this.disposed) throw new Error("Session runtime is closed; explicitly close and reopen the session");
+    try {
+      // The owned loader resets activity after SDK shutdown, before constructing extensions.
+      await reloadHostedSession(this.session);
+      this.activity?.attach(this.session, () => this.onActivity("work"));
+      await this.refreshActivity();
+      this.publish({ type: "remote_resources_reloaded" });
+      this.onActivity();
+    } catch (error) {
+      // A partially rebuilt runtime must not execute with an unknown set of guards.
+      this.fence();
+      throw new Error(`Remote reload failed; close and reopen this session. History is preserved. ${String(error)}`);
+    }
+  }
+
+  /** Fence pre-fetched dispatch references before close crosses its first await. */
+  fence(): void { this.disposed = true; fenceHostedSession(this.session); this.activity?.revokeRuntime(); }
 
   get lastSeq(): number {
     return this.log.last;
@@ -94,7 +215,11 @@ export class HostedSession {
     return this.controller !== undefined;
   }
 
+  /** Activation notices share the normal sequence and replay log, including after commitStop. */
+  publishRuntimeEvent(event: unknown): void { this.publish(event); }
+
   private publish(event: unknown): void {
+    if (this.runtimeReleased) return;
     const logged = this.log.append(event);
     for (const listener of this.listeners) listener(logged);
   }
@@ -116,6 +241,7 @@ export class HostedSession {
 
   /** Take the single controller lease. False when another owner holds it. */
   acquireControl(owner: unknown): boolean {
+    if (this.disposed) return false;
     if (this.controller !== undefined && this.controller !== owner) return false;
     this.controller = owner;
     return true;
@@ -138,15 +264,23 @@ export class HostedSession {
 
   /** Resolve a pending dialog; the blocked extension (and so the turn) continues. */
   answerDialog(requestId: string, answer: Parameters<UiBridge["answer"]>[1]): boolean {
-    return this.ui.answer(requestId, answer);
+    if (this.disposed) return false;
+    const answered = this.ui.answer(requestId, answer);
+    if (answered) this.onActivity();
+    return answered;
   }
 
   /** Stop the running turn (if any) and release the session. The session file stays on disk. */
   async dispose(options: { abort: boolean }): Promise<void> {
+    this.fence();
+    this.activity?.dispose();
+    // Abort synchronously before releasing dialogs, so cancellation cannot resume a model/tool continuation.
+    const aborted = options.abort ? this.session.abort().catch(() => undefined) : Promise.resolve();
     this.ui.cancelAll();
-    if (options.abort) await this.session.abort().catch(() => undefined);
+    await aborted;
     this.unsubscribe();
     this.listeners.clear();
+    this.runtimeReleased = true;
     this.log.flush();
     this.session.dispose();
   }
@@ -180,7 +314,7 @@ export class HostedSession {
         released = true;
         this.releaseOnAgentEnd.delete(release);
         this.promptsInFlight--;
-        this.onActivity();
+        this.onActivity("work");
         this.runStrandedQueue();
       };
       this.session
@@ -190,6 +324,7 @@ export class HostedSession {
           source: "rpc",
           // Pi 0.82 passes a boolean (false: rejected); Pi 1.x passes the disposition string and only calls this on success.
           preflightResult: (outcome: unknown) => {
+            if (this.disposed) throw new Error("Session runtime is closed; explicitly reopen the session");
             if (outcome === false) return;
             accepted = true;
             resolve(ok(id, command, dispositionData(outcome)));
@@ -240,7 +375,7 @@ export class HostedSession {
    */
   private runStrandedQueue(): void {
     const session = this.session;
-    if (this.promptsInFlight > 0 || session.isStreaming || session.pendingMessageCount === 0) return;
+    if (this.disposed || this.promptsInFlight > 0 || session.isStreaming || session.pendingMessageCount === 0) return;
     this.promptsInFlight++;
     const refuse = (error: unknown, messages: string[]) => {
       const text = error instanceof Error ? error.message : String(error);
@@ -256,6 +391,7 @@ export class HostedSession {
         await session.prompt(first, {
           source: "rpc",
           preflightResult: (outcome: unknown) => {
+            if (this.disposed) throw new Error("Session runtime is closed; explicitly reopen the session");
             if (outcome === false) return;
             for (const text of rest) steerOrFollowUp(session, "followUp", text, undefined).catch((error: unknown) => refuse(error, [text]));
           },
@@ -271,12 +407,35 @@ export class HostedSession {
       })
       .finally(() => {
         this.promptsInFlight--;
-        this.onActivity();
+        this.onActivity("work");
         this.runStrandedQueue();
       });
   }
 
   async handle(command: RpcCommand): Promise<RpcResponse> {
+    if (this.disposed) return fail(command.id, command.type, "Session runtime is closed; explicitly reopen the session");
+    const passive = command.type.startsWith("get_") || command.type === "set_session_name";
+    try { if (!command.type.startsWith("get_")) assertHostedAdmission(this.session, command.type === "set_session_name"); }
+    catch (error) { return fail(command.id, command.type, String(error)); }
+    this.operations++;
+    const work: CommandWork = { kind: command.type, dialogs: 0 };
+    if (!passive) {
+      // Installed synchronously, before dispatch can reach provider/preflight awaits.
+      this.commandsInFlight.add(work);
+      this.onActivity();
+      this.onActivity("work");
+    }
+    try { return await this.workContext.run(work, () => this.dispatch(command)); }
+    finally {
+      this.operations--;
+      if (!passive) {
+        this.commandsInFlight.delete(work);
+        this.onActivity("work");
+      }
+    }
+  }
+
+  private async dispatch(command: RpcCommand): Promise<RpcResponse> {
     const id = command.id;
     const session = this.session;
     try {
@@ -299,21 +458,8 @@ export class HostedSession {
           await session.abort();
           return ok(id, "abort");
         case "get_state": {
-          const state: RpcSessionState = {
-            model: session.model,
-            thinkingLevel: session.thinkingLevel,
-            isStreaming: session.isStreaming,
-            isCompacting: session.isCompacting,
-            steeringMode: session.steeringMode,
-            followUpMode: session.followUpMode,
-            sessionFile: session.sessionFile,
-            sessionId: session.sessionId,
-            sessionName: session.sessionName,
-            autoCompactionEnabled: session.autoCompactionEnabled,
-            messageCount: session.messages.length,
-            pendingMessageCount: session.pendingMessageCount,
-          };
-          return ok(id, "get_state", { ...state, lastSeq: this.lastSeq, hasController: this.hasController, needsInput: this.needsInput });
+          const state = this.rpcState();
+          return ok(id, "get_state", { ...state, model: clientModel(session.model), lastSeq: this.lastSeq, hasController: this.hasController, needsInput: this.needsInput });
         }
         case "set_model": {
           const models = await session.modelRuntime.getAvailable();
@@ -321,12 +467,14 @@ export class HostedSession {
           if (!model) return fail(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
           await session.setModel(model);
           this.onActivity();
-          return ok(id, "set_model", model);
+          return ok(id, "set_model", clientModel(model));
         }
-        case "cycle_model":
-          return ok(id, "cycle_model", (await session.cycleModel()) ?? null);
+        case "cycle_model": {
+          const result = await session.cycleModel();
+          return ok(id, "cycle_model", result ? { ...result, model: clientModel(result.model) } : null);
+        }
         case "get_available_models":
-          return ok(id, "get_available_models", { models: await session.modelRuntime.getAvailable() });
+          return ok(id, "get_available_models", { models: (await session.modelRuntime.getAvailable()).map(clientModel) });
         case "set_thinking_level":
           session.setThinkingLevel(command.level);
           return ok(id, "set_thinking_level");
@@ -353,8 +501,22 @@ export class HostedSession {
         case "abort_retry":
           session.abortRetry();
           return ok(id, "abort_retry");
-        case "bash":
-          return ok(id, "bash", await session.executeBash(command.command, undefined, { excludeFromContext: command.excludeFromContext, id }));
+        case "bash": {
+          let guardError: string | undefined;
+          const off = session.extensionRunner.onError((error) => { if (error.event === "user_bash") guardError = error.error; });
+          let intercepted: Awaited<ReturnType<typeof session.extensionRunner.emitUserBash>>;
+          try {
+            intercepted = await session.extensionRunner.emitUserBash({ type: "user_bash", command: command.command, excludeFromContext: command.excludeFromContext ?? false, cwd: session.sessionManager.getCwd() });
+            if (this.disposed) throw new Error("Session runtime is closed; explicitly reopen the session");
+            // Older Pi versions report guard errors without throwing; still fail closed.
+            if (guardError) throw new Error(guardError);
+          } finally { off(); }
+          if (intercepted?.result) {
+            session.recordBashResult(command.command, intercepted.result, { excludeFromContext: command.excludeFromContext });
+            return ok(id, "bash", intercepted.result);
+          }
+          return ok(id, "bash", await session.executeBash(command.command, undefined, { excludeFromContext: command.excludeFromContext, operations: intercepted?.operations, id }));
+        }
         case "abort_bash":
           session.abortBash();
           return ok(id, "abort_bash");
@@ -382,7 +544,7 @@ export class HostedSession {
           const name = command.name.trim();
           if (!name) return fail(id, "set_session_name", "Session name cannot be empty");
           session.setSessionName(name);
-          this.onActivity();
+          this.onActivity("metadata");
           return ok(id, "set_session_name");
         }
         case "get_messages":

@@ -5,8 +5,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --strict --skipLibCheck index.ts index.test.ts",
-    "test": "node --import tsx --test index.test.ts"
+    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --strict --skipLibCheck index.ts index.test.ts panels.ts panels.test.ts",
+    "test": "node --import tsx --test *.test.ts"
   },
   "exports": {
     ".": "./index.ts"

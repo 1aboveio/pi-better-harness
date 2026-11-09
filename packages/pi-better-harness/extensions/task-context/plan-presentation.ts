@@ -1,0 +1,158 @@
+import type { Component } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { renderCompactTaskHeader, type CompactTaskHeader } from "./compact-task-header.js";
+
+export interface PlanRenderTheme {
+  fg(color: string, value: string): string;
+}
+
+// `implemented` and `reviewed` are in-progress states a workflow row can show between
+// "code done" and "delivered"; native plans never use them.
+export type DisplayStatus = "completed" | "in_progress" | "implemented" | "reviewed" | "pending" | "blocked" | "failed" | "skipped" | "unknown";
+export interface PlanRow {
+  label: string;
+  title: string;
+  status: DisplayStatus;
+  // Workflow cancellations keep skipped styling but are excluded from the completion total.
+  cancelled?: boolean;
+  statusLabel?: string;
+  details?: string[];
+}
+export interface PlanPresentation {
+  rows: PlanRow[];
+  metadata?: { text: string; color: string }[][];
+}
+
+export const plainPlanTheme: PlanRenderTheme = { fg: (_color, value) => value };
+
+export const COMPACT_PLAN_ROWS = 5;
+
+function compactRowIndices(rows: PlanRow[]): number[] {
+  if (rows.length <= COMPACT_PLAN_ROWS) return rows.map((_, index) => index);
+  let active = rows.flatMap((row, index) =>
+    ["in_progress", "implemented", "reviewed"].includes(row.status) ? [index] : []);
+  if (!active.length) active = rows.flatMap((row, index) =>
+    row.status === "blocked" || row.status === "failed" ? [index] : []);
+  const firstPending = rows.findIndex((row) => row.status === "pending");
+  const anchor = active.at(-1) ?? (firstPending < 0 ? rows.length - 1 : firstPending);
+  const start = Math.max(0, Math.min(anchor - 2, rows.length - COMPACT_PLAN_ROWS));
+  const indices = new Set(active.slice(-COMPACT_PLAN_ROWS));
+  for (let index = start; index < start + COMPACT_PLAN_ROWS && indices.size < COMPACT_PLAN_ROWS; index++) {
+    indices.add(index);
+  }
+  return [...indices].sort((a, b) => a - b);
+}
+
+export function statusStyle(status: DisplayStatus): { glyph: string; color: string; label: string } {
+  switch (status) {
+    case "completed": return { glyph: "✓", color: "success", label: "" };
+    case "in_progress": return { glyph: "●", color: "accent", label: "active" };
+    case "implemented": return { glyph: "◐", color: "accent", label: "implemented" };
+    case "reviewed": return { glyph: "◑", color: "success", label: "review passed" };
+    case "blocked": return { glyph: "!", color: "warning", label: "blocked" };
+    case "failed": return { glyph: "×", color: "error", label: "failed" };
+    case "skipped": return { glyph: "—", color: "dim", label: "skipped" };
+    case "unknown": return { glyph: "?", color: "warning", label: "unknown" };
+    case "pending": return { glyph: "○", color: "dim", label: "" };
+  }
+}
+
+// Keep each piece of external text on one terminal row before measuring it.
+export function planText(value: string): string {
+  return value.replace(/[\r\n\t]/g, " ");
+}
+
+export function renderPlanPresentation(
+  plan: PlanPresentation, width: number, theme: PlanRenderTheme,
+  full = false, selectedIndex = -1, expanded = false,
+  header?: CompactTaskHeader,
+): string[] {
+  const size = Math.max(1, Math.floor(width));
+  const count = (status: DisplayStatus) => plan.rows.filter((row) => row.status === status).length;
+  const total = plan.rows.filter((row) => !row.cancelled).length;
+  const summary = [`${count("completed")}/${total} complete`];
+  for (const [status, label] of [
+    ["in_progress", "in progress"], ["implemented", "implemented"], ["reviewed", "review passed"],
+    ["blocked", "blocked"], ["failed", "failed"],
+    ["skipped", "skipped"], ["unknown", "unknown"],
+  ] as const) {
+    if (count(status)) summary.push(`${count(status)} ${label}`);
+  }
+  if (count("pending") && summary.length === 1) summary.push(`${count("pending")} pending`);
+  const lines = !full && header ? renderCompactTaskHeader(summary[0], size, theme, header)
+    : [theme.fg("warning", "todo") + theme.fg("dim", `  ${summary.join(" · ")}`)];
+  for (const metadata of plan.metadata ?? []) {
+    const content = metadata.map((part) => theme.fg(part.color, planText(part.text))).join("");
+    for (const line of wrapTextWithAnsi(content, Math.max(1, size - 2))) lines.push(`  ${line}`);
+  }
+
+  const labelWidth = Math.min(12, Math.max(1, ...plan.rows.map((row) => visibleWidth(planText(row.label)))));
+  const statusWidth = Math.min(24, Math.max(0, ...plan.rows.map((row) =>
+    visibleWidth(planText(row.statusLabel ?? statusStyle(row.status).label)))));
+  const indices = full || expanded ? plan.rows.map((_, index) => index) : compactRowIndices(plan.rows);
+  let previous = -1;
+  for (const index of indices) {
+    if (index > previous + 1) {
+      const omitted = index - previous - 1;
+      lines.push(theme.fg("dim", `  ... ${omitted} ${previous < 0 ? "earlier " : ""}${omitted === 1 ? "step" : "steps"}`));
+    }
+    previous = index;
+    const row = plan.rows[index]!;
+    const style = statusStyle(row.status);
+    const label = truncateToWidth(planText(row.label), labelWidth);
+    const prefix = (index === selectedIndex ? theme.fg("accent", "› ") : "  ") +
+      theme.fg(style.color, style.glyph) + " " + theme.fg("dim", label) +
+      " ".repeat(Math.max(0, labelWidth - visibleWidth(label)) + 1);
+    const titleColor = row.status === "blocked" ? "warning" : row.status === "failed" ? "error" :
+      row.status === "in_progress" || row.status === "implemented" || row.status === "reviewed" ? "text" : "muted";
+    const badge = planText(row.statusLabel ?? style.label);
+    const available = size - visibleWidth(prefix);
+    // At narrow widths use an inline status so it survives title truncation.
+    if (badge && available < statusWidth + 14) {
+      lines.push(prefix + theme.fg(style.color, `${badge} · `) + theme.fg(titleColor, planText(row.title)));
+    } else {
+      const titleWidth = Math.max(0, available - (statusWidth ? statusWidth + 2 : 0));
+      const title = truncateToWidth(planText(row.title), titleWidth);
+      lines.push(prefix + theme.fg(titleColor, title) + (badge
+        ? " ".repeat(Math.max(0, titleWidth - visibleWidth(title)) + 2) + theme.fg(style.color, badge)
+        : ""));
+    }
+    if (full) {
+      for (const detail of row.details ?? []) {
+        const indent = Math.min(visibleWidth(prefix), Math.max(0, size - 4));
+        for (const line of wrapTextWithAnsi(planText(detail), Math.max(1, size - indent))) {
+          lines.push(" ".repeat(indent) + theme.fg("dim", line));
+        }
+      }
+    }
+  }
+  if (previous < plan.rows.length - 1) {
+    const omitted = plan.rows.length - previous - 1;
+    lines.push(theme.fg("dim", `  ... ${omitted} more ${omitted === 1 ? "step" : "steps"}`));
+  }
+  if (full) lines.push("", theme.fg("dim", "↑↓ navigate · esc / ← back"));
+  return lines.map((line) => truncateToWidth(line, size));
+}
+
+export function createPlanPresentationComponent(
+  source: PlanPresentation | (() => PlanPresentation), theme: PlanRenderTheme, onClose: () => void,
+): Component {
+  const presentation = () => typeof source === "function" ? source() : source;
+  const plan = presentation();
+  let selected = plan.rows.findIndex((row) => row.status === "in_progress");
+  if (selected < 0) selected = plan.rows.findIndex((row) => row.status !== "completed");
+  if (selected < 0) selected = Math.max(0, plan.rows.length - 1);
+  return {
+    render: (width) => {
+      const current = presentation();
+      selected = Math.min(selected, Math.max(0, current.rows.length - 1));
+      return renderPlanPresentation(current, width, theme, true, selected);
+    },
+    handleInput(data) {
+      if (matchesKey(data, "up")) selected = Math.max(0, selected - 1);
+      else if (matchesKey(data, "down")) selected = Math.min(Math.max(0, presentation().rows.length - 1), selected + 1);
+      else if (matchesKey(data, "escape") || matchesKey(data, "left") || matchesKey(data, "ctrl+c")) onClose();
+    },
+    invalidate() {},
+  };
+}

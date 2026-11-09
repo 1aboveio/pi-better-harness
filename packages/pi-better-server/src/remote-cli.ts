@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
+import { resolveAgent } from "./cli-args.ts";
 import { GLOBAL_OPTIONS, createContext, type Subcommand } from "./remote/context.ts";
 
 /** One module per subcommand; add a line here to register another (move, return, attach). */
@@ -18,7 +19,7 @@ const SUBCOMMANDS: Record<string, () => Promise<{ command: Subcommand }>> = {
 
 async function usage(): Promise<string> {
   const lines = await Promise.all(Object.values(SUBCOMMANDS).map(async (load) => `  pi-remote ${(await load()).command.usage}`));
-  return `Usage:\n${lines.join("\n")}\n\nOptions for every command:\n  --host <ssh-alias>   reach the daemon on another machine through an SSH-forwarded socket\n  --remote-dir <dir>   daemon server dir on that machine (default: ask its shell)\n  --socket <path>      daemon socket on this machine\n  --json               machine-readable output\n`;
+  return `Usage:\n${lines.join("\n")}\n\nOptions for every command:\n  --host <ssh-alias>   reach the daemon on another machine through an SSH-forwarded socket\n  --remote-dir <dir>   daemon server dir on that machine (default: registered runtime)\n  --agent <pi|codex>  Pi starts on demand; Codex uses its existing daemon\n  --socket <path>      daemon socket on this machine\n  --json               machine-readable output\n`;
 }
 
 /** The subcommand is the first positional once global options (and their values, like `--host r9`) are skipped. */
@@ -42,11 +43,15 @@ export async function main(argv: string[]): Promise<number> {
   const { command } = await load();
   const { values, positionals } = parseArgs({ args: argv, options: { ...GLOBAL_OPTIONS, ...command.options }, allowPositionals: true });
   positionals.splice(positionals.indexOf(name), 1); // the subcommand name; a global option's value is never a positional
+  let agent;
+  try { agent = resolveAgent([], values.agent as string | undefined ?? process.env.PI_SERVER_AGENT); }
+  catch (error) { process.stderr.write(`pi-remote: ${String(error)}\n`); return 2; }
   const abort = new AbortController();
   const stop = (): void => abort.abort();
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   const context = createContext({
+    agent,
     host: values.host as string | undefined,
     socket: values.socket as string | undefined,
     remoteDir: values["remote-dir"] as string | undefined,

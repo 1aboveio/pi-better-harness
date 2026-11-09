@@ -4,6 +4,7 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +27,7 @@ const {
     roleSlug,
     tiersForLaunch,
 } = await import("../catalog-runtime.ts");
+const { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } = await import("../permission-policy.ts");
 const { configureTierPolicy } = await import("../tier-policy.ts");
 const { setConfigForTests } = await import("../config.ts");
 const { buildDetailLines, buildNavigatorDetail } = await import("../navigator.mjs");
@@ -232,6 +234,24 @@ Edited instructions.
         assert.deepEqual(distinct.jobs.map((job) => job.role), ["role.developer", "role.reviewer"]);
     });
 
+    it("keeps saved conversation selectors out of catalog clarification and expansion", async () => {
+        const continued = { prompt: "Follow up.", session_id: "saved-native-session",
+            agent: "agent.payments", role: ["role.developer", "role.reviewer"] };
+        const named = { prompt: "Named follow up.", session_name: "worker", role: ["role.reviewer", "role.explorer"] };
+        const result = await clarifyCatalogRequest([
+            continued,
+            { prompt: "Fresh work.", role: "role.developer" },
+            named,
+        ], { hasUI: false });
+        assert.equal(result.status, "resolved");
+        assert.equal(result.jobs.length, 3);
+        assert.deepEqual(result.jobs[0].role, continued.role);
+        assert.equal(result.jobs[0].agent, continued.agent);
+        assert.equal(result.jobs[0].session_id, continued.session_id);
+        assert.equal(result.jobs[2].session_name, named.session_name);
+        assert.deepEqual(result.jobs[2].role, named.role);
+    });
+
     it("splits one ambiguous run into single-role jobs and keeps the other job", async () => {
         const result = await clarifyCatalogRequest([
             { prompt: "Both.", role: ["role.developer", "role.reviewer"] },
@@ -349,6 +369,29 @@ Edited instructions.
         assert.notDeepEqual(first.capabilities.effective, retiled.capabilities.effective);
     });
 
+    it("keeps sandbox capability inspection scoped to its Pi event bus", () => {
+        const h = fixture().host();
+        noteCatalogHost(h);
+        setConfigForTests({ defaultModel: null, tierPolicy: null });
+        const snapshot = loadLaunchSnapshot(h);
+        const input = { inspection: { id: "role.developer", found: true }, snapshotDigest: snapshot.digest };
+        const events = new EventEmitter();
+        const permissions = { enabled: true, projectFiles: "write", outsideProject: "read",
+            storedCredentials: "off", commands: true, network: false };
+        events.on(SANDBOX_POLICY_REQUEST_CHANNEL, () => events.emit(SANDBOX_POLICY_CHANNEL, {
+            state: "disabled", subagentPermissions: permissions,
+        }));
+        const enabled = createLaunchEnricher({ events });
+        const fresh = createLaunchEnricher({ events: new EventEmitter() });
+        assert.equal(enabled(input).capabilities.effective.sandbox.enabled, true);
+        assert.deepEqual(fresh(input).capabilities.effective.sandbox, {
+            enabled: false, applied: false, writes: "unconfined",
+        });
+        assert.deepEqual(enabled(input).capabilities.effective.sandbox.permissions, permissions);
+        assert.equal(enabled(input).capabilities.effective.workspace.cwd, h.cwd);
+        assert.equal(enabled(input).capabilities.grantedByCatalog, false);
+    });
+
     it("applies each ambiguous job's choice only to that job", async () => {
         const calls = [];
         const result = await clarifyCatalogRequest([
@@ -460,7 +503,9 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
-base=$(dirname "$sess")
+// Native sessions now live in the durable Pi agent directory, so the fake child
+// is told the volatile registry root explicitly instead of deriving it.
+base="$PI_SUBAGENTS_TEST_REGISTRY"
 mkdir -p "$base/runs/$id"
 printf '%s\\n' "\${args[@]}" > "$base/runs/$id/argv.txt"
 printf '%s\\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}' > "$base/runs/$id/output.log"
@@ -470,6 +515,7 @@ fi
 `);
         chmodSync(piPath, 0o755);
         process.env.PATH = `${binDir}:${process.env.PATH}`;
+        process.env.PI_SUBAGENTS_TEST_REGISTRY = baseDir();
         process.env.PI_CODING_AGENT_DIR = fx.userRoot;
         writeAgent(fx.userRoot, "agent.payments", "role.developer", "Look at payments.");
         const extension = await import(`../index.ts?catalog-lifecycle=${Date.now()}`);
@@ -939,7 +985,7 @@ fi
     });
 
     describe("short role names (#370)", () => {
-        const VALID = "Valid roles: architect, developer, explorer, product-manager, researcher, reviewer.";
+        const VALID = "Valid roles: architect, developer, explorer, product-manager, researcher, reviewer, writer.";
 
         function newRuns(before) {
             const runsDir = join(runtimeTmp, "pi-better-subagents", "runs");

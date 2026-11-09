@@ -4,6 +4,7 @@
  * validateToolArguments, not only tool.execute.
  */
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { describe, it, after } from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,6 +19,7 @@ mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
 
 const { setConfigForTests } = await import("../config.ts");
 const { clarifyCatalogRequest } = await import("../catalog-runtime.ts");
+const { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } = await import("../permission-policy.ts");
 const { resolveRoleAssignment } = await import("../role-assignment.ts");
 const { mergeJobOptions } = await import("../batch.mjs");
 const { default: extension } = await import("../index.ts");
@@ -69,8 +71,8 @@ describe("review runtime P1", () => {
         assert.equal(first.details.view.capabilities.effective.toolAllowlist, "read");
         assert.equal(first.details.view.capabilities.effective.extensions.providerExtensions, "resolved");
         assert.equal(first.details.view.capabilities.effective.nesting.allowNested, false);
-        assert.equal(first.details.view.capabilities.effective.sandbox.enabled, true);
-        assert.equal(typeof first.details.view.capabilities.effective.sandbox.applied, "boolean");
+        assert.deepEqual(first.details.view.capabilities.effective.sandbox, { enabled: false, applied: false, writes: "unconfined" });
+        assert.equal(first.details.view.capabilities.effective.workspace.sandboxRoot, null);
         assert.equal(first.details.view.capabilities.effective.workspace.cwd, root);
         assert.equal(first.details.view.capabilities.effective.workspace.gitClone, false);
         assert.match(first.details.view.text, /tool allowlist: "read"/);
@@ -94,6 +96,57 @@ describe("review runtime P1", () => {
             third.details.view.capabilities.controls,
             first.details.view.capabilities.controls,
         );
+    });
+
+    it("reports a saved enabled Subagents profile and follows current human settings", async () => {
+        const events = new EventEmitter();
+        const main = { enabled: false, projectFiles: "read-write", outsideProject: "read",
+            storedCredentials: "read", commands: true, network: true };
+        const saved = { ...main, enabled: true, outsideProject: "write", storedCredentials: "read-write", processAccess: "off" };
+        let policy = { state: "disabled", permissions: main, subagentPermissions: saved };
+        events.on(SANDBOX_POLICY_REQUEST_CHANNEL, () => events.emit(SANDBOX_POLICY_CHANNEL, policy));
+        // The publisher can load saved settings before the catalog subscribes.
+        events.emit(SANDBOX_POLICY_CHANNEL, policy);
+        const localTools = {};
+        extension({
+            events,
+            registerTool(tool) { localTools[tool.name] = tool; },
+            registerCommand() {},
+            on() {},
+            sendMessage() {},
+        });
+        const ctx = ctxWith({ getAvailable: () => [{ provider: "openai", id: "gpt-6.1-sol", reasoning: true }] });
+        const inspect = async () => (await localTools.agents_catalog.execute("inspect", {
+            action: "inspect", id: "role.developer",
+        }, undefined, undefined, ctx)).details.view;
+        const first = await inspect();
+        assert.deepEqual(first.capabilities.effective.sandbox, {
+            enabled: true, applied: "unknown", writes: "unknown", permissions: saved,
+        });
+        assert.equal(first.capabilities.effective.workspace.sandboxRoot, root);
+        assert.equal(first.capabilities.grantedByCatalog, false);
+        assert.match(first.text, /"outsideProject":"write"/);
+
+        const restricted = { ...saved, projectFiles: "read", outsideProject: "off", storedCredentials: "off",
+            commands: false, network: false, processAccess: "read" };
+        // A replay must refresh capability details even when the model cache is unchanged.
+        policy = { ...policy, subagentPermissions: restricted };
+        const changed = await inspect();
+        assert.deepEqual(changed.capabilities.effective.sandbox.permissions, restricted);
+        assert.equal(changed.capabilities.effective.sandbox.enabled, true);
+        assert.equal(changed.actualModel, first.actualModel);
+        assert.deepEqual(first.capabilities.effective.sandbox.permissions, saved);
+
+        const disabled = { ...restricted, enabled: false };
+        policy = { ...policy, permissions: { ...main, enabled: true }, subagentPermissions: disabled };
+        events.emit(SANDBOX_POLICY_CHANNEL, policy);
+        const listed = await localTools.agents_catalog.execute("list", { action: "list" }, undefined, undefined, ctx);
+        const entry = listed.details.entries.find((view) => view.id === "role.developer");
+        assert.deepEqual(entry.capabilities.effective.sandbox, {
+            enabled: false, applied: false, writes: "unconfined", permissions: disabled,
+        });
+        assert.equal(entry.capabilities.effective.workspace.sandboxRoot, null);
+        assert.equal(entry.capabilities.grantedByCatalog, false);
     });
 
     it("admits an ambiguous role array through Pi validation and does not launch", async () => {

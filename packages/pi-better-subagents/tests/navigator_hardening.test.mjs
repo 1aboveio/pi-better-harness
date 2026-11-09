@@ -360,21 +360,16 @@ describe("navigator hardening: selection stability", () => {
 describe("navigator hardening: footer / reload / timers", () => {
     // @covers navigator.hardening
     // @level unit
-    it("footer count hint publishes and clears; close-confirm coexists then clears", () => {
+    it("footer compatibility helpers do not write status", () => {
         const calls = [];
         const ui = { setStatus(k, v) { calls.push([k, v]); } };
         assert.equal(navigatorFooterHint(0), null);
-        assert.equal(navigatorFooterHint(2), "← subagents · 2");
+        assert.equal(navigatorFooterHint(2), null);
         applyNavigatorFooter(ui, 2);
         applyCloseConfirmFooter(ui, closeConfirmHint(row("sa_1", { name: "alpha", status: "running" })));
         applyCloseConfirmFooter(ui, null);
         applyNavigatorFooter(ui, 0);
-        assert.deepEqual(calls, [
-            [NAVIGATOR_STATUS_KEY, "← subagents · 2"],
-            [CLOSE_CONFIRM_STATUS_KEY, "x again to stop alpha"],
-            [CLOSE_CONFIRM_STATUS_KEY, undefined],
-            [NAVIGATOR_STATUS_KEY, undefined],
-        ]);
+        assert.deepEqual(calls, []);
     });
 
     // @covers navigator.hardening

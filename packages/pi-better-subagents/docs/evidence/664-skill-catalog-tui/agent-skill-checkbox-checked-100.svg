@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="256" viewBox="0 0 880 256">
+  <rect width="880" height="256" fill="#15161a" rx="12"/>
+  <rect x="0.5" y="0.5" width="879" height="255" fill="none" stroke="#2c2d34" rx="11.5"/>
+  <circle cx="24" cy="16" r="4" fill="#f87171"/>
+  <circle cx="36" cy="16" r="4" fill="#fbbf24"/>
+  <circle cx="48" cy="16" r="4" fill="#34d399"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#d7d8de">
+  <text x="20" y="42" xml:space="preserve"><tspan fill="#7dd3fc" font-weight="700">  Selected skills</tspan></text>
+  <text x="20" y="60" xml:space="preserve"><tspan fill="#6b6c75">  Up/Down Move · Space Toggle · Enter Apply · Esc Cancel</tspan></text>
+  <text x="20" y="78" xml:space="preserve"></text>
+  <text x="20" y="96" xml:space="preserve"><tspan fill="#d7d8de">  Search &gt; </tspan><tspan fill="#d7d8de" style="text-decoration:none"> </tspan><tspan fill="#d7d8de">                                                                                        </tspan></text>
+  <text x="20" y="114" xml:space="preserve"><tspan fill="#d7d8de" font-weight="700" style="text-decoration:none">&gt; [x] review                        </tspan><tspan fill="#6b6c75" font-weight="700" style="text-decoration:none">Review a change before handoff.</tspan><tspan fill="#d7d8de">                                 </tspan></text>
+  <text x="20" y="132" xml:space="preserve"><tspan fill="#d7d8de">  [ ] test-quality                  </tspan><tspan fill="#6b6c75">Write tests that catch real bugs.</tspan></text>
+  <text x="20" y="150" xml:space="preserve"><tspan fill="#d7d8de">  ✓ Apply selection (1 checked)</tspan></text>
+  <text x="20" y="168" xml:space="preserve"><tspan fill="#d7d8de">  + Add skill path…</tspan></text>
+  <text x="20" y="186" xml:space="preserve"><tspan fill="#6b6c75">  1 checked</tspan></text>
+  <text x="20" y="204" xml:space="preserve"><tspan fill="#6b6c75">  0 checked applies No skill catalog, not discovery.</tspan></text>
+  </g>
+</svg>

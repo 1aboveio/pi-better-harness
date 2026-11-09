@@ -8,8 +8,8 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { createPermissionsPage } from "../packages/pi-better-sandbox/permissions-page.ts";
 import { defaultSandboxPermissions } from "../packages/pi-better-sandbox/permissions.ts";
 import { formatSshProfileChip } from "../packages/pi-better-ssh/src/profile.ts";
-import { renderCompactPlan } from "../packages/pi-better-plan/src/plan-render.ts";
-import { createPlanWidget } from "../packages/pi-better-plan/src/plan-widget.ts";
+import { renderCompactPlan } from "../packages/pi-better-harness/extensions/task-context/plan-render.ts";
+import { createPlanWidget } from "../packages/pi-better-harness/extensions/task-context/plan-widget.ts";
 
 import { renderGoalClockLine } from "../packages/pi-better-goal/src/goal-clock.ts";
 import { buildWidgetLines, fmtElapsed, shortModel } from "../packages/pi-better-subagents/widget.mjs";
@@ -32,6 +32,8 @@ const LOGO = readFileSync(join(ROOT, "docs/images/brand/logo.png")).toString("ba
 const TERMINAL_COLUMNS = 76;
 const NOW = 1_800_000;
 const NOW_SECONDS = 1_800;
+// The Todo previews belong to the active Harness package, not the retired Plan archive.
+const harnessManifest = JSON.parse(readFileSync(join(ROOT, "packages/pi-better-harness/package.json"), "utf8"));
 
 const packages = [
   {
@@ -39,7 +41,7 @@ const packages = [
     accent: "#67e8c3",
 
     title: "One session. Work in parallel.",
-    status: "Sandbox / subagents / background tasks / SSH / goals / plans",
+    status: "Sandbox / subagents / background tasks / SSH / goals / Outcome & Todo",
     blocks: [
       { label: "goal rail", lines: goalLines(TERMINAL_COLUMNS) },
       { label: "background-work navigator", lines: compactNavigator("harness") },
@@ -111,22 +113,6 @@ const packages = [
     footer: "Pi bash stays local · remote_bash is synchronous · no interactive shell",
   },
   {
-    id: "pi-better-plan",
-    accent: "#f0abfc",
-
-    title: "A plan with explicit progress.",
-    status: "Structured steps / dependencies / persistent session state",
-    blocks: [
-      { label: "plan widget", lines: planLines() },
-      { label: "get_plan · example", lines: [
-        'Checklist progress: 2/5 completed',
-        'Current step: Run the regression suite',
-        'Ready: none · release waits for verification',
-      ] },
-    ],
-    footer: "/plan · inspect the complete checklist · progress changes only through updates",
-  },
-  {
     id: "pi-better-read-aloud",
     accent: "#fdba74",
     command: "pi -e ./packages/pi-better-read-aloud",
@@ -148,7 +134,7 @@ const packages = [
   },
 ];
 
-const planExamples = [
+const todoExamples = [
   { file: "start", title: "Just started", active: 0, expanded: false },
   { file: "middle", title: "In the middle", active: 3, expanded: false },
   { file: "near-end", title: "Near the end", active: 6, expanded: false },
@@ -156,17 +142,19 @@ const planExamples = [
 ].map((example) => ({
   file: example.file,
   pkg: {
-    id: "pi-better-plan",
+    id: harnessManifest.name,
     accent: "#f0abfc",
     title: example.title,
-    status: "The same eight-step plan / actual widget renderer / demonstration state",
-    blocks: [{ label: "plan widget", lines: planExampleLines(example.active, example.expanded) }],
-    footer: "Click to fold or unfold in fullscreen Pi · /plan expand · /plan collapse",
+    status: "The same eight-step todo / actual widget renderer / demonstration state",
+    blocks: [{ label: "todo widget", lines: todoExampleLines(example.active, example.expanded) }],
+    footer: "Click to fold or unfold in fullscreen Pi · /todo expand · /todo collapse",
   },
 }));
 
-if (!process.argv.includes("--check")) {
-  if (!process.argv.includes("--plan-examples")) {
+const todoExamplesOnly = process.argv.includes("--todo-examples") || process.argv.includes("--plan-examples");
+const checkOnly = process.argv.includes("--check");
+if (!checkOnly) {
+  if (!todoExamplesOnly) {
     mkdirSync(OUT_DIR, { recursive: true });
     for (const pkg of packages) {
       const svg = renderScreenshot(pkg);
@@ -178,29 +166,29 @@ if (!process.argv.includes("--check")) {
     }
     renderContactSheet();
   }
-  const examplesDir = join(OUT_DIR, "plan-examples");
+  const examplesDir = join(OUT_DIR, "todo-examples");
   mkdirSync(examplesDir, { recursive: true });
-  for (const { file, pkg } of planExamples) {
+  for (const { file, pkg } of todoExamples) {
     const svgPath = join(examplesDir, `${file}.svg`);
     const pngPath = join(examplesDir, `${file}.png`);
     writeFileSync(svgPath, renderScreenshot(pkg));
     execFileSync("sips", ["-s", "format", "png", svgPath, "--out", pngPath], { stdio: "ignore" });
-    console.log(`plan ${file}: ${pngPath}`);
+    console.log(`todo ${file}: ${pngPath}`);
   }
 }
-checkGallery();
-for (const { file, pkg } of planExamples) {
-  const base = join(OUT_DIR, "plan-examples", file);
+if (!todoExamplesOnly) checkGallery();
+for (const { file, pkg } of todoExamples) {
+  const base = join(OUT_DIR, "todo-examples", file);
   if (readFileSync(`${base}.svg`, "utf8") !== renderScreenshot(pkg)) {
-    throw new Error(`plan ${file}: stale preview; regenerate with --plan-examples`);
+    throw new Error(`todo ${file}: stale preview; regenerate with --todo-examples`);
   }
   const png = readFileSync(`${base}.png`);
   if (!png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
       png.toString("ascii", 12, 16) !== "IHDR" ||
       png.readUInt32BE(16) !== WIDTH || png.readUInt32BE(20) !== HEIGHT) {
-    throw new Error(`plan ${file}: expected a ${WIDTH}x${HEIGHT} PNG`);
+    throw new Error(`todo ${file}: expected a ${WIDTH}x${HEIGHT} PNG`);
   }
-  console.log(`plan ${file}: renderer output and PNG OK`);
+  console.log(`todo ${file}: renderer output and PNG OK`);
 }
 
 function renderContactSheet() {
@@ -255,27 +243,17 @@ function sandboxLines() {
   return page.render(TERMINAL_COLUMNS).filter((line) => line.trim()).slice(0, 13);
 }
 
-function planLines() {
-  return renderCompactPlan({ steps: [
-    { step: "Inspect the release requirements", status: "completed" },
-    { step: "Implement the scoped changes", status: "completed" },
-    { step: "Run the regression suite", status: "in_progress" },
-    { step: "Review the results", status: "pending" },
-    { step: "Publish the release", status: "pending" },
-  ] }, TERMINAL_COLUMNS, { fg: (_color, value) => value });
-}
-
-function planExampleLines(active, expanded) {
+function todoExampleLines(active, expanded) {
   const titles = [
-    "Inspect session state", "Reproduce missing plan", "Retain read-only handoff",
+    "Inspect session state", "Reproduce missing outcome", "Retain read-only handoff",
     "Select five relevant steps", "Add fold controls", "Persist fold preference",
     "Test mouse dispatch", "Verify and commit",
   ];
-  const plan = { steps: titles.map((step, index) => ({
+  const todo = { steps: titles.map((step, index) => ({
     step, status: index < active ? "completed" : index === active ? "in_progress" : "pending",
   })) };
   return createPlanWidget(
-    (width) => renderCompactPlan(plan, width, { fg: (_color, value) => value }, expanded),
+    (width) => renderCompactPlan(todo, width, { fg: (_color, value) => value }, expanded),
     () => true, () => expanded, () => {},
   ).render(TERMINAL_COLUMNS).filter((line) => line.trim());
 }

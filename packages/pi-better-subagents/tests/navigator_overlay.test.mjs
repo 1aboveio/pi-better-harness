@@ -112,20 +112,19 @@ function fakeStatusUi() {
 describe("navigator footer hint", () => {
     // @covers navigator.footer-hint
     // @level unit
-    it("hint text is `← subagents · N` for N ≥ 1 and null at zero", () => {
-        assert.equal(navigatorFooterHint(1), "← subagents · 1");
-        assert.equal(navigatorFooterHint(3), "← subagents · 3");
+    it("does not expose a footer hint", () => {
+        assert.equal(navigatorFooterHint(1), null);
+        assert.equal(navigatorFooterHint(3), null);
         assert.equal(navigatorFooterHint(0), null);
     });
 
     // @covers navigator.footer-hint
     // @level unit
-    it("applyNavigatorFooter sets the status while visible runs exist and clears it at zero", () => {
+    it("does not write status on refresh or clear", () => {
         const ui = fakeStatusUi();
         applyNavigatorFooter(ui, 2);
-        assert.deepEqual(ui.calls, [[NAVIGATOR_STATUS_KEY, "← subagents · 2"]]);
         applyNavigatorFooter(ui, 0);
-        assert.deepEqual(ui.calls.at(-1), [NAVIGATOR_STATUS_KEY, undefined]);
+        assert.deepEqual(ui.calls, []);
     });
 
     // @covers navigator.footer-hint

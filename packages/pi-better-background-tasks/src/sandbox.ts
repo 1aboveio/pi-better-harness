@@ -1,5 +1,7 @@
 /**
- * Foreground write-sandbox policy for locally launched background tasks.
+ * Background launch sandbox policy. New publishers provide a separate Background
+ * tasks profile; older publishers retain the historical Main-policy behavior.
+ * Every task keeps its policy snapshot for its whole lifetime.
  *
  * `pi-better-sandbox` owns the foreground policy and publishes an immutable
  * snapshot of it on `pi.events`. This module is the consumer side of that wire
@@ -23,23 +25,36 @@
  * tests that pin them.
  */
 
-import { mkdirSync } from "node:fs";
+import { accessSync, constants, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { delimiter, dirname, isAbsolute, resolve } from "node:path";
 
 import { commandExecution } from "./process.js";
 import { baseDir } from "./registry.js";
-import { compileWritePolicy, describeSandboxSupport, maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
+import { canonicalizePath, compileWritePolicy, describeSandboxSupport, directApplicationTarget, maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
 
 type SandboxPermissions = {
   /** `write` = read, create and overwrite in place; `read-write` = Write & delete. */
   projectFiles: "off" | "read" | "write" | "read-write";
   outsideProject: "off" | "read" | "write" | "read-write";
   storedCredentials: "off" | "read" | "read-write";
+  /** Master switch for command execution. */
   commands: boolean;
   network: boolean;
+  /**
+   * Optional refinement of `commands`: may a launch command be interpreted by a
+   * shell? Absent means yes (the historical behavior). Off confines a launch to
+   * a direct executable through `shell: false` argv.
+   */
+  shell?: boolean;
+  /**
+   * Optional outer cap for one launch command, in seconds. Absent or null means
+   * no cap. A value is validated here and copied into the immutable launch
+   * snapshot; it caps each actual command, never a watch's whole lifetime.
+   */
+  commandTimeoutSeconds?: number | null;
 };
-import type { CommandSpec } from "./types.js";
+import type { CommandSpec, TaskSandboxProvenance } from "./types.js";
 import { SandboxDiagnostics, diagnosticPackageVersion, type DiagnosticResource } from "./shared-sandbox-diagnostics.js";
 
 function backgroundDiagnostics(policy: unknown): SandboxDiagnostics | undefined {
@@ -63,13 +78,121 @@ function backgroundDiagnostics(policy: unknown): SandboxDiagnostics | undefined 
  * is an optional peer.
  */
 export const FOREGROUND_SANDBOX_REMEDY =
-  "Run unconfined on purpose with /sandbox off, or work in a session that has a backend.";
+  "Change the controlling Sandbox column in /sandbox, or work in a session that has a backend.";
 
 /** Channel `pi-better-sandbox` publishes every effective-policy change on. */
 export const FOREGROUND_SANDBOX_POLICY_CHANNEL = "pi-better-sandbox:policy";
 
 /** Channel a consumer emits on to ask for the current policy. */
 export const FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL = "pi-better-sandbox:policy-request";
+
+/** Largest single-command cap a timer can hold: 2_147_483 seconds is 2_147_483_000 ms. */
+export const MAX_COMMAND_TIMEOUT_SECONDS = 2_147_483;
+
+/** A positive finite number of seconds no larger than {@link MAX_COMMAND_TIMEOUT_SECONDS}. */
+export function isCommandTimeoutSeconds(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= MAX_COMMAND_TIMEOUT_SECONDS;
+}
+
+/** Executables whose whole purpose is to interpret a shell command string. */
+const SHELL_EXECUTABLES = Object.freeze([
+  "sh", "bash", "zsh", "dash", "ksh", "ksh93", "mksh", "pdksh", "ash", "csh", "tcsh", "fish",
+  "yash", "posh", "rbash", "busybox", "pwsh", "powershell", "cmd",
+] as const);
+const SHELL_NAMES = new Set<string>(SHELL_EXECUTABLES);
+
+function shellExecutableName(path: string): boolean {
+  const normalized = String(path ?? "").replace(/\\/g, "/");
+  const name = normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase();
+  const stem = name.endsWith(".exe") ? name.slice(0, -4) : name;
+  return name.length > 0 && (SHELL_NAMES.has(name) || SHELL_NAMES.has(stem));
+}
+
+/**
+ * Resolve an executable the way spawn will: a relative or bare name against the
+ * launch cwd, and a bare name through the launch's PATH. A relative PATH entry
+ * is itself resolved against the launch cwd, because the child changes directory
+ * before it searches PATH.
+ *
+ * The candidate must be a regular file this process may execute, so a
+ * non-executable shadow earlier on PATH does not stand in for the real target.
+ */
+function resolvedExecutablePath(executable: string, env: NodeJS.ProcessEnv, cwd: string): string | undefined {
+  const value = String(executable ?? "");
+  if (value.includes("/") || (process.platform === "win32" && value.includes("\\"))) {
+    return resolve(cwd, value);
+  }
+  const path = env.PATH ?? env.Path;
+  if (!path) return undefined;
+  for (const directory of path.split(delimiter)) {
+    const candidate = resolve(cwd, directory || ".", value);
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch { /* A PATH entry may vanish, or not be executable. */ }
+  }
+  return undefined;
+}
+
+let shellIdentities: { path: string | undefined; cwd: string; ids: Set<string> } | undefined;
+
+/**
+ * Device/inode identities of the known shell binaries on this launch's PATH.
+ *
+ * A hardlink to a shell can carry any name, so a name check and a symlink's
+ * canonical target cannot see it. This mirrors the confined executor's identity
+ * check (`task-sandbox/exec.ts`), resolved against the launch cwd and PATH.
+ */
+function knownShellIdentities(env: NodeJS.ProcessEnv, cwd: string): Set<string> {
+  const path = env.PATH ?? env.Path;
+  const cached = shellIdentities;
+  if (cached && cached.path === path && cached.cwd === cwd) return cached.ids;
+  const ids = new Set<string>();
+  for (const directory of (path ?? "").split(delimiter)) {
+    for (const name of SHELL_EXECUTABLES) {
+      try {
+        const info = statSync(resolve(cwd, directory || ".", name), { bigint: true });
+        if (info.isFile()) ids.add(`${info.dev}:${info.ino}`);
+      } catch { /* Not present in this directory. */ }
+    }
+  }
+  shellIdentities = { path, cwd, ids };
+  return ids;
+}
+
+/**
+ * True when `argv[0]` names a shell interpreter directly.
+ *
+ * With Shell scripts Off, a `shell: false` argv is still a way to ask a shell to
+ * run a command (`["/bin/bash", "-c", ...]`). The requested name is checked
+ * first, then the executable spawn would resolve against `cwd` and the launch's
+ * PATH, then its canonical target, so a symlink or an alternate name pointing at
+ * a shell is still refused. A hardlink to a shell is refused by inode identity.
+ * Only a direct interpreter is refused: an application that happens to launch a
+ * shell itself is a different capability from asking Pi to interpret a command.
+ */
+export function isShellExecutable(
+  executable: string,
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): boolean {
+  if (shellExecutableName(executable)) return true;
+  const resolved = resolvedExecutablePath(String(executable ?? ""), env, cwd);
+  if (!resolved) return false;
+  let canonical: string;
+  try {
+    canonical = realpathSync.native(resolved);
+  } catch {
+    return false;
+  }
+  if (shellExecutableName(canonical)) return true;
+  try {
+    const info = statSync(canonical, { bigint: true });
+    if (knownShellIdentities(env, cwd).has(`${info.dev}:${info.ino}`)) return true;
+  } catch { /* A missing file fails when the launch runs it. */ }
+  return false;
+}
 
 /**
  * What the foreground sandbox is doing right now.
@@ -92,6 +215,7 @@ export interface ForegroundSandboxPolicy {
   /** Human-readable evidence for why `state` is what it is. */
   readonly reason: string;
   readonly permissions?: Readonly<SandboxPermissions & { enabled: boolean }>;
+  readonly policySource?: "background" | "main-legacy";
 }
 
 /** The minimum `pi.events` surface this module uses. */
@@ -106,7 +230,7 @@ export class ForegroundSandboxBlockedError extends Error {
 
   constructor(policy: ForegroundSandboxPolicy, detail?: string) {
     super(
-      `Foreground sandbox is ${policy.state}; this local background task was blocked rather than launched unconfined. ${detail ?? policy.reason}`,
+      `${policy.policySource === "background" ? "Background tasks" : "Foreground"} sandbox is ${policy.state}; this local background task was blocked rather than launched unconfined. ${detail ?? policy.reason}`,
     );
     this.name = "ForegroundSandboxBlockedError";
     this.policy = policy;
@@ -124,6 +248,12 @@ export type ForegroundSandboxPlan =
     };
 
 const UNCONFINED: ForegroundSandboxPlan = { confined: false };
+const launchPolicies = new WeakMap<ForegroundSandboxPlan, ForegroundSandboxPolicy | undefined>();
+function capturePlan(plan: ForegroundSandboxPlan, policy: ForegroundSandboxPolicy | undefined): ForegroundSandboxPlan {
+  const snapshot = { ...plan };
+  launchPolicies.set(snapshot, policy);
+  return snapshot;
+}
 
 const VALID_STATES = new Set<string>(["inactive", "enabled", "disabled", "unavailable", "failed"]);
 
@@ -134,7 +264,8 @@ const VALID_STATES = new Set<string>(["inactive", "enabled", "disabled", "unavai
  * sessions inside one process (and separate tests) cannot read each other's
  * policy.
  */
-const mirrors = new WeakMap<PolicyEventBus, { policy: ForegroundSandboxPolicy | undefined; error?: Error }>();
+type PolicyMirror = { policy: ForegroundSandboxPolicy | undefined; error?: Error; processAccess?: "off" | "read"; mainConfined?: boolean };
+const mirrors = new WeakMap<PolicyEventBus, PolicyMirror>();
 
 function eventBusOf(pi: unknown): PolicyEventBus | undefined {
   const events = (pi as { events?: unknown } | undefined)?.events;
@@ -149,7 +280,7 @@ function eventBusOf(pi: unknown): PolicyEventBus | undefined {
  * understands, so an unrelated extension emitting on the channel cannot clear a
  * real policy or invent one.
  */
-function readPolicy(data: unknown): ForegroundSandboxPolicy | undefined {
+function readPolicy(data: unknown, profile = "Main"): ForegroundSandboxPolicy | undefined {
   if (!data || typeof data !== "object") return undefined;
   const value = data as Record<string, unknown>;
   if (typeof value.state !== "string" || !VALID_STATES.has(value.state)) return undefined;
@@ -159,7 +290,7 @@ function readPolicy(data: unknown): ForegroundSandboxPolicy | undefined {
     : [];
   const permissions = value.permissions === undefined ? undefined : readPermissions(value.permissions);
   if (value.permissions !== undefined && !permissions) {
-    throw new Error("Invalid Main sandbox permission profile; update permissions in the sandbox UI.");
+    throw new Error(`Invalid ${profile} sandbox permission profile; update permissions in the sandbox UI.`);
   }
   return {
     state: value.state as ForegroundSandboxState,
@@ -177,12 +308,20 @@ function readPermissions(value: unknown): ForegroundSandboxPolicy["permissions"]
   const access = (v: unknown) => credential(v) || v === "write";
   if (typeof p.enabled !== "boolean" || typeof p.commands !== "boolean" ||
       typeof p.network !== "boolean" || !access(p.projectFiles) ||
-      !access(p.outsideProject) || !credential(p.storedCredentials)) return undefined;
+      !access(p.outsideProject) || !credential(p.storedCredentials) ||
+      (p.processAccess !== undefined && p.processAccess !== "off" && p.processAccess !== "read") ||
+      (p.shell !== undefined && typeof p.shell !== "boolean") ||
+      (p.commandTimeoutSeconds !== undefined && p.commandTimeoutSeconds !== null &&
+        !isCommandTimeoutSeconds(p.commandTimeoutSeconds))) return undefined;
+  // Copy only what the publisher sent: absent optional settings keep their
+  // documented default meaning instead of being invented here.
   return Object.freeze({
     enabled: p.enabled, commands: p.commands, network: p.network,
     projectFiles: p.projectFiles as SandboxPermissions["projectFiles"],
     outsideProject: p.outsideProject as SandboxPermissions["outsideProject"],
     storedCredentials: p.storedCredentials as SandboxPermissions["storedCredentials"],
+    ...(p.shell === undefined ? {} : { shell: p.shell as boolean }),
+    ...(p.commandTimeoutSeconds === undefined ? {} : { commandTimeoutSeconds: p.commandTimeoutSeconds as number | null }),
   });
 }
 
@@ -198,14 +337,25 @@ export function observeForegroundSandboxPolicy(pi: unknown): void {
   const events = eventBusOf(pi);
   if (!events || mirrors.has(events)) return;
 
-  const mirror: { policy: ForegroundSandboxPolicy | undefined; error?: Error } = { policy: undefined };
+  const mirror: PolicyMirror = { policy: undefined };
   mirrors.set(events, mirror);
   events.on(FOREGROUND_SANDBOX_POLICY_CHANNEL, (data) => {
     try {
-      const policy = readPolicy(data);
+      const published = data && typeof data === "object" ? data as Record<string, unknown> : undefined;
+      const hasBackground = published && Object.hasOwn(published, "background");
+      const policy = readPolicy(hasBackground ? published.background : data, hasBackground ? "Background tasks" : "Main");
+      if (hasBackground && !policy) throw new Error("Invalid Background tasks sandbox policy; update permissions in /sandbox.");
+      const access = (value: unknown): unknown => {
+        if (!value || typeof value !== "object") return undefined;
+        return (value as { permissions?: { processAccess?: unknown } }).permissions?.processAccess;
+      };
+      mirror.mainConfined = published?.state !== "disabled" && published?.state !== "inactive";
+      mirror.processAccess = access(data) === "read" && access(hasBackground ? published.background : data) === "read" ? "read" : "off";
+      if (policy) Object.assign(policy, { policySource: hasBackground ? "background" : "main-legacy" });
       if (policy) { mirror.policy = policy; mirror.error = undefined; }
     } catch (error) {
       mirror.error = error as Error;
+      mirror.processAccess = "off";
     }
   });
   events.emit(FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, undefined);
@@ -230,6 +380,28 @@ export function currentForegroundSandboxPolicy(pi: unknown): ForegroundSandboxPo
   return mirror?.policy;
 }
 
+/** Current diagnostics permissions are independent of the task's launch snapshot. */
+export function backgroundProcessDiagnosticsAccess(pi: unknown): "read" | "off" | "unknown" | "confined" {
+  try { currentForegroundSandboxPolicy(pi); } catch { return "off"; }
+  const events = eventBusOf(pi);
+  const mirror = events ? mirrors.get(events) : undefined;
+  const access = mirror?.processAccess ?? "unknown";
+  return access === "read" && mirror?.mainConfined ? "confined" : access;
+}
+
+export function sandboxProvenance(plan: ForegroundSandboxPlan, remote = false): TaskSandboxProvenance {
+  const policy = launchPolicies.get(plan);
+  const policySource = remote ? "remote" : policy?.policySource ?? (policy ? "main-legacy" : "no-publisher");
+  if (remote) return { confinement: "unknown", policySource, policySummary: "Remote execution; local sandbox does not establish remote confinement.", changesAffectTask: false };
+  if (!plan.confined) return { confinement: "unconfined", policySource,
+    policySummary: policy ? "Sandbox disabled at launch." : "No sandbox policy publisher at launch.", changesAffectTask: false };
+  const support = describeSandboxSupport();
+  const p = plan.permissions;
+  return { confinement: "confined", policySource, ...(support.supported ? { backend: support.backend } : {}),
+    policySummary: p ? `project=${p.projectFiles}; outside=${p.outsideProject}; credentials=${p.storedCredentials}; commands=${p.commands ? "on" : "off"}; network=${p.network ? "on" : "off"}`
+      : "Project write confinement with protected paths.", changesAffectTask: false };
+}
+
 /**
  * Decide how a local launch must be confined, before the task has an id, a
  * directory, or a log.
@@ -239,15 +411,15 @@ export function currentForegroundSandboxPolicy(pi: unknown): ForegroundSandboxPo
  */
 export function resolveForegroundSandboxPlan(pi: unknown, remote = false, operation?: unknown, tool = "bg_task_spawn"): ForegroundSandboxPlan {
   const policy = currentForegroundSandboxPolicy(pi);
-  if (remote && !policy?.permissions) return UNCONFINED; // Preserve legacy SSH behavior.
+  if (remote && !policy?.permissions) return capturePlan(UNCONFINED, policy); // Preserve legacy SSH behavior.
   try {
     const plan = planFor(policy);
     if (remote && plan.confined) {
       throw new ForegroundSandboxBlockedError(policy!, !plan.permissions?.network
-        ? "Main profile disables network. SSH launches are blocked."
-        : "Structured SSH cannot apply local file and credential permissions yet. Use SSH through confined bash, or change Main permissions in /sandbox.");
+        ? `${policy?.policySource === "background" ? "Background tasks" : "Main"} profile disables network. SSH launches are blocked.`
+        : `Structured SSH cannot apply local file and credential permissions yet. Use SSH through confined bash, or change ${policy?.policySource === "background" ? "Background tasks" : "Main"} permissions in /sandbox.`);
     }
-    return plan;
+    return capturePlan(plan, policy);
   } catch (error) {
     if (error instanceof ForegroundSandboxBlockedError) {
       const resource: DiagnosticResource = policy?.permissions?.enabled && !policy.permissions.commands ? "command-execution"
@@ -264,7 +436,7 @@ export function planFor(policy: ForegroundSandboxPolicy | undefined): Foreground
   // keeps its historical unsandboxed behaviour.
   if (!policy) return UNCONFINED;
   if (policy.permissions?.enabled && !policy.permissions.commands) {
-    throw new ForegroundSandboxBlockedError(policy, "Main profile disables commands. Change permissions in the sandbox UI before launching background tasks.");
+    throw new ForegroundSandboxBlockedError(policy, `${policy.policySource === "background" ? "Background tasks" : "Main"} profile disables commands. Change permissions in /sandbox before launching background tasks.`);
   }
   if (policy.state === "inactive" || policy.state === "disabled") return UNCONFINED;
   if (policy.state !== "enabled" || !policy.writableRoot) {
@@ -276,9 +448,357 @@ export function planFor(policy: ForegroundSandboxPolicy | undefined): Foreground
     storedCredentials: policy.permissions.storedCredentials,
     commands: policy.permissions.commands,
     network: policy.permissions.network,
+    ...(policy.permissions.shell === undefined ? {} : { shell: policy.permissions.shell }),
+    ...(policy.permissions.commandTimeoutSeconds === undefined ? {} : { commandTimeoutSeconds: policy.permissions.commandTimeoutSeconds }),
   } : undefined;
   return { confined: true, writableRoot: policy.writableRoot, denyWrite: policy.denyWrite,
     ...(permissions ? { permissions } : {}) };
+}
+
+/**
+ * The parent-captured task authority a worker conversation launches background
+ * tasks under.
+ *
+ * This is a structural subset of the Subagents task policy and is declared here
+ * on purpose: `pi-better-background-tasks` must keep working when the Subagents
+ * package is absent, so it never imports that package. The parent supplies the
+ * object from the policy it captured at worker launch; it is never built from
+ * model tool arguments, so a child cannot widen its own authority by asking for
+ * a different profile. The object is treated as immutable; the resolved plan is
+ * a copy that later changes to the source cannot alter.
+ *
+ * A present `root` means the worker was confined. An unconfined worker (the
+ * `sandbox:false` opt-out) has no captured task authority and passes `undefined`
+ * (or `null`). A `PermissionProfile`-shaped source may also express that with
+ * `permissions.enabled === false`.
+ *
+ * Supported intersection contract:
+ *
+ * - No worker authority: the current Background tasks profile applies unchanged.
+ * - Worker confined, Background tasks off: the worker's confinement and settings
+ *   are preserved exactly.
+ * - Both confined, same canonical root: project/outside/credential levels take
+ *   the weaker side, commands/network/shell are ANDed, the command cap is the
+ *   smaller one, and deny paths are unioned.
+ * - Both confined with different canonical roots, or either confined side
+ *   publishing no permission levels to intersect, refuses the launch. Dropping
+ *   one side's file or command rules would be a weaker profile than either
+ *   owner approved.
+ */
+export interface WorkerSandboxPolicy {
+  /** Canonical project directory the parent confined the worker to. */
+  readonly root: string;
+  readonly permissions?: WorkerSandboxPermissions;
+  /** Concrete paths that stay non-writable inside `root`. */
+  readonly denyWrite?: readonly string[];
+}
+
+/** The capability levels and command switches a worker was launched with. */
+export interface WorkerSandboxPermissions {
+  readonly projectFiles: "off" | "read" | "write" | "read-write";
+  readonly outsideProject: "off" | "read" | "write" | "read-write";
+  readonly storedCredentials: "off" | "read" | "read-write";
+  readonly commands: boolean;
+  readonly network: boolean;
+  readonly shell?: boolean;
+  readonly commandTimeoutSeconds?: number | null;
+  /** Present only on a `PermissionProfile`-shaped source; false = not confined. */
+  readonly enabled?: boolean;
+}
+
+/** Thrown when a parent-supplied worker policy is malformed; nothing was launched. */
+export class InvalidWorkerSandboxPolicyError extends Error {
+  constructor(detail: string) {
+    super(`Invalid worker sandbox policy: ${detail}`);
+    this.name = "InvalidWorkerSandboxPolicyError";
+  }
+}
+
+const FILE_ACCESS_RANK = Object.freeze({ off: 0, read: 1, write: 2, "read-write": 3 } as const);
+const CREDENTIAL_ACCESS_RANK = Object.freeze({ off: 0, read: 1, "read-write": 2 } as const);
+
+type WorkerAuthority =
+  | { readonly confined: false }
+  | { readonly confined: true; readonly root: string; readonly denyWrite: readonly string[]; readonly permissions?: SandboxPermissions };
+
+/**
+ * Validate and normalize the parent-captured authority before anything else
+ * happens. Levels are checked as a whole profile so a typo cannot narrow itself
+ * silently, and a relative root or deny entry is refused rather than resolved
+ * against Pi's own cwd.
+ */
+function readWorkerAuthority(value: WorkerSandboxPolicy | null | undefined): WorkerAuthority {
+  if (value === null || value === undefined) return { confined: false };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new InvalidWorkerSandboxPolicyError("the parent-captured policy must be an object.");
+  }
+  const raw = value as unknown as Record<string, unknown>;
+  if (typeof raw.root !== "string" || raw.root.length === 0 || !isAbsolute(raw.root)) {
+    throw new InvalidWorkerSandboxPolicyError("root must be an absolute path.");
+  }
+  const root = canonicalizePath(raw.root);
+  if (root === dirname(root) || root === canonicalizePath(homedir())) {
+    throw new InvalidWorkerSandboxPolicyError("root must be a project directory, not the filesystem or home root.");
+  }
+  const denyWrite = raw.denyWrite;
+  if (denyWrite !== undefined && (!Array.isArray(denyWrite) ||
+      !denyWrite.every((entry) => typeof entry === "string" && isAbsolute(entry)))) {
+    throw new InvalidWorkerSandboxPolicyError("denyWrite must be a list of absolute paths.");
+  }
+  const deny = Object.freeze([...new Set((denyWrite as string[] | undefined) ?? [])]);
+
+  if (raw.permissions === undefined) {
+    return { confined: true, root, denyWrite: deny };
+  }
+  const source = raw.permissions;
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    throw new InvalidWorkerSandboxPolicyError("permissions must be an object.");
+  }
+  const p = source as Record<string, unknown>;
+  if (p.enabled !== undefined && typeof p.enabled !== "boolean") {
+    throw new InvalidWorkerSandboxPolicyError("permissions.enabled must be a boolean.");
+  }
+  // A PermissionProfile that is not enabled grants no task authority at all.
+  if (p.enabled === false) return { confined: false };
+  if (typeof p.projectFiles !== "string" || !Object.hasOwn(FILE_ACCESS_RANK, p.projectFiles)) {
+    throw new InvalidWorkerSandboxPolicyError("permissions.projectFiles must be off, read, write or read-write.");
+  }
+  if (typeof p.outsideProject !== "string" || !Object.hasOwn(FILE_ACCESS_RANK, p.outsideProject)) {
+    throw new InvalidWorkerSandboxPolicyError("permissions.outsideProject must be off, read, write or read-write.");
+  }
+  if (typeof p.storedCredentials !== "string" || !Object.hasOwn(CREDENTIAL_ACCESS_RANK, p.storedCredentials)) {
+    throw new InvalidWorkerSandboxPolicyError("permissions.storedCredentials must be off, read or read-write.");
+  }
+  if (typeof p.commands !== "boolean") {
+    throw new InvalidWorkerSandboxPolicyError("permissions.commands must be a boolean.");
+  }
+  if (typeof p.network !== "boolean") {
+    throw new InvalidWorkerSandboxPolicyError("permissions.network must be a boolean.");
+  }
+  if (p.shell !== undefined && typeof p.shell !== "boolean") {
+    throw new InvalidWorkerSandboxPolicyError("permissions.shell must be a boolean.");
+  }
+  if (p.commandTimeoutSeconds !== undefined && p.commandTimeoutSeconds !== null && !isCommandTimeoutSeconds(p.commandTimeoutSeconds)) {
+    throw new InvalidWorkerSandboxPolicyError(`permissions.commandTimeoutSeconds must be null or a positive, finite number of seconds up to ${MAX_COMMAND_TIMEOUT_SECONDS}.`);
+  }
+  const permissions: SandboxPermissions = {
+    projectFiles: p.projectFiles as SandboxPermissions["projectFiles"],
+    outsideProject: p.outsideProject as SandboxPermissions["outsideProject"],
+    storedCredentials: p.storedCredentials as SandboxPermissions["storedCredentials"],
+    commands: p.commands,
+    network: p.network,
+    ...(p.shell === undefined ? {} : { shell: p.shell }),
+    ...(p.commandTimeoutSeconds === undefined ? {} : { commandTimeoutSeconds: p.commandTimeoutSeconds as number | null }),
+  };
+  return { confined: true, root, denyWrite: deny, permissions: Object.freeze(permissions) };
+}
+
+/** The weaker of two file-access levels; deletion is never broader than writes. */
+function weakerFileAccess(
+  a: SandboxPermissions["projectFiles"],
+  b: SandboxPermissions["projectFiles"],
+): SandboxPermissions["projectFiles"] {
+  return FILE_ACCESS_RANK[a] <= FILE_ACCESS_RANK[b] ? a : b;
+}
+
+function weakerCredentialAccess(
+  a: SandboxPermissions["storedCredentials"],
+  b: SandboxPermissions["storedCredentials"],
+): SandboxPermissions["storedCredentials"] {
+  return CREDENTIAL_ACCESS_RANK[a] <= CREDENTIAL_ACCESS_RANK[b] ? a : b;
+}
+
+/** Intersect two already-validated capability profiles. */
+function intersectPermissions(background: SandboxPermissions, worker: SandboxPermissions): SandboxPermissions {
+  const backgroundCap = isCommandTimeoutSeconds(background.commandTimeoutSeconds) ? background.commandTimeoutSeconds : undefined;
+  const workerCap = isCommandTimeoutSeconds(worker.commandTimeoutSeconds) ? worker.commandTimeoutSeconds : undefined;
+  const cap = backgroundCap === undefined ? workerCap
+    : workerCap === undefined ? backgroundCap : Math.min(backgroundCap, workerCap);
+  const shellGiven = background.shell !== undefined || worker.shell !== undefined;
+  const capGiven = background.commandTimeoutSeconds !== undefined || worker.commandTimeoutSeconds !== undefined;
+  return Object.freeze({
+    projectFiles: weakerFileAccess(background.projectFiles, worker.projectFiles),
+    outsideProject: weakerFileAccess(background.outsideProject, worker.outsideProject),
+    storedCredentials: weakerCredentialAccess(background.storedCredentials, worker.storedCredentials),
+    commands: background.commands && worker.commands,
+    network: background.network && worker.network,
+    ...(shellGiven ? { shell: background.shell !== false && worker.shell !== false } : {}),
+    ...(capGiven ? { commandTimeoutSeconds: cap ?? null } : {}),
+  });
+}
+
+/**
+ * The policy snapshot stored behind a worker-authored plan, so provenance and
+ * {@link backgroundExecutionLimits} read the effective authority rather than
+ * the parent's published profile.
+ */
+function workerPlanPolicy(
+  plan: { readonly writableRoot: string; readonly denyWrite: readonly string[]; readonly permissions?: SandboxPermissions },
+  reason: string,
+): ForegroundSandboxPolicy {
+  return Object.freeze({
+    state: "enabled",
+    writableRoot: plan.writableRoot,
+    denyWrite: Object.freeze([...plan.denyWrite]),
+    reason,
+    ...(plan.permissions ? { permissions: Object.freeze({ ...plan.permissions, enabled: true }) } : {}),
+    policySource: "background",
+  });
+}
+
+/**
+ * Resolve how a worker-launched local background task must be confined.
+ *
+ * The effective authority is always the worker's captured task authority and
+ * the current Background tasks profile, never the parent session's sibling Main
+ * profile. When the publisher sends a Background column this reads that column;
+ * a legacy publisher with one profile keeps its historical meaning, which is
+ * already what Background tasks enforce.
+ *
+ * Validation runs before any task state exists. A malformed policy, an invalid
+ * command cap or level, a disabled worker command capability, differing
+ * canonical roots, or an unsupported intersection refuses the launch instead of
+ * dropping a rule. The returned plan is an immutable snapshot: it is captured
+ * through {@link capturePlan} so later command checks and
+ * {@link backgroundExecutionLimits} keep the authority this launch started with.
+ */
+export function resolveWorkerSandboxPlan(
+  pi: unknown,
+  workerPolicy?: WorkerSandboxPolicy | null,
+  operation?: unknown,
+  tool = "bg_task_spawn",
+): ForegroundSandboxPlan {
+  const background = currentForegroundSandboxPolicy(pi);
+  let worker: WorkerAuthority;
+  try {
+    worker = readWorkerAuthority(workerPolicy);
+  } catch (error) {
+    backgroundDiagnostics(background)?.observe({ tool, operation, resource: "sandbox-backend", basis: "policy-refusal", outcome: "denied" });
+    throw error;
+  }
+
+  // No captured authority: the current Background tasks profile is the whole
+  // answer, exactly as it is for a parent-launched task.
+  if (!worker.confined) return capturePlan(planFor(background), background);
+
+  // Commands Off is the worker's master switch, independent of Background being
+  // on or off. It is checked before any plan is built.
+  if (worker.permissions && !worker.permissions.commands) {
+    const snapshot = { writableRoot: worker.root, denyWrite: worker.denyWrite, permissions: worker.permissions };
+    const policy = workerPlanPolicy(snapshot, "The worker task authority disables commands.");
+    backgroundDiagnostics(background)?.observe({ tool, operation, resource: "command-execution", basis: "policy-refusal", outcome: "denied" });
+    throw new ForegroundSandboxBlockedError(policy,
+      "The worker task authority disables commands. Change the Subagents permissions before launching background tasks.");
+  }
+
+  const backgroundOff = !background || background.state === "inactive" || background.state === "disabled";
+  if (backgroundOff) {
+    // Preserve the worker's own confinement even though no Background profile is
+    // enforcing anything. Its settings are copied, never linked to the source.
+    const plan = {
+      confined: true as const,
+      writableRoot: worker.root,
+      denyWrite: Object.freeze([...worker.denyWrite]),
+      ...(worker.permissions ? { permissions: worker.permissions } : {}),
+    };
+    return capturePlan(plan, workerPlanPolicy(plan, "Worker task authority applies; the Background tasks profile is off."));
+  }
+
+  try {
+    const base = planFor(background);
+    if (!base.confined) throw new Error("Worker sandbox resolution expected a confined Background tasks plan.");
+    const backgroundRoot = canonicalizePath(base.writableRoot);
+    if (backgroundRoot !== worker.root) {
+      throw new ForegroundSandboxBlockedError(background,
+        `Cannot intersect the Background tasks root ${JSON.stringify(backgroundRoot)} with the worker root ${JSON.stringify(worker.root)}: they confine different directories, so a correct intersection cannot be constructed. Refusing rather than dropping either side's rules.`);
+    }
+    if (!base.permissions || !worker.permissions) {
+      throw new ForegroundSandboxBlockedError(background,
+        `Cannot intersect the Background tasks profile with the worker task authority because ${base.permissions ? "the worker" : "the Background tasks profile"} publishes no permission levels (file access, commands, network). Refusing rather than dropping the other side's controls; update the sandbox packages or set permissions in /sandbox.`);
+    }
+    const permissions = intersectPermissions(base.permissions, worker.permissions);
+    const denyWrite = Object.freeze([...new Set([...base.denyWrite, ...worker.denyWrite])]);
+    const plan = { confined: true as const, writableRoot: backgroundRoot, denyWrite, permissions };
+    return capturePlan(plan, workerPlanPolicy(plan,
+      "Worker task authority intersected with the Background tasks profile (weaker levels, ANDed switches, smallest cap, deny paths unioned)."));
+  } catch (error) {
+    if (error instanceof ForegroundSandboxBlockedError) {
+      backgroundDiagnostics(background)?.observe({ tool, operation, resource: "sandbox-backend", basis: "policy-refusal", outcome: "denied" });
+    }
+    throw error;
+  }
+}
+
+/**
+ * The application, shell, and time switches captured with one launch plan.
+ *
+ * The Background tasks profile is the gate: when it is off, launches keep their
+ * historical unconfined behavior. When it is on, `commands` remains the master
+ * switch (enforced by {@link planFor}); this narrows it with the optional
+ * `shell` and `commandTimeoutSeconds` fields. An absent `shell` means On, and an
+ * absent or null cap means no cap, so a publisher that predates those fields is
+ * unchanged.
+ */
+export interface BackgroundExecutionLimits {
+  /** May a launch command be interpreted by a shell? */
+  readonly shell: boolean;
+  /** Immutable outer cap for one command, in seconds; undefined means unlimited. */
+  readonly commandTimeoutSeconds?: number;
+}
+
+const UNLIMITED_EXECUTION: BackgroundExecutionLimits = Object.freeze({ shell: true });
+
+/** Read the immutable application switches captured for `plan`. */
+export function backgroundExecutionLimits(plan: ForegroundSandboxPlan): BackgroundExecutionLimits {
+  const permissions = launchPolicies.get(plan)?.permissions;
+  if (!permissions?.enabled) return UNLIMITED_EXECUTION;
+  const cap = isCommandTimeoutSeconds(permissions.commandTimeoutSeconds)
+    ? permissions.commandTimeoutSeconds
+    : undefined;
+  return Object.freeze({
+    shell: permissions.shell !== false,
+    ...(cap === undefined ? {} : { commandTimeoutSeconds: cap }),
+  });
+}
+
+/**
+ * Refuse a launch the captured Background tasks application switches forbid.
+ *
+ * Called before any task id, directory, log, or metadata exists, so a refused
+ * launch leaves nothing behind. `commands: false` is still the master refusal
+ * and is raised by {@link planFor}; this is the narrower shell rule. With Shell
+ * scripts Off, only a direct executable through `shell: false` argv is allowed.
+ * A shell command string and a direct shell interpreter in argv[0] would both
+ * reintroduce shell interpretation, and structured SSH carries a remote shell
+ * command, so all three are refused.
+ *
+ * `cwd` is the launch directory the task will actually run in. A relative
+ * executable, a relative PATH entry, and an alias found only in that directory
+ * are resolved exactly as the launch resolves them, never against Pi's own
+ * process cwd.
+ */
+export function assertBackgroundExecutionAllowed(
+  spec: CommandSpec,
+  plan: ForegroundSandboxPlan,
+  options: { remote?: boolean; cwd?: string } = {},
+): void {
+  const limits = backgroundExecutionLimits(plan);
+  if (limits.shell) return;
+  const launchCwd = options.cwd ?? spec.cwd ?? process.cwd();
+  const detail = options.remote
+    ? "Structured SSH carries a remote shell command, so it cannot run while Shell scripts is Off. Use a local shell:false argv launch, or turn Shell scripts on in /sandbox."
+    : spec.shell !== false
+      ? "Background tasks profile disables shell commands. Pass shell:false with an argv for a direct executable, or turn Shell scripts on in /sandbox."
+      : isShellExecutable(spec.argv?.[0] ?? "", { ...process.env, ...spec.env }, launchCwd)
+        ? "Background tasks profile disables shell commands. A direct shell executable is refused; launch the program itself with shell:false, or turn Shell scripts on in /sandbox."
+        : undefined;
+  if (detail === undefined) return;
+  const policy = launchPolicies.get(plan) ?? {
+    state: "failed" as const,
+    denyWrite: [],
+    reason: "The Background tasks profile disables shell commands.",
+  };
+  throw new ForegroundSandboxBlockedError(policy, detail);
 }
 
 /**
@@ -307,6 +827,10 @@ export function confineCommandSpec(
   if (!plan.confined) return spec;
 
   const { execPath, execArgs } = commandExecution(spec);
+  const directOnly = spec.shell === false && plan.permissions?.shell === false;
+  const target = directOnly
+    ? directApplicationTarget(execPath, execArgs, { ...process.env, ...spec.env }, false)
+    : { execPath, execArgs };
   // The generated profile is written here, so its directory must exist before
   // the backend builds the command.
   mkdirSync(dirname(profilePath), { recursive: true });
@@ -341,8 +865,8 @@ export function confineCommandSpec(
       {
         profilePath,
         policy,
-        execPath,
-        execArgs,
+        ...target,
+        ...(directOnly ? { internalHelperExecutable: true } : {}),
       },
       // `explicitSandbox` because the foreground state already said a sandbox
       // applies: an absent or unusable backend must throw here rather than hand
@@ -361,13 +885,15 @@ export function confineCommandSpec(
   }
   for (const line of command.notices ?? []) onNotice(line);
 
-  return { ...spec, argv: [command.file, ...command.fileArgs], shell: false };
+  return { ...spec, ...(directOnly ? { env: { PATH: "/usr/bin:/bin", HOME: homedir() } } : {}),
+    argv: [command.file, ...command.fileArgs], shell: false };
 }
 
 function blocked(plan: ForegroundSandboxPlan & { confined: true }, detail: string): Error {
   return new ForegroundSandboxBlockedError(
     {
       state: "failed",
+      policySource: launchPolicies.get(plan)?.policySource,
       writableRoot: plan.writableRoot,
       denyWrite: plan.denyWrite,
       reason: detail,

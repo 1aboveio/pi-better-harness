@@ -2,11 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultSandboxPermissions, describeLoosening, parseSandboxPermissions } from "../permissions.ts";
 
-test("permission defaults preserve independent Main and Subagents columns", () => {
+test("fresh permission defaults start all sandbox switches Off with independent profiles", () => {
     const settings = defaultSandboxPermissions();
     assert.equal(settings.main.enabled, false);
-    assert.equal(settings.subagents.enabled, true);
-    assert.deepEqual(settings.subagents, { ...settings.main, enabled: true, outsideProject: "write", storedCredentials: "read-write" });
+    assert.equal(settings.subagents.enabled, false);
+    assert.equal(settings.background.enabled, false);
+    assert.deepEqual(settings.background, settings.main);
+    settings.background.enabled = true;
+    settings.background.outsideProject = "off";
+    assert.equal(settings.main.enabled, false);
+    assert.equal(settings.main.outsideProject, "read");
+    assert.equal(settings.subagents.enabled, false);
+    assert.deepEqual(settings.subagents, { ...settings.main, outsideProject: "write", storedCredentials: "read-write" });
     assert.equal(settings.main.processAccess, "read");
     assert.equal(settings.subagents.processAccess, "read");
     settings.main.processAccess = "off";
@@ -17,6 +24,81 @@ test("permission defaults preserve independent Main and Subagents columns", () =
     settings.main.outsideProject = "read-write";
     assert.equal(settings.subagents.outsideProject, "write");
     assert.equal(defaultSandboxPermissions().main.outsideProject, "read");
+});
+
+test("fresh and legacy profiles keep shell On and no command time limit", () => {
+    const settings = defaultSandboxPermissions();
+    assert.equal(settings.main.shell, true);
+    assert.equal(settings.main.commandTimeoutSeconds, null);
+    assert.equal(settings.subagents.shell, true);
+    assert.equal(settings.background.commandTimeoutSeconds, null);
+    const { shell: _mainShell, commandTimeoutSeconds: _mainTimeout, ...main } = settings.main;
+    const { shell: _subagentShell, commandTimeoutSeconds: _subagentTimeout, ...subagents } = settings.subagents;
+    const decoded = parseSandboxPermissions({ ...settings, main, subagents });
+    assert.equal(decoded.main.shell, true);
+    assert.equal(decoded.main.commandTimeoutSeconds, null);
+    assert.equal(decoded.subagents.shell, true);
+    assert.equal(decoded.subagents.commandTimeoutSeconds, null);
+    decoded.main.shell = false;
+    assert.equal(settings.main.shell, true, "decoding copies instead of aliasing");
+});
+
+test("explicit shell and command time limits are validated and copied", () => {
+    const settings = defaultSandboxPermissions();
+    settings.main.shell = false;
+    settings.main.commandTimeoutSeconds = 600;
+    settings.background.commandTimeoutSeconds = null;
+    assert.deepEqual(parseSandboxPermissions(settings), settings);
+    assert.equal(parseSandboxPermissions({ ...settings, main: { ...settings.main, commandTimeoutSeconds: 2147483 } })
+        .main.commandTimeoutSeconds, 2147483);
+    for (const shell of [null, 0, 1, "yes"] as const) {
+        assert.throws(() => parseSandboxPermissions({ ...settings, main: { ...settings.main, shell } }),
+            /explicit permission values/);
+    }
+    for (const commandTimeoutSeconds of [0, -1, 2147484, Number.POSITIVE_INFINITY, Number.NaN, "60", true] as const) {
+        assert.throws(() => parseSandboxPermissions({
+            ...settings, main: { ...settings.main, commandTimeoutSeconds },
+        }), /explicit permission values/);
+    }
+});
+
+test("shell and command time limit loosening is reported only when access grows", () => {
+    const before = defaultSandboxPermissions();
+    before.main.enabled = true;
+    before.main.shell = false;
+    before.main.commandTimeoutSeconds = 60;
+    const looser = structuredClone(before);
+    looser.main.shell = true;
+    looser.main.commandTimeoutSeconds = 300;
+    assert.deepEqual(describeLoosening(before, looser), [
+        "Main: shell scripts on", "Main: command time limit 60s → 300s",
+    ]);
+    const uncapped = structuredClone(looser);
+    uncapped.main.commandTimeoutSeconds = null;
+    assert.deepEqual(describeLoosening(looser, uncapped), ["Main: command time limit 300s → no limit"]);
+    const tighter = structuredClone(before);
+    tighter.main.shell = false;
+    tighter.main.commandTimeoutSeconds = 30;
+    assert.deepEqual(describeLoosening(before, tighter), [], "adding or lowering a cap tightens");
+    const uncappedTighter = structuredClone(tighter);
+    uncappedTighter.main.commandTimeoutSeconds = null;
+    assert.deepEqual(describeLoosening(tighter, uncappedTighter), ["Main: command time limit 30s → no limit"]);
+});
+
+test("legacy shell and timeout values mean On and no limit for loosening", () => {
+    const legacy = defaultSandboxPermissions();
+    const { shell: _shell, commandTimeoutSeconds: _timeout, ...main } = legacy.main;
+    const { shell: _childShell, commandTimeoutSeconds: _childTimeout, ...subagents } = legacy.subagents;
+    const decoded = parseSandboxPermissions({ ...legacy, main, subagents });
+    const next = structuredClone(decoded);
+    next.main.shell = true;
+    next.main.commandTimeoutSeconds = null;
+    assert.deepEqual(describeLoosening(decoded, next), [], "absent values already mean On and no limit");
+    const narrowed = structuredClone(decoded);
+    narrowed.main.shell = false;
+    narrowed.main.commandTimeoutSeconds = 60;
+    assert.deepEqual(describeLoosening(decoded, narrowed), [], "turning shell Off and adding a cap tighten");
+    assert.deepEqual(describeLoosening(narrowed, decoded), ["Main: shell scripts on", "Main: command time limit 60s → no limit"]);
 });
 
 test("decoding preserves explicitly saved credential restrictions instead of applying new defaults", () => {
@@ -57,12 +139,13 @@ test("legacy profiles keep Process access Off and malformed values fail closed",
 
 test("describes only the changes that grant more", () => {
     const before = defaultSandboxPermissions();
-    const after = defaultSandboxPermissions();
+    before.subagents.enabled = true;
+    const after = structuredClone(before);
     after.subagents.outsideProject = "read-write";
     after.main.network = false;
     after.subagents.projectFiles = "write";
     assert.deepEqual(describeLoosening(before, after), ["Subagents: outsideProject write → read-write"]);
-    const disabled = defaultSandboxPermissions();
+    const disabled = structuredClone(before);
     disabled.subagents.enabled = false;
     assert.deepEqual(describeLoosening(before, disabled), ["Subagents: sandbox off"]);
 });
@@ -75,6 +158,37 @@ test("strict decoding rejects incomplete and invalid profiles", () => {
         [{ ...defaultSandboxPermissions(), subagents: { ...defaultSandboxPermissions().subagents, storedCredentials: "all" } },
             /explicit permission values/],
     ] as const) assert.throws(() => parseSandboxPermissions(value), message);
+});
+
+test("missing Background profiles inherit every Main value once, while malformed profiles are rejected", () => {
+    const settings = defaultSandboxPermissions();
+    const main = { ...settings.main, enabled: true, projectFiles: "write" as const,
+        outsideProject: "off" as const, storedCredentials: "off" as const,
+        network: false, commands: false, processAccess: "off" as const };
+    const { background: _background, ...legacy } = { ...settings, main };
+    const migrated = parseSandboxPermissions(legacy);
+    assert.deepEqual(migrated.background, main);
+    migrated.main.enabled = false;
+    migrated.main.network = true;
+    assert.equal(migrated.background.enabled, true);
+    assert.equal(migrated.background.network, false);
+    assert.deepEqual(parseSandboxPermissions(migrated).background, main);
+    for (const background of [null, {}, { ...main, network: "on" }, { ...main, storedCredentials: "write" }]) {
+        assert.throws(() => parseSandboxPermissions({ ...legacy, background }), /Background tasks profile/);
+    }
+});
+
+test("Background loosening names only Background tasks capabilities", () => {
+    const before = defaultSandboxPermissions();
+    Object.assign(before.background, { enabled: true, commands: false, network: false, processAccess: "off" });
+    const next = structuredClone(before);
+    Object.assign(next.background, { enabled: false, commands: true, network: true,
+        outsideProject: "write", storedCredentials: "read-write", processAccess: "read" });
+    assert.deepEqual(describeLoosening(before, next), [
+        "Background tasks: sandbox off", "Background tasks: outsideProject read → write",
+        "Background tasks: storedCredentials read → read-write", "Background tasks: commands on",
+        "Background tasks: network on", "Background tasks: processAccess off → read",
+    ]);
 });
 
 test("decoding copies policy and preserves inactive values", () => {

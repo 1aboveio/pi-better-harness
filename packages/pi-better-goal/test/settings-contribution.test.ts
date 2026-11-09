@@ -25,14 +25,18 @@ test("goal settings discovery uses the standalone opener and shared preferences,
     events,
     registerCommand(name: string, command: Omit<RegisteredCommand, "name" | "sourceInfo">) { commands.set(name, command); },
     registerTool() {}, registerShortcut() {},
-    on(name: string, handler: Function) { handlers.set(name, handler); },
+    on(name: string, handler: Function) {
+      const previous = handlers.get(name);
+      handlers.set(name, async (...args: unknown[]) => { await previous?.(...args); return handler(...args); });
+    },
     appendEntry(...args: unknown[]) { entries.push(args); },
     sendMessage(...args: unknown[]) { messages.push(args); },
     sendUserMessage() { assert.fail("settings must not send user messages"); },
   } as unknown as ExtensionAPI;
   extension(pi);
-  assert.equal(registrations.length, 1);
-  const contribution = registrations[0]!;
+  const links = registrations.filter(item => item.command);
+  assert.equal(links.length, 1);
+  const contribution = links[0]!;
   assert.equal(contribution.id, "goal");
   assert.equal(contribution.label, "Goal");
   assert.equal(contribution.command, "/goal settings");
@@ -40,7 +44,7 @@ test("goal settings discovery uses the standalone opener and shared preferences,
   events.on("harness-settings:register", (data) => later.push(data as Contribution));
   events.emit("harness-settings:request", undefined);
   events.emit("harness-settings:request", undefined);
-  assert.deepEqual(later, [contribution, contribution]);
+  assert.deepEqual(later.filter(item => item.command), [contribution, contribution]);
 
   const pages: string[] = [];
   let toggle = false;

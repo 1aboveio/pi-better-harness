@@ -1,0 +1,6 @@
+schema: pi-agent-catalog/v1
+id: io.1above.pi-better-harness
+name: Pi Better Harness
+definitionSchema: pi-agent/v1
+paths:
+  roles: packages/pi-better-subagents/roles

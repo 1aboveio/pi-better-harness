@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="864" height="526" viewBox="0 0 864 526">
+  <rect width="864" height="526" fill="#15161a" rx="12"/>
+  <rect x="0.5" y="0.5" width="863" height="525" fill="none" stroke="#2c2d34" rx="11.5"/>
+  <circle cx="24" cy="16" r="4" fill="#f87171"/>
+  <circle cx="36" cy="16" r="4" fill="#fbbf24"/>
+  <circle cx="48" cy="16" r="4" fill="#34d399"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#d7d8de">
+  <text x="20" y="42" xml:space="preserve"><tspan fill="#7dd3fc">Agents / Payments Developer</tspan></text>
+  <text x="20" y="60" xml:space="preserve"><tspan fill="#7dd3fc">[Settings]</tspan><tspan fill="#d7d8de">   </tspan><tspan fill="#6b6c75">Instructions</tspan><tspan fill="#d7d8de">   </tspan><tspan fill="#6b6c75">Files</tspan></text>
+  <text x="20" y="78" xml:space="preserve"><tspan fill="#6b6c75">Tab / Shift+Tab switch  ·  ↑↓ select / scroll  ·  Enter change  ·  Esc list</tspan></text>
+  <text x="20" y="96" xml:space="preserve"></text>
+  <text x="20" y="114" xml:space="preserve"><tspan fill="#7dd3fc">  </tspan><tspan fill="#8b8c95">  Model     </tspan><tspan fill="#d7d8de">openai/gpt-6.1-sol                                              </tspan><tspan fill="#6b6c75">inherited</tspan></text>
+  <text x="20" y="132" xml:space="preserve"><tspan fill="#d7d8de">  </tspan><tspan fill="#8b8c95">  Effort    </tspan><tspan fill="#d7d8de">high                                                            </tspan><tspan fill="#6b6c75">inherited</tspan></text>
+  <text x="20" y="150" xml:space="preserve"><tspan fill="#d7d8de">  </tspan><tspan fill="#7dd3fc">&gt; Skills    </tspan><tspan fill="#d7d8de">1 selected · /Users/exoulster/.agents/skills/review/SKILL.md    </tspan><tspan fill="#6b6c75">override</tspan></text>
+  <text x="20" y="168" xml:space="preserve"></text>
+  <text x="20" y="186" xml:space="preserve"><tspan fill="#d7d8de">  </tspan><tspan fill="#6b6c75">Model and effort are session edits. Skills save to the definition.</tspan></text>
+  <text x="20" y="204" xml:space="preserve"></text>
+  <text x="20" y="222" xml:space="preserve"><tspan fill="#d7d8de">  ID       agent.worker</tspan></text>
+  <text x="20" y="240" xml:space="preserve"><tspan fill="#d7d8de">  Scope    user</tspan></text>
+  <text x="20" y="258" xml:space="preserve"><tspan fill="#d7d8de">  Role     role.work</tspan></text>
+  <text x="20" y="276" xml:space="preserve"><tspan fill="#d7d8de">  Tier     balanced</tspan></text>
+  <text x="20" y="294" xml:space="preserve"><tspan fill="#d7d8de">  Actual   not resolved</tspan></text>
+  <text x="20" y="312" xml:space="preserve"></text>
+  <text x="20" y="330" xml:space="preserve"><tspan fill="#d7d8de">  </tspan><tspan fill="#8b8c95">Launch resolution</tspan></text>
+  <text x="20" y="348" xml:space="preserve"><tspan fill="#d7d8de">  The catalog definition has no blocking diagnostic, but that is not launchability. Inject model a</tspan></text>
+  <text x="20" y="366" xml:space="preserve"><tspan fill="#d7d8de">  vailability and effort support before launching. No actual model was selected here.</tspan></text>
+  <text x="20" y="384" xml:space="preserve"></text>
+  <text x="20" y="402" xml:space="preserve"><tspan fill="#6b6c75">Showing 1-15 of 15 lines</tspan></text>
+  <text x="20" y="420" xml:space="preserve"></text>
+  <text x="20" y="438" xml:space="preserve"><tspan fill="#6b6c75">Ctrl+S Save defaults</tspan></text>
+  <text x="20" y="456" xml:space="preserve"></text>
+  <text x="20" y="474" xml:space="preserve"><tspan fill="#8b8c95">Skills saved (user): agent.worker · 1 selected</tspan></text>
+  </g>
+</svg>

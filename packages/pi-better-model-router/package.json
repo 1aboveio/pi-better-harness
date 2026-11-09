@@ -1,0 +1,49 @@
+{
+  "name": "pi-better-model-router",
+  "version": "0.1.4",
+  "description": "Price-aware virtual model routing for Pi.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "model-routing"
+  ],
+  "pi": {
+    "childRequirements": "./src/child-requirements.ts",
+    "extensions": [
+      "./node_modules/pi-ollama-cloud/index.ts",
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "scripts/*.mjs",
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "node scripts/stage-dependencies.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/*.test.ts"
+  },
+  "bundledDependencies": [
+    "pi-ollama-cloud"
+  ],
+  "peerDependencies": {
+    "@sinclair/typebox": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1aboveio/pi-better-harness.git",
+    "directory": "packages/pi-better-model-router"
+  },
+  "dependencies": {
+    "pi-ollama-cloud": "0.13.1"
+  },
+  "bundleDependencies": [
+    "pi-ollama-cloud"
+  ]
+}

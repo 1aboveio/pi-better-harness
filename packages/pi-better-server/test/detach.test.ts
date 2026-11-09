@@ -392,6 +392,28 @@ describe("/detach and return between a local session and a daemon", { concurrenc
     }
   });
 
+  it("the transcript gate survives context invalidation while preserving the fence", async () => {
+    const local = makeLocal();
+    process.env.PI_REMOTE_STATE_DIR = join(local.env.root, "pistate");
+    try {
+      const { hooks } = loadExtension();
+      const manager = SessionManager.open(local.sessionFile);
+      let stale = false;
+      hooks.session_start!({}, { get sessionManager() {
+        if (stale) throw new Error("stale extension context");
+        return manager;
+      } });
+      stale = true;
+      manager.appendMessage({ role: "user", content: "restored runtime", timestamp: Date.now() });
+      assert.ok(readFileSync(local.sessionFile, "utf8").includes("restored runtime"));
+      writeLocalRecord(join(process.env.PI_REMOTE_STATE_DIR, "local-sessions"), {
+        sessionId: local.info.sessionId, state: "fenced", epoch: 0, moveId: "m-restored", cwd: local.repo, host: "testhost",
+      });
+      manager.appendMessage({ role: "user", content: "must stay fenced", timestamp: Date.now() });
+      assert.ok(!readFileSync(local.sessionFile, "utf8").includes("must stay fenced"));
+    } finally { delete process.env.PI_REMOTE_STATE_DIR; }
+  });
+
   it("entries a turn appends while the session is fenced reach the file once a failed move unfences it", async () => {
     const local = makeLocal();
     process.env.PI_REMOTE_STATE_DIR = join(local.env.root, "pistate");

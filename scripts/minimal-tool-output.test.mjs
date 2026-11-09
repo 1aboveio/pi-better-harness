@@ -15,9 +15,10 @@ import { installMinimalOutputHook, loadToolPrototype, loadCompactionPrototype, l
 import { toolIdentity } from "../packages/pi-better-harness/extensions/minimal-output/tool-identity.ts";
 import { toolVisibility } from "../packages/pi-better-harness/extensions/minimal-output/tool-visibility.ts";
 import subagentsExtension from "../packages/pi-better-subagents/index.ts";
+import sandboxExtension from "../packages/pi-better-sandbox/index.ts";
 import backgroundTasksExtension from "../packages/pi-better-background-tasks/src/index.ts";
 import goalExtension from "../packages/pi-better-goal/src/index.ts";
-import planExtension from "../packages/pi-better-plan/src/index.ts";
+import taskContextExtension from "../packages/pi-better-harness/extensions/task-context/index.ts";
 import sshExtension from "../packages/pi-better-ssh/src/index.ts";
 
 const sdk = process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR
@@ -284,13 +285,28 @@ test("minimal mode suppresses streaming error bodies and inline images without d
   assert.equal(component.imageComponents.length, 1);
 });
 
-test("actual Harness tools retain useful compact calls, hide results, and expand their native renderers", () => {
+test("actual Harness tools retain useful compact calls, hide results, and expand their native renderers", async () => {
   const definitions = new Map();
+  const controls = new Map();
+  const bus = events();
+  bus.on("harness-settings:register", (candidate) => {
+    if (candidate && Array.isArray(candidate.values) && typeof candidate.change === "function") {
+      controls.set(candidate.id, candidate);
+    }
+  });
   const pi = {
-    events: events(), registerTool(definition) { definitions.set(definition.name, definition); },
+    events: bus, registerTool(definition) { definitions.set(definition.name, definition); },
     registerCommand() {}, registerShortcut() {}, on() {},
   };
-  for (const extension of [subagentsExtension, backgroundTasksExtension, goalExtension, planExtension, sshExtension]) extension(pi);
+  for (const extension of [sandboxExtension, subagentsExtension, backgroundTasksExtension, goalExtension, taskContextExtension, sshExtension]) extension(pi);
+  const ctx = {
+    mode: "print", hasUI: false, cwd: process.cwd(), isIdle: () => true,
+    sessionManager: { getBranch: () => [] },
+    ui: { notify() {}, setWidget() {}, setStatus() {} },
+  };
+  const todoControl = controls.get("outcome-todo");
+  assert.ok(todoControl, "Outcome & Todo owns its native settings control");
+  await todoControl.change("On", ctx);
   const hook = install();
   hook.setEnabled(true);
   const cases = [
@@ -302,6 +318,7 @@ test("actual Harness tools retain useful compact calls, hide results, and expand
     ["subagent_list", { status: ["running"], all: true }, /running.*all/],
     ["agents_catalog", { action: "inspect", id: "role.developer" }, /inspect.*role.developer/],
     ["bg_task_spawn", { command: "npm test", name: "unit-tests" }, /unit-tests.*npm test/],
+    ["run_application", { executable: "pnpm", args: ["test", "literal; argument"] }, /pnpm.*test.*literal; argument/],
     ["bg_task_watch", { command: "deploy status", ssh: { user: "ops", host: "builder" } }, /ops@builder.*deploy status/],
     ["bg_task_status", { id: "bg-tests" }, /bg-tests/],
     ["bg_task_log", { id: "bg-tests" }, /bg-tests/],
@@ -314,8 +331,8 @@ test("actual Harness tools retain useful compact calls, hide results, and expand
     ["goal_resume", { reason: "Continue verification" }, /Continue verification/],
     ["get_background_activity", {}, /Get background activity/],
     ["release_workflow", {}, /Release workflow/],
-    ["update_plan", { plan: [{ step: "Verify checkout", status: "in_progress" }] }, /1 steps/],
-    ["get_plan", {}, /Get plan/],
+    ["update_todo", { todo: [{ step: "Verify checkout", status: "in_progress" }], outcome: { objective: "Ship checkout" } }, /1 steps/],
+    ["get_todo", {}, /Get todo/],
     ["remote_bash", { host: "builder", command: "git status" }, /builder.*git status/],
     ["ssh_profile", { action: "use", host: "builder" }, /use.*builder/],
     ["ssh_mux", { action: "status", host: "builder" }, /status.*builder/],
@@ -513,7 +530,7 @@ test("compact rows color the tool icon and name together, while arguments remain
 });
 
 test("running names and details shimmer through both themes without changing text or width", (t) => {
-  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
   const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
   handles.push(hook);
   hook.setEnabled(true);
@@ -610,7 +627,7 @@ test("tool-name shimmer preserves Unicode and degrades to static color for termi
 });
 
 test("animation stops on expansion, disable, settled runs, history restore, and final disposal", (t) => {
-  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
   const first = installMinimalOutputHook(prototype, () => themeModule.theme);
   const second = installMinimalOutputHook(prototype, () => themeModule.theme);
   handles.push(first, second);
@@ -657,35 +674,91 @@ test("animation stops on expansion, disable, settled runs, history restore, and 
   stopped();
 });
 
-test("animation stops when a running row is no longer rendered and resumes when it returns", (t) => {
-  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+test("an idle running row keeps a slow clock and returns to the frame cadence when painting resumes", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
   const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
   handles.push(hook);
   hook.setEnabled(true);
   let redraws = 0;
+  let paintEachRequest = false;
   let component;
-  const ui = animationUI(() => [component], () => { redraws++; });
+  // While paintEachRequest is false the host only counts the request, so no render refreshes
+  // the row's timestamp and the clock has to fall back to its idle cadence.
+  const ui = animationUI(() => [component], () => {
+    redraws++;
+    if (paintEachRequest) component.render(80);
+  });
   component = new ToolExecutionComponent("read", "stale-render", {}, {}, undefined, ui, process.cwd());
   component.render(80);
-  for (let frame = 0; frame < 10; frame++) t.mock.timers.tick(80);
-  const count = redraws;
-  assert.ok(count > 0);
-  t.mock.timers.tick(800);
-  assert.equal(redraws, count);
-  component.render(80);
+  // Five frames at 80 ms stay inside the 400 ms fast window; the sixth falls to the idle cadence.
+  for (let frame = 0; frame < 5; frame++) t.mock.timers.tick(80);
+  const fast = redraws;
+  assert.equal(fast, 5);
   t.mock.timers.tick(80);
-  assert.equal(redraws, count + 1);
+  // The row is still running and still visible, so the clock must keep asking for renders
+  // rather than clearing itself and waiting for an unrelated render to restart it. This sixth
+  // frame is the one that discovers idleness, then re-arms at the slow cadence.
+  assert.equal(redraws, fast + 1, "the frame that discovers idleness still requests a render");
+  redraws = 0;
+  t.mock.timers.tick(1000);
+  assert.equal(redraws, 1, "an idle running row keeps one request a second instead of stopping");
+  redraws = 0;
+  t.mock.timers.tick(1000);
+  assert.equal(redraws, 1, "the idle clock keeps running on its own");
+  // Painting resumes: the next idle request renders, and that render must restore 80 ms rather
+  // than re-arming another idle second. This is the recovery the old stop-the-timer version lost.
+  paintEachRequest = true;
+  redraws = 0;
+  t.mock.timers.tick(1000);
+  assert.equal(redraws, 1);
+  redraws = 0;
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1, "a frame cadence returns as soon as the row paints again");
+  redraws = 0;
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1, "the recovered clock stays at the frame cadence");
+  // A failure result retires the row, which stops the clock without an age check.
   component.updateResult({ ...payload, isError: true }, false);
   const failure = component.render(80)[0];
   assert.ok(failure.includes(themeModule.theme.fg("error", "\u25a4 Read")));
   redraws = 0;
-  t.mock.timers.tick(800);
-  assert.equal(redraws, 0);
+  t.mock.timers.tick(2000);
+  assert.equal(redraws, 0, "an error row retires its clock");
   assert.equal(component.render(80)[0], failure);
 });
 
+test("a deferred render shortens a pending idle timeout to the frame cadence", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
+  const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
+  handles.push(hook);
+  hook.setEnabled(true);
+  let redraws = 0;
+  let deferredRender;
+  let component;
+  // A host that paints after the timer callback returns leaves paintingFrame false, so the
+  // render path itself has to shorten the idle timeout paintFrame already armed.
+  const ui = animationUI(() => [component], () => {
+    redraws++;
+    deferredRender = () => component.render(80);
+  });
+  component = new ToolExecutionComponent("read", "deferred-render", {}, {}, undefined, ui, process.cwd());
+  component.render(80);
+  for (let frame = 0; frame < 6; frame++) t.mock.timers.tick(80);
+  const paint = deferredRender;
+  assert.equal(typeof paint, "function", "the idling frame requested a render");
+  paint();
+  redraws = 0;
+  // Deferred painting restored the frame cadence, so the next 80 ms fires instead of waiting
+  // out the idle second that was pending when this render arrived.
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1, "a deferred render replaces the pending idle timeout");
+  redraws = 0;
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1, "the shortened timeout keeps the frame cadence");
+});
+
 test("scrollback hosts and unresolved palettes never start a redundant animation clock", (t) => {
-  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
   let theme = themeModule.theme;
   const hook = installMinimalOutputHook(prototype, () => theme);
   handles.push(hook);
@@ -717,7 +790,7 @@ test("scrollback hosts and unresolved palettes never start a redundant animation
 });
 
 test("clipped running rows do not redraw even when the host keeps rendering them, and custom call renderers are not rebuilt", (t) => {
-  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
   const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
   handles.push(hook);
   hook.setEnabled(true);
@@ -749,7 +822,7 @@ test("clipped running rows do not redraw even when the host keeps rendering them
 });
 
 test("real scrollback TUI leaves off-screen running rows unchanged without scrollback clears", (t) => {
-  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
   const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
   handles.push(hook);
   hook.setEnabled(true);
@@ -1027,7 +1100,7 @@ test("the contributed hub control changes real tool rows, shares command state, 
 });
 
 test("tool animation preference applies immediately, persists through reload, and survives failed saves", async (t) => {
-  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
   const handlers = new Map();
   const pi = { events: events(), on: (name, handler) => handlers.set(name, handler), registerCommand() {}, appendEntry() {} };
   minimalOutputExtension(pi);

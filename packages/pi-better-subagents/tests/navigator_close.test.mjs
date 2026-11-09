@@ -199,15 +199,13 @@ describe("close confirm hint", () => {
 
     // @covers navigator.close
     // @level unit
-    it("applyCloseConfirmFooter uses a dedicated status key and coexists with the count hint", () => {
+    it("footer compatibility helpers do not write status", () => {
         const calls = [];
         const ui = { setStatus(k, v) { calls.push([k, v]); } };
         applyNavigatorFooter(ui, 2);
         applyCloseConfirmFooter(ui, "x again to stop alpha");
-        assert.deepEqual(calls[0], [NAVIGATOR_STATUS_KEY, "← subagents · 2"]);
-        assert.deepEqual(calls[1], [CLOSE_CONFIRM_STATUS_KEY, "x again to stop alpha"]);
         applyCloseConfirmFooter(ui, null);
-        assert.deepEqual(calls.at(-1), [CLOSE_CONFIRM_STATUS_KEY, undefined]);
+        assert.deepEqual(calls, []);
         assert.equal(CLOSE_ARM_MS, 3000);
     });
 });
@@ -687,7 +685,7 @@ describe("tool compatibility after navigator close-dismiss", () => {
             result: subagentResultTool(TypeStub),
             stop: subagentStopTool(TypeStub, { onStopped: () => {} }),
         };
-        assert.ok(resultText(await tools.list.execute("tc", {})).includes(id));
+        assert.ok(resultText(await tools.list.execute("tc", {}, undefined, undefined, { cwd: "/tmp" })).includes(id));
         assert.ok(resultText(await tools.output.execute("tc", { id })).includes(id));
         assert.ok(resultText(await tools.result.execute("tc", { id })).includes(id));
         assert.equal(isDismissed(readMeta(id)), true);

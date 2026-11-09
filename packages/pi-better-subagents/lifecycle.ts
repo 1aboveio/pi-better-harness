@@ -7,6 +7,7 @@ export type LifecycleClassification =
     | "incomplete_no_terminal_event"
     | "incomplete_open_tools"
     | "failed_exit"
+    | "failed_model_error"
     | "killed"
     | "timed_out"
     | "orphaned"
@@ -21,6 +22,12 @@ export interface LifecycleDiagnostics {
     unmatchedTools: string[];
     /** Process exit code when known. */
     exitCode: number | null | undefined;
+    /**
+     * Message of the last model request that failed and was not superseded by a
+     * later assistant turn. Present even when the run is `complete`: a provider
+     * error can end the loop with a zero exit and a terminal event.
+     */
+    modelError?: string;
     /** Durable run status when known. */
     status?: RunStatus | "exited";
 }
@@ -58,6 +65,7 @@ function buildDiagnostics(
         unmatchedToolCount: run.unmatchedToolCalls.length,
         unmatchedTools: unmatchedToolLabels(run),
         exitCode,
+        modelError: run.modelError,
         status,
     };
 }
@@ -94,6 +102,20 @@ export function classifyChildExit(code: number | null, run: ParsedRun): ChildExi
             classification: "incomplete_open_tools",
             diagnostics,
             verdict: `! incomplete child exit (exit ${code})`,
+        };
+    }
+
+    // A zero exit with terminal evidence still proves nothing about the model: Pi
+    // ends the loop normally when the last request could not be served, and the
+    // stream is coherent. Without this check such a run is reported as ✓ completed
+    // with whatever partial text preceded the error.
+    if (run.modelError) {
+        return {
+            status: "failed",
+            incomplete: false,
+            classification: "failed_model_error",
+            diagnostics,
+            verdict: "✗ failed (model error)",
         };
     }
 
@@ -196,6 +218,8 @@ function summaryFor(classification: LifecycleClassification): string {
             return "lifecycle incomplete_open_tools — unmatched tool executions remain";
         case "failed_exit":
             return "lifecycle failed_exit";
+        case "failed_model_error":
+            return "lifecycle failed_model_error — the last model request failed";
         case "killed":
             return "lifecycle killed";
         case "timed_out":
@@ -213,9 +237,11 @@ export function formatLifecycleDiagnostics(lifecycle: LifecycleValidation): stri
     const unmatched = d.unmatchedTools.length
         ? d.unmatchedTools.join(", ")
         : "none";
+    const modelError = d.modelError ? [`Model error: ${d.modelError}`] : [];
     return [
         `Lifecycle: ${lifecycle.classification}`,
         `Lifecycle diagnostics: terminal event: ${d.sawTerminalEvent ? "yes" : "no"}; unmatched tools: ${unmatched}; exit: ${d.exitCode === undefined ? "?" : String(d.exitCode)}`,
+        ...modelError,
     ].join("\n");
 }
 

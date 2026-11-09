@@ -33,7 +33,7 @@ import { logPathFor } from "./registry.ts";
 interface ContentBlock { type: string; text?: string; thinking?: string; name?: string }
 interface Cost { total?: number }
 interface MsgUsage { input?: number; output?: number; cacheRead?: number; cost?: Cost }
-interface Msg { role?: string; content?: string | ContentBlock[]; usage?: MsgUsage }
+interface Msg { role?: string; content?: string | ContentBlock[]; usage?: MsgUsage; stopReason?: string; errorMessage?: string }
 
 /** Cumulative token + cost spend across a run's turns. */
 export interface Usage {
@@ -133,6 +133,12 @@ export interface ParsedRun {
     unmatchedToolCalls: UnmatchedToolCall[];
     /** True if we saw the terminal `agent_end`/`agent_settled` event. */
     sawEnd: boolean;
+    /**
+     * Message of the last model request that failed and that no later assistant
+     * turn superseded. A stream ending on one did not do the work: Pi still ends
+     * the loop normally, so the terminal event alone cannot prove success.
+     */
+    modelError?: string;
     /** Cumulative token + cost spend so far. */
     usage: Usage;
     /** Diagnostics about truncation or parse failure, surfaced to the user. */
@@ -1101,6 +1107,8 @@ interface ParseState {
     openToolCalls: Map<string, UnmatchedToolCall>;
     anonymousToolCall: number;
     sawEnd: boolean;
+    /** Last unrecovered failed model request, cleared by a later successful turn. */
+    modelError?: string;
     /** Bytes were skipped by a bounded cold start on an already-large log. */
     windowTruncated: boolean;
     /** Log size at the last read, for the truncation diagnostic. */
@@ -1245,6 +1253,15 @@ function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
             // Latest finalized assistant text wins, so a run without a
             // terminal `agent_end` still yields its LAST answer, not its first.
             if (t) { state.lastActivity = t; state.finalText = t; }
+            // A failed request is evidence until a later assistant turn proves the
+            // model serves again. Only the LAST request matters: earlier failures
+            // show up as `auto_retry_*` retries that already recovered. The stop
+            // reason decides, because Pi pairs `stopReason: "aborted"` with a real
+            // error message and an aborted turn is a stop, not a provider failure.
+            const errorMessage = typeof m.errorMessage === "string" ? m.errorMessage.trim() : "";
+            state.modelError = m.stopReason === "error"
+                ? errorMessage || "assistant stopReason=error"
+                : undefined;
             const u = m?.usage;
             if (u) {
                 state.usage.input += u.input ?? 0;
@@ -1350,6 +1367,7 @@ export function parseRun(id: string): ParsedRun {
         toolCallCount: view.toolCallCount,
         unmatchedToolCalls: [...view.openToolCalls.values()],
         sawEnd: view.sawEnd,
+        modelError: view.modelError,
         usage,
         diagnostics,
     };

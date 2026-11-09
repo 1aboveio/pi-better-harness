@@ -21,9 +21,9 @@ export class ConnectionControl {
   /** Stream a session's events to this connection, replaying after `sinceSeq` first. Replaces an earlier subscription. */
   subscribe(sessionId: string, hosted: HostedSession, sinceSeq: number | undefined): { summary: Record<string, unknown>; events: LoggedEvent[] } {
     this.unsubscribe(sessionId);
-    const { replay, unsubscribe } = hosted.subscribe(sinceSeq, (logged) => this.send({ type: "event", sessionId, seq: logged.seq, event: logged.event }));
+    const { replay, unsubscribe } = hosted.subscribe(sinceSeq, (logged) => this.send({ type: "event", sessionId, generation: hosted.generation, seq: logged.seq, event: logged.event }));
     this.subscriptions.set(sessionId, unsubscribe);
-    const summary = { lastSeq: hosted.lastSeq, firstSeq: replay.firstSeq, replayed: replay.events.length, truncated: replay.truncated };
+    const summary = { generation: hosted.generation, lastSeq: hosted.lastSeq, firstSeq: replay.firstSeq, replayed: replay.events.length, truncated: replay.truncated };
     return { summary, events: replay.events };
   }
 
@@ -45,7 +45,7 @@ export class ConnectionControl {
       if (since !== undefined && (typeof since !== "number" || !Number.isInteger(since) || since < 0)) return refuse("sinceSeq must be a non-negative integer");
       const { summary, events } = this.subscribe(sessionId, hosted, since as number | undefined);
       reply(summary);
-      for (const logged of events) this.send({ type: "event", sessionId, seq: logged.seq, event: logged.event });
+      for (const logged of events) this.send({ type: "event", sessionId, generation: hosted.generation, seq: logged.seq, event: logged.event });
       return;
     }
     if (type === "acquire_control") {

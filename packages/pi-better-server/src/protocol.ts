@@ -11,6 +11,7 @@
  */
 import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
 import type { CompanionInfo } from "./companion.ts";
+import type { ServerBuild, UpgradeRequest } from "./startup/managed-types.ts";
 import type { DialogAnswer, PendingDialog } from "./ui-bridge.ts";
 
 export type { DialogAnswer, PendingDialog };
@@ -58,12 +59,18 @@ export interface HelloCommand {
   piVersion?: string;
   /** Extension and harness versions the client runs, by package name. Reported, not enforced. */
   extensionVersions?: Record<string, string>;
+  /** Optional native transport features; ordinary SDK compatibility is unchanged. */
+  capabilities?: string[];
 }
 
 export interface HelloData {
   protocolVersion: number;
   piVersion: string;
   extensionVersions: Record<string, string>;
+  capabilities?: string[];
+  build?: ServerBuild;
+  /** Token of the exclusive owner, distinct for every daemon incarnation. */
+  instanceId?: string;
 }
 
 export type DaemonCommand =
@@ -77,6 +84,7 @@ export type DaemonCommand =
       thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
     }
   | { id?: string; type: "open_session"; sessionId: string }
+  | { id?: string; type: "rename_session"; sessionId: string; name: string }
   | { id?: string; type: "close_session"; sessionId: string }
   | { id?: string; type: "start_companion"; sessionId: string }
   | { id?: string; type: "stop_companion"; sessionId: string }
@@ -88,16 +96,16 @@ export type DaemonCommand =
  */
 export type MoveCommand =
   | { id?: string; type: "move_fence"; sessionId: string; moveId: string; waitMs?: number }
-  | { id?: string; type: "move_export"; sessionId: string; moveId: string }
+  | { id?: string; type: "move_export"; sessionId: string; moveId: string; includeWorkspace?: boolean; compression?: "gzip" | "none" }
   | { id?: string; type: "move_read"; moveId: string; offset: number; length: number }
   | { id?: string; type: "move_retire"; sessionId: string; moveId: string; movedTo: string }
   | { id?: string; type: "move_unfence"; sessionId: string; moveId?: string }
-  | { id?: string; type: "move_begin"; moveId: string; sessionId: string; size: number; sha256: string; cwd?: string; rebindProvider?: string }
+  | { id?: string; type: "move_begin"; moveId: string; sessionId: string; sourceSessionId?: string; copy?: boolean; includeWorkspace?: boolean; size: number; sha256: string; cwd?: string; rebindProvider?: string }
   | { id?: string; type: "move_write"; moveId: string; offset: number; data: string }
   | { id?: string; type: "move_commit"; moveId: string }
   | { id?: string; type: "move_abort"; moveId: string; sessionId: string }
   /** Checks to run on the receiving daemon before anything is fenced; with `sessionId`, also describes that session for a pull. */
-  | { id?: string; type: "move_preflight"; sessionId?: string; model?: string; modelProvider?: string; rebindProvider?: string; repoRemote?: string; requireGh?: boolean; bytes?: number; dir?: string };
+  | { id?: string; type: "move_preflight"; sessionId?: string; includeWorkspace?: boolean; model?: string; modelProvider?: string; rebindProvider?: string; repoRemote?: string; requireGh?: boolean; bytes?: number; dir?: string };
 
 /**
  * Event delivery and control, all addressed to one session:
@@ -112,13 +120,17 @@ export type ControlCommand =
   | { id?: string; type: "release_control"; sessionId: string }
   | ({ id?: string; type: "extension_ui_response"; sessionId: string; requestId: string } & DialogAnswer);
 
-export type ClientCommand = HelloCommand | DaemonCommand | ControlCommand | SessionCommand;
+export type ClientCommand = HelloCommand | DaemonCommand | ControlCommand | SessionCommand
+  | ({ id?: string; type: "runtime_upgrade" } & UpgradeRequest)
+  | { id?: string; type: "runtime_upgrade_status" }
+  | { id?: string; type: "client_reload"; sessionId: string };
 
 export type DaemonResponse =
   | { id?: string; type: "response"; command: "hello"; success: true; data: HelloData }
   | { id?: string; type: "response"; command: "list_sessions"; success: true; data: { sessions: SessionSummary[] } }
   | { id?: string; type: "response"; command: "create_session"; success: true; sessionId: string; data: SessionSummary }
   | { id?: string; type: "response"; command: "open_session"; success: true; sessionId: string; data: SessionSummary }
+  | { id?: string; type: "response"; command: "rename_session"; success: true; sessionId: string; data: SessionSummary }
   | { id?: string; type: "response"; command: "close_session"; success: true; sessionId: string }
   | { id?: string; type: "response"; command: "start_companion"; success: true; sessionId: string; data: CompanionInfo }
   | { id?: string; type: "response"; command: "stop_companion"; success: true; sessionId: string; data: { stopped: boolean } };
@@ -128,7 +140,7 @@ export type SessionResponse = RpcResponse & { sessionId?: string };
 export type ServerMessage =
   | DaemonResponse
   | SessionResponse
-  | { type: "event"; sessionId: string; seq: number; event: unknown };
+  | { type: "event"; sessionId: string; seq: number; generation?: string; event: unknown };
 
 export const MOVE_COMMANDS: ReadonlySet<string> = new Set([
   "move_fence",
@@ -143,7 +155,7 @@ export const MOVE_COMMANDS: ReadonlySet<string> = new Set([
   "move_preflight",
 ]);
 
-export const DAEMON_COMMANDS: ReadonlySet<string> = new Set(["list_sessions", "create_session", "open_session", "close_session", "start_companion", "stop_companion", ...MOVE_COMMANDS]);
+export const DAEMON_COMMANDS: ReadonlySet<string> = new Set(["list_sessions", "create_session", "open_session", "rename_session", "close_session", "start_companion", "stop_companion", ...MOVE_COMMANDS]);
 
 export const CONTROL_COMMANDS: ReadonlySet<string> = new Set(["subscribe", "acquire_control", "release_control", "extension_ui_response"]);
 
