@@ -169,21 +169,28 @@ export class CoordinatorClient {
         if (!socket || socket.destroyed) throw new Error("coordinator is not connected");
         const requestId = `req-${randomUUID()}`;
         const withId = { ...request, requestId } as CoordinatorRequest;
-        return await new Promise<CoordinatorReply>((resolvePromise, reject) => {
-            const timer = setTimeout(() => {
-                this.pending.delete(requestId);
-                reject(new Error("coordinator request timed out"));
-            }, 5_000);
-            timer.unref?.();
-            this.pending.set(requestId, { resolve: resolvePromise, reject, timer });
-            try {
-                socket.write(`${JSON.stringify(withId)}\n`);
-            } catch (error) {
-                clearTimeout(timer);
-                this.pending.delete(requestId);
-                reject(error instanceof Error ? error : new Error(String(error)));
-            }
-        });
+        // Only explicit in-flight work owns process lifetime. An idle advisory
+        // subscription must not prevent a CLI or SDK process from exiting.
+        socket.ref();
+        try {
+            return await new Promise<CoordinatorReply>((resolvePromise, reject) => {
+                const timer = setTimeout(() => {
+                    this.pending.delete(requestId);
+                    reject(new Error("coordinator request timed out"));
+                }, 5_000);
+                timer.unref?.();
+                this.pending.set(requestId, { resolve: resolvePromise, reject, timer });
+                try {
+                    socket.write(`${JSON.stringify(withId)}\n`);
+                } catch (error) {
+                    clearTimeout(timer);
+                    this.pending.delete(requestId);
+                    reject(error instanceof Error ? error : new Error(String(error)));
+                }
+            });
+        } finally {
+            if (this.pending.size === 0) socket.unref();
+        }
     }
 
     private async subscribe(): Promise<void> {
@@ -292,6 +299,7 @@ export class CoordinatorClient {
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         this.reconnectTimer = undefined;
         this.socket = socket;
+        socket.unref();
         this.buffer = "";
         socket.on("data", (chunk: string) => {
             this.buffer += chunk;

@@ -16,12 +16,16 @@ import { createRequire } from "node:module";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
+import { createServer, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { openStore } from "../shared-operation-coordinator/index.js";
 import { coordinatorPaths } from "./paths.js";
+import { CoordinatorServer } from "./server.js";
+import { CoordinatorClient } from "./client.js";
+import { COORDINATOR_PROTOCOL_VERSION } from "./protocol.js";
 
 const tsxImport = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
 const packageSource = dirname(fileURLToPath(import.meta.url));
@@ -212,6 +216,97 @@ function writeHostFixture(root: string): string {
 }
 
 describe("real multi-process coordinator acceptance", () => {
+  it("lets an idle subscribed client exit naturally while the external leader stays alive", async () => {
+    const root = workspace("idle-exit");
+    const options = { storePath: join(root, "operations.sqlite"), supervisorDirectory: join(root, "supervisor"), stateDirectory: join(root, "state"), spawnServer: false };
+    const server = (await CoordinatorServer.start(options)).server!;
+    cleanups.push(() => server.close());
+    const script = join(root, "idle-exit.mts");
+    writeFileSync(script, `import { CoordinatorClient } from ${JSON.stringify(pathToFileURL(join(packageSource, "client.ts")).href)};
+      const client = new CoordinatorClient(${JSON.stringify(options)});
+      await client.start([{ kind: "parent-session", sessionId: "idle-exit", workspace: ${JSON.stringify(root)}, branchId: null, goalId: null }]);
+      console.log("STARTED");`);
+    const fixture = startFixture(script, [], root);
+    await waitForLine(fixture, /^STARTED$/);
+    await waitForClose(fixture);
+    expect(fixture.child.exitCode).toBe(0);
+    const observer = new CoordinatorClient(options);
+    cleanups.push(() => observer.close());
+    await observer.start([]);
+    expect((await observer.stats()).pid).toBe(process.pid);
+  }, 15_000);
+
+  it.each(["reply", "timeout"])("keeps a child alive through delayed subscription and pending RPC %s, then exits naturally", async (mode) => {
+    const root = workspace(`rpc-exit-${mode}`);
+    const options = { storePath: join(root, "operations.sqlite"), supervisorDirectory: join(root, "supervisor"), stateDirectory: join(root, "state"), spawnServer: false };
+    const paths = coordinatorPaths(options.storePath, options.supervisorDirectory);
+    if (process.platform !== "win32") mkdirSync(dirname(paths.socket), { recursive: true, mode: 0o700 });
+    const sockets = new Set<Socket>();
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    let statsRequests = 0;
+    const peer = createServer((socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+      socket.on("error", () => {});
+      socket.setEncoding("utf8");
+      let buffer = "";
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        let newline: number;
+        while ((newline = buffer.indexOf("\n")) >= 0) {
+          const request = JSON.parse(buffer.slice(0, newline));
+          buffer = buffer.slice(newline + 1);
+          if (request.type === "stats") statsRequests++;
+          if (request.type === "stats" && mode === "timeout") continue;
+          const reply = request.type === "subscribe"
+            ? { type: "subscribed", owners: 0, latestSeq: 0 }
+            : { type: "stats", stats: { pid: process.pid } };
+          const timer = setTimeout(() => {
+            timers.delete(timer);
+            socket.write(JSON.stringify({ ...reply, version: COORDINATOR_PROTOCOL_VERSION, requestId: request.requestId }) + "\n");
+          }, request.type === "subscribe" ? 200 : 200 * statsRequests);
+          timers.add(timer);
+        }
+      });
+    });
+    await new Promise<void>((resolve) => peer.listen(paths.socket, resolve));
+    cleanups.push(async () => {
+      for (const timer of timers) clearTimeout(timer);
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => peer.close(() => resolve()));
+    });
+    const script = join(root, "rpc-exit.mts");
+    writeFileSync(script, `import assert from "node:assert/strict";
+      import { CoordinatorClient } from ${JSON.stringify(pathToFileURL(join(packageSource, "client.ts")).href)};
+      const client = new CoordinatorClient(${JSON.stringify(options)});
+      await client.start([]);
+      console.log("STARTED");
+      ${mode === "reply"
+        ? `const replies = await Promise.all([client.stats(), client.stats()]); assert.ok(replies.every(reply => reply.pid === ${process.pid}));`
+        : `await assert.rejects(client.stats(), /coordinator request timed out/);`}
+      console.log("SETTLED");`);
+    const fixture = startFixture(script, [], root);
+    await waitForLine(fixture, /^SETTLED$/);
+    await waitForClose(fixture);
+    expect(fixture.child.exitCode).toBe(0);
+    expect(statsRequests).toBe(mode === "reply" ? 2 : 1);
+  }, 15_000);
+
+  it("keeps an awaited unavailable start alive until its bounded rejection", async () => {
+    const root = workspace("unavailable-exit");
+    const options = { storePath: join(root, "operations.sqlite"), supervisorDirectory: join(root, "supervisor"), stateDirectory: join(root, "state"), spawnServer: false };
+    const script = join(root, "unavailable-exit.mts");
+    writeFileSync(script, `import assert from "node:assert/strict";
+      import { CoordinatorClient } from ${JSON.stringify(pathToFileURL(join(packageSource, "client.ts")).href)};
+      const client = new CoordinatorClient(${JSON.stringify(options)});
+      await assert.rejects(client.start([]), /unavailable after 8 attempts/);
+      console.log("UNAVAILABLE");`);
+    const fixture = startFixture(script, [], root);
+    await waitForLine(fixture, /^UNAVAILABLE$/);
+    await waitForClose(fixture);
+    expect(fixture.child.exitCode).toBe(0);
+  }, 15_000);
+
   it.skipIf(process.platform === "win32").each([false, true])("shares election and discovery across temporary and agent environments (explicit state: %s)", async (explicitState) => {
     const root = workspace("environment-namespace");
     const storePath = join(root, "operations.sqlite"), supervisorDirectory = join(root, "supervisor");
