@@ -355,6 +355,22 @@ test("an escape-paused workflow goal puts the paused instruction before, and ove
   assert.match(disabled, /Only coordinate work/);
   assert.doesNotMatch(disabled, /goal_resume/, "disabling the resume tool retains the workflow pause override");
 
+  // Replay a permission pause written by an older release with its workflow retained.
+  entries.push({ type: "custom", customType: "pi-better-goal", data: {
+    version: 1, kind: "set", source: "command", at: 100,
+    goal: { ...currentGoalSnapshot(ctx)!, status: "paused", pauseReason: "permission-blocker" },
+  } });
+  await commands.get("goal")?.handler("settings conversational-resume on", ctx);
+  await handlers.get("session_start")?.({ reason: "reload" }, ctx);
+  assert.equal(currentGoalSnapshot(ctx)?.status, "paused");
+  assert.equal(currentGoalSnapshot(ctx)?.pauseReason, undefined);
+  assert.ok(currentWorkflowOwner(entries), "legacy replay retains the workflow owner");
+  const legacy = (await invokeBeforeAgentStart(handlers, ctx, "base")).systemPrompt;
+  assert.match(legacy, /do not continue the goal's work until it is resumed/);
+  assert.match(legacy, /this overrides the workflow instructions below/);
+  assert.doesNotMatch(legacy, /pressed escape|goal_resume/,
+    "a legacy pause neither invents an Escape nor allows conversational resume");
+
   await commands.get("goal")?.handler("resume", ctx);
   const running = (await invokeBeforeAgentStart(handlers, ctx, "base")).systemPrompt;
   assert.doesNotMatch(running, /pressed escape|overrides the workflow/);

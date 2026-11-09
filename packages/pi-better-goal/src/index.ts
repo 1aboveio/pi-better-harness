@@ -110,9 +110,11 @@ function pausedGoalPrompt(goal: GoalSnapshot, conversationalResume: boolean, inc
   return [
     goal.pauseReason === "handback"
       ? `Pi Better Goal is paused because its workflow handed back unfinished work for the user's answer.${includeObjective ? ` Goal: ${goal.objective}` : ""}`
-      : `Pi Better Goal is paused because the user pressed escape.${includeObjective ? ` Goal: ${goal.objective}` : ""}`,
+      : goal.pauseReason === "interrupt"
+        ? `Pi Better Goal is paused because the user pressed escape.${includeObjective ? ` Goal: ${goal.objective}` : ""}`
+        : `Pi Better Goal is paused.${includeObjective ? ` Goal: ${goal.objective}` : ""}`,
     "Treat the user's messages as ordinary conversation: answer them, but do not continue the goal's work until it is resumed.",
-    conversationalResume ? GOAL_RESUME_RULE : "Only the user can resume this goal, with /goal resume or alt+g. A conversational go-ahead does not resume it.",
+    agentResumable(goal, conversationalResume) ? GOAL_RESUME_RULE : "Only the user can resume this goal, with /goal resume or alt+g. A conversational go-ahead does not resume it.",
   ].join("\n");
 }
 
@@ -1319,7 +1321,7 @@ export default function (pi: ExtensionAPI): void {
     const harnessPresent = requestTaskContext(pi, "inspect", goal).enabled !== undefined;
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
-    const pausedInstruction = goal?.status === "paused" && (goal.pauseReason === "interrupt" || goal.pauseReason === "handback")
+    const pausedInstruction = goal?.status === "paused"
       ? pausedGoalPrompt(goal, preferences.conversationalResume, !harnessPresent) : "";
     if (!isPokeable(goal) && !owner) {
       return publishGoalGuidance(event, pausedInstruction);

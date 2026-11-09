@@ -2059,7 +2059,10 @@ test("an escape-paused goal tells the agent to converse and when it may resume",
   await commands.get("goal")?.handler("resume", ctx);
   await commands.get("goal")?.handler("pause", ctx);
   const sticky = await invokeBeforeAgentStart(handlers, ctx, "base");
-  assert.deepEqual(sticky.sections, {}, "a /goal pause adds no goal_resume guidance");
+  assert.match(sticky.systemPrompt, /Only the user can resume this goal/);
+  assert.match(sticky.systemPrompt, /do not continue the goal's work until it is resumed/);
+  assert.doesNotMatch(sticky.systemPrompt, /goal_resume|pressed escape/,
+    "a manual pause requires human resume without inventing an interrupt");
 });
 
 test("an explicit /goal pause is not undone by later user messages", async (t) => {
