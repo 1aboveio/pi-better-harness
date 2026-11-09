@@ -47,6 +47,7 @@ import { cleanupAll, createCtx, defaultPlan, schemasFor, sessionFixture, startSt
 const durableRoot = mkdtempSync(join(tmpdir(), "worker-races-durable-"));
 const volatileRoot = mkdtempSync(join(tmpdir(), "worker-races-tmp-"));
 const children = [];
+const pendingGates = new Set();
 
 before(() => {
     process.env.PI_SUBAGENT_DURABLE_DIR = durableRoot;
@@ -60,7 +61,13 @@ after(() => {
     rmSync(volatileRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
-afterEach(() => cleanupAll());
+afterEach(async () => {
+    try {
+        for (const release of pendingGates) await release();
+    } finally {
+        cleanupAll();
+    }
+});
 
 function workerScope(attemptId, workspace, { branchId = "branch-1", goalId = null } = {}) {
     return { runId: attemptId, conversationId: attemptId, workspace, authorityReference: "authority:test", branchId, goalId };
@@ -79,6 +86,7 @@ async function seedPark(stack, {
     ownerSessionId = "parent-session-1",
     goalId = null,
     completed = true,
+    holdPending = false,
 } = {}) {
     const plan = defaultPlan();
     const policy = {
@@ -105,13 +113,45 @@ async function seedPark(stack, {
         owner: { sessionId: ownerSessionId, workspace: ownerWorkspace, branchId: "branch-1", goalId },
     });
     const owner = { kind: "worker-conversation", sessionId: attemptId, workspace: stack.workspace, branchId: "branch-1", goalId };
+    const releaseFile = join(stack.workspace, `${attemptId}-release`);
+    const command = holdPending
+        ? `const fs = require('node:fs'); const timer = setInterval(() => {
+            if (fs.existsSync(${JSON.stringify(releaseFile)})) { clearInterval(timer); console.log('race-ok'); }
+        }, 20);`
+        : "console.log('race-ok')";
     const launch = await stack.bridge.rpc.call("execute-tool", {
         runId: attemptId,
         conversationId: attemptId,
         tool: "bg_task_spawn",
-        params: { argv: [process.execPath, "-e", "console.log('race-ok')"], shell: false, name: "race-task" },
+        params: { argv: [process.execPath, "-e", command], shell: false, name: "race-task" },
     });
     const taskId = String(launch.id);
+    const scope = workerScope(attemptId, stack.workspace, { goalId });
+    const release = async () => {
+        if (!pendingGates.has(release)) return;
+        try {
+            writeFileSync(releaseFile, "release\n");
+            const deadline = Date.now() + 10_000;
+            for (;;) {
+                const status = stack.service.statusForWorker(scope, taskId);
+                if (status.phase === "terminal") {
+                    assert.equal(status.terminalOutcome, "succeeded", JSON.stringify(status));
+                    return;
+                }
+                assert.ok(Date.now() < deadline, `released gate did not terminate: ${JSON.stringify(status)}`);
+                await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+        } catch (error) {
+            // Use the supervisor's ownership checks if a broken fixture cannot
+            // finish; never leave a gated command behind when its root is removed.
+            try { await stack.service.stopForWorker(scope, taskId); }
+            catch (cleanupError) { error.message += `; gate cleanup failed: ${cleanupError.message}`; }
+            throw error;
+        } finally {
+            pendingGates.delete(release);
+        }
+    };
+    if (holdPending) pendingGates.add(release);
     const admitted = await stack.bridge.rpc.call("wait-admission", {
         runId: attemptId,
         conversationId: attemptId,
@@ -151,7 +191,7 @@ async function seedPark(stack, {
         }
     }
 
-    return { waitId, generation, taskId, plan, policy };
+    return { waitId, generation, taskId, plan, policy, release };
 }
 
 function writeParkedAttempt(stack, {
@@ -520,7 +560,7 @@ test("park finalization uses the worker workspace, not the foreground parent wor
     const stack = await startStack();
     const attemptId = "sa_race_workspace";
     const parentWorkspace = join(stack.root, "parent-workspace");
-    const seeded = await seedPark(stack, { attemptId, target: "parking", ownerWorkspace: parentWorkspace });
+    const seeded = await seedPark(stack, { attemptId, target: "parking", ownerWorkspace: parentWorkspace, holdPending: true });
     writeParkedAttempt(stack, {
         attemptId,
         waitId: seeded.waitId,
@@ -535,15 +575,22 @@ test("park finalization uses the worker workspace, not the foreground parent wor
         { foreground: parentWorkspace, worker: stack.workspace },
     );
 
-    // Background only recognizes the worker workspace, so finalization proves the fix.
-    const result = await finalizeWorkerParkAfterExit({
-        runId: attemptId,
-        service: stack.service,
-        writerLeaseReleased: true,
-        writerPidGone: true,
-    });
-    assert.equal(result.outcome, "parked", JSON.stringify(result));
-    assert.equal(readParkRecord(attemptId).phase, "waiting");
+    try {
+        const status = stack.service.statusForWorker(workerScope(attemptId, stack.workspace), seeded.taskId);
+        assert.equal(status.phase, "running", JSON.stringify(status));
+        assert.equal(status.terminalRevision, 0, JSON.stringify(status));
+        // Background only recognizes the worker workspace, so finalization proves the fix.
+        const result = await finalizeWorkerParkAfterExit({
+            runId: attemptId,
+            service: stack.service,
+            writerLeaseReleased: true,
+            writerPidGone: true,
+        });
+        assert.equal(result.outcome, "parked", JSON.stringify(result));
+        assert.equal(readParkRecord(attemptId).phase, "waiting");
+    } finally {
+        await seeded.release();
+    }
 });
 
 test("park finalization never overwrites a continuation published during checkpoint dispatch", async () => {
@@ -570,16 +617,23 @@ test("park finalization never overwrites a continuation published during checkpo
 test("restart reconciliation finalizes a proven staged park and holds an ambiguous one", async () => {
     const stack = await startStack();
     const attemptId = "sa_race_restart";
-    const seeded = await seedPark(stack, { attemptId, target: "parking" });
+    const seeded = await seedPark(stack, { attemptId, target: "parking", holdPending: true });
     writeParkedAttempt(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
     const park = parkFor(attemptId, seeded.waitId, seeded.generation);
 
-    // The exit handler never ran (restart). The staged checkpoint plus a dead
-    // writer and a free lease is the evidence; it must finalize, not strand.
-    const recovered = await recoverStagedPark(park, stack.service);
-    assert.equal(recovered, "parked");
-    const afterRecovery = readParkRecord(attemptId);
-    assert.notEqual(afterRecovery.phase, "parking");
+    try {
+        const status = stack.service.statusForWorker(workerScope(attemptId, stack.workspace), seeded.taskId);
+        assert.equal(status.phase, "running", JSON.stringify(status));
+        assert.equal(status.terminalRevision, 0, JSON.stringify(status));
+        // The exit handler never ran (restart). The staged checkpoint plus a dead
+        // writer and a free lease is the evidence; it must finalize, not strand.
+        const recovered = await recoverStagedPark(park, stack.service);
+        assert.equal(recovered, "parked");
+        const afterRecovery = readParkRecord(attemptId);
+        assert.notEqual(afterRecovery.phase, "parking");
+    } finally {
+        await seeded.release();
+    }
 
     // Ambiguous: a live conversation writer lease holds the history.
     const attemptId2 = "sa_race_lease";

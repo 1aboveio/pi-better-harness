@@ -5,7 +5,8 @@
  * file exercises the same protocol in-process for fast failure localization and
  * measures that the running-set scan is central rather than per client.
  */
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createServer } from "node:net";
@@ -30,7 +31,8 @@ afterEach(async () => {
 function workspace(name: string): string {
   const root = mkdtempSync(join(tmpdir(), `pi-coordinator-${name}-`));
   process.env.PI_CODING_AGENT_DIR = join(root, "agent");
-  cleanups.push(() => rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+  // Yield while Windows releases socket/watch handles closed by earlier cleanups.
+  cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   return root;
 }
 
