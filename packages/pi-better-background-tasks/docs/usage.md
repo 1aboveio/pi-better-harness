@@ -261,6 +261,31 @@ events until availability rather than preloading follow-ups while Pi is busy.
 Urgent failure alerts retain their existing immediate follow-up behavior.
 This extension does not change Pi core or Pi's default follow-up mode.
 
+## Shared coordination and retention
+
+Sessions sharing a state directory use one on-demand coordinator for task
+discovery, supervisor reconciliation and maintenance. It sends owner-scoped
+change hints only; synchronization never starts a model turn. Callback batching,
+owner/branch checks, continuation admission and evidence acknowledgement remain
+in each Pi session. `PI_BG_COORDINATOR=off` disables the shared coordinator.
+
+Dismissing or clearing a row does not delete history. While the coordinator is
+enabled, the legacy terminal task registry is swept daily after seven days
+through its protection checks. Durable operation and validated supervisor-record
+pruning is **off by default** and is enabled only with
+`PI_BG_DURABLE_RETENTION_APPLY=1`.
+`PI_BG_RETENTION_MS` sets the minimum terminal age (default 7 days);
+`PI_BG_RETENTION_BATCH` bounds operations per sweep (default 25, max 1000); and
+`PI_BG_COORDINATOR_HINT_RETENTION_MS` bounds hint retention (default 30 days,
+with the newest 10,000 hints retained).
+
+Cleanup protects running/unreadable work, pending or undelivered callbacks and
+outbox events, unconsumed waits, evidence pins and resume references. It removes
+only validated runtime-owned supervisor paths, preserves malformed or symlinked
+paths, and tombstones the pruned launch identity; older clients without the
+retention API fail closed on that tombstone trigger. Retention preview/bounded
+apply are internal coordinator operations, not a user-facing `bg_task` action.
+
 ## Write Sandbox
 
 `pi-better-sandbox` publishes the effective foreground write policy on

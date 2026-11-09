@@ -28,6 +28,8 @@ Runtime code, installed dependencies, configuration, policy files, and control d
 
 ## Trust and limitations
 
+[ADR 0022](0022-shared-background-coordination.md) amends runtime bookkeeping authority: shared Background reconciliation and maintenance move to an on-demand coordinator for each canonical user/state directory. It remains trusted runtime work; task permissions, protected control paths, and execution confinement do not change.
+
 This boundary does not sandbox Pi itself or user-installed provider/extension code. That code is part of the trusted runtime, as are SDK parsing and rendering. Its initialization and runtime hooks are not an operating-system security boundary. A task tool can only be admitted when its implementation confines its task effects; arbitrary extension tools, direct SSH effects, and scripting bridges are unsupported until an adapter establishes that contract.
 
 The credential-files scope from ADR 0005 remains unchanged. Inherited environment tokens and OS credential services are not controlled by the Stored credentials row. The current-user MDS runtime exception restores CLI Keychain compatibility; it does not enforce read-only Keychain APIs and permits writes to that user's MDS cache databases. No global writable `~/.pi`, cross-user `/private/var/folders`, or `*.lock` allowance is added. See [the compatibility map](../sandbox-default-compatibility.md) for the historical behavior and regression gate.

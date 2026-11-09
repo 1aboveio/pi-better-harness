@@ -334,6 +334,41 @@ resume after settlement when its original parent session and branch are active
 and current capacity, Goal, workflow and permission gates allow it. Restarting Pi
 does not start an unattended model. Uncertain recovery stays held with a reason.
 
+## Shared coordination and retention
+
+Pi sessions that share a state directory use one on-demand local coordinator for
+task discovery, supervisor reconciliation and maintenance. It communicates over
+a Unix socket (named pipe on Windows) and sends only owner-scoped change hints;
+synchronization never starts a model turn. Each Pi session still performs its own
+callback batching, branch/owner checks, continuation admission and evidence
+acknowledgement. Set `PI_BG_COORDINATOR=off` to disable the shared coordinator;
+task supervision still works, but shared reconciliation and automatic
+maintenance are not running.
+
+`clear` and the navigator dismiss action are presentation-only: they do not
+delete task history. While the coordinator is enabled, the existing terminal
+task registry is still swept daily after seven days, but it now runs through the
+coordinator's protection checks.
+Physical pruning of durable operations and their validated supervisor records is
+separate and **disabled by default**. Enable the bounded coordinator sweep with:
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `PI_BG_DURABLE_RETENTION_APPLY=1` | unset/off | Enables physical durable pruning. |
+| `PI_BG_RETENTION_MS` | 604800000 (7 days) | Minimum terminal age before durable pruning. |
+| `PI_BG_RETENTION_BATCH` | 25 (max 1000) | Maximum durable operations removed per sweep. |
+| `PI_BG_COORDINATOR_HINT_RETENTION_MS` | 2592000000 (30 days) | Retention for change hints; the newest 10,000 hints are also retained. |
+
+Cleanup protects running or unreadable tasks, pending/claimed/undelivered
+deliveries and standalone callbacks, unconsumed waits, evidence pins and resume
+references. Only runtime-owned supervisor paths are removed; malformed records
+and symlinked paths are preserved. A completed tombstone prevents the pruned
+launch identity from being registered again; an older client that does not know
+the retention API hits the database tombstone trigger and fails closed.
+Retention preview and bounded apply exist as internal coordinator operations;
+this package does not currently expose a user-facing cleanup command or a
+preview flag on `bg_task`.
+
 ## Failure observations
 
 Task lifecycle and failure evidence are reported separately. A watch can remain

@@ -1175,7 +1175,7 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
     });
 
 
-    it("keeps running when a wait result is already settled", async () => {
+    for (const phase of ["ready", "parking"]) it(`handles a settled wait in ${phase} without bypassing the writer handoff`, async () => {
         const caps = {
             background: { spawn: false, watch: false, status: false, log: false },
             wait: true,
@@ -1203,7 +1203,7 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
             request: async () => ({
                 waitId: "wait-settled",
                 generation: 1,
-                phase: "ready",
+                phase,
                 settled: true,
                 park: true,
                 taskIds: ["bg_1"],
@@ -1231,10 +1231,17 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
             undefined,
             {},
         );
-        assert.equal(result.terminate, undefined, "a settled wait must not terminate the run");
-        assert.equal(installed.getState().pendingPark, undefined);
-        assert.equal(installed.getState().status, "ready");
-        assert.equal(handlers.get("tool_call")({ toolName: "bash", input: {} }), undefined);
+        if (phase === "parking") {
+            assert.equal(result.terminate, true, "settlement must not bypass the parking checkpoint boundary");
+            assert.equal(installed.getState().pendingPark?.waitId, "wait-settled");
+            assert.equal(installed.getState().status, "parking");
+            assert.equal(handlers.get("tool_call")({ toolName: "bash", input: {} })?.block, true);
+        } else {
+            assert.equal(result.terminate, undefined, "an already-ready wait requires no writer handoff");
+            assert.equal(installed.getState().pendingPark, undefined);
+            assert.equal(installed.getState().status, "ready");
+            assert.equal(handlers.get("tool_call")({ toolName: "bash", input: {} }), undefined);
+        }
         handlers.get("session_shutdown")?.();
     });
 

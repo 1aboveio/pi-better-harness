@@ -4,6 +4,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { BashOperations, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const { createBashToolDefinition, createReadToolDefinition, createWriteToolDefinition,
     createEditToolDefinition } = PiCodingAgent;
+import { createHash } from "node:crypto";
 import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, readlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
@@ -78,16 +79,64 @@ export function writableRuntimeAlias(path: string, root: string, permissions: {
     return undefined;
 }
 
+function backgroundRuntimeName(): string {
+    const pool = process.env.VITEST_POOL_ID;
+    return pool && /^\d+$/.test(pool)
+        ? `pi-better-background-tasks-vitest-${pool}`
+        : "pi-better-background-tasks";
+}
+
+/**
+ * Control roots for the shared Background coordinator's default identity.
+ *
+ * Keep this naming in lockstep with packages/pi-better-background-tasks/src/
+ * coordinator/paths.ts. The Unix socket root is deliberately fixed under /tmp:
+ * TMPDIR, TMP, TEMP and agent/state overrides must not move discovery or its
+ * protection. Windows IPC is a named pipe, which has no filesystem directory.
+ * The election and state roots are included for defense in depth even though
+ * the default operation store lives under the separately protected agent dir.
+ */
+export function coordinatorRuntimeDirectories(): string[] {
+    const user = process.getuid?.() ?? createHash("sha256").update(homedir()).digest("hex").slice(0, 8);
+    const stateRoot = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+    const storePath = join(stateRoot, "operation-coordinator.sqlite");
+    const supervisorDirectory = join(tmpdir(), backgroundRuntimeName(), "supervisor");
+    const key = createHash("sha256")
+        .update(canonicalizePath(storePath))
+        .update("\0")
+        .update(canonicalizePath(supervisorDirectory))
+        .digest("hex")
+        .slice(0, 20);
+    return [
+        ...(process.platform === "win32" ? [] : [canonicalizePath(join("/tmp", `pi-bg-${user}`))]),
+        canonicalizePath(join(dirname(canonicalizePath(storePath)), `.pi-bg-${user}-${key}`)),
+        canonicalizePath(join(resolve(stateRoot), "background-tasks-coordinator", key)),
+    ];
+}
+
 export function harnessRuntimeDirectories(): string[] {
     const names = ["pi-better-subagents", "pi-better-background-tasks"];
     const pool = process.env.VITEST_POOL_ID;
     if (pool && /^\d+$/.test(pool)) names.push(`pi-better-background-tasks-vitest-${pool}`);
-    return names.map((name) => canonicalizePath(join(tmpdir(), name)));
+    return [
+        ...names.map((name) => canonicalizePath(join(tmpdir(), name))),
+        ...coordinatorRuntimeDirectories(),
+    ];
 }
 
 export function ensureHarnessRuntimeDirectories(): string[] {
     const directories = harnessRuntimeDirectories();
-    for (const path of directories) mkdirSync(path, { recursive: true, mode: 0o700 });
+    const coordinator = new Set(coordinatorRuntimeDirectories());
+    const temporary = [canonicalizePath(tmpdir()), canonicalizePath("/tmp")];
+    for (const path of directories) {
+        // The coordinator's default election and state roots live under the
+        // agent directory, which trusted Pi may legitimately keep read-only
+        // here. Its own process creates them; only temp roots need placeholders
+        // for Linux deny mounts. A state override under temp still needs one.
+        if (coordinator.has(path) &&
+            !temporary.some((root) => path === root || path.startsWith(`${root}${sep}`))) continue;
+        mkdirSync(path, { recursive: true, mode: 0o700 });
+    }
     return directories;
 }
 

@@ -546,6 +546,27 @@ test("park finalization uses the worker workspace, not the foreground parent wor
     assert.equal(readParkRecord(attemptId).phase, "waiting");
 });
 
+test("park finalization never overwrites a continuation published during checkpoint dispatch", async () => {
+    const stack = await startStack();
+    const attemptId = "sa_race_checkpoint_dispatch";
+    const seeded = await seedPark(stack, { attemptId, target: "parking" });
+    writeParkedAttempt(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
+    const service = { ...stack.service };
+    service.checkpointWorkerWait = async (scope, input) => {
+        const view = await stack.service.checkpointWorkerWait(scope, input);
+        registry.updateParkRecord(attemptId, {
+            phase: "resuming", resumedBy: "sa_published_successor", resumeClaimId: "claim_checkpoint_dispatch",
+        });
+        return view;
+    };
+    const result = await finalizeWorkerParkAfterExit({
+        runId: attemptId, service, writerLeaseReleased: true, writerPidGone: true,
+    });
+    assert.equal(result.outcome, "parked");
+    assert.equal(readParkRecord(attemptId).phase, "resuming");
+    assert.equal(readParkRecord(attemptId).resumedBy, "sa_published_successor");
+});
+
 test("restart reconciliation finalizes a proven staged park and holds an ambiguous one", async () => {
     const stack = await startStack();
     const attemptId = "sa_race_restart";

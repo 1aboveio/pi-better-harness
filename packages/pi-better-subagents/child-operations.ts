@@ -1012,7 +1012,11 @@ export function installChildOperationBridge(
                 toolCallId,
             },
         };
-        const shouldPark = normalized.result.park && !normalized.result.settled;
+        // Settlement is independent of the writer handoff. A dependency can
+        // finish while this call is registering its park, but a generation in
+        // parking still needs the tool-result checkpoint and writer exit.
+        const shouldPark = normalized.result.park && (!normalized.result.settled
+            || normalized.result.phase === "parking" || normalized.result.phase === "registering");
         if (shouldPark) {
             if (!state.descriptor?.capabilities.parking) {
                 throw new OperationToolError("the parent asked this worker to park without a parking capability");

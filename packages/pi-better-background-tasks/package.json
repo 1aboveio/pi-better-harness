@@ -46,6 +46,8 @@
     "src/**/*.ts",
     "src/supervisor/**/*.mjs",
     "src/supervisor/**/*.js",
+    "src/coordinator/**/*.mjs",
+    "src/coordinator/**/*.js",
     "!src/**/*.test.ts",
     "!src/test-support/**",
     "!src/shared-ssh-core/test-support/**",

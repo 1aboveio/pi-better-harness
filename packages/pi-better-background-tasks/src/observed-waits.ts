@@ -71,6 +71,8 @@ import {
 } from "./supervisor/index.js";
 import type { BackgroundTaskCallbackOrigin, CommandSpec, Condition, TaskSandboxProvenance } from "./types.js";
 import type { SpawnTaskParams, WatchTaskParams } from "./runtime.js";
+import { CoordinatorClient } from "./coordinator/client.js";
+import { coordinatorPaths } from "./coordinator/paths.js";
 
 export const OBSERVED_WAITS_SERVICE_VERSION = 1 as const;
 export const OBSERVED_WAITS_SERVICE_CHANNEL = "pi-better-background-tasks:observed-waits-service";
@@ -538,6 +540,11 @@ export interface ObservedWaitHostOptions {
   supervisor?: LocalSupervisor;
   /** Reconcile cadence; `0` disables the timer (tests call `reconcileNow`). */
   pollMs?: number;
+  /**
+   * Start/connect the shared coordinator (default true). `PI_BG_COORDINATOR=off`
+   * disables it; tests that drive an explicit local reconciliation pass `false`.
+   */
+  coordinator?: boolean;
   /** Parent callback delivery. Production wires the existing callback batcher. */
   notifyParent?: ParentNotifier;
   logger?: (line: string) => void;
@@ -816,8 +823,11 @@ export class ObservedWaitHost {
   private readonly supervisor: LocalSupervisor;
   private readonly directory: string;
   private readonly pollMs: number;
+  private readonly coordinatorEnabled: boolean;
   private readonly options: ObservedWaitHostOptions;
   private timer?: NodeJS.Timeout;
+  private coordinator?: CoordinatorClient;
+  private coordinatorStarting?: Promise<void>;
   private closed = false;
   private unavailableReason?: string;
   private parentOrigin?: BackgroundTaskCallbackOrigin;
@@ -855,6 +865,7 @@ export class ObservedWaitHost {
     this.directory = options.supervisorDirectory ?? defaultSupervisorDirectory();
     this.supervisor = options.supervisor ?? createLocalSupervisor({ directory: this.directory });
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS;
+    this.coordinatorEnabled = options.coordinator ?? process.env.PI_BG_COORDINATOR !== "off";
     const base = {
       version: OBSERVED_WAITS_SERVICE_VERSION,
       serviceId: this.serviceId,
@@ -909,7 +920,7 @@ export class ObservedWaitHost {
       // reload. Re-evaluate pending deliveries against the new active origin.
       this.recoverAbandonedDeliveries();
       this.discoverObservedTasks();
-      void this.reconcileNow();
+      void this.startCoordinator();
       this.recoverTerminalNotifications();
       this.terminalRecoveryNeeded = false;
       return;
@@ -937,13 +948,12 @@ export class ObservedWaitHost {
     this.writeHostDebug();
     this.recoverAbandonedDeliveries();
     this.discoverObservedTasks();
-    void this.reconcileNow();
+    void this.startCoordinator();
     this.recoverTerminalNotifications();
     this.terminalRecoveryNeeded = false;
-    if (this.pollMs > 0) {
-      this.timer = setInterval(() => { void this.reconcileNow(); }, this.pollMs);
-      this.timer.unref?.();
-    }
+    // Reconciliation is centralized. `reconcileNow()` remains an explicit
+    // test/diagnostic pass; there is deliberately no per-session clock tick,
+    // even when the coordinator is disabled.
   }
 
   close(): void {
@@ -952,6 +962,9 @@ export class ObservedWaitHost {
     HOST_INSTANCE_STATE.closed.add(this.hostId);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    this.coordinator?.close();
+    this.coordinator = undefined;
+    this.coordinatorStarting = undefined;
     try { this.store?.close(); } catch { /* already closed */ }
     this.store = undefined;
     this.launches.clear();
@@ -972,7 +985,13 @@ export class ObservedWaitHost {
   /** Recover a callback a previous host recorded terminal but never delivered. */
   private recoverTerminalNotifications(): void {
     if (!this.store) return;
-    for (const operation of this.store.listOperations({ phase: "terminal" })) {
+    const owner = this.activeContext ? this.ownerFor(this.activeContext) : undefined;
+    // Startup recovery is owner-scoped. A host must not read every terminal row
+    // in a shared store merely because it shares the registry with other sessions.
+    const operations = owner
+      ? this.store.listOperations({ owner, phase: "terminal" })
+      : [];
+    for (const operation of operations) {
       if (operation.terminalOutcome === null) continue;
       this.attemptTerminalCallback(
         operation,
@@ -1085,6 +1104,179 @@ export class ObservedWaitHost {
     }
     this.retryPendingTerminalCallbacks();
     await this.dispatchOutbox();
+  }
+
+  /**
+   * Start or refresh the shared coordinator subscription. The coordinator is
+   * the only process that scans the running set; this client only receives
+   * durable hints for the owners it can actually act for.
+   */
+  private async startCoordinator(): Promise<void> {
+    if (!this.coordinatorEnabled || !this.store || this.closed) return;
+    if (this.coordinatorStarting) return this.coordinatorStarting;
+    this.coordinatorStarting = (async () => {
+      if (!this.coordinator) {
+        const storePath = this.options.storePath ?? this.store!.path;
+        const paths = coordinatorPaths(storePath, this.directory);
+        const client = new CoordinatorClient({
+          storePath,
+          supervisorDirectory: this.directory,
+          stateDirectory: paths.stateDirectory,
+          ...(this.options.logger ? { onLog: this.options.logger } : {}),
+        });
+        client.onChange((change) => { void this.handleCoordinatorChange(change); });
+        client.onCatchup((changes) => {
+          void this.handleCoordinatorCatchup(changes);
+        });
+        this.coordinator = client;
+      }
+      await this.coordinator.start(this.coordinatorOwners());
+      if (process.env.PI_BG_COORDINATOR_DEBUG === "1") {
+        this.options.logger?.(`coordinator connected for ${this.coordinatorOwners().length} owner(s)`);
+      }
+    })().catch((error) => {
+      this.options.logger?.(`observed waits: coordinator unavailable: ${oneLine(String(error), 200)}`);
+    }).finally(() => {
+      this.coordinatorStarting = undefined;
+    });
+    return this.coordinatorStarting;
+  }
+
+  private coordinatorOwners(): OwnerIdentity[] {
+    const owners = new Map<string, OwnerIdentity>();
+    const add = (owner: OwnerIdentity | undefined): void => {
+      if (owner) owners.set(ownerKey(owner), owner);
+    };
+    if (this.activeContext) add(this.ownerFor(this.activeContext));
+    for (const run of this.rpcRuns.values()) add(run.owner);
+    // A parked run may release its bridge binding before its wait settles.
+    // Keep the wait owner subscribed so the terminal hint still reaches the
+    // continuation admission path instead of waiting for a global scan.
+    for (const owner of this.waitOwners.values()) add(owner);
+    for (const context of this.launches.values()) {
+      // A launch context does not retain the full worker owner; parent owners
+      // are already covered by the active context.
+      void context;
+    }
+    return [...owners.values()];
+  }
+
+  private syncCoordinatorOwners(): void {
+    if (!this.coordinator || !this.coordinatorEnabled) return;
+    void this.coordinator.updateOwners(this.coordinatorOwners()).catch((error) => {
+      this.options.logger?.(`observed waits: coordinator subscription update failed: ${oneLine(String(error), 160)}`);
+    });
+  }
+
+  /**
+   * A hint causes a scoped read, never a model turn and never a global terminal
+   * scan. The existing callback branch/admission and evidence rules still decide
+   * whether anything is delivered or consumed.
+   */
+  private async handleCoordinatorChange(change: {
+    kind: string;
+    operationId: string | null;
+    taskId: string | null;
+    owner: OwnerIdentity;
+    waitId: string | null;
+    generation: number | null;
+    terminalRevision: number;
+  }): Promise<void> {
+    if (!this.store || this.closed) return;
+    this.applyCoordinatorChange(change);
+    this.retryPendingTerminalCallbacks();
+    await this.dispatchOutbox(change.owner);
+  }
+
+  /**
+   * Process one catch-up page. The coordinator emits a page per bounded chunk
+   * and a final empty page, so a cursor reset is already represented by
+   * owner-scoped synthetic changes. Re-running a full owner snapshot per page
+   * would be redundant work; callbacks still run per change and outbox dispatch
+   * is coalesced once per owner for the page.
+   */
+  private async handleCoordinatorCatchup(
+    changes: ReadonlyArray<{
+      kind: string;
+      operationId: string | null;
+      taskId: string | null;
+      owner: OwnerIdentity;
+      waitId: string | null;
+      generation: number | null;
+      terminalRevision: number;
+    }>,
+  ): Promise<void> {
+    if (!this.store || this.closed || changes.length === 0) return;
+    const owners = new Map<string, OwnerIdentity>();
+    for (const change of changes) {
+      this.applyCoordinatorChange(change);
+      owners.set(ownerKey(change.owner), change.owner);
+    }
+    this.retryPendingTerminalCallbacks();
+    for (const owner of owners.values()) await this.dispatchOutbox(owner);
+  }
+
+  private applyCoordinatorChange(change: {
+    kind: string;
+    operationId: string | null;
+    taskId: string | null;
+    owner: OwnerIdentity;
+    waitId: string | null;
+    generation: number | null;
+    terminalRevision: number;
+  }): void {
+    const store = this.store;
+    if (!store || this.closed) return;
+    if (change.waitId && change.generation !== null) {
+      const wait = store.getWait({ waitId: change.waitId, generation: change.generation });
+      if (wait && sameOwner(wait.owner, change.owner)) this.trackWorkerWait(wait);
+    }
+    if (process.env.PI_BG_COORDINATOR_DEBUG === "1") {
+      this.options.logger?.(`coordinator change ${change.kind} ${change.operationId ?? change.taskId ?? ""} owner=${change.owner.sessionId}`);
+    }
+    let operation: OperationRecord | null | undefined = change.operationId ? store.getOperation(change.operationId) : null;
+    if (!operation && change.taskId) operation = this.operationForTask(change.taskId);
+    if (operation) {
+      if (operation.terminalRevision > 0) {
+        this.watchedRunningTasks.delete(operation.taskId);
+        this.attemptTerminalCallback(
+          operation,
+          this.statusOf(operation.operationId),
+          operation.terminalOutcome ?? "failed",
+          [],
+          { pendingWithoutContext: true },
+        );
+        this.emitDurableTaskChange();
+      } else {
+        this.watchedRunningTasks.add(operation.taskId);
+      }
+    }
+  }
+
+  /**
+   * Owner-scoped snapshot after a coordinator reports that a client cursor
+   * predates the retained hint journal. This is intentionally not a global
+   * terminal scan: each subscribed owner reads only its own operations and
+   * pending outbox, then the existing callback/evidence fences decide delivery.
+   */
+  async resyncCoordinatorOwners(): Promise<void> {
+    const store = this.store;
+    if (!store || this.closed) return;
+    this.discoverObservedTasks();
+    for (const owner of this.coordinatorOwners()) {
+      for (const operation of store.listOperations({ owner, phase: "terminal" })) {
+        if (operation.terminalRevision <= 0) continue;
+        this.attemptTerminalCallback(
+          operation,
+          this.statusOf(operation.operationId),
+          operation.terminalOutcome ?? "failed",
+          [],
+          { pendingWithoutContext: true },
+        );
+      }
+      await this.dispatchOutbox(owner);
+    }
+    this.retryPendingTerminalCallbacks();
   }
 
   isDurableTask(taskId: string): boolean {
@@ -1603,6 +1795,7 @@ export class ObservedWaitHost {
     const store = this.requireStore();
     if (input.params.ssh) throw new Error("Worker background launches are local-only; structured SSH is unavailable through this service.");
     const owner = this.workerOwner(run);
+    this.coordinator?.addOwner(owner);
     const prepared = this.prepareLaunch(
       input.kind,
       input.params,
@@ -1677,6 +1870,7 @@ export class ObservedWaitHost {
       throw new Error("Worker parking requires a verified continuation adapter; start Subagents' coordinator before registering a park wait. The operation was not parked.");
     }
     const owner = this.workerOwner(run);
+    this.coordinator?.addOwner(owner);
     const operations = this.operationsForTaskIds(owner, input.taskIds);
     const registered = store.registerWait({
       owner,
@@ -1696,6 +1890,7 @@ export class ObservedWaitHost {
       to: "parking",
       reason: "waiting for the parked worker checkpoint",
     });
+    this.trackWorkerWait(parking.wait);
     return this.waitView(parking.wait);
   }
 
@@ -1703,6 +1898,7 @@ export class ObservedWaitHost {
     const store = this.requireStore();
     const owner = this.workerOwner(run);
     const wait = this.ownedWait(owner, input.waitId, input.generation);
+    this.trackWorkerWait(wait);
     // A replacement host may replay the post-exit finalization. Once the
     // generation has left parking, the checkpoint is already proven.
     if (wait.phase === "waiting" || wait.phase === "ready" || wait.phase === "resuming" || wait.phase === "consumed") {
@@ -1721,8 +1917,8 @@ export class ObservedWaitHost {
       proof,
       reason: "checkpoint committed and the original writer exited",
     });
-    await this.dispatchOutbox();
-    return this.waitView(transitioned.wait);
+    await this.dispatchOutbox(owner);
+    return this.waitView(store.getWait({ waitId: wait.waitId, generation: wait.generation }) ?? transitioned.wait);
   }
 
   /**
@@ -1825,8 +2021,31 @@ export class ObservedWaitHost {
 
   listWorkerWaits(run: WorkerRunScope, options: { pendingOnly?: boolean } = {}): WaitView[] {
     const store = this.requireStore();
-    return store.listWaits({ owner: this.workerOwner(run), ...(options.pendingOnly ? { pendingOnly: true } : {}) })
-      .map((wait) => this.waitView(wait));
+    const waits = store.listWaits({ owner: this.workerOwner(run), ...(options.pendingOnly ? { pendingOnly: true } : {}) });
+    for (const wait of waits) this.trackWorkerWait(wait);
+    return waits.map((wait) => this.waitView(wait));
+  }
+
+  private trackWorkerWait(wait: WaitRecord): void {
+    if (wait.owner.kind !== "worker-conversation") return;
+    const key = waitKey(wait.waitId, wait.generation);
+    if (wait.phase === "consumed" || wait.phase === "cancelled") this.waitOwners.delete(key);
+    else if (this.workerWaitBelongsToActiveParent(wait)) this.waitOwners.set(key, wait.owner);
+    else this.waitOwners.delete(key);
+    this.syncCoordinatorOwners();
+  }
+
+  private workerWaitBelongsToActiveParent(wait: WaitRecord): boolean {
+    // Listing shared parked history grants no delivery authority. Recover that
+    // authority only from the launch-time parent recorded with its dependencies,
+    // never from the caller-supplied worker scope. Branch eligibility remains a
+    // continuation decision: an inactive branch must not lose recovery interest.
+    if (!this.store || !this.activeContext || wait.dependencies.length === 0) return false;
+    return wait.dependencies.every((dependency) => {
+      const operation = this.store!.getOperation(dependency.operationId);
+      const origin = operation && this.currentLaunchContext(operation.taskId)?.parentOrigin;
+      return !!origin?.sessionId && this.isParentOriginActive(origin);
+    });
   }
 
   cancelWorkerWait(run: WorkerRunScope, input: { waitId: string; generation: number; reason: string }): WaitView {
@@ -2002,13 +2221,14 @@ export class ObservedWaitHost {
       ...(typeof params.writerPid === "number" && params.writerPid > 0 ? { writerPid: params.writerPid } : {}),
       ...(typeof params.writerLeaseId === "string" ? { writerLeaseId: params.writerLeaseId } : {}),
     }));
+    this.syncCoordinatorOwners();
     return { runId, conversationId, workspace, attemptId, workerOperations: true };
   }
 
   private rpcReleaseRun(params: JsonRecord): JsonRecord {
     const runId = requireRpcString(params, "runId");
     this.rpcRuns.delete(runId);
-    if (this.rpcRuns.size === 0) this.waitOwners.clear();
+    this.syncCoordinatorOwners();
     return { runId, released: true };
   }
 
@@ -2327,6 +2547,7 @@ export class ObservedWaitHost {
       owner: wait.owner,
       reason,
     });
+    this.trackWorkerWait(result.wait);
     this.stagedCheckpoints.delete(waitKey(waitId, generation));
     try {
       void Promise.resolve(this.continuation?.onWaitCancelled?.({ waitId, generation, reason })).catch(() => {});
@@ -2376,6 +2597,7 @@ export class ObservedWaitHost {
         wait.owner.workspace !== binding.workspace) {
       throw new Error(`Wait ${waitId} is not owned by this worker conversation.`);
     }
+    this.trackWorkerWait(wait);
     return { wait, owner: wait.owner };
   }
 
@@ -2948,7 +3170,18 @@ export class ObservedWaitHost {
         });
       } catch { /* another host already recovered it */ }
     }
-    for (const operation of store.listOperations({ phase: "terminal" })) {
+    // Only task ids this host knows about can hold a local callback claim.
+    // Reading every terminal row here would turn branch navigation into a
+    // global historical scan in a shared store.
+    const candidates = new Set<string>([
+      ...this.pendingTerminalCallbacks,
+      ...this.watchedRunningTasks,
+      ...this.discoveredTaskSidecars,
+      ...this.launches.keys(),
+    ]);
+    for (const taskId of candidates) {
+      const operation = this.operationForTask(taskId);
+      if (!operation) continue;
       const context = this.currentLaunchContext(operation.taskId);
       if (!context?.callbackClaimedBy || context.callbackClaimedBy === this.hostId) continue;
       if (this.claimState(context.callbackClaimedBy) !== "dead") continue;
@@ -2969,10 +3202,17 @@ export class ObservedWaitHost {
     }
   }
 
-  private async dispatchOutbox(): Promise<void> {
+  private async dispatchOutbox(scope?: OwnerIdentity): Promise<void> {
     const store = this.store;
     if (!store || this.closed) return;
-    const pending = store.listOutbox({ state: "pending" });
+    if (!scope && this.coordinatorEnabled) {
+      const owners = this.coordinatorOwners();
+      if (owners.length > 0) {
+        for (const owner of owners) await this.dispatchOutbox(owner);
+        return;
+      }
+    }
+    const pending = store.listOutbox({ state: "pending", ...(scope ? { recipient: scope } : {}) });
     if (pending.length === 0) return;
     const byRecipient = new Map<string, { owner: OwnerIdentity; events: OutboxEventRecord[] }>();
     for (const event of pending) {
@@ -3245,6 +3485,7 @@ export class ObservedWaitHost {
       owner,
       reason,
     });
+    this.trackWorkerWait(cancelled.wait);
     try {
       void Promise.resolve(this.continuation?.onWaitCancelled?.({ waitId, generation, reason })).catch(() => {});
     } catch { /* a continuation adapter failure cannot undo a persisted cancellation */ }
@@ -3263,6 +3504,7 @@ export class ObservedWaitHost {
       note: input.note,
       terminalRevisions: revisions,
     });
+    this.trackWorkerWait(result.wait);
     return {
       waitId: result.wait.waitId,
       generation: result.wait.generation,
@@ -3400,6 +3642,7 @@ export class ObservedWaitHost {
     if (!nextSessionId && previousSessionId) return;
     const origin = { cwd: ctx.cwd, sessionId: nextSessionId ?? this.sessionId(ctx) };
     const nextKey = this.contextKey(ctx);
+    if (previous && previousKey !== nextKey) this.waitOwners.clear();
     this.parentOrigin = origin;
     this.activeOrigin = origin;
     this.activeContext = ctx;
@@ -3407,6 +3650,7 @@ export class ObservedWaitHost {
     // terminal callback journal once. Same-session calls keep the live context
     // current without rescanning historical terminal records.
     if (!previous || previousKey !== nextKey) this.terminalRecoveryNeeded = true;
+    this.syncCoordinatorOwners();
     this.writeHostDebug();
   }
 
@@ -3589,6 +3833,7 @@ export class ObservedWaitHost {
     const wait = this.requireStore().getWait({ waitId, generation });
     if (!wait) throw new Error(`Unknown wait ${waitId} generation ${generation}.`);
     if (!sameOwner(wait.owner, owner)) throw new Error(`Wait ${waitId} belongs to another execution owner.`);
+    this.trackWorkerWait(wait);
     return wait;
   }
 

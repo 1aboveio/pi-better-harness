@@ -1335,10 +1335,18 @@ export async function finalizeWorkerParkAfterExit(input: ParkFinalizationInput):
             generation: record.generation,
             proof,
         });
-        updateParkRecord(input.runId, {
-            phase: phaseOf(view.phase),
-            heldReason: view.phase === "held" ? "the Background host held the wait after checkout" : undefined,
-        });
+        // Checkpoint publication may synchronously dispatch a continuation. Its
+        // claim/mirror can advance while we await the host; never overwrite that
+        // newer resuming (or terminal) record with our pre-dispatch snapshot.
+        const current = readParkRecord(input.runId);
+        if (current && current.waitId === record.waitId && current.generation === record.generation
+            && !current.resumedBy && !current.resumeClaimId
+            && (current.phase === "parking" || current.phase === "waiting" || current.phase === "ready")) {
+            updateParkRecord(input.runId, {
+                phase: phaseOf(view.phase),
+                heldReason: view.phase === "held" ? "the Background host held the wait after checkout" : undefined,
+            });
+        }
         return { outcome: "parked", wait: view, proof };
     } catch (error) {
         return hold(`the Background host refused the park checkpoint: ${reasonOf(error)}`);

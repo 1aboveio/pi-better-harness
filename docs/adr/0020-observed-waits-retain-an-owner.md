@@ -22,6 +22,8 @@ This extends [ADR 0016](0016-unified-execution-concurrency.md). That ADR introdu
 
 ## Consequences
 
+[ADR 0022](0022-shared-background-coordination.md) assigns shared observation and reconciliation to a per-state-directory coordinator rather than each session. Execution owners retain interpretation and continuation authority; owner, session, branch, pause, and delivery checks remain in force. Synchronizing state alone does not start a model turn.
+
 Plans retain deliverables rather than watcher processes. A waiting deliverable references its operation and owner; absent supervision is visible as unmonitored work, not reported as healthy waiting. Worker parking releases active capacity without erasing the assignment. Restart, cancellation, permissions and duplicate events must preserve this relationship.
 
 Broad bans on long commands, model subagents used solely as pollers, and child processes kept idle to preserve context are rejected as the default design. Domain watchers retain their own state and evidence contracts: for example, merge observation uses an appropriate stateful delivery watcher, rather than replacing it with a stateless predicate.

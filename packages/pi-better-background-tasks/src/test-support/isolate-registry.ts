@@ -12,6 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, inject } from "vitest";
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT ??= "off"; // never create real APFS snapshots from tests
+// Most tests exercise the explicit local reconciliation seam (`pollMs: 0` and
+// `reconcileNow`). The cross-process coordinator tests enable it explicitly so a
+// suite of isolated hosts does not spawn a detached process per fixture.
+process.env.PI_BG_COORDINATOR ??= "off";
 
 // The per-run root from isolate-registry-root.ts is removed at the end of the run,
 // which also covers files whose tests are all skipped (their afterAll never runs).
