@@ -85,7 +85,7 @@ jobs:
 
       - name: Windows process unit and integration checks
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts
+        run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts src/windows-paths.test.ts
         working-directory: packages/pi-better-background-tasks
 
   # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
@@ -146,6 +146,17 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Enable the Linux sandbox backend for compatibility tests
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / -- /bin/true
+          node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
 
       - name: Install selected Pi SDK without changing the lockfile
         run: |
