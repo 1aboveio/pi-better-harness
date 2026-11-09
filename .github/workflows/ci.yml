@@ -61,7 +61,7 @@ jobs:
         run: npm run typecheck -w pi-better-background-tasks
 
       - name: Windows process unit and integration checks
-        run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts
+        run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts src/windows-paths.test.ts
         working-directory: packages/pi-better-background-tasks
 
   # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
