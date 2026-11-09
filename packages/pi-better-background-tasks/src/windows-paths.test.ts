@@ -31,6 +31,7 @@ describe("coordinator workspace validation on Windows", () => {
   itOnWindows("accepts the drive path a Windows session reports", () => {
     expect(requireWorkspace("C:\\AiProjects\\Strata")).toBe("C:\\AiProjects\\Strata");
     expect(requireWorkspace("C:/AiProjects/Strata")).toBe("C:/AiProjects/Strata");
+    expect(requireWorkspace("\\\\server\\share\\Strata")).toBe("\\\\server\\share\\Strata");
   });
 
   it("accepts a POSIX absolute path", () => {
