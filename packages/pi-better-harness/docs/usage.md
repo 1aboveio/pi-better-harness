@@ -59,9 +59,12 @@ control. An outcome can exist without a checklist. A finished or cleared checkli
 does not complete or remove the outcome.
 
 Hooks enable `update_todo`, `get_todo`, capture, matching Goal lifecycle bridge
-writes, reminders, and automated cleanup. While hooks are enabled and a task is
-active, Harness includes a short outcome reminder and current Todo focus before
-each model call. No hook file or postinstall setup is required. Turning hooks off
+writes, outcome updates, and automated cleanup. When hooks are enabled, the next
+agent start records a hidden outcome message only if the outcome differs from
+the last published update on the current branch. Pi persists these messages;
+subsequent requests keep them unchanged instead of rebuilding a temporary
+reminder. Todo progress remains available through the tools, not a per-request
+focus injection. No hook file or postinstall setup is required. Turning hooks off
 does not delete saved state. Enabling hooks never starts or resumes work. `/goal`
 and skills cannot enable them on their own.
 

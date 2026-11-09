@@ -31,9 +31,9 @@ test("default off, settings toggle, outcome, goal binding, and branch restore", 
     const get = async () => (await tools.get("get_todo").execute("", {}, undefined, undefined, ctx)).details;
     await update({ outcome: { objective: "Ship", doneWhen: ["Tests pass"] }, todo: [{ step: "Test", status: "completed" }] });
     assert.equal((await get()).outcome.status, "active");
-    const messages = [{ role: "user", content: "hello", timestamp: 1 }];
-    const first = hooks.get("context")({ messages }).messages;
-    assert.equal(hooks.get("context")({ messages: first }).messages.length, 2);
+    const first = hooks.get("before_agent_start")({}, ctx).message;
+    entries.push({ type: "custom_message", ...first });
+    assert.equal(hooks.get("before_agent_start")({}, ctx), undefined);
     await update({ todo: [] });
     assert.equal((await get()).outcome.objective, "Ship");
     const branch = entries.slice();

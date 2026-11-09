@@ -677,13 +677,14 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   pi.on("session_tree", async (_event, ctx) => {
     restore(ctx);
   });
-  pi.on("context", (event) => {
-    const messages = event.messages.filter(message => message.role !== "custom" || message.customType !== "pi-better-harness:outcome-reminder");
-    if (!enabled || outcome?.status !== "active") return messages.length === event.messages.length ? undefined : { messages };
-    const unit = rushPlan?.issues.find(item => item.status === "in-flight") ?? rushPlan?.issues.find(item => item.status === "pending");
-    const step = currentPlan?.steps.find(item => item.status === "in_progress") ?? currentPlan?.steps.find(item => item.status === "pending");
-    const focus = rushBinding ? (unit ? `${unit.id}: ${unit.title}` : undefined) : step?.step;
-    return { messages: [...messages, { role: "custom" as const, customType: "pi-better-harness:outcome-reminder", content: `${formatOutcome(outcome, true)}${focus ? `\nTodo focus: ${focus.slice(0, 300)}` : ""}\nChoose work that advances this outcome or meets a binding requirement. Report unrelated debt without fixing it. Latest user instructions win; questions are not permission to execute. Stop when the agreed outcome and required checks are done.`, display: false, timestamp: Date.now() }] };
+  pi.on("before_agent_start", (_event, ctx) => {
+    if (!enabled || !outcome) return;
+    const content = formatOutcome(outcome);
+    // These messages are persisted by Pi. Never rebuild or remove them in context.
+    const previous = [...ctx.sessionManager.getBranch()].reverse().find(entry =>
+      entry.type === "custom_message" && entry.customType === "pi-better-harness:outcome-update");
+    if (previous?.type === "custom_message" && previous.content === content) return;
+    return { message: { customType: "pi-better-harness:outcome-update", content, display: false } };
   });
   pi.on("session_shutdown", async (_event, ctx) => {
     cancelCompletedPlanClear();

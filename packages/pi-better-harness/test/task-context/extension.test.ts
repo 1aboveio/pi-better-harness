@@ -15,6 +15,7 @@ interface SessionEntry {
   type: string;
   customType?: string;
   data?: unknown;
+  content?: string;
 }
 
 interface CommandDefinition {
@@ -198,7 +199,7 @@ test("todo progress is independent of the subagents delegation mode", async () =
   assert.equal((await snapshot()).progress.inProgress, 1);
 });
 
-test("the model sees the accepted outcome and current Todo focus before each request", async () => {
+test("outcome updates persist once and preserve request prefixes across tool calls and reload", async () => {
   const entries: SessionEntry[] = [];
   const tools = new Map<string, ToolDefinition>();
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
@@ -209,13 +210,14 @@ test("the model sees the accepted outcome and current Todo focus before each req
     sessionManager: { getBranch: () => entries },
     ui: { setWidget() {}, setStatus() {} },
   } as unknown as ExtensionContext;
-  extension({
+  const pi = {
     events,
     appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
     registerTool(tool: ToolDefinition) { tools.set(tool.name, tool); },
     registerCommand() {},
     on(name: string, handler: (event: any, ctx: ExtensionContext) => unknown) { handlers.set(name, handler); },
-  } as unknown as ExtensionAPI);
+  } as unknown as ExtensionAPI;
+  extension(pi);
   await handlers.get("session_start")!({}, ctx);
   await settings.current()!.change("On", ctx);
   await tools.get("update_todo")!.execute("todo", { outcome: { objective: "Deliver the integration", doneWhen: ["Both services work together"] }, todo: [
@@ -223,15 +225,48 @@ test("the model sees the accepted outcome and current Todo focus before each req
     { id: "worker", step: "Build worker", status: "pending" },
     { id: "join", step: "Integrate", status: "pending", dependsOn: ["api", "worker"] },
   ] }, undefined, undefined, ctx);
-  const original = [{ role: "user", content: "Continue", timestamp: 1 }];
-  const first = await handlers.get("context")!({ messages: original }, ctx) as { messages: any[] };
-  const prompt = first.messages.at(-1).content;
-  assert.match(prompt, /Deliver the integration/);
-  assert.match(prompt, /Both services work together/);
-  assert.match(prompt, /Todo focus: Build API/);
-  assert.equal(original.length, 1, "request-local injection must not change persisted input");
-  const second = await handlers.get("context")!({ messages: first.messages }, ctx) as { messages: any[] };
-  assert.equal(second.messages.length, 2, "a second request must replace rather than accumulate the reminder");
+  const start = async () => {
+    const result = await handlers.get("before_agent_start")?.({}, ctx) as { message?: { customType: string; content: string } } | undefined;
+    if (result?.message) entries.push({ type: "custom_message", ...result.message });
+    return result;
+  };
+  const first = await start();
+  assert.ok(first?.message, "the first outcome must be published as a persistent message");
+  assert.match(first.message.content, /Deliver the integration/);
+  assert.match(first.message.content, /Both services work together/);
+  assert.doesNotMatch(first.message.content, /Todo focus|Choose work|Report unrelated/);
+  let messages: any[] = entries.filter(entry => entry.type === "custom_message");
+  for (let i = 0; i < 3; i++) {
+    const prefix = structuredClone(messages);
+    messages = [...messages, { role: "assistant", content: `action ${i}` }, { role: "toolResult", content: `result ${i}` }];
+    const result = await handlers.get("context")?.({ messages }, ctx) as { messages: any[] } | undefined;
+    messages = result?.messages ?? messages;
+    assert.deepEqual(messages.slice(0, prefix.length), prefix, "each request must retain the entire previous request prefix");
+    assert.equal(messages.length, prefix.length + 2, "tool calls must not append another reminder");
+  }
+  assert.equal(await start(), undefined, "unchanged outcomes must not repeat on a new turn");
+  await tools.get("update_todo")!.execute("progress", { todo: [
+    { id: "api", step: "Build API", status: "completed" },
+    { id: "worker", step: "Build worker", status: "in_progress" },
+    { id: "join", step: "Integrate", status: "pending", dependsOn: ["api", "worker"] },
+  ] }, undefined, undefined, ctx);
+  assert.equal(await start(), undefined, "Todo focus changes must not add another outcome message");
+  await handlers.get("session_shutdown")!({}, ctx);
+  handlers.clear();
+  extension(pi);
+  await handlers.get("session_start")!({}, ctx);
+  assert.equal(await start(), undefined, "reload must use the persisted message for deduplication");
+  const branch = entries.slice();
+  await tools.get("update_todo")!.execute("done", { outcome: { objective: "Deliver the integration", status: "complete" } }, undefined, undefined, ctx);
+  const completed = await start();
+  assert.match(completed!.message!.content, /Outcome \(complete\)/);
+  assert.equal(await start(), undefined);
+  entries.splice(0, entries.length, ...branch);
+  await handlers.get("session_tree")!({}, ctx);
+  assert.equal(await start(), undefined, "a sibling branch must retain its own active outcome snapshot");
+  await settings.current()!.change("Off", ctx);
+  assert.equal(await start(), undefined);
+  await handlers.get("session_shutdown")?.({}, ctx);
 });
 
 test("concurrent todo updates persist and invalid updates leave the plan unchanged", async () => {

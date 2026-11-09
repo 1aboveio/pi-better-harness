@@ -76,7 +76,7 @@ test("saved task display defaults on without enabling hooks or writing configura
   f.events.emit("pi-better-harness:task-context", { action: "pause", goalId: f.goal.goalId });
   f.events.emit("pi-better-harness:task-context", { action: "start", goalId: "another", objective: "Do not capture" });
   assert.deepEqual(f.entries, before);
-  assert.equal(f.hooks.get("context")({ messages: [] }), undefined);
+  assert.equal(f.hooks.get("before_agent_start")({}, f.ctx), undefined);
   await assert.rejects(f.tools.get("update_todo").execute("", { outcome: { objective: "Blocked capture" } }, undefined, undefined, f.ctx), /off/);
   await f.commands.get("todo").handler("", f.ctx);
   assert.match(f.fullView(), /Customers can finish checkout/);
@@ -106,8 +106,8 @@ test("all display and hooks combinations keep visual ownership independent of ca
       assert.equal(f.render().length > 0, display);
       if (enabled) {
         await f.tools.get("update_todo").execute("", { outcome: { objective: "Updated accepted outcome" } }, undefined, undefined, f.ctx);
-        const reminder = f.hooks.get("context")({ messages: [] });
-        assert.match(reminder.messages.at(-1).content, /Updated accepted outcome/);
+        const update = f.hooks.get("before_agent_start")({}, f.ctx);
+        assert.match(update.message.content, /Updated accepted outcome/);
       }
     });
   }

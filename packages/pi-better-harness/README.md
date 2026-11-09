@@ -45,8 +45,9 @@ existing saved labels remain unchanged until deliberately updated.
 Use `newTask: true` with a new
 outcome for unrelated work; a correction to the current task keeps its binding.
 Hooks enable `update_todo`, `get_todo`, capture, matching Goal lifecycle bridge
-writes, reminders, and automated cleanup. While hooks are enabled and the outcome is active, Harness
-includes a short reminder before each model call. Turning hooks off stops those
+writes, outcome updates, and automated cleanup. With hooks enabled, Harness records
+a hidden, persistent outcome update at the next agent start only when its content
+changes. It does not rebuild reminders before each model call. Turning hooks off stops those
 hooks without deleting saved state or starting a turn. `/goal` and skills never
 enable them.
 
