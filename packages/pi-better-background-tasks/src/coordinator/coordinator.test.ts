@@ -5,7 +5,7 @@
  * file exercises the same protocol in-process for fast failure localization and
  * measures that the running-set scan is central rather than per client.
  */
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -72,6 +72,56 @@ function startClient(root: string, rootStore: string, supervisorDirectory: strin
 }
 
 describe("shared coordinator process", () => {
+  it("does not turn a missing supervisor root into evidence that an unknown task is dead", async () => {
+    const root = workspace("missing-root-unknown");
+    const options = { storePath: join(root, "operations.sqlite"), supervisorDirectory: join(root, "supervisor"), stateDirectory: join(root, "state"), safetyIntervalMs: 60_000, now: () => Date.now() + 60_000 };
+    const server = (await CoordinatorServer.start(options)).server!;
+    cleanups.push(() => server.close());
+    await rm(options.supervisorDirectory, { recursive: true });
+    server.storeHandle.registerOperation({ operationId: "op_missing_root", taskId: supervisorTaskIdForToken("missing_root_unknown"), launchToken: "missing_root_unknown", owner: owner("unknown", root), observer: { kind: "local-supervisor", version: "1" } });
+    for (let scan = 0; scan < 3; scan++) await server.reconcileOnce();
+    expect(server.storeHandle.getOperation("op_missing_root")?.phase).toBe("running");
+    expect(server.storeHandle.getOperation("op_missing_root")?.terminalOutcome).toBe(null);
+    expect(existsSync(options.supervisorDirectory)).toBe(false);
+  });
+
+  it("does not recreate removed supervisor roots during scans or hints and resumes watching a legitimate launch", async () => {
+    const root = workspace("removed-root");
+    const options = { storePath: join(root, "operations.sqlite"), supervisorDirectory: join(root, "supervisor"), stateDirectory: join(root, "state"), safetyIntervalMs: 60_000 };
+    const server = (await CoordinatorServer.start(options)).server!;
+    cleanups.push(() => server.close());
+    const taskRoot = join(options.supervisorDirectory, "tasks");
+    expect(existsSync(taskRoot)).toBe(true);
+    for (const path of [taskRoot, options.supervisorDirectory]) {
+      await rm(path, { recursive: true });
+      for (let scan = 0; scan < 3; scan++) {
+        await server.reconcileOnce();
+        expect(existsSync(path)).toBe(false);
+      }
+      const scans = server.currentStats.runningScans;
+      const taskOwner = owner("hint-owner", root);
+      const suffix = path === taskRoot ? "tasks" : "supervisor";
+      server.storeHandle.registerOperation({ operationId: `op_removed_${suffix}`, taskId: `task_removed_${suffix}`, launchToken: `removed_${suffix}`, owner: taskOwner, observer: { kind: "test", version: "1" } });
+      server.storeHandle.recordTerminalOutcome({ operationId: `op_removed_${suffix}`, eventId: `removed_terminal_${suffix}`, outcome: "succeeded", reason: "disposable fixture", owner: taskOwner });
+      await until(() => server.currentStats.runningScans > scans, 3_000);
+      expect(existsSync(path)).toBe(false);
+    }
+    const taskOwner = owner("launch-owner", root);
+    const client = new CoordinatorClient({ ...options, spawnServer: false });
+    cleanups.push(() => client.close());
+    const changes: CoordinatorChange[] = [];
+    client.onChange((change) => changes.push(change));
+    await client.start([taskOwner]);
+    const token = `removed_root_${Date.now()}`;
+    const taskId = supervisorTaskIdForToken(token);
+    server.storeHandle.registerOperation({ operationId: "op_removed_launch", taskId, launchToken: token, owner: taskOwner, observer: { kind: "local-supervisor", version: "1" } });
+    const supervisor = createLocalSupervisor({ directory: options.supervisorDirectory, runnerPath: supervisorRunnerEntry() });
+    await supervisor.start({ token, argv: [process.execPath, "-e", "setTimeout(() => process.exit(0), 250)"], cwd: root, kind: "process" });
+    await until(() => changes.some((change) => change.operationId === "op_removed_launch" && change.kind === "terminal"), 5_000);
+    expect(existsSync(taskRoot)).toBe(true);
+    expect(server.storeHandle.getOperation("op_removed_launch")?.terminalOutcome).toBe("succeeded");
+  }, 15_000);
+
   it.each(Array.from({ length: 30 }, (_, index) => index))("coalesces operation WAL hints into a central owner-scoped update without waiting for safety recovery (startup %i)", async () => {
     const root = workspace("wal-input");
     const trace: string[] = [];

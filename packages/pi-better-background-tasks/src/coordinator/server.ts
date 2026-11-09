@@ -366,11 +366,11 @@ export class CoordinatorServer {
         this.hintTimer.unref?.();
     }
 
-    private watchInput(watchers: Map<string, FSWatcher>, path: string, relevant: (name: string | null) => boolean, file = false): void {
+    private watchInput(watchers: Map<string, FSWatcher>, path: string, relevant: (name: string | null) => boolean, rearmOnRename = false): void {
         if (this.closed || watchers.has(path)) return;
         try {
             const watcher = watch(path, { persistent: false }, (event, filename) => {
-                if (file && event === "rename") {
+                if (rearmOnRename && event === "rename") {
                     watcher.close();
                     if (watchers.get(path) === watcher) watchers.delete(path);
                 }
@@ -401,9 +401,13 @@ export class CoordinatorServer {
             if (existsSync(path)) this.watchInput(this.inputWatchers, path, () => true, true);
         }
         const tasks = join(this.supervisorDirectory, "tasks");
-        try { mkdirSync(tasks, { recursive: true, mode: 0o700 }); } catch { return; }
+        if (!existsSync(tasks)) {
+            this.inputWatchers.get(tasks)?.close();
+            this.inputWatchers.delete(tasks);
+            return;
+        }
         // Nonrecursive: membership changes discover new tasks, not log writes.
-        this.watchInput(this.inputWatchers, tasks, () => true);
+        this.watchInput(this.inputWatchers, tasks, () => true, true);
     }
 
     private unwatchTask(directory: string): void {
@@ -412,6 +416,9 @@ export class CoordinatorServer {
     }
 
     private async listen(): Promise<void> {
+        // Bootstrap once. Observation/recovery must not recreate a removed
+        // supervisor root; a subsequent supervisor launch owns creating it.
+        mkdirSync(join(this.supervisorDirectory, "tasks"), { recursive: true, mode: 0o700 });
         if (process.platform !== "win32") {
             const directory = dirname(this.paths.socket);
             mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -692,7 +699,8 @@ export class CoordinatorServer {
                     inspection = undefined;
                 }
                 if (!inspection) {
-                    if (this.now() - operation.createdAt >= 30_000) {
+                    // A removed namespace is unavailable evidence, not a failed launch.
+                    if (existsSync(join(this.supervisorDirectory, "tasks")) && this.now() - operation.createdAt >= 30_000) {
                         try {
                             this.store.recordTerminalOutcome({
                                 operationId: operation.operationId,

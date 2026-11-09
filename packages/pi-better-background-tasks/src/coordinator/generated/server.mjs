@@ -275,12 +275,12 @@ export class CoordinatorServer {
         }, 50);
         this.hintTimer.unref?.();
     }
-    watchInput(watchers, path, relevant, file = false) {
+    watchInput(watchers, path, relevant, rearmOnRename = false) {
         if (this.closed || watchers.has(path))
             return;
         try {
             const watcher = watch(path, { persistent: false }, (event, filename) => {
-                if (file && event === "rename") {
+                if (rearmOnRename && event === "rename") {
                     watcher.close();
                     if (watchers.get(path) === watcher)
                         watchers.delete(path);
@@ -310,19 +310,19 @@ export class CoordinatorServer {
                 this.watchInput(this.inputWatchers, path, () => true, true);
         }
         const tasks = join(this.supervisorDirectory, "tasks");
-        try {
-            mkdirSync(tasks, { recursive: true, mode: 0o700 });
-        }
-        catch {
+        if (!existsSync(tasks)) {
+            this.inputWatchers.get(tasks)?.close();
+            this.inputWatchers.delete(tasks);
             return;
         }
-        this.watchInput(this.inputWatchers, tasks, () => true);
+        this.watchInput(this.inputWatchers, tasks, () => true, true);
     }
     unwatchTask(directory) {
         this.taskWatchers.get(directory)?.close();
         this.taskWatchers.delete(directory);
     }
     async listen() {
+        mkdirSync(join(this.supervisorDirectory, "tasks"), { recursive: true, mode: 0o700 });
         if (process.platform !== "win32") {
             const directory = dirname(this.paths.socket);
             mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -612,7 +612,7 @@ export class CoordinatorServer {
                     inspection = undefined;
                 }
                 if (!inspection) {
-                    if (this.now() - operation.createdAt >= 30_000) {
+                    if (existsSync(join(this.supervisorDirectory, "tasks")) && this.now() - operation.createdAt >= 30_000) {
                         try {
                             this.store.recordTerminalOutcome({
                                 operationId: operation.operationId,

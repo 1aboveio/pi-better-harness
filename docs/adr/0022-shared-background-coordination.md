@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted decision for [#675](https://github.com/1aboveio/pi-better-harness/issues/675); implementation is pending final qualification. This decision amends [ADR 0007](0007-trusted-runtime-task-boundary.md), [ADR 0017](0017-background-adapter-admission.md), and [ADR 0020](0020-observed-waits-retain-an-owner.md).
+Accepted decision for [#675](https://github.com/1aboveio/pi-better-harness/issues/675). This decision amends [ADR 0007](0007-trusted-runtime-task-boundary.md), [ADR 0017](0017-background-adapter-admission.md), and [ADR 0020](0020-observed-waits-retain-an-owner.md).
 
 ## Decision
 
@@ -10,9 +10,11 @@ Use one on-demand coordinator process per canonical user/state directory, shared
 
 The coordinator owns shared event-driven task discovery, reconciliation, and maintenance. Advisory filesystem watchers observe the operation database and WAL, task creation, and active result and lost files; log changes are filtered. Events feed reconciliation coalesced over 50 ms, and watchers close on shutdown. A centralized bounded safety fallback recovers from lost notifications and crashed runners. SQLite and supervisor evidence remain authoritative; IPC notifications are not evidence of task state. The coordinator sends owner-scoped notifications, not global ticks that wake every client to repeat identical scans.
 
+The supervisor `tasks` namespace is bootstrapped once at coordinator startup. Reconciliation and watcher retries do not recreate a removed namespace; a legitimate new supervisor launch owns its recreation. A missing namespace means evidence is unavailable, not proof that a launch failed.
+
 Durable journal cursors are per owner, with bounded pagination. Journal trimming removes only a contiguous sequence prefix, even if wall clocks move backward. A client outside the replay horizon receives an owner-scoped snapshot and reset.
 
-Transport receipt, completion delivery, evidence acknowledgement, and physical deletion are distinct events. Sessions retain callback batching, suppression and deferral, owner/session/branch checks, paused Goal behavior, continuation ownership, and duplicate-delivery fences. State synchronization alone never invokes a model. Tool admission, execution permissions, and runtime control protections remain unchanged.
+Transport receipt, completion delivery, evidence acknowledgement, and physical deletion are distinct events. An idle advisory client connection does not keep a CLI or SDK process alive, while an in-flight RPC remains referenced until its response or bounded failure. Sessions retain callback batching, suppression and deferral, owner/session/branch checks, paused Goal behavior, continuation ownership, and duplicate-delivery fences. State synchronization alone never invokes a model. Tool admission, execution permissions, and runtime control protections remain unchanged.
 
 ## Retention
 
