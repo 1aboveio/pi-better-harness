@@ -26,7 +26,6 @@ import {
 } from "./observed-waits.js";
 import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
 import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask, type WatchTaskParams, type BackgroundTaskRuntime } from "./runtime.js";
-import { runTaskMaintenance } from "./maintenance.js";
 import { backgroundProcessDiagnosticsAccess, ForegroundSandboxBlockedError } from "./sandbox.js";
 import { inspectTaskProcess } from "./task-diagnostics.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
@@ -315,7 +314,9 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
         resumeRunningTask(pi, meta, getActiveSession);
       }
     }
-    runTaskMaintenance({ activeOrigin: activeSession });
+    // Legacy/durable retention is owned by the shared Background Tasks
+    // coordinator (with its protection authority). Running the raw sweep here
+    // would leave a second, unprotected deleter racing the coordinator.
   });
   pi.on("agent_start", (_event, ctx) => {
     setCallbackBatchContext(pi, ctx);

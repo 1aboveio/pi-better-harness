@@ -890,7 +890,12 @@ export async function createOperationBridgeHost(
             if (tool === "wait_for_operations") {
                 const wait = normalizeWaitForOperationsResult(cloned);
                 if (!wait.ok) throw new OperationBridgeError("response-invalid", wait.message);
-                if (wait.result.park && !wait.result.settled) {
+                // Match the child's admitted-park boundary: terminal evidence
+                // can already exist while this generation still needs its
+                // checkpoint and writer exit. Settlement must not revoke the
+                // exact generation's permission to publish that checkpoint.
+                if (wait.result.park && (!wait.result.settled
+                    || wait.result.phase === "parking" || wait.result.phase === "registering")) {
                     run.issuedWaits.set(wait.result.waitId, {
                         generation: wait.result.generation,
                         requestId: envelope.id,

@@ -16,6 +16,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { StoreError } from "./errors.ts";
+import { appendChange } from "./changes.ts";
 import {
     acknowledgeGenerationOutbox,
     enqueueReadyGeneration,
@@ -329,6 +330,12 @@ export function registerWait(ctx: StoreContext, input: RegisterWaitInput): Regis
                     `Unknown operation ${dependency.operationId}. A wait may only depend on a registered operation; an unregistered id is refused rather than watched.`,
                 );
             }
+            if (getRow(ctx, "SELECT operation_id FROM retention_units WHERE operation_id = ?", dependency.operationId)) {
+                throw new StoreError(
+                    "retention-protected",
+                    `Operation ${dependency.operationId} is reserved for retention and cannot gain a new wait dependency.`,
+                );
+            }
             const operationOwner = ownerFromRow(row);
             if (dependency.link === "owner" && !sameOwner(operationOwner, owner)) {
                 throw new StoreError(
@@ -451,6 +458,14 @@ export function registerWait(ctx: StoreContext, input: RegisterWaitInput): Regis
         });
 
         const outbox = settled ? enqueueReadyGeneration(ctx, waitId, generation, at) : [];
+        appendChange(ctx, {
+            kind: settled ? "wait-ready" : "wait",
+            owner,
+            operationId: resolved.length === 1 ? resolved[0]?.dependency.operationId : null,
+            waitId,
+            generation,
+            terminalRevision: resolved.length === 1 ? resolved[0]?.terminalRevision ?? 0 : 0,
+        });
         return {
             wait: requireWait(ctx, waitId, generation),
             settledAtRegistration: settled,
@@ -553,6 +568,13 @@ export function transitionWaitPhase(
             generation,
         );
         const outbox = resulting === "ready" ? enqueueReadyGeneration(ctx, waitId, generation, at) : [];
+        appendChange(ctx, {
+            kind: resulting === "ready" ? "wait-ready" : "wait",
+            owner: wait.owner,
+            waitId,
+            generation,
+            terminalRevision: state.settled ? Math.max(0, ...state.dependencies.map((dep) => dep.terminalRevision)) : 0,
+        });
         return { wait: requireWait(ctx, waitId, generation), outbox };
     });
 }
@@ -604,6 +626,12 @@ export function cancelWait(ctx: StoreContext, input: CancelWaitInput): CancelWai
         );
         const voidedOutboxIds = voidGenerationOutbox(ctx, waitId, generation, reason, at);
         releaseGenerationPins(ctx, waitId, generation, "wait-cancelled", at);
+        appendChange(ctx, {
+            kind: "wait-consumed",
+            owner,
+            waitId,
+            generation,
+        });
         return {
             wait: requireWait(ctx, waitId, generation),
             invalidatedClaimIds,
@@ -624,6 +652,19 @@ export function claimResume(ctx: StoreContext, input: ClaimResumeInput): ResumeC
     return ctx.transaction(() => {
         assertCurrentGeneration(ctx, waitId, generation);
         const wait = requireWait(ctx, waitId, generation);
+        if (getRow(
+            ctx,
+            `SELECT 1 FROM wait_dependencies d
+             JOIN retention_units r ON r.operation_id = d.operation_id
+             WHERE d.wait_id = ? AND d.generation = ? LIMIT 1`,
+            waitId,
+            generation,
+        )) {
+            throw new StoreError(
+                "retention-protected",
+                `Wait ${waitId} generation ${generation} references an operation reserved for retention; resume admission is refused.`,
+            );
+        }
         const active = getRows(
             ctx,
             "SELECT claim_id FROM resume_claims WHERE wait_id = ? AND generation = ? AND state IN ('claimed', 'published')",
@@ -1045,6 +1086,16 @@ export function recordEvidenceRead(
             operationId,
             terminalRevision,
         );
+        if (changes > 0) {
+            appendChange(ctx, {
+                kind: "evidence",
+                owner,
+                operationId,
+                terminalRevision,
+                waitId,
+                generation,
+            });
+        }
         return { read: mapEvidenceRead(row as Record<string, unknown>), recorded: changes > 0 };
     });
 }
@@ -1143,6 +1194,16 @@ export function recordEvidencePin(
                 kind,
                 ref,
             );
+        if (changes > 0) {
+            appendChange(ctx, {
+                kind: "evidence",
+                owner: wait.owner,
+                operationId,
+                terminalRevision,
+                waitId,
+                generation,
+            });
+        }
         return { pin: mapEvidencePin(row as Record<string, unknown>), recorded: changes > 0 };
     });
 }
@@ -1290,6 +1351,12 @@ export function acknowledgeResult(
         );
         const acknowledgedOutboxIds = acknowledgeGenerationOutbox(ctx, waitId, generation, at);
         const releasedPinIds = releaseGenerationPins(ctx, waitId, generation, "wait-consumed", at);
+        appendChange(ctx, {
+            kind: "wait-consumed",
+            owner,
+            waitId,
+            generation,
+        });
         return {
             wait: requireWait(ctx, waitId, generation),
             acknowledgedOutboxIds,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
     existsSync,
     mkdirSync,
@@ -8,8 +9,8 @@ import {
     rmSync,
     writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import nodeTest, { after, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -50,7 +51,7 @@ import {
     FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
     type ForegroundSandboxPolicyEvent,
 } from "../events.ts";
-import { describeSandboxSupport } from "../shared-sandbox-core.ts";
+import { canonicalizePath, describeSandboxSupport } from "../shared-sandbox-core.ts";
 import { realBackendSkip } from "./support/resolvable-backend.ts";
 
 // Policy/registration checks need discovery only; worker execution needs a
@@ -173,6 +174,29 @@ function record(branch: SessionEntry[] = []): Recorded {
     return Object.assign(recorded, { pi, tools, commands, handlers, toolCallHandlers, published, events });
 }
 
+/** The coordinator contract from background-tasks/src/coordinator/paths.ts. */
+function expectedCoordinatorDirectories(): string[] {
+    const user = process.getuid?.() ?? createHash("sha256").update(homedir()).digest("hex").slice(0, 8);
+    const agentDir = getAgentDir();
+    const storePath = join(agentDir, "operation-coordinator.sqlite");
+    const pool = process.env.VITEST_POOL_ID;
+    const runtimeName = pool && /^\d+$/.test(pool)
+        ? `pi-better-background-tasks-vitest-${pool}`
+        : "pi-better-background-tasks";
+    const supervisorDirectory = join(tmpdir(), runtimeName, "supervisor");
+    const key = createHash("sha256")
+        .update(canonicalizePath(storePath))
+        .update("\0")
+        .update(canonicalizePath(supervisorDirectory))
+        .digest("hex")
+        .slice(0, 20);
+    return [
+        ...(process.platform === "win32" ? [] : [canonicalizePath(join("/tmp", `pi-bg-${user}`))]),
+        canonicalizePath(join(dirname(canonicalizePath(storePath)), `.pi-bg-${user}-${key}`)),
+        canonicalizePath(join(resolve(agentDir), "background-tasks-coordinator", key)),
+    ];
+}
+
 function assertProtectedPolicy(recorded: Recorded, root: string, rules: string[] = [...PACKAGED_DENY_WRITE_TEMPLATES]): void {
     const paths = [...(recorded.published.at(-1)?.denyWrite ?? [])];
     const expected = [
@@ -180,6 +204,7 @@ function assertProtectedPolicy(recorded: Recorded, root: string, rules: string[]
         getAgentDir(),
         join(realpathSync(tmpdir()), "pi-better-subagents"),
         join(realpathSync(tmpdir()), "pi-better-background-tasks"),
+        ...expectedCoordinatorDirectories(),
         realpathSync(join(packageRoot, "../../node_modules")),
         packageRoot,
         join(root, ".pi"),

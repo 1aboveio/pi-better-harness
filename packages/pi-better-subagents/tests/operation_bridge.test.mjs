@@ -529,7 +529,7 @@ describe("worker operation bridge transport", () => {
     });
 
 
-async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } = {}) {
+async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false, waitPhase = "parking", settled = false } = {}) {
     const root = mkdtempSync(join(tmpdir(), "operation-sdk-parking-"));
     const agentDir = join(root, "agent");
     const sessionDir = join(root, "sessions");
@@ -537,6 +537,8 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
     mkdirSync(sessionDir, { recursive: true });
     const counters = { modelRequests: 0, checkpoint: 0, parkFailed: 0, shutdowns: 0 };
     const diagnostics = [];
+    const handoffOrder = [];
+    const taskIds = settled ? ["bg_1", "bg_2", "bg_3"] : ["bg_1"];
     const host = await createOperationBridgeHost({ requestTimeoutMs: 4_000 });
     const sessionManager = SessionManager.create(root, sessionDir);
     const conversationId = sessionManager.getSessionId();
@@ -552,18 +554,21 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
             parking: true,
         },
         tools: [createToolDescriptor("wait_for_operations")],
-        ownership: (taskId) => taskId === "bg_1",
+        ownership: (taskId) => taskIds.includes(taskId),
         handlers: {
             wait_for_operations: async () => ({
                 waitId: "wait-real",
                 generation: 1,
-                phase: "parking",
-                settled: false,
+                phase: waitPhase,
+                settled,
                 park: true,
-                taskIds: ["bg_1"],
-                dependencies: [],
+                taskIds,
+                dependencies: settled ? taskIds.map((taskId, index) => ({
+                    taskId, operationId: `op_${index}`, terminalRevision: 1,
+                    terminalOutcome: index === 0 ? "succeeded" : "failed",
+                })) : [],
             }),
-            checkpoint: async () => { counters.checkpoint += 1; return { recorded: true }; },
+            checkpoint: async () => { handoffOrder.push("checkpoint"); counters.checkpoint += 1; return { recorded: true }; },
             park_failed: async () => { counters.parkFailed += 1; return { recorded: true }; },
         },
     });
@@ -588,7 +593,7 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
                 : first
                     ? [
                         { type: "toolCall", id: "real-wait-call", name: "wait_for_operations",
-                            arguments: { task_ids: ["bg_1"], continuation_note: "read the result" } },
+                            arguments: { task_ids: taskIds, continuation_note: "read the result" } },
                         ...(batch ? [{ type: "toolCall", id: "real-other-call", name: "other_work", arguments: {} }] : []),
                     ]
                     : [{ type: "text", text: bashEnvCheck ? "checked environment" : "continued after wait" }];
@@ -673,7 +678,7 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
     const errors = [];
     await session.bindExtensions({
         onError: (error) => errors.push(String(error)),
-        shutdownHandler: () => { counters.shutdowns += 1; },
+        shutdownHandler: () => { handoffOrder.push("shutdown"); counters.shutdowns += 1; },
     });
     t.after(async () => {
         await session.abort().catch(() => {});
@@ -682,7 +687,7 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
         await host.close();
         rmSync(root, { recursive: true, force: true });
     });
-    return { session, sessionManager, counters, diagnostics, errors };
+    return { session, sessionManager, counters, diagnostics, errors, handoffOrder };
 }
 
     it("lets the parent reject checkpoint evidence before any checkpoint handler runs", async () => {
@@ -1175,7 +1180,7 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
     });
 
 
-    it("keeps running when a wait result is already settled", async () => {
+    for (const phase of ["ready", "parking"]) it(`handles a settled wait in ${phase} without bypassing the writer handoff`, async () => {
         const caps = {
             background: { spawn: false, watch: false, status: false, log: false },
             wait: true,
@@ -1203,7 +1208,7 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
             request: async () => ({
                 waitId: "wait-settled",
                 generation: 1,
-                phase: "ready",
+                phase,
                 settled: true,
                 park: true,
                 taskIds: ["bg_1"],
@@ -1231,12 +1236,37 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
             undefined,
             {},
         );
-        assert.equal(result.terminate, undefined, "a settled wait must not terminate the run");
-        assert.equal(installed.getState().pendingPark, undefined);
-        assert.equal(installed.getState().status, "ready");
-        assert.equal(handlers.get("tool_call")({ toolName: "bash", input: {} }), undefined);
+        if (phase === "parking") {
+            assert.equal(result.terminate, true, "settlement must not bypass the parking checkpoint boundary");
+            assert.equal(installed.getState().pendingPark?.waitId, "wait-settled");
+            assert.equal(installed.getState().status, "parking");
+            assert.equal(handlers.get("tool_call")({ toolName: "bash", input: {} })?.block, true);
+        } else {
+            assert.equal(result.terminate, undefined, "an already-ready wait requires no writer handoff");
+            assert.equal(installed.getState().pendingPark, undefined);
+            assert.equal(installed.getState().status, "ready");
+            assert.equal(handlers.get("tool_call")({ toolName: "bash", input: {} }), undefined);
+        }
         handlers.get("session_shutdown")?.();
     });
+
+    for (const phase of ["parking", "registering", "ready"]) {
+        it(`settled failed ${phase} waits keep the real bridge checkpoint ledger consistent`, { timeout: 20_000 }, async (t) => {
+            const fixture = await realSdkParkingSession(t, { waitPhase: phase, settled: true });
+            await fixture.session.prompt("Interpret the completed task through the admitted wait.");
+            await fixture.session.waitForIdle();
+            assert.deepEqual(fixture.errors, []);
+            if (phase === "ready") {
+                assert.deepEqual(fixture.handoffOrder, [], "ready results must not invent a park checkpoint");
+                assert.equal(fixture.counters.modelRequests, 2);
+            } else {
+                assert.equal(fixture.counters.checkpoint, 1, JSON.stringify(fixture.diagnostics));
+                assert.equal(fixture.counters.parkFailed, 0, JSON.stringify(fixture.diagnostics));
+                assert.deepEqual(fixture.handoffOrder, ["checkpoint", "shutdown"]);
+                assert.equal(fixture.counters.modelRequests, 1, "checkpoint handoff must precede another model request");
+            }
+        });
+    }
 
     it("stops a real AgentSession before the next model request and certifies the saved wait result", { timeout: 20_000 }, async (t) => {
         assert.equal(supportsParkingBoundary(VERSION), true, `installed SDK ${VERSION} has the terminate boundary`);

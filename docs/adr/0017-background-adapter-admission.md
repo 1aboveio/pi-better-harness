@@ -16,6 +16,8 @@ The event bus establishes compatibility, not authentication. Source provenance a
 
 ## Admitted Operations
 
+[ADR 0022](0022-shared-background-coordination.md) assigns shared Background reconciliation and maintenance to a per-state-directory coordinator instead of each session. This changes bookkeeping authority, not tool admission, launch confinement, stop ownership checks, or permission defaults in this ADR.
+
 - Local launches: `bg_task_spawn`, `bg_task_watch`, and `bg_task` with the exact actions `spawn` or `watch`. Background owns executable confinement and its launch-time permission snapshot.
 - Registry operations: `bg_task_list`, `bg_task_status`, `bg_task_log`, and `bg_task` or `bg_status` with the exact actions `list`, `status`, `log`, or `clear`.
 - Local stop: `bg_task_stop`, or the exact action `stop` on either wrapper, only when the Background closure reads existing local process/watch metadata without SSH or remote metadata. Missing or unreadable target metadata does not receive this exemption. The existing session-ownership checks still run in the tool body.

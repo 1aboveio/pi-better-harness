@@ -2943,7 +2943,15 @@ export default function (pi: ExtensionAPI) {
                 // After the writer lease is free: a clean park may already have a
                 // ready dependency, and a failed park must hold its wait rather
                 // than leave an automatic resume armed.
-                void settleParkedExit(id);
+                void settleParkedExit(id).finally(() => {
+                    // This exit freed a capacity slot. Re-offer pending wait
+                    // deliveries through the existing adapter/admission gates;
+                    // no polling timer or held-to-ready transition is involved.
+                    if (!sessionTornDown && resumeOrchestration) {
+                        try { workerOperations.service?.registerContinuationAdapter(resumeOrchestration.adapter); }
+                        catch { /* a closing host retries on session activation */ }
+                    }
+                });
                 // If this attempt was a published resume of an earlier parked
                 // assignment, an exit before acknowledgement must settle that
                 // unconsumed generation explicitly instead of leaving it resuming.

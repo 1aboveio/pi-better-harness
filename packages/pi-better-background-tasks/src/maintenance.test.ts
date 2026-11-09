@@ -65,7 +65,12 @@ describe("background task registry maintenance", () => {
     writeMeta(boundary);
     writeMeta(recent);
 
-    const result = runTaskMaintenance({ now, metas: [old, boundary, recent], force: true });
+    const result = runTaskMaintenance({
+      now,
+      metas: [old, boundary, recent],
+      force: true,
+      authorizeRemoval: () => ({ allowed: true }),
+    });
 
     expect(result.removed).toBe(1);
     expect(readMeta(old.id)).toBeUndefined();

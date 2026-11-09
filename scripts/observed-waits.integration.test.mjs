@@ -34,9 +34,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, afterEach, test } from "node:test";
 
@@ -45,6 +45,13 @@ const fixtures = join(repoRoot, "scripts", "fixtures", "observed-waits");
 
 // Standalone runs get the same private TMPDIR/durable store the root test
 // preload provides, so no acceptance artifact reaches the machine registry.
+const originalEnv = {
+    TMPDIR: process.env.TMPDIR,
+    TMP: process.env.TMP,
+    TEMP: process.env.TEMP,
+    PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+    PI_SUBAGENT_DURABLE_DIR: process.env.PI_SUBAGENT_DURABLE_DIR,
+};
 const ownsScratch = !process.env.PI_SCRIPTS_TEST_ISOLATED_TMPDIR;
 const scratchRoot = process.env.PI_SCRIPTS_TEST_ISOLATED_TMPDIR
     ?? mkdtempSync(join(tmpdir(), "observed-waits-acceptance-tmp-"));
@@ -53,6 +60,9 @@ if (ownsScratch) {
     process.env.TMP = scratchRoot;
     process.env.TEMP = scratchRoot;
 }
+const isolatedAgentDir = join(scratchRoot, "agent");
+mkdirSync(isolatedAgentDir, { recursive: true });
+process.env.PI_CODING_AGENT_DIR = isolatedAgentDir;
 const ownsDurableRoot = !process.env.PI_SUBAGENT_DURABLE_DIR;
 const durableRoot = process.env.PI_SUBAGENT_DURABLE_DIR ?? join(scratchRoot, "durable-subagents");
 process.env.PI_SUBAGENT_DURABLE_DIR = durableRoot;
@@ -99,6 +109,7 @@ const { InMemoryCredentialStore } = await import("@earendil-works/pi-ai");
 const { parentProvider } = await import("./fixtures/observed-waits/parent-provider.extension.mjs");
 const { findSavedConversation } = await import("../packages/pi-better-subagents/continuation.ts");
 const { processExists } = await import("../packages/pi-better-subagents/spawn.ts");
+const { readProcessStartTokenFresh } = await import("../packages/pi-better-background-tasks/src/process-identity.ts");
 const support = await import("../packages/pi-better-subagents/tests/worker-waits-support.mjs");
 
 const WORKER_FIXTURE = join(fixtures, "worker-session.mjs");
@@ -108,23 +119,144 @@ const PARENT_EXTENSION = join(fixtures, "parent-provider.extension.mjs");
 const PARENT_SESSION = "parent-session-1";
 const BRANCH = "branch-1";
 const runningChildren = new Set();
+const ownedStacks = new Set();
 
-afterEach(() => {
-    support.cleanupAll();
+async function startOwnedStack() {
+    const stack = await support.startStack();
+    ownedStacks.add(stack);
+    return stack;
+}
+
+async function closeOwnedStack(stack) {
+    try { await stack.bridge?.close?.(); } catch { /* already closed */ }
+    try { stack.close?.(); } catch { /* already closed */ }
+    try { stack.host?.close?.(); } catch { /* already closed */ }
+    try { stack.store?.close?.(); } catch { /* already closed */ }
+}
+
+afterEach(async () => {
     for (const child of runningChildren) {
         try { child.kill("SIGKILL"); } catch { /* already gone */ }
     }
     runningChildren.clear();
+    for (const stack of ownedStacks) await closeOwnedStack(stack);
+    ownedStacks.clear();
+    await stopOwnedCoordinators();
+    support.cleanupAll();
     delete process.env.PI_ACCEPTANCE_WATCH_MARKER;
 });
 
-after(() => {
+after(async () => {
     process.env.PATH = originalPath;
+    for (const stack of ownedStacks) await closeOwnedStack(stack);
+    ownedStacks.clear();
+    await stopOwnedCoordinators();
+    support.cleanupAll();
+    for (const [key, value] of Object.entries(originalEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+    }
     if (ownsDurableRoot) rmSync(durableRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     if (ownsScratch) rmSync(scratchRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Teardown scans only this file's private scratch root. A live coordinator is
+// signaled only while its current lock record and fresh OS start token prove the
+// same identity; missing or changed proof is unknown ownership and fails closed.
+function ownedCoordinatorLocks() {
+    const locks = [];
+    const visit = (directory) => {
+        let entries;
+        try { entries = readdirSync(directory, { withFileTypes: true }); } catch { return; }
+        for (const entry of entries) {
+            const path = join(directory, entry.name);
+            if (entry.isDirectory()) { visit(path); continue; }
+            if (!entry.isFile() || entry.name !== "leader.lock") continue;
+            let record;
+            try { record = JSON.parse(readFileSync(path, "utf8")); }
+            catch { throw new Error(`cannot read owned coordinator lock ${path}`); }
+            if (!Number.isSafeInteger(record.pid) || record.pid <= 0
+                || typeof record.stateDirectory !== "string"
+                || resolve(record.stateDirectory) !== resolve(directory)) {
+                throw new Error(`unexpected owned coordinator lock ${path}`);
+            }
+            locks.push({
+                pid: record.pid,
+                lockPath: path,
+                nonce: typeof record.nonce === "string" ? record.nonce : undefined,
+                startToken: typeof record.startToken === "string" ? record.startToken : undefined,
+                stateDirectory: resolve(record.stateDirectory),
+            });
+        }
+    };
+    visit(scratchRoot);
+    return locks;
+}
+
+function verifyOwnedCoordinator(lock) {
+    if (!processExists(lock.pid)) return false;
+    if (!lock.startToken || !lock.nonce) {
+        throw new Error(`unknown coordinator ownership: live pid ${lock.pid} at ${lock.lockPath} has no start token or nonce`);
+    }
+    let current;
+    try { current = JSON.parse(readFileSync(lock.lockPath, "utf8")); }
+    catch {
+        if (!processExists(lock.pid)) return false;
+        throw new Error(`unknown coordinator ownership: live pid ${lock.pid} has no current lock record at ${lock.lockPath}`);
+    }
+    if (current.version !== 1
+        || current.pid !== lock.pid
+        || current.nonce !== lock.nonce
+        || current.startToken !== lock.startToken
+        || resolve(current.stateDirectory ?? "") !== lock.stateDirectory) {
+        if (!processExists(lock.pid)) return false;
+        throw new Error(`unknown coordinator ownership: current lock record changed for live pid ${lock.pid} at ${lock.lockPath}`);
+    }
+    const token = readProcessStartTokenFresh(lock.pid);
+    if (!token || token !== lock.startToken) {
+        if (!processExists(lock.pid)) return false;
+        throw new Error(`unknown coordinator ownership: fresh start token does not match live pid ${lock.pid} at ${lock.lockPath}`);
+    }
+    return true;
+}
+
+async function waitForOwnedCoordinatorsToExit(locks, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && locks.some((lock) => processExists(lock.pid))) await sleep(50);
+}
+
+async function stopOwnedCoordinators() {
+    for (let pass = 0; pass < 3; pass++) {
+        const alive = new Map();
+        for (const lock of ownedCoordinatorLocks()) {
+            if (verifyOwnedCoordinator(lock) && !alive.has(lock.pid)) alive.set(lock.pid, lock);
+        }
+        for (const lock of alive.values()) {
+            try { process.kill(lock.pid, "SIGTERM"); }
+            catch (error) { if (error.code !== "ESRCH") throw error; }
+        }
+        await waitForOwnedCoordinatorsToExit([...alive.values()], 4_000);
+        // A live PID with a removed/changed record is unknown ownership:
+        // verifyOwnedCoordinator throws before any SIGKILL is sent.
+        for (const lock of alive.values()) {
+            if (!processExists(lock.pid) || !verifyOwnedCoordinator(lock)) continue;
+            try { process.kill(lock.pid, "SIGKILL"); }
+            catch (error) { if (error.code !== "ESRCH") throw error; }
+        }
+        await waitForOwnedCoordinatorsToExit([...alive.values()], 4_000);
+        const survivors = [...alive.values()].filter((lock) => processExists(lock.pid));
+        if (survivors.length > 0) {
+            throw new Error(`owned coordinators survived teardown: ${survivors.map((lock) => `${lock.pid} (${lock.lockPath})`).join(", ")}`);
+        }
+        await sleep(100);
+    }
+    const remaining = ownedCoordinatorLocks().filter((lock) => processExists(lock.pid));
+    if (remaining.length > 0) {
+        throw new Error(`owned coordinator locks remain live: ${remaining.map((lock) => `${lock.pid} (${lock.lockPath})`).join(", ")}`);
+    }
+}
 
 function readJson(path) {
     return JSON.parse(readFileSync(path, "utf8"));
@@ -491,7 +623,7 @@ function assertSlotReleased(stack, attemptId) {
 }
 
 test("a real worker parks, releases its slot, the runner survives, and the saved session resumes once and acknowledges", { timeout: 180_000 }, async () => {
-    const stack = await support.startStack();
+    const stack = await startOwnedStack();
     assert.equal(stack.started, true, "the Subagents bridge host must resolve the real Background service");
     assert.equal(supportsParkingBoundary(VERSION), true, `installed SDK ${VERSION} exposes the terminate boundary`);
 
@@ -629,7 +761,7 @@ test("a real worker parks, releases its slot, the runner survives, and the saved
 });
 
 test("a failed controlled task is interpreted as blocked by the resumed saved session", { timeout: 180_000 }, async () => {
-    const stack = await support.startStack();
+    const stack = await startOwnedStack();
     assert.equal(stack.started, true);
     const attemptId = "sa_ow_failure";
     const parked = await prepareParkedWorker(stack, { attemptId, outcome: "failure" });
@@ -723,7 +855,7 @@ async function startParentOnlyStack() {
     host.start(ctx);
     registerTools(pi);
     const store = openStore({ path: storePath });
-    return {
+    const stack = {
         root,
         workspace,
         pi,
@@ -739,6 +871,8 @@ async function startParentOnlyStack() {
             try { host.close(); } catch { /* already closed */ }
         },
     };
+    ownedStacks.add(stack);
+    return stack;
 }
 
 async function waitUntil(fn, label, timeoutMs = 60_000) {
@@ -944,7 +1078,7 @@ test("the parent delivery recipe registers the bundled watcher, attributes it to
 });
 
 test("cancelling a parked wait detaches observation and no continuation is launched", { timeout: 180_000 }, async () => {
-    const stack = await support.startStack();
+    const stack = await startOwnedStack();
     assert.equal(stack.started, true);
     const attemptId = "sa_ow_cancel";
     const parked = await prepareParkedWorker(stack, { attemptId, outcome: "success" });
