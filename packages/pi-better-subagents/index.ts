@@ -1625,10 +1625,10 @@ function returnWidgetNavToInput(): void {
     exitWidgetNav();
 }
 
-function viewWidgetNavSelection(ctx: ExtensionContext): void {
+function viewWidgetNavSelection(ctx: ExtensionContext, owner?: symbol): void {
     const selected = selectedWidgetNavRun();
     if (!selected) return;
-    openNavigator(ctx, selected.id);
+    openNavigator(ctx, selected.id, owner);
 }
 
 function stopWidgetNavSelection(ctx: ExtensionContext): void {
@@ -1640,9 +1640,9 @@ function stopWidgetNavSelection(ctx: ExtensionContext): void {
 }
 
 /** Open the focused navigator overlay. No-op without a UI or visible runs. */
-function openNavigator(ctx: ExtensionContext, initialDetailId?: string): void {
+function openNavigator(ctx: ExtensionContext, initialDetailId?: string, owner?: symbol): void {
     void initialDetailId;
-    ensureNavigator(ctx);
+    ensureNavigator(ctx, owner);
 }
 
 /** Refresh the shared navigator after run changes. */
@@ -1651,7 +1651,7 @@ function updateNavigatorFooter(ctx: ExtensionContext | undefined): void {
 }
 
 /** Install the empty-editor ← wrapper once per UI (reload-safe, composable). */
-function ensureNavigator(ctx: ExtensionContext): void {
+function ensureNavigator(ctx: ExtensionContext, owner?: symbol): void {
     if (!isNavigatorUiAvailable(ctx)) return;
     try {
         ensureSubagentProvider();
@@ -1662,7 +1662,7 @@ function ensureNavigator(ctx: ExtensionContext): void {
             matchKey: (data: string, keyId: string) => matchesKey(data, keyId),
             truncate: truncateToWidth,
             createTranscriptComponent: createSubagentTranscriptComponent,
-        });
+        }, owner);
     } catch { /* ignore */ }
 }
 
@@ -2012,6 +2012,8 @@ export default function (pi: ExtensionAPI) {
         restrictContextFilesToWorktree(event.systemPromptOptions, PiCodingAgent.getAgentDir());
     });
     initializeNavigatorPanels(pi);
+    // Each cached factory instance owns the navigator it installs (#460).
+    const navigatorOwner = Symbol("subagents navigator factory");
     const agentSessionSettings = createAgentSessionSettings(pi);
     let catalogModelRegistry: ExtensionContext["modelRegistry"] | undefined;
     let delegationOverride: DelegationMode | undefined;
@@ -3932,10 +3934,10 @@ export default function (pi: ExtensionAPI) {
         // Adopt records left non-terminal by a pi that died without a clean
         // shutdown, so the age sweep can eventually retire them.
         reconcileAbandonedRuns();
-        disposeBackgroundWorkNavigator(ctx);
+        disposeBackgroundWorkNavigator(ctx, navigatorOwner);
         widgetNavActive = false;
         widgetNavSelectedId = undefined;
-        ensureNavigator(ctx);
+        ensureNavigator(ctx, navigatorOwner);
         publishAcceptanceHooks();
         updateNavigatorFooter(ctx);
         // Clear the retired legacy widget so the shared navigator is the only
@@ -3956,7 +3958,9 @@ export default function (pi: ExtensionAPI) {
         cancelCallbackBatch(pi);
         mainAgentStartedAt = undefined;
         mainAgentTools.clear();
-        disposeBackgroundWorkNavigator();
+        // Owned disposal only: a headless child or a stale factory must not clear
+        // the parent's navigator by omitting the context and owner.
+        disposeBackgroundWorkNavigator(undefined, navigatorOwner);
     });
 
     // Tear down the timer and clear the widget when the session ends.
@@ -4008,7 +4012,7 @@ export default function (pi: ExtensionAPI) {
         resetParseRunCursor();
         // Always dispose navigator detail timers (no UI call — just clearInterval).
         // Safe in every mode; the dispose hook is only set when a TUI overlay opened.
-        disposeBackgroundWorkNavigator(ctx);
+        disposeBackgroundWorkNavigator(ctx, navigatorOwner);
         // Widget clear is intentional in every mode that exposes ui, including RPC.
         try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
     });

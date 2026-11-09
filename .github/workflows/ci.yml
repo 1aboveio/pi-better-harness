@@ -121,9 +121,8 @@ jobs:
       - name: pi-better-server suite on supported native Pi 1.2
         run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.2.0 "$RUNNER_TEMP/pi-compat"
 
-  # Exercise affected extensions against the minimum and current Pi 1.x SDKs.
-  # Kept separate from pi-1x-compat: this matrix moves independently of the
-  # Server lane, which keeps its native Pi 1.2 run and pinned Codex prerequisite.
+  # Exercise the affected extensions against the minimum and current Pi 1.x
+  # SDKs without taking over the server lane's supported Pi 1.2 proof.
   pi-1x-compat-extensions:
     name: pi-1x-compat-extensions (${{ matrix.pi-version }})
     runs-on: ubuntu-latest

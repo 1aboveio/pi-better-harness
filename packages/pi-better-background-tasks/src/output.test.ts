@@ -226,8 +226,11 @@ describe("progress observations and launch provenance (#572)", () => {
   });
 
   it("uses suspected-stall wording in navigator rows and details, and clears it after output", () => {
+    // A cached factory registers its provider only for the TUI session that owns
+    // it, so a headless sibling cannot replace the parent's rows (#460).
     ensureBackgroundTasksNavigatorProvider({} as any);
-    ensureBackgroundTasksNavigator({ ...ctx, hasUI: false } as any);
+    ensureBackgroundTasksNavigator({ ...ctx, mode: "tui", hasUI: true,
+      ui: { setStatus() {}, setWidget() {}, setEditorComponent() {} } } as any);
     const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("background-tasks");
     const task = running();
     vi.setSystemTime(startedAt + 60_000);
@@ -1036,7 +1039,9 @@ describe("status cursor delegation (#323)", () => {
 describe("#332 navigator rows", () => {
   it("history-only failures keep the command in the row; an actionable incident still leads it", () => {
     ensureBackgroundTasksNavigatorProvider({} as any);
-    ensureBackgroundTasksNavigator({ cwd: origin.cwd, hasUI: false, sessionManager: { getSessionId: () => origin.sessionId } } as any);
+    ensureBackgroundTasksNavigator({ cwd: origin.cwd, mode: "tui", hasUI: true,
+      ui: { setStatus() {}, setWidget() {}, setEditorComponent() {} },
+      sessionManager: { getSessionId: () => origin.sessionId } } as any);
     const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("background-tasks");
     const quiet = fixture({ status: "running", endedAt: undefined, command: "rg needle src" });
     recordFailure(quiet, "exit", "exited with declared expected code 1", "q1", { expected: true });

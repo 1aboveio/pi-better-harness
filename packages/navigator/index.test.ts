@@ -180,6 +180,39 @@ describe("shared background work navigator", () => {
     assert.deepEqual(statuses, []);
   });
 
+  it("releases a factory-owned navigator only for the factory that installed it", () => {
+    const ui = {
+      factory: undefined as any,
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    const owner = Symbol("installing factory");
+    const other = Symbol("replacement factory");
+    const state = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")];
+
+    ensureBackgroundWorkNavigator(ctx, {
+      createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+      isOpenTrigger: () => false,
+      matchKey: () => false,
+      truncate: (value) => value,
+    }, owner);
+
+    // Omitting ownership is not evidence of ownership: a headless child calling
+    // dispose() with no context or token must leave the parent's navigator alone.
+    disposeBackgroundWorkNavigator();
+    assert.equal(state.uiCtx, ctx);
+    // A stale factory's token cannot release its replacement either.
+    disposeBackgroundWorkNavigator(undefined, other);
+    assert.equal(state.uiCtx, ctx);
+
+    // The owner's token is the release path.
+    disposeBackgroundWorkNavigator(undefined, owner);
+    assert.equal(state.uiCtx, undefined);
+  });
+
   it("survives a retained stale context and releases it during disposal", () => {
     const ui = {
       factory: undefined as any,
