@@ -139,7 +139,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Provision private runtime test Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+
+      - name: Export private runtime test Node
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "PI_TEST_PRIVATE_RUNTIME_NODE=" + process.execPath + "\n")'
+
+      - name: Restore host Node 22
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
