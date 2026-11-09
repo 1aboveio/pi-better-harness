@@ -88,6 +88,19 @@ jobs:
         run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts src/windows-paths.test.ts
         working-directory: packages/pi-better-background-tasks
 
+      # Keep the existing Node 22 Windows proof above. The shared coordinator's
+      # durable IPC and native SQLite path requires Node 24 and is validated here.
+      - name: Set up Node 24 for coordinator IPC
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+
+      - name: Coordinator Windows named-pipe and multiprocess tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npx vitest run src/coordinator/coordinator.test.ts src/coordinator/coordinator.multiprocess.test.ts
+        working-directory: packages/pi-better-background-tasks
+
   # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
   pi-1x-compat:
     name: pi-1x-compat
