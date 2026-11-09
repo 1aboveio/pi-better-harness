@@ -11,6 +11,7 @@
  *    reference channels (`continuationNote`, `reason`, `summary`, `authorityRef`)
  *    that a caller could otherwise use to persist a secret.
  */
+import { isAbsolute } from "node:path";
 import { StoreError } from "./errors.ts";
 import type { EvidenceKind, OwnerIdentity, OwnerKind } from "./types.ts";
 
@@ -143,7 +144,8 @@ export function requirePath(field: string, value: unknown): string {
 /** Workspace binding: an absolute path that may contain spaces. */
 export function requireWorkspace(value: unknown): string {
     const workspace = assertPlainString("owner.workspace", value, TEXT_LIMITS.workspace).trim();
-    if (!workspace.startsWith("/")) fail("owner.workspace", "must be an absolute path");
+    // Platform-aware: a Windows workspace is "C:\...", which never starts with "/".
+    if (!isAbsolute(workspace)) fail("owner.workspace", "must be an absolute path");
     return workspace;
 }
 
