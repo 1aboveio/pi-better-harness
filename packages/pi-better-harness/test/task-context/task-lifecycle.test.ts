@@ -53,7 +53,7 @@ test("refining a Goal outcome preserves its binding; re-enable reconciles comple
   assert.equal((await f.get()).outcome.goalId, "goal-one");
   f.trigger("pause", "paused");
   assert.equal((await f.get()).outcome.status, "paused");
-  assert.equal(f.hooks.get("context")({ messages: [] }), undefined);
+  assert.match(f.hooks.get("before_agent_start")({}, f.ctx).message.content, /Outcome \(paused\)/);
   f.trigger("resume", "active");
   assert.deepEqual((await f.get()).outcome.doneWhen, ["A payment succeeds"]);
   f.trigger("start", "active");
@@ -62,7 +62,7 @@ test("refining a Goal outcome preserves its binding; re-enable reconciles comple
   f.trigger("complete", "complete");
   await f.setting.change("On", f.ctx);
   assert.equal((await f.get()).outcome.status, "complete");
-  assert.equal(f.hooks.get("context")({ messages: [] }), undefined);
+  assert.match(f.hooks.get("before_agent_start")({}, f.ctx).message.content, /Outcome \(complete\)/);
   assert.equal(f.turns(), 0, "restoring task memory must not start or resume an agent turn");
 });
 
