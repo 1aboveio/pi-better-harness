@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.41.3] - 2026-11-10
+
+### Fixed
+
+- Record the current outcome as one hidden, persisted message at agent start only when its content changed, instead of rebuilding a reminder before every model call. The model-visible prompt prefix now stays stable across turns.
+- Bundle Subagents 0.28.2, Background Tasks 0.14.3, and SSH 0.1.5 for owner-scoped navigator and failure-attention lifecycles plus Windows support.
+
+## [pi-better-subagents@0.28.2] - 2026-11-10
+
+### Fixed
+
+- Scope navigator provider registration and disposal to the cached extension factory that installed them, so a stale factory or a headless child cannot unregister another instance's provider or dispose the navigator it does not own.
+- Accept Windows absolute paths when binding an operation's owner workspace.
+
+## [pi-better-background-tasks@0.14.3] - 2026-11-10
+
+### Fixed
+
+- Give each cached factory invocation its own runtime, failure-attention timers, navigator projection, and durable host, so a reloaded, replaced, or child instance no longer shares timers or rows with another session. A suspended instance defers its failure notifications instead of rescheduling them under the shared owner.
+- Defer navigator provider registration until a TUI session owns it. A refresh from a non-TUI tool context repaints the stored owner UI rather than a headless child's context.
+- Accept Windows absolute and UNC workspace paths in operation owner validation, and derive portable durable temporary names.
+
+## [pi-better-ssh@0.1.5] - 2026-11-10
+
+### Fixed
+
+- Use independent SSH connections on Windows, where native OpenSSH cannot provide a working ControlMaster socket. Mux options from callers and SSH config are overridden, `ssh_mux status` reports mux down with the reason, `stop` has no master to stop, and `remote_bash` reports `mux.state: "down"`. Linux and macOS keep connection reuse.
+- Accept Windows absolute paths when binding an operation's owner workspace.
+
 ## [pi-better-harness@0.41.2] - 2026-11-09
 
 ### Fixed
