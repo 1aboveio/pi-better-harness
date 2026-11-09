@@ -13,7 +13,7 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -26,10 +26,17 @@ import { coordinatorPaths } from "./paths.js";
 const tsxImport = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
 const packageSource = dirname(fileURLToPath(import.meta.url));
 const cleanups: Array<() => void | Promise<void>> = [];
+const fixtures: Fixture[] = [];
 const originalAgentDirectory = process.env.PI_CODING_AGENT_DIR;
 
 afterEach(async () => {
+  // Stop reconnecting clients before any leader can disappear during teardown.
+  await Promise.all(fixtures.filter((fixture) => fixture.graceful && !fixture.isClosed).map(async (fixture) => {
+    fixture.child.stdin.write("close\n");
+    await waitForLine(fixture, /^CLOSED$/);
+  }));
   while (cleanups.length > 0) await cleanups.pop()!();
+  fixtures.length = 0;
   if (originalAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = originalAgentDirectory;
 });
@@ -37,7 +44,16 @@ afterEach(async () => {
 function workspace(name: string): string {
   const root = mkdtempSync(join(tmpdir(), `pi-coordinator-mp-${name}-`));
   process.env.PI_CODING_AGENT_DIR = join(root, "agent");
-  cleanups.push(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  cleanups.push(() => {
+    try { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+    catch (error) {
+      console.error("fixture removal failed", JSON.stringify({ root, children: fixtures.map((fixture) => ({
+        pid: fixture.child.pid, closed: fixture.isClosed, exitCode: fixture.child.exitCode,
+        signal: fixture.child.signalCode, tail: fixture.lines.slice(-3), stderr: fixture.stderr.slice(-500),
+      })) }));
+      throw error;
+    }
+  });
   return root;
 }
 
@@ -46,6 +62,9 @@ interface Fixture {
   lines: string[];
   waiters: Array<{ pattern: RegExp; resolve: (line: string) => void }>;
   stderr: string;
+  closed: Promise<void>;
+  isClosed: boolean;
+  graceful?: boolean;
 }
 
 function startFixture(script: string, args: string[], cwd: string, environment: Record<string, string> = {}): Fixture {
@@ -54,7 +73,9 @@ function startFixture(script: string, args: string[], cwd: string, environment: 
     env: { ...process.env, PI_BG_COORDINATOR: "on", ...environment },
     stdio: ["pipe", "pipe", "pipe"],
   }) as ChildProcessWithoutNullStreams;
-  const fixture: Fixture = { child, lines: [], waiters: [], stderr: "" };
+  const fixture: Fixture = { child, lines: [], waiters: [], stderr: "", isClosed: false,
+    closed: new Promise<void>((resolve) => child.once("close", () => { fixture.isClosed = true; resolve(); })) };
+  fixtures.push(fixture);
   let buffer = "";
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
@@ -75,21 +96,23 @@ function startFixture(script: string, args: string[], cwd: string, environment: 
       newline = buffer.indexOf("\n");
     }
   });
-  cleanups.push(() => {
-    try { child.kill("SIGKILL"); } catch { /* already gone */ }
+  cleanups.push(async () => {
+    if (!fixture.isClosed) {
+      if (fixture.graceful) child.stdin.write("exit\n");
+      else child.kill("SIGKILL");
+    }
+    await waitForClose(fixture);
   });
   return fixture;
 }
 
-function pidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-function stopCoordinator(storePath: string, supervisorDirectory: string): void {
+async function waitForClose(fixture: Fixture): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const lock = JSON.parse(readFileSync(coordinatorPaths(storePath, supervisorDirectory).lock, "utf8")) as { pid?: unknown };
-    if (typeof lock.pid === "number" && lock.pid > 0) process.kill(lock.pid, "SIGKILL");
-  } catch { /* already stopped */ }
+    await Promise.race([fixture.closed, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`fixture did not close: pid=${fixture.child.pid}; stdout=${fixture.lines.slice(-5).join("|")}; stderr=${fixture.stderr.slice(-1000)}`)), 10_000);
+    })]);
+  } finally { clearTimeout(timer); }
 }
 
 async function waitForLine(fixture: Fixture, pattern: RegExp, timeoutMs = 30_000): Promise<string> {
@@ -111,11 +134,29 @@ function writeIdleFixture(root: string): string {
   const api = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm/api")).href;
   writeFileSync(entryPath, `import { tsImport } from ${JSON.stringify(api)}; await tsImport(${JSON.stringify(pathToFileURL(join(packageSource, "runner.ts")).href)}, import.meta.url);`);
   const path = join(root, "idle-client.mts");
+  // Keep real on-demand spawning, but retain its ChildProcess handles inside
+  // the spawning fixture so failover and teardown never signal a stored PID.
   writeFileSync(path, [
     `import { createInterface } from "node:readline";`,
+    `import childProcess from "node:child_process";`,
+    `import { syncBuiltinESMExports } from "node:module";`,
     `import { CoordinatorClient } from ${JSON.stringify(pathToFileURL(join(packageSource, "client.ts")).href)};`,
     `import { coordinatorPaths } from ${JSON.stringify(pathToFileURL(join(packageSource, "paths.ts")).href)};`,
     `const [storePath, supervisorDirectory, sessionId] = process.argv.slice(2);`,
+    `const owned = new Map();`,
+    `const originalSpawn = childProcess.spawn;`,
+    `childProcess.spawn = (...args) => {`,
+    `  const child = originalSpawn(...args);`,
+    `  if (args[1]?.includes(${JSON.stringify(entryPath)})) owned.set(child, new Promise(resolve => child.once("close", resolve)));`,
+    `  return child;`,
+    `};`,
+    `syncBuiltinESMExports();`,
+    `async function stopOwned(pid) {`,
+    `  const children = [...owned].filter(([child]) => pid === undefined || child.pid === pid);`,
+    `  for (const [child] of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");`,
+    `  await Promise.all(children.map(([, closed]) => closed));`,
+    `  return children.length;`,
+    `}`,
     `const client = new CoordinatorClient({`,
     `  storePath, supervisorDirectory,`,
     `  stateDirectory: coordinatorPaths(storePath, supervisorDirectory).stateDirectory,`,
@@ -129,7 +170,9 @@ function writeIdleFixture(root: string): string {
     `const rl = createInterface({ input: process.stdin });`,
     `rl.on("line", async (line) => {`,
     `  if (line === "stats") { const stats = await client.stats(); process.stdout.write("STATS " + JSON.stringify(stats) + "\\n"); }`,
-    `  if (line === "exit") { client.close(); process.exit(0); }`,
+    `  if (line === "close") { client.close(); process.stdout.write("CLOSED\\n"); }`,
+    `  if (line.startsWith("kill ")) { const pid = Number(line.slice(5)); process.stdout.write("OWNED " + pid + " " + await stopOwned(pid) + "\\n"); }`,
+    `  if (line === "exit") { client.close(); console.log("STOPPING OWNED " + [...owned.keys()].map(child => child.pid).join(",")); await stopOwned(); process.exit(0); }`,
     `});`,
   ].join("\n"));
   return path;
@@ -159,7 +202,10 @@ function writeHostFixture(root: string): string {
     `  process.stdout.write("LAUNCH " + JSON.stringify({ taskId: launch.id, operationId: launch.operationId }) + "\\n");`,
     `}`,
     `const rl = createInterface({ input: process.stdin });`,
-    `rl.on("line", (line) => { if (line === "exit") { host.close(); process.exit(0); } });`,
+    `rl.on("line", (line) => {`,
+    `  if (line === "close") { host.close(); process.stdout.write("CLOSED\\n"); }`,
+    `  if (line === "exit") { host.close(); process.exit(0); }`,
+    `});`,
     `setTimeout(() => process.exit(0), 25_000);`,
   ].join("\n"));
   return path;
@@ -232,7 +278,6 @@ describe("real multi-process coordinator acceptance", () => {
     const root = workspace("idle");
     const storePath = join(root, "operations.sqlite");
     const supervisorDirectory = join(root, "supervisor");
-    cleanups.push(() => stopCoordinator(storePath, supervisorDirectory));
 
     // Seed thousands of terminal rows directly. They are historical data, never
     // work: the coordinator's idle path must not compensate by scanning them.
@@ -269,6 +314,7 @@ describe("real multi-process coordinator acceptance", () => {
     const script = writeIdleFixture(root);
     const clients = Array.from({ length: 17 }, (_, index) =>
       startFixture(script, [storePath, supervisorDirectory, `idle-session-${index}`], root));
+    for (const client of clients) client.graceful = true;
     await Promise.all(clients.map((client) => waitForLine(client, /^READY$/)));
 
     await new Promise((resolve) => setTimeout(resolve, 900));
@@ -301,15 +347,9 @@ describe("real multi-process coordinator acceptance", () => {
 
     // Kill only the leader. Every client must reconnect and all must converge on
     // one newly elected process with a different pid.
-    process.kill(firstStats.pid, "SIGKILL");
-    await new Promise<void>((resolve) => {
-      const until = Date.now() + 15_000;
-      const poll = (): void => {
-        if (!pidAlive(firstStats.pid) || Date.now() > until) resolve();
-        else setTimeout(poll, 50);
-      };
-      poll();
-    });
+    for (const client of clients) client.child.stdin.write(`kill ${firstStats.pid}\n`);
+    const owners = await Promise.all(clients.map((client) => waitForLine(client, new RegExp(`^OWNED ${firstStats.pid} `))));
+    expect(owners.filter((line) => line.endsWith(" 1"))).toHaveLength(1);
     await new Promise((resolve) => setTimeout(resolve, 600));
     let secondStats: {
       pid: number;
@@ -329,14 +369,12 @@ describe("real multi-process coordinator acceptance", () => {
     expect(secondStats!.connectedClients).toBe(17);
     console.info("675 measured failover", JSON.stringify(secondStats));
 
-    for (const client of clients) client.child.stdin.write("exit\n");
   }, 90_000);
 
   it("17 real hosts deliver one owner's completion only to that owner, without a model wake", async () => {
     const root = workspace("hosts");
     const storePath = join(root, "operations.sqlite");
     const supervisorDirectory = join(root, "supervisor");
-    cleanups.push(() => stopCoordinator(storePath, supervisorDirectory));
     const script = writeHostFixture(root);
     const serverScript = join(root, "source-server.mts");
     writeFileSync(serverScript, `import { CoordinatorServer } from ${JSON.stringify(pathToFileURL(join(packageSource, "server.ts")).href)};
@@ -346,6 +384,7 @@ describe("real multi-process coordinator acceptance", () => {
     await waitForLine(startFixture(serverScript, [], root), /^READY$/);
     const hosts = Array.from({ length: 17 }, (_, index) =>
       startFixture(script, [storePath, supervisorDirectory, `owner-${index}`, index === 0 ? "launcher" : "idle"], root));
+    for (const host of hosts) host.graceful = true;
     await Promise.all(hosts.map((host) => waitForLine(host, /^READY$/)));
     const launched = JSON.parse((await waitForLine(hosts[0]!, /^LAUNCH /)).slice(7)) as {
       taskId: string;
@@ -368,6 +407,5 @@ describe("real multi-process coordinator acceptance", () => {
     cleanups.push(() => store.close());
     expect(store.getOperation(launched.operationId)?.terminalRevision).toBe(1);
     expect(store.getOperation(launched.operationId)?.terminalOutcome).toBe("succeeded");
-    for (const host of hosts) host.child.stdin.write("exit\n");
   }, 90_000);
 });

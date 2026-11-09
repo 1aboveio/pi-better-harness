@@ -128,20 +128,29 @@ describe("shared coordinator process", () => {
     const server = (await CoordinatorServer.start(options)).server!;
     cleanups.push(() => server.close());
     const a = owner("a", root), b = owner("b", root);
+    const seedStartedAt = Date.now();
     for (let index = 0; index < 601; index++) {
       server.storeHandle.registerOperation({ operationId: `op_page_${index}`, taskId: `task_page_${index}`,
         launchToken: `page_${index}`, owner: index === 0 ? b : a, observer: { kind: "test", version: "1" } });
       server.storeHandle.recordTerminalOutcome({ operationId: `op_page_${index}`, eventId: `terminal_${index}`, outcome: "succeeded", reason: "disposable fixture", owner: index === 0 ? b : a });
     }
+    const seedMs = Date.now() - seedStartedAt;
     const client = new CoordinatorClient({ ...options, spawnServer: false });
     cleanups.push(() => client.close());
     const hints: CoordinatorChange[] = [];
     client.onCatchup((changes) => hints.push(...changes));
+    const replayStartedAt = Date.now();
     await client.start([a]);
+    const replayMs = Date.now() - replayStartedAt;
+    expect(replayMs).toBeLessThan(5_000);
     expect(new Set(hints.map((hint) => hint.operationId)).size).toBe(600);
+    const ownerStartedAt = Date.now();
     await client.updateOwners([a, b]);
+    const ownerMs = Date.now() - ownerStartedAt;
+    expect(ownerMs).toBeLessThan(5_000);
     expect(hints.some((hint) => hint.operationId === "op_page_0")).toBe(true);
-  });
+    console.info("675 history fixture timings", JSON.stringify({ seedMs, replayMs, ownerMs }));
+  }, 30_000);
 
   it.each([0, 1])("resets a pruned cursor to individual owner-scoped hints with %i journal entries retained", async (keepLatest) => {
     const root = workspace("trim");

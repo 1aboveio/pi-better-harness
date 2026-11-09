@@ -294,7 +294,16 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
     // The bridge socket worked from the confined child: a wait was registered and
     // its verified checkpoint staged while the child was still alive.
     const stored = registry.readParkRecord(attemptId);
-    assert.ok(stored, "the child must have produced a park checkpoint");
+    if (!stored) {
+        const waits = stack.store.listWaits().slice(-8).map((wait) => ({
+            waitId: wait.waitId, generation: wait.generation, phase: wait.phase,
+            ownerSessionId: wait.owner.sessionId, settled: wait.settled,
+            dependencies: wait.dependencies.map(({ operationId, terminalRevision, terminalOutcome }) => ({
+                operationId, terminalRevision, terminalOutcome,
+            })),
+        }));
+        assert.fail(`the child must have produced a park checkpoint\nwaits: ${JSON.stringify(waits)}\nstdout tail:\n${fresh.stdout.slice(-12_000)}\nstderr tail:\n${fresh.stderr.slice(-4_000)}`);
+    }
     assert.equal(stored.phase, "parking");
     const waitId = stored.waitId;
     const generation = stored.generation;
