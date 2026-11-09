@@ -15,6 +15,7 @@ import { StoreError } from "./errors.ts";
 import { mapOperation, ownerFromRow, readOperation, requireOperation } from "./rows.ts";
 import {
     columnText,
+    getRow,
     getRows,
     isUniqueViolation,
     run,
@@ -49,6 +50,7 @@ import {
 } from "./validate.ts";
 import { mapOutbox } from "./rows.ts";
 import { settleWaitsForOperation } from "./waits.ts";
+import { appendChange } from "./changes.ts";
 
 const HEALTH_VALUES: readonly ObserverHealth[] = ["active", "unmonitored", "lost"];
 const OUTCOME_VALUES: readonly TerminalOutcome[] = ["succeeded", "failed", "cancelled", "lost"];
@@ -148,6 +150,26 @@ export function registerOperation(
         if (existing) {
             assertLaunchIdentity(existing);
             return { operation: existing, created: false };
+        }
+        const tombstone = getRow(
+            ctx,
+            `SELECT operation_id, task_id FROM retention_units
+             WHERE state = 'complete'
+               AND (
+                   operation_id = ?
+                   OR (task_id IS NOT NULL AND task_id = ?)
+                   OR (launch_token IS NOT NULL AND launch_token = ?)
+               )
+             LIMIT 1`,
+            operationId,
+            taskId,
+            launchToken,
+        );
+        if (tombstone) {
+            throw new StoreError(
+                "retention-protected",
+                `Operation ${operationId} reuses a launch identity tombstoned by completed retention (operation ${columnText(tombstone, "operation_id")}, task ${columnText(tombstone, "task_id")}). Register a new launch identity; a pruned identity is never resurrected.`,
+            );
         }
         assertTaskAvailable();
 
@@ -322,6 +344,13 @@ export function recordTerminalOutcome(
         );
         const settledOperation = requireOperation(ctx, operationId);
         const settled = settleWaitsForOperation(ctx, settledOperation, at);
+        appendChange(ctx, {
+            kind: "terminal",
+            owner: settledOperation.owner,
+            operationId: settledOperation.operationId,
+            taskId: settledOperation.taskId,
+            terminalRevision: settledOperation.terminalRevision,
+        });
         const outbox = listOutboxForRevision(ctx, operationId, 1);
         return {
             operation: settledOperation,

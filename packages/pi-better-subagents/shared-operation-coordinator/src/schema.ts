@@ -176,6 +176,89 @@ const DDL: readonly string[] = [
     )`,
     `CREATE INDEX outbox_recipient ON outbox_events (recipient_kind, recipient_session_id, state)`,
     `CREATE INDEX outbox_wait ON outbox_events (wait_id, generation)`,
+    // Owner-scoped change hints. They are hints, not deliveries: the shared
+    // coordinator routes them to subscribed clients, which then read exactly
+    // their own operation/wait/outbox state. A hint never wakes a model.
+    `CREATE TABLE IF NOT EXISTS coordinator_changes (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        at INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        operation_id TEXT,
+        task_id TEXT,
+        owner_kind TEXT NOT NULL,
+        owner_session_id TEXT NOT NULL,
+        owner_workspace TEXT NOT NULL,
+        owner_branch_id TEXT,
+        owner_goal_id TEXT,
+        terminal_revision INTEGER NOT NULL DEFAULT 0,
+        wait_id TEXT,
+        generation INTEGER
+    )`,
+    `CREATE INDEX IF NOT EXISTS coordinator_changes_owner
+        ON coordinator_changes (owner_kind, owner_session_id, owner_workspace, seq)`,
+    // Retention reservations/tombstones. A reservation blocks new references;
+    // `complete` is retained as a tombstone so a task id is not silently reused
+    // and a retried cleanup reports completion rather than deleting again.
+    `CREATE TABLE IF NOT EXISTS retention_units (
+        operation_id TEXT PRIMARY KEY,
+        task_id TEXT,
+        launch_token TEXT,
+        token TEXT NOT NULL,
+        state TEXT NOT NULL,
+        artifact_ref TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        detail TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS retention_units_state ON retention_units (state, updated_at)`,
+    // Cross-client safety: an old client that does not know about retention
+    // still cannot add a reference to an operation the coordinator reserved.
+    `CREATE TRIGGER IF NOT EXISTS retention_blocks_wait_dependency
+        BEFORE INSERT ON wait_dependencies
+        WHEN EXISTS (SELECT 1 FROM retention_units WHERE operation_id = NEW.operation_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'retention-reserved operation cannot gain a wait dependency');
+        END`,
+    `CREATE TRIGGER IF NOT EXISTS retention_blocks_evidence_pin
+        BEFORE INSERT ON evidence_pins
+        WHEN EXISTS (SELECT 1 FROM retention_units WHERE operation_id = NEW.operation_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'retention-reserved operation cannot gain an evidence pin');
+        END`,
+    `CREATE TRIGGER IF NOT EXISTS retention_blocks_outbox
+        BEFORE INSERT ON outbox_events
+        WHEN EXISTS (SELECT 1 FROM retention_units WHERE operation_id = NEW.operation_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'retention-reserved operation cannot gain an outbox event');
+        END`,
+    `CREATE TRIGGER IF NOT EXISTS retention_blocks_resume_claim
+        BEFORE INSERT ON resume_claims
+        WHEN EXISTS (
+            SELECT 1 FROM wait_dependencies d
+            JOIN retention_units r ON r.operation_id = d.operation_id
+            WHERE d.wait_id = NEW.wait_id AND d.generation = NEW.generation
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'retention-reserved operation cannot gain a resume reference');
+        END`,
+    // A completed tombstone means the launch identity was physically pruned.
+    // Even an old v1 client that does not know the retention API must not
+    // resurrect that identity and create records the current coordinator can no
+    // longer legally clean up.
+    `CREATE TRIGGER IF NOT EXISTS retention_blocks_tombstoned_operation
+        BEFORE INSERT ON operations
+        WHEN EXISTS (
+            SELECT 1 FROM retention_units r
+            WHERE r.state = 'complete'
+              AND (
+                  r.operation_id = NEW.operation_id
+                  OR (r.task_id IS NOT NULL AND r.task_id = NEW.task_id)
+                  OR (r.launch_token IS NOT NULL AND r.launch_token = NEW.launch_token)
+              )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'retention-tombstoned operation identity cannot be reused');
+        END`,
 ];
 
 const SCHEMA_VERSION_KEY = "schema_version";
@@ -235,6 +318,35 @@ export function ensureSchema(ctx: StoreContext): void {
             `The database is at schema version ${recorded}; this build needs version ${SCHEMA_VERSION}. No migration is provided for this pair; records are left in place.`,
         );
     }
+    // Version 1 gained additive tables/triggers without changing any existing
+    // record shape. Keeping the version at 1 means an older client can still
+    // open the database and simply ignores the hint/retention tables; a newer
+    // client creates them on a version-1 database. No record is rewritten.
+    ensureAdditiveSchema(ctx);
+}
+
+function ensureAdditiveSchema(ctx: StoreContext): void {
+    ctx.transaction(() => {
+        // Create the additive tables/indexes first, then migrate the launch
+        // token column, and only then create triggers that reference it.
+        for (const statement of DDL) {
+            if (statement.includes("CREATE TABLE IF NOT EXISTS coordinator_changes")
+                || statement.includes("CREATE TABLE IF NOT EXISTS retention_units")
+                || statement.includes("CREATE INDEX IF NOT EXISTS coordinator_changes_owner")
+                || statement.includes("CREATE INDEX IF NOT EXISTS retention_units_state")) {
+                ctx.db.exec(statement);
+            }
+        }
+        const columns = getRows(ctx, "PRAGMA table_info(retention_units)");
+        if (!columns.some((column) => columnText(column, "name") === "launch_token")) {
+            ctx.db.exec("ALTER TABLE retention_units ADD COLUMN launch_token TEXT");
+        }
+        for (const statement of DDL) {
+            if (statement.includes("CREATE TRIGGER IF NOT EXISTS retention_blocks")) {
+                ctx.db.exec(statement);
+            }
+        }
+    });
 }
 
 /** Test and diagnostic seam: read the recorded schema version without opening a store. */

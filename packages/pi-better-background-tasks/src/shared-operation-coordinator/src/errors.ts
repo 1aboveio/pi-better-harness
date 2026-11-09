@@ -57,6 +57,8 @@ export type StoreErrorCode =
     | "stale-evidence"
     /** The outbox event is not in a state that allows the requested step. */
     | "outbox-state"
+    /** Physical retention is blocked by a fresh reference, pin, delivery or wait. */
+    | "retention-protected"
     /** The store has been closed. */
     | "closed";
 

@@ -52,13 +52,33 @@ import {
 } from "./outbox.ts";
 import { readOperationEvidence } from "./rows.ts";
 import {
+    latestChangeSeq as readLatestChangeSeq,
+    listChanges as readChanges,
+    oldestChangeSeq as readOldestChangeSeq,
+    pruneChangesBefore as writePruneChanges,
+} from "./changes.ts";
+import {
+    finalizeRetention as writeRetentionFinalize,
+    listRetentionUnits as readRetentionUnits,
+    markRetentionFilesRemoved as writeRetentionFilesRemoved,
+    markRetentionDeletionStarted as writeRetentionDeletionStarted,
+    markRetentionDeletionUnknown as writeRetentionDeletionUnknown,
+    previewRetention as readRetentionPreview,
+    releaseRetention as writeRetentionRelease,
+    reserveRetention as writeRetentionReserve,
+    retentionProtectionReasons,
+    retentionUnit as readRetentionUnit,
+} from "./retention.ts";
+import {
     SCHEMA_VERSION,
     type AcknowledgeResultInput,
     type AcknowledgeResultOutput,
     type CancelWaitInput,
     type CancelWaitResult,
+    type ChangeFilter,
     type ClaimOutboxInput,
     type ClaimResumeInput,
+    type CoordinatorChange,
     type EvidencePinRecord,
     type EvidenceReadRecord,
     type HoldFailedResumeInput,
@@ -86,6 +106,14 @@ import {
     type ReleaseOutboxInput,
     type ReleaseResumeClaimInput,
     type ReleaseResumeClaimResult,
+    type ReserveRetentionInput,
+    type RetentionApplyInput,
+    type RetentionApplyResult,
+    type RetentionCandidate,
+    type RetentionPreview,
+    type RetentionPreviewInput,
+    type RetentionProtection,
+    type RetentionUnitRecord,
     type ResumeClaimFilter,
     type ResumeClaimRecord,
     type ResumeClaimResult,
@@ -229,6 +257,32 @@ export interface Store {
     markOutboxDelivered(input: OutboxDispatchInput): OutboxEventRecord;
     /** Return a claimed delivery to the queue with a retained recovery reason. */
     releaseOutbox(input: ReleaseOutboxInput): OutboxEventRecord;
+
+    // ---- coordinator hints ---------------------------------------------
+
+    /** Owner-scoped durable hints written in the same transaction as their facts. */
+    listChanges(filter?: ChangeFilter): CoordinatorChange[];
+    latestChangeSeq(): number;
+    oldestChangeSeq(): number | null;
+    /** Bounded journal maintenance; cursors before the retained window reset. */
+    pruneChangesBefore(cutoff: number, keepLatest?: number): number;
+
+    // ---- retention ------------------------------------------------------
+
+    /** Read-only eligibility/protection preview; performs no deletion. */
+    previewRetention(input: RetentionPreviewInput): RetentionPreview;
+    /** Recheck protections and reserve one operation for bounded deletion. */
+    reserveRetention(input: ReserveRetentionInput): RetentionUnitRecord;
+    /** Persist the irreversible deletion fence before any filesystem mutation. */
+    markRetentionDeletionStarted(operationId: string, token: string): RetentionUnitRecord;
+    markRetentionFilesRemoved(operationId: string, token: string, detail?: string): RetentionUnitRecord;
+    /** Keep the reservation but disclose that the artifact state cannot be proven. */
+    markRetentionDeletionUnknown(operationId: string, token: string, detail: string): RetentionUnitRecord;
+    finalizeRetention(operationId: string, token: string): RetentionUnitRecord;
+    releaseRetention(operationId: string, token: string, reason: string): RetentionUnitRecord;
+    listRetentionUnits(filter?: { state?: RetentionUnitRecord["state"] | readonly RetentionUnitRecord["state"][]; limit?: number }): RetentionUnitRecord[];
+    retentionUnit(operationId: string): RetentionUnitRecord | null;
+    retentionProtectionReasons(operationId: string, cutoff: number): RetentionProtection[];
 }
 
 export type { OperationFilter };
@@ -385,6 +439,64 @@ export function openStore(options: StoreOptions): Store {
         releaseOutbox(input) {
             alive();
             return writeOutboxRelease(ctx, input);
+        },
+        listChanges(filter = {}) {
+            alive();
+            return readChanges(ctx, filter);
+        },
+        latestChangeSeq() {
+            alive();
+            return readLatestChangeSeq(ctx);
+        },
+        oldestChangeSeq() {
+            alive();
+            return readOldestChangeSeq(ctx);
+        },
+        pruneChangesBefore(cutoff, keepLatest) {
+            alive();
+            return writePruneChanges(ctx, cutoff, keepLatest);
+        },
+        previewRetention(input) {
+            alive();
+            return readRetentionPreview(ctx, input);
+        },
+        reserveRetention(input) {
+            alive();
+            return writeRetentionReserve(ctx, input);
+        },
+        markRetentionFilesRemoved(operationId, token, detail) {
+            alive();
+            return writeRetentionFilesRemoved(ctx, operationId, token, detail);
+        },
+        markRetentionDeletionStarted(operationId, token) {
+            alive();
+            return writeRetentionDeletionStarted(ctx, operationId, token);
+        },
+        markRetentionDeletionUnknown(operationId, token, detail) {
+            alive();
+            return writeRetentionDeletionUnknown(ctx, operationId, token, detail);
+        },
+        finalizeRetention(operationId, token) {
+            alive();
+            return writeRetentionFinalize(ctx, operationId, token);
+        },
+        releaseRetention(operationId, token, reason) {
+            alive();
+            return writeRetentionRelease(ctx, operationId, token, reason);
+        },
+        listRetentionUnits(filter = {}) {
+            alive();
+            return readRetentionUnits(ctx, filter);
+        },
+        retentionUnit(operationId) {
+            alive();
+            return readRetentionUnit(ctx, operationId);
+        },
+        retentionProtectionReasons(operationId, cutoff) {
+            alive();
+            const operation = readOperationRecord(ctx, operationId);
+            if (!operation) return ["invalid-record"];
+            return retentionProtectionReasons(ctx, operation, cutoff);
         },
     };
     return store;

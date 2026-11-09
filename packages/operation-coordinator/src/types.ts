@@ -632,6 +632,131 @@ export interface ReleaseOutboxInput {
     reason: string;
 }
 
+// ---- coordinator change hints ------------------------------------------
+
+/**
+ * One durable hint that an owner-scoped fact changed. Hints are append-only and
+ * are read by the shared Background Tasks coordinator, then routed only to
+ * clients subscribed to the recorded owner. A hint never starts a model turn.
+ */
+export interface CoordinatorChange {
+    seq: number;
+    at: number;
+    /** `terminal`, `wait`, `wait-ready`, `wait-consumed`, or `evidence`. */
+    kind: string;
+    operationId: string | null;
+    taskId: string | null;
+    owner: OwnerIdentity;
+    terminalRevision: number;
+    waitId: string | null;
+    generation: number | null;
+}
+
+export interface ChangeFilter {
+    owner?: OwnerIdentity;
+    afterSeq?: number;
+    /** Inclusive upper bound; omitted means the latest retained hint. */
+    throughSeq?: number;
+    limit?: number;
+}
+
+// ---- retention ----------------------------------------------------------
+
+export type RetentionProtection =
+    | "nonterminal"
+    | "too-recent"
+    | "pending-outbox"
+    | "unconsumed-wait"
+    | "resume-reference"
+    | "evidence-pin"
+    | "reservation"
+    | "invalid-record";
+
+export interface RetentionCandidate {
+    operationId: string;
+    taskId: string;
+    owner: OwnerIdentity;
+    terminalRevision: number;
+    terminalOutcome: TerminalOutcome | null;
+    terminalAt: number | null;
+}
+
+export interface RetentionProtected {
+    operationId: string;
+    taskId: string;
+    reasons: RetentionProtection[];
+}
+
+export interface RetentionPreview {
+    cutoff: number;
+    scanned: number;
+    candidates: RetentionCandidate[];
+    protected: RetentionProtected[];
+    /** True when more candidates existed than the bounded limit returned. */
+    truncated: boolean;
+}
+
+export interface RetentionPreviewInput {
+    /** Candidates must have reached a terminal outcome strictly before this time. */
+    cutoff: number;
+    /** Maximum candidates returned and reservable at once (bounded apply). */
+    limit: number;
+}
+
+/**
+ * A reservation is the coordinator's exclusive intent to remove one terminal
+ * operation. It blocks new waits, pins, outbox rows and resume references while
+ * filesystem and SQLite cleanup run.
+ */
+export type RetentionUnitState =
+    /** Reservation committed; no destructive step has started. */
+    | "reserved"
+    /**
+     * Irreversible deletion fence. Files may already be gone; restart recovery
+     * must finish or hold this unit, never release the reservation.
+     */
+    | "deleting"
+    | "files-removed"
+    /** Filesystem state can no longer be proven; references stay protected. */
+    | "deletion-unknown"
+    | "complete";
+
+export interface RetentionUnitRecord {
+    operationId: string;
+    taskId: string | null;
+    /** Immutable launch identity retained with a complete tombstone. */
+    launchToken: string | null;
+    token: string;
+    state: RetentionUnitState;
+    /** Caller-owned artifact reference (for example a supervisor task directory). */
+    artifactRef: string | null;
+    createdAt: number;
+    updatedAt: number;
+    /** Last recorded progress/error; never contains credential material. */
+    detail: string | null;
+}
+
+export interface ReserveRetentionInput {
+    operationId: string;
+    /** Recheck the same age boundary used by the preview. */
+    cutoff: number;
+    token: string;
+    artifactRef?: string | null;
+}
+
+export interface RetentionApplyInput extends RetentionPreviewInput {
+    token: string;
+    /** Artifact reference resolver; the store never invents a filesystem path. */
+    artifactRef?: (candidate: RetentionCandidate) => string | null;
+}
+
+export interface RetentionApplyResult {
+    preview: RetentionPreview;
+    reserved: RetentionUnitRecord[];
+    completed: RetentionUnitRecord[];
+    failed: Array<{ operationId: string; error: string }>;
+}
+
 // ---- store options ------------------------------------------------------
 
 export interface StoreOptions {
