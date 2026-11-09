@@ -99,8 +99,8 @@ jobs:
 
   # Exercise the affected extensions against the minimum and current Pi 1.x
   # SDKs without taking over the server lane's supported Pi 1.2 proof.
-  pi-1x-extensions:
-    name: pi-1x-extensions (${{ matrix.pi-version }})
+  pi-1x-compat-extensions:
+    name: pi-1x-compat-extensions (${{ matrix.pi-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -130,6 +130,17 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Enable the Linux sandbox backend for compatibility tests
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / -- /bin/true
+          node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
 
       - name: Install selected Pi SDK without changing the lockfile
         run: |
