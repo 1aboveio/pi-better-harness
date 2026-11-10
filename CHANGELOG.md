@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.42.0] - 2026-11-10
+
+### Added
+
+- Add an optional durable work ledger for project-scoped high-level outcomes and items. It is off by default: enable **Long-term work ledger** in `/harness-settings`. `update_todo` and `get_todo` carry optional ledger payloads and selectors for create, update, attach, detach, list, and read. Updates require the current revision and preserve completed evidence and history; overall completion is refused while high-level items remain open. Attaching stores only a session reference and does not copy the ledger, start a Goal, or authorize old work.
+- Add `/ledger list`, `/ledger attach <id>`, `/ledger switch <id>`, `/ledger detach`, and `/ledger show`. A resumed session restores its reference; a clean session stays unassociated. Bounded recovery reminders are rebuilt from the durable record after compaction or resume. Turning the setting off removes ledger views, queries, mutations, and hints without deleting records.
+- Bundle Subagents 0.29.0 for configurable tool-wait and no-progress observation alerts.
+
+### Changed
+
+- `/todo` reveals the compact Overview and returns it to automatic display instead of opening a full-screen plan. The common work-plan view (outcome, generic Todo or workflow rows, and any associated ledger summary) remains available through `get_todo` when hooks are enabled, and `/todo expand` / `/todo collapse` continue to control visible rows.
+
+## [pi-better-subagents@0.29.0] - 2026-11-10
+
+### Added
+
+- Alert the parent once when a tool call stays open for the configurable tool-wait window (default 5 minutes). Parallel calls alert independently, and a durable once-per-call marker survives `/reload`. The alert reports the run, tool, duration, and current operation; it is observation only and never stops, cancels, restarts, or retries the run.
+- Configure the tool-wait and no-progress times independently in `/subagents settings`, with `/subagents tool-wait <minutes>` and `/subagents stuck <minutes>`, per-spawn timing parameters, `config.json`, and `PI_SUBAGENT_*_MINUTES`. `0` disables one alert; no-progress remains 10 minutes by default and never stops the run.
+
+### Changed
+
+- Track every parallel open call instead of only the last one, so a bounded log read after `/reload` keeps each call's still-alive evidence. Tool waiting and no progress are reported separately; time inside a running call still does not count toward the no-progress window.
+
+## [pi-better-server@0.2.3] - 2026-11-10
+
+### Fixed
+
+- Update the embedded SSH core to report multiplexing as disabled on Windows and use independent connections for supported commands. Unix-socket forwarding remains unsupported without ControlMaster; this patch does not enable Windows remote Server connections, which require that forwarding. Linux and macOS keep connection reuse.
+
 ## [pi-better-harness@0.41.3] - 2026-11-10
 
 ### Fixed
