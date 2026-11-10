@@ -25,17 +25,37 @@ test("the task header groups its subtitle with progress and runtime without chan
   assert.match(stripVTControlCharacters(lines[1]!), /\.\.\.$/);
 });
 
-test("display and hooks defaults, legacy values, and independent changes are validated without mutation", () => {
-  assert.deepEqual(parseOutcomeTodoPreferences(undefined), { version: 1, enabled: false, display: true });
+test("the existing Todo header adds one bounded ledger count line without a second widget", () => {
+  const ledger = "ledger 1/3 complete · 2 open · 1 blocked · next: Ship API";
+  for (const width of [1, 12, 40, 80]) {
+    const lines = renderCompactTaskHeader("0/2 complete", width, theme, {
+      subtitle: "Deliver checkout",
+      disclosure: "▸",
+      runtime: { status: "active", clock: "2:14" },
+      ledger,
+    });
+    assert.equal(lines.length, 4, "header, subtitle, ledger, and one blank row, with no extra widget");
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    if (width >= 80) {
+      assert.equal(lines[1], "  Deliver checkout");
+      assert.equal(lines[2], `  ${ledger}`);
+    }
+    assert.equal(lines[3], "");
+  }
+});
+
+test("display, hooks, and ledger defaults and independent changes are validated without mutation", () => {
+  assert.deepEqual(parseOutcomeTodoPreferences(undefined), { version: 1, enabled: false, display: true, ledger: false });
   for (const enabled of [false, true]) {
     const legacy = Object.freeze({ version: 1, enabled });
-    assert.deepEqual(parseOutcomeTodoPreferences(legacy), { ...legacy, display: true });
+    assert.deepEqual(parseOutcomeTodoPreferences(legacy), { ...legacy, display: true, ledger: false });
     const hidden = changeOutcomeTodoPreference(legacy, "display", false);
-    assert.deepEqual(hidden, { ...legacy, display: false });
-    assert.deepEqual(changeOutcomeTodoPreference(hidden, "enabled", !enabled), { version: 1, enabled: !enabled, display: false });
+    assert.deepEqual(hidden, { ...legacy, display: false, ledger: false });
+    assert.deepEqual(changeOutcomeTodoPreference(hidden, "enabled", !enabled), { version: 1, enabled: !enabled, display: false, ledger: false });
+    assert.deepEqual(changeOutcomeTodoPreference(hidden, "ledger", true), { version: 1, enabled, display: false, ledger: true });
     assert.deepEqual(legacy, { version: 1, enabled });
   }
-  for (const invalid of [null, [], false, { version: 2 }, { version: 1, enabled: "false" }, { version: 1, display: 0 }]) {
+  for (const invalid of [null, [], false, { version: 2 }, { version: 1, enabled: "false" }, { version: 1, display: 0 }, { version: 1, ledger: "On" }]) {
     assert.throws(() => changeOutcomeTodoPreference(invalid, "display", true), /Invalid outcomeTodo/);
   }
 });

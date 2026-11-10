@@ -28,6 +28,11 @@ const LOCK_WAIT_MS = 20;
 const ITEM_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 const LEDGER_ID = /^ledger_[a-z0-9]+_[a-f0-9]+$/;
 
+/** True when a value can name a stored ledger. Storage validation still applies on read. */
+export function isWorkLedgerId(value: unknown): value is string {
+  return typeof value === "string" && LEDGER_ID.test(value);
+}
+
 export interface WorkItem {
   id: string;
   title: string;
@@ -375,7 +380,7 @@ function applyUpdate(current: WorkLedger, input: UpdateWorkLedgerInput, at: stri
   }
 
   if (ledgerFields.length === 0 && itemChanges.length === 0) {
-    throw new Error("work_ledger update needs outcome, boundaries, status, changes, or addItems.");
+    throw new Error("A work ledger update needs outcome, boundaries, status, changes, or addItems.");
   }
 
   next.revision = revision;

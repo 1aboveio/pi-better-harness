@@ -5,6 +5,8 @@ export interface CompactTaskHeader {
   subtitle?: string;
   disclosure?: string;
   runtime?: { status: string; clock?: string };
+  /** Preformatted high-level ledger counts shown in the existing Todo surface. */
+  ledger?: string;
 }
 
 export function canRenderTaskRuntime(width: number, runtime: CompactTaskHeader["runtime"]): boolean {
@@ -26,10 +28,16 @@ export function renderCompactTaskHeader(summary: string | undefined, width: numb
     ? title + " ".repeat(Math.max(2, size - visibleWidth(title) - rightWidth)) + right
     : truncateToWidth(left, size);
   const lines = [truncateToWidth(heading, size)];
+  const indent = Math.min(2, size - 1);
+  const details: string[] = [];
   if (header.subtitle) {
-    const indent = Math.min(2, size - 1);
     const text = header.subtitle.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
-    lines.push(" ".repeat(indent) + theme.fg("muted", truncateToWidth(text, size - indent)), "");
+    details.push(" ".repeat(indent) + theme.fg("muted", truncateToWidth(text, size - indent)));
   }
+  if (header.ledger) {
+    const text = header.ledger.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
+    details.push(" ".repeat(indent) + theme.fg("dim", truncateToWidth(text, size - indent)));
+  }
+  if (details.length > 0) lines.push(...details, "");
   return lines;
 }
