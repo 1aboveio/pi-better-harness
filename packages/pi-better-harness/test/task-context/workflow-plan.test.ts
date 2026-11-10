@@ -52,7 +52,6 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
   const commands = new Map<string, { handler(args: string, ctx: ExtensionContext): Promise<void> | void }>();
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   let widget: any;
-  let fullView = "";
   let notification = "";
   const ctx = {
     cwd, mode: "tui", hasUI: true,
@@ -60,10 +59,6 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     ui: {
       setStatus() {}, setWidget(_name: string, factory: unknown) { widget = factory; },
       notify(message: string) { notification = message; },
-      custom: async (factory: any) => {
-        const component = factory({ requestRender() {} }, {}, {}, () => {});
-        fullView = component.render(140).join("\n");
-      },
     },
   } as unknown as ExtensionContext;
   const events = new EventEmitter();
@@ -103,13 +98,12 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     assert.ok((renderWidgetLines(true)[2] ?? "").includes(`${owner} · rev 1`));
     assert.match(renderWidget(), /Extract shared core.*active/);
     assert.match(renderWidget(), /Add mux support/);
-    await commands.get("todo")!.handler("", ctx);
-    assert.match(fullView, /self-review · in-flight/);
-    assert.match(fullView, /after: #214/);
-    assert.doesNotMatch(fullView, /Old generic step/);
     const result = await tools.get("get_todo")!.execute("get", {}, undefined, undefined, ctx);
     assert.equal((result.details as any).workflowOwner, owner);
-    assert.ok(fullView.includes(`${owner} · rev 1`));
+    assert.match((result.content[0] as { text: string }).text, /self-review · in-flight/);
+    assert.match((result.content[0] as { text: string }).text, /after: #214/);
+    assert.doesNotMatch((result.content[0] as { text: string }).text, /Old generic step/);
+    assert.match((result.content[0] as { text: string }).text, new RegExp(`${owner} · rev 1`));
     assert.equal((result.details as any).plan.planRevision, 1);
     await commands.get("todo")!.handler("clear", ctx);
     assert.match(notification, /workflow owns its plan/);
@@ -173,12 +167,7 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
   const events = new EventEmitter();
   const settings = captureSettings(events);
   let widgetFactory: any;
-  let fullView = "";
-  let fullComponent: any;
   let redraws = 0;
-  let fullRedraws = 0;
-  let holdFullPlan = false;
-  let closeFullPlan = () => {};
   const tui = { requestRender() { redraws++; } };
   let notification = "";
   const ctx = {
@@ -187,14 +176,6 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
     ui: {
       setStatus() {}, setWidget(_name: string, factory: unknown) { widgetFactory = factory; },
       notify(message: string) { notification = message; },
-      custom: async (factory: any) => {
-        let close = () => {};
-        const closed = new Promise<void>(resolve => { close = resolve; });
-        closeFullPlan = close;
-        fullComponent = factory({ requestRender() { fullRedraws++; } }, {}, {}, close);
-        fullView = fullComponent.render(140).join("\n");
-        if (holdFullPlan) await closed;
-      },
     },
   } as unknown as ExtensionContext;
   extension({
@@ -213,9 +194,6 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
     },
     shutdown: () => handlers.get("session_shutdown")!({}, ctx),
     redraws: () => redraws,
-    fullRedraws: () => fullRedraws,
-    holdFullPlan: () => { holdFullPlan = true; },
-    closeFullPlan: () => { holdFullPlan = false; closeFullPlan(); },
     navigate: async (branch: WorkflowSessionEntry[]) => {
       entries = branch;
       await handlers.get("session_tree")!({}, ctx);
@@ -233,7 +211,6 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
     },
     command: (args: string, context = ctx) => commands.get("todo")!.handler(args, context),
     widget: () => widgetFactory(tui, { fg: (_color: string, value: string) => value }).render(140).join("\n"),
-    fullView: () => fullComponent ? fullComponent.render(140).join("\n") : fullView,
     notification: () => notification,
   };
 }
@@ -267,28 +244,20 @@ test("canceled rows disappear at 30 seconds, redraw automatically, and can be re
     changes: [{ target: "unit", add: { id: "U2", title: "Optional work", stage: "pending", status: "pending" } }],
   } });
   await harness.command("expand");
-  harness.holdFullPlan();
-  t.after(() => harness.closeFullPlan());
-  const fullView = harness.command("");
-  await Promise.resolve();
-  assert.match(harness.fullView(), /1\/2 complete/);
-  const beforeCancellation = harness.fullRedraws();
+  assert.match(harness.widget(), /1\/2 complete/);
   await harness.update({ workflow: {
     event: "scope-cancelled", changes: [{ id: "U2", set: { status: "cancelled" } }],
   } });
-  assert.ok(harness.fullRedraws() > beforeCancellation, "an open overlay observes later cancellations");
-  assert.match(harness.fullView(), /Optional work\s+cancelled/);
+  assert.match(workflowText(await harness.get()), /Optional work\s+cancelled/);
   assert.match(harness.widget(), /Optional work\s+cancelled/);
   t.mock.timers.tick(29_999);
   // Reloading the file must not restart the row's display deadline.
   assert.match(workflowText(await harness.get()), /Optional work\s+cancelled/);
   const persisted = readFileSync(path, "utf8");
   const redraws = harness.redraws();
-  const fullRedraws = harness.fullRedraws();
   t.mock.timers.tick(1);
   assert.ok(harness.redraws() > redraws, "expiry requests a render without another tool call");
-  assert.ok(harness.fullRedraws() > fullRedraws, "an already-open full plan redraws at expiry too");
-  for (const view of [harness.widget(), harness.fullView(), workflowText(await harness.get())]) {
+  for (const view of [harness.widget(), workflowText(await harness.get())]) {
     assert.doesNotMatch(view, /Optional work|cancelled/);
     assert.match(view, /1\/1 complete/);
   }
@@ -298,8 +267,8 @@ test("canceled rows disappear at 30 seconds, redraw automatically, and can be re
   } });
   assert.match(harness.widget(), /Optional work/);
   assert.match(harness.widget(), /1\/2 complete/);
-  assert.match(harness.fullView(), /Optional work/);
-  assert.match(harness.fullView(), /1\/2 complete/);
+  assert.match(workflowText(await harness.get()), /Optional work/);
+  assert.match(workflowText(await harness.get()), /1\/2 complete/);
   await harness.update({ workflow: {
     event: "scope-cancelled-again", changes: [{ id: "U2", set: { status: "cancelled" } }],
   } });
@@ -307,9 +276,7 @@ test("canceled rows disappear at 30 seconds, redraw automatically, and can be re
   assert.match(harness.widget(), /Optional work/);
   t.mock.timers.tick(1);
   assert.doesNotMatch(harness.widget(), /Optional work/);
-  assert.doesNotMatch(harness.fullView(), /Optional work/);
-  harness.closeFullPlan();
-  await fullView;
+  assert.doesNotMatch(workflowText(await harness.get()), /Optional work/);
 });
 
 test("cancellation expiry survives session restore and stays scoped to its plan", async (t) => {
@@ -362,9 +329,7 @@ test("a persisted cancellation updates completion counts across workflow views",
   } });
   assert.match(harness.widget(), /\b1\/1 complete\b/);
   assert.match(workflowText(await harness.get()), /\b1\/1 complete\b/);
-  await harness.command("");
-  assert.match(harness.fullView(), /\b1\/1 complete\b/);
-  assert.match(harness.fullView(), /Optional work\s+cancelled/);
+  assert.match(workflowText(await harness.get()), /Optional work\s+cancelled/);
   harness.owner(null);
   const restored = workflowHarness(cwd, [...harness.entries()]);
   await restored.start();
@@ -394,11 +359,6 @@ test("released workflow stays inspectable but cannot write; replacement and clea
   assert.equal((released.details as any).readOnly, true);
   assert.equal((released.details as any).plan.runId, "handoff");
   assert.match(workflowText(released), /read-only handoff/);
-  await harness.command("");
-  assert.match(harness.fullView(), /read-only handoff/);
-  assert.match(harness.fullView(), /Deliver handoff/);
-  await harness.command("", { ...harness.ctx, mode: "rpc" });
-  assert.match(harness.notification(), /read-only handoff/);
 
   const savedFile = readFileSync(path, "utf8");
   const savedEntries = structuredClone(harness.entries());

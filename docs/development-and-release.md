@@ -127,12 +127,14 @@ The compact widget has one Todo heading with the caret after Todo, the completio
 count on the left, and matching Goal status and its existing active-time clock on
 the right. Its outcome is one muted, truncated subtitle. Collapsed view shows up
 to five relevant rows, expanded view all rows, and clicks toggle the view. `/todo`
-shows the full objective, acceptance criteria, boundaries, and plan. Subagent and
-background-task rows open their existing navigator details on click; Enter and
-keyboard controls remain, and editor input stays passive. Harness packages do not
-write to Pi's status bar, including Goal holds, SSH profiles, navigator hints, and
-remote connection state. Commands and widgets retain their state displays;
-permission checks and pause/resume rules are unchanged.
+reveals the compact Overview when display is on and returns it to automatic
+display; the full objective, acceptance criteria, boundaries, and plan remain
+available through `get_todo` when hooks are enabled. Subagent and background-task rows open their
+existing navigator details on click; Enter and keyboard controls remain, and
+editor input stays passive.
+Harness packages do not write to Pi's status bar, including Goal holds, SSH
+profiles, navigator hints, and remote connection state. Commands and widgets retain
+their state displays; permission checks and pause/resume rules are unchanged.
 
 Goal retains its raw trigger and separate lifecycle. On bridge `inspect`, optional
 `display: true` means Harness actually displays the requested `goalId`; only then

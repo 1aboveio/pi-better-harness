@@ -152,8 +152,11 @@ test("todo tools persist progress without taking over editor navigation", async 
   editor.handleInput("\u001b[C");
   assert.deepEqual(delegatedInput, ["\u001b[C"], "right remains normal editor input on an empty editor");
 
+  await commands.get("todo")?.handler("hide", ctx);
+  assert.deepEqual(widget.render(80), [], "hide removes the compact overview");
   await commands.get("todo")?.handler("", ctx);
-  assert.equal(customViews, 1, "/todo still opens the full plan view");
+  assert.equal(customViews, 0, "/todo reveals the overview instead of opening a full plan view");
+  assert.match(widget.render(80).join("\n"), /1\/3 complete/, "the revealed overview keeps the checklist");
 
   const getTodo = tools.get("get_todo");
   assert.ok(getTodo);

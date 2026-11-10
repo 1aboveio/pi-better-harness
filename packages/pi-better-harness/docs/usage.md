@@ -54,11 +54,12 @@ The compact widget has one Todo heading, a caret after Todo, and the completion
 count on the left. Matching Goal status and its existing active-time clock appear
 on the right. The outcome appears as a single muted, truncated subtitle. The
 collapsed view shows up to five relevant rows; the expanded view shows all rows.
-Click to toggle. `/todo` shows the full objective, acceptance criteria, boundaries,
-and plan; `/todo expand`, `/todo collapse`, `/todo hide`, and `/todo show` control
-its display. These commands remain available with hooks off for explicit user
-control. An outcome can exist without a checklist. A finished or cleared checklist
-does not complete or remove the outcome.
+Click to toggle. `/todo` reveals the compact Overview when display is on and
+returns it to automatic display; `/todo expand`, `/todo collapse`, `/todo hide`,
+and `/todo show` control its display. When hooks are enabled, the full objective, acceptance criteria,
+boundaries, and plan remain available through `get_todo`. These commands remain
+available with hooks off for explicit user control. An outcome can exist without a
+checklist. A finished or cleared checklist does not complete or remove the outcome.
 
 Hooks enable `update_todo`, `get_todo`, capture, matching Goal lifecycle bridge
 writes, outcome updates, and automated cleanup. When hooks are enabled, the next

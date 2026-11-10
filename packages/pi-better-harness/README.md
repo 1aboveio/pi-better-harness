@@ -33,9 +33,11 @@ The compact widget has one Todo heading, with a caret after Todo and the complet
 count on the left. A matching Goal's status and existing active-time clock appear
 on the right. The outcome is one muted, truncated subtitle. The collapsed view
 shows up to five relevant rows; the expanded view shows all rows. Click to toggle.
-`/todo` shows the full objective, acceptance criteria, boundaries, and plan;
-`/todo expand` and `/todo collapse` also control the compact checklist. Todo
-commands remain available with hooks off for explicit user control.
+`/todo` reveals the compact Overview (when display is on) and returns it to automatic display;
+`/todo expand` and `/todo collapse` control which rows it shows. The full
+objective, acceptance criteria, boundaries, and plan remain available through
+`get_todo` when hooks are enabled. Todo commands remain available with hooks off
+for explicit user control.
 
 An accepted outcome can be saved without a checklist. Completing or clearing its
 Todo does not complete or remove the outcome. Write labels as short, plain actions,

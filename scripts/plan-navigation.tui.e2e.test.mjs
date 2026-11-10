@@ -55,13 +55,14 @@ test("golden path: the todo stays passive and right arrow remains editor input",
   waitForScreen((screen) => screen.includes("draft"));
   assert.doesNotMatch(captureScreen(), /^› /m, "typing does not focus the todo");
   sendKey("C-u");
+  sendLiteral("\x1b[200~/todo hide\x1b[201~");
+  sendKey("Enter");
+  waitForScreen((screen) => !/^todo(?:\s|$)/m.test(screen));
   sendLiteral("/todo");
   sendKey("Enter");
-  waitForScreen((screen) => /^› ●\s+step_2\s+Implement todo navigation/m.test(screen));
-  sendKey("Up");
-  waitForScreen((screen) => /^› ✓\s+step_1\s+Inspect the navigator/m.test(screen));
-  sendKey("Escape");
-  waitForScreen((screen) => /^todo  1\/3 complete/im.test(screen) && !/^› /m.test(screen));
+  const revealed = waitForScreen((screen) => /^todo  1\/3 complete/im.test(screen) &&
+    screen.includes("Implement todo navigation") && !/^› /m.test(screen));
+  assert.doesNotMatch(revealed, /after: step_1|↑↓ navigate/, "/todo must reveal the compact overview, not the removed detail view");
 });
 
 // @covers todo.workflow-projection
@@ -92,14 +93,18 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   assert.match(widget, /●\s+#214\s+Extract shared core\s+active/);
   assert.match(widget, /Add mux support/);
   assert.doesNotMatch(widget, /Old generic step/);
+  sendLiteral("\x1b[200~/todo hide\x1b[201~");
+  sendKey("Enter");
+  waitForScreen((screen) => !/^todo(?:\s|$)/m.test(screen));
   sendLiteral("/todo");
   sendKey("Enter");
-  const full = waitForScreen((screen) => screen.includes("after: #214") && /^› ●\s+#214/m.test(screen));
-  assert.match(full, /self-review · in-flight/);
-  sendKey("Down");
-  waitForScreen((screen) => /^› ○\s+#215/m.test(screen));
-  sendKey("Left");
-  waitForScreen((screen) => screen.includes("rush-issues · rev 7") && !/^› /m.test(screen));
+  const revealed = waitForScreen((screen) => screen.includes("rush-issues · rev 7") &&
+    /^todo  0\/2 complete/im.test(screen) && !/^› /m.test(screen));
+  assert.match(revealed, /explore ✓\s+implement ○\s+review ○\s+ci ○/, "the workflow overview keeps its stage line");
+  assert.match(revealed, /Extract shared core/);
+  assert.match(revealed, /Add mux support/);
+  assert.doesNotMatch(revealed, /self-review · in-flight|after: #214|↑↓ navigate/,
+    "the workflow overview does not open the removed detail view");
 });
 
 // @covers todo.compact-folding
