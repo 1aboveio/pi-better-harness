@@ -615,6 +615,37 @@ test("the ledger toggle stops and restores integration without deleting data or 
   assert.equal(h.settings()!.get(), "On", "the ledger toggle does not change hooks");
 });
 
+test("ledger Off suppresses the manual list and show views without losing the record or reference", async (t) => {
+  const f = fixture(t);
+  const ledger = createLedger(f);
+  const h = harness(t, f, { preferences: { enabled: true, display: true, ledger: true } });
+  await h.start();
+  await h.command(`attach ${ledger.id}`);
+  const storedBefore = openWorkLedgerStore({ cwd: f.cwd, agentDir: f.agentDir }).read(ledger.id);
+  const referenceBefore = structuredClone(h.session.branch);
+
+  await h.control("outcome-todo-ledger")!.change("Off", h.ctx);
+  for (const action of ["", "list", "show"]) {
+    await h.command(action);
+    const notice = h.notices.at(-1)!;
+    assert.equal(notice.level, "warning", `/${action || "ledger"} must report that the capability is off`);
+    assert.match(notice.text, /Long-term work ledger is off/);
+    assert.doesNotMatch(notice.text, new RegExp(ledger.id), `/${action || "ledger"} must not disclose ledger content while Off`);
+    assert.doesNotMatch(notice.text, /Deliver checkout/, `/${action || "ledger"} must not disclose the stored outcome while Off`);
+  }
+  const storedAfter = openWorkLedgerStore({ cwd: f.cwd, agentDir: f.agentDir }).read(ledger.id);
+  assert.deepEqual(storedAfter, storedBefore, "Off leaves the durable record and history unchanged");
+  assert.deepEqual(h.session.branch, referenceBefore, "Off leaves the session reference unchanged");
+
+  await h.control("outcome-todo-ledger")!.change("On", h.ctx);
+  assert.equal((await h.get()).details.ledger.id, ledger.id, "re-enabling restores the same association");
+  await h.command("show");
+  assert.match(h.notices.at(-1)!.text, new RegExp(ledger.id));
+  assert.match(h.notices.at(-1)!.text, /Deliver checkout/);
+  await h.command("list");
+  assert.match(h.notices.at(-1)!.text, new RegExp(ledger.id));
+});
+
 test("durable reminders stay bounded and carry no execution authorization", (t) => {
   const f = fixture(t);
   const ledger = createLedger(f, Array.from({ length: 20 }, (_, index) => ({

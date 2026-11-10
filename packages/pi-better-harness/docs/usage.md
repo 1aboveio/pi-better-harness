@@ -125,7 +125,8 @@ Use `/ledger` to inspect and explicitly select a durable record:
 - `/ledger attach <id>` selects an existing ledger for this session.
 - `/ledger switch <id>` replaces the current selection with another ledger.
 - `/ledger detach` removes the session reference but keeps the ledger.
-- `/ledger show` prints the associated ledger, including when hooks are off.
+- `/ledger show` prints the associated ledger while the ledger setting is on,
+  including when hooks are off.
 
 Attaching stores only a reference. It does not copy the ledger, start a Goal,
 authorize old work, or alter permissions. Resuming the same session restores the
@@ -150,7 +151,8 @@ second checklist or widget; workflow rows remain canonical. Completing the
 session Outcome is refused while the associated ledger is active and has open
 high-level items. Closing those items does not complete the ledger automatically,
 and completing a Todo or workflow plan never completes an unfinished high-level
-outcome.
+outcome. While the ledger setting is off, `/ledger list` and `/ledger show`
+disclose no ledger content; `/ledger detach` can still clear the reference.
 
 ## Ordinary Startup
 

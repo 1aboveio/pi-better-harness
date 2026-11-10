@@ -864,6 +864,10 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     getArgumentCompletions: ledgerArgumentCompletions,
     handler: async (args, ctx) => {
       const [action = "", value = ""] = args.trim().split(/\s+/, 2);
+      if (!ledgerEnabled && (action === "" || action === "list" || action === "show")) {
+        ctx.ui.notify("Long-term work ledger is off. Enable it in /harness-settings to view ledgers.", "warning");
+        return;
+      }
       const store = openWorkLedgerStore({ cwd: ctx.cwd });
       if (!action || action === "list") {
         ctx.ui.notify(formatLedgerList(store.list(), ledgerId), "info");

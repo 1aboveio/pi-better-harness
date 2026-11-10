@@ -117,8 +117,11 @@ The human controls association deliberately:
   completed evidence, and revision sequence. `attach` refuses to silently replace
   a different current association; `switch` is the explicit replacement.
 - `/ledger detach` removes only the session reference. `/ledger show` inspects
-  the current record, including while hooks are off. `/ledger attach` and
-  `/ledger switch` require the ledger setting to be on.
+  the current record while the ledger setting is on, including while hooks are
+  off. `/ledger list`, `/ledger show`, `/ledger attach`, and `/ledger switch`
+  require the ledger setting to be on. While it is off, the list/show commands
+  disclose no ledger content; `/ledger detach` remains available to clear the
+  reference explicitly.
 
 `update_todo({ledger:{action:"attach"|"detach"}})` is the model-facing form of
 the same deliberate action. It must never infer association from the project
