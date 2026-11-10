@@ -52,7 +52,10 @@ function makeHarness(options = {}) {
     const pi = {
         registerTool: (def) => tools.set(def.name, def),
         on: (event, fn) => handlers.set(event, fn),
-        sendMessage: (message, sendOptions) => { sent.push({ message, options: sendOptions }); },
+        sendMessage: (message, sendOptions) => {
+            if (options.failSend?.()) throw new Error("simulated callback send failure");
+            sent.push({ message, options: sendOptions });
+        },
     };
     const ctx = {
         cwd: tmpdir(),
@@ -164,8 +167,9 @@ describe("harness timing: launch", () => {
             assert.equal(meta.timing.deadlineAt, undefined);
             assert.equal(meta.timing.graceMs, 5 * 60_000);
             assert.equal(meta.timing.ceilingAt, undefined);
+            assert.equal(meta.timing.toolWaitMs, 5 * 60_000);
             assert.equal(meta.timing.stuckMs, 10 * 60_000);
-            assert.match(run.out, /Timing: no soft deadline, no ceiling, stuck wake after 10m without progress\./);
+            assert.match(run.out, /Timing: no soft deadline, no ceiling, tool wait after 5m, stuck wake after 10m without progress\./);
             const log = await waitFor(() => {
                 const text = existsSync(meta.logPath) ? readFileSync(meta.logPath, "utf8") : "";
                 return text.includes("--extension") ? text : undefined;
@@ -639,6 +643,126 @@ describe("harness timing: stuck wake", () => {
                 await tick();
                 await waitFor(() => wakes(h, "stuck").length === 2);
                 assert.equal(wakes(h, "stuck").length, 2, "a new stuck spell after progress wakes again");
+                await reap(run);
+            } finally { h.shutdown(); }
+        });
+    });
+});
+
+describe("harness timing: tool wait", () => {
+    const startCall = (callId, command = "npm test", at = Date.now()) => [
+        { type: "message_end", message: { role: "assistant", timestamp: at, content: [] } },
+        { type: "tool_execution_start", toolCallId: callId, toolName: "bash", args: { command } },
+    ];
+    const endCall = (callId, command = "npm test", at = Date.now()) => ({
+        type: "message_end", message: { role: "toolResult", toolCallId: callId, toolName: "bash", isError: false, timestamp: at, content: [], args: { command } },
+    });
+
+    it("wakes once per open call with facts, never stops the run, and lets the next call alert independently", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            try {
+                const run = await spawnRun(h, { name: "builder", deadline_minutes: 0, max_minutes: 0, tool_wait_minutes: 0.002, stuck_minutes: 0 });
+                appendEvents(run.id, startCall("long-test"));
+                await sleep(200);
+                await tick();
+                await waitFor(() => wakes(h, "tool-wait").length === 1);
+                const first = wakes(h, "tool-wait");
+                assert.equal(first.length, 1, "a long normal tool call still alerts once");
+                assert.match(first[0].message.content, new RegExp(run.id));
+                assert.match(first[0].message.content, /tool wait/i);
+                assert.match(first[0].message.content, /long-test/);
+                assert.match(first[0].message.content, /bash: npm test/);
+                assert.match(first[0].message.content, /Last progress: none observed/);
+                assert.match(first[0].message.content, /subagent_output id=/);
+                assert.doesNotMatch(first[0].message.content, /before deciding|no action is needed|Inspect it with/i);
+                const meta = readMeta(run.id);
+                assert.equal(meta.status, "running", "the alert does not stop or cancel the run");
+                assert.deepEqual(meta.timing.toolWaitAlerted, ["long-test"]);
+                process.kill(run.pid, 0);
+                await tick();
+                assert.equal(wakes(h, "tool-wait").length, 1, "one alert while the same call stays open");
+
+                appendEvents(run.id, [endCall("long-test")]);
+                await tick();
+                assert.equal(readMeta(run.id).timing.toolWaitAlerted, undefined, "the finished call no longer needs a marker");
+                appendEvents(run.id, startCall("second-test", "npm run lint"));
+                await sleep(200);
+                await tick();
+                await waitFor(() => wakes(h, "tool-wait").length === 2);
+                const second = wakes(h, "tool-wait");
+                assert.equal(second.length, 2, "the next call alerts independently");
+                assert.match(second[1].message.content, /second-test/);
+                assert.match(second[1].message.content, /npm run lint/);
+                assert.match(second[1].message.content, new RegExp(run.id));
+                await reap(run);
+            } finally { h.shutdown(); }
+        });
+    });
+
+    it("alerts parallel calls independently and does not repeat either after reload", async () => {
+        await withFakeClock(async () => {
+            const first = makeHarness();
+            const run = await spawnRun(first, { name: "parallel", deadline_minutes: 0, max_minutes: 0, tool_wait_minutes: 0.002, stuck_minutes: 0 });
+            let second;
+            try {
+                appendEvents(run.id, [...startCall("call-a", "build"), ...startCall("call-b", "test").slice(1)]);
+                await sleep(200);
+                await tick();
+                await waitFor(() => wakes(first, "tool-wait").length === 2);
+                assert.equal(wakes(first, "tool-wait").length, 2, "each parallel call gets its own alert");
+                assert.deepEqual(new Set(readMeta(run.id).timing.toolWaitAlerted), new Set(["call-a", "call-b"]));
+                assert.deepEqual(readMeta(run.id).timing.openCalls.map((call) => call.id), ["call-a", "call-b"]);
+
+                forgetProgressCacheForTests();
+                second = makeHarness();
+                await second.handlers.get("session_start")({}, second.ctx);
+                await tick();
+                assert.equal(wakes(second, "tool-wait").length, 0, "a reload does not repeat a handed-off wait alert");
+                assert.equal(readMeta(run.id).status, "running");
+                await reap(run);
+            } finally {
+                second?.shutdown();
+                first.shutdown();
+            }
+        });
+    });
+
+    it("retries a failed send on the next tick instead of marking the call alerted", async () => {
+        await withFakeClock(async () => {
+            let fail = true;
+            const h = makeHarness({ failSend: () => fail });
+            try {
+                const run = await spawnRun(h, { deadline_minutes: 0, max_minutes: 0, tool_wait_minutes: 0.002, stuck_minutes: 0 });
+                appendEvents(run.id, startCall("retry-call", "slow test"));
+                await sleep(200);
+                await tick();
+                assert.equal(wakes(h, "tool-wait").length, 0);
+                assert.equal(readMeta(run.id).timing.toolWaitAlerted, undefined, "a failed handoff leaves the marker unset");
+                fail = false;
+                await tick();
+                await waitFor(() => wakes(h, "tool-wait").length === 1);
+                assert.equal(wakes(h, "tool-wait").length, 1, "the existing urgent callback path retries");
+                assert.deepEqual(readMeta(run.id).timing.toolWaitAlerted, ["retry-call"]);
+                await reap(run);
+            } finally { h.shutdown(); }
+        });
+    });
+
+    it("keeps callback:false quiet while still marking the call and showing the human notify", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            try {
+                const run = await spawnRun(h, { callback: false, deadline_minutes: 0, max_minutes: 0, tool_wait_minutes: 0.002, stuck_minutes: 0 });
+                appendEvents(run.id, startCall("quiet-call", "quiet test"));
+                await sleep(200);
+                await tick();
+                await waitFor(() => readMeta(run.id).timing.toolWaitAlerted?.includes("quiet-call"));
+                assert.equal(wakes(h, "tool-wait").length, 0, "callback:false suppresses the model message");
+                assert.match(h.notes.at(-1).msg, /tool wait/i, "the human notify remains");
+                assert.deepEqual(readMeta(run.id).timing.toolWaitAlerted, ["quiet-call"]);
+                await tick();
+                assert.equal(wakes(h, "tool-wait").length, 0, "the marked call does not retry");
                 await reap(run);
             } finally { h.shutdown(); }
         });

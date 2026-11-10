@@ -21,7 +21,7 @@ function snapshot(mode, overrides = {}) {
 test("the policy is published as its own section, with the block last and its note first", () => {
     const settings = snapshot("adaptive");
     const section = publish(settings);
-    assert.ok(section.startsWith("Treat the Subagent settings block in this section as the authoritative delegation mode and cap."),
+    assert.ok(section.startsWith("Treat the Subagent settings block in this section as the authoritative delegation mode, cap, and timing-alert settings."),
         "the note that points at the block has to travel with it, and lead it");
     assert.ok(section.endsWith(formatSubagentSettings(settings)),
         "the block stays last inside its own section, so the note introduces it");

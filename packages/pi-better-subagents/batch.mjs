@@ -105,6 +105,7 @@ export function mergeJobOptions(shared, job) {
         deadline_minutes: job.deadline_minutes ?? shared?.deadline_minutes,
         grace_minutes: job.grace_minutes ?? shared?.grace_minutes,
         max_minutes: job.max_minutes ?? shared?.max_minutes,
+        tool_wait_minutes: job.tool_wait_minutes ?? shared?.tool_wait_minutes,
         stuck_minutes: job.stuck_minutes ?? shared?.stuck_minutes,
         // A per-job agent or role replaces the shared selector pair. Mixing
         // shared.agent with job.role would invent an ambiguous run.

@@ -19,9 +19,11 @@ Set `delegationMode` in the user config described under
 `coordinator` (default `adaptive`). This controls foreground delegation guidance,
 not child permissions or catalog definitions. `/subagents settings` (or simply
 `/subagents`) opens the terminal settings page with mode, concurrent-subagent
-cap, and default skill-exposure controls, an Agents shortcut to `/agents`, and
-Reset to defaults. The page uses the same selected-row and active-cell styling
-as `/sandbox`, with one editable value column. Skill exposure cycles between
+cap, tool-wait alert, no-progress alert, and default skill-exposure controls, an
+Agents shortcut to `/agents`, and Reset to defaults. The two time values are
+edited independently in minutes; `0` turns one alert off. The page uses the same
+selected-row and active-cell styling as `/sandbox`, with one editable value
+column. Skill exposure cycles between
 Discover automatically and No skill catalog. The Selected skills row opens the
 shared searchable checkbox picker, which lists loaded skills by name and
 description, uses Space to toggle, Enter to apply, and Esc to cancel. Typing
@@ -33,15 +35,18 @@ absolute and exist. Invalid input stays in the editor with an explanation rather
 than being dropped.
 Edits automatically persist for this session, including across reloads; Escape
 closes the page without undoing them.
-Enter edits the cap as a positive whole number; Escape cancels an unfinished edit.
-Ctrl+S saves mode, cap, and skill exposure as defaults. Reset to defaults restores
-all three from the saved config. Sandbox permissions remain in `/sandbox`.
+Enter edits the cap as a positive whole number or a timing value in minutes;
+Escape cancels an unfinished edit. Ctrl+S saves mode, cap, timing alerts, and
+skill exposure as defaults. Reset to defaults restores them from the saved
+config. Sandbox permissions remain in `/sandbox`.
 
 Command equivalents also work outside the terminal UI:
 
 ```text
 /subagents mode manual|adaptive|coordinator
 /subagents cap 6
+/subagents tool-wait 5
+/subagents stuck 10
 /subagents save
 /subagents reset
 ```
@@ -51,8 +56,9 @@ below the running count leaves existing work untouched and blocks new admissions
 until capacity becomes available. Slots already reserved by an in-flight launch
 remain admitted. Settings apply to this parent Pi process, not
 all Pi sessions on the machine. Saving preserves unrelated config keys and
-clears the mode, cap, and skill session overrides. The command form asks for confirmation when a UI
-is available. Reset restores saved defaults without changing config.
+clears the mode, cap, timing-alert, and skill session overrides. The command form
+asks for confirmation when a UI is available. Reset restores saved defaults
+without changing config.
 
 `/reload` retains session overrides; new sessions use config, while resuming or
 navigating a branch restores its settings. On the navigator `main` sheet, `m`
@@ -106,9 +112,9 @@ thresholds continue to take precedence for subagent health.
 
 | Tool | Blocks? | What it does |
 |------|---------|--------------|
-| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `skills` ([skill exposure](#skill-exposure)), `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`. |
+| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `skills` ([skill exposure](#skill-exposure)), `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-tool-wait-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `tool_wait_minutes`, `stuck_minutes`. |
 | `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; optional per-job `session_id` or `session_name` continues a saved conversation), `onCapacity` (`reject` or `launch-available`). |
-| `subagent_settings` | never | Read-only effective settings and capacity snapshot. No parameters. Returns `delegationMode`, `maxConcurrent`, per-setting `sources` (`session` or `config`), a stable settings `revision`, `runningCount`, `pendingCount`, `occupiedSlots`, and `availableSlots`. The limit is a ceiling, not a target; spawn admission rechecks live capacity. |
+| `subagent_settings` | never | Read-only effective settings and capacity snapshot. No parameters. Returns `delegationMode`, `maxConcurrent`, `toolWaitMinutes`, `stuckMinutes`, per-setting `sources`/`timingSources` (`environment`, `session`, `config`, or `default`), a stable settings `revision`, `runningCount`, `pendingCount`, `occupiedSlots`, and `availableSlots`. Timing values already account for the same environment precedence a launch uses. The limit is a ceiling, not a target; spawn admission rechecks live capacity. |
 | `subagent_list` | never | Compact list for the current folder and descendants across foreground sessions (default 10 rows / 1 KiB page). Each row includes `session_id`. Params: `all` (machine-global search), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. Abandoned launch records are reported separately and are never counted as runs. |
 | `subagent_output` | never | Bounded current-session excerpt (default 1 KiB / 10 lines). Params: `id`, `lines` (`tail_lines` is a deprecated alias), `cursor` (a returned `nextCursor`, `statusCursor`, or `incidentCursor`), `max_bytes` (max 4 KiB; raw 16 KiB default, 64 KiB max), `mode` (`raw` pages retained log bytes), `tail` (raw mode: start from the newest retained byte and page backwards; the final step returns an append-ready cursor), `include` (`["cost"]`, `["tools"]`, or both: opt-in spend and tool-count lines), `all` (foreign-session id). Missing/unreadable logs are gaps, not empty healthy output. |
 | `subagent_result` | never | Finished-run answer for the current session (2048-byte page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `max_bytes` (maximum 8192 bytes), `lines` (optional line cap per answer page), `mode` (`raw`), `tail` (raw mode: newest bytes first), `include` (`["cost"]`, `["tools"]`, or both), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
@@ -272,21 +278,22 @@ completion callbacks with `subagent_result`; do not poll or keep a script open
 waiting for completion. Callbacks and capacity/catalog guarantees remain owned
 by the existing harness runtime.
 
-## Run timing (deadline, ceiling, stuck)
+## Run timing (deadline, ceiling, tool wait, stuck)
 
 Timeout control belongs to the harness, not to the prompt or the skill that
 launched the run. A time limit written into a prompt is enforced by nothing, and
 a parent that only notices late tends to kill a child that was still making
-progress. Every run gets stall detection by default. Elapsed-time limits are
-opt-in because total runtime does not distinguish a slow agent from a stalled
-one.
+progress. Every run gets a tool-wait alert and stall detection by default.
+Elapsed-time limits are opt-in because total runtime does not distinguish a slow
+agent from a stalled one.
 
 | Control | Default | What happens |
 |---------|---------|--------------|
 | Soft deadline (`deadline_minutes`) | Off | When configured, the child gets one steering message (delivered through Pi's steer queue after its current tool call finishes): stop starting new work, commit or save what is done, and report what is complete, what is not, and where the work is. The parent gets one wake saying so. |
 | Grace (`grace_minutes`) | 5 | Grace starts when the steering message actually reaches the child, which is after its current tool call. While the message is still waiting behind a running tool call, the deadline stop is held, so a test run that began just before the deadline is not killed mid-run. If the child has not finished by the end of grace, the harness stops it; the ordinary completion callback reports `killed; stopped: deadline`. A child that completes inside grace is not stopped; its surfaces say `deadline: finished in grace`. |
 | Hard ceiling (`max_minutes`) | Off | When configured, the run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds the run, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
-| Stuck window (`stuck_minutes`) | 10 | No progress (see below) for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. |
+| Tool-wait window (`tool_wait_minutes`) | 5 | One tool call that stays open this long sends one factual parent wake for that call, including when it is a normal long test. Parallel calls alert independently. The alert never stops, cancels, or restarts the run, and a later call can alert on its own. |
+| Stuck window (`stuck_minutes`) | 10 | No progress (see below) for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. Time inside a running tool call is excluded, so tool waiting and no-progress are reported separately. |
 
 `0` turns a control off. `null` or an omitted value means "inherit": on
 `subagent_spawn` that is the configured default; on a `subagent_spawn_batch` job
@@ -301,13 +308,14 @@ may be fractional. A job's own number (including `0`) wins over `shared`.
   hung tool call is never delivered, the deadline stop stays held, and the run
   is never stopped by that deadline. Opt into a ceiling to bound the whole run.
 - The parent reads at most the last 32 MiB of a child log after `/reload`. It
-  also records the call it last saw open in the run's metadata on each
+  also records the calls it last saw open in the run's metadata on each
   supervision tick, so a reload normally keeps the hold and the not-stuck
   accounting even when the call's start is outside that window. The record is
   written by the tick, so a call that started less than one tick (15 s) before
   the reload is not covered; and a record whose call ended while the window was
   lost keeps the hold, and keeps the run from being reported stuck, until the
-  next observed tool call starts. Opt into a ceiling when the run needs a hard
+  next observed turn proves that batch ended (a newer retained message followed
+  by its tool call start). Opt into a ceiling when the run needs a hard
   wall-clock bound.
 - The child confirms delivery by matching the steer's exact text in its
   conversation. If another extension rewrites user input (an input-transform
@@ -329,7 +337,9 @@ long ago counts again. Time the child spends waiting on a running tool call does
 stuck window, so a child in the middle of a 20-minute test run is waiting, not
 stuck — including after `/reload`: the call the parent saw open is stored in the
 run's metadata, so a bounded log read that no longer contains its start does not
-turn it into "no progress". A hanging command can be bounded by the sandbox command time limit; the run
+turn it into "no progress". That same open-call evidence drives the independent
+tool-wait alert: each call alerts once after its configured window, and the
+durable marker survives `/reload`. A hanging command can be bounded by the sandbox command time limit; the run
 ceiling separately bounds the whole run.
 The other stuck signal is the existing escalation: the same operation failing
 three times wakes the parent once as an `Action required` incident
@@ -349,11 +359,13 @@ example it crashed or a user stopped it), `stopped: ceiling`, or `stuck`. The sp
 | Soft deadline | `PI_SUBAGENT_DEADLINE_MINUTES` | `deadlineMinutes` |
 | Grace | `PI_SUBAGENT_GRACE_MINUTES` | `graceMinutes` |
 | Hard ceiling | `PI_SUBAGENT_MAX_MINUTES` | `maxMinutes` |
+| Tool-wait window | `PI_SUBAGENT_TOOL_WAIT_MINUTES` | `toolWaitMinutes` |
 | Stuck window | `PI_SUBAGENT_STUCK_MINUTES` | `stuckMinutes` |
 
 **Durability and delivery.** The policy and its one-shot markers (steer
-requested, deadline wake, stuck wake, stop reason) are stored in the run's
-metadata at launch, so `/reload` keeps the deadline and never repeats a wake.
+requested, deadline wake, tool-wait marker per call, stuck wake, stop reason)
+are stored in the run's metadata at launch, so `/reload` keeps the deadline and
+never repeats a wake.
 The parent checks timing on its 15-second supervision tick. The steer travels
 through a request file in the run directory, read by a small harness extension
 loaded into every child (it registers no tools and runs no commands). When the

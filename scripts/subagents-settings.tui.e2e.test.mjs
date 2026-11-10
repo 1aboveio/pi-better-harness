@@ -8,8 +8,9 @@ import test from "node:test";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
+const piCli = process.env.PI_SUBAGENTS_SETTINGS_CLI ?? join(root, "node_modules/.bin/pi");
 
-test("subagent settings edit mode and cap, validate, save, reset, survive reload, and open Agents in the real TUI", { skip: !hasTmux }, () => {
+test("subagent settings edit mode, timing, and cap, validate, save, reset, survive reload, and open Agents in the real TUI", { skip: !hasTmux }, () => {
     const fixture = mkdtempSync(join(tmpdir(), "pi-subagent-settings-"));
     const config = join(fixture, "settings.json");
     const wrapper = join(fixture, "settings-extension.ts");
@@ -20,10 +21,12 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
 `);
     const args = ["-L", `pi-subagent-settings-${process.pid}`];
     const q = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
-    const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(join(fixture, "agent"))} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(join(root, "node_modules/.bin/pi"))} -e ${q(wrapper)} --no-skills --no-context-files --approve --model openai/gpt-4o-mini`;
+    const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(join(fixture, "agent"))} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(piCli)} -e ${q(wrapper)} --no-skills --no-context-files --approve --model openai/gpt-4o-mini`;
     const tmux = (...more) => execFileSync("tmux", [...args, ...more], { encoding: "utf8" });
     const key = (value) => tmux("send-keys", "-t", "settings", value);
     const literal = (value) => tmux("send-keys", "-t", "settings", "-l", value);
+    const down = (count = 1) => { for (let index = 0; index < count; index++) key("Down"); };
+    const up = (count = 1) => { for (let index = 0; index < count; index++) key("Up"); };
     const wait = (pattern) => {
         const deadline = Date.now() + 10_000;
         let screen = "";
@@ -39,6 +42,8 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         wait(/settings-extension\.ts/);
         literal("/subagents settings"); wait(/\/subagents settings/); key("Tab"); key("Enter");
         wait(/Subagent settings/);
+        wait(/Tool-wait alert\s+5 min/);
+        wait(/No-progress alert\s+10 min/);
         const selected = tmux("capture-pane", "-t", "settings", "-e", "-p").split("\n")
             .find((line) => line.replace(/\x1b\[[0-9;]*m/g, "").startsWith("> Delegation mode"));
         assert.ok(selected, "selected row is visible");
@@ -51,29 +56,44 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         wait(/positive whole number/);
         key("C-u"); literal("7"); key("Enter");
         wait(/Concurrent subagents\s+7/);
+        down(); key("Enter"); key("C-u"); literal("6.5"); key("Enter");
+        wait(/Tool-wait alert\s+6\.5 min/);
+        wait(/No-progress alert\s+10 min/);
+        down(); key("Enter"); key("C-u"); literal("12.5"); key("Enter");
+        wait(/No-progress alert\s+12\.5 min/);
+        wait(/Tool-wait alert\s+6\.5 min/);
         assert.deepEqual(JSON.parse(readFileSync(config, "utf8")).piBetterHarness.subagents, {
             delegationMode: "adaptive", maxConcurrent: 4, defaultTools: "read",
-        }, "editing session values must not save defaults");
+        }, "editing session mode, cap, and timing must not save defaults");
         key("C-s"); wait(/Subagent defaults saved/);
         const saved = JSON.parse(readFileSync(config, "utf8")).piBetterHarness.subagents;
         assert.equal(saved.delegationMode, "coordinator");
         assert.equal(saved.maxConcurrent, 7);
+        assert.equal(saved.toolWaitMinutes, 6.5);
+        assert.equal(saved.stuckMinutes, 12.5);
         assert.equal(saved.defaultTools, "read");
+        up(2);
         key("Enter"); key("C-u"); literal("2"); key("Enter");
         wait(/Concurrent subagents\s+2/);
-        key("Down"); key("Down"); key("Down"); key("Down"); key("Enter");
+        down(6); key("Enter");
         wait(/Concurrent subagents\s+7/);
-        key("Up"); key("Up"); key("Up"); key("Up"); key("Enter"); key("C-u"); literal("6"); key("Enter");
+        wait(/Tool-wait alert\s+6\.5 min/);
+        wait(/No-progress alert\s+12\.5 min/);
+        up(6); key("Enter"); key("C-u"); literal("6"); key("Enter");
         wait(/Concurrent subagents\s+6/);
         key("Escape"); wait(/^(?![\s\S]*Subagent settings)/);
         literal("/reload"); key("Enter"); wait(/Reloaded/);
         literal("/subagents"); key("Enter");
         wait(/Delegation mode\s+coordinator/);
         wait(/Concurrent subagents\s+6/);
+        wait(/Tool-wait alert\s+6\.5 min/);
+        wait(/No-progress alert\s+12\.5 min/);
         assert.equal(JSON.parse(readFileSync(config, "utf8")).piBetterHarness.subagents.maxConcurrent, 7, "an unsaved cap survives reload without changing defaults");
         tmux("resize-window", "-t", "settings", "-x", "40", "-y", "24");
         wait(/Concurrent subagents\s+6/);
-        key("Down"); key("Down"); key("Down"); key("Down"); key("Enter");
+        wait(/Tool-wait alert\s+6\.5 min/);
+        wait(/No-progress alert\s+12\.5 min/);
+        down(6); key("Enter");
         const catalog = wait(/Agents\s+.*definitions/);
         assert.doesNotMatch(catalog, /Subagent settings/, "the settings pane closes before opening Agents");
         key("Escape");

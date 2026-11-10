@@ -12,13 +12,14 @@ register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 const { default: extension, subagentsArgumentCompletions } = await import("../index.ts");
 const { setConfigForTests, setConfigPathForTests, loadConfig, writeSubagentSettings, normalizeConcurrencyCap } = await import("../config.ts");
 const { normalizeDelegationMode, delegationPrompt, DELEGATION_MODE_REQUEST } = await import("../delegation.ts");
+const { resolveRunTiming, TIMING_ENV } = await import("../timing.ts");
 
-function harness() {
+function harness(options = {}) {
     const handlers = new Map();
     const commands = new Map();
     const tools = new Map();
     const notifications = [];
-    const entries = [];
+    const entries = options.entries ?? [];
     const events = new EventEmitter();
     extension({
         events,
@@ -205,19 +206,142 @@ test("normalization falls back to adaptive and each prompt expresses its boundar
 
 test("/subagents action completions expose complete mode selections with context", () => {
     assert.deepEqual(subagentsArgumentCompletions(""), [
-        { value: "settings", label: "settings", description: "Open delegation mode and concurrency settings" },
+        { value: "settings", label: "settings", description: "Open delegation, concurrency, and timing settings" },
         { value: "cap", label: "cap <number>", description: "Set a positive concurrent subagent limit for this session" },
-        { value: "reset", label: "reset", description: "Reset session mode and cap to saved defaults" },
+        { value: "tool-wait", label: "tool-wait <minutes>", description: "Set the session tool-wait alert time; 0 turns it off" },
+        { value: "stuck", label: "stuck <minutes>", description: "Set the session no-progress alert time; 0 turns it off" },
+        { value: "reset", label: "reset", description: "Reset session mode, cap, and timing alerts to saved defaults" },
         { value: "mode manual", label: "mode manual", description: "Delegate only when explicitly requested" },
         { value: "mode adaptive", label: "mode adaptive", description: "Delegate substantial independent work" },
         { value: "mode coordinator", label: "mode coordinator", description: "Delegate role-owned work by default" },
-        { value: "save", label: "save", description: "Save the current mode and cap as defaults" },
+        { value: "save", label: "save", description: "Save the current mode, cap, and timing alerts as defaults" },
     ]);
     assert.deepEqual(subagentsArgumentCompletions(" mode a")?.map((entry) => entry.value), ["mode adaptive"]);
     assert.equal(subagentsArgumentCompletions("mode invalid"), null);
     const command = harness().commands.get("subagents");
     assert.deepEqual(command.getArgumentCompletions("mode c").map((entry) => entry.value), ["mode coordinator"]);
-    assert.match(command.description, /settings.*cap <number>.*save.*reset/);
+    assert.match(command.description, /settings.*cap <number>.*tool-wait <minutes>.*save.*reset/);
+});
+
+test("session timing alerts validate, persist across reload, save, and reset independently", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "delegation-timing-"));
+    const path = join(dir, "settings.json");
+    setConfigPathForTests(path);
+    try {
+        const h = harness();
+        const command = h.commands.get("subagents");
+        const inspect = async () => (await h.tools.get("subagent_settings").execute()).structuredContent;
+        const baseline = await inspect();
+
+        await command.handler("tool-wait 3.5", h.ctx);
+        let current = await inspect();
+        assert.equal(current.toolWaitMinutes, 3.5);
+        assert.equal(current.stuckMinutes, 10, "the no-progress time is unchanged");
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "session", stuckMinutes: "default" });
+        assert.notEqual(current.revision, baseline.revision, "an alert-time edit changes the settings revision");
+        assert.deepEqual(h.entries.at(-1), {
+            type: "custom", customType: "pi-better-subagents-timing", data: { version: 1, toolWaitMinutes: 3.5 },
+        });
+
+        const beforeInvalid = h.entries.length;
+        for (const value of ["-1", "soon", "", "10081"]) {
+            await command.handler(`tool-wait ${value}`, h.ctx);
+            assert.equal(h.entries.length, beforeInvalid, `invalid ${JSON.stringify(value)} changes no history`);
+            assert.equal(h.notifications.at(-1).level, "warning");
+        }
+        await command.handler("stuck 0", h.ctx);
+        current = await inspect();
+        assert.equal(current.stuckMinutes, 0, "0 disables only the no-progress alert");
+        assert.equal(current.toolWaitMinutes, 3.5);
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "session", stuckMinutes: "session" });
+
+        // Reload restores both session overrides from the branch.
+        await h.handlers.get("session_start")({}, { ...h.ctx, mode: "print", hasUI: false, cwd: process.cwd(), isIdle: () => true });
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 3.5);
+        assert.equal(current.stuckMinutes, 0);
+
+        await command.handler("save", h.ctx);
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 3.5);
+        assert.equal(current.stuckMinutes, 0);
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "config", stuckMinutes: "config" });
+        assert.equal(loadConfig().toolWaitMinutes, 3.5);
+        assert.equal(loadConfig().stuckMinutes, 0);
+        const fresh = harness();
+        assert.deepEqual(await (async () => (await fresh.tools.get("subagent_settings").execute()).structuredContent)(), current,
+            "a new extension sees the saved timing defaults and revision");
+
+        await command.handler("tool-wait 9", h.ctx);
+        await command.handler("reset", h.ctx);
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 3.5, "reset returns to the saved tool-wait default");
+        assert.equal(current.stuckMinutes, 0);
+    } finally {
+        setConfigPathForTests(undefined);
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("effective timing alerts honor environment precedence and expose invalid environment values", async () => {
+    const previous = {
+        tool: process.env[TIMING_ENV.toolWait],
+        stuck: process.env[TIMING_ENV.stuck],
+    };
+    setConfigForTests({ delegationMode: "adaptive", maxConcurrent: 4, toolWaitMinutes: 0, stuckMinutes: 0 });
+    process.env[TIMING_ENV.toolWait] = "7";
+    process.env[TIMING_ENV.stuck] = "13";
+    try {
+        const h = harness();
+        const command = h.commands.get("subagents");
+        const inspect = async () => (await h.tools.get("subagent_settings").execute()).structuredContent;
+
+        let current = await inspect();
+        assert.equal(current.toolWaitMinutes, 7);
+        assert.equal(current.stuckMinutes, 13);
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "environment", stuckMinutes: "environment" });
+        assert.match(h.prompt(), /Timing alerts: tool wait 7m \(environment\); no progress 13m \(environment\)\./);
+        let launched = resolveRunTiming({ settings: loadConfig(), env: process.env, startedAt: 0 });
+        assert.equal(launched.toolWaitMs, 7 * 60_000, "inspection matches the value launch resolution uses");
+        assert.equal(launched.stuckMs, 13 * 60_000);
+
+        await command.handler("tool-wait 3", h.ctx);
+        await command.handler("stuck 4", h.ctx);
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 7, "environment still wins over the session override");
+        assert.equal(current.stuckMinutes, 13);
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "environment", stuckMinutes: "environment" });
+        await command.handler("", h.ctx);
+        assert.match(h.notifications.at(-1).message, /Tool-wait alert: 7 min\. No-progress alert: 13 min\./,
+            "the settings summary matches the next launch");
+
+        delete process.env[TIMING_ENV.toolWait];
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 3, "removing the environment override reveals the session choice");
+        assert.equal(current.timingSources.toolWaitMinutes, "session");
+        assert.equal(current.stuckMinutes, 13);
+        assert.equal(current.timingSources.stuckMinutes, "environment");
+
+        delete process.env[TIMING_ENV.stuck];
+        launched = resolveRunTiming({
+            settings: { ...loadConfig(), toolWaitMinutes: 3, stuckMinutes: 4 },
+            env: process.env, startedAt: 0,
+        });
+        assert.equal(launched.toolWaitMs, 3 * 60_000);
+        assert.equal(launched.stuckMs, 4 * 60_000);
+
+        process.env[TIMING_ENV.toolWait] = "soon";
+        current = await inspect();
+        assert.match(current.timingError, /PI_SUBAGENT_TOOL_WAIT_MINUTES must be a number of minutes/);
+        assert.equal(current.timingSources.toolWaitMinutes, "environment", "an invalid environment value is not hidden");
+        assert.match(h.prompt(), /Timing alert settings error: PI_SUBAGENT_TOOL_WAIT_MINUTES must be/);
+    } finally {
+        if (previous.tool === undefined) delete process.env[TIMING_ENV.toolWait];
+        else process.env[TIMING_ENV.toolWait] = previous.tool;
+        if (previous.stuck === undefined) delete process.env[TIMING_ENV.stuck];
+        else process.env[TIMING_ENV.stuck] = previous.stuck;
+        setConfigForTests(undefined);
+    }
 });
 
 test("/subagents save confirms, preserves other config, and clears the session override", async () => {

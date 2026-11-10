@@ -17,7 +17,7 @@ import { SELF_SPEC } from "./extensions.ts";
 import { installedPackage } from "./child-dependencies.mjs";
 import { isDelegationMode, type DelegationMode } from "./delegation.ts";
 import { normalizeSkillExposure } from "./skills.ts";
-import type { TimingSettings } from "./timing.ts";
+import { validatedTimingMinutes, type TimingSettings } from "./timing.ts";
 import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.ts";
 
 export interface SubagentConfig extends TimingSettings {
@@ -197,12 +197,19 @@ export function writeSubagentSettings(
         maxConcurrent: number;
         /** Omit to preserve the saved value; `null` explicitly records discovery. */
         defaultSkills?: string[] | null;
+        /** Omit to preserve the saved value. `0` disables that alert. */
+        toolWaitMinutes?: number;
+        /** Omit to preserve the saved value. `0` disables that alert. */
+        stuckMinutes?: number;
     },
     path = configPath(),
 ): void {
     if (!isDelegationMode(settings.delegationMode)) throw new Error("Invalid delegation mode.");
     if (!isConcurrencyCap(settings.maxConcurrent)) throw new Error("Concurrent subagents must be a positive whole number.");
-    const next: { delegationMode: DelegationMode; maxConcurrent: number; defaultSkills?: string[] | null } = {
+    const next: {
+        delegationMode: DelegationMode; maxConcurrent: number; defaultSkills?: string[] | null;
+        toolWaitMinutes?: number; stuckMinutes?: number;
+    } = {
         delegationMode: settings.delegationMode,
         maxConcurrent: settings.maxConcurrent,
     };
@@ -217,6 +224,12 @@ export function writeSubagentSettings(
             }
             next.defaultSkills = skills;
         }
+    }
+    if (settings.toolWaitMinutes !== undefined) {
+        next.toolWaitMinutes = validatedTimingMinutes(settings.toolWaitMinutes, "toolWaitMinutes");
+    }
+    if (settings.stuckMinutes !== undefined) {
+        next.stuckMinutes = validatedTimingMinutes(settings.stuckMinutes, "stuckMinutes");
     }
     writeConfigSettings(next, path);
 }

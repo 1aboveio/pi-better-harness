@@ -43,14 +43,22 @@ import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
 import {
     decideTiming,
     describeTiming,
+    DEFAULT_TIMING_MINUTES,
     emptyProgress,
     foldProgress,
     formatTimingLimits,
+    isTimingMinutes,
     isProgressRelevantLine,
     resolveRunTiming,
     steerText,
+    stuckAlertText,
+    TIMING_ENV,
     timingParameterSchemas,
+    toolWaitAlertText,
+    validatedTimingMinutes,
+    type OpenCallRecord,
     type ProgressState,
+    type TimingSettings,
     type TimingParams,
     type TimingStopReason,
 } from "./timing.ts";
@@ -222,13 +230,15 @@ import { defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
 import { restrictContextFilesToWorktree } from "./shared-worktree-context.ts";
 
 const SUBAGENT_MODE_ACTIONS: readonly AutocompleteItem[] = [
-    { value: "settings", label: "settings", description: "Open delegation mode and concurrency settings" },
+    { value: "settings", label: "settings", description: "Open delegation, concurrency, and timing settings" },
     { value: "cap", label: "cap <number>", description: "Set a positive concurrent subagent limit for this session" },
-    { value: "reset", label: "reset", description: "Reset session mode and cap to saved defaults" },
+    { value: "tool-wait", label: "tool-wait <minutes>", description: "Set the session tool-wait alert time; 0 turns it off" },
+    { value: "stuck", label: "stuck <minutes>", description: "Set the session no-progress alert time; 0 turns it off" },
+    { value: "reset", label: "reset", description: "Reset session mode, cap, and timing alerts to saved defaults" },
     { value: "mode manual", label: "mode manual", description: "Delegate only when explicitly requested" },
     { value: "mode adaptive", label: "mode adaptive", description: "Delegate substantial independent work" },
     { value: "mode coordinator", label: "mode coordinator", description: "Delegate role-owned work by default" },
-    { value: "save", label: "save", description: "Save the current mode and cap as defaults" },
+    { value: "save", label: "save", description: "Save the current mode, cap, and timing alerts as defaults" },
 ];
 
 export function subagentsArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
@@ -827,7 +837,9 @@ function readProgress(meta: RunMeta): ProgressState {
     const read = readAppendedLines(logPathFor(meta.id), entry?.cursor);
     // A fresh (or restarted) fold may have lost the start of a call that is still
     // running: seed it from the durable record rather than reporting silence.
-    if (!entry || read.restarted) entry = { state: emptyProgress(meta.startedAt, meta.timing?.inFlight) };
+    if (!entry || read.restarted) {
+        entry = { state: emptyProgress(meta.startedAt, meta.timing?.openCalls ?? meta.timing?.inFlight) };
+    }
     if (read.error === undefined) entry.cursor = read.cursor;
     for (const line of read.lines) {
         if (!isProgressRelevantLine(line)) continue;
@@ -867,11 +879,19 @@ function fmtWindow(ms: number): string {
     return minutes >= 1 ? `${minutes}m` : `${Math.max(1, Math.round(ms / 1000))}s`;
 }
 
+function sameOpenCalls(a: readonly OpenCallRecord[] | undefined, b: readonly OpenCallRecord[]): boolean {
+    return a !== undefined && a.length === b.length && a.every((call, index) => {
+        const next = b[index];
+        return next !== undefined && call.id === next.id && call.since === next.since
+            && call.name === next.name && call.command === next.command;
+    });
+}
+
 /**
  * One parent wake for a timing event. The marker records a handoff (or an
  * intentional suppression), so reloads and later ticks never repeat it.
  */
-function deliverTimingWake(pi: ExtensionAPI | undefined, meta: RunMeta, kind: "deadline" | "stuck", key: string,
+function deliverTimingWake(pi: ExtensionAPI | undefined, meta: RunMeta, kind: "deadline" | "stuck" | "tool-wait", key: string,
     content: string, isHandled: (current: RunMeta) => boolean, markHandled: (at: number) => void): void {
     if (!callbackSuppressionReason(meta)) {
         try { uiCtx?.ui.notify(content, "warning"); } catch { /* ignore */ }
@@ -942,22 +962,39 @@ function enforceTiming(pi: ExtensionAPI | undefined, meta: RunMeta, now: number)
         return timing.ceilingAt !== undefined && now >= timing.ceilingAt ? stopForTiming(pi, meta.id, "ceiling", now) : false;
     }
     if (meta.status !== "running") return false;
-    // Progress is folded whenever a control can use it: the stuck window, or a deadline whose
-    // steer must be held behind a running call (the record of that call must exist before the
-    // deadline, not only after it).
-    const needsProgress = timing.stuckMs !== undefined || timing.deadlineAt !== undefined;
+    // Progress is folded whenever a control can use it: the stuck or tool-wait
+    // window, or a deadline whose steer must be held behind a running call (the
+    // record of that call must exist before the deadline, not only after it).
+    const needsProgress = timing.stuckMs !== undefined || timing.toolWaitMs !== undefined || timing.deadlineAt !== undefined;
     const progress = needsProgress ? readProgress(meta) : undefined;
     const patch: Partial<NonNullable<RunMeta["timing"]>> = {};
     if (progress?.lastProgressAt !== undefined && progress.lastProgressAt > (timing.lastProgressAt ?? 0)) patch.lastProgressAt = progress.lastProgressAt;
     if (progress) {
-        // Durable still-alive evidence: the call the child is waiting on. Survives a
-        // reload whose bounded log read no longer contains the call's start (#620).
-        const openId = progress.open.keys().next().value as string | undefined;
-        const since = progress.inFlightSince ?? progress.lastEventAt ?? meta.startedAt;
+        const openCalls: OpenCallRecord[] = [...progress.open.entries()].map(([id, call]) => ({
+            id, since: call.startedAt,
+            ...(call.name ? { name: call.name } : {}),
+            ...(call.command !== undefined ? { command: call.command.slice(0, 200) } : {}),
+        }));
+        const first = openCalls[0];
+        const openId = first?.id;
+        const since = progress.inFlightSince ?? first?.since ?? progress.lastEventAt ?? meta.startedAt;
+        // Durable still-alive evidence: every call the child is waiting on. Survives a
+        // reload whose bounded log read no longer contains a call's start (#620).
+        if (openCalls.length > 0) {
+            if (!sameOpenCalls(timing.openCalls, openCalls)) patch.openCalls = openCalls;
+        } else if (timing.openCalls !== undefined) {
+            patch.openCalls = undefined;
+        }
         if (openId === undefined) {
             if (timing.inFlight !== undefined) patch.inFlight = undefined;
         } else if (timing.inFlight?.id !== openId || timing.inFlight.since !== since) {
             patch.inFlight = { id: openId, since };
+        }
+        // A finished call needs no marker. Keeping only live call ids bounds the record.
+        const openIds = new Set(openCalls.map((call) => call.id));
+        const alerted = (timing.toolWaitAlerted ?? []).filter((id) => openIds.has(id));
+        if (alerted.length !== (timing.toolWaitAlerted ?? []).length) {
+            patch.toolWaitAlerted = alerted.length > 0 ? alerted : undefined;
         }
     }
     if (timing.steerRequestedAt !== undefined && timing.steerDeliveredAt === undefined) {
@@ -980,17 +1017,44 @@ function enforceTiming(pi: ExtensionAPI | undefined, meta: RunMeta, now: number)
         deliverTimingWake(pi, meta, "deadline", "deadline",
             `Subagent ${timingLabel(meta)} reached its ${limit} soft deadline. The harness told it to stop starting new work, ` +
             `commit what is done, and report. The message reaches it after its current tool call; if it has not finished ${fmtWindow(t.graceMs)} after that, ` +
-            `the harness stops it (reason: deadline). ` +
-            `Its completion or stop is reported here; no action is needed now.`,
+            `the harness stops it (reason: deadline).`,
             (current) => current.timing?.deadlineWakeSentAt !== undefined,
             (at) => { patchTiming(meta.id, { deadlineWakeSentAt: at }); });
     }
+    for (const wake of actions.toolWaitWakes ?? []) {
+        const lastProgressAt = Math.max(progress?.lastProgressAt ?? 0, meta.timing?.lastProgressAt ?? 0) || undefined;
+        const content = toolWaitAlertText({
+            id: meta.id,
+            label: timingLabel(meta),
+            callId: wake.callId,
+            toolName: wake.name ?? "",
+            ...(wake.command !== undefined ? { command: wake.command } : {}),
+            openMs: wake.ageMs,
+            thresholdMs: meta.timing?.toolWaitMs ?? wake.ageMs,
+            now,
+            ...(lastProgressAt !== undefined ? { lastProgressAt } : {}),
+            logPath: meta.logPath,
+        });
+        deliverTimingWake(pi, meta, "tool-wait", `tool-wait:${wake.callId}`, content,
+            (current) => (current.timing?.toolWaitAlerted ?? []).includes(wake.callId),
+            () => {
+                const current = readMeta(meta.id);
+                const alerted = current?.timing?.toolWaitAlerted ?? [];
+                if (!alerted.includes(wake.callId)) {
+                    patchTiming(meta.id, { toolWaitAlerted: [...alerted, wake.callId] });
+                }
+            });
+    }
     if (actions.stuckWake) {
         const { anchorAt, ageMs } = actions.stuckWake;
+        const lastProgressAt = Math.max(progress?.lastProgressAt ?? 0, meta.timing?.lastProgressAt ?? 0) || undefined;
         deliverTimingWake(pi, meta, "stuck", `stuck:${anchorAt}`,
-            `Subagent ${timingLabel(meta)} looks stuck: no progress for ${fmtWindow(ageMs)}. Its successful tool calls, if any, only repeated earlier calls ` +
-            `(same tool, same arguments), for example re-reading the same file or re-running the same command; time inside running tool calls is not counted. ` +
-            `It is still running and will not be stopped for this; this is reported once. Inspect it with subagent_output before deciding to stop it.`,
+            stuckAlertText({
+                id: meta.id, label: timingLabel(meta), ageMs,
+                windowMs: meta.timing?.stuckMs ?? ageMs, now,
+                ...(lastProgressAt !== undefined ? { lastProgressAt } : {}),
+                logPath: meta.logPath,
+            }),
             (current) => current.timing?.stuckWakeSentAt !== undefined && (current.timing.stuckAnchorAt ?? 0) >= anchorAt,
             (at) => { patchTiming(meta.id, { stuckWakeSentAt: at, stuckAnchorAt: anchorAt }); });
     }
@@ -2018,6 +2082,7 @@ export default function (pi: ExtensionAPI) {
     let catalogModelRegistry: ExtensionContext["modelRegistry"] | undefined;
     let delegationOverride: DelegationMode | undefined;
     let capOverride: number | undefined;
+    let timingOverride: { toolWaitMinutes?: number; stuckMinutes?: number } = {};
     interface SkillSelection { mode: SkillExposureMode; paths: string[] }
     let skillsOverride: SkillSelection | undefined;
     const savedSkills = (): SkillSelection & { source: "config" | "default"; error?: string } => {
@@ -2062,10 +2127,59 @@ export default function (pi: ExtensionAPI) {
         return { value: skillsOverride.mode === "none" ? [] : [...skillsOverride.paths] };
     };
     const activeConcurrencyCap = (): number => capOverride ?? normalizeConcurrencyCap(loadConfig().maxConcurrent);
+    const timingSettingsFor = (cfg = loadConfig()): TimingSettings => ({ ...cfg, ...timingOverride });
+    interface TimingMinutesState {
+        toolWaitMinutes: number;
+        stuckMinutes: number;
+        toolWaitSource: "environment" | "session" | "config" | "default";
+        stuckSource: "environment" | "session" | "config" | "default";
+        defaultToolWaitMinutes: number;
+        defaultStuckMinutes: number;
+        timingError?: string;
+    }
+    const timingState = (): TimingMinutesState => {
+        const cfg = loadConfig();
+        const envFor = (key: "toolWaitMinutes" | "stuckMinutes"): string | undefined => {
+            const raw = key === "toolWaitMinutes" ? process.env[TIMING_ENV.toolWait] : process.env[TIMING_ENV.stuck];
+            return raw !== undefined && raw.trim() !== "" ? raw : undefined;
+        };
+        const sourceFor = (key: "toolWaitMinutes" | "stuckMinutes"): "environment" | "session" | "config" | "default" =>
+            envFor(key) !== undefined ? "environment"
+                : timingOverride[key] !== undefined ? "session"
+                    : cfg[key] !== undefined && cfg[key] !== null ? "config" : "default";
+        try {
+            const effective = resolveRunTiming({ settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
+            const defaults = resolveRunTiming({ settings: cfg, env: process.env, startedAt: 0 });
+            const minutes = (ms: number | undefined): number => ms === undefined ? 0 : ms / 60_000;
+            return {
+                toolWaitMinutes: minutes(effective.toolWaitMs),
+                stuckMinutes: minutes(effective.stuckMs),
+                toolWaitSource: sourceFor("toolWaitMinutes"),
+                stuckSource: sourceFor("stuckMinutes"),
+                defaultToolWaitMinutes: minutes(defaults.toolWaitMs),
+                defaultStuckMinutes: minutes(defaults.stuckMs),
+            };
+        } catch (error) {
+            return {
+                toolWaitMinutes: DEFAULT_TIMING_MINUTES.toolWait,
+                stuckMinutes: DEFAULT_TIMING_MINUTES.stuck,
+                toolWaitSource: sourceFor("toolWaitMinutes"),
+                stuckSource: sourceFor("stuckMinutes"),
+                defaultToolWaitMinutes: DEFAULT_TIMING_MINUTES.toolWait,
+                defaultStuckMinutes: DEFAULT_TIMING_MINUTES.stuck,
+                timingError: error instanceof Error ? error.message : String(error),
+            };
+        }
+    };
     const changeCap = (cap: number): void => {
         if (!isConcurrencyCap(cap)) throw new Error("Concurrent subagents must be a positive whole number.");
         capOverride = cap;
         pi.appendEntry("pi-better-subagents-cap", { version: 1, maxConcurrent: cap });
+    };
+    const changeTiming = (key: "toolWaitMinutes" | "stuckMinutes", minutes: number): void => {
+        const value = validatedTimingMinutes(minutes, key);
+        timingOverride = { ...timingOverride, [key]: value };
+        pi.appendEntry("pi-better-subagents-timing", { version: 1, ...timingOverride });
     };
     const changeMode = (mode: DelegationMode): void => {
         delegationOverride = mode;
@@ -2074,9 +2188,11 @@ export default function (pi: ExtensionAPI) {
     const resetSettings = (): void => {
         capOverride = undefined;
         delegationOverride = undefined;
+        timingOverride = {};
         skillsOverride = undefined;
         pi.appendEntry("pi-better-subagents-cap", { version: 1, maxConcurrent: null });
         pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: null });
+        pi.appendEntry("pi-better-subagents-timing", { version: 1, toolWaitMinutes: null, stuckMinutes: null });
         pi.appendEntry("pi-better-subagents-skills", { version: 1, mode: null });
     };
     const activeDelegationMode = (): DelegationMode => delegationOverride ?? normalizeDelegationMode(loadConfig().delegationMode);
@@ -2104,11 +2220,19 @@ export default function (pi: ExtensionAPI) {
             .finally(() => syncHealthTicker());
         return true;
     };
-    const effectiveSettings = () => effectiveSubagentSettings({
-        delegationMode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap(),
-        sources: { delegationMode: delegationOverride ? "session" : "config",
-            maxConcurrent: capOverride !== undefined ? "session" : "config" },
-    }, countRunning(), getSharedCapacityGate(countRunning).pending);
+    const effectiveSettings = () => {
+        const timing = timingState();
+        return effectiveSubagentSettings({
+            delegationMode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap(),
+            sources: { delegationMode: delegationOverride ? "session" : "config",
+                maxConcurrent: capOverride !== undefined ? "session" : "config" },
+            timing: {
+                toolWaitMinutes: timing.toolWaitMinutes, stuckMinutes: timing.stuckMinutes,
+                sources: { toolWaitMinutes: timing.toolWaitSource, stuckMinutes: timing.stuckSource },
+                ...(timing.timingError ? { error: timing.timingError } : {}),
+            },
+        }, countRunning(), getSharedCapacityGate(countRunning).pending);
+    };
     const saveSettings = (): { ok: boolean; message: string } => {
         try {
             const skills = activeSkills();
@@ -2125,11 +2249,26 @@ export default function (pi: ExtensionAPI) {
             // Saving mode and cap must not write a skill key into a config that
             // never had one. Discovery only replaces a saved choice when a saved
             // skill value already exists.
-            const savedSkillValue = loadConfig().defaultSkills;
+            const cfg = loadConfig();
+            const savedSkillValue = cfg.defaultSkills;
             const hasSavedSkillChoice = savedSkillValue !== undefined && savedSkillValue !== null;
+            // Like skills, only save a timing key this session overrides or the
+            // config already carries; built-in defaults need no stored copy.
+            const savedTiming: { toolWaitMinutes?: number; stuckMinutes?: number } = {};
+            if (timingOverride.toolWaitMinutes !== undefined) {
+                savedTiming.toolWaitMinutes = timingOverride.toolWaitMinutes;
+            } else if (isTimingMinutes(cfg.toolWaitMinutes)) {
+                savedTiming.toolWaitMinutes = cfg.toolWaitMinutes;
+            }
+            if (timingOverride.stuckMinutes !== undefined) {
+                savedTiming.stuckMinutes = timingOverride.stuckMinutes;
+            } else if (isTimingMinutes(cfg.stuckMinutes)) {
+                savedTiming.stuckMinutes = cfg.stuckMinutes;
+            }
             writeSubagentSettings({
                 delegationMode: activeDelegationMode(),
                 maxConcurrent: activeConcurrencyCap(),
+                ...savedTiming,
                 ...(skills.mode === "inherit" && !hasSavedSkillChoice ? {} : {
                     // null is an explicit discovery choice; it must override a saved path list.
                     defaultSkills: skills.mode === "inherit" ? null : [...skills.paths],
@@ -2163,6 +2302,7 @@ export default function (pi: ExtensionAPI) {
     const restoreDelegationMode = (ctx: ExtensionContext): void => {
         delegationOverride = undefined;
         capOverride = undefined;
+        timingOverride = {};
         skillsOverride = undefined;
         const branch = ctx.sessionManager?.getBranch?.();
         if (!Array.isArray(branch)) return;
@@ -2185,6 +2325,17 @@ export default function (pi: ExtensionAPI) {
                     && data.paths.every((path): path is string => typeof path === "string" && isAbsolute(path))) {
                     skillsOverride = { mode: "explicit", paths: [...data.paths] };
                 }
+                continue;
+            }
+            if (entry.type === "custom" && entry.customType === "pi-better-subagents-timing") {
+                const data = entry.data as {
+                    version?: unknown; toolWaitMinutes?: unknown; stuckMinutes?: unknown;
+                } | null;
+                if (data?.version !== 1) continue;
+                const next: { toolWaitMinutes?: number; stuckMinutes?: number } = {};
+                if (isTimingMinutes(data.toolWaitMinutes)) next.toolWaitMinutes = data.toolWaitMinutes;
+                if (isTimingMinutes(data.stuckMinutes)) next.stuckMinutes = data.stuckMinutes;
+                timingOverride = next;
                 continue;
             }
             if (entry.type !== "custom" || entry.customType !== "pi-better-subagents-delegation") continue;
@@ -2386,8 +2537,8 @@ export default function (pi: ExtensionAPI) {
             );
         }
         const cfg = loadConfig();
-        // Harness-owned timing (soft deadline, ceiling, stuck window); validated before any side effect.
-        resolveRunTiming({ params: p, settings: cfg, env: process.env, startedAt: 0 });
+        // Harness-owned timing (soft deadline, ceiling, tool-wait and stuck windows); validated before any side effect.
+        resolveRunTiming({ params: p, settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
         let model: string | undefined;
         let thinking: ThinkingLevel | undefined;
         if (resume) {
@@ -2784,7 +2935,7 @@ export default function (pi: ExtensionAPI) {
                     authorityReference: "",
                     // The assignment deadline the attempt was admitted with; a
                     // continuation must not silently extend it.
-                    deadlineAt: resolveRunTiming({ params: p, settings: cfg, env: process.env, startedAt: Date.now() }).deadlineAt ?? null,
+                    deadlineAt: resolveRunTiming({ params: p, settings: timingSettingsFor(cfg), env: process.env, startedAt: Date.now() }).deadlineAt ?? null,
                     taskPolicy: taskRuntime?.policy ?? null,
                 });
                 const authorityReference = `worker-policy:${createHash("sha256")
@@ -2923,7 +3074,7 @@ export default function (pi: ExtensionAPI) {
                         tools: bridgePlan.tools,
                     },
                 } : {}),
-                timing: resolveRunTiming({ params: p, settings: cfg, env: process.env, startedAt }),
+                timing: resolveRunTiming({ params: p, settings: timingSettingsFor(cfg), env: process.env, startedAt }),
             };
             // This instance holds the exit observer for a run it actually
             // started; only it can finalize on the exit event (#625).
@@ -3173,6 +3324,7 @@ export default function (pi: ExtensionAPI) {
             ...(timing.deadlineAt !== undefined ? { deadline_minutes: minutes(timing.deadlineAt) } : {}),
             ...(timing.ceilingAt !== undefined ? { max_minutes: minutes(timing.ceilingAt) } : {}),
             ...(timing.graceMs !== undefined ? { grace_minutes: timing.graceMs / 60_000 } : {}),
+            ...(timing.toolWaitMs !== undefined ? { tool_wait_minutes: timing.toolWaitMs / 60_000 } : {}),
             ...(timing.stuckMs !== undefined ? { stuck_minutes: timing.stuckMs / 60_000 } : {}),
         };
     }
@@ -3263,7 +3415,7 @@ export default function (pi: ExtensionAPI) {
             "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. When the task already names its SKILL.md by path, pass skills with those absolute paths (or [] for none) so the child does not advertise the whole skills catalog. Without an agent or role, pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
             ...CATALOG_GUIDELINES,
             "Subagent sandboxing defaults to off. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Set sandbox:true to request kernel confinement, including without published settings. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
-            "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. No progress for stuck_minutes (default 10) wakes you once without stopping the run. Elapsed-time limits are opt-in: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace. Do not set elapsed-time limits merely because a task may take a while; use them only when the work needs a real wall-clock bound.",
+            "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. A tool call still open for tool_wait_minutes (default 5) or no progress for stuck_minutes (default 10) sends one factual alert; these alerts never stop, cancel, or restart the run. Elapsed-time limits are opt-in for work with a real wall-clock bound: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
             "Saved conversations persist automatically. To continue a completed or stopped worker in its own history, call subagent_spawn with session_id (the native session id reported for the saved conversation) and the new feedback as prompt. Omit session_id for a brand-new conversation.",
             "On a continuation, pass prompt, session_id, and only optional model, thinking, callback, or timing overrides. Launch-only options (name, agent, role, alias, tools, exclude_tools, skills, clean, sandbox, sandbox_dir, cwd, git_clone_workspace, approve, allow_nested) keep the saved recipe; repeat them only with the same value, otherwise the launch is refused.",
@@ -3333,6 +3485,7 @@ export default function (pi: ExtensionAPI) {
                         deadline_minutes: p.deadline_minutes,
                         grace_minutes: p.grace_minutes,
                         max_minutes: p.max_minutes,
+                        tool_wait_minutes: p.tool_wait_minutes,
                         stuck_minutes: p.stuck_minutes,
                     };
                     const { id, spawned, runtime, warn, sandboxDir, modelNote } = await spawnSubagentRun(
@@ -3758,17 +3911,24 @@ export default function (pi: ExtensionAPI) {
                 get: () => {
                     const settings = effectiveSettings();
                     const skills = activeSkills();
+                    const timing = timingState();
                     return {
                         mode: settings.delegationMode, maxConcurrent: settings.maxConcurrent,
                         modeSource: settings.sources.delegationMode,
                         capSource: settings.sources.maxConcurrent,
                         defaultMode: normalizeDelegationMode(loadConfig().delegationMode),
                         defaultCap: normalizeConcurrencyCap(loadConfig().maxConcurrent),
+                        toolWaitMinutes: settings.toolWaitMinutes, stuckMinutes: settings.stuckMinutes,
+                        toolWaitSource: settings.timingSources.toolWaitMinutes,
+                        stuckSource: settings.timingSources.stuckMinutes,
+                        defaultToolWaitMinutes: timing.defaultToolWaitMinutes,
+                        defaultStuckMinutes: timing.defaultStuckMinutes,
+                        ...(settings.timingError ? { timingError: settings.timingError } : {}),
                         skillsMode: skills.mode, skillsPaths: skills.paths, skillsSource: skills.source,
                         skillsError: skills.error,
                     };
                 },
-                changeMode, changeCap, changeSkills, save: saveSettings, reset: resetSettings,
+                changeMode, changeCap, changeTiming, changeSkills, save: saveSettings, reset: resetSettings,
                 discoverSkills: () => discoveredSkillsFromContext(ctx),
                 // Close this page first; the catalog opens after ui.custom resolves.
                 openAgents: () => done("agents"),
@@ -3778,7 +3938,10 @@ export default function (pi: ExtensionAPI) {
             const skills = activeSkills();
             const skillChoice = skills.mode === "inherit" ? "discovery"
                 : skills.mode === "none" ? "no skills" : `${skills.paths.length} selected skills`;
-            ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. Skills: ${skillChoice}. Use /subagents mode <mode>, cap <number>, or settings; /subagents save persists them.`, "info");
+            const timing = timingState();
+            ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. ` +
+                `Tool-wait alert: ${timing.toolWaitMinutes} min. No-progress alert: ${timing.stuckMinutes} min. Skills: ${skillChoice}. ` +
+                `Use /subagents mode <mode>, cap <number>, tool-wait <minutes>, stuck <minutes>, or settings; /subagents save persists them.`, "info");
         }
     };
     const contribution = { id: "subagents", label: "Subagents", command: "/subagents settings", open: openSettings };
@@ -3793,7 +3956,7 @@ export default function (pi: ExtensionAPI) {
     if (typeof pi.registerCommand === "function") {
         agentOperations.registerCommands(pi);
         pi.registerCommand("subagents", {
-            description: "[settings|mode manual|adaptive|coordinator|cap <number>|save|reset] — Subagent settings",
+            description: "[settings|mode manual|adaptive|coordinator|cap <number>|tool-wait <minutes>|stuck <minutes>|save|reset] — Subagent settings",
             getArgumentCompletions: subagentsArgumentCompletions,
             async handler(args, ctx) {
                 const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -3810,7 +3973,10 @@ export default function (pi: ExtensionAPI) {
                     }
                     const skillChoice = skills.mode === "inherit" ? "skill discovery"
                         : skills.mode === "none" ? "no skills" : `${skills.paths.length} selected skills`;
-                    if (ctx.hasUI && !(await ctx.ui.confirm("Save subagent defaults?", `Future sessions will start in ${activeDelegationMode()} with a cap of ${activeConcurrencyCap()} and ${skillChoice}.`))) {
+                    const timing = timingState();
+                    if (ctx.hasUI && !(await ctx.ui.confirm("Save subagent defaults?",
+                        `Future sessions will start in ${activeDelegationMode()} with a cap of ${activeConcurrencyCap()}, ` +
+                        `tool-wait alert ${timing.toolWaitMinutes} min, no-progress alert ${timing.stuckMinutes} min, and ${skillChoice}.`))) {
                         ctx.ui.notify("Subagent defaults unchanged.", "info");
                         return;
                     }
@@ -3830,8 +3996,19 @@ export default function (pi: ExtensionAPI) {
                     }
                     changeCap(cap);
                     ctx.ui.notify(`Concurrent subagents: ${cap} (current session). Running subagents are unchanged.`, "info");
+                } else if (tokens.length === 2 && (tokens[0] === "tool-wait" || tokens[0] === "stuck")) {
+                    const key = tokens[0] === "tool-wait" ? "toolWaitMinutes" : "stuckMinutes";
+                    let minutes: number;
+                    try {
+                        minutes = validatedTimingMinutes(requested, key);
+                    } catch (error) {
+                        ctx.ui.notify(`${error instanceof Error ? error.message : String(error)} Nothing changed.`, "warning");
+                        return;
+                    }
+                    changeTiming(key, minutes);
+                    ctx.ui.notify(`${tokens[0] === "tool-wait" ? "Tool-wait" : "No-progress"} alert: ${minutes} min (current session). Running subagents are unchanged.`, "info");
                 } else {
-                    ctx.ui.notify("Usage: /subagents [settings|mode manual|adaptive|coordinator|cap <number>|save|reset]", "warning");
+                    ctx.ui.notify("Usage: /subagents [settings|mode manual|adaptive|coordinator|cap <number>|tool-wait <minutes>|stuck <minutes>|save|reset]", "warning");
                 }
                 refreshBackgroundWorkNavigator(ctx);
             },

@@ -3,7 +3,7 @@
 ## Status
 
 Accepted, 2026-09-27. Amended to disable wall-clock limits by default while
-retaining default-on stall detection.
+retaining default-on tool-wait and stall alerts.
 
 ## Problem
 
@@ -15,16 +15,17 @@ The subagent harness, not skills or prompts, owns timeouts and stuck detection. 
 
 - **Soft deadline** (default off): when configured, one steering message enters the child session through Pi's steer queue (stop starting new work, commit what is done, report) and the parent gets one wake. Pi delivers a steer only after the current tool call, so **grace** (default 5 min) starts when the steer enters the child's conversation, recorded by a receipt the child's harness extension writes; while it waits behind a running tool call, the deadline stop is held. An unfinished run is then stopped and reported through the ordinary completion callback with reason `deadline`. Counting grace from the request would have killed a test run started just before the deadline, which is the incident above.
 - **Hard ceiling** (default off): when configured, the run is stopped at once, without grace, reason `ceiling`. It bounds a tool call that never ends and applies to orphaned runs this parent still supervises.
+- **Tool-wait wake** (default 5 min): one factual parent wake for each tool call that stays open that long. A normal long test alerts too; the alert is not a failure verdict. Parallel calls alert independently, and a durable once-per-call marker prevents a reload, event replay, or later supervision tick from repeating the same alert. A failed handoff leaves the marker unset, so the existing urgent-callback retry path sends it again. The alert never cancels a tool, stops or restarts the run, or changes an explicitly configured deadline or ceiling.
 - **Stuck wake** (default 10 min without progress): one parent wake per stuck spell, reason `stuck`; never a stop. Progress is any successful tool call that is not an exact repeat of an earlier call in the run (same tool name and arguments, null and absent optional fields treated alike as in #336); file-mutating tools (edit, write, multi_edit, apply_patch, str_replace, and the like), `git commit`, and a success after a failure always count. Time inside a running tool call does not count. Seen calls are remembered as fixed-size hashes, at most 4096 per run, oldest forgotten first. The existing "same operation failed three times" incident remains the other stuck signal.
 
-Spawn parameters override the defaults; environment and `config.json` set them globally. The steer reaches the child through a request file in the run directory and a small harness extension loaded into every child that registers no tools and runs no commands. The parent evaluates timing on its supervision tick and records each one-shot event (steer, wake, stop reason) in run metadata, so `/reload` neither loses the deadline nor repeats a wake.
+Spawn parameters override the defaults; environment and `config.json` set them globally, and `/subagents settings` exposes the tool-wait and no-progress times for session edits and Ctrl+S defaults. The steer reaches the child through a request file in the run directory and a small harness extension loaded into every child that registers no tools and runs no commands. The parent evaluates timing on its supervision tick and records each one-shot event (steer, wake per call/spell, stop reason) in run metadata, so `/reload` neither loses the deadline nor repeats a wake. Tool-wait and stuck alerts report facts (run identity, category, duration, current operation, available evidence and last progress) without prescribing whether the parent should inspect, continue, stop, or retry.
 
 ## Consequences
 
 - A slow child that is still working is not stopped merely because elapsed time crossed a generic limit. Callers can opt into a deadline or ceiling when the task has a real wall-clock bound.
 - The stop reason is a lifecycle fact shown on list, output, result, and callbacks; it is not a failure observation (ADR 0006 keeps lifecycle and observations separate).
 - Read-only work (review, research) counts as progress while its calls are new; a child that loops on the same call does not. An earlier draft counted only edits, writes, and commits, which would have flagged every long review; this was rejected.
-- A command that hangs forever does not count as stuck (it is waiting); only an explicitly configured deadline or ceiling bounds it.
+- A command that hangs forever does not count as stuck (it is waiting). The tool-wait wake reports how long it has been open without inferring failure; only an explicitly configured deadline or ceiling stops it.
 - Runs launched before this change have no timing record and are not timed.
 - Timing is enforced by the parent that launched the run. When that parent dies, another Pi session adopts the run for status only (it does not deliver callbacks or stop work it did not launch), so the ceiling of a run whose parent is gone is not enforced; `session_shutdown` already stops a session's own children, which leaves only a parent crash uncovered.
 - A batch job's `null` timing value inherits the `shared` value, then the default, like its other options.
