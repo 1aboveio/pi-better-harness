@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1298,18 +1298,23 @@ describe("durable read-only projections", () => {
       let changes = 0;
       const off = host.onDurableTaskChange(() => { changes += 1; });
       try {
-        const otherProcess = openStore({ path: join(root, "operations.sqlite") });
-        try {
-          otherProcess.recordTerminalOutcome({
-            operationId: launch.operationId,
-            eventId: "cross-process-terminal",
-            outcome: "succeeded",
-            owner: launch.owner,
-            evidence: [{ kind: "terminal-record", ref: "cross/result.json", summary: "exit 0" }],
-          });
-        } finally {
-          otherProcess.close();
-        }
+        const storeModule = new URL("./shared-operation-coordinator/index.ts", import.meta.url).href;
+        const child = spawnSync(process.execPath, ["--import", "tsx", "-e", `
+          import { openStore } from ${JSON.stringify(storeModule)};
+          const store = openStore({ path: ${JSON.stringify(join(root, "operations.sqlite"))} });
+          try {
+            store.recordTerminalOutcome({
+              operationId: ${JSON.stringify(launch.operationId)},
+              eventId: "cross-process-terminal",
+              outcome: "succeeded",
+              owner: ${JSON.stringify(launch.owner)},
+              evidence: [{ kind: "terminal-record", ref: "cross/result.json", summary: "exit 0" }],
+            });
+          } finally {
+            store.close();
+          }
+        `], { cwd: process.cwd(), encoding: "utf8", timeout: 60_000 });
+        expect(child.status, child.stderr || child.stdout).toBe(0);
         const beforeReconcile = changes;
         host.resetDurableProjectionMetrics();
         await host.reconcileNow();
