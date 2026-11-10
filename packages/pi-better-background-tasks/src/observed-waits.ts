@@ -126,6 +126,20 @@ const HOST_INSTANCE_STATE = (() => {
 })();
 const LOCAL_DURABLE_ID = /^bgs_[0-9a-f]{20}$/;
 const DEFAULT_POLL_MS = 250;
+/**
+ * A cached projection survives unchanged renders. Host notifications invalidate
+ * it immediately; this bound only recovers changes whose notification was lost
+ * or came from a process this host never observed. It is not a render cadence.
+ */
+const DURABLE_PROJECTION_CACHE_MS = 5_000;
+
+/** Observable work performed by {@link ObservedWaitHost.listDurableTasks}. */
+export interface DurableProjectionMetrics {
+  listCalls: number;
+  rowsRead: number;
+  projectionsBuilt: number;
+  cacheHits: number;
+}
 
 /** A parent launch is always local; remote launches stay on the legacy task route. */
 export type DurableTaskKind = "process" | "watch";
@@ -836,6 +850,19 @@ export class ObservedWaitHost {
   private readonly watchedRunningTasks = new Set<string>();
   /** Durable sidecars discovered in this supervisor directory. */
   private readonly discoveredTaskSidecars = new Set<string>();
+  private durableProjectionCache?: {
+    readonly originKey: string;
+    readonly key: string;
+    readonly at: number;
+    readonly list: DurableTaskProjection[];
+    readonly byTask: Map<string, DurableTaskProjection>;
+  };
+  private projectionMetrics: DurableProjectionMetrics = {
+    listCalls: 0,
+    rowsRead: 0,
+    projectionsBuilt: 0,
+    cacheHits: 0,
+  };
   private continuation?: ContinuationAdapter;
   private continuationError?: string;
   private readonly launches = new Map<string, LaunchContext>();
@@ -965,6 +992,7 @@ export class ObservedWaitHost {
     this.pendingTerminalCallbacks.clear();
     this.watchedRunningTasks.clear();
     this.discoveredTaskSidecars.clear();
+    this.durableProjectionCache = undefined;
     this.writeHostDebug();
     this.announceUnavailable("the Background operation host closed");
   }
@@ -995,6 +1023,7 @@ export class ObservedWaitHost {
     if (!store) return;
     let names: string[];
     try { names = readdirSync(join(this.directory, "observed")); } catch { return; }
+    let discovered = false;
     for (const name of names) {
       if (!name.endsWith(".json") || name === "host.json") continue;
       const taskId = name.slice(0, -5);
@@ -1002,6 +1031,7 @@ export class ObservedWaitHost {
       const operation = this.operationForTask(taskId);
       if (!operation) continue; // registration may land on the next tick
       this.discoveredTaskSidecars.add(taskId);
+      discovered = true;
       if (operation.terminalRevision > 0) {
         this.attemptTerminalCallback(
           operation,
@@ -1014,6 +1044,10 @@ export class ObservedWaitHost {
         this.watchedRunningTasks.add(taskId);
       }
     }
+    // A task launched by another Pi process became visible in this host's
+    // supervisor directory. The navigator must refresh without waiting for a
+    // render to rediscover it, and its cached projections are now stale.
+    if (discovered) this.emitDurableTaskChange();
   }
 
   /**
@@ -1062,11 +1096,13 @@ export class ObservedWaitHost {
     this.discoverObservedTasks();
     const running = this.store.listOperations({ phase: "running" });
     const runningIds = new Set(running.map((operation) => operation.taskId));
+    let projectionChanged = false;
     for (const taskId of [...this.watchedRunningTasks]) {
       if (runningIds.has(taskId)) continue;
       this.watchedRunningTasks.delete(taskId);
       const operation = this.operationForTask(taskId);
       if (operation && operation.terminalRevision > 0) {
+        projectionChanged = true;
         // Another host may have recorded the terminal result without a live
         // owner context. This host watched the operation, so recover its callback
         // now that the active branch/identity can authorize the handoff.
@@ -1079,6 +1115,7 @@ export class ObservedWaitHost {
         );
       }
     }
+    if (projectionChanged) this.emitDurableTaskChange();
     for (const operation of running) {
       this.watchedRunningTasks.add(operation.taskId);
       this.reconcileOperation(operation);
@@ -1262,12 +1299,25 @@ export class ObservedWaitHost {
     const store = this.store;
     if (!store || this.closed) return [];
     if (!origin.sessionId) return [];
+    this.projectionMetrics.listCalls += 1;
     const now = this.options.now?.() ?? Date.now();
+    const originKey = `${origin.cwd}\0${origin.sessionId}`;
+    const cacheKey = `${originKey}\0${options.retentionMs ?? ""}\0${options.includeDismissed === true ? 1 : 0}`;
+    const cached = this.durableProjectionCache;
+    if (cached && cached.key === cacheKey && now >= cached.at && now - cached.at < DURABLE_PROJECTION_CACHE_MS) {
+      this.projectionMetrics.cacheHits += 1;
+      if (options.retentionMs === undefined) return cached.list;
+      const live = cached.list.filter((projection) => !this.expiredProjection(projection, options, now));
+      return live.length === cached.list.length ? cached.list : live;
+    }
     const projections: DurableTaskProjection[] = [];
-    for (const operation of store.listOperations({
+    const operations = store.listOperations({
       ownerScope: { kind: "parent-session", sessionId: origin.sessionId, workspace: origin.cwd },
-    })) {
+    });
+    this.projectionMetrics.rowsRead += operations.length;
+    for (const operation of operations) {
       if (!this.belongsToParentOrigin(operation, origin)) continue;
+      this.projectionMetrics.projectionsBuilt += 1;
       const projection = this.projectDurable(operation, now);
       if (!projection) continue;
       if (projection.dismissedAt !== undefined && options.includeDismissed !== true) continue;
@@ -1277,13 +1327,49 @@ export class ObservedWaitHost {
       }
       projections.push(projection);
     }
-    return projections.sort((a, b) => b.startedAt - a.startedAt);
+    projections.sort((a, b) => b.startedAt - a.startedAt);
+    this.durableProjectionCache = {
+      originKey,
+      key: cacheKey,
+      at: now,
+      list: projections,
+      byTask: new Map(projections.map((projection) => [projection.id, projection])),
+    };
+    const live = projections.filter((projection) => !this.expiredProjection(projection, options, now));
+    return live.length === projections.length ? projections : live;
   }
 
   readDurableTask(origin: BackgroundTaskCallbackOrigin, taskId: string): DurableTaskProjection | undefined {
+    const now = this.options.now?.() ?? Date.now();
+    const cached = this.durableProjectionCache;
+    if (cached && cached.originKey === `${origin.cwd}\0${origin.sessionId ?? ""}`
+      && now >= cached.at && now - cached.at < DURABLE_PROJECTION_CACHE_MS) {
+      const projection = cached.byTask.get(taskId);
+      if (projection) return projection;
+    }
     const operation = this.operationForTask(taskId);
     if (!operation || !this.belongsToParentOrigin(operation, origin)) return undefined;
-    return this.projectDurable(operation, this.options.now?.() ?? Date.now());
+    this.projectionMetrics.projectionsBuilt += 1;
+    return this.projectDurable(operation, now);
+  }
+
+  /** Accumulated projection work, for performance regression proof. */
+  getDurableProjectionMetrics(): DurableProjectionMetrics {
+    return { ...this.projectionMetrics };
+  }
+
+  resetDurableProjectionMetrics(): void {
+    this.projectionMetrics = { listCalls: 0, rowsRead: 0, projectionsBuilt: 0, cacheHits: 0 };
+  }
+
+  private expiredProjection(
+    projection: DurableTaskProjection,
+    options: { retentionMs?: number },
+    now: number,
+  ): boolean {
+    if (!projection.terminal || options.retentionMs === undefined) return false;
+    const endedAt = projection.endedAt ?? now;
+    return now - endedAt >= options.retentionMs;
   }
 
   /**
@@ -1324,6 +1410,7 @@ export class ObservedWaitHost {
     const operation = this.operationForTask(taskId);
     if (!operation || !this.belongsToParentOrigin(operation, origin)) return undefined;
     await this.stop(taskId, operation.owner);
+    this.invalidateDurableProjection();
     return this.projectDurable(operation, this.options.now?.() ?? Date.now());
   }
 
@@ -1355,9 +1442,14 @@ export class ObservedWaitHost {
   }
 
   private emitDurableTaskChange(): void {
+    this.invalidateDurableProjection();
     for (const listener of [...this.durableChangeListeners]) {
       try { listener(); } catch { /* a projection listener cannot break supervision */ }
     }
+  }
+
+  private invalidateDurableProjection(): void {
+    this.durableProjectionCache = undefined;
   }
 
   private belongsToParentOrigin(operation: OperationRecord, origin: BackgroundTaskCallbackOrigin): boolean {
@@ -2655,6 +2747,10 @@ export class ObservedWaitHost {
         refs,
         { pendingWithoutContext: true },
       );
+      // The local projection cache may still show this operation as running even
+      // though another process committed its terminal revision. Invalidate and
+      // notify so the navigator repaints on this reconcile pass.
+      this.emitDurableTaskChange();
       return;
     }
     this.options.logger?.(`observed waits: ${operation.taskId} ${status} (revision ${recorded.operation.terminalRevision})`);

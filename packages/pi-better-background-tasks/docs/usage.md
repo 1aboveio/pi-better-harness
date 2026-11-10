@@ -390,6 +390,19 @@ PI_BETTER_STALL_QUIET_MS=120000
 PI_BETTER_STALL_MS=600000
 ```
 
+## Navigator redraw behavior
+
+The background-work navigator reuses an unchanged durable projection instead of
+re-reading the operation database for every host redraw. The query is scoped to
+the active parent session and workspace before rows are decoded, so historical
+operations from other sessions or branches are not materialized. A local
+launch, terminal outcome, dismissal or stop invalidates the projection
+immediately. Another Pi process is observed by the existing 250 ms reconcile
+pass, which also invalidates the projection when it discovers a new task or
+terminal revision. A five-second fallback refresh covers a missed notification;
+it is not a render cadence. Compact tool headers are reused until their
+arguments, partial/final result, expansion, width or theme changes.
+
 ## Examples
 
 ```json

@@ -1225,6 +1225,103 @@ describe("durable read-only projections", () => {
     expect(host.listDurableTasks({ cwd: root })).toEqual([]);
   });
 
+  it("keeps unchanged panel projections off unrelated history after warm-up", async () => {
+    const root = workspace("projection-cache");
+    const { host } = startHost({ root });
+    const store = openStore({ path: join(root, "operations.sqlite") });
+    try {
+      for (let index = 0; index < 3_140; index += 1) {
+        store.registerOperation({
+          operationId: `op-history-${index}`,
+          taskId: `bgs_${index.toString(16).padStart(20, "0")}`,
+          launchToken: `launch_history_${index}`,
+          owner: {
+            kind: "parent-session",
+            sessionId: `historical-session-${index % 37}`,
+            workspace: root,
+            branchId: `branch-${index % 5}`,
+            goalId: null,
+          },
+          observer: { kind: "background-tasks", version: "1" },
+        });
+      }
+      for (const [index, branchId] of ["main", "side", "other"].entries()) {
+        store.registerOperation({
+          operationId: `op-current-${index}`,
+          taskId: `bgs_${(0x100000 + index).toString(16).padStart(20, "0")}`,
+          launchToken: `launch_current_${index}`,
+          owner: { kind: "parent-session", sessionId: "current-session", workspace: root, branchId, goalId: null },
+          observer: { kind: "background-tasks", version: "1" },
+        });
+      }
+    } finally {
+      store.close();
+    }
+
+    const origin = { cwd: root, sessionId: "current-session" };
+    host.resetDurableProjectionMetrics();
+    const first = host.listDurableTasks(origin, { retentionMs: 30_000 });
+    expect(first).toHaveLength(3);
+    expect(host.getDurableProjectionMetrics()).toEqual({
+      listCalls: 1,
+      rowsRead: 3,
+      projectionsBuilt: 3,
+      cacheHits: 0,
+    });
+
+    for (let render = 0; render < 25; render += 1) {
+      expect(host.listDurableTasks(origin, { retentionMs: 30_000 })).toHaveLength(3);
+    }
+    expect(host.getDurableProjectionMetrics()).toEqual({
+      listCalls: 26,
+      rowsRead: 3,
+      projectionsBuilt: 3,
+      cacheHits: 25,
+    });
+  }, 120_000);
+
+  it("invalidates a cached projection when another process records the terminal revision", async () => {
+    const root = workspace("projection-cross-process");
+    const { host } = startHost({ root });
+    const ctx = createCtx(root, "session-projection-cross");
+    const origin = { cwd: root, sessionId: "session-projection-cross" };
+    const launch = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => {}, 5000)"), shell: false, callback: false },
+      ctx,
+    });
+    try {
+      await host.reconcileNow();
+      expect(host.listDurableTasks(origin)[0]).toMatchObject({ id: launch.id, status: "running", terminal: false });
+      let changes = 0;
+      const off = host.onDurableTaskChange(() => { changes += 1; });
+      try {
+        const otherProcess = openStore({ path: join(root, "operations.sqlite") });
+        try {
+          otherProcess.recordTerminalOutcome({
+            operationId: launch.operationId,
+            eventId: "cross-process-terminal",
+            outcome: "succeeded",
+            owner: launch.owner,
+            evidence: [{ kind: "terminal-record", ref: "cross/result.json", summary: "exit 0" }],
+          });
+        } finally {
+          otherProcess.close();
+        }
+        const beforeReconcile = changes;
+        host.resetDurableProjectionMetrics();
+        await host.reconcileNow();
+        expect(changes).toBeGreaterThan(beforeReconcile);
+        expect(host.listDurableTasks(origin)[0]).toMatchObject({ id: launch.id, status: "succeeded", terminal: true });
+        expect(host.getDurableProjectionMetrics().rowsRead).toBe(1);
+      } finally {
+        off();
+      }
+    } finally {
+      await host.stopDurableTask(origin, launch.id);
+    }
+  });
+
   it("projects only the exact parent origin, never a worker or foreign session", async () => {
     const root = workspace("projection");
     const { host } = startHost({ root });
