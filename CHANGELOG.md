@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.42.1] - 2026-11-10
+
+### Fixed
+
+- Include a package-local `CHANGELOG.md` in the npm artifact so Pi can discover extension update notes. Generate it from the canonical root changelog with Harness-only entries and numeric version headings that Pi can parse.
+- Refuse packing when the current Harness version has no substantive release notes. Keep Pi's first-seen version recording behavior and user settings unchanged.
+
 ## [pi-better-harness@0.42.0] - 2026-11-10
 
 ### Added
