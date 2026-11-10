@@ -2695,12 +2695,18 @@ export class ObservedWaitHost {
     if (operation.health !== "active" || operation.supervision?.hostId !== this.hostId) {
       // Health is observational; write it only when the supervising host or the
       // reported health actually changed. A 250 ms tick must not churn SQLite.
-      this.store?.recordSupervision({
-        operationId: operation.operationId,
-        owner: operation.owner,
-        supervision: this.supervision(),
-        health: "active",
-      });
+      try {
+        this.store?.recordSupervision({
+          operationId: operation.operationId,
+          owner: operation.owner,
+          supervision: this.supervision(),
+          health: "active",
+        });
+      } catch (error) {
+        // Another host can hold the write lock. Leave health unchanged and let
+        // the next reconciliation tick retry this observational update.
+        if (rpcCode(error) !== "store-busy") throw error;
+      }
     }
   }
 
