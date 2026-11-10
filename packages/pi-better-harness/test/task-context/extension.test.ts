@@ -127,7 +127,7 @@ test("todo tools persist progress without taking over editor navigation", async 
   assert.deepEqual(activeTools, ["read"], "Outcome & Todo starts off with no session tools");
   assert.equal(settings.current()?.get(), "Off");
   await settings.current()!.change("On", ctx);
-  assert.deepEqual(activeTools, ["read", "update_todo", "get_todo"]);
+  assert.deepEqual(activeTools, ["read", "update_todo", "get_todo", "work_ledger"]);
   const updateTodo = tools.get("update_todo");
   assert.ok(updateTodo);
   assert.ok(updateTodo.promptGuidelines?.some((line) => line.includes("active delegation mode")));

@@ -36,6 +36,11 @@ import {
   type PlanSnapshot,
   type PlanStepInput,
 } from "./types.js";
+import {
+  WORK_LEDGER_TOOL,
+  executeWorkLedgerTool,
+  type WorkLedgerToolInput,
+} from "./work-ledger-tool.js";
 
 const PlanStepSchema = Type.Object({
   id: Type.Optional(Type.String({ description: "Stable step id used by dependsOn (letters, digits, underscore, hyphen; max 64 characters)." })),
@@ -129,10 +134,11 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   let display = true;
   let widgetContext: ExtensionContext | undefined;
   let outcome: Outcome | null = null;
+  const taskTools = ["update_todo", "get_todo", WORK_LEDGER_TOOL.name] as const;
   const syncTools = (): void => {
     if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
-    const active = pi.getActiveTools().filter(name => name !== "update_todo" && name !== "get_todo");
-    pi.setActiveTools(enabled ? [...active, "update_todo", "get_todo"] : active);
+    const active = pi.getActiveTools().filter(name => !taskTools.includes(name as typeof taskTools[number]));
+    pi.setActiveTools(enabled ? [...active, ...taskTools] : active);
   };
   const saveOutcome = (next: Outcome): void => {
     outcome = next;
@@ -577,6 +583,25 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         content: [{ type: "text", text: `${formatOutcome(outcome)}\n${formatPlan(currentPlan)}` }],
         details: { outcome, hasPlan: true, plan: currentPlan, progress },
       };
+    },
+  });
+
+  pi.registerTool({
+    ...WORK_LEDGER_TOOL,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!enabled) throw new Error("Outcome & Todo hooks are off. Enable them in /harness-settings.");
+      return executeWorkLedgerTool(params as WorkLedgerToolInput, ctx.cwd);
+    },
+    renderCall(args, theme) {
+      return new Text(
+        theme.fg("toolTitle", theme.bold("work_ledger ")) + theme.fg("muted", args.action),
+        0,
+        0,
+      );
+    },
+    renderResult(result, _options, theme) {
+      const text = result.content[0];
+      return new Text(theme.fg("success", "✓ ") + theme.fg("muted", text?.type === "text" ? text.text : "Work ledger updated"), 0, 0);
     },
   });
 

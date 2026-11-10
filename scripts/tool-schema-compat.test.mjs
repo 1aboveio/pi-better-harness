@@ -69,7 +69,7 @@ test("Outcome & Todo tool schemas, including the optional outcome, use only prov
   const ctx = { hasUI: false, sessionManager: { getBranch: () => [] }, ui: { setStatus() {} } };
   await hooks.get("session_start")({}, ctx);
   t.after(() => hooks.get("session_shutdown")({}, ctx));
-  assert.deepEqual([...tools.keys()].sort(), ["get_todo", "update_todo"]);
+  assert.deepEqual([...tools.keys()].sort(), ["get_todo", "update_todo", "work_ledger"]);
   assert.deepEqual([...active], [], "a fresh runtime exposes neither Todo tool before the human enables it");
   for (const [name, tool] of tools) {
     assert.deepEqual(findProviderRejectedKeywords(plain(tool.parameters)), [], name);
@@ -87,4 +87,20 @@ test("Outcome & Todo tool schemas, including the optional outcome, use only prov
   }
   assert.equal(outcome.properties.doneWhen.type, "array", "doneWhen is a list, not a comma-joined string");
   assert.ok(!update.required?.includes("outcome"), "an outcome is optional so a checklist can stand alone");
+  const ledger = plain(tools.get("work_ledger").parameters);
+  assert.equal(ledger.properties.action.type, "string");
+  assert.deepEqual([...ledger.properties.action.enum].sort(), ["create", "list", "read", "update"]);
+  for (const field of ["addItems", "boundaries", "changes", "items", "ledgerId", "outcome", "revision"]) {
+    assert.ok(ledger.properties[field], `the work ledger schema keeps ${field}`);
+  }
+  assert.equal(ledger.properties.changes.type, "array");
+  for (const field of ["completion", "evidence"]) {
+    assert.equal(ledger.properties.changes.items.properties[field].type, "array", `${field} is a list`);
+  }
+  assert.deepEqual(
+    ledger.properties.changes.items.properties.blocker.anyOf?.map((schema) => schema.type),
+    ["string", "null"],
+    "a blocker can be cleared explicitly",
+  );
+  assert.ok(!ledger.required?.includes("changes"), "work ledger update fields stay optional for create/list/read");
 });
