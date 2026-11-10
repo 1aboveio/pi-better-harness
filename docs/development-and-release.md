@@ -204,6 +204,13 @@ columns, retain one input frame, and return to a working editor. It seeds only
 session-scoped registry/log fixtures; navigation and rendering use the real Pi
 TUI in an isolated tmux server, without a model request.
 
+Every launch owns a fresh fixture directory, probe file and tmux server. The
+readiness file records its launch, probe and Pi process identity, and the test
+refuses state from any other producer. A launch that fails to become ready is
+stopped immediately. A controlled late-start regression holds two launches
+behind FIFOs and proves that releasing the older Pi cannot create the newer
+launch's readiness.
+
 The test prints its evidence directory and saves terminal panes plus
 `smoke-results.json`. Set `PI_NAVIGATOR_EVIDENCE_DIR` to choose the directory;
 CI uploads it as `navigator-golden`, including failure captures. Width/grapheme

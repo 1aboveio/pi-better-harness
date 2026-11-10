@@ -27,7 +27,8 @@ const evidenceDir = resolve(process.env.PI_NAVIGATOR_EVIDENCE_DIR ?? join(tmpdir
 const unicodeLog = `GOLDEN_LOG_BEGIN${"甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳".repeat(4)}GOLDEN_LOG_END`;
 const taskTitle = `background golden path ${"中文任务标题".repeat(8)}`;
 const fixtures = mkdtempSync(join(tmpdir(), "pi-navigator-e2e-"));
-const probePath = join(fixtures, "session-probe.mjs");
+const launches = [];
+let launchSequence = 0;
 const defaultSubagentId = `sa_navigator_e2e_${process.pid}`;
 const defaultTaskId = `bg_navigator_e2e_${process.pid}`;
 const dummyWorkers = [];
@@ -42,7 +43,7 @@ const mouseSkip = skip || (mouseRouting || process.env.PI_NAVIGATOR_MOUSE === "1
   : "requires a fullscreen mouse-capable Pi host; set PI_NAVIGATOR_MOUSE=1 and PI_NAVIGATOR_CLI to one");
 
 after(() => {
-  for (const name of [goldenSession, closeSession, refocusSession, replaceSession, wrapSession, diagnosticSession, clickSession]) spawnSync("tmux", ["-L", name, "kill-server"], { stdio: "ignore" });
+  for (const launch of launches) stopLaunch(launch);
   for (const worker of dummyWorkers) {
     try { process.kill(-worker.pid, "SIGKILL"); } catch { /* already stopped */ }
   }
@@ -414,18 +415,180 @@ test("switching full-page details with multiline diagnostics keeps exactly one t
   }
 });
 
-function launchPi(name, { multilineDiagnostic = false } = {}) {
+// @covers navigator.detail-overlay
+// @level e2e
+test("a late-starting previous Pi cannot satisfy the next launch's readiness", { skip }, () => {
+  assertPrivateRegistry();
+  assert.ok(hasTmux, "the navigator late-start regression requires tmux");
+  const previousGate = join(fixtures, "late-previous.gate");
+  const currentGate = join(fixtures, "late-current.gate");
+  execFileSync("mkfifo", [previousGate]);
+  execFileSync("mkfifo", [currentGate]);
+  let previous;
+  let current;
+  try {
+    // Both Pi processes are held before they execute. Each launch owns its probe
+    // file, so releasing the previous one must never create the current one's
+    // readiness file.
+    previous = startPiLaunch(`pi-navigator-late-previous-e2e-${process.pid}`, { gatePath: previousGate });
+    current = startPiLaunch(`pi-navigator-late-current-e2e-${process.pid}`, { gatePath: currentGate });
+    assert.notEqual(previous.probePath, current.probePath, "every launch needs its own probe file");
+    assert.equal(existsSync(previous.statePath), false, "the gated previous launch must not be ready yet");
+    assert.equal(existsSync(current.statePath), false, "the gated current launch must not be ready yet");
+
+    releaseLaunchGate(previous);
+    waitFor(() => existsSync(previous.statePath) || existsSync(current.statePath),
+      "the released previous Pi to report readiness", 10_000);
+    assert.ok(existsSync(previous.statePath), "the late previous Pi must write only its own readiness");
+    assert.equal(existsSync(current.statePath), false, "a previous launch must not write the current launch's readiness");
+    const previousState = waitForLaunchReady(previous).state;
+    assert.equal(previousState.piPid, previous.piPid);
+    assert.equal(previousState.probeId, previous.probeId);
+
+    releaseLaunchGate(current);
+    const currentState = waitForLaunchReady(current).state;
+    assert.equal(currentState.piPid, current.piPid);
+    assert.equal(currentState.probeId, current.probeId);
+    assert.notEqual(currentState.sessionId, previousState.sessionId);
+  } finally {
+    if (previous) stopLaunch(previous);
+    if (current) stopLaunch(current);
+  }
+});
+
+// @covers navigator.detail-overlay
+// @level e2e
+test("a launch that never becomes ready is stopped immediately", { skip }, () => {
+  assertPrivateRegistry();
+  assert.ok(hasTmux, "the navigator failed-launch regression requires tmux");
+  const name = `pi-navigator-failed-launch-e2e-${process.pid}`;
+  execFileSync("mkfifo", [join(fixtures, "failed-launch.gate")]);
+  let failure;
+  try {
+    launchPi(name, { gatePath: join(fixtures, "failed-launch.gate"), readyTimeoutMs: 300 });
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure, "the gated launch must fail readiness");
+  assert.match(failure.message, /Timed out waiting for Pi session probe/);
+  assert.ok(failure.launch?.piPid, "the failed launch must expose its Pi pid for cleanup verification");
+  waitFor(() => !isProcessAlive(failure.launch.piPid), "the failed launch's Pi process to stop", 2_000);
+  assert.notEqual(
+    spawnSync("tmux", ["-L", name, "has-session", "-t", name], { stdio: "ignore" }).status,
+    0,
+    "a launch that fails readiness must not leave its tmux server or Pi running",
+  );
+});
+
+function launchPi(name, { multilineDiagnostic = false, gatePath = null, readyTimeoutMs = 10_000 } = {}) {
+  const launch = startPiLaunch(name, { multilineDiagnostic, gatePath });
+  try {
+    return waitForLaunchReady(launch, readyTimeoutMs);
+  } catch (error) {
+    stopLaunch(launch);
+    error.launch = launch;
+    throw error;
+  }
+}
+
+function startPiLaunch(name, { multilineDiagnostic = false, gatePath = null } = {}) {
+  const sequence = ++launchSequence;
+  const launchId = `launch-${sequence}-${name}`;
+  const dir = join(fixtures, launchId);
+  mkdirSync(dir, { recursive: true });
+  const launch = {
+    session: name,
+    tmuxArgs: ["-L", name],
+    launchId,
+    probeId: `${launchId}-${process.pid}`,
+    probePath: join(dir, "session-probe.mjs"),
+    statePath: join(dir, "session-state.json"),
+    activityPath: join(dir, "session-state.json.activity.json"),
+    focusStealPath: join(dir, "steal-focus"),
+    replacePath: join(dir, "replace-editor"),
+    sessionDir: join(dir, "sessions"),
+    gatePath,
+  };
+  // A launch never rewrites another launch's probe or fixtures. The exclusive
+  // write also makes an accidental reuse fail at its source.
+  writeFileSync(launch.probePath, probeExtension(launch, multilineDiagnostic), { flag: "wx" });
   session = name;
   tmuxArgs = ["-L", name];
-  const probeStatePath = join(fixtures, `${name}-session-state.json`);
-  const focusStealPath = join(fixtures, `${name}-steal-focus`);
-  const replacePath = join(fixtures, `${name}-replace-editor`);
-  writeFileSync(probePath, probeExtension(probeStatePath, focusStealPath, replacePath, multilineDiagnostic));
-  startPiSession();
-  const state = waitForJson(probeStatePath);
-  waitForJson(`${probeStatePath}.activity.json`);
-  const piPid = Number(execFileSync("tmux", [...tmuxArgs, "display-message", "-p", "-t", session, "#{pane_pid}"], { encoding: "utf8" }).trim());
-  return { state, piPid, focusStealPath, replacePath };
+  launches.push(launch);
+  try {
+    startPiSession(launch);
+    launch.piPid = panePid(launch);
+  } catch (error) {
+    stopLaunch(launch);
+    throw error;
+  }
+  return launch;
+}
+
+function waitForLaunchReady(launch, timeoutMs = 10_000) {
+  const expected = `launch ${launch.launchId}, probe ${launch.probeId}, pid ${launch.piPid}`;
+  const state = waitForJson(launch.statePath, {
+    timeoutMs,
+    what: `Pi session probe for ${expected}`,
+    validate: (value) => validateLaunchJson(launch, value, "session readiness"),
+  });
+  waitForJson(launch.activityPath, {
+    timeoutMs,
+    what: `Pi activity probe for ${expected}`,
+    validate: (value) => validateLaunchProducer(launch, value, "activity readiness"),
+  });
+  launch.state = state;
+  return {
+    state,
+    piPid: launch.piPid,
+    focusStealPath: launch.focusStealPath,
+    replacePath: launch.replacePath,
+    launch,
+  };
+}
+
+function validateLaunchProducer(launch, value, what) {
+  if (value?.launchId !== launch.launchId || value?.probeId !== launch.probeId || value?.piPid !== launch.piPid) {
+    throw new Error(`${what} came from a different producer; expected launch ${launch.launchId} probe ${launch.probeId} pid ${launch.piPid}, got ${JSON.stringify(value).slice(0, 500)}`);
+  }
+  return true;
+}
+
+function validateLaunchJson(launch, value, what) {
+  validateLaunchProducer(launch, value, what);
+  if (typeof value.cwd !== "string" || typeof value.sessionId !== "string" || value.sessionId.length === 0) {
+    throw new Error(`${what} is missing cwd/sessionId: ${JSON.stringify(value).slice(0, 500)}`);
+  }
+  return true;
+}
+
+function panePid(launch) {
+  const value = execFileSync("tmux", [...launch.tmuxArgs, "display-message", "-p", "-t", launch.session, "#{pane_pid}"], { encoding: "utf8" }).trim();
+  const pid = Number(value);
+  assert.ok(Number.isInteger(pid) && pid > 0, `Pi launch ${launch.launchId} has no pane pid: ${value}`);
+  return pid;
+}
+
+function releaseLaunchGate(launch) {
+  assert.ok(launch.gatePath, `launch ${launch.launchId} has no gate`);
+  execFileSync("sh", ["-c", `printf '%s\\n' go > ${shellQuote(launch.gatePath)}`], { timeout: 5_000, stdio: "ignore" });
+}
+
+function stopLaunch(launch) {
+  try {
+    execFileSync("tmux", [...launch.tmuxArgs, "kill-server"], { stdio: "ignore" });
+  } catch {
+    // The launch may have failed before its tmux server existed.
+  }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function waitFor(condition, what, timeoutMs = 5_000) {
@@ -455,9 +618,10 @@ function writeResult(status, note) {
   ], null, 2) + "\n");
 }
 
-function startPiSession() {
+function startPiSession(launch) {
+  const gate = launch.gatePath ? `read -r _ < ${shellQuote(launch.gatePath)} && ` : "";
   const command = [
-    `cd ${shellQuote(extensionRoot)}`,
+    `${gate}cd ${shellQuote(extensionRoot)}`,
     "&& exec env",
     `PI_CODING_AGENT_DIR=${shellQuote(join(fixtures, "agent"))}`,
     // Explicit, so Pi's registries follow the test's private TMPDIR whatever tmux's global env holds.
@@ -466,27 +630,33 @@ function startPiSession() {
     "OPENAI_API_KEY=sk-tui-e2e-placeholder",
     shellQuote(piBin),
     `-e ${shellQuote(extensionRoot)}`,
-    `-e ${shellQuote(probePath)}`,
+    `-e ${shellQuote(launch.probePath)}`,
     "--approve",
     "--no-skills",
     "--no-context-files",
-    `--session-dir ${shellQuote(join(fixtures, `${session}-sessions`))}`,
+    `--session-dir ${shellQuote(launch.sessionDir)}`,
     "--name navigator-tui-e2e",
     "--model openai/gpt-4o-mini",
   ].join(" ");
-  execFileSync("tmux", [...tmuxArgs, "new-session", "-d", "-s", session, "-x", "100", "-y", "40", command]);
+  execFileSync("tmux", [...launch.tmuxArgs, "new-session", "-d", "-s", launch.session, "-x", "100", "-y", "40", command]);
 }
 
-function probeExtension(path, focusStealPath, replacePath, multilineDiagnostic) {
+function probeExtension(launch, multilineDiagnostic) {
   // Besides reporting the session, the probe re-installs the current editor when the
   // test creates focusStealPath, the way any extension that wraps the editor does (with
   // "wrap" in the file, inside its own proxy component), and restores Pi's default
   // editor when it creates replacePath.
   return `import * as fs from "node:fs";
+const identity = ${JSON.stringify({ launchId: launch.launchId, probeId: launch.probeId })};
+function writeJson(file, value) {
+  const temp = file + "." + process.pid + ".tmp";
+  fs.writeFileSync(temp, JSON.stringify(value));
+  fs.renameSync(temp, file);
+}
 export default function(pi) {
-  const activityPath = ${JSON.stringify(`${path}.activity.json`)};
+  const activityPath = ${JSON.stringify(launch.activityPath)};
   pi.events.on("pi-better-goal:activity", (snapshot) => {
-    if (snapshot.activeBackgroundCount > 0 && !fs.existsSync(activityPath)) fs.writeFileSync(activityPath, JSON.stringify(snapshot));
+    if (snapshot.activeBackgroundCount > 0 && !fs.existsSync(activityPath)) writeJson(activityPath, { ...identity, piPid: process.pid, snapshot });
   });
   pi.on("session_start", async (_event, ctx) => {
     const fs = await import("node:fs");
@@ -494,7 +664,7 @@ export default function(pi) {
       id: "footer-fixture",
       getActivity: () => ({ providerId: "footer-fixture", items: [{ id: "footer-work", status: "running", active: true }] }),
     });
-    fs.writeFileSync(${JSON.stringify(path)}, JSON.stringify({ cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId() }, null, 2));
+    writeJson(${JSON.stringify(launch.statePath)}, { ...identity, piPid: process.pid, cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId() });
     if (${JSON.stringify(multilineDiagnostic)}) {
       const provider = globalThis[Symbol.for("pi-better-harness.navigator.state")]?.providers.get("subagents");
       if (!provider) throw new Error("navigator diagnostic fixture: subagent provider missing");
@@ -505,9 +675,9 @@ export default function(pi) {
       };
     }
     const timer = setInterval(() => {
-      if (!fs.existsSync(${JSON.stringify(focusStealPath)})) return;
-      const mode = fs.readFileSync(${JSON.stringify(focusStealPath)}, "utf8").trim();
-      fs.rmSync(${JSON.stringify(focusStealPath)}, { force: true });
+      if (!fs.existsSync(${JSON.stringify(launch.focusStealPath)})) return;
+      const mode = fs.readFileSync(${JSON.stringify(launch.focusStealPath)}, "utf8").trim();
+      fs.rmSync(${JSON.stringify(launch.focusStealPath)}, { force: true });
       const prev = ctx.ui.getEditorComponent();
       if (mode !== "wrap") ctx.ui.setEditorComponent(prev);
       // Wrap the current editor in this extension's own component, delegating everything to it.
@@ -516,8 +686,8 @@ export default function(pi) {
       }));
     }, 100);
     const replacer = setInterval(() => {
-      if (!fs.existsSync(${JSON.stringify(replacePath)})) return;
-      fs.rmSync(${JSON.stringify(replacePath)}, { force: true });
+      if (!fs.existsSync(${JSON.stringify(launch.replacePath)})) return;
+      fs.rmSync(${JSON.stringify(launch.replacePath)}, { force: true });
       ctx.ui.setEditorComponent(undefined);
     }, 100);
     replacer.unref?.();
@@ -635,13 +805,31 @@ function waitForScreen(matches, timeoutMs = 5_000) {
   throw new Error(`Timed out waiting for navigator page. Current screen:\n${screen}`);
 }
 
-function waitForJson(path, timeoutMs = 10_000) {
+function waitForJson(path, { timeoutMs = 10_000, what = "Pi session probe", validate = () => true } = {}) {
   const deadline = Date.now() + timeoutMs;
+  let lastValue = "";
   while (Date.now() < deadline) {
-    if (existsSync(path)) return JSON.parse(readFileSync(path, "utf8"));
+    if (!existsSync(path)) {
+      sleep(50);
+      continue;
+    }
+    let value;
+    try {
+      value = JSON.parse(readFileSync(path, "utf8"));
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        sleep(50);
+        continue;
+      }
+      lastValue = `unreadable JSON: ${error instanceof Error ? error.message : String(error)}`;
+      sleep(50);
+      continue;
+    }
+    if (validate(value)) return value;
+    lastValue = JSON.stringify(value).slice(0, 500);
     sleep(50);
   }
-  throw new Error(`Timed out waiting for Pi session probe. Current screen:\n${captureScreen()}`);
+  throw new Error(`Timed out waiting for ${what}${lastValue ? `; last producer: ${lastValue}` : ""}. Current screen:\n${captureScreen()}`);
 }
 
 function sleep(ms) {
