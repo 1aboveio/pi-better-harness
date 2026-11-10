@@ -8,6 +8,9 @@ node_modules/
 dist/
 coverage/
 
+# Generated from the canonical root changelog during Harness prepack.
+/packages/pi-better-harness/CHANGELOG.md
+
 # pi local state
 .pi/
 
