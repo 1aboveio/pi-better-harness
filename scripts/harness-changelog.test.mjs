@@ -20,6 +20,13 @@ test("packing requires notes for the manifest version, even with older notes pre
   assert.throws(() => projectHarnessChangelog("## [pi-better-server@0.42.1]\nother", "0.42.1"), /no pi-better-harness@0\.42\.1 entry/);
 });
 
+test("current version rejects empty, whitespace-only, and subheading-only notes", () => {
+  for (const body of ["", " \n\t\n", "### Fixed\n\n### Changed\n"]) {
+    assert.throws(() => projectHarnessChangelog(`## [pi-better-harness@0.42.1]\n${body}\n## [pi-better-harness@0.42.0]\nOlder notes`, "0.42.1"), /pi-better-harness@0\.42\.1 entry has no notes/);
+  }
+  assert.match(projectHarnessChangelog("## [pi-better-harness@0.42.1]\n### Fixed\n- Include update notes.", "0.42.1"), /- Include update notes\./);
+});
+
 test("real Harness tarball contains projected notes and staged bundled components", async () => {
   const dir = mkdtempSync(join(tmpdir(), "harness-changelog-test-"));
   try {
@@ -41,7 +48,14 @@ test("real Harness tarball contains projected notes and staged bundled component
       const entries = parseChangelog(file);
       assert.ok(entries.some(({ major, minor, patch, content }) => major === 0 && minor === 42 && patch === 0 && content.includes("optional durable work ledger")));
       assert.equal(entries.length, (notes.match(/^## \[\d/gm) ?? []).length);
-      assert.deepEqual(getNewEntries(entries, "0.41.3").map(({ major, minor, patch }) => `${major}.${minor}.${patch}`), ["0.42.0"]);
+      const newEntries = getNewEntries(entries, "0.41.3");
+      const current = newEntries.find(({ major, minor, patch }) => `${major}.${minor}.${patch}` === manifest.version);
+      assert.ok(current, "Pi selects the packed manifest version's notes after an update");
+      assert.ok(current.content.split("\n").slice(1).some((line) => line.trim() && !line.trimStart().startsWith("#")), "Selected current entry has actual notes");
+      const historic = newEntries.find(({ major, minor, patch }) => major === 0 && minor === 42 && patch === 0);
+      const canonicalHistoric = readFileSync(join(root, "CHANGELOG.md"), "utf8")
+        .split("## [pi-better-harness@0.42.0]")[1].split("\n## ")[0].trimEnd();
+      assert.equal(historic?.content, `## [0.42.0]${canonicalHistoric}`, "Pi preserves the complete historic 0.42.0 entry");
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -20,8 +20,12 @@ export function projectHarnessChangelog(source, version) {
       if (current) entries.push(current);
     } else if (current) current.lines.push(line);
   }
-  if (!entries.some((entry) => entry.version === version)) {
+  const versionEntry = entries.find((entry) => entry.version === version);
+  if (!versionEntry) {
     throw new Error(`Root CHANGELOG.md has no pi-better-harness@${version} entry`);
+  }
+  if (!versionEntry.lines.slice(1).some((line) => line.trim() && !/^\s*#{1,6}(?:\s|$)/.test(line))) {
+    throw new Error(`Root CHANGELOG.md pi-better-harness@${version} entry has no notes`);
   }
   return `# Changelog\n\n${entries.map((entry) => entry.lines.join("\n").trim()).join("\n\n")}\n`;
 }

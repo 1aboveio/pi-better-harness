@@ -369,8 +369,9 @@ Harness `prepack` projects only its root entries into an ignored, generated
 `packages/pi-better-harness/CHANGELOG.md`, included explicitly in the npm tarball.
 Do not maintain a second changelog there. The generated version-only headings
 let compatible Pi hosts show Extension Updates using the default changelog path.
-Packing fails if the Harness manifest version has no root entry, including for
-metadata-only releases; add notes for every new Harness version.
+Packing fails if the Harness manifest version has no root entry or that entry
+contains only whitespace or headings, including for metadata-only releases;
+add notes for every new Harness version.
 
 Run `node --test scripts/harness-changelog.test.mjs` for projection edge cases
 and a real npm tarball check, including bundled components. To also parse the
