@@ -103,6 +103,40 @@ associate it with the session, inject old work, start a Goal, or change the
 generic outcome/Todo, workflow plan, or display/hooks state. Session association
 and recovery reminders are separate work.
 
+### Associate a ledger with a session
+
+Use `/ledger` to inspect and explicitly select a durable record:
+
+- `/ledger list` shows this project's ledgers and marks the associated one.
+- `/ledger attach <id>` selects an existing ledger for this session.
+- `/ledger switch <id>` replaces the current selection with another ledger.
+- `/ledger detach` removes the session reference but keeps the ledger.
+- `/ledger show` prints the associated ledger, including when hooks are off.
+
+Attaching stores only a reference. It does not copy the ledger, start a Goal,
+authorize old work, or alter permissions. Resuming the same session restores the
+reference and reads the current record again. A clean new session in the same
+project starts unassociated even when ledgers exist; `/ledger list` discovers
+them but does not adopt one. A fork or clone follows its copied branch and keeps
+the same reference without copying the ledger. Selecting a different ledger
+continues that same id, history, completed evidence, and revision sequence.
+
+With hooks on, Harness adds a bounded reminder built from the durable record after
+compaction, resume, branch restoration, explicit attach, or enabling hooks. It
+lists the overall outcome, totals, and only a few unfinished items. Detaching or
+switching removes stale ledger reminders from the next model request. The
+reminder is context, not permission: confirm the current human request and the
+Goal's pause state before acting. Hooks off publishes no reminder; display off
+hides the ledger count line without changing the reference.
+
+The existing Todo surface gains one compact ledger line when an association
+exists, for example `ledger 1/3 complete · 2 open · next: Ship API`. It is not a
+second checklist or widget; workflow rows remain canonical. Completing the
+session Outcome is refused while the associated ledger is active and has open
+high-level items. Closing those items does not complete the ledger automatically,
+and completing a Todo or workflow plan never completes an unfinished high-level
+outcome.
+
 ## Ordinary Startup
 
 Nothing changes about how you start Pi:

@@ -7,7 +7,9 @@ distribution as the shared session-outcome surface described in
 [ADR 0013](0013-harness-settings-and-next-prompt-suggestions.md) and the Goal
 prompt ownership implied by that arrangement. Does not make `pi-better-goal`
 depend on `pi-better-harness`. Amended by [#679](https://github.com/1aboveio/pi-better-harness/issues/679)
-to add the independent durable work ledger described below.
+to add the independent durable work ledger described below, and by
+[#680](https://github.com/1aboveio/pi-better-harness/issues/680) to define its
+explicit session association and recovery contract.
 
 ## Decision
 
@@ -61,8 +63,9 @@ execution plan:
   their evidence, and cancelled or otherwise closed records remain in the record;
   items are never silently dropped or replaced by a partial update.
 - The deliberate tool paths are `work_ledger` actions `create`, `list`, `read`,
-  and `update`. The typed `openWorkLedgerStore()` module API exposes the same
-  operations for later session-association work.
+  and `update`, plus the explicit session `attach` and `detach` actions described
+  below. The typed `openWorkLedgerStore()` module API remains the storage
+  boundary used by both the tool and association code.
 - `update` requires the revision the caller last read. A mismatch is refused
   before any write. Writes serialize on a project ledger lock and replace the
   complete JSON record atomically, so competing writers cannot both accept the
@@ -79,6 +82,62 @@ execution plan:
   [#680](https://github.com/1aboveio/pi-better-harness/issues/680).
 - Temporary widget visibility and cleanup remain separate from durable records.
   Hiding or clearing a display never deletes ledger history or completed evidence.
+
+### Explicit session association
+
+A session may store an explicit reference to one ledger. The reference is an
+ordinary custom session entry under `pi-better-harness:work-ledger` with either
+`{version: 1, kind: "attach", ledgerId}` or `{version: 1, kind: "detach"}`. The
+latest valid action on the active branch wins; malformed or unknown entries are
+ignored rather than erasing an earlier valid reference. The entry contains no
+ledger body, so restoring a session re-reads the same durable record and its
+current revision. A clean new session has no reference: discovery through the
+project ledger list is not adoption, and no session inherits a ledger from its
+working directory. A fork or clone follows the copied branch, so it continues the
+same record by explicit copy of the reference, still without copying the ledger.
+
+The human controls association deliberately:
+
+- `/ledger list` discovers this project's ledgers and marks the current one.
+- `/ledger attach <id>` and `/ledger switch <id>` select an existing record.
+  Selecting never copies the ledger; the session continues the same id, history,
+  completed evidence, and revision sequence. `attach` refuses to silently replace
+  a different current association; `switch` is the explicit replacement.
+- `/ledger detach` removes only the session reference. `/ledger show` inspects
+  the current record, including while hooks are off.
+
+The `work_ledger` tool also exposes `attach` and `detach` for an explicit human
+request. It must never infer association from the project directory, existing
+files, a similar outcome, or the start of unrelated work. The tool's `create`,
+`list`, `read`, and `update` actions remain unassociated.
+
+While hooks are on, Harness publishes a bounded recovery reminder built from the
+durable record after compaction, resume, branch restoration, explicit attach, or
+enabling hooks. The reminder carries the overall outcome, totals, and at most a
+few unfinished items plus their progress, next step, or blocker. It is reference
+only: it does not authorize work, resume a paused Goal, change permissions, or
+supersede the workflow's canonical plan. A context filter drops ledger reminders whose
+`details.ledgerId` no longer matches the active reference, so detach and switch
+remove stale work instructions from the next model request. Hooks off publishes
+no reminder; display off hides the surface without changing the reference.
+
+Completing the session Outcome is refused while the associated ledger is active
+and has pending, in-progress, or blocked items. Completing a Todo or workflow
+execution plan still never completes the overall ledger or Outcome
+automatically. Closing all ledger items does not complete the ledger; its overall
+status remains an explicit update. A completed or cancelled ledger no longer
+blocks Outcome completion. Starting a `newTask` is an explicit context switch and
+appends a detach reference after the requested task operation succeeds; a failed
+operation leaves the reference unchanged. Goal owns its lifecycle and completion
+authority, so Goal events are neither blocked nor synthesized by ledger
+association.
+
+The existing Todo surface shows one compact ledger count line (completed/total,
+open, blocked, and the next open item) when an association exists. This is an
+additive summary in the existing widget, not a second editable plan or widget.
+Workflow-owned rows remain the canonical execution rows. Association and
+restoration never start a Goal, enable hooks, change display preferences, or
+start an agent turn.
 
 ## Bridge Contract
 
@@ -137,6 +196,11 @@ of cycles. Harness consumes the public event contract and remains optional.
   A new session in the same project can discover them only through an explicit
   `work_ledger` list or id. Discovery is not adoption, and stale updates are
   refused rather than silently replacing newer progress.
+- Resuming the same session restores its explicit ledger reference and the same
+  durable record. A fresh session stays unassociated until the human runs
+  `/ledger attach` or explicitly requests `work_ledger attach`; neither action
+  copies the record or authorizes old work. Detach and switch remove stale
+  context before the next model request.
 - `/goal` does not enable Outcome & Todo hooks. A human must enable hooks in
   `/harness-settings`; saved outcomes and checklists display by default even with
   hooks off. Display off does not stop active hooks. `/todo` commands remain
@@ -195,3 +259,19 @@ reload the extension from durable storage, and confirm that neither creation nor
 reload associates the ledger with the session or writes session entries. The
 existing task-context, workflow-plan, Goal, and display/hooks suites remain the
 boundary regression.
+
+Session-association tests drive the registered extension with real settings,
+session entries, tool calls, and durable stores. They prove that an explicit
+attach survives a same-session reconstruction while a fresh session with the same
+project stays unassociated; resuming does not copy the ledger or add a second
+association; and continuing in the selected session updates the same id, history,
+and revision. Compaction tests remove the active reminder and prove a fresh
+bounded reminder is rebuilt from the store (including newer external progress)
+rather than the conversation summary, while the context filter removes reminders
+for a detached or replaced ledger. Completion tests prove Outcome completion is
+refused while associated items are open, that completing a Todo does not complete
+the ledger, and that a new unrelated task detaches the old reference. Additional
+integration coverage keeps a paused Goal, independent hooks/display controls, and
+a workflow-owned canonical plan unchanged around association and reminder events.
+The compact-header test proves the ledger count line stays within width and adds
+no second widget.

@@ -25,6 +25,25 @@ test("the task header groups its subtitle with progress and runtime without chan
   assert.match(stripVTControlCharacters(lines[1]!), /\.\.\.$/);
 });
 
+test("the existing Todo header adds one bounded ledger count line without a second widget", () => {
+  const ledger = "ledger 1/3 complete · 2 open · 1 blocked · next: Ship API";
+  for (const width of [1, 12, 40, 80]) {
+    const lines = renderCompactTaskHeader("0/2 complete", width, theme, {
+      subtitle: "Deliver checkout",
+      disclosure: "▸",
+      runtime: { status: "active", clock: "2:14" },
+      ledger,
+    });
+    assert.equal(lines.length, 4, "header, subtitle, ledger, and one blank row, with no extra widget");
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    if (width >= 80) {
+      assert.equal(lines[1], "  Deliver checkout");
+      assert.equal(lines[2], `  ${ledger}`);
+    }
+    assert.equal(lines[3], "");
+  }
+});
+
 test("display and hooks defaults, legacy values, and independent changes are validated without mutation", () => {
   assert.deepEqual(parseOutcomeTodoPreferences(undefined), { version: 1, enabled: false, display: true });
   for (const enabled of [false, true]) {

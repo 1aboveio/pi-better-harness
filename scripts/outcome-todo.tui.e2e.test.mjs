@@ -21,7 +21,7 @@ const boundaries = ["Do not edit the legacy Plan package"];
 // @level e2e
 // This starts the actual settings hub and task-context extension. Only the model is synthetic.
 for (const legacyFirst of [true, false]) {
-test(`Outcome & Todo masks legacy Plan loaded ${legacyFirst ? "before" : "after"} Harness and preserves native settings`, { skip }, () => {
+test(`Outcome & Todo masks legacy Plan loaded ${legacyFirst ? "before" : "after"} Harness and preserves native settings`, { skip }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "outcome-todo-tui-"));
   const agent = join(dir, "agent");
   const fixture = join(dir, "fixture.mjs");
@@ -171,6 +171,23 @@ export default function(pi){
   };
   try {
     assert.ok(existsSync(runtime), `Outcome & Todo runtime is missing: ${runtime}`);
+    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agent;
+    let ledgerId;
+    try {
+      const { openWorkLedgerStore } = await import(new URL("../packages/pi-better-harness/extensions/task-context/work-ledger.ts", import.meta.url).href);
+      ledgerId = openWorkLedgerStore({ cwd: dir }).create({
+        outcome: "Deliver the durable terminal journey",
+        items: [
+          { id: "api", title: "Ship API", status: "completed", evidence: ["Focused tests passed"] },
+          { id: "worker", title: "Ship worker", status: "in_progress", nextStep: "Wire the queue" },
+          { id: "integrate", title: "Integrate the journey" },
+        ],
+      }).id;
+    } finally {
+      if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    }
     const ordered = legacyFirst ? [join(legacy, "index.ts"), runtime] : [runtime, join(legacy, "index.ts")];
     const launch = [`cd ${quote(dir)} && exec env`, `PI_CODING_AGENT_DIR=${quote(agent)}`, "PI_OFFLINE=1", quote(cli),
       "--approve --no-skills --no-context-files", "-e", quote(settings), "-e", quote(goal), ...ordered.flatMap(path => ["-e", quote(path)]), "-e", quote(fixture)].join(" ");
@@ -213,6 +230,19 @@ export default function(pi){
     assert.equal(calls().length, 5, "each explicit seed turn makes one tool call and one follow-up");
     assert.equal(calls()[4].messages.findLast(message => message.role === "toolResult")?.isError, false, "todo update must succeed");
     assertCompactOutcome(compact, { mutedPrefix });
+    assert.doesNotMatch(compact, /^\s*ledger /m, "a fresh session must not adopt a project ledger automatically");
+
+    command(`/ledger attach ${ledgerId}`);
+    const withLedger = wait(frame => /^\s*ledger 1\/3 complete · 2 open · next: Ship worker/m.test(frame) && /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame));
+    const ledgerRows = withLedger.split("\n");
+    const ledgerIndex = ledgerRows.findIndex(line => /^todo(?:\s|$)/.test(line));
+    assert.match(ledgerRows[ledgerIndex + 1], new RegExp(objective.slice(0, 24)), "the Outcome subtitle stays first");
+    assert.match(ledgerRows[ledgerIndex + 2], /^\s*ledger 1\/3 complete · 2 open · next: Ship worker/, "the existing Todo surface carries the ledger counts");
+    assert.equal(ledgerRows[ledgerIndex + 3], "", "one blank row separates the ledger summary from the checklist");
+    assert.equal(ledgerRows.filter(line => /^\s*ledger .*complete/.test(line)).length, 1, "the ledger adds no second widget");
+    command("/ledger detach");
+    const withoutLedger = wait(frame => !/^\s*ledger .*complete/m.test(frame) && /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame));
+    assertCompactOutcome(withoutLedger, { mutedPrefix });
 
     execFileSync("tmux", ["-L", socket, "resize-window", "-t", "test", "-x", "40", "-y", "40"]);
     const narrow = wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame) && frame.split("\n").some(line => /^\s{2}\S/.test(line) && line.trimEnd().endsWith("...")));

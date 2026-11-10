@@ -39,8 +39,21 @@ import {
 import {
   WORK_LEDGER_TOOL,
   executeWorkLedgerTool,
+  formatLedgerList,
   type WorkLedgerToolInput,
 } from "./work-ledger-tool.js";
+import { openWorkLedgerStore, type WorkLedger } from "./work-ledger.js";
+import {
+  WORK_LEDGER_ASSOCIATION_ENTRY,
+  WORK_LEDGER_REMINDER_MESSAGE,
+  formatWorkLedgerReminder,
+  formatWorkLedgerTodo,
+  readAssociatedWorkLedger,
+  restoreWorkLedgerAssociation,
+  workLedgerAssociationEntry,
+  workLedgerHeader,
+  workLedgerTodoSummary,
+} from "./work-ledger-session.js";
 
 const PlanStepSchema = Type.Object({
   id: Type.Optional(Type.String({ description: "Stable step id used by dependsOn (letters, digits, underscore, hyphen; max 64 characters)." })),
@@ -107,10 +120,23 @@ const PLAN_ACTIONS: readonly AutocompleteItem[] = [
   { value: "pin on", label: "pin on", description: "Keep Todo pinned" },
   { value: "pin off", label: "pin off", description: "Keep Todo unpinned" },
 ];
+const LEDGER_ACTIONS: readonly AutocompleteItem[] = [
+  { value: "list", label: "list", description: "List this project's work ledgers" },
+  { value: "attach ", label: "attach", description: "Associate an existing ledger with this session" },
+  { value: "switch ", label: "switch", description: "Associate a different existing ledger" },
+  { value: "detach", label: "detach", description: "Remove this session's ledger reference" },
+  { value: "show", label: "show", description: "Show the associated ledger" },
+];
 
 export function planArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
   const prefix = argumentPrefix.trimStart().toLowerCase();
   const matches = PLAN_ACTIONS.filter((action) => action.value.startsWith(prefix));
+  return matches.length > 0 ? [...matches] : null;
+}
+
+export function ledgerArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+  const prefix = argumentPrefix.trimStart().toLowerCase();
+  const matches = LEDGER_ACTIONS.filter((action) => action.value.startsWith(prefix));
   return matches.length > 0 ? [...matches] : null;
 }
 
@@ -156,6 +182,10 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   let completedPlanClearTimer: ReturnType<typeof setTimeout> | undefined;
   let cancelledRowsTimer: ReturnType<typeof setTimeout> | undefined;
   let refreshFullPlan: (() => void) | undefined;
+  let ledgerId: string | null = null;
+  let ledger: WorkLedger | null = null;
+  let ledgerError: string | null = null;
+  let agentLoopActive = false;
   const cancelCancelledRowsTimer = (): void => {
     if (cancelledRowsTimer !== undefined) clearTimeout(cancelledRowsTimer);
     cancelledRowsTimer = undefined;
@@ -194,6 +224,120 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   const refresh = (force = false): void => {
     refreshWidget?.(force);
     refreshFullPlan?.();
+  };
+
+  const activeSessionEntries = (ctx: ExtensionContext): Array<{ type: string; customType?: string; data?: unknown; content?: string; details?: unknown }> => {
+    const manager = ctx.sessionManager as unknown as {
+      getBranch(): Array<{ type: string; customType?: string; data?: unknown; content?: string; details?: unknown }>;
+      buildContextEntries?: () => Array<{ type: string; customType?: string; data?: unknown; content?: string; details?: unknown }>;
+    };
+    try {
+      return manager.buildContextEntries?.() ?? manager.getBranch();
+    } catch {
+      return manager.getBranch();
+    }
+  };
+
+  const restoreLedgerState = (ctx: ExtensionContext): void => {
+    ledgerId = restoreWorkLedgerAssociation(ctx.sessionManager.getBranch());
+    ledger = null;
+    ledgerError = null;
+    if (!ledgerId) return;
+    try {
+      ledger = readAssociatedWorkLedger(ctx.cwd, ledgerId);
+    } catch (error) {
+      ledgerError = error instanceof Error ? error.message : String(error);
+    }
+  };
+
+  const ledgerHeaderText = (): string | undefined => {
+    if (ledger) return workLedgerHeader(ledger);
+    return ledgerId ? `ledger ${ledgerId} unavailable` : undefined;
+  };
+
+  const ledgerTodoText = (full = false): string | null => {
+    if (ledger) return formatWorkLedgerTodo(ledger, full);
+    return ledgerId ? `Associated work ledger ${ledgerId} is unavailable: ${ledgerError ?? "not found"}.` : null;
+  };
+
+  const rememberLedger = (ctx: ExtensionContext): void => {
+    restoreLedgerState(ctx);
+    refresh(true);
+  };
+
+  const sendLedgerReminder = (
+    ctx: ExtensionContext,
+    event?: { willRetry?: boolean },
+  ): void => {
+    if (!enabled || !ledgerId) return;
+    try {
+      rememberLedger(ctx);
+      if (!ledger) return;
+      const content = formatWorkLedgerReminder(ledger);
+      const previous = [...activeSessionEntries(ctx)].reverse().find((entry) =>
+        entry.type === "custom_message" && entry.customType === WORK_LEDGER_REMINDER_MESSAGE);
+      if (previous?.content === content) return;
+      if (typeof pi.sendMessage !== "function") return;
+      const options = agentLoopActive || event?.willRetry
+        ? { deliverAs: "steer" as const }
+        : { triggerTurn: false };
+      pi.sendMessage({
+        customType: WORK_LEDGER_REMINDER_MESSAGE,
+        content,
+        display: false,
+        details: { ledgerId: ledger.id, revision: ledger.revision },
+      }, options);
+    } catch {
+      // Recovery context is best effort; it must never block or start a turn.
+    }
+  };
+
+  const attachLedger = (ctx: ExtensionContext, id: string): WorkLedger => {
+    const candidate = readAssociatedWorkLedger(ctx.cwd, id);
+    if (ledgerId !== id) pi.appendEntry(WORK_LEDGER_ASSOCIATION_ENTRY, workLedgerAssociationEntry(id));
+    ledgerId = id;
+    ledger = candidate;
+    ledgerError = null;
+    refresh(true);
+    sendLedgerReminder(ctx);
+    return candidate;
+  };
+
+  const detachLedger = (ctx: ExtensionContext): void => {
+    if (!ledgerId) return;
+    pi.appendEntry(WORK_LEDGER_ASSOCIATION_ENTRY, workLedgerAssociationEntry(null));
+    ledgerId = null;
+    ledger = null;
+    ledgerError = null;
+    refresh(true);
+  };
+
+  const refreshAssociatedLedger = (ctx: ExtensionContext): void => {
+    if (!ledgerId) return;
+    try {
+      ledger = readAssociatedWorkLedger(ctx.cwd, ledgerId);
+      ledgerError = null;
+    } catch (error) {
+      ledger = null;
+      ledgerError = error instanceof Error ? error.message : String(error);
+    }
+  };
+
+  const assertOutcomeCompletionAllowed = (ctx: ExtensionContext, nextOutcome: Outcome | null): void => {
+    if (!nextOutcome || nextOutcome.status !== "complete" || !ledgerId) return;
+    refreshAssociatedLedger(ctx);
+    if (!ledger) {
+      throw new Error(`Outcome completion is blocked: associated work ledger ${ledgerId} is unavailable `
+        + `(${ledgerError ?? "not found"}). Read it again or detach it before completing the outcome.`);
+    }
+    if (ledger.status !== "active") return;
+    const open = ledger.items.filter((item) =>
+      item.status === "pending" || item.status === "in_progress" || item.status === "blocked");
+    if (open.length === 0) return;
+    const examples = open.slice(0, 5).map((item) => `${item.id} (${item.status})`).join(", ");
+    throw new Error(`Outcome completion is blocked: work ledger ${ledger.id} still has ${open.length} open `
+      + `high-level item(s): ${examples}${open.length > 5 ? ", ..." : ""}. Complete or cancel them first; `
+      + "Todo or execution-plan completion does not complete the overall work.");
   };
 
   const loadRushPlan = (ctx: ExtensionContext): RushPlan | null => {
@@ -274,6 +418,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   const restore = (ctx: ExtensionContext): void => {
     const entries = ctx.sessionManager.getBranch();
     outcome = restoreOutcome(entries);
+    restoreLedgerState(ctx);
     if (enabled) {
       const trigger = reconstructGoalSnapshot(entries);
       if (!outcome && trigger && trigger.status !== "complete") {
@@ -337,8 +482,10 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
               subtitle: outcome?.objective, disclosure,
               runtime: boundGoal ? goalHeaderRuntime(boundGoal)
                 : outcome ? { status: outcome.status } : undefined,
+              ledger: ledgerHeaderText(),
             };
-            const heading = outcome ? renderCompactTaskHeader(undefined, width, theme as never, header) : [];
+            const heading = outcome || ledger || ledgerId
+              ? renderCompactTaskHeader(undefined, width, theme as never, header) : [];
             if (displayedWorkflowOwner || rushBinding) {
               if (!rushBinding || (displayedWorkflowOwner && rushBinding.owner !== displayedWorkflowOwner) ||
                   !workflowBinding(ctx.sessionManager.getBranch())) return heading;
@@ -396,10 +543,20 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       return;
     }
     if (!currentPlan) {
+      const associated = ledgerTodoText(true);
+      if (!outcome && associated) {
+        if (ctx.mode !== "tui") { ctx.ui.notify(associated, "info"); return; }
+        await ctx.ui.custom<void>((_tui, _theme, _keys, done) => ({
+          render: width => new Text(associated, 0, 0).render(width),
+          handleInput: data => { if (matchesKey(data, "escape") || matchesKey(data, "left")) done(); },
+          invalidate() {},
+        }));
+        return;
+      }
       if (!outcome) { ctx.ui.notify("No outcome or Todo is set.", "info"); return; }
       if (ctx.mode !== "tui") { ctx.ui.notify(formatOutcome(outcome), "info"); return; }
       await ctx.ui.custom<void>((_tui, _theme, _keys, done) => ({
-        render: width => new Text(formatOutcome(outcome), 0, 0).render(width),
+        render: width => new Text([formatOutcome(outcome), ...(associated ? [associated] : [])].join("\n"), 0, 0).render(width),
         handleInput: data => { if (matchesKey(data, "escape") || matchesKey(data, "left")) done(); },
         invalidate() {},
       }));
@@ -410,10 +567,15 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       return;
     }
     const snapshot = currentPlan;
+    const associated = ledgerTodoText(true);
     await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
       const component = createFullPlanComponent(snapshot, theme as never, () => done());
       return {
-        render: (width) => [...(outcome ? new Text(formatOutcome(outcome), 0, 0).render(width) : []), ...component.render(width)],
+        render: (width) => [
+          ...(outcome ? new Text(formatOutcome(outcome), 0, 0).render(width) : []),
+          ...(associated ? new Text(associated, 0, 0).render(width) : []),
+          ...component.render(width),
+        ],
         handleInput(data) {
           component.handleInput?.(data);
           tui.requestRender();
@@ -440,6 +602,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       "Use a generic plan as a milestone ledger only when no workflow owns planning. Otherwise follow the workflow's task plan and foreground role.",
       "For generic plans, use separate steps for distinct deliverables, not one step per worker process. Before completing verification or the plan, inspect and integrate every relevant delegated result or failure.",
       "While a workflow owns planning, bind its persisted task plan with update_todo({workflow:{path,revision}}). Record transitions with workflow event and changes rather than editing task-plan.json or its profiling log.",
+      "When a durable work ledger is associated with this session, completing the overall Outcome is refused while high-level items remain open. Completing the Todo or an execution plan does not complete the associated ledger; reconcile the ledger explicitly.",
     ],
     parameters: UpdatePlanSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -451,10 +614,13 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       if (input.todo !== undefined && input.workflow !== undefined) throw new Error("Send either todo or workflow, not both.");
       if (input.todo !== undefined && owner) throw new Error(`${owner} owns the task plan. Send workflow instead of todo.`);
       const nextOutcome = input.outcome ? prepareOutcome(outcome, input.outcome, input.newTask) : null;
+      if (!input.newTask) assertOutcomeCompletionAllowed(ctx, nextOutcome);
       const replacement = input.todo?.length ? replacePlan(input.newTask ? null : currentPlan, input.todo, input.explanation) : null;
+      const detachOnCommit = input.newTask && ledgerId !== null;
       // Commit task memory only after the requested checklist or workflow operation succeeds.
       const commitOutcome = (): void => {
         if (!nextOutcome) return;
+        if (detachOnCommit) detachLedger(ctx);
         if (input.newTask && input.todo === undefined) {
           if (!input.workflow) clearWorkflowPlan();
           if (currentPlan) clearPlan();
@@ -554,11 +720,15 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "get_todo",
     label: "Get Todo",
-    description: "Inspect the accepted outcome, Todo progress, and any bound workflow task plan.",
+    description: "Inspect the accepted outcome, Todo progress, any bound workflow task plan, and the associated work ledger.",
     promptSnippet: "Inspect the current outcome and Todo",
     parameters: getTodoParameters,
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       if (!enabled) throw new Error("Outcome & Todo hooks are off. Enable them in /harness-settings.");
+      refreshAssociatedLedger(ctx);
+      const ledgerText = ledgerTodoText();
+      const ledgerDetails = ledger ? workLedgerTodoSummary(ledger) : null;
+      const ledgerFields = { ledger: ledgerDetails, ledgerId, ...(ledgerError ? { ledgerError } : {}) };
       const owner = workflowPlanOwner(ctx);
       const binding = workflowBinding(ctx.sessionManager.getBranch());
       if (owner || binding) {
@@ -568,20 +738,20 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
           content: [{ type: "text", text: `${formatOutcome(outcome)}\n${workflowPlan
             ? renderRushPlan(workflowPlan, 160, true, undefined, planOwner, !owner).join("\n")
             : owner ? `${owner} owns the task plan; ${rushError ?? "consult its persisted workflow state"}.`
-              : `${planOwner} read-only handoff unavailable: ${rushError ?? "not bound"}.`}` }],
-          details: { outcome, hasPlan: !!workflowPlan, plan: workflowPlan, progress: null, workflowOwner: planOwner, ...(!owner ? { readOnly: true } : {}) },
+              : `${planOwner} read-only handoff unavailable: ${rushError ?? "not bound"}.`}${ledgerText ? `\n${ledgerText}` : ""}` }],
+          details: { outcome, hasPlan: !!workflowPlan, plan: workflowPlan, progress: null, workflowOwner: planOwner, ...ledgerFields, ...(!owner ? { readOnly: true } : {}) },
         };
       }
       if (!currentPlan) {
         return {
-          content: [{ type: "text", text: `${formatOutcome(outcome)}\nNo todo is set.` }],
-          details: { outcome, hasPlan: false, plan: null, progress: null },
+          content: [{ type: "text", text: `${formatOutcome(outcome)}\nNo todo is set.${ledgerText ? `\n${ledgerText}` : ""}` }],
+          details: { outcome, hasPlan: false, plan: null, progress: null, ...ledgerFields },
         };
       }
       const progress = planProgress(currentPlan);
       return {
-        content: [{ type: "text", text: `${formatOutcome(outcome)}\n${formatPlan(currentPlan)}` }],
-        details: { outcome, hasPlan: true, plan: currentPlan, progress },
+        content: [{ type: "text", text: `${formatOutcome(outcome)}\n${formatPlan(currentPlan)}${ledgerText ? `\n${ledgerText}` : ""}` }],
+        details: { outcome, hasPlan: true, plan: currentPlan, progress, ...ledgerFields },
       };
     },
   });
@@ -590,7 +760,18 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     ...WORK_LEDGER_TOOL,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!enabled) throw new Error("Outcome & Todo hooks are off. Enable them in /harness-settings.");
-      return executeWorkLedgerTool(params as WorkLedgerToolInput, ctx.cwd);
+      const result = executeWorkLedgerTool(params as WorkLedgerToolInput, ctx.cwd, {
+        associatedLedgerId: () => ledgerId,
+        associate: (id) => { attachLedger(ctx, id); },
+        detach: () => { detachLedger(ctx); },
+      });
+      const updated = result.details.ledger;
+      if (updated && updated.id === ledgerId) {
+        ledger = updated;
+        ledgerError = null;
+        refresh(true);
+      }
+      return result;
     },
     renderCall(args, theme) {
       return new Text(
@@ -643,6 +824,57 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand("ledger", {
+    description: "List, associate, switch, detach, or inspect a durable work ledger",
+    getArgumentCompletions: ledgerArgumentCompletions,
+    handler: async (args, ctx) => {
+      const [action = "", value = ""] = args.trim().split(/\s+/, 2);
+      const store = openWorkLedgerStore({ cwd: ctx.cwd });
+      if (!action || action === "list") {
+        ctx.ui.notify(formatLedgerList(store.list(), ledgerId), "info");
+        return;
+      }
+      if (action === "show") {
+        const text = ledgerTodoText(true);
+        ctx.ui.notify(text ?? "This session has no associated work ledger.", text ? "info" : "warning");
+        return;
+      }
+      if (action === "detach") {
+        if (!ledgerId) { ctx.ui.notify("This session has no associated work ledger.", "info"); return; }
+        detachLedger(ctx);
+        ctx.ui.notify("Work ledger detached. The ledger, completed items, and history remain stored.", "info");
+        return;
+      }
+      if (action !== "attach" && action !== "switch") {
+        ctx.ui.notify("Usage: /ledger [list|attach <ledger-id>|switch <ledger-id>|detach|show]", "warning");
+        return;
+      }
+      if (!value) {
+        ctx.ui.notify(`Usage: /ledger ${action} <ledger-id>${store.list().length ? ` (ledger ids: ${store.list().map((item) => item.id).join(", ")})` : ""}`, "warning");
+        return;
+      }
+      if (action === "attach" && ledgerId && ledgerId !== value) {
+        ctx.ui.notify(`This session is already associated with ${ledgerId}. Use /ledger switch ${value} to replace it.`, "warning");
+        return;
+      }
+      if (action === "switch" && !ledgerId) {
+        ctx.ui.notify("No work ledger is associated. Use /ledger attach <ledger-id> first.", "warning");
+        return;
+      }
+      if (ledgerId === value) {
+        ctx.ui.notify(`This session is already associated with ${value}. No copy was made.`, "info");
+        return;
+      }
+      try {
+        const associated = attachLedger(ctx, value);
+        ctx.ui.notify(`Associated with work ledger ${associated.id} rev ${associated.revision} (${associated.status}). `
+          + "This only restores the reference; it does not start a Goal or authorize work.", "info");
+      } catch (error) {
+        ctx.ui.notify(`Cannot associate ${value}: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+    },
+  });
+
   const setting = (key: "enabled" | "display") => ({
     id: key === "enabled" ? "outcome-todo" : "outcome-todo-display",
     label: key === "enabled" ? "Outcome & Todo hooks" : "Outcome & Todo display", values: ["Off", "On"],
@@ -656,6 +888,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       if (!enabled) { cancelCompletedPlanClear(); cancelCancelledRowsTimer(); }
       installWidget(ctx);
       restore(ctx);
+      if (enabled) sendLedgerReminder(ctx);
     },
   });
   const controls = [setting("display"), setting("enabled")];
@@ -696,17 +929,41 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     installWidget(ctx);
     restore(ctx);
     registerSettings();
+    sendLedgerReminder(ctx);
   };
   legacyPlanMask = installLegacyPlanMask(getTodoParameters);
   pi.on("session_start", onSessionStart);
   pi.on("session_tree", async (_event, ctx) => {
     restore(ctx);
+    sendLedgerReminder(ctx);
+  });
+  pi.on("agent_start", () => { agentLoopActive = true; });
+  pi.on("agent_end", () => { agentLoopActive = false; });
+  pi.on("session_compact", async (event, ctx) => {
+    sendLedgerReminder(ctx, event as { willRetry?: boolean });
+  });
+  pi.on("context", (event) => {
+    const messages = event.messages;
+    let lastReminder = -1;
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index] as { role?: string; customType?: string; details?: unknown };
+      if (message.role === "custom" && message.customType === WORK_LEDGER_REMINDER_MESSAGE) lastReminder = index;
+    }
+    const kept = enabled && ledgerId && lastReminder >= 0 &&
+      ((messages[lastReminder] as { details?: { ledgerId?: unknown } }).details)?.ledgerId === ledgerId
+      ? lastReminder : -1;
+    const filtered = messages.filter((message, index) => {
+      const custom = message as { role?: string; customType?: string };
+      return custom.role !== "custom" || custom.customType !== WORK_LEDGER_REMINDER_MESSAGE || index === kept;
+    });
+    if (filtered.length === messages.length) return undefined;
+    return { messages: filtered };
   });
   pi.on("before_agent_start", (_event, ctx) => {
     if (!enabled || !outcome) return;
     const content = formatOutcome(outcome);
     // These messages are persisted by Pi. Never rebuild or remove them in context.
-    const previous = [...ctx.sessionManager.getBranch()].reverse().find(entry =>
+    const previous = [...activeSessionEntries(ctx)].reverse().find(entry =>
       entry.type === "custom_message" && entry.customType === "pi-better-harness:outcome-update");
     if (previous?.type === "custom_message" && previous.content === content) return;
     return { message: { customType: "pi-better-harness:outcome-update", content, display: false } };
