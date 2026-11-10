@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -156,6 +157,42 @@ function sandboxPublisher(events: EventEmitter) {
 }
 
 describe("parent durable launches", () => {
+  it("retries reconciliation after coordinator write contention", async () => {
+    const root = workspace("store-busy");
+    const supervisor = fakeSupervisor(root, "lost");
+    const inspect = supervisor.inspect.bind(supervisor);
+    supervisor.inspect = (taskId) => ({ ...inspect(taskId)!, status: "running", terminal: false });
+    const { host } = startHost({ root, supervisor });
+    const ctx = createCtx(root);
+    const launch = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("process.exit(0)"), shell: false, callback: false },
+      ctx,
+    });
+    const store = openStore({ path: join(root, "operations.sqlite") });
+    store.recordSupervision({ operationId: launch.operationId, owner: launch.owner, health: "unmonitored", reason: "test recovery" });
+    store.close();
+    const blocker = new DatabaseSync(join(root, "operations.sqlite"));
+    try {
+      blocker.exec("BEGIN IMMEDIATE");
+      await expect(host.reconcileNow()).resolves.toBeUndefined();
+      expect(host.statusForParent(ctx, launch.id).phase).toBe("running");
+    } finally {
+      blocker.exec("ROLLBACK");
+      blocker.close();
+    }
+    await host.reconcileNow();
+    const recovered = openStore({ path: join(root, "operations.sqlite") });
+    try {
+      expect(recovered.getOperation(launch.operationId)?.health).toBe("active");
+    } finally {
+      recovered.close();
+    }
+    supervisor.inspect = inspect;
+    await host.reconcileNow();
+    expect(host.statusForParent(ctx, launch.id).terminalOutcome).toBe("lost");
+  }, 15_000);
+
   it("runs a local process through the real supervisor and reconciles one terminal revision", async () => {
     const root = workspace("process");
     const marker = join(root, "ran.txt");
