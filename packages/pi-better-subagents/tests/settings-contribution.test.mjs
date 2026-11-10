@@ -9,6 +9,7 @@ const root = mkdtempSync(join(tmpdir(), "subagent-settings-contribution-"));
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 const { default: extension } = await import("../index.ts");
 const { setConfigPathForTests, setConfigForTests, loadConfig } = await import("../config.ts");
+const { TIMING_ENV } = await import("../timing.ts");
 const theme = { fg: (_color, text) => text, bg: (_color, text) => text,
     bold: (text) => text, inverse: (text) => text };
 
@@ -16,7 +17,17 @@ test("subagents contributes the standalone settings opener with shared session a
     const path = join(root, "settings.json");
     setConfigPathForTests(path);
     setConfigForTests({ delegationMode: "manual", maxConcurrent: 3 });
+    const previousTimingEnv = {
+        toolWait: process.env[TIMING_ENV.toolWait],
+        stuck: process.env[TIMING_ENV.stuck],
+    };
+    process.env[TIMING_ENV.toolWait] = "7";
+    process.env[TIMING_ENV.stuck] = "13";
     t.after(() => {
+        if (previousTimingEnv.toolWait === undefined) delete process.env[TIMING_ENV.toolWait];
+        else process.env[TIMING_ENV.toolWait] = previousTimingEnv.toolWait;
+        if (previousTimingEnv.stuck === undefined) delete process.env[TIMING_ENV.stuck];
+        else process.env[TIMING_ENV.stuck] = previousTimingEnv.stuck;
         setConfigPathForTests(undefined);
         rmSync(root, { recursive: true, force: true });
     });
@@ -91,6 +102,10 @@ test("subagents contributes the standalone settings opener with shared session a
     await commands.get("subagents").handler("settings", ctx);
     assert.equal(pages.length, 2);
     assert.equal(pages[0], pages[1]);
+    assert.match(pages[0], /Tool-wait alert\s+7 min/, "the real settings page shows the environment-effective value");
+    assert.match(pages[0], /No-progress alert\s+13 min/);
+    delete process.env[TIMING_ENV.toolWait];
+    delete process.env[TIMING_ENV.stuck];
     assert.equal(closed, 2);
     assert.deepEqual(entries, []);
     assert.equal(existsSync(path), false);

@@ -353,18 +353,19 @@ export function foldProgress(state: ProgressState, event: Record<string, unknown
         if (!id) return;
         const args = event.args as { command?: unknown } | undefined;
         const name = String(event.toolName ?? "");
-        // A different call starting after ONE seeded call means that call finished
-        // while the log window was lost: its wait is a pause, not progress. Multiple
-        // seeds are parallel calls, so one starting does not prove another ended.
-        // A seed for this same id is replaced by the real event below.
+        // Pi emits every tool start for one assistant batch before its results,
+        // and starts the next batch only after the previous one finished. So a
+        // retained assistant/message timestamp after a seed's start proves that
+        // seed's batch ended even when its own result fell outside the window.
+        // Seeds started in the current retained batch stay open (genuine
+        // parallel calls), and a seed for this same id is replaced below.
         const seedSince = state.inFlightSince;
         let supersededSeed = false;
-        if ([...state.open.values()].filter((call) => call.seeded).length === 1) {
-            for (const [openId, call] of state.open) {
-                if (call.seeded && openId !== id) {
-                    state.open.delete(openId);
-                    supersededSeed = true;
-                }
+        const boundary = state.lastEventAt;
+        for (const [openId, call] of state.open) {
+            if (call.seeded && openId !== id && boundary !== undefined && boundary > call.startedAt) {
+                state.open.delete(openId);
+                supersededSeed = true;
             }
         }
         if (supersededSeed && state.open.size === 0 && seedSince !== undefined) {

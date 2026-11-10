@@ -217,6 +217,37 @@ describe("progress", () => {
         const clamped = emptyProgress(1_000, { id: "build", since: 10 });
         assert.equal(clamped.inFlightSince, 1_000, "the pause cannot start before the run");
     });
+
+    it("retires restored parallel calls when a later observed batch proves their results were lost", () => {
+        const state = emptyProgress(0, [
+            { id: "a", since: 100, name: "bash", command: "build" },
+            { id: "b", since: 100, name: "bash", command: "test" },
+        ]);
+        // The retained window begins after a/b ended: their results are gone, but
+        // a later assistant message, the next call, and its result remain.
+        foldProgress(state, { type: "message_end", message: { role: "assistant", timestamp: 10_000, content: [] } });
+        foldProgress(state, { type: "tool_execution_start", toolCallId: "c", toolName: "read", args: { path: "next" } });
+        foldProgress(state, { type: "message_end", message: { role: "toolResult", toolCallId: "c", toolName: "read", isError: false, timestamp: 11_000 } });
+        assert.equal(state.open.size, 0, "lost-result seeds do not survive later observed work");
+        const actions = decideTiming({ graceMs: 0, toolWaitMs: 300, stuckMs: 300 }, state, 1_000_000);
+        assert.equal(actions.toolWaitWakes, undefined, "finished calls do not manufacture long-tool alerts");
+        assert.deepEqual(actions.stuckWake, { anchorAt: 11_000, ageMs: 989_000 }, "genuine no-progress resumes");
+    });
+
+    it("keeps genuine parallel restores in the observed batch open", () => {
+        const state = emptyProgress(0, [
+            { id: "a", since: 100, name: "bash", command: "build" },
+            { id: "b", since: 100, name: "bash", command: "test" },
+        ]);
+        // The seeded calls started in this retained assistant batch; a sibling
+        // start does not prove either finished.
+        foldProgress(state, { type: "message_end", message: { role: "assistant", timestamp: 100, content: [] } });
+        foldProgress(state, { type: "tool_execution_start", toolCallId: "c", toolName: "read", args: { path: "same-batch" } });
+        assert.deepEqual([...state.open.keys()], ["a", "b", "c"]);
+        assert.equal(state.open.get("a").seeded, true);
+        assert.equal(state.open.get("b").seeded, true);
+        assert.deepEqual(decideTiming({ graceMs: 0, toolWaitMs: 300 }, state, 500).toolWaitWakes?.map((wake) => wake.callId), ["a", "b", "c"]);
+    });
 });
 
 describe("timing decisions", () => {

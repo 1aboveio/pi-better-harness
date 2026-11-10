@@ -52,6 +52,7 @@ import {
     resolveRunTiming,
     steerText,
     stuckAlertText,
+    TIMING_ENV,
     timingParameterSchemas,
     toolWaitAlertText,
     validatedTimingMinutes,
@@ -2130,20 +2131,25 @@ export default function (pi: ExtensionAPI) {
     interface TimingMinutesState {
         toolWaitMinutes: number;
         stuckMinutes: number;
-        toolWaitSource: "session" | "config" | "default";
-        stuckSource: "session" | "config" | "default";
+        toolWaitSource: "environment" | "session" | "config" | "default";
+        stuckSource: "environment" | "session" | "config" | "default";
         defaultToolWaitMinutes: number;
         defaultStuckMinutes: number;
         timingError?: string;
     }
     const timingState = (): TimingMinutesState => {
         const cfg = loadConfig();
-        const sourceFor = (key: "toolWaitMinutes" | "stuckMinutes"): "session" | "config" | "default" =>
-            timingOverride[key] !== undefined ? "session"
-                : cfg[key] !== undefined && cfg[key] !== null ? "config" : "default";
+        const envFor = (key: "toolWaitMinutes" | "stuckMinutes"): string | undefined => {
+            const raw = key === "toolWaitMinutes" ? process.env[TIMING_ENV.toolWait] : process.env[TIMING_ENV.stuck];
+            return raw !== undefined && raw.trim() !== "" ? raw : undefined;
+        };
+        const sourceFor = (key: "toolWaitMinutes" | "stuckMinutes"): "environment" | "session" | "config" | "default" =>
+            envFor(key) !== undefined ? "environment"
+                : timingOverride[key] !== undefined ? "session"
+                    : cfg[key] !== undefined && cfg[key] !== null ? "config" : "default";
         try {
-            const effective = resolveRunTiming({ settings: timingSettingsFor(cfg), startedAt: 0 });
-            const defaults = resolveRunTiming({ settings: cfg, startedAt: 0 });
+            const effective = resolveRunTiming({ settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
+            const defaults = resolveRunTiming({ settings: cfg, env: process.env, startedAt: 0 });
             const minutes = (ms: number | undefined): number => ms === undefined ? 0 : ms / 60_000;
             return {
                 toolWaitMinutes: minutes(effective.toolWaitMs),
@@ -2246,17 +2252,18 @@ export default function (pi: ExtensionAPI) {
             const cfg = loadConfig();
             const savedSkillValue = cfg.defaultSkills;
             const hasSavedSkillChoice = savedSkillValue !== undefined && savedSkillValue !== null;
-            const timing = timingState();
             // Like skills, only save a timing key this session overrides or the
             // config already carries; built-in defaults need no stored copy.
             const savedTiming: { toolWaitMinutes?: number; stuckMinutes?: number } = {};
-            if (timingOverride.toolWaitMinutes !== undefined
-                || (cfg.toolWaitMinutes !== undefined && cfg.toolWaitMinutes !== null)) {
-                savedTiming.toolWaitMinutes = timing.toolWaitMinutes;
+            if (timingOverride.toolWaitMinutes !== undefined) {
+                savedTiming.toolWaitMinutes = timingOverride.toolWaitMinutes;
+            } else if (isTimingMinutes(cfg.toolWaitMinutes)) {
+                savedTiming.toolWaitMinutes = cfg.toolWaitMinutes;
             }
-            if (timingOverride.stuckMinutes !== undefined
-                || (cfg.stuckMinutes !== undefined && cfg.stuckMinutes !== null)) {
-                savedTiming.stuckMinutes = timing.stuckMinutes;
+            if (timingOverride.stuckMinutes !== undefined) {
+                savedTiming.stuckMinutes = timingOverride.stuckMinutes;
+            } else if (isTimingMinutes(cfg.stuckMinutes)) {
+                savedTiming.stuckMinutes = cfg.stuckMinutes;
             }
             writeSubagentSettings({
                 delegationMode: activeDelegationMode(),

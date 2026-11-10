@@ -6,7 +6,7 @@ import { EXECUTION_POLICY_TEXT, publishExecutionPolicy, supportsPromptSections }
 
 export const SUBAGENT_SETTINGS_CONTEXT = "pi-better-subagents-settings";
 
-export type TimingSettingSource = "session" | "config" | "default";
+export type TimingSettingSource = "environment" | "session" | "config" | "default";
 
 export interface EffectiveTimingSettings {
     toolWaitMinutes: number;

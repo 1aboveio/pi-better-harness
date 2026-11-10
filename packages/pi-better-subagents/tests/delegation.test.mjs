@@ -12,6 +12,7 @@ register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 const { default: extension, subagentsArgumentCompletions } = await import("../index.ts");
 const { setConfigForTests, setConfigPathForTests, loadConfig, writeSubagentSettings, normalizeConcurrencyCap } = await import("../config.ts");
 const { normalizeDelegationMode, delegationPrompt, DELEGATION_MODE_REQUEST } = await import("../delegation.ts");
+const { resolveRunTiming, TIMING_ENV } = await import("../timing.ts");
 
 function harness(options = {}) {
     const handlers = new Map();
@@ -279,6 +280,67 @@ test("session timing alerts validate, persist across reload, save, and reset ind
     } finally {
         setConfigPathForTests(undefined);
         rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("effective timing alerts honor environment precedence and expose invalid environment values", async () => {
+    const previous = {
+        tool: process.env[TIMING_ENV.toolWait],
+        stuck: process.env[TIMING_ENV.stuck],
+    };
+    setConfigForTests({ delegationMode: "adaptive", maxConcurrent: 4, toolWaitMinutes: 0, stuckMinutes: 0 });
+    process.env[TIMING_ENV.toolWait] = "7";
+    process.env[TIMING_ENV.stuck] = "13";
+    try {
+        const h = harness();
+        const command = h.commands.get("subagents");
+        const inspect = async () => (await h.tools.get("subagent_settings").execute()).structuredContent;
+
+        let current = await inspect();
+        assert.equal(current.toolWaitMinutes, 7);
+        assert.equal(current.stuckMinutes, 13);
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "environment", stuckMinutes: "environment" });
+        assert.match(h.prompt(), /Timing alerts: tool wait 7m \(environment\); no progress 13m \(environment\)\./);
+        let launched = resolveRunTiming({ settings: loadConfig(), env: process.env, startedAt: 0 });
+        assert.equal(launched.toolWaitMs, 7 * 60_000, "inspection matches the value launch resolution uses");
+        assert.equal(launched.stuckMs, 13 * 60_000);
+
+        await command.handler("tool-wait 3", h.ctx);
+        await command.handler("stuck 4", h.ctx);
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 7, "environment still wins over the session override");
+        assert.equal(current.stuckMinutes, 13);
+        assert.deepEqual(current.timingSources, { toolWaitMinutes: "environment", stuckMinutes: "environment" });
+        await command.handler("", h.ctx);
+        assert.match(h.notifications.at(-1).message, /Tool-wait alert: 7 min\. No-progress alert: 13 min\./,
+            "the settings summary matches the next launch");
+
+        delete process.env[TIMING_ENV.toolWait];
+        current = await inspect();
+        assert.equal(current.toolWaitMinutes, 3, "removing the environment override reveals the session choice");
+        assert.equal(current.timingSources.toolWaitMinutes, "session");
+        assert.equal(current.stuckMinutes, 13);
+        assert.equal(current.timingSources.stuckMinutes, "environment");
+
+        delete process.env[TIMING_ENV.stuck];
+        launched = resolveRunTiming({
+            settings: { ...loadConfig(), toolWaitMinutes: 3, stuckMinutes: 4 },
+            env: process.env, startedAt: 0,
+        });
+        assert.equal(launched.toolWaitMs, 3 * 60_000);
+        assert.equal(launched.stuckMs, 4 * 60_000);
+
+        process.env[TIMING_ENV.toolWait] = "soon";
+        current = await inspect();
+        assert.match(current.timingError, /PI_SUBAGENT_TOOL_WAIT_MINUTES must be a number of minutes/);
+        assert.equal(current.timingSources.toolWaitMinutes, "environment", "an invalid environment value is not hidden");
+        assert.match(h.prompt(), /Timing alert settings error: PI_SUBAGENT_TOOL_WAIT_MINUTES must be/);
+    } finally {
+        if (previous.tool === undefined) delete process.env[TIMING_ENV.toolWait];
+        else process.env[TIMING_ENV.toolWait] = previous.tool;
+        if (previous.stuck === undefined) delete process.env[TIMING_ENV.stuck];
+        else process.env[TIMING_ENV.stuck] = previous.stuck;
+        setConfigForTests(undefined);
     }
 });
 

@@ -17,8 +17,8 @@ export interface SubagentSettingsSnapshot {
     defaultCap: number;
     toolWaitMinutes: number;
     stuckMinutes: number;
-    toolWaitSource: "session" | "config" | "default";
-    stuckSource: "session" | "config" | "default";
+    toolWaitSource: "environment" | "session" | "config" | "default";
+    stuckSource: "environment" | "session" | "config" | "default";
     defaultToolWaitMinutes: number;
     defaultStuckMinutes: number;
     /** A saved timing value the launcher cannot read, kept visible rather than hidden. */
