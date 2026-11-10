@@ -18,6 +18,29 @@ import {
 afterEach(cleanupHarnesses);
 
 describe("operation registration", () => {
+    it("filters owner scopes before decoding unrelated history, across branches", () => {
+        const harness = createHarness();
+        registerOperation(harness.store, { operationId: "parent-main", owner: parentOwner });
+        registerOperation(harness.store, { operationId: "parent-other-branch", owner: { ...parentOwner, branchId: "other", goalId: "goal-2" } });
+        for (const [operationId, owner] of [
+            ["foreign-session", { ...parentOwner, sessionId: "foreign" }],
+            ["foreign-workspace", { ...parentOwner, workspace: "/workspace/other" }],
+            ["worker", { ...parentOwner, kind: "worker-conversation" }],
+        ] as const) {
+            registerOperation(harness.store, { operationId, owner });
+        }
+        // Invalid payloads make accidental decoding of excluded history observable.
+        const db = new DatabaseSync(harness.path);
+        try {
+            db.exec("UPDATE operations SET supervision_json = 'invalid-json' WHERE operation_id IN ('foreign-session', 'foreign-workspace', 'worker')");
+        } finally {
+            db.close();
+        }
+        assert.deepEqual(harness.store.listOperations({ ownerScope: {
+            kind: parentOwner.kind, sessionId: parentOwner.sessionId, workspace: parentOwner.workspace,
+        } }).map((operation) => operation.operationId).sort(), ["parent-main", "parent-other-branch"]);
+    });
+
     it("persists the launch identity and reads it back after reopen", () => {
         const harness = createHarness();
         const { operation } = registerOperation(harness.store);

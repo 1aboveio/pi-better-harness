@@ -95,3 +95,67 @@ export default function(pi) {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// @covers harness.minimal-tool-error
+// @level e2e
+test("dark: a failed tool settles with its error count and the final assistant stream visible", {
+  skip: !fullscreen ? "This Pi SDK has no fullscreen viewport" : spawnSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0 ? "tmux is unavailable" : false,
+}, () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-tool-error-"));
+  const socket = `tool-error-${process.pid}`;
+  const agent = join(dir, "agent");
+  const ready = join(dir, "ready");
+  const fixture = join(dir, "fixture.mjs");
+  mkdirSync(agent);
+  writeFileSync(join(agent, "settings.json"), JSON.stringify({ theme: "dark", tuiMode: "fullscreen", packages: [], quietStartup: true,
+    piBetterHarness: { toolOutput: { version: 1, enabled: true }, toolAnimation: { version: 1, enabled: false } } }));
+  writeFileSync(fixture, `import { writeFileSync } from 'node:fs';
+import { Type } from ${JSON.stringify(import.meta.resolve("typebox"))};
+import { createAssistantMessageEventStream } from ${JSON.stringify(import.meta.resolve("@earendil-works/pi-ai"))};
+function streamSimple(model, context) {
+  const stream = createAssistantMessageEventStream();
+  const finished = context.messages.at(-1)?.role === 'toolResult';
+  const message = { role: 'assistant', api: model.api, provider: model.provider, model: model.id,
+    content: finished ? [{type:'text',text:'Error proof complete'}]
+      : [{type:'toolCall',id:'header-error',name:'header_error',arguments:{path:'error-proof'}}],
+    stopReason: finished ? 'stop' : 'toolUse', timestamp: Date.now(),
+    usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}} };
+  queueMicrotask(() => { stream.push({type:'start',partial:message}); stream.push({type:'done',reason:message.stopReason,message}); stream.end(); });
+  return stream;
+}
+export default function(pi) {
+  pi.registerProvider('header-error-test',{api:'header-error-api',apiKey:'fake',baseUrl:'http://localhost:0',streamSimple,
+    models:[{id:'local',name:'Local error proof',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:4096}]});
+  pi.registerTool({name:'header_error',label:'Header error',description:'Local failing tool fixture',parameters:Type.Object({path:Type.String()}),
+    async execute(){await new Promise(resolve=>setTimeout(resolve,2000));throw new Error('HEADER_ERROR_BODY');}});
+  pi.on('session_start',async(_event,ctx)=>{await pi.setModel(ctx.modelRegistry.find('header-error-test','local'));writeFileSync(${JSON.stringify(ready)},'ready');});
+}`);
+  const tmux = (...args) => execFileSync("tmux", ["-L", socket, ...args], { encoding: "utf8" });
+  const capture = () => tmux("capture-pane", "-t", "test", "-p", "-e");
+  const send = text => tmux("send-keys", "-t", "test", "-l", text);
+  const key = name => tmux("send-keys", "-t", "test", name);
+  const wait = predicate => {
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) { const frame = capture(); if (predicate(stripVTControlCharacters(frame))) return frame; sleep(30); }
+    throw new Error(`Terminal condition timed out:\n${capture()}`);
+  };
+  try {
+    const command = ["exec env", `PI_CODING_AGENT_DIR=${q(agent)}`, "PI_OFFLINE=1", "COLORTERM=truecolor", q(cli),
+      "--approve --no-skills --no-context-files", "-e", q(join(root, "packages/pi-better-harness/extensions/minimal-output/index.ts")), "-e", q(fixture)].join(" ");
+    tmux("new-session", "-d", "-s", "test", "-x", "100", "-y", "32", command);
+    tmux("set-option", "-w", "-t", "test", "remain-on-exit", "on");
+    wait(() => existsSync(ready));
+    send("Run the local error fixture"); key("Enter");
+    const running = wait(frame => frame.includes("Header error") && frame.includes("(running)"));
+    assert.match(stripVTControlCharacters(running), /Header error/);
+    assert.doesNotMatch(stripVTControlCharacters(running), /HEADER_ERROR_BODY/);
+    const finished = wait(frame => frame.includes("1 failed") && frame.includes("Error proof complete"));
+    assert.doesNotMatch(stripVTControlCharacters(finished), /HEADER_ERROR_BODY|\(running\)/);
+    tmux("resize-window", "-t", "test", "-x", "60", "-y", "24");
+    const resized = wait(frame => frame.includes("1 failed") && frame.includes("Error proof complete"));
+    assert.match(stripVTControlCharacters(resized), /1 tool call/);
+  } finally {
+    spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

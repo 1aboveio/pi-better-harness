@@ -821,6 +821,56 @@ test("clipped running rows do not redraw even when the host keeps rendering them
   assert.equal(redraws, 1);
 });
 
+test("unchanged compact calls reuse layout while arguments, results, width, theme and expansion invalidate it", () => {
+  let theme = { fg: (_color, value) => `<a>${value}</>` };
+  const hook = installMinimalOutputHook(prototype, () => theme);
+  handles.push(hook);
+  hook.setEnabled(true);
+  let renders = 0;
+  const component = new ToolExecutionComponent("cache_probe", "cache-call", { path: "/tmp/cache" }, {}, {
+    renderCall: () => ({
+      render(width) { renders += 1; return [`CACHE_CALL width=${width}`]; },
+      invalidate() {},
+    }),
+  }, { requestRender() {} }, process.cwd());
+
+  const first = component.render(100).join("\n");
+  const afterFirst = renders;
+  assert.match(first, /CACHE_CALL width=4096/);
+  for (let repeat = 0; repeat < 8; repeat++) {
+    assert.equal(component.render(100).join("\n"), first, "an unchanged redraw returns identical output");
+  }
+  assert.equal(renders, afterFirst, "unchanged redraws do not re-render the native call");
+
+  const narrow = component.render(20).join("\n");
+  assert.notEqual(narrow, first, "a width change repaints the fitting line");
+  assert.equal(renders, afterFirst, "widths below the fixed header width still reuse the native call");
+  component.render(5_000);
+  assert.equal(renders, afterFirst + 1, "a width above the fixed header width re-renders the call");
+
+  component.updateArgs({ path: "/tmp/changed" });
+  component.render(100);
+  assert.equal(renders, afterFirst + 2, "streamed arguments invalidate the cached call");
+
+  component.updateResult(payload, true);
+  component.render(100);
+  assert.equal(renders, afterFirst + 3, "a partial result invalidates the running/final state");
+  component.updateResult(payload, false);
+  component.render(100);
+  assert.equal(renders, afterFirst + 4, "a final result invalidates the running/final state");
+
+  const beforeTheme = component.render(100).join("\n");
+  theme = { fg: (_color, value) => `<b>${value}</>` };
+  const repainted = component.render(100).join("\n");
+  assert.notEqual(repainted, beforeTheme, "a theme change repaints the styled line");
+  assert.equal(renders, afterFirst + 4, "a theme-only change does not re-render the native call");
+
+  component.setExpanded(true);
+  component.setExpanded(false);
+  component.render(100);
+  assert.equal(renders, afterFirst + 5, "collapse after expansion rebuilds the compact call");
+});
+
 test("real scrollback TUI leaves off-screen running rows unchanged without scrollback clears", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
   const hook = installMinimalOutputHook(prototype, () => themeModule.theme);

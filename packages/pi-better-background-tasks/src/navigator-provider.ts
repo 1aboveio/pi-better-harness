@@ -22,6 +22,12 @@ import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.j
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
 
 const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
+const DURABLE_ROW_CACHE_MS = 1_000;
+let durableRowCache: {
+  tasks: readonly DurableTaskProjection[];
+  at: number;
+  rows: BackgroundWorkRow[];
+} | undefined;
 
 export function createBackgroundTasksNavigator(runtime: Pick<BackgroundTaskRuntime, "stopTask"> = { stopTask }) {
 const owner = Symbol("background-tasks navigator factory");
@@ -88,7 +94,7 @@ const provider: BackgroundWorkProvider = {
   },
   listRows: (now) => [
     ...visibleMetas(now).map((meta) => rowFromMeta(meta, now)),
-    ...visibleDurableTasks(now).map((task) => rowFromDurable(task, now)),
+    ...durableRows(visibleDurableTasks(now), now),
   ],
   detail: (id, now, options) => {
     const durable = durableTask(id);
@@ -123,12 +129,12 @@ const provider: BackgroundWorkProvider = {
   },
   onVisibleChanged: (notify) => {
     const offMeta = onMetaChanged(notify);
-    const offDurable = getObservedWaitHost(piRef)?.onDurableTaskChange(() => {
-      invalidateDurableProjection();
+    const offDurable = getObservedWaitHost(piRef)?.onDurableTaskChange((change) => {
+      const active = activeNavigatorOrigin;
+      if (!active || change.workspace !== active.cwd || change.sessionId !== active.sessionId) return;
       notify();
     });
     return () => {
-      invalidateDurableProjection();
       offMeta();
       offDurable?.();
     };
@@ -139,30 +145,24 @@ function navigatorHost() {
   return piRef ? getObservedWaitHost(piRef) : undefined;
 }
 
-/**
- * One refresh asks for {@link provider.visibleCount} and then {@link provider.listRows},
- * and a detail view asks again. Rebuilding the projection re-reads every durable
- * record, so a single paint would pay for the same list up to three times. Hold
- * one result per paint window; a durable-change notification clears it.
- */
-const PROJECTION_MEMO_MS = 250;
-let projectionMemo: { at: number; tasks: DurableTaskProjection[] } | undefined;
-
-function invalidateDurableProjection(): void {
-  projectionMemo = undefined;
-}
-
 function visibleDurableTasks(now = Date.now()): DurableTaskProjection[] {
   const active = activeNavigatorOrigin;
   const host = navigatorHost();
   if (!active || !host) return [];
-  if (projectionMemo && now - projectionMemo.at < PROJECTION_MEMO_MS) {
-    return projectionMemo.tasks.filter((task) => !isExpiredDurableRow(task, now));
-  }
+  // ObservedWaitHost caches unchanged projections and invalidates them on every
+  // durable notification, so a host redraw no longer re-queries per panel.
   const listed = host.listDurableTasks(active, { retentionMs: TERMINAL_NAVIGATOR_RETENTION_MS });
-  const tasks = listed.filter((task) => task.dismissedAt === undefined);
-  projectionMemo = { at: now, tasks };
-  return tasks.filter((task) => !isExpiredDurableRow(task, now));
+  return listed;
+}
+
+function durableRows(tasks: readonly DurableTaskProjection[], now: number): BackgroundWorkRow[] {
+  if (durableRowCache && durableRowCache.tasks === tasks
+    && now >= durableRowCache.at && now - durableRowCache.at < DURABLE_ROW_CACHE_MS) {
+    return durableRowCache.rows;
+  }
+  const rows = tasks.map((task) => rowFromDurable(task, now));
+  durableRowCache = { tasks, at: now, rows };
+  return rows;
 }
 
 function durableTask(id: string): DurableTaskProjection | undefined {
@@ -170,11 +170,6 @@ function durableTask(id: string): DurableTaskProjection | undefined {
   const host = navigatorHost();
   if (!active || !host) return undefined;
   return host.readDurableTask(active, id);
-}
-
-function isExpiredDurableRow(task: DurableTaskProjection, now: number): boolean {
-  if (!task.terminal || task.endedAt === undefined) return false;
-  return now - task.endedAt >= TERMINAL_NAVIGATOR_RETENTION_MS;
 }
 
 function rowFromDurable(task: DurableTaskProjection, now: number): BackgroundWorkRow {

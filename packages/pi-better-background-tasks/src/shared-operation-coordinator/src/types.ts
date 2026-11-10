@@ -204,6 +204,8 @@ export interface RecordTerminalOutcomeResult {
 /** Filter for `listOperations`. */
 export interface OperationFilter {
     owner?: OwnerIdentity;
+    /** Session/workspace scope spanning all branches and goals. */
+    ownerScope?: Pick<OwnerIdentity, "kind" | "sessionId" | "workspace">;
     phase?: OperationPhase;
     taskId?: string;
 }
