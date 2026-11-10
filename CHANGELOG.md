@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-background-tasks@0.14.4] - 2026-11-10
+
+### Fixed
+
+- Resolve a real Node.js executable before spawning the detached supervisor runner instead of trusting `process.execPath`. A standalone Pi binary (pi 1.5, compiled with Bun) is not Node.js: spawning it with the runner script started another agent session that treated the script path as a positional prompt, never claimed its launch token, and left the task attested `lost` after the 30-second claim window while a stray headless session lingered per launch. The invocation now refuses non-Node executables, honors `PI_BETTER_BACKGROUND_TASKS_NODE`, falls back to the first `node` found on `PATH`, and reports a clear error when none exists.
+
 ## [pi-better-harness@0.42.0] - 2026-11-10
 
 ### Added
