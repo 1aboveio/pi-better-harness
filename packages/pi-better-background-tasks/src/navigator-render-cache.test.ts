@@ -94,6 +94,7 @@ describe("background-work navigator projection cache", () => {
     // Installing the navigator already warmed the projection. That one read saw
     // only the three current-session rows, never the 3,140 historical rows.
     const warm = host.getDurableProjectionMetrics();
+    expect(warm.queries).toBe(1);
     expect(warm.rowsRead).toBe(3);
     expect(warm.projectionsBuilt).toBe(3);
     const now = Date.now();
@@ -110,6 +111,7 @@ describe("background-work navigator projection cache", () => {
     }
     expect(host.getDurableProjectionMetrics()).toEqual({
       listCalls: 20,
+      queries: 0,
       rowsRead: 0,
       projectionsBuilt: 0,
       cacheHits: 20,

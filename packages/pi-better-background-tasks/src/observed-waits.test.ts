@@ -1264,6 +1264,7 @@ describe("durable read-only projections", () => {
     expect(first).toHaveLength(3);
     expect(host.getDurableProjectionMetrics()).toEqual({
       listCalls: 1,
+      queries: 1,
       rowsRead: 3,
       projectionsBuilt: 3,
       cacheHits: 0,
@@ -1274,6 +1275,7 @@ describe("durable read-only projections", () => {
     }
     expect(host.getDurableProjectionMetrics()).toEqual({
       listCalls: 26,
+      queries: 1,
       rowsRead: 3,
       projectionsBuilt: 3,
       cacheHits: 25,
@@ -1313,6 +1315,7 @@ describe("durable read-only projections", () => {
         await host.reconcileNow();
         expect(changes).toBeGreaterThan(beforeReconcile);
         expect(host.listDurableTasks(origin)[0]).toMatchObject({ id: launch.id, status: "succeeded", terminal: true });
+        expect(host.getDurableProjectionMetrics().queries).toBe(1);
         expect(host.getDurableProjectionMetrics().rowsRead).toBe(1);
       } finally {
         off();

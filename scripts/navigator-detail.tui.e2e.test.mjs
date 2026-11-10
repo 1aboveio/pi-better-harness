@@ -133,6 +133,18 @@ test("golden path: navigate both providers and read complete Unicode logs withou
       assert.ok(taskPage.replace(/\s/g, "").includes(unicodeLog), `wrapped log lost content at ${width} columns:\n${taskPage}`);
     }
 
+    const expandedCommand = waitForScreen((screen) => screen.includes("provider Background Tasks")
+      && screen.includes("Enter collapse") && hasSettledInputFrame(screen));
+    assert.match(expandedCommand, /Enter collapse/, "the command section starts expanded");
+    sendKey("Enter");
+    const foldedCommand = waitForScreen((screen) => screen.includes("provider Background Tasks")
+      && screen.includes("Enter expand") && /^\s+command\s+.*folded\s*$/m.test(screen) && hasSettledInputFrame(screen));
+    saveScreen("background-command-folded", foldedCommand);
+    sendKey("Enter");
+    const unfoldedCommand = waitForScreen((screen) => screen.includes("provider Background Tasks")
+      && screen.includes("Enter collapse") && screen.includes("GOLDEN_LOG_BEGIN") && hasSettledInputFrame(screen));
+    saveScreen("background-command-unfolded", unfoldedCommand);
+
     sendKey("Escape");
     waitForScreen((screen) => !screen.includes("provider Background Tasks"));
     execFileSync("tmux", [...tmuxArgs, "send-keys", "-t", session, "-l", "golden-editor-alive"]);

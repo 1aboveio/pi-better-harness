@@ -136,6 +136,7 @@ const DURABLE_PROJECTION_CACHE_MS = 5_000;
 /** Observable work performed by {@link ObservedWaitHost.listDurableTasks}. */
 export interface DurableProjectionMetrics {
   listCalls: number;
+  queries: number;
   rowsRead: number;
   projectionsBuilt: number;
   cacheHits: number;
@@ -859,6 +860,7 @@ export class ObservedWaitHost {
   };
   private projectionMetrics: DurableProjectionMetrics = {
     listCalls: 0,
+    queries: 0,
     rowsRead: 0,
     projectionsBuilt: 0,
     cacheHits: 0,
@@ -1314,6 +1316,7 @@ export class ObservedWaitHost {
     const operations = store.listOperations({
       ownerScope: { kind: "parent-session", sessionId: origin.sessionId, workspace: origin.cwd },
     });
+    this.projectionMetrics.queries += 1;
     this.projectionMetrics.rowsRead += operations.length;
     for (const operation of operations) {
       if (!this.belongsToParentOrigin(operation, origin)) continue;
@@ -1359,7 +1362,7 @@ export class ObservedWaitHost {
   }
 
   resetDurableProjectionMetrics(): void {
-    this.projectionMetrics = { listCalls: 0, rowsRead: 0, projectionsBuilt: 0, cacheHits: 0 };
+    this.projectionMetrics = { listCalls: 0, queries: 0, rowsRead: 0, projectionsBuilt: 0, cacheHits: 0 };
   }
 
   private expiredProjection(
