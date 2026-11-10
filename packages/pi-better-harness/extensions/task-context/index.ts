@@ -1,6 +1,6 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text, matchesKey, type AutocompleteItem } from "@earendil-works/pi-tui";
+import { Text, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.js";
 import { initializeNavigatorPanels, setNavigatorPanel } from "../shared-navigator-panels.ts";
@@ -20,12 +20,12 @@ import {
   reconstructPlanState,
   replacePlan,
 } from "./plan-state.js";
-import { createFullPlanComponent, renderCompactPlan } from "./plan-render.js";
+import { renderCompactPlan } from "./plan-render.js";
 import { createPlanWidget } from "./plan-widget.js";
 import { installLegacyPlanMask, type LegacyPlanMask } from "./legacy-plan-mask.js";
 import { COMPACT_PLAN_ROWS } from "./plan-presentation.js";
 import {
-  createRushPlanComponent, readRushPlan, renderRushPlan, workflowBinding,
+  readRushPlan, renderRushPlan, workflowBinding,
   WORKFLOW_PLAN_ENTRY, visibleRushUnits, type RushPlan, type WorkflowPlanBinding,
 } from "./workflow-plan.js";
 import { cancelledRowsClearDelay, observeCancelledRows } from "./cancelled-rows.js";
@@ -188,7 +188,6 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   let refreshWidget: ((force?: boolean) => void) | undefined;
   let completedPlanClearTimer: ReturnType<typeof setTimeout> | undefined;
   let cancelledRowsTimer: ReturnType<typeof setTimeout> | undefined;
-  let refreshFullPlan: (() => void) | undefined;
   let ledgerId: string | null = null;
   let ledger: WorkLedger | null = null;
   let ledgerError: string | null = null;
@@ -230,7 +229,6 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
 
   const refresh = (force = false): void => {
     refreshWidget?.(force);
-    refreshFullPlan?.();
   };
 
   const activeSessionEntries = (ctx: ExtensionContext): Array<{ type: string; customType?: string; data?: unknown; content?: string; details?: unknown }> => {
@@ -527,94 +525,6 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     );
   };
 
-  const showFullPlan = async (ctx: ExtensionContext): Promise<void> => {
-    const owner = workflowPlanOwner(ctx);
-    const binding = workflowBinding(ctx.sessionManager.getBranch());
-    if (owner || binding) {
-      const plan = loadRushPlan(ctx);
-      const planOwner = owner ?? binding!.owner;
-      const associated = ledgerTodoText(true);
-      if (!plan) {
-        ctx.ui.notify(`${planOwner}${owner ? " plan" : " read-only handoff"} unavailable: ${rushError ?? "not bound"}`, "warning");
-        return;
-      }
-      if (ctx.mode !== "tui") {
-        ctx.ui.notify([
-          ...(outcome ? [formatOutcome(outcome)] : []),
-          ...(associated ? [associated] : []),
-          renderRushPlan(plan, 160, true, undefined, planOwner, !owner).join("\n"),
-        ].join("\n"), "info");
-        return;
-      }
-      try {
-        await ctx.ui.custom<void>((tui, theme, _keys, done) => {
-          refreshFullPlan = () => tui.requestRender();
-          const fg = typeof theme?.fg === "function"
-            ? (color: string, value: string) => theme.fg(color as never, value)
-            : undefined;
-          const component = createRushPlanComponent(() => rushPlan ?? { ...plan, issues: [] }, () => done(), fg, planOwner, !owner);
-          return {
-            render: (width) => [
-              ...(outcome ? new Text(formatOutcome(outcome), 0, 0).render(width) : []),
-              ...(associated ? new Text(associated, 0, 0).render(width) : []),
-              ...component.render(width),
-            ],
-            handleInput(data) {
-              component.handleInput?.(data);
-              tui.requestRender();
-            },
-            invalidate: () => component.invalidate(),
-          };
-        });
-      } finally {
-        refreshFullPlan = undefined;
-      }
-      return;
-    }
-    if (!currentPlan) {
-      const associated = ledgerTodoText(true);
-      if (!outcome && associated) {
-        if (ctx.mode !== "tui") { ctx.ui.notify(associated, "info"); return; }
-        await ctx.ui.custom<void>((_tui, _theme, _keys, done) => ({
-          render: width => new Text(associated, 0, 0).render(width),
-          handleInput: data => { if (matchesKey(data, "escape") || matchesKey(data, "left")) done(); },
-          invalidate() {},
-        }));
-        return;
-      }
-      if (!outcome) { ctx.ui.notify("No outcome or Todo is set.", "info"); return; }
-      if (ctx.mode !== "tui") { ctx.ui.notify(formatOutcome(outcome), "info"); return; }
-      await ctx.ui.custom<void>((_tui, _theme, _keys, done) => ({
-        render: width => new Text([formatOutcome(outcome), ...(associated ? [associated] : [])].join("\n"), 0, 0).render(width),
-        handleInput: data => { if (matchesKey(data, "escape") || matchesKey(data, "left")) done(); },
-        invalidate() {},
-      }));
-      return;
-    }
-    if (ctx.mode !== "tui") {
-      ctx.ui.notify(formatPlan(currentPlan), "info");
-      return;
-    }
-    const snapshot = currentPlan;
-    const associated = ledgerTodoText(true);
-    await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-      const component = createFullPlanComponent(snapshot, theme as never, () => done());
-      return {
-        render: (width) => [
-          ...(outcome ? new Text(formatOutcome(outcome), 0, 0).render(width) : []),
-          ...(associated ? new Text(associated, 0, 0).render(width) : []),
-          ...component.render(width),
-        ],
-        handleInput(data) {
-          component.handleInput?.(data);
-          tui.requestRender();
-        },
-        invalidate: () => component.invalidate(),
-      };
-    });
-  };
-
-
   pi.registerTool({
     name: "update_todo",
     label: "Update Todo",
@@ -826,7 +736,10 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     getArgumentCompletions: planArgumentCompletions,
     handler: async (args, ctx) => {
       const input = args.trim().toLowerCase();
-      if (!input) return showFullPlan(ctx);
+      if (!input) {
+        setDisplayMode("auto");
+        return;
+      }
       if (input === "clear") {
         if (workflowPlanOwner(ctx)) {
           ctx.ui.notify("The workflow owns its plan; /todo clear cannot change it.", "warning");
@@ -1025,7 +938,6 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     cancelCompletedPlanClear();
     cancelCancelledRowsTimer();
-    refreshFullPlan = undefined;
     if (typeof unsubscribeWorkflow === "function") unsubscribeWorkflow();
     if (typeof unsubscribeSettings === "function") unsubscribeSettings();
     if (typeof unsubscribeTask === "function") unsubscribeTask();

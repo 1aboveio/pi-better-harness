@@ -236,9 +236,11 @@ of cycles. Harness consumes the public event contract and remains optional.
   completion count on the left. Matching Goal status and its existing active-time
   clock appear on the right; outcome text is one muted, truncated subtitle. The
   collapsed view shows up to five relevant rows and the expanded view all rows;
-  clicks toggle them. `/todo` shows the full objective, acceptance criteria,
-  boundaries, and plan. No permanent status bar is added, and existing critical
-  permission and paused notices remain unchanged.
+  clicks toggle them. `/todo` reveals the compact Overview when display is on and
+  returns it to automatic display; the full objective, acceptance criteria, boundaries, and plan
+  remain available through `get_todo` when hooks are enabled. The fullscreen detail
+  view is not part of the normal Todo interaction. No permanent status bar is added,
+  and existing critical permission and paused notices remain unchanged.
 - Runtime implementation, settings wiring, installation manifests, and the TUI
   journey are owned by the Harness workstream. Goal's contract is limited to the
   event above and the prompt-suppression rules recorded here.

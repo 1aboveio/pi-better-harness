@@ -276,17 +276,18 @@ export default function(pi){
     wait(frame => /Journey task 9/.test(frame) && /^todo\s+▾\s{2}0\/9 complete/m.test(frame));
     command("/todo collapse");
     wait(frame => /^todo\s+▸\s{2}0\/9 complete/im.test(frame) && !frame.includes("Journey task 9"));
+    command("/todo hide");
+    wait(frame => !headerLine(frame));
     command("/todo");
-    let full = wait(frame => /^›.*step_1/m.test(frame) && frame.includes("中文任务"));
-    assert.ok(full.replace(/\s/g, "").includes("中文任务验证长标签不会重叠并保持完整内容ABCDEFGHIJKLMN"), `long CJK label must wrap without losing content:\n${full}`);
-    assert.match(full, /Outcome \(active\): Deliver the terminal journey/);
-    assert.match(full, /Done when: Evidence is visible; Narrow widths stay readable/);
-    assert.match(full, /Boundaries: Do not edit the legacy Plan package/);
-    key("Down");
-    full = wait(frame => /^›.*step_2/m.test(frame));
-    assert.match(full, /step_1/, "dependent row must show its prerequisite");
-    key("Escape");
-    wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/im.test(frame) && !/^› /m.test(frame));
+    const revealed = wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame) &&
+      frame.includes("Deliver the terminal journey") && !/^› /m.test(frame));
+    assert.doesNotMatch(revealed, /Outcome \(active\):|↑↓ navigate/, "/todo must reveal the compact overview, not the removed full view");
+    assert.ok(revealed.split("\n").some(line => /Journey task 1|step_1/.test(line)), "the revealed overview keeps its checklist");
+    send("TODO_OVERVIEW_EDITOR_SENTINEL");
+    const overviewWithEditor = wait(frame => frame.includes("TODO_OVERVIEW_EDITOR_SENTINEL") && /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame));
+    assert.ok(!overviewWithEditor.split("\n").some(line => line.includes("TODO_OVERVIEW_EDITOR_SENTINEL") && /todo/.test(line)),
+      "revealing the overview leaves the editor active");
+    key("C-u");
 
     setHooks(false);
     assert.deepEqual(preferences(), { version: 1, enabled: false, display: true, ledger: true });
@@ -308,13 +309,12 @@ export default function(pi){
     wait(frame => /Journey task 9/.test(frame));
     command("/todo collapse");
     wait(frame => /^todo\s+▸\s{2}0\/9 complete/im.test(frame) && !frame.includes("Journey task 9"));
+    command("/todo hide");
+    wait(frame => !headerLine(frame));
     command("/todo");
-    full = wait(frame => /^›.*step_1/m.test(frame) && frame.includes("中文任务"));
-    assert.match(full, /Outcome \(active\): Deliver the terminal journey/);
-    assert.match(full, /Done when: Evidence is visible; Narrow widths stay readable/);
-    assert.match(full, /Boundaries: Do not edit the legacy Plan package/);
-    key("Escape");
-    wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/im.test(frame) && !/^› /m.test(frame));
+    const hooksOffRevealed = wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame) &&
+      frame.includes("Journey task 1") && !/^› /m.test(frame));
+    assert.doesNotMatch(hooksOffRevealed, /Outcome \(active\):|↑↓ navigate/, "hooks off still reveals only the compact overview");
     command("/todo hide");
     wait(frame => !headerLine(frame));
     command("/todo show");
@@ -323,6 +323,12 @@ export default function(pi){
     setDisplay(false);
     assert.deepEqual(preferences(), { version: 1, enabled: false, display: false, ledger: true });
     assertNoHeader(screen());
+    command("/todo");
+    send("DISPLAY_OFF_TODO_SENTINEL");
+    const displayOff = wait(frame => frame.includes("DISPLAY_OFF_TODO_SENTINEL"));
+    assertNoHeader(displayOff);
+    assert.match(displayOff, /DISPLAY_OFF_TODO_SENTINEL/, "the settings-off display stays hidden when /todo asks to reveal it");
+    key("C-u");
     setHooks(true);
     assert.deepEqual(preferences(), { version: 1, enabled: true, display: false, ledger: true });
     assert.ok(["update_todo", "get_todo"].every(name => probeState().active.includes(name)), "display off must not disable hooks");

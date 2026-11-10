@@ -32,14 +32,12 @@ async function fixture(t: TestContext, preferences?: { enabled: boolean; display
   const commands = new Map<string, any>();
   const hooks = new Map<string, any>();
   const widgets = new Map<string, any>();
-  let fullView = "";
   let active = ["read"];
   const theme = { fg: (_color: string, value: string) => value };
   events.on("harness-settings:register", control => settings.set(control.id, control));
   const ctx: any = { cwd: dir, hasUI: true, mode: "tui", isIdle: () => true, sessionManager: { getBranch: () => entries, getSessionId: () => "display-hooks" }, ui: {
     setStatus() {}, notify() {},
     setWidget(key: string, content: any) { widgets.set(key, content?.({ requestRender() {} }, theme)); },
-    async custom(factory: any) { fullView = factory({ requestRender() {} }, theme, {}, () => {}).render(80).join("\n"); },
   } };
   const pi: any = { events,
     registerTool(tool: any) { tools.set(tool.name, tool); },
@@ -56,7 +54,7 @@ async function fixture(t: TestContext, preferences?: { enabled: boolean; display
   });
   await hooks.get("session_start")({}, ctx);
   return { dir, settingsPath, ctx, entries, goal, outcome, events, settings, tools, commands, hooks, pi, widgets,
-    active: () => active, render: (width = 80) => widgets.get("background-work-list").render(width), fullView: () => fullView };
+    active: () => active, render: (width = 80) => widgets.get("background-work-list").render(width) };
 }
 
 test("saved task display defaults on without enabling hooks or writing configuration or session entries", async t => {
@@ -78,10 +76,11 @@ test("saved task display defaults on without enabling hooks or writing configura
   assert.deepEqual(f.entries, before);
   assert.equal(f.hooks.get("before_agent_start")({}, f.ctx), undefined);
   await assert.rejects(f.tools.get("update_todo").execute("", { outcome: { objective: "Blocked capture" } }, undefined, undefined, f.ctx), /off/);
+  await f.commands.get("todo").handler("hide", f.ctx);
+  assert.deepEqual(f.render(), []);
   await f.commands.get("todo").handler("", f.ctx);
-  assert.match(f.fullView(), /Customers can finish checkout/);
-  assert.match(f.fullView(), /Payment succeeds/);
-  assert.match(f.fullView(), /No production writes/);
+  assert.match(f.render().join("\n"), /Customers can finish checkout/,
+    "/todo reveals the compact overview with its accepted outcome");
 });
 
 test("an empty session stays invisible without placeholders, state writes, or implicit Goal ownership", async t => {
@@ -182,14 +181,4 @@ test("Goal, Todo, and background work reuse one native navigator", async t => {
   assert.match(text, /Customers can finish checkout/);
   assert.match(text, /Verify checkout/);
   assert.match(text, /Verify shared rendering/);
-});
-
-test("the full view retains long outcomes and all acceptance criteria beyond the compact subtitle", async t => {
-  const f = await fixture(t, { display: true, enabled: true });
-  const objective = `${"A long accepted outcome. ".repeat(50)}Final objective marker`;
-  await f.tools.get("update_todo").execute("", { outcome: { objective, doneWhen: ["First criterion", "Second criterion", "Third criterion", "Last criterion"] } }, undefined, undefined, f.ctx);
-  assert.doesNotMatch(f.render(40).join("\n"), /Final objective marker/);
-  await f.commands.get("todo").handler("", f.ctx);
-  assert.match(f.fullView(), /Final\s+objective\s+marker/);
-  assert.match(f.fullView(), /Last criterion/);
 });

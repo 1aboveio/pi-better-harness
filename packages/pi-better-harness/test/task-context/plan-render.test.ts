@@ -3,8 +3,8 @@ import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 import { replacePlan } from "../../extensions/task-context/plan-state.js";
-import { renderCompactPlan, renderFullPlan, createFullPlanComponent } from "../../extensions/task-context/plan-render.js";
-import { renderRushPlan, createRushPlanComponent, projectRushPlan, type RushPlan } from "../../extensions/task-context/workflow-plan.js";
+import { renderCompactPlan } from "../../extensions/task-context/plan-render.js";
+import { renderRushPlan, projectRushPlan, type RushPlan } from "../../extensions/task-context/workflow-plan.js";
 
 const theme = { fg: (_color: string, value: string) => value };
 
@@ -52,7 +52,6 @@ test("compact plan follows progress from head to tail and expansion reveals omit
   assert.match(tail.join("\n"), /\.\.\. 7 earlier steps/);
   assert.match(tail[0]!, /11\/12 complete/);
   assert.equal(titles(renderCompactPlan(make(6), 100, theme, true)).length, 12);
-  assert.equal(titles(renderFullPlan(make(6), 100, theme)).length, 12);
   assert.deepEqual(titles(renderCompactPlan(make(12), 100, theme)), ["Task 8", "Task 9", "Task 10", "Task 11", "Task 12"]);
 });
 
@@ -112,7 +111,7 @@ test("long workflow and read-only handoff views use the same five-row window and
   assert.doesNotMatch(expanded.join("\n"), /\.\.\./);
 });
 
-test("compact and full plan rendering name blocked state and obey width", () => {
+test("compact plan rendering names blocked state and obeys width", () => {
   const plan = replacePlan(null, [
     { step: "Completed step", status: "completed" },
     { step: "A blocked step with a deliberately long description", status: "blocked" },
@@ -122,7 +121,7 @@ test("compact and full plan rendering name blocked state and obey width", () => 
   const compact = renderCompactPlan(plan, 28, theme);
   assert.ok(compact.some((line) => line.includes("blocked")));
   assert.ok(compact.every((line) => !line.startsWith("›")));
-  assert.ok([...compact, ...renderFullPlan(plan, 28, theme, 1)].every((line) => visibleWidth(line) <= 28));
+  assert.ok(compact.every((line) => visibleWidth(line) <= 28));
 });
 
 test("every user-facing todo view heads the checklist as todo", () => {
@@ -133,8 +132,6 @@ test("every user-facing todo view heads the checklist as todo", () => {
   const views = [
     renderCompactPlan(native, 80, theme),
     renderCompactPlan(native, 80, theme, true),
-    renderFullPlan(native, 80, theme),
-    createFullPlanComponent(native, theme, () => {}).render(80),
   ];
   for (const lines of views) {
     assert.equal(lines[0], "todo  1/2 complete · 1 in progress");
@@ -143,36 +140,6 @@ test("every user-facing todo view heads the checklist as todo", () => {
   const workflow = rushFixture();
   assert.match(renderRushPlan(workflow, 80)[0]!, /^todo  \d+\/\d+ complete/);
   assert.equal(renderRushPlan(workflow, 80, true)[0], renderRushPlan(workflow, 80)[0]);
-});
-
-test("the full view names steps by id and shows prerequisite edges inside the width", () => {
-  const plan = replacePlan(null, [
-    { id: "step_1", step: "Inspect the terminal", status: "completed" },
-    { id: "step_2", step: "中文任务验证长标签不会重叠并保持完整内容ABCDEFGHIJKLMN", status: "in_progress", dependsOn: ["step_1"] },
-    { id: "step_3", step: "Verify the terminal journey", status: "pending", dependsOn: ["step_1", "step_2"] },
-  ], undefined, 100);
-
-  const compact = renderCompactPlan(plan, 80, theme).join("\n");
-  assert.match(compact, /●\s+2\s+(?=中文)/, "the compact widget keeps its stable ordinals");
-  assert.doesNotMatch(compact, /after:/, "edges stay out of the folded widget");
-
-  const full = renderFullPlan(plan, 80, theme, 1).join("\n");
-  assert.match(full, /^\u203a ●\s+step_2/m);
-  assert.match(full, /after: step_1$/m);
-  assert.match(full, /after: step_1, step_2/);
-  assert.ok(full.replace(/\s/g, "").includes("中文任务验证长标签不会重叠并保持完整内容ABCDEFGHIJKLMN"), "long CJK titles keep their content");
-
-  const component = createFullPlanComponent(plan, theme, () => {}).render(80).join("\n");
-  assert.match(component, /^\u203a ●\s+step_2/m, "the fullscreen view starts on the active step id");
-  assert.match(component, /after: step_1/);
-
-  for (const width of [1, 2, 8, 16, 28, 40, 80]) {
-    const lines = [
-      ...renderCompactPlan(plan, width, theme), ...renderCompactPlan(plan, width, theme, true),
-      ...renderFullPlan(plan, width, theme, 0), ...createFullPlanComponent(plan, theme, () => {}).render(width),
-    ];
-    assert.ok(lines.every((line) => visibleWidth(line) <= width), `overflow at ${width}`);
-  }
 });
 
 function rushFixture(): RushPlan {
@@ -228,7 +195,7 @@ test("Unicode and narrow terminals keep every row within its cell budget", () =>
   const native = replacePlan(null, [{ step: workflow.issues[1]!.title, status: "blocked" }], undefined, 100);
   for (const width of [1, 2, 8, 16, 28, 40, 80, 100, 160]) {
     const lines = [
-      ...renderCompactPlan(native, width, theme), ...renderFullPlan(native, width, theme, 0),
+      ...renderCompactPlan(native, width, theme),
       ...renderRushPlan(workflow, width), ...renderRushPlan(workflow, width, true),
     ];
     assert.ok(lines.every((line) => visibleWidth(line) <= width), `overflow at ${width}`);
@@ -263,8 +230,7 @@ test("workflow completion counts exclude cancellation spellings but retain skipp
   const compact = renderRushPlan(workflow, 160);
   const expanded = renderRushPlan(workflow, 160, false, undefined, "rush-issues", false, true);
   const full = renderRushPlan(workflow, 160, true);
-  const component = createRushPlanComponent(workflow, () => {}).render(160);
-  for (const lines of [compact, expanded, full, component]) {
+  for (const lines of [compact, expanded, full]) {
     assert.match(lines[0]!, /\b2\/9 complete\b/);
   }
   assert.doesNotMatch(compact.join("\n"), /Unit 10|Unit 11/, "hidden cancellations still affect the total");
@@ -328,20 +294,6 @@ test("a code-done unit without a HEAD keeps the plain in-progress state", () => 
   assert.equal(renderRushPlan(unit, 100)[0], "todo  0/1 complete · 1 in progress");
 });
 
-test("both full components use the same selection and return keys", () => {
-  const native = replacePlan(null, [{ step: "Done", status: "completed" }, { step: "Working", status: "in_progress" }], undefined, 100);
-  let closed = 0;
-  for (const component of [
-    createFullPlanComponent(native, theme, () => closed++),
-    createRushPlanComponent(rushFixture(), () => closed++),
-  ]) {
-    assert.match(component.render(100).join("\n"), /^› ●/m);
-    component.handleInput?.("\x1b[A");
-    assert.match(component.render(100).join("\n"), /^› ✓/m);
-    component.handleInput?.("\x1b[D");
-  }
-  assert.equal(closed, 2);
-});
 test("the canary cell shows, last, only when a unit carries warehouse canary work", () => {
   const raw = (warehouseCanary?: unknown) => ({
     runId: "canary", planRevision: 3,

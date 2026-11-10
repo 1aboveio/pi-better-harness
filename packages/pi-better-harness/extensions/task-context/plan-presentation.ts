@@ -1,5 +1,4 @@
-import type { Component } from "@earendil-works/pi-tui";
-import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { renderCompactTaskHeader, type CompactTaskHeader } from "./compact-task-header.js";
 
 export interface PlanRenderTheme {
@@ -64,7 +63,7 @@ export function planText(value: string): string {
 
 export function renderPlanPresentation(
   plan: PlanPresentation, width: number, theme: PlanRenderTheme,
-  full = false, selectedIndex = -1, expanded = false,
+  full = false, expanded = false,
   header?: CompactTaskHeader,
 ): string[] {
   const size = Math.max(1, Math.floor(width));
@@ -100,7 +99,7 @@ export function renderPlanPresentation(
     const row = plan.rows[index]!;
     const style = statusStyle(row.status);
     const label = truncateToWidth(planText(row.label), labelWidth);
-    const prefix = (index === selectedIndex ? theme.fg("accent", "› ") : "  ") +
+    const prefix = "  " +
       theme.fg(style.color, style.glyph) + " " + theme.fg("dim", label) +
       " ".repeat(Math.max(0, labelWidth - visibleWidth(label)) + 1);
     const titleColor = row.status === "blocked" ? "warning" : row.status === "failed" ? "error" :
@@ -130,29 +129,5 @@ export function renderPlanPresentation(
     const omitted = plan.rows.length - previous - 1;
     lines.push(theme.fg("dim", `  ... ${omitted} more ${omitted === 1 ? "step" : "steps"}`));
   }
-  if (full) lines.push("", theme.fg("dim", "↑↓ navigate · esc / ← back"));
   return lines.map((line) => truncateToWidth(line, size));
-}
-
-export function createPlanPresentationComponent(
-  source: PlanPresentation | (() => PlanPresentation), theme: PlanRenderTheme, onClose: () => void,
-): Component {
-  const presentation = () => typeof source === "function" ? source() : source;
-  const plan = presentation();
-  let selected = plan.rows.findIndex((row) => row.status === "in_progress");
-  if (selected < 0) selected = plan.rows.findIndex((row) => row.status !== "completed");
-  if (selected < 0) selected = Math.max(0, plan.rows.length - 1);
-  return {
-    render: (width) => {
-      const current = presentation();
-      selected = Math.min(selected, Math.max(0, current.rows.length - 1));
-      return renderPlanPresentation(current, width, theme, true, selected);
-    },
-    handleInput(data) {
-      if (matchesKey(data, "up")) selected = Math.max(0, selected - 1);
-      else if (matchesKey(data, "down")) selected = Math.min(Math.max(0, presentation().rows.length - 1), selected + 1);
-      else if (matchesKey(data, "escape") || matchesKey(data, "left") || matchesKey(data, "ctrl+c")) onClose();
-    },
-    invalidate() {},
-  };
 }

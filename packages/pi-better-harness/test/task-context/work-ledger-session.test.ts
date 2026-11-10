@@ -117,10 +117,6 @@ function harness(t: TestContext, f: Fixture, options: {
       notify: (text: string, level = "info") => notices.push({ text, level }),
       setWidget: (key: string, content: any) => widgets.set(key, content),
       setStatus: () => undefined,
-      custom: async (factory: any) => {
-        const component = factory({ requestRender() {} }, { fg: (_color: string, value: string) => value }, {}, () => {});
-        notices.push({ text: component.render(100).join("\n"), level: "full" });
-      },
     },
   };
   const pi: any = {
@@ -159,7 +155,6 @@ function harness(t: TestContext, f: Fixture, options: {
   });
 
   const command = async (text: string) => commands.get("ledger")?.handler(text, ctx);
-  const todoCommand = async (text = "") => commands.get("todo")?.handler(text, ctx);
   const get = async (): Promise<ToolResult> => tools.get("get_todo")!.execute("get", {}, undefined, undefined, ctx) as Promise<ToolResult>;
   const update = async (input: any): Promise<ToolResult> => tools.get("update_todo")!.execute("update", input, undefined, undefined, ctx) as Promise<ToolResult>;
   const mutateLedger = async (ledger: any): Promise<ToolResult> =>
@@ -179,7 +174,7 @@ function harness(t: TestContext, f: Fixture, options: {
     control: (id: string) => settingControls.get(id),
     active: () => active,
     userMessages: () => userMessages,
-    start, shutdown, reload, command, todoCommand, get, update, mutateLedger, queryLedger, enable, enableLedger,
+    start, shutdown, reload, command, get, update, mutateLedger, queryLedger, enable, enableLedger,
     append,
     render: (width = 100) => {
       const factory = widgets.get("background-work-list");
@@ -510,10 +505,6 @@ test("an associated ledger stays additive to the workflow's canonical plan", asy
   assert.match(todo.content[0]!.text, /implement · in-flight · building/,
     "workflow stage, status, and delivery still come from workflow-plan.ts");
   assert.match(todo.content[0]!.text, new RegExp(ledger.id));
-  await h.todoCommand();
-  const fullView = h.notices.at(-1)!.text;
-  assert.match(fullView, /implement · in-flight · building/, "the full view keeps the same workflow stage projection");
-  assert.match(fullView, new RegExp(ledger.id), "the full view shows workflow rows with ledger context");
   assert.equal(readFileSync(planPath, "utf8"), planBefore, "association must not rewrite the canonical workflow plan");
   assert.equal(h.session.branch.filter((entry) => entry.customType?.startsWith("pi-better-workflow")).length, workflowBefore,
     "association adds no workflow binding or ownership entry");
