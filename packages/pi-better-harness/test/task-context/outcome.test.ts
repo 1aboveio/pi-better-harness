@@ -26,7 +26,7 @@ test("default off, settings toggle, outcome, goal binding, and branch restore", 
     assert.equal(existsSync(join(dir, "settings.json")), false);
     await assert.rejects(tools.get("update_todo").execute("", { outcome: { objective: "x" } }, undefined, undefined, ctx), /off/);
     await setting.change("On", ctx);
-    assert.deepEqual(active, ["read", "update_todo", "get_todo"]);
+    assert.deepEqual(active, ["read", "update_todo", "get_todo", "work_ledger"]);
     const update = (input: any) => tools.get("update_todo").execute("", input, undefined, undefined, ctx);
     const get = async () => (await tools.get("get_todo").execute("", {}, undefined, undefined, ctx)).details;
     await update({ outcome: { objective: "Ship", doneWhen: ["Tests pass"] }, todo: [{ step: "Test", status: "completed" }] });

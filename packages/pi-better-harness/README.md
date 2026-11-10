@@ -55,6 +55,12 @@ Existing Plan session histories restore as Todo. Workflow task-plan files and
 revision checks stay unchanged; skills continue using their own records when the
 optional interface is off. See the [usage guide](docs/usage.md#outcome--todo).
 
+Hooks also enable `work_ledger`, a durable project-scoped record of the overall
+outcome, boundaries, and high-level items. Its explicit `create`, `list`, `read`,
+and `update` actions require a current revision for each update, preserve
+completed evidence and history, and never associate old work with a new session
+automatically. See [usage](docs/usage.md#durable-work-ledgers).
+
 Subagent and background-task rows can be clicked to open their existing navigator
 details. Enter and keyboard controls remain available, and editor input stays
 passive. Harness packages do not write to Pi's status bar. Goal holds and resume

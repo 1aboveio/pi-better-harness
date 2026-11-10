@@ -80,6 +80,29 @@ Use `newTask: true` with an outcome when switching to unrelated work; omit it fo
 corrections to the current task. Session state follows the active branch and survives
 compaction and reload. Existing Plan histories remain readable as Todo.
 
+### Durable work ledgers
+
+When Outcome & Todo hooks are on, the `work_ledger` tool keeps a high-level work
+record that is independent of session history:
+
+- `create` stores the overall outcome, boundaries, and initial high-level items.
+- `list` discovers ledgers for the current project; `read` opens one by id.
+- `update` requires the revision last read and changes only the named items and
+  fields. A stale revision is refused atomically. Omitted items, completed
+  evidence, and history entries are preserved.
+
+Items carry a stable id, status, completion conditions, progress, next step,
+blocker and recovery condition, and completion evidence. Completed items keep
+their evidence, and every accepted revision adds a history entry. Completing an
+item requires evidence; marking one blocked requires both a blocker and a
+recovery condition. The overall ledger cannot complete while items remain open.
+
+Ledgers are stored under the Pi agent directory, keyed by the canonical project
+directory, not in the session or repository. Listing or creating one does not
+associate it with the session, inject old work, start a Goal, or change the
+generic outcome/Todo, workflow plan, or display/hooks state. Session association
+and recovery reminders are separate work.
+
 ## Ordinary Startup
 
 Nothing changes about how you start Pi:
@@ -126,7 +149,7 @@ After installation, Pi can use these model-callable tools:
 | `pi-better-background-tasks` | `bg_task_spawn`, `bg_task_watch`, `bg_task_list`, `bg_task_status`, `bg_task_log`, `bg_task_stop`, `bg_task`, `bg_status` |
 | `pi-better-ssh` | `remote_bash`, `ssh_profile`, `ssh_mux` |
 | `pi-better-goal` | `get_goal`, `update_goal`, `get_background_activity` |
-| Harness Outcome & Todo (when hooks are enabled) | `update_todo`, `get_todo` |
+| Harness Outcome & Todo (when hooks are enabled) | `update_todo`, `get_todo`, `work_ledger` |
 
 The goal extension also provides the `/goal` and `/better-activity` commands.
 

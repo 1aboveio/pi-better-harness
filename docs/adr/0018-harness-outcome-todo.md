@@ -6,7 +6,8 @@ Accepted by the user. Supersedes the old standalone Plan
 distribution as the shared session-outcome surface described in
 [ADR 0013](0013-harness-settings-and-next-prompt-suggestions.md) and the Goal
 prompt ownership implied by that arrangement. Does not make `pi-better-goal`
-depend on `pi-better-harness`.
+depend on `pi-better-harness`. Amended by [#679](https://github.com/1aboveio/pi-better-harness/issues/679)
+to add the independent durable work ledger described below.
 
 ## Decision
 
@@ -41,6 +42,43 @@ In shared session state, Harness owns the outcome and checklist records. It read
 existing todo/plan entries and appends changes under their existing identities;
 old session history is not rewritten. Legacy checklists are not inferred as a
 business outcome. Goal state stays in its existing custom entries.
+
+## Durable Work Ledger
+
+Harness also owns a **durable work ledger** that is independent of a session and
+of the LLM context. This is a storage ownership change, not a second editable
+execution plan:
+
+- Ledger records live outside session custom entries under the Pi agent directory
+  (`PI_CODING_AGENT_DIR/work-ledgers/<project-key>/<ledger-id>.json`), scoped by
+  the canonical project working directory. They are not stored in the repository,
+  in `.resolve-issues` workflow runs, or in widget/display state.
+- Each record has a stable ledger id, a monotonically increasing revision, the
+  overall outcome, boundaries, overall status, and high-level items with stable
+  ids. Items retain completion conditions, progress, next step, blocker and
+  recovery condition, completion evidence, and timestamps.
+- Every accepted revision appends one structured history entry. Completed items,
+  their evidence, and cancelled or otherwise closed records remain in the record;
+  items are never silently dropped or replaced by a partial update.
+- The deliberate tool paths are `work_ledger` actions `create`, `list`, `read`,
+  and `update`. The typed `openWorkLedgerStore()` module API exposes the same
+  operations for later session-association work.
+- `update` requires the revision the caller last read. A mismatch is refused
+  before any write. Writes serialize on a project ledger lock and replace the
+  complete JSON record atomically, so competing writers cannot both accept the
+  same revision. A partial update changes only the named item ids and fields.
+- Completing an item requires evidence. Marking an item blocked requires both a
+  blocker and a recovery condition. Completing the overall ledger is refused
+  while items remain pending, in progress, or blocked; plan or item completion
+  never completes the outcome automatically.
+- The ledger does not alter `update_todo`, `get_todo`, workflow-owned canonical
+  task plans, Goal lifecycle, permissions, or Outcome & Todo display/hooks.
+  Creating or listing a ledger does not associate it with a session, inject old
+  work, start a Goal, or execute anything. Explicit association, recovery
+  reminders, detaching, and UI remain the separate contract in
+  [#680](https://github.com/1aboveio/pi-better-harness/issues/680).
+- Temporary widget visibility and cleanup remain separate from durable records.
+  Hiding or clearing a display never deletes ledger history or completed evidence.
 
 ## Bridge Contract
 
@@ -95,6 +133,10 @@ of cycles. Harness consumes the public event contract and remains optional.
 - There is a short period where Goal's prompt and the Harness outcome may both
   describe the same work if a third party also injects objective text; Goal
   avoids its own duplication but does not rewrite other extensions' prompts.
+- Durable work ledgers survive session reload, compaction, and session deletion.
+  A new session in the same project can discover them only through an explicit
+  `work_ledger` list or id. Discovery is not adoption, and stale updates are
+  refused rather than silently replacing newer progress.
 - `/goal` does not enable Outcome & Todo hooks. A human must enable hooks in
   `/harness-settings`; saved outcomes and checklists display by default even with
   hooks off. Display off does not stop active hooks. `/todo` commands remain
@@ -141,3 +183,15 @@ continue to cover permission holds, workflow gates, scheduler waits, explicit
 resume, and autonomous wake policy. The alias workflow test no longer imports
 the removed legacy Plan package; its coordinator binding, handback, reload, and
 resume assertions remain.
+
+Durable work ledger tests use a temporary project and agent directory. They
+create a ledger, reopen it from disk, and prove project-scope isolation and that
+no file is written into the project tree. Incremental updates prove that
+untouched items, completed evidence, outcome metadata, totals, and per-revision
+history survive; stale revisions are refused without changing stored state.
+Two worker threads race the same revision through the real store and exactly one
+is accepted. Registered-tool tests keep generic outcome/Todo state unchanged,
+reload the extension from durable storage, and confirm that neither creation nor
+reload associates the ledger with the session or writes session entries. The
+existing task-context, workflow-plan, Goal, and display/hooks suites remain the
+boundary regression.
