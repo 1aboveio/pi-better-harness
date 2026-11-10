@@ -121,7 +121,7 @@ test("subagents contributes the standalone settings opener with shared session a
     const beforeAgents = entries.length;
     const openedBefore = pages.length;
     const eventsBefore = uiEvents.length;
-    keyBatches.push(["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r"]); // settings menu: four rows down from Delegation mode lands on Agents
+    keyBatches.push(["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r"]); // six rows down from Delegation mode lands on Agents
     await contribution.open(ctx);
     assert.match(pages.at(-2), /Agents/);
     assert.match(pages.at(-2), /Reset to defaults/);

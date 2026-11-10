@@ -95,7 +95,7 @@ function ctx() {
 }
 
 function keysToSkillsRow() {
-    return ["\x1b[B", "\x1b[B"];
+    return ["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B"];
 }
 
 function writeRoleDefinition() {

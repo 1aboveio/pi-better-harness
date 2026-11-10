@@ -18,8 +18,12 @@ import {
     emptyProgress,
     foldProgress,
     resolveRunTiming,
+    stuckAlertText,
     stuckAge,
     timingParameterSchemas,
+    toolWaitAlertText,
+    isTimingMinutes,
+    validatedTimingMinutes,
     MAX_SEEN_CALLS,
     callKey,
     isMutatingTool,
@@ -33,40 +37,53 @@ const MIN = 60_000;
 describe("timing policy resolution", () => {
     it("uses spawn parameter, then environment, then settings, then the built-in default", () => {
         const env = { [TIMING_ENV.deadline]: "20", [TIMING_ENV.stuck]: "4" };
-        const settings = { deadlineMinutes: 25, graceMinutes: 2, maxMinutes: 60 };
-        const t = resolveRunTiming({ params: { deadline_minutes: 45 }, settings, env, startedAt: 1000 });
+        const settings = { deadlineMinutes: 25, graceMinutes: 2, maxMinutes: 60, toolWaitMinutes: 7 };
+        const t = resolveRunTiming({ params: { deadline_minutes: 45, tool_wait_minutes: 3 }, settings, env, startedAt: 1000 });
         assert.equal(t.deadlineAt, 1000 + 45 * MIN, "parameter wins");
         assert.equal(t.graceMs, 2 * MIN, "settings when no parameter or env");
         assert.equal(t.ceilingAt, 1000 + 60 * MIN);
+        assert.equal(t.toolWaitMs, 3 * MIN, "the tool-wait parameter is independent");
         assert.equal(t.stuckMs, 4 * MIN, "environment beats settings");
         const envOnly = resolveRunTiming({ settings, env, startedAt: 0 });
         assert.equal(envOnly.deadlineAt, 20 * MIN);
+        assert.equal(envOnly.toolWaitMs, 7 * MIN, "the tool-wait setting is independent of the stuck setting");
         const defaults = resolveRunTiming({ startedAt: 0 });
         assert.deepEqual(defaults, {
             graceMs: 5 * MIN,
+            toolWaitMs: 5 * MIN,
             stuckMs: 10 * MIN,
-        }, "elapsed-time limits are opt-in; stall detection is default-on");
+        }, "elapsed-time limits are opt-in; tool-wait and stall detection are default-on and independent");
     });
 
     it("treats null and empty env as unset, 0 as off, and rejects anything else", () => {
-        const t = resolveRunTiming({ params: { deadline_minutes: null, max_minutes: 0, stuck_minutes: 0 }, env: { [TIMING_ENV.grace]: "" }, startedAt: 0 });
+        const t = resolveRunTiming({ params: { deadline_minutes: null, max_minutes: 0, tool_wait_minutes: 0, stuck_minutes: 0 }, env: { [TIMING_ENV.grace]: "" }, startedAt: 0 });
         assert.equal(t.deadlineAt, undefined);
         assert.equal(t.graceMs, 5 * MIN);
         assert.equal(t.ceilingAt, undefined);
+        assert.equal(t.toolWaitMs, undefined);
         assert.equal(t.stuckMs, undefined);
         assert.throws(() => resolveRunTiming({ params: { grace_minutes: -1 }, startedAt: 0 }), /grace_minutes must be/);
         assert.throws(() => resolveRunTiming({ params: { max_minutes: Number.NaN }, startedAt: 0 }), /max_minutes must be/);
+        assert.throws(() => resolveRunTiming({ params: { tool_wait_minutes: -1 }, startedAt: 0 }), /tool_wait_minutes must be/);
         assert.throws(() => resolveRunTiming({ env: { [TIMING_ENV.deadline]: "soon" }, startedAt: 0 }), /PI_SUBAGENT_DEADLINE_MINUTES must be/);
+        assert.throws(() => resolveRunTiming({ settings: { toolWaitMinutes: "soon" }, startedAt: 0 }), /toolWaitMinutes must be/);
         assert.throws(() => resolveRunTiming({ settings: { stuckMinutes: "ten" }, startedAt: 0 }), /stuckMinutes must be/);
+        assert.equal(isTimingMinutes(0), true);
+        assert.equal(isTimingMinutes(7 * 24 * 60), true);
+        assert.equal(isTimingMinutes(7 * 24 * 60 + 1), false);
+        assert.equal(validatedTimingMinutes("0.5", "toolWaitMinutes"), 0.5);
+        assert.throws(() => validatedTimingMinutes("", "stuckMinutes"), /stuckMinutes must be/);
     });
 
     it("a batch job's null or omitted value inherits the shared value; a number or 0 overrides it", () => {
-        const shared = { deadline_minutes: 12, grace_minutes: 2, max_minutes: 40, stuck_minutes: 3 };
+        const shared = { deadline_minutes: 12, grace_minutes: 2, max_minutes: 40, tool_wait_minutes: 6, stuck_minutes: 3 };
         const inherited = mergeJobOptions(shared, { prompt: "a", deadline_minutes: null });
         assert.equal(inherited.deadline_minutes, 12);
+        assert.equal(inherited.tool_wait_minutes, 6);
         assert.equal(inherited.stuck_minutes, 3);
-        const own = mergeJobOptions(shared, { prompt: "b", deadline_minutes: 7, stuck_minutes: 0 });
+        const own = mergeJobOptions(shared, { prompt: "b", deadline_minutes: 7, tool_wait_minutes: 0, stuck_minutes: 0 });
         assert.equal(own.deadline_minutes, 7);
+        assert.equal(own.tool_wait_minutes, 0);
         assert.equal(own.stuck_minutes, 0);
         assert.equal(resolveRunTiming({ params: mergeJobOptions(undefined, { prompt: "c", deadline_minutes: null }), startedAt: 0 }).deadlineAt, undefined,
             "with no shared value, null falls through to the disabled default");
@@ -75,8 +92,8 @@ describe("timing policy resolution", () => {
     it("offers provider-accepted schemas that admit explicit null", () => {
         const schema = Type.Object(timingParameterSchemas(Type));
         assert.deepEqual(findProviderRejectedKeywords(JSON.parse(JSON.stringify(schema))), []);
-        assert.equal(Value.Check(schema, { deadline_minutes: null, grace_minutes: null, max_minutes: null, stuck_minutes: null }), true);
-        assert.equal(Value.Check(schema, { deadline_minutes: 45, stuck_minutes: 0 }), true);
+        assert.equal(Value.Check(schema, { deadline_minutes: null, grace_minutes: null, max_minutes: null, tool_wait_minutes: null, stuck_minutes: null }), true);
+        assert.equal(Value.Check(schema, { deadline_minutes: 45, tool_wait_minutes: 5, stuck_minutes: 0 }), true);
         assert.equal(Value.Check(schema, {}), true);
         assert.equal(Value.Check(schema, { deadline_minutes: "45" }), false);
     });
@@ -149,6 +166,29 @@ describe("progress", () => {
         assert.equal(stuckAge(state, 41_000), 41_000 - 50 - 40_000, "only time outside the tool call counts");
     });
 
+    it("records each open call's own start, including parallel calls and durable seeds", () => {
+        const state = emptyProgress(0);
+        foldProgress(state, assistant(1_000));
+        foldProgress(state, start("first", "bash", { command: "npm test" }));
+        foldProgress(state, start("second", "bash", { command: "npm run lint" }));
+        assert.equal(state.open.get("first").startedAt, 1_000);
+        assert.equal(state.open.get("second").startedAt, 1_000, "parallel starts share the last event timestamp");
+
+        const reloaded = emptyProgress(0, [
+            { id: "first", since: 1_000, name: "bash", command: "npm test" },
+            { id: "second", since: 2_000, name: "bash", command: "npm run lint" },
+        ]);
+        assert.deepEqual([...reloaded.open.keys()], ["first", "second"]);
+        assert.equal(reloaded.open.get("first").startedAt, 1_000);
+        assert.equal(reloaded.open.get("second").startedAt, 2_000);
+        assert.equal(reloaded.inFlightSince, 1_000, "the pause begins when the first call opened");
+        // The real start still replaces the seed's empty arguments without moving its wait.
+        foldProgress(reloaded, start("first", "bash", { command: "npm test" }));
+        assert.equal(reloaded.open.get("first").startedAt, 1_000);
+        assert.equal(reloaded.open.get("first").seeded, undefined);
+        assert.equal(reloaded.open.get("second").seeded, true, "a parallel seeded call is not superseded by its sibling");
+    });
+
     it("keeps a durable record of the open call, so a bounded reload read does not turn waiting into no progress (#620)", () => {
         // The parent reloaded and can only rebuild from a bounded log window that no longer
         // holds the call's start; the recorded call is its still-alive evidence.
@@ -219,6 +259,55 @@ describe("timing decisions", () => {
             "past the deadline, the wrap-up flow governs");
     });
 
+    it("wakes once per open tool call at its own threshold, including parallel calls, without becoming stuck", () => {
+        const t = { graceMs: 0, toolWaitMs: 300 };
+        const state = emptyProgress(0);
+        foldProgress(state, { type: "tool_execution_start", toolCallId: "long", toolName: "bash", args: { command: "npm test" } });
+        assert.deepEqual(decideTiming(t, state, 299), {});
+        assert.deepEqual(decideTiming(t, state, 300).toolWaitWakes, [
+            { callId: "long", startedAt: 0, ageMs: 300, name: "bash", command: "npm test" },
+        ]);
+        assert.equal(decideTiming(t, state, 300).stuckWake, undefined, "a running tool is waiting, not no-progress");
+        assert.deepEqual(decideTiming({ ...t, toolWaitAlerted: ["long"] }, state, 900), {}, "one alert per call across reconstruction");
+
+        const parallel = emptyProgress(0);
+        foldProgress(parallel, { type: "tool_execution_start", toolCallId: "a", toolName: "bash", args: { command: "first" } });
+        foldProgress(parallel, { type: "tool_execution_start", toolCallId: "b", toolName: "read", args: { path: "x" } });
+        assert.deepEqual(decideTiming(t, parallel, 300).toolWaitWakes?.map((wake) => wake.callId), ["a", "b"],
+            "parallel calls alert independently");
+        assert.deepEqual(decideTiming({ ...t, toolWaitAlerted: ["a"] }, parallel, 300).toolWaitWakes?.map((wake) => wake.callId), ["b"],
+            "the marker for one call does not suppress its sibling");
+
+        const reloadSeed = emptyProgress(0, [
+            { id: "a", since: 100, name: "bash", command: "first" },
+            { id: "b", since: 200, name: "read" },
+        ]);
+        const reload = decideTiming(t, reloadSeed, 400);
+        assert.deepEqual(reload.toolWaitWakes?.map((wake) => [wake.callId, wake.ageMs]), [["a", 300]],
+            "the persisted calls keep their own start times after reconstruction");
+        assert.deepEqual(decideTiming({ graceMs: 0, toolWaitMs: 300, toolWaitAlerted: ["a", "b"] }, reloadSeed, 500), {},
+            "a reload with the alert marker does not repeat it");
+    });
+
+    it("keeps tool-wait dedup separate from the stuck spell and re-arms on a later call", () => {
+        const state = emptyProgress(0);
+        foldProgress(state, { type: "message_end", message: { role: "assistant", timestamp: 100 } });
+        foldProgress(state, { type: "tool_execution_start", toolCallId: "first", toolName: "bash", args: { command: "make" } });
+        const t = { graceMs: 0, toolWaitMs: 300, stuckMs: 300 };
+        assert.deepEqual(decideTiming(t, state, 400).toolWaitWakes?.map((wake) => wake.callId), ["first"]);
+        // The first call returns without progress: its wait is a pause.
+        foldProgress(state, { type: "message_end", message: { role: "toolResult", toolCallId: "first", toolName: "bash", isError: true, timestamp: 500 } });
+        const settled = { ...t, toolWaitAlerted: ["first"] };
+        assert.equal(decideTiming(settled, state, 600).stuckWake, undefined, "the long call's duration is a pause");
+        assert.deepEqual(decideTiming(settled, state, 700).stuckWake, { anchorAt: 0, ageMs: 300 },
+            "the tool-wait marker does not suppress a genuine no-progress spell");
+        // A later tool call gets its own wait alert even while the stuck marker is set.
+        foldProgress(state, { type: "tool_execution_start", toolCallId: "second", toolName: "bash", args: { command: "make test" } });
+        const second = decideTiming({ ...t, stuckWakeSentAt: 700, stuckAnchorAt: 0, toolWaitAlerted: ["first"] }, state, 1_200);
+        assert.deepEqual(second.toolWaitWakes?.map((wake) => wake.callId), ["second"], "the next call alerts independently");
+        assert.equal(second.stuckWake, undefined, "its wait keeps the stuck clock paused");
+    });
+
     it("a recorded open call holds both the stuck wake and the deadline stop across a bounded reload (#620)", () => {
         const seeded = emptyProgress(0, { id: "build", since: 1_000 });
         assert.deepEqual(decideTiming({ graceMs: 0, stuckMs: 300 }, seeded, 10 * MIN), {}, "a silent build past the window is still waiting");
@@ -246,6 +335,36 @@ describe("timing decisions", () => {
         assert.equal(describeTiming({ startedAt: 0, status: "killed", timing: { ceilingAt: 90 * MIN, graceMs: 0, stopReason: "ceiling" } }).short, "stopped: ceiling");
         assert.equal(describeTiming({ startedAt: 0, timing: { graceMs: 0, stuckMs: MIN, stuckWakeSentAt: 5, stuckAnchorAt: 3 } }).reason, "stuck");
         assert.equal(describeTiming({ startedAt: 0, timing: { graceMs: 0, stuckMs: MIN, stuckWakeSentAt: 5, stuckAnchorAt: 3, lastProgressAt: 9 } }), undefined, "progress since the wake clears it");
+    });
+
+    it("renders factual long-tool and no-progress alerts without prescribing a response", () => {
+        const tool = toolWaitAlertText({
+            id: "sa_alert_1", label: "builder (sa_alert_1)", callId: "call_7",
+            toolName: "bash", command: "npm test -- --watch=false",
+            openMs: 5.2 * MIN, thresholdMs: 5 * MIN, now: 10 * MIN,
+            lastProgressAt: 2 * MIN, logPath: "/tmp/run/output.log",
+        });
+        assert.match(tool, /sa_alert_1/);
+        assert.match(tool, /tool wait/i);
+        assert.match(tool, /call_7/);
+        assert.match(tool, /bash: npm test/);
+        assert.match(tool, /open for 5\.2m/);
+        assert.match(tool, /threshold 5m/);
+        assert.match(tool, /Last progress: 8m ago/);
+        assert.match(tool, /subagent_output id="sa_alert_1"/);
+        assert.match(tool, /does not stop, cancel, or restart/);
+        assert.doesNotMatch(tool, /before deciding|no action is needed|Inspect it with|must |should /i);
+
+        const stuck = stuckAlertText({
+            id: "sa_alert_2", label: "reviewer (sa_alert_2)", ageMs: 10 * MIN, windowMs: 10 * MIN,
+            now: 12 * MIN, logPath: "/tmp/run/output.log",
+        });
+        assert.match(stuck, /no progress/i);
+        assert.match(stuck, /only repeated earlier calls/);
+        assert.match(stuck, /Current operation: none \(no tool call open\)/);
+        assert.match(stuck, /Last progress: none observed/);
+        assert.match(stuck, /subagent_output id="sa_alert_2"/);
+        assert.doesNotMatch(stuck, /before deciding|no action is needed|Inspect it with|must |should /i);
     });
 });
 

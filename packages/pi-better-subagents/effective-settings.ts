@@ -1,15 +1,35 @@
 import { createHash } from "node:crypto";
 import { delegationPrompt, type DelegationMode } from "./delegation.ts";
+import { DEFAULT_TIMING_MINUTES } from "./timing.ts";
 
 import { EXECUTION_POLICY_TEXT, publishExecutionPolicy, supportsPromptSections } from "./shared-execution-policy.ts";
 
 export const SUBAGENT_SETTINGS_CONTEXT = "pi-better-subagents-settings";
+
+export type TimingSettingSource = "session" | "config" | "default";
+
+export interface EffectiveTimingSettings {
+    toolWaitMinutes: number;
+    stuckMinutes: number;
+    sources: {
+        toolWaitMinutes: TimingSettingSource;
+        stuckMinutes: TimingSettingSource;
+    };
+    error?: string;
+}
 
 export interface EffectiveSubagentSettings {
     revision: string;
     delegationMode: DelegationMode;
     maxConcurrent: number;
     sources: { delegationMode: "session" | "config"; maxConcurrent: "session" | "config" };
+    toolWaitMinutes: number;
+    stuckMinutes: number;
+    timingSources: {
+        toolWaitMinutes: TimingSettingSource;
+        stuckMinutes: TimingSettingSource;
+    };
+    timingError?: string;
     runningCount: number;
     pendingCount: number;
     occupiedSlots: number;
@@ -17,16 +37,37 @@ export interface EffectiveSubagentSettings {
 }
 
 export function effectiveSubagentSettings(
-    settings: Pick<EffectiveSubagentSettings, "delegationMode" | "maxConcurrent" | "sources">,
+    settings: Pick<EffectiveSubagentSettings, "delegationMode" | "maxConcurrent" | "sources"> & {
+        timing?: EffectiveTimingSettings;
+    },
     runningCount: number,
     pendingCount: number,
 ): EffectiveSubagentSettings {
+    const timing = settings.timing ?? {
+        toolWaitMinutes: DEFAULT_TIMING_MINUTES.toolWait,
+        stuckMinutes: DEFAULT_TIMING_MINUTES.stuck,
+        sources: { toolWaitMinutes: "default" as const, stuckMinutes: "default" as const },
+    };
     const revision = createHash("sha256").update(JSON.stringify([
         settings.delegationMode, settings.maxConcurrent, settings.sources.delegationMode, settings.sources.maxConcurrent,
+        timing.toolWaitMinutes, timing.stuckMinutes, timing.sources.toolWaitMinutes, timing.sources.stuckMinutes,
     ])).digest("hex").slice(0, 12);
     const occupiedSlots = runningCount + pendingCount;
-    return { ...settings, revision, runningCount, pendingCount, occupiedSlots,
+    return {
+        revision,
+        delegationMode: settings.delegationMode,
+        maxConcurrent: settings.maxConcurrent,
+        sources: settings.sources,
+        toolWaitMinutes: timing.toolWaitMinutes,
+        stuckMinutes: timing.stuckMinutes,
+        timingSources: timing.sources,
+        ...(timing.error ? { timingError: timing.error } : {}),
+        runningCount, pendingCount, occupiedSlots,
         availableSlots: Math.max(0, settings.maxConcurrent - occupiedSlots) };
+}
+
+function alertMinutes(value: number): string {
+    return value === 0 ? "off" : `${value}m`;
 }
 
 export function formatSubagentSettings(settings: EffectiveSubagentSettings): string {
@@ -43,6 +84,9 @@ export function formatSubagentSettings(settings: EffectiveSubagentSettings): str
         `Subagent settings: revision ${settings.revision}`,
         `Delegation: ${settings.delegationMode} (${settings.sources.delegationMode})`,
         `Concurrency limit: ${settings.maxConcurrent} (${settings.sources.maxConcurrent})`,
+        `Timing alerts: tool wait ${alertMinutes(settings.toolWaitMinutes)} (${settings.timingSources.toolWaitMinutes}); ` +
+            `no progress ${alertMinutes(settings.stuckMinutes)} (${settings.timingSources.stuckMinutes}).`,
+        ...(settings.timingError ? [`Timing alert settings error: ${settings.timingError}`] : []),
         // Mode first: the policy governs the settings that follow it.
         delegationPrompt(settings.delegationMode),
         capacity + " Spawn admission rechecks capacity; lower the limit without stopping existing runs.",
@@ -76,7 +120,7 @@ export interface PromptSectionTarget {
  * render in publication order, so Background Tasks and Goal publish after this one;
  * naming its own section keeps the sentence true whatever the load order.
  */
-const SUBAGENT_DELEGATION_NOTE = "Treat the Subagent settings block in this section as the authoritative delegation mode and cap. Its delegation guidance replaces earlier mode-specific guidance, including guidance in a plan. Live occupancy is not pushed into context: inspect subagent_settings when it matters, and never treat the concurrency limit as a target number of agents.";
+const SUBAGENT_DELEGATION_NOTE = "Treat the Subagent settings block in this section as the authoritative delegation mode, cap, and timing-alert settings. Its delegation guidance replaces earlier mode-specific guidance, including guidance in a plan. Live occupancy is not pushed into context: inspect subagent_settings when it matters, and never treat the concurrency limit as a target number of agents.";
 
 export function publishSubagentSettings<T extends object>(options: T, settings: EffectiveSubagentSettings): T {
     // Note first, block last inside the section: the note introduces the block it
@@ -92,12 +136,15 @@ export function subagentSettingsTool(Type: any, read: () => EffectiveSubagentSet
     return {
         name: "subagent_settings",
         label: "Subagent Settings",
-        description: "Inspect effective subagent delegation mode, concurrency limit, setting sources, revision, and running/reserved/available slots. Read-only; does not change settings or launch work. The limit is a ceiling, not a target.",
+        description: "Inspect effective subagent delegation mode, concurrency limit, tool-wait and no-progress alert times, setting sources, revision, and running/reserved/available slots. Read-only; does not change settings or launch work. The limit is a ceiling, not a target.",
         parameters: Type.Object({}),
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         outputSchema: Type.Object({
             revision: Type.String(), delegationMode: Type.String(), maxConcurrent: Type.Number({ minimum: 1, multipleOf: 1 }),
             sources: Type.Object({ delegationMode: Type.String(), maxConcurrent: Type.String() }),
+            toolWaitMinutes: Type.Number({ minimum: 0 }), stuckMinutes: Type.Number({ minimum: 0 }),
+            timingSources: Type.Object({ toolWaitMinutes: Type.String(), stuckMinutes: Type.String() }),
+            timingError: Type.Optional(Type.String()),
             runningCount: Type.Number({ minimum: 0, multipleOf: 1 }), pendingCount: Type.Number({ minimum: 0, multipleOf: 1 }),
             occupiedSlots: Type.Number({ minimum: 0, multipleOf: 1 }), availableSlots: Type.Number({ minimum: 0, multipleOf: 1 }),
         }),

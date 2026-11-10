@@ -18,7 +18,7 @@ Use `pi-better-subagents` when you want Pi to launch independent agent work with
 - Explicit tool allowlists for child sessions, and `skills` for prompt exposure: omit it to keep user-catalog discovery, pass `[]` for no skills, or pass absolute `SKILL.md` paths for exactly those. See [skill exposure](docs/usage.md#skill-exposure).
 - Durable logs, result retrieval, and [failure observations](docs/failure-observations.md) independent of lifecycle status. A live child handles its own tool errors; the parent is woken only for actionable incidents, and children can classify handled failures with `failure_disposition`.
 - Live background-work navigator for active runs.
-- Harness-owned run timing: every run gets a no-progress wake (10 min), while wall-clock soft deadlines and hard ceilings are opt-in so productive agents are not stopped solely for taking a long time. Configure per spawn with `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`, or globally in `config.json` / `PI_SUBAGENT_*_MINUTES`. See [usage notes](docs/usage.md#run-timing-deadline-ceiling-stuck).
+- Harness-owned run timing: every run gets independent factual alerts for a tool call left open (5 min) and for no progress (10 min), while wall-clock soft deadlines and hard ceilings are opt-in so productive agents are not stopped solely for taking a long time. Configure per spawn with `deadline_minutes`, `grace_minutes`, `max_minutes`, `tool_wait_minutes`, `stuck_minutes`, globally in `config.json` / `PI_SUBAGENT_*_MINUTES`, or in `/subagents settings`. See [usage notes](docs/usage.md#run-timing-deadline-ceiling-tool-wait-stuck).
 
 Every single or batch launch automatically joins one shared supervision watcher in the
 foreground Pi process. The last active run's exit or stop tears it down; a later
@@ -80,8 +80,10 @@ Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or ne
 
 The user config sets `delegationMode` to `manual`, `adaptive` (default), or
 `coordinator`. `/subagents settings` (or `/subagents`) opens a settings page
-for delegation mode, the concurrent-subagent cap (default 6), and the default
-skill exposure. Skill exposure cycles between Discover automatically and No skill
+for delegation mode, the concurrent-subagent cap (default 6), the tool-wait
+alert (default 5 minutes), the no-progress alert (default 10 minutes), and the
+default skill exposure. The two time values are edited independently; `0` turns
+one alert off. Skill exposure cycles between Discover automatically and No skill
 catalog. The Selected skills row opens the same searchable checkbox picker used
 by `/agents`: it lists loaded skills by name and description, Space toggles one,
 Enter applies, and typing filters without dropping checked items. Saved paths
@@ -89,25 +91,26 @@ missing from discovery stay visible as unavailable and survive apply. Zero
 checked applies No skill catalog, not discovery. Manual Add skill path remains
 available. The page names whether the current value comes from the saved config
 or this session. The session choice controls the next launch before Ctrl+S, and
-edits persist across reloads. Ctrl+S saves mode, cap, and skill exposure as
-defaults, and Reset to defaults clears session overrides, including the skill
-list. Agents opens the same catalog as `/agents`; a definition that inherits
+edits persist across reloads. Ctrl+S saves mode, cap, timing alerts, and skill
+exposure as defaults, and Reset to defaults clears session overrides, including
+the skill list. Agents opens the same catalog as `/agents`; a definition that inherits
 skill exposure shows whether the live value comes from this session, saved
 config, or discovery, and an invalid draft is marked invalid rather than shown
-as discovery. `/subagents mode manual|adaptive|coordinator` and
-`/subagents cap <number>` are command equivalents; `/subagents save` persists
+as discovery. `/subagents mode manual|adaptive|coordinator`,
+`/subagents cap <number>`, `/subagents tool-wait <minutes>`, and
+`/subagents stuck <minutes>` are command equivalents; `/subagents save` persists
 the current settings. Lowering the cap blocks new single and batch launches, including launches
 still preparing, without stopping running work. Saved configuration changes are
 picked up on subsequent reads; explicit session overrides still take precedence.
 Before every model request, including continuations after tool calls,
 the foreground receives one temporary settings block with the current mode, cap,
-setting sources, revision, and running/reserved/available slots. The latest block
+timing alerts, setting sources, revision, and running/reserved/available slots. The latest block
 replaces older snapshots and delegation guidance; it is not saved as conversation
 history. Changes reach the model at its next request, not during an in-flight
 response, and are not broadcast to running children. The cap is a ceiling, not a
 target number of agents. `subagent_settings` inspects the same effective state
-without changing it. Its revision is a stable fingerprint of mode, cap, and
-sources; occupancy changes do not change the revision. Admission rechecks capacity
+without changing it. Its revision is a stable fingerprint of mode, cap, timing
+alerts, and sources; occupancy changes do not change the revision. Admission rechecks capacity
 when spawning because the snapshot can become stale.
 
 The navigator's `main` row retains its mode-only controls:
@@ -122,7 +125,8 @@ Saved defaults live in global `~/.pi/agent/settings.json` under
 `piBetterHarness.subagents` (or under `PI_CODING_AGENT_DIR`) and survive package
 reinstalls and upgrades. The old user config migrates on first use. Global values
 override the package's `config.json`, which remains a compatibility fallback.
-Save existing mode, cap, and skill choices with `/subagents save` or Ctrl+S.
+Save existing mode, cap, timing-alert, and skill choices with `/subagents save`
+or Ctrl+S.
 Discovery is saved as `defaultSkills: null`, which clears a previously saved
 path list. Put other
 custom config keys in `piBetterHarness.subagents` as well; edits made only inside

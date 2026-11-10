@@ -20,6 +20,8 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
     let current = {
         mode: "adaptive", maxConcurrent: 4, modeSource: "config", capSource: "config",
         defaultMode: "adaptive", defaultCap: 4,
+        toolWaitMinutes: 5, stuckMinutes: 10, toolWaitSource: "default", stuckSource: "default",
+        defaultToolWaitMinutes: 5, defaultStuckMinutes: 10,
         skillsMode: "inherit", skillsPaths: [], skillsSource: "default",
         ...skills,
     };
@@ -31,6 +33,13 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
         get: () => current,
         changeMode(mode) { current = { ...current, mode, modeSource: "session" }; },
         changeCap(maxConcurrent) { current = { ...current, maxConcurrent, capSource: "session" }; },
+        changeTiming(key, minutes) {
+            if (!Number.isFinite(minutes) || minutes < 0) throw new Error("Timing must be minutes from 0.");
+            current = {
+                ...current, [key]: minutes,
+                [key === "toolWaitMinutes" ? "toolWaitSource" : "stuckSource"]: "session",
+            };
+        },
         changeSkills(mode, paths) {
             if (mode !== "explicit" && paths.length > 0) throw new Error("Only Selected skills carries a path list.");
             if (mode === "explicit" && paths.some((path) => !path.startsWith("/"))) {
@@ -49,7 +58,9 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
             savedSkills.source = "config";
             current = {
                 ...current, defaultMode: current.mode, defaultCap: current.maxConcurrent,
+                defaultToolWaitMinutes: current.toolWaitMinutes, defaultStuckMinutes: current.stuckMinutes,
                 modeSource: "config", capSource: "config", skillsSource: "config",
+                toolWaitSource: "config", stuckSource: "config",
             };
             return { ok: true, message: "Subagent defaults saved." };
         },
@@ -57,6 +68,8 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
             current = {
                 ...current, mode: current.defaultMode, maxConcurrent: current.defaultCap,
                 modeSource: "config", capSource: "config",
+                toolWaitMinutes: current.defaultToolWaitMinutes, stuckMinutes: current.defaultStuckMinutes,
+                toolWaitSource: "config", stuckSource: "config",
                 skillsMode: savedSkills.mode, skillsPaths: [...savedSkills.paths], skillsSource: savedSkills.source,
             };
         },
@@ -68,7 +81,10 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
     return { page, settings: () => current, saved: () => saved, closed: () => closed, agents: () => agents, failSave: () => { saveFailure = true; } };
 }
 
-const LABELS = ["Delegation mode", "Concurrent subagents", "Skill exposure", "Selected skills", "Agents", "Reset to defaults"];
+const LABELS = [
+    "Delegation mode", "Concurrent subagents", "Tool-wait alert", "No-progress alert",
+    "Skill exposure", "Selected skills", "Agents", "Reset to defaults",
+];
 
 function rowLabels(page) {
     return page.render(100).flatMap((line) => {
@@ -203,6 +219,52 @@ test("numeric cap validation and cancel leave the active cap unchanged", () => {
         enterCap(h.page, "5");
         assert.equal(h.settings().maxConcurrent, 5);
     }
+});
+
+test("tool-wait and no-progress alerts are separate editable times that save and reset", () => {
+    const h = harness();
+    selectLabel(h.page, "Tool-wait alert");
+    h.page.handleInput("\r");
+    typeAndSubmit(h.page, "7.5");
+    assert.equal(h.settings().toolWaitMinutes, 7.5);
+    assert.equal(h.settings().toolWaitSource, "session");
+    assert.equal(h.settings().stuckMinutes, 10, "editing one time leaves the other unchanged");
+    assert.equal(h.saved(), 0, "the edit applies to this session first");
+
+    selectLabel(h.page, "No-progress alert");
+    h.page.handleInput("\r");
+    typeAndSubmit(h.page, "0");
+    assert.equal(h.settings().stuckMinutes, 0, "0 turns the alert off");
+    assert.equal(h.settings().toolWaitMinutes, 7.5);
+    assert.match(h.page.render(100).join("\n"), /No-progress alert\s+0 min/);
+
+    for (const [label, value] of [["Tool-wait alert", "-1"], ["No-progress alert", "soon"], ["Tool-wait alert", ""]]) {
+        selectLabel(h.page, label);
+        h.page.handleInput("\r");
+        typeAndSubmit(h.page, value);
+        assert.equal(h.settings()[label === "Tool-wait alert" ? "toolWaitMinutes" : "stuckMinutes"],
+            label === "Tool-wait alert" ? 7.5 : 0, `${label} rejects ${JSON.stringify(value)}`);
+        assert.match(h.page.render(160).join("\n"), /minutes from 0/);
+        h.page.handleInput("\x1b");
+    }
+
+    h.page.handleInput("\x13");
+    assert.equal(h.saved(), 1);
+    assert.equal(h.settings().defaultToolWaitMinutes, 7.5);
+    assert.equal(h.settings().defaultStuckMinutes, 0);
+    assert.equal(h.settings().toolWaitSource, "config");
+    assert.equal(h.settings().stuckSource, "config");
+
+    selectLabel(h.page, "Tool-wait alert");
+    h.page.handleInput("\r");
+    typeAndSubmit(h.page, "9");
+    selectLabel(h.page, "No-progress alert");
+    h.page.handleInput("\r");
+    typeAndSubmit(h.page, "11");
+    selectLabel(h.page, "Reset to defaults");
+    h.page.handleInput("\r");
+    assert.equal(h.settings().toolWaitMinutes, 7.5, "reset restores the saved tool-wait default");
+    assert.equal(h.settings().stuckMinutes, 0, "reset restores the saved no-progress default");
 });
 
 test("single value column keeps current settings readable without showing saved values", () => {

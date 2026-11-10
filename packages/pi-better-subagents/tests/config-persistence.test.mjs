@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configPath, loadConfig, setConfigForTests, setConfigPathForTests, writeDelegationMode, writeSubagentSettings } from "../config.ts";
+import { resolveRunTiming } from "../timing.ts";
 
 test("the default config location honors the agent directory outside installed packages", () => {
     const original = process.env.PI_CODING_AGENT_DIR;
@@ -68,6 +69,44 @@ test("legacy user config migrates without replacing Pi settings and stays subord
         setConfigForTests(undefined);
         if (original === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = original;
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("tool-wait and no-progress times save, reload, validate, and leave unrelated keys intact", () => {
+    const root = mkdtempSync(join(tmpdir(), "subagents-timing-config-"));
+    const user = join(root, "settings.json");
+    setConfigPathForTests(user);
+    try {
+        writeSubagentSettings({ delegationMode: "adaptive", maxConcurrent: 4, toolWaitMinutes: 7.5, stuckMinutes: 12 });
+        setConfigForTests(undefined);
+        const saved = loadConfig();
+        assert.equal(saved.toolWaitMinutes, 7.5);
+        assert.equal(saved.stuckMinutes, 12);
+        const timing = resolveRunTiming({ settings: saved, startedAt: 1_000 });
+        assert.equal(timing.toolWaitMs, 7.5 * 60_000, "the tool-wait value is independent");
+        assert.equal(timing.stuckMs, 12 * 60_000, "the no-progress value is independent");
+
+        writeSubagentSettings({ delegationMode: "adaptive", maxConcurrent: 4, toolWaitMinutes: 0, stuckMinutes: 0 });
+        setConfigForTests(undefined);
+        const off = resolveRunTiming({ settings: loadConfig(), startedAt: 0 });
+        assert.equal(off.toolWaitMs, undefined, "0 turns tool-wait alerts off");
+        assert.equal(off.stuckMs, undefined, "0 turns no-progress alerts off");
+
+        writeDelegationMode("manual");
+        setConfigForTests(undefined);
+        assert.equal(loadConfig().toolWaitMinutes, 0, "a mode-only save preserves timing values");
+        assert.equal(loadConfig().stuckMinutes, 0);
+
+        assert.throws(() => writeSubagentSettings({ delegationMode: "adaptive", maxConcurrent: 4, toolWaitMinutes: -1 }),
+            /toolWaitMinutes must be/);
+        assert.throws(() => writeSubagentSettings({ delegationMode: "adaptive", maxConcurrent: 4, stuckMinutes: Number.NaN }),
+            /stuckMinutes must be/);
+        setConfigForTests(undefined);
+        assert.equal(loadConfig().toolWaitMinutes, 0, "a rejected save leaves the prior value intact");
+        assert.equal(loadConfig().stuckMinutes, 0);
+    } finally {
+        setConfigPathForTests(undefined);
         rmSync(root, { recursive: true, force: true });
     }
 });

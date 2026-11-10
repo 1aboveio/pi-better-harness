@@ -277,7 +277,8 @@ export interface RunMeta {
     operations?: RunOperationsBinding;
     /**
      * Harness-owned timing policy and one-shot markers (soft deadline, grace,
-     * hard ceiling, stuck window). Written at launch so /reload keeps it.
+     * hard ceiling, tool-wait and stuck windows). Written at launch so /reload
+     * keeps it.
      * Additive: runs launched before it have none and are never timed.
      */
     timing?: RunTiming;

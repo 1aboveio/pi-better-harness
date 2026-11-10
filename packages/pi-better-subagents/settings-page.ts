@@ -4,6 +4,9 @@ import { isConcurrencyCap } from "./config.ts";
 import { DELEGATION_MODES, type DelegationMode } from "./delegation.ts";
 import type { SkillExposureMode } from "./skills.ts";
 import { createSkillPicker, type DiscoveredSkill } from "./skill-picker.ts";
+import { validatedTimingMinutes } from "./timing.ts";
+
+export type TimingSettingKey = "toolWaitMinutes" | "stuckMinutes";
 
 export interface SubagentSettingsSnapshot {
     mode: DelegationMode;
@@ -12,6 +15,14 @@ export interface SubagentSettingsSnapshot {
     capSource: "session" | "config";
     defaultMode: DelegationMode;
     defaultCap: number;
+    toolWaitMinutes: number;
+    stuckMinutes: number;
+    toolWaitSource: "session" | "config" | "default";
+    stuckSource: "session" | "config" | "default";
+    defaultToolWaitMinutes: number;
+    defaultStuckMinutes: number;
+    /** A saved timing value the launcher cannot read, kept visible rather than hidden. */
+    timingError?: string;
     /** Session draft, or the saved global default when this session has no override. */
     skillsMode: SkillExposureMode;
     skillsPaths: readonly string[];
@@ -24,6 +35,7 @@ export interface SubagentSettingsHandlers {
     get(): SubagentSettingsSnapshot;
     changeMode(mode: DelegationMode): void;
     changeCap(cap: number): void;
+    changeTiming(key: TimingSettingKey, minutes: number): void;
     changeSkills(mode: SkillExposureMode, paths: readonly string[]): void;
     /** Loaded Pi skill metadata for the checkbox picker. Absent means manual paths only. */
     discoverSkills?(): readonly DiscoveredSkill[];
@@ -33,11 +45,13 @@ export interface SubagentSettingsHandlers {
     openAgents?(): void;
 }
 
-type EditTarget = { kind: "cap" };
+type EditTarget = { kind: "cap" } | { kind: "toolWait" } | { kind: "stuck" };
 
 type Row =
     | { kind: "mode" }
     | { kind: "cap" }
+    | { kind: "toolWait" }
+    | { kind: "stuck" }
     | { kind: "skills" }
     | { kind: "choose" }
     | { kind: "agents" }
@@ -95,7 +109,10 @@ export function createSubagentSettingsPage(
     }
 
     function rowsOf(settings: SubagentSettingsSnapshot): Row[] {
-        const rows: Row[] = [{ kind: "mode" }, { kind: "cap" }, { kind: "skills" }, { kind: "choose" }];
+        const rows: Row[] = [
+            { kind: "mode" }, { kind: "cap" }, { kind: "toolWait" }, { kind: "stuck" },
+            { kind: "skills" }, { kind: "choose" },
+        ];
         rows.push({ kind: "agents" }, { kind: "reset" });
         return rows;
     }
@@ -157,6 +174,10 @@ export function createSubagentSettingsPage(
                 report("Session mode updated.");
             } else if (selected.kind === "cap") {
                 startEditing({ kind: "cap" }, String(settings.maxConcurrent));
+            } else if (selected.kind === "toolWait") {
+                startEditing({ kind: "toolWait" }, String(settings.toolWaitMinutes));
+            } else if (selected.kind === "stuck") {
+                startEditing({ kind: "stuck" }, String(settings.stuckMinutes));
             } else if (selected.kind === "skills") {
                 if (settings.skillsMode === "explicit") rememberedSkillPaths = [...settings.skillsPaths];
                 const next = cycleSkillMode(settings.skillsMode);
@@ -197,6 +218,14 @@ export function createSubagentSettingsPage(
                 report(cause instanceof Error ? cause.message : String(cause), true);
             }
             return;
+        }
+        const key = target.kind === "toolWait" ? "toolWaitMinutes" : "stuckMinutes";
+        try {
+            const minutes = validatedTimingMinutes(value.trim(), key);
+            handlers.changeTiming(key, minutes);
+            finishEditing(`${target.kind === "toolWait" ? "Tool-wait" : "No-progress"} alert updated.`);
+        } catch (cause) {
+            report(cause instanceof Error ? cause.message : String(cause), true);
         }
     };
 
@@ -273,13 +302,21 @@ export function createSubagentSettingsPage(
             rows.forEach((entry, index) => {
                 const selected = index === row;
                 if (selected) selectedStart = lines.length;
-                if (entry.kind === "mode" || entry.kind === "cap") {
-                    const label = entry.kind === "mode" ? "Delegation mode" : "Concurrent subagents";
-                    const value = entry.kind === "mode" ? settings.mode : String(settings.maxConcurrent);
-                    const active = editing?.kind === "cap" && entry.kind === "cap"
+                if (entry.kind === "mode" || entry.kind === "cap" || entry.kind === "toolWait" || entry.kind === "stuck") {
+                    const label = entry.kind === "mode" ? "Delegation mode"
+                        : entry.kind === "cap" ? "Concurrent subagents"
+                        : entry.kind === "toolWait" ? "Tool-wait alert" : "No-progress alert";
+                    const value = entry.kind === "mode" ? settings.mode
+                        : entry.kind === "cap" ? String(settings.maxConcurrent)
+                        : `${entry.kind === "toolWait" ? settings.toolWaitMinutes : settings.stuckMinutes} min`;
+                    const active = editing?.kind === entry.kind
                         ? input.render(compact ? Math.max(1, w - 2) : valueWidth)[0]!
                         : value;
                     pushSetting(label, value, selected, active);
+                    if (entry.kind === "stuck" && settings.timingError) {
+                        const sourceLine = compact ? "    " + settings.timingError : " ".repeat(LABEL_WIDTH) + " " + settings.timingError;
+                        lines.push(theme.fg("error", Tui.truncateToWidth(sourceLine, w, "")));
+                    }
                 } else if (entry.kind === "skills") {
                     pushSetting("Skill exposure", skillLabel(settings.skillsMode), selected, skillLabel(settings.skillsMode));
                     const sourceLine = compact ? "    " + source : " ".repeat(LABEL_WIDTH) + " " + source;
