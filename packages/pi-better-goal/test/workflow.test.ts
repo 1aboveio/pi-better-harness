@@ -227,7 +227,7 @@ test("an alias declaring workflow-alias-of binds its coordinator for goal handba
     /Outcome & Todo hooks are off/,
   );
   await todoControl!.change("On", ctx);
-  assert.deepEqual(harnessActiveTools, ["read", "update_todo", "get_todo"]);
+  assert.deepEqual(harnessActiveTools, ["read", "update_todo", "get_todo", "work_ledger"]);
 
   await goalHandlers.get("session_start")?.({ reason: "startup" }, ctx);
   await goalHandlers.get("input")?.({ source: "interactive", text: "/skill:resolve-issues #312" }, ctx);
