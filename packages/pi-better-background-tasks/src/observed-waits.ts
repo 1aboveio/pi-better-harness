@@ -1261,9 +1261,12 @@ export class ObservedWaitHost {
   ): DurableTaskProjection[] {
     const store = this.store;
     if (!store || this.closed) return [];
+    if (!origin.sessionId) return [];
     const now = this.options.now?.() ?? Date.now();
     const projections: DurableTaskProjection[] = [];
-    for (const operation of store.listOperations()) {
+    for (const operation of store.listOperations({
+      ownerScope: { kind: "parent-session", sessionId: origin.sessionId, workspace: origin.cwd },
+    })) {
       if (!this.belongsToParentOrigin(operation, origin)) continue;
       const projection = this.projectDurable(operation, now);
       if (!projection) continue;

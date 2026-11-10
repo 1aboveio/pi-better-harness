@@ -342,6 +342,11 @@ export function listOperations(
 ): OperationRecord[] {
     const clauses: string[] = [];
     const params: Array<string | number> = [];
+    if (filter.ownerScope) {
+        const owner = normalizeOwner("ownerScope", filter.ownerScope);
+        clauses.push("owner_kind = ? AND owner_session_id = ? AND owner_workspace = ?");
+        params.push(owner.kind, owner.sessionId, owner.workspace);
+    }
     if (filter.owner) {
         const owner = normalizeOwner("owner", filter.owner);
         clauses.push(

@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -1201,6 +1202,29 @@ describe("actual Subagents client integration", () => {
 });
 
 describe("durable read-only projections", () => {
+  it("does not decode another session's historical operations when listing", () => {
+    const root = workspace("projection-history");
+    const { host } = startHost({ root });
+    const store = openStore({ path: join(root, "operations.sqlite") });
+    try {
+      store.registerOperation({
+        operationId: "foreign-history", taskId: "foreign-history-task", launchToken: "foreign-token",
+        owner: { kind: "parent-session", sessionId: "foreign-session", workspace: root },
+        observer: { kind: "background-tasks", version: "1" },
+      });
+    } finally {
+      store.close();
+    }
+    const db = new DatabaseSync(join(root, "operations.sqlite"));
+    try {
+      db.exec("UPDATE operations SET supervision_json = 'invalid-json' WHERE operation_id = 'foreign-history'");
+    } finally {
+      db.close();
+    }
+    expect(host.listDurableTasks({ cwd: root, sessionId: "current-session" })).toEqual([]);
+    expect(host.listDurableTasks({ cwd: root })).toEqual([]);
+  });
+
   it("projects only the exact parent origin, never a worker or foreign session", async () => {
     const root = workspace("projection");
     const { host } = startHost({ root });
