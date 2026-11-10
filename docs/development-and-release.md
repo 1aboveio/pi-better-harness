@@ -365,6 +365,22 @@ a consumer, add its expected path to `publish.yml`'s pack check and to `ci.yml`'
 bundled-tarball assertions, or a release can ship a package missing the module it
 imports.
 
+Harness `prepack` projects only its root entries into an ignored, generated
+`packages/pi-better-harness/CHANGELOG.md`, included explicitly in the npm tarball.
+Do not maintain a second changelog there. The generated version-only headings
+let compatible Pi hosts show Extension Updates using the default changelog path.
+Packing fails if the Harness manifest version has no root entry or that entry
+contains only whitespace or headings, including for metadata-only releases;
+add notes for every new Harness version.
+
+Run `node --test scripts/harness-changelog.test.mjs` for projection edge cases
+and a real npm tarball check, including bundled components. To also parse the
+extracted changelog with a compatible installed Pi host, set
+`PI_CHANGELOG_PARSER` to that host's `dist/utils/changelog.js`. No external host
+path is hardcoded in the tests. This bridge was verified with Pi 1.5.1: the
+0.42.0 notes parse and are selected as newer than 0.41.3. The Harness workspace
+typecheck also passed. These checks do not publish or change package versions.
+
 Add package-scoped notes to `CHANGELOG.md`; independent packages can use the
 same semantic version without colliding:
 
