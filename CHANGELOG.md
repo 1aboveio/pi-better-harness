@@ -4,6 +4,34 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.42.1] - 2026-11-10
+
+### Changed
+
+- Reuse a compact tool call's rendered header and final styled line across redraws until its arguments, native call renderer, partial or final result, expansion state, width, or theme changes. An explicit invalidate clears the cached row, and animated headers still render for each frame.
+- Bundle Background Tasks 0.14.4 and Subagents 0.29.1.
+
+### Fixed
+
+- Project the root changelog into the Harness package during `prepack` and include `CHANGELOG.md` in the npm tarball, so compatible Pi hosts can show release notes in Extension Updates. Packing now fails when the manifest version has no root entry or that entry has no notes. (#691)
+
+## [pi-better-subagents@0.29.1] - 2026-11-10
+
+### Changed
+
+- Update the vendored operation coordinator so `listOperations` accepts a session/workspace `ownerScope` filter, matching the shared component contract. Subagent launch, wait, and alert behavior is unchanged.
+
+## [pi-better-background-tasks@0.14.4] - 2026-11-10
+
+### Changed
+
+- Cache the navigator's durable projection and derived rows while the panel is unchanged, so repeated redraws and detail views reuse one decoded result instead of re-reading the operation store. A local launch, terminal outcome, dismissal, or stop invalidates the cache immediately. Another Pi process is picked up by the existing reconcile pass when it discovers a new task or terminal revision for the active parent session. A five-second fallback covers a missed notification; it is not a render cadence. (#690)
+- Filter durable projection queries by the active parent session and workspace in SQLite before decoding rows, so historical operations from other sessions and branches are not materialized. Durable change notifications are emitted only for that active parent scope, so foreign sessions, workers, and other workspaces neither evict the warmed projection nor request a navigator repaint. (#690)
+
+### Fixed
+
+- Treat `store-busy` from the reconciliation health write as a transient deferral and retry on the next tick, so coordinator write contention no longer surfaces as a supervision error. (#694)
+
 ## [pi-better-harness@0.42.0] - 2026-11-10
 
 ### Added
