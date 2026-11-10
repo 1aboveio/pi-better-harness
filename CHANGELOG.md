@@ -27,7 +27,7 @@ All notable changes to this project are documented in this file. The format is b
 
 - Track every parallel open call instead of only the last one, so a bounded log read after `/reload` keeps each call's still-alive evidence. Tool waiting and no progress are reported separately; time inside a running call still does not count toward the no-progress window.
 
-## [pi-better-server@0.2.3] - 2026-11-10
+## [pi-better-server@0.2.4] - 2026-11-10
 
 ### Fixed
 
