@@ -42,11 +42,12 @@ const ItemPatchSchema = Type.Object({
   })),
 });
 
-export const workLedgerParameters = Type.Object({
-  action: StringEnum(["create", "list", "read", "update", "attach", "detach"] as const, {
-    description: "create a ledger, list this project's ledgers, read one, incrementally update one, or explicitly associate/detach the session.",
+/** Ledger mutations exposed as the optional update_todo.ledger payload. */
+export const updateTodoLedgerParameters = Type.Object({
+  action: StringEnum(["create", "update", "attach", "detach"] as const, {
+    description: "Create a durable ledger, patch one item set, or explicitly associate/detach this session.",
   }),
-  ledgerId: Type.Optional(Type.String({ description: "Ledger id from create or list. Required for read and update." })),
+  ledgerId: Type.Optional(Type.String({ description: "Ledger id from create or get_todo. Required for update and attach." })),
   revision: Type.Optional(Type.Integer({
     minimum: 1,
     description: "The ledger revision last read. Required for update; stale revisions are refused.",
@@ -73,58 +74,74 @@ export const workLedgerParameters = Type.Object({
     maxItems: 200,
     description: "New high-level items to add in an update. Recorded in history; existing items are preserved.",
   })),
-});
+}, { description: "Durable long-term work ledger mutation. Send ledger alone; it is not a second execution plan." });
 
-export type WorkLedgerToolInput = Static<typeof workLedgerParameters>;
+/** Ledger reads exposed as the optional get_todo.ledger selector. */
+export const getTodoLedgerParameters = Type.Object({
+  action: StringEnum(["list", "read"] as const, {
+    description: "List this project's durable ledgers or read one by id.",
+  }),
+  ledgerId: Type.Optional(Type.String({ description: "Ledger id from list; required for read." })),
+}, { description: "Read-only durable work ledger selector." });
 
-export interface WorkLedgerToolDetails {
-  ok: true;
-  action: WorkLedgerToolInput["action"];
-  ledger?: WorkLedger;
-  ledgers?: WorkLedgerSummary[];
-  totals?: WorkLedgerTotals;
-  /** Ledger explicitly associated with the current session, if any. */
-  associatedLedgerId?: string | null;
+export type UpdateTodoLedgerInput = Static<typeof updateTodoLedgerParameters>;
+export type GetTodoLedgerInput = Static<typeof getTodoLedgerParameters>;
+
+export interface LedgerActionResult {
+  content: Array<{ type: "text"; text: string }>;
+  details: {
+    ok: true;
+    action: UpdateTodoLedgerInput["action"];
+    ledger?: WorkLedger;
+    totals?: WorkLedgerTotals;
+    /** Ledger explicitly associated with the current session, if any. */
+    associatedLedgerId?: string | null;
+  };
 }
 
-/** Session hooks the tool uses only for deliberate associate/detach actions. */
+export interface LedgerQueryResult {
+  content: Array<{ type: "text"; text: string }>;
+  details: {
+    ok: true;
+    action: GetTodoLedgerInput["action"];
+    ledger?: WorkLedger;
+    ledgers?: WorkLedgerSummary[];
+    totals?: WorkLedgerTotals;
+    associatedLedgerId?: string | null;
+  };
+}
+
+/** Session hooks the ledger payload uses only for deliberate associate/detach actions. */
 export interface WorkLedgerSessionBinding {
   associatedLedgerId(): string | null;
   associate(ledgerId: string): void;
   detach(): void;
 }
 
-export const WORK_LEDGER_TOOL = {
-  name: "work_ledger",
-  label: "Work Ledger",
-  description: "Create, list, read, or incrementally update a durable high-level work ledger for this project. "
-    + "The ledger is independent of session history and is not bound to the session automatically. "
-    + "Updates require the revision last read; stale revisions are refused atomically.",
-  promptSnippet: "Create, inspect, or incrementally update a durable project work ledger",
-  promptGuidelines: [
-    "Use work_ledger for a durable high-level outcome with stable work items; it is separate from the workflow task plan and does not bind or inject old work into a session.",
-    "Only use work_ledger attach when the user explicitly names an existing ledger or asks to continue it. Never infer association from the working directory, project files, or a similar outcome, and never attach while starting unrelated work.",
-    "Read a work ledger before updating it, then send its current revision. Never silently retry a stale revision or overwrite newer progress.",
-    "In a work_ledger update, send only the items that changed. Omitted items and fields keep their stored progress.",
-    "Mark a work_ledger item completed only with concrete evidence. Record both blocker and recovery before marking it blocked.",
-    "A plan or item completion does not complete the overall ledger outcome. Complete the ledger explicitly after all unfinished items are resolved; a completed execution plan cannot complete an associated ledger with open items.",
-    "After attach, the session keeps only a reference to the same ledger. Detach or switch when the user changes work; do not copy the ledger into session state.",
-  ],
-  parameters: workLedgerParameters,
-};
+export const WORK_LEDGER_PROMPT_GUIDELINES = [
+  "When Long-term work ledger is on, use update_todo with ledger for a durable high-level outcome and stable items. It is the same interface as Todo, not a separate execution plan or public tool.",
+  "Only use update_todo ledger attach when the user explicitly names an existing ledger or asks to continue it. Never infer association from the working directory, project files, or a similar outcome, and never attach while starting unrelated work.",
+  "Read the ledger with get_todo {ledger:{action:'read'}} before updating it, then send its current revision. Never silently retry a stale revision or overwrite newer progress. Use get_todo {ledger:{action:'list'}} to discover records.",
+  "In an update_todo ledger update, send only the items that changed. Omitted items and fields keep their stored progress.",
+  "Mark a ledger item completed only with concrete evidence. Record both blocker and recovery before marking it blocked.",
+  "A plan or item completion does not complete the overall ledger. Complete the ledger explicitly after all unfinished items are resolved; a completed Todo or workflow plan cannot complete an associated ledger with open items.",
+  "While a workflow owns planning, update_todo {workflow:...} remains the canonical execution writer. The durable ledger holds the overall goal and high-level continuity; do not mirror workflow stages or rows into it.",
+  "After attach, the session keeps only a reference to the same ledger. Detach or switch when the user changes work; do not copy the ledger into session state.",
+] as const;
 
-export function executeWorkLedgerTool(input: WorkLedgerToolInput, cwd: string, session?: WorkLedgerSessionBinding): {
-  content: Array<{ type: "text"; text: string }>;
-  details: WorkLedgerToolDetails;
-} {
+export function executeLedgerMutation(
+  input: UpdateTodoLedgerInput,
+  cwd: string,
+  session?: WorkLedgerSessionBinding,
+): LedgerActionResult {
   const store = openWorkLedgerStore({ cwd });
   const associatedLedgerId = session?.associatedLedgerId() ?? null;
   switch (input.action) {
     case "create": {
       if (input.ledgerId !== undefined || input.revision !== undefined || input.changes !== undefined || input.addItems !== undefined) {
-        throw new Error("work_ledger create uses outcome, boundaries, status, and items; do not send ledgerId, revision, changes, or addItems.");
+        throw new Error("update_todo ledger create uses outcome, boundaries, status, and items; do not send ledgerId, revision, changes, or addItems.");
       }
-      if (input.outcome === undefined) throw new Error("work_ledger create requires outcome.");
+      if (input.outcome === undefined) throw new Error("update_todo ledger create requires outcome.");
       const ledger = store.create({
         outcome: input.outcome,
         ...(input.boundaries === undefined ? {} : { boundaries: input.boundaries }),
@@ -134,22 +151,14 @@ export function executeWorkLedgerTool(input: WorkLedgerToolInput, cwd: string, s
       });
       return result(input.action, formatWorkLedger(ledger), { ledger, totals: workLedgerTotals(ledger) });
     }
-    case "list": {
-      const ledgers = store.list();
-      return result(input.action, formatLedgerList(ledgers, associatedLedgerId), { ledgers, associatedLedgerId });
-    }
-    case "read": {
-      const ledger = store.read(requireLedgerId(input));
-      return result(input.action, formatWorkLedger(ledger), { ledger, totals: workLedgerTotals(ledger), associatedLedgerId });
-    }
     case "update": {
       const ledgerId = requireLedgerId(input);
-      if (input.revision === undefined) throw new Error("work_ledger update requires the revision last read.");
-      if (input.items !== undefined) throw new Error("work_ledger update takes changes and addItems; items is only for create.");
+      if (input.revision === undefined) throw new Error("update_todo ledger update requires the revision last read.");
+      if (input.items !== undefined) throw new Error("update_todo ledger update takes changes and addItems; items is only for create.");
       if (input.outcome === undefined && input.boundaries === undefined && input.status === undefined &&
           (input.changes === undefined || input.changes.length === 0) &&
           (input.addItems === undefined || input.addItems.length === 0)) {
-        throw new Error("work_ledger update needs outcome, boundaries, status, changes, or addItems.");
+        throw new Error("update_todo ledger update needs outcome, boundaries, status, changes, or addItems.");
       }
       const ledger = store.update({
         ledgerId,
@@ -165,14 +174,14 @@ export function executeWorkLedgerTool(input: WorkLedgerToolInput, cwd: string, s
     }
     case "attach": {
       if (!session) throw new Error("This session cannot associate a work ledger.");
-      if (input.ledgerId === undefined) throw new Error("work_ledger attach requires ledgerId.");
+      if (input.ledgerId === undefined) throw new Error("update_todo ledger attach requires ledgerId.");
       if (input.revision !== undefined || input.changes !== undefined || input.addItems !== undefined ||
           input.items !== undefined || input.outcome !== undefined || input.boundaries !== undefined ||
           input.status !== undefined) {
-        throw new Error("work_ledger attach takes ledgerId only; update the ledger separately.");
+        throw new Error("update_todo ledger attach takes ledgerId only; update the ledger separately.");
       }
       const ledgerId = requireLedgerId(input);
-      if (!isWorkLedgerId(ledgerId)) throw new Error("work_ledger attach requires a valid ledgerId.");
+      if (!isWorkLedgerId(ledgerId)) throw new Error("update_todo ledger attach requires a valid ledgerId.");
       const ledger = store.read(ledgerId);
       session.associate(ledger.id);
       return result(input.action,
@@ -191,28 +200,63 @@ export function executeWorkLedgerTool(input: WorkLedgerToolInput, cwd: string, s
         { associatedLedgerId: null });
     }
     default:
-      throw new Error(`Unknown work_ledger action ${JSON.stringify(input.action)}.`);
+      throw new Error(`Unknown ledger action ${JSON.stringify((input as { action?: unknown }).action)}.`);
   }
 }
 
-function requireLedgerId(input: WorkLedgerToolInput): string {
+export function executeLedgerQuery(
+  input: GetTodoLedgerInput,
+  cwd: string,
+  associatedLedgerId: string | null = null,
+): LedgerQueryResult {
+  const store = openWorkLedgerStore({ cwd });
+  switch (input.action) {
+    case "list": {
+      const ledgers = store.list();
+      return queryResult(input.action, formatLedgerList(ledgers, associatedLedgerId), { ledgers, associatedLedgerId });
+    }
+    case "read": {
+      if (input.ledgerId === undefined) throw new Error("get_todo ledger read requires ledgerId.");
+      const ledger = store.read(input.ledgerId);
+      return queryResult(input.action, formatWorkLedger(ledger), {
+        ledger, totals: workLedgerTotals(ledger), associatedLedgerId,
+      });
+    }
+    default:
+      throw new Error(`Unknown ledger query action ${JSON.stringify((input as { action?: unknown }).action)}.`);
+  }
+}
+
+function requireLedgerId(input: UpdateTodoLedgerInput): string {
   if (typeof input.ledgerId !== "string" || !input.ledgerId) throw new Error("ledgerId is required for this action.");
   return input.ledgerId;
 }
 
 function result(
-  action: WorkLedgerToolInput["action"],
+  action: UpdateTodoLedgerInput["action"],
   text: string,
-  details: Omit<WorkLedgerToolDetails, "ok" | "action">,
-): {
-  content: Array<{ type: "text"; text: string }>;
-  details: WorkLedgerToolDetails;
-} {
-  const truncation = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-  const content = truncation.truncated
-    ? `${truncation.content}\n[Work ledger output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines. Read the ledger with a narrower item or use the details.]`
-    : text;
+  details: Omit<LedgerActionResult["details"], "ok" | "action">,
+): LedgerActionResult {
+  const { content } = truncateLedgerText(text);
   return { content: [{ type: "text", text: content }], details: { ok: true, action, ...details } };
+}
+
+function queryResult(
+  action: GetTodoLedgerInput["action"],
+  text: string,
+  details: Omit<LedgerQueryResult["details"], "ok" | "action">,
+): LedgerQueryResult {
+  const { content } = truncateLedgerText(text);
+  return { content: [{ type: "text", text: content }], details: { ok: true, action, ...details } };
+}
+
+function truncateLedgerText(text: string): { content: string } {
+  const truncation = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+  return {
+    content: truncation.truncated
+      ? `${truncation.content}\n[Work ledger output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines. Use get_todo ledger read with a narrower record or the details.]`
+      : text,
+  };
 }
 
 export function formatLedgerList(ledgers: WorkLedgerSummary[], associatedLedgerId: string | null = null): string {

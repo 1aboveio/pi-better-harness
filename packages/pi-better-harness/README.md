@@ -22,10 +22,12 @@ Use `pi-better-harness` when you want the full working set for Pi. It manages:
 
 In `/harness-settings`, **Outcome & Todo display** (`outcome-todo-display`)
 defaults to **On**, and **Outcome & Todo hooks** (`outcome-todo`) defaults to
-**Off**. Saved outcomes and checklists display even when hooks are off; missing
-state creates no placeholder, state, or settings. Turning display off does not
-disable hooks. Saved v1 `enabled` remains the hooks authority; the new optional
-display preference defaults to true.
+**Off**. **Long-term work ledger** (`outcome-todo-ledger`) is a third independent
+control and defaults to **Off**. Saved outcomes and checklists display even when
+hooks are off; missing state creates no placeholder, state, or settings. Turning
+display off does not disable hooks. Saved v1 `enabled` remains the hooks
+authority; the optional display and ledger preferences default to their existing
+or conservative values.
 
 The compact widget has one Todo heading, with a caret after Todo and the completion
 count on the left. A matching Goal's status and existing active-time clock appear
@@ -55,15 +57,19 @@ Existing Plan session histories restore as Todo. Workflow task-plan files and
 revision checks stay unchanged; skills continue using their own records when the
 optional interface is off. See the [usage guide](docs/usage.md#outcome--todo).
 
-Hooks also enable `work_ledger`, a durable project-scoped record of the overall
-outcome, boundaries, and high-level items. Its explicit `create`, `list`, `read`,
-and `update` actions require a current revision for each update, preserve
-completed evidence and history, and never associate old work with a new session
-automatically. Use `/ledger attach <id>` (or `work_ledger attach` on an explicit
-request) to continue the same record; `/ledger list`, `/ledger switch`, and
-`/ledger detach` manage the reference without copying it. A resumed session keeps
-its reference, a fresh session stays unassociated, and bounded recovery reminders
-after compaction or resume are rebuilt from durable state. See
+The separate **Long-term work ledger** setting enables a durable project-scoped
+record of the overall outcome, boundaries, and high-level items. It stays off by
+default; turning it off removes ledger views and hints without deleting records.
+The same `update_todo` / `get_todo` interface carries optional ledger payloads and
+selectors for create, update, attach, detach, list, and read. Updates require the
+current revision, preserve completed evidence and history, and never associate old
+work with a new session automatically. Use `/ledger attach <id>` (or an explicit
+`update_todo` ledger attach) to continue the same record; `/ledger list`,
+`/ledger switch`, and `/ledger detach` manage the reference without copying it. A
+resumed session keeps its reference, a fresh session stays unassociated, and
+bounded recovery reminders after compaction or resume are rebuilt from durable
+state. Workflow-owned rows keep their canonical stage/status rendering; the
+ledger adds context, not a second execution model. See
 [usage](docs/usage.md#associate-a-ledger-with-a-session).
 
 Subagent and background-task rows can be clicked to open their existing navigator

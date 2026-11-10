@@ -66,7 +66,7 @@ interface SessionState {
 }
 
 function harness(t: TestContext, f: Fixture, options: {
-  preferences?: { enabled: boolean; display: boolean };
+  preferences?: { enabled: boolean; display: boolean; ledger?: boolean };
   branch?: any[];
   context?: any[];
   hasUI?: boolean;
@@ -159,11 +159,19 @@ function harness(t: TestContext, f: Fixture, options: {
   });
 
   const command = async (text: string) => commands.get("ledger")?.handler(text, ctx);
+  const todoCommand = async (text = "") => commands.get("todo")?.handler(text, ctx);
   const get = async (): Promise<ToolResult> => tools.get("get_todo")!.execute("get", {}, undefined, undefined, ctx) as Promise<ToolResult>;
   const update = async (input: any): Promise<ToolResult> => tools.get("update_todo")!.execute("update", input, undefined, undefined, ctx) as Promise<ToolResult>;
-  const ledgerTool = async (input: any): Promise<ToolResult> => tools.get("work_ledger")!.execute("ledger", input, undefined, undefined, ctx) as Promise<ToolResult>;
+  const mutateLedger = async (ledger: any): Promise<ToolResult> =>
+    tools.get("update_todo")!.execute("ledger", { ledger }, undefined, undefined, ctx) as Promise<ToolResult>;
+  const queryLedger = async (ledger: any): Promise<ToolResult> =>
+    tools.get("get_todo")!.execute("ledger-query", { ledger }, undefined, undefined, ctx) as Promise<ToolResult>;
   const enable = async () => {
     if (settings?.get() !== "On") await settings!.change("On", ctx);
+  };
+  const enableLedger = async () => {
+    const control = settingControls.get("outcome-todo-ledger");
+    if (control?.get() !== "On") await control!.change("On", ctx);
   };
   return {
     f, session, tools, commands, handlers, events, notices, sent, widgets, ctx, pi,
@@ -171,7 +179,7 @@ function harness(t: TestContext, f: Fixture, options: {
     control: (id: string) => settingControls.get(id),
     active: () => active,
     userMessages: () => userMessages,
-    start, shutdown, reload, command, get, update, ledgerTool, enable,
+    start, shutdown, reload, command, todoCommand, get, update, mutateLedger, queryLedger, enable, enableLedger,
     append,
     render: (width = 100) => {
       const factory = widgets.get("background-work-list");
@@ -210,6 +218,7 @@ test("explicit attach restores the same durable record on resume while a fresh s
   const ledger = createLedger(f);
   const first = harness(t, f);
   await first.enable();
+  await first.enableLedger();
   await first.command(`attach ${ledger.id}`);
   const restored = await first.get();
   assert.equal(restored.details.ledger.id, ledger.id);
@@ -233,16 +242,19 @@ test("explicit attach restores the same durable record on resume while a fresh s
     "resume must not append another association or copy the ledger");
   assert.equal(openWorkLedgerStore({ cwd: f.cwd, agentDir: f.agentDir }).read(ledger.id).revision, 1);
 
-  const fresh = harness(t, f, { preferences: { enabled: true, display: true } });
+  const fresh = harness(t, f, { preferences: { enabled: true, display: true, ledger: true } });
   await fresh.start("new");
   assert.equal((await fresh.get()).details.ledger, null, "a new session must not adopt a project ledger automatically");
   assert.deepEqual(fresh.session.branch, [], "a new session stays unassociated and writes nothing");
   assert.equal(fresh.sent.length, 0, "discovery must not inject old work");
   await fresh.command("list");
   assert.match(fresh.notices.at(-1)!.text, new RegExp(ledger.id));
+  const discovered = await fresh.queryLedger({ action: "list" });
+  assert.deepEqual(discovered.details.ledgerQuery.ledgers.map((item: { id: string }) => item.id), [ledger.id],
+    "get_todo ledger list discovers the project record without associating it");
   await fresh.command(`attach ${ledger.id}`);
   assert.equal((await fresh.get()).details.ledger.id, ledger.id);
-  const updated = await fresh.ledgerTool({
+  const updated = await fresh.mutateLedger({
     action: "update",
     ledgerId: ledger.id,
     revision: 1,
@@ -267,7 +279,7 @@ test("compaction rebuilds bounded reminders from durable state and context remov
     })),
   ];
   const ledger = createLedger(f, items);
-  const h = harness(t, f, { preferences: { enabled: true, display: true } });
+  const h = harness(t, f, { preferences: { enabled: true, display: true, ledger: true } });
   await h.start();
   await h.command(`attach ${ledger.id}`);
   const firstReminder = h.sent.at(-1)!;
@@ -326,7 +338,7 @@ test("switch, detach, and branch navigation restore the right reference and hide
     outcome: "Deliver refunds",
     items: [{ id: "refund", title: "Ship refunds", status: "pending", nextStep: "Start refund work" }],
   });
-  const h = harness(t, f, { preferences: { enabled: true, display: true } });
+  const h = harness(t, f, { preferences: { enabled: true, display: true, ledger: true } });
   await h.start();
   await h.command(`attach ${first.id}`);
   assert.equal((await h.get()).details.ledger.id, first.id);
@@ -361,7 +373,7 @@ test("switch, detach, and branch navigation restore the right reference and hide
 test("completion reconciliation refuses the overall Outcome while high-level items remain open", async (t) => {
   const f = fixture(t);
   const ledger = createLedger(f);
-  const h = harness(t, f, { preferences: { enabled: true, display: true } });
+  const h = harness(t, f, { preferences: { enabled: true, display: true, ledger: true } });
   await h.start();
   await h.command(`attach ${ledger.id}`);
   await h.update({
@@ -419,6 +431,7 @@ test("association does not start work, change a paused Goal, or alter hooks/disp
   };
   const h = harness(t, f, { branch: [goalEntry] });
   await h.start("resume");
+  await h.enableLedger();
   const preferencesBefore = readFileSync(join(f.agentDir, "settings.json"), "utf8");
   await h.command(`attach ${ledger.id}`);
   assert.match(h.notices.at(-1)!.text, new RegExp(ledger.id));
@@ -439,33 +452,33 @@ test("association does not start work, change a paused Goal, or alter hooks/disp
   assert.match(pausedOutcome.message.content, /Outcome \(paused\)/, "a paused Goal keeps its lifecycle state");
 });
 
-test("work_ledger attach and detach are explicit actions and list marks the session reference", async (t) => {
+test("update_todo ledger attach and detach are explicit actions and get_todo list marks the session reference", async (t) => {
   const f = fixture(t);
   const ledger = createLedger(f);
-  const h = harness(t, f, { preferences: { enabled: true, display: true } });
+  const h = harness(t, f, { preferences: { enabled: true, display: true, ledger: true } });
   await h.start();
-  await h.ledgerTool({ action: "create", outcome: "Other project work" });
-  const listedBefore = await h.ledgerTool({ action: "list" });
+  await h.mutateLedger({ action: "create", outcome: "Other project work" });
+  const listedBefore = await h.queryLedger({ action: "list" });
   assert.doesNotMatch(listedBefore.content[0]!.text, /ledger_.*\[associated/);
-  await h.ledgerTool({ action: "attach", ledgerId: ledger.id });
+  await h.mutateLedger({ action: "attach", ledgerId: ledger.id });
   assert.ok(h.session.branch.some((entry) => entry.customType === WORK_LEDGER_ASSOCIATION_ENTRY &&
     (entry.data as any).ledgerId === ledger.id));
   assert.equal((await h.get()).details.ledger.id, ledger.id);
-  const listedAfter = await h.ledgerTool({ action: "list" });
-  assert.equal(listedAfter.details.associatedLedgerId, ledger.id);
+  const listedAfter = await h.queryLedger({ action: "list" });
+  assert.equal(listedAfter.details.ledgerQuery.associatedLedgerId, ledger.id);
   assert.match(listedAfter.content[0]!.text, new RegExp(`${ledger.id}.*\\[associated with this session\\]`));
   await assert.rejects(
-    h.ledgerTool({ action: "attach", ledgerId: "ledger_missing_00" }),
+    h.mutateLedger({ action: "attach", ledgerId: "ledger_missing_00" }),
     /not found/,
   );
   await assert.rejects(
-    h.ledgerTool({ action: "attach", ledgerId: ledger.id, revision: 1 }),
+    h.mutateLedger({ action: "attach", ledgerId: ledger.id, revision: 1 }),
     /takes ledgerId only/,
   );
-  await h.ledgerTool({ action: "detach" });
+  await h.mutateLedger({ action: "detach" });
   assert.equal((await h.get()).details.ledger, null);
-  assert.equal((await h.ledgerTool({ action: "list" })).details.associatedLedgerId, null);
-  assert.match((await h.ledgerTool({ action: "list" })).content[0]!.text, new RegExp(ledger.id));
+  assert.equal((await h.queryLedger({ action: "list" })).details.ledgerQuery.associatedLedgerId, null);
+  assert.match((await h.queryLedger({ action: "list" })).content[0]!.text, new RegExp(ledger.id));
 });
 
 test("an associated ledger stays additive to the workflow's canonical plan", async (t) => {
@@ -475,14 +488,14 @@ test("an associated ledger stays additive to the workflow's canonical plan", asy
   writeFileSync(planPath, JSON.stringify({
     planRevision: 1,
     runId: "run-1",
-    issues: [{ id: "1", title: "Ship workflow slice", stage: "implement", status: "pending" }],
+    issues: [{ id: "1", title: "Ship workflow slice", stage: "implement", status: "in-flight", delivery: "building" }],
     fleet: { implement: { status: "in-flight" } },
   }));
   const workflowEntries = [
     { type: "custom", customType: "pi-better-workflow", data: { version: 1, kind: "set", owner: { name: "fixture", planOwner: "workflow" } } },
     { type: "custom", customType: "pi-better-workflow-plan", data: { version: 1, kind: "set", owner: "fixture", path: planPath, runId: "run-1" } },
   ];
-  const h = harness(t, f, { branch: workflowEntries, preferences: { enabled: true, display: true } });
+  const h = harness(t, f, { branch: workflowEntries, preferences: { enabled: true, display: true, ledger: true } });
   await h.start("resume");
   const ledger = createLedger(f);
   const planBefore = readFileSync(planPath, "utf8");
@@ -494,7 +507,13 @@ test("an associated ledger stays additive to the workflow's canonical plan", asy
   assert.equal(todo.details.ledger.id, ledger.id);
   assert.match(todo.content[0]!.text, /fixture · rev 1/);
   assert.match(todo.content[0]!.text, /Ship workflow slice/);
+  assert.match(todo.content[0]!.text, /implement · in-flight · building/,
+    "workflow stage, status, and delivery still come from workflow-plan.ts");
   assert.match(todo.content[0]!.text, new RegExp(ledger.id));
+  await h.todoCommand();
+  const fullView = h.notices.at(-1)!.text;
+  assert.match(fullView, /implement · in-flight · building/, "the full view keeps the same workflow stage projection");
+  assert.match(fullView, new RegExp(ledger.id), "the full view shows workflow rows with ledger context");
   assert.equal(readFileSync(planPath, "utf8"), planBefore, "association must not rewrite the canonical workflow plan");
   assert.equal(h.session.branch.filter((entry) => entry.customType?.startsWith("pi-better-workflow")).length, workflowBefore,
     "association adds no workflow binding or ownership entry");
@@ -508,11 +527,24 @@ test("an associated ledger stays additive to the workflow's canonical plan", asy
   assert.match((await h.get()).content[0]!.text, /Deliver checkout/);
 });
 
+test("ordinary Todo rows gain no engineering stage model", async (t) => {
+  const f = fixture(t);
+  const h = harness(t, f, { preferences: { enabled: true, display: true, ledger: false } });
+  await h.start();
+  await h.update({ todo: [{ id: "write", step: "Write the note", status: "in_progress" }] });
+  const todo = await h.get();
+  assert.deepEqual(Object.keys(todo.details.plan.steps[0]).sort(), ["id", "status", "step"],
+    "a generic item keeps identity, label, and status without an engineering stage");
+  assert.doesNotMatch(todo.content[0]!.text, /\b(?:stage|delivery)\b/i);
+});
+
 test("association survives independent display and hooks controls", async (t) => {
   const f = fixture(t);
   const ledger = createLedger(f);
   const h = harness(t, f, { hasUI: true, preferences: { enabled: false, display: true } });
   await h.start();
+  assert.equal(h.control("outcome-todo-ledger")!.get(), "Off", "long-term ledger defaults off");
+  await h.enableLedger();
   await h.command(`attach ${ledger.id}`);
   assert.equal(h.sent.length, 0, "hooks off does not inject a reminder");
   assert.match(h.render().join("\n"), /ledger 0\/2 complete · 2 open/);
@@ -536,6 +568,51 @@ test("association survives independent display and hooks controls", async (t) =>
     { role: "user", content: "continue" },
   ] }, h.ctx), { messages: [{ role: "user", content: "continue" }] },
   "hooks off removes ledger reminders from the next model request without changing display");
+});
+
+test("the ledger toggle stops and restores integration without deleting data or changing association", async (t) => {
+  const f = fixture(t);
+  const ledger = createLedger(f);
+  const h = harness(t, f, { preferences: { enabled: true, display: true, ledger: false } });
+  await h.start();
+  assert.equal(h.control("outcome-todo-ledger")!.get(), "Off");
+  assert.equal((await h.get()).details.ledger, undefined, "off omits the ledger view");
+  await assert.rejects(
+    h.mutateLedger({ action: "attach", ledgerId: ledger.id }),
+    /Long-term work ledger is off/,
+  );
+  await h.enableLedger();
+  assert.equal((await h.get()).details.ledger, null, "enabling the setting never adopts an existing project ledger");
+  await h.command(`attach ${ledger.id}`);
+  assert.equal((await h.get()).details.ledger.id, ledger.id);
+  assert.equal(h.sent.length, 1, "enabling and selecting publishes a reminder");
+  const beforeOff = h.sent.length;
+  await h.control("outcome-todo-ledger")!.change("Off", h.ctx);
+  assert.equal(JSON.parse(readFileSync(join(f.agentDir, "settings.json"), "utf8"))
+    .piBetterHarness.outcomeTodo.ledger, false, "the toggle persists through the existing settings framework");
+  assert.equal((await h.get()).details.ledger, undefined, "off removes the ledger view");
+  assert.deepEqual(h.handlers.get("context")!({ messages: [
+    { role: "custom", customType: WORK_LEDGER_REMINDER_MESSAGE, content: "old", details: { ledgerId: ledger.id } },
+    { role: "user", content: "continue" },
+  ] }, h.ctx), { messages: [{ role: "user", content: "continue" }] }, "off removes ledger hints from the request");
+  await assert.rejects(
+    h.mutateLedger({ action: "update", ledgerId: ledger.id, revision: 1, changes: [{ id: "api", progress: "ignored" }] }),
+    /Long-term work ledger is off/,
+  );
+  assert.equal(h.sent.length, beforeOff, "off publishes no new reminder");
+  const store = openWorkLedgerStore({ cwd: f.cwd, agentDir: f.agentDir });
+  store.update({
+    ledgerId: ledger.id,
+    revision: 1,
+    event: "external-progress",
+    changes: [{ id: "api", progress: "Progress made while integration was off" }],
+  });
+  assert.equal(store.read(ledger.id).revision, 2, "off never deletes or changes stored data");
+  await h.enableLedger();
+  assert.equal((await h.get()).details.ledger.id, ledger.id, "re-enabling restores the same session association");
+  assert.equal(h.sent.length, beforeOff + 1, "re-enabling restores the recovery hint");
+  assert.match(h.sent.at(-1)!.message.content, /rev 2/, "the restored hint is rebuilt from the current durable revision");
+  assert.equal(h.settings()!.get(), "On", "the ledger toggle does not change hooks");
 });
 
 test("durable reminders stay bounded and carry no execution authorization", (t) => {

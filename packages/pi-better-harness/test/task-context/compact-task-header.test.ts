@@ -44,17 +44,18 @@ test("the existing Todo header adds one bounded ledger count line without a seco
   }
 });
 
-test("display and hooks defaults, legacy values, and independent changes are validated without mutation", () => {
-  assert.deepEqual(parseOutcomeTodoPreferences(undefined), { version: 1, enabled: false, display: true });
+test("display, hooks, and ledger defaults and independent changes are validated without mutation", () => {
+  assert.deepEqual(parseOutcomeTodoPreferences(undefined), { version: 1, enabled: false, display: true, ledger: false });
   for (const enabled of [false, true]) {
     const legacy = Object.freeze({ version: 1, enabled });
-    assert.deepEqual(parseOutcomeTodoPreferences(legacy), { ...legacy, display: true });
+    assert.deepEqual(parseOutcomeTodoPreferences(legacy), { ...legacy, display: true, ledger: false });
     const hidden = changeOutcomeTodoPreference(legacy, "display", false);
-    assert.deepEqual(hidden, { ...legacy, display: false });
-    assert.deepEqual(changeOutcomeTodoPreference(hidden, "enabled", !enabled), { version: 1, enabled: !enabled, display: false });
+    assert.deepEqual(hidden, { ...legacy, display: false, ledger: false });
+    assert.deepEqual(changeOutcomeTodoPreference(hidden, "enabled", !enabled), { version: 1, enabled: !enabled, display: false, ledger: false });
+    assert.deepEqual(changeOutcomeTodoPreference(hidden, "ledger", true), { version: 1, enabled, display: false, ledger: true });
     assert.deepEqual(legacy, { version: 1, enabled });
   }
-  for (const invalid of [null, [], false, { version: 2 }, { version: 1, enabled: "false" }, { version: 1, display: 0 }]) {
+  for (const invalid of [null, [], false, { version: 2 }, { version: 1, enabled: "false" }, { version: 1, display: 0 }, { version: 1, ledger: "On" }]) {
     assert.throws(() => changeOutcomeTodoPreference(invalid, "display", true), /Invalid outcomeTodo/);
   }
 });

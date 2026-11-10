@@ -43,10 +43,12 @@ again. The explicit installer removes the selected registration instead.
 
 In `/harness-settings`, **Outcome & Todo display** (`outcome-todo-display`)
 defaults to **On**, independently of **Outcome & Todo hooks** (legacy id
-`outcome-todo`), which defaults to **Off**. Saved outcomes and checklists render
-with hooks off. If state is missing, Harness creates no placeholder, state, or
-settings. Turning display off leaves hooks active. Saved v1 `enabled` remains
-the hooks authority; the new optional display preference defaults to true.
+`outcome-todo`), which defaults to **Off**, and **Long-term work ledger**
+(`outcome-todo-ledger`), which defaults to **Off**. Saved outcomes and checklists
+render with hooks off. If state is missing, Harness creates no placeholder, state,
+or settings. Turning display off leaves hooks active. Saved v1 `enabled` remains
+the hooks authority; the optional display preference defaults to true and the
+ledger preference to false.
 
 The compact widget has one Todo heading, a caret after Todo, and the completion
 count on the left. Matching Goal status and its existing active-time clock appear
@@ -82,13 +84,17 @@ compaction and reload. Existing Plan histories remain readable as Todo.
 
 ### Durable work ledgers
 
-When Outcome & Todo hooks are on, the `work_ledger` tool keeps a high-level work
-record that is independent of session history:
+**Long-term work ledger** is a separate setting, default Off. When it and the
+Outcome & Todo hooks are on, the same `update_todo` / `get_todo` interface keeps a
+high-level work record that is independent of session history:
 
-- `create` stores the overall outcome, boundaries, and initial high-level items.
-- `list` discovers ledgers for the current project; `read` opens one by id.
-- `update` requires the revision last read and changes only the named items and
-  fields. A stale revision is refused atomically. Omitted items, completed
+- `update_todo` with a `ledger` payload creates or updates a ledger, or attaches
+  and detaches the session reference.
+- `get_todo` with a `ledger` selector lists this project's ledgers or reads one by
+  id. Without a selector, `get_todo` returns the common work-plan view and, when
+  associated, the current ledger summary.
+- A ledger update requires the revision last read and changes only the named items
+  and fields. A stale revision is refused atomically. Omitted items, completed
   evidence, and history entries are preserved.
 
 Items carry a stable id, status, completion conditions, progress, next step,
@@ -101,7 +107,15 @@ Ledgers are stored under the Pi agent directory, keyed by the canonical project
 directory, not in the session or repository. Listing or creating one does not
 associate it with the session, inject old work, start a Goal, or change the
 generic outcome/Todo, workflow plan, or display/hooks state. Session association
-and recovery reminders are separate work.
+and recovery reminders are separate work. Turning the ledger setting off removes
+ledger views, queries, mutations, and hints, but never deletes records or changes
+Goal pause/authorization state. Re-enabling restores the association and hints
+from the stored record.
+
+Workflow-owned rows stay canonical: their stage, status, and delivery projection
+continue to come from `workflow-plan.ts` and task-plan.json. The ledger adds the
+overall goal and continuity context without mirroring or replacing those rows.
+Ordinary Todo items do not acquire implement/review/CI stages.
 
 ### Associate a ledger with a session
 
@@ -121,13 +135,14 @@ them but does not adopt one. A fork or clone follows its copied branch and keeps
 the same reference without copying the ledger. Selecting a different ledger
 continues that same id, history, completed evidence, and revision sequence.
 
-With hooks on, Harness adds a bounded reminder built from the durable record after
-compaction, resume, branch restoration, explicit attach, or enabling hooks. It
-lists the overall outcome, totals, and only a few unfinished items. Detaching or
-switching removes stale ledger reminders from the next model request. The
-reminder is context, not permission: confirm the current human request and the
-Goal's pause state before acting. Hooks off publishes no reminder; display off
-hides the ledger count line without changing the reference.
+With hooks and the ledger setting on, Harness adds a bounded reminder built from
+the durable record after compaction, resume, branch restoration, explicit attach,
+or enabling the setting. It lists the overall outcome, totals, and only a few
+unfinished items. Detaching or switching removes stale ledger reminders from the
+next model request. The reminder is context, not permission: confirm the current
+human request and the Goal's pause state before acting. Hooks off or ledger off
+publishes no reminder; display off hides the ledger count line without changing
+the reference.
 
 The existing Todo surface gains one compact ledger line when an association
 exists, for example `ledger 1/3 complete · 2 open · next: Ship API`. It is not a
@@ -183,7 +198,7 @@ After installation, Pi can use these model-callable tools:
 | `pi-better-background-tasks` | `bg_task_spawn`, `bg_task_watch`, `bg_task_list`, `bg_task_status`, `bg_task_log`, `bg_task_stop`, `bg_task`, `bg_status` |
 | `pi-better-ssh` | `remote_bash`, `ssh_profile`, `ssh_mux` |
 | `pi-better-goal` | `get_goal`, `update_goal`, `get_background_activity` |
-| Harness Outcome & Todo (when hooks are enabled) | `update_todo`, `get_todo`, `work_ledger` |
+| Harness Outcome & Todo (when hooks are enabled) | `update_todo`, `get_todo` — optional ledger payload/selector when Long-term work ledger is on |
 
 The goal extension also provides the `/goal` and `/better-activity` commands.
 

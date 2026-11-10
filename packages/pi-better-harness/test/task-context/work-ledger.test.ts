@@ -365,8 +365,10 @@ async function extensionFixture(t: TestContext) {
   const events = new EventEmitter();
   let activeTools = ["read"];
   let setting: SettingControl | undefined;
+  let ledgerSetting: SettingControl | undefined;
   events.on("harness-settings:register", (control: SettingControl) => {
     if (control?.id === "outcome-todo") setting = control;
+    if (control?.id === "outcome-todo-ledger") ledgerSetting = control;
   });
   const ctx = {
     cwd: f.cwd,
@@ -406,25 +408,38 @@ async function extensionFixture(t: TestContext) {
     start,
     reload,
     setting: () => setting,
+    ledgerSetting: () => ledgerSetting,
     active: () => activeTools,
   };
 }
 
-test("the registered work_ledger tool preserves items and history across reload without adopting session work", async (t) => {
+test("the unified update_todo ledger payload preserves items and history across reload without adopting session work", async (t) => {
   const f = await extensionFixture(t);
   assert.deepEqual(f.active(), ["read"], "the project work ledger stays inactive while hooks are off");
-  const disabledTool = f.tools.get("work_ledger");
-  assert.ok(disabledTool);
   await assert.rejects(
-    disabledTool.execute("create-disabled", { action: "create", outcome: "Should not persist" }, undefined, undefined, f.ctx),
+    f.tools.get("update_todo")!.execute("create-disabled", {
+      ledger: { action: "create", outcome: "Should not persist" },
+    }, undefined, undefined, f.ctx),
     /hooks are off/,
   );
 
   await f.setting()!.change("On", f.ctx);
-  assert.deepEqual(f.active(), ["read", "update_todo", "get_todo", "work_ledger"]);
+  assert.deepEqual(f.active(), ["read", "update_todo", "get_todo"]);
   const updateTodo = f.tools.get("update_todo")!;
   const getTodo = f.tools.get("get_todo")!;
-  const ledgerTool = f.tools.get("work_ledger")!;
+  assert.equal(f.ledgerSetting()!.get(), "Off");
+  await assert.rejects(
+    updateTodo.execute("ledger-disabled", {
+      ledger: { action: "create", outcome: "Should not persist while the capability is off" },
+    }, undefined, undefined, f.ctx),
+    /Long-term work ledger is off/,
+  );
+  await assert.rejects(
+    getTodo.execute("ledger-disabled-read", { ledger: { action: "list" } }, undefined, undefined, f.ctx),
+    /Long-term work ledger is off/,
+  );
+  await f.ledgerSetting()!.change("On", f.ctx);
+  assert.deepEqual(f.active(), ["read", "update_todo", "get_todo"], "the unified interface adds no public tool");
 
   await updateTodo.execute("generic-task", {
     outcome: { objective: "Session task", doneWhen: ["Session check passes"] },
@@ -433,37 +448,42 @@ test("the registered work_ledger tool preserves items and history across reload 
   const genericTask = structuredClone((await getTodo.execute("generic-read", {}, undefined, undefined, f.ctx)).details);
   const taskEntries = f.entries.length;
 
-  const created = await ledgerTool.execute("create-ledger", {
-    action: "create",
-    outcome: "Deliver checkout",
-    boundaries: ["No production writes"],
-    items: [
-      {
-        id: "api",
-        title: "Ship API",
-        completion: ["Contract tests pass"],
-        progress: "Contract drafted",
-        nextStep: "Implement handler",
-      },
-      { id: "docs", title: "Ship docs", completion: ["Docs published"] },
-    ],
+  const created = await updateTodo.execute("create-ledger", {
+    ledger: {
+      action: "create",
+      outcome: "Deliver checkout",
+      boundaries: ["No production writes"],
+      items: [
+        {
+          id: "api",
+          title: "Ship API",
+          completion: ["Contract tests pass"],
+          progress: "Contract drafted",
+          nextStep: "Implement handler",
+        },
+        { id: "docs", title: "Ship docs", completion: ["Docs published"] },
+      ],
+    },
   }, undefined, undefined, f.ctx) as ToolResult;
-  assert.equal(f.entries.length, taskEntries, "work_ledger must not write session custom entries");
+  assert.equal(f.entries.length, taskEntries, "a ledger create must not write session custom entries");
   const ledgerId = created.details.ledger.id as string;
   assert.equal(created.details.ledger.revision, 1);
   const untouched = structuredClone(created.details.ledger.items[1]);
 
-  const read = await ledgerTool.execute("read-ledger", {
-    action: "read", ledgerId,
+  const read = await getTodo.execute("read-ledger", {
+    ledger: { action: "read", ledgerId },
   }, undefined, undefined, f.ctx) as ToolResult;
-  assert.deepEqual(read.details.ledger, created.details.ledger);
+  assert.deepEqual(read.details.ledgerQuery.ledger, created.details.ledger);
+  assert.match(read.content[0]!.text, /Deliver checkout/);
 
-  const updated = await ledgerTool.execute("update-ledger", {
-    action: "update",
-    ledgerId,
-    revision: 1,
-    event: "item-progress",
-    changes: [{ id: "api", status: "completed", progress: "Handler merged", evidence: ["Focused tests passed"] }],
+  const updated = await updateTodo.execute("update-ledger", {
+    ledger: {
+      action: "update",
+      ledgerId,
+      revision: 1,
+      event: "item-progress",
+      changes: [{ id: "api", status: "completed", progress: "Handler merged", evidence: ["Focused tests passed"] }],
+    },
   }, undefined, undefined, f.ctx) as ToolResult;
   assert.equal(updated.details.ledger.revision, 2);
   assert.deepEqual(updated.details.ledger.items[1], untouched, "an unrelated item is preserved");
@@ -474,25 +494,26 @@ test("the registered work_ledger tool preserves items and history across reload 
   const genericAfter = (await getTodo.execute("generic-after", {}, undefined, undefined, f.ctx)).details;
   assert.deepEqual(genericAfter, genericTask, "ledger updates must not change generic outcome/todo state");
   await assert.rejects(
-    ledgerTool.execute("stale-ledger", {
-      action: "update",
-      ledgerId,
-      revision: 1,
-      changes: [{ id: "docs", progress: "Stale progress" }],
+    updateTodo.execute("stale-ledger", {
+      ledger: {
+        action: "update",
+        ledgerId,
+        revision: 1,
+        changes: [{ id: "docs", progress: "Stale progress" }],
+      },
     }, undefined, undefined, f.ctx),
     /revision mismatch/,
   );
 
   await f.reload();
-  const restoredTool = f.tools.get("work_ledger")!;
-  const restored = await restoredTool.execute("read-after-reload", {
-    action: "read", ledgerId,
+  const restored = await f.tools.get("get_todo")!.execute("read-after-reload", {
+    ledger: { action: "read", ledgerId },
   }, undefined, undefined, f.ctx) as ToolResult;
-  assert.deepEqual(restored.details.ledger, updated.details.ledger, "reload restores the same durable ledger");
-  const listed = await restoredTool.execute("list-after-reload", {
-    action: "list",
+  assert.deepEqual(restored.details.ledgerQuery.ledger, updated.details.ledger, "reload restores the same durable ledger");
+  const listed = await f.tools.get("get_todo")!.execute("list-after-reload", {
+    ledger: { action: "list" },
   }, undefined, undefined, f.ctx) as ToolResult;
-  assert.deepEqual(listed.details.ledgers.map((ledger: { id: string }) => ledger.id), [ledgerId]);
+  assert.deepEqual(listed.details.ledgerQuery.ledgers.map((ledger: { id: string }) => ledger.id), [ledgerId]);
   const genericRestored = (await f.tools.get("get_todo")!.execute("generic-restored", {}, undefined, undefined, f.ctx)).details;
   assert.deepEqual(genericRestored, genericTask, "reload must not associate the ledger with the session");
   assert.equal(f.entries.length, taskEntries, "reload must not persist or adopt ledger work as session entries");

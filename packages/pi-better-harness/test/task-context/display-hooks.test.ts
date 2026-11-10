@@ -116,7 +116,10 @@ test("all display and hooks combinations keep visual ownership independent of ca
 test("display changes preserve hooks and unrelated preferences, and hidden Todo releases Goal ownership", async t => {
   const f = await fixture(t, { display: true, enabled: true });
   await f.settings.get("outcome-todo-display").change("Off", f.ctx);
-  assert.deepEqual(JSON.parse(readFileSync(f.settingsPath, "utf8")), { quietStartup: true, piBetterHarness: { keep: 7, outcomeTodo: { version: 1, enabled: true, display: false } } });
+  assert.deepEqual(JSON.parse(readFileSync(f.settingsPath, "utf8")), {
+    quietStartup: true,
+    piBetterHarness: { keep: 7, outcomeTodo: { version: 1, enabled: true, display: false, ledger: false } },
+  });
   assert.ok(f.active().includes("update_todo"));
   await f.settings.get("outcome-todo-display").change("On", f.ctx);
   await f.settings.get("outcome-todo").change("Off", f.ctx);

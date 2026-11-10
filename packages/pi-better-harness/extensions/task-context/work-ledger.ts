@@ -380,7 +380,7 @@ function applyUpdate(current: WorkLedger, input: UpdateWorkLedgerInput, at: stri
   }
 
   if (ledgerFields.length === 0 && itemChanges.length === 0) {
-    throw new Error("work_ledger update needs outcome, boundaries, status, changes, or addItems.");
+    throw new Error("A work ledger update needs outcome, boundaries, status, changes, or addItems.");
   }
 
   next.revision = revision;

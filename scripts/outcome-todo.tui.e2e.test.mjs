@@ -124,7 +124,8 @@ export default function(pi){
   };
   const setSetting = (label, enabled) => {
     command("/harness-settings");
-    wait(frame => /Outcome & Todo display\s+(?:On|Off)/.test(frame) && /Outcome & Todo hooks\s+(?:On|Off)/.test(frame));
+    wait(frame => /Outcome & Todo display\s+(?:On|Off)/.test(frame) && /Outcome & Todo hooks\s+(?:On|Off)/.test(frame) &&
+      /Long-term work ledger\s+(?:On|Off)/.test(frame));
     selectSetting(label);
     const expected = enabled ? "On" : "Off";
     const current = new RegExp(`${label}\\s+(On|Off)`).exec(screen())?.[1];
@@ -137,6 +138,7 @@ export default function(pi){
   };
   const setHooks = enabled => setSetting("Outcome & Todo hooks", enabled);
   const setDisplay = enabled => setSetting("Outcome & Todo display", enabled);
+  const setLedger = enabled => setSetting("Long-term work ledger", enabled);
   const probeState = () => {
     rmSync(probe, { force: true });
     command("/probe-todo-tools");
@@ -202,7 +204,9 @@ export default function(pi){
     assert.deepEqual(fresh.settings.filter(item => item.id.startsWith("outcome-todo")), [
       { id: "outcome-todo-display", label: "Outcome & Todo display", value: "On" },
       { id: "outcome-todo", label: "Outcome & Todo hooks", value: "Off" },
+      { id: "outcome-todo-ledger", label: "Long-term work ledger", value: "Off" },
     ], "display defaults On, hooks default Off, and each has its own id and label");
+    assert.ok(!fresh.all.includes("work_ledger"), "the unified interface adds no public work_ledger tool");
     assert.deepEqual(readFileSync(legacyEffects, "utf8").trim().split("\n").map(JSON.parse), ["factory", "shutdown"], "legacy factory listeners must be cleaned up before startup");
     assert.doesNotMatch(screen(), /LEGACY_PLAN_WIDGET/);
     assertNoHeader(screen());
@@ -214,7 +218,7 @@ export default function(pi){
     assert.ok(!calls()[0].tools?.some(name => ["update_todo", "get_todo"].includes(name)), "disabled tools must not be sent to the provider");
 
     setHooks(true);
-    assert.deepEqual(preferences(), { version: 1, enabled: true, display: true });
+    assert.deepEqual(preferences(), { version: 1, enabled: true, display: true, ledger: false });
     const enabledTools = probeState().active;
     assert.ok(["update_todo", "get_todo"].every(name => enabledTools.includes(name)));
 
@@ -232,6 +236,8 @@ export default function(pi){
     assertCompactOutcome(compact, { mutedPrefix });
     assert.doesNotMatch(compact, /^\s*ledger /m, "a fresh session must not adopt a project ledger automatically");
 
+    setLedger(true);
+    assert.deepEqual(preferences(), { version: 1, enabled: true, display: true, ledger: true });
     command(`/ledger attach ${ledgerId}`);
     const withLedger = wait(frame => /^\s*ledger 1\/3 complete · 2 open · next: Ship worker/m.test(frame) && /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame));
     const ledgerRows = withLedger.split("\n");
@@ -283,7 +289,7 @@ export default function(pi){
     wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/im.test(frame) && !/^› /m.test(frame));
 
     setHooks(false);
-    assert.deepEqual(preferences(), { version: 1, enabled: false, display: true });
+    assert.deepEqual(preferences(), { version: 1, enabled: false, display: true, ledger: true });
     assert.ok(!probeState().active.some(name => ["update_todo", "get_todo"].includes(name)));
     const hooksOff = wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/im.test(frame) && frame.includes("Journey task 1"));
     assertCompactOutcome(hooksOff, { mutedPrefix });
@@ -315,10 +321,10 @@ export default function(pi){
     wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/im.test(frame));
 
     setDisplay(false);
-    assert.deepEqual(preferences(), { version: 1, enabled: false, display: false });
+    assert.deepEqual(preferences(), { version: 1, enabled: false, display: false, ledger: true });
     assertNoHeader(screen());
     setHooks(true);
-    assert.deepEqual(preferences(), { version: 1, enabled: true, display: false });
+    assert.deepEqual(preferences(), { version: 1, enabled: true, display: false, ledger: true });
     assert.ok(["update_todo", "get_todo"].every(name => probeState().active.includes(name)), "display off must not disable hooks");
     assertNoHeader(screen());
     setDisplay(true);
@@ -339,13 +345,13 @@ export default function(pi){
     assertNoStandaloneGoal(combined);
 
     setHooks(false);
-    assert.deepEqual(preferences(), { version: 1, enabled: false, display: true });
+    assert.deepEqual(preferences(), { version: 1, enabled: false, display: true, ledger: true });
     const displayWithoutHooks = wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame) && /active\s+\d+:\d{2}\s*$/m.test(frame));
     assertCompactOutcome(displayWithoutHooks, { bound: true, mutedPrefix });
     assertNoStandaloneGoal(displayWithoutHooks);
 
     setHooks(true);
-    assert.deepEqual(preferences(), { version: 1, enabled: true, display: true });
+    assert.deepEqual(preferences(), { version: 1, enabled: true, display: true, ledger: true });
     wait(frame => /^todo\s+[▸▾]\s{2}0\/9 complete/m.test(frame) && frame.includes("Journey task 1"));
     assert.equal(calls().length, 6, "settings, navigation, Goal display and toggles must not start agent turns");
     assert.ok(calls().every(call => !String(call.systemPrompt).includes("LEGACY_PLAN_PROMPT")), "legacy prompt hooks must never run");
@@ -360,7 +366,9 @@ export default function(pi){
     assert.deepEqual(reloadedState.settings.filter(item => item.id.startsWith("outcome-todo")), [
       { id: "outcome-todo-display", label: "Outcome & Todo display", value: "On" },
       { id: "outcome-todo", label: "Outcome & Todo hooks", value: "On" },
+      { id: "outcome-todo-ledger", label: "Long-term work ledger", value: "On" },
     ], "reload keeps exactly one control per id with its saved value");
+    assert.ok(!reloadedState.all.includes("work_ledger"), "reload keeps the unified interface free of a public ledger tool");
     assert.ok(["update_todo", "get_todo"].every(name => reloadedState.active.includes(name)), "reload must retain the enabled Todo and its saved history");
     assert.deepEqual(readFileSync(legacyEffects, "utf8").trim().split("\n").map(JSON.parse), ["factory", "shutdown", "factory", "shutdown", "factory", "shutdown"], "each reload must mask Plan again without leaking listeners");
   } finally {

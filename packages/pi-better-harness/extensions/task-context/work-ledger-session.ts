@@ -165,7 +165,7 @@ export function formatWorkLedgerReminder(
       : open.length === 0
         ? "All high-level items are closed, but the overall ledger is still active. Confirm delivery and complete it explicitly."
         : "This reminder is rebuilt from durable state, not the conversation summary.",
-    "It is reference only: it does not authorize work, resume a paused Goal, change permissions, or supersede the workflow's canonical plan. Confirm the current human instruction before acting; use work_ledger read for full detail.",
+    "It is reference only: it does not authorize work, resume a paused Goal, change permissions, or supersede the workflow's canonical plan. Confirm the current human instruction before acting; use get_todo with ledger {action:'read'} for full detail.",
   ];
   for (let count = itemLines.length; count >= 0; count -= 1) {
     const omitted = open.length - count;
