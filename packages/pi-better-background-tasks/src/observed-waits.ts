@@ -142,6 +142,12 @@ export interface DurableProjectionMetrics {
   cacheHits: number;
 }
 
+/** The active parent scope whose durable projection changed. */
+export interface DurableTaskChange {
+  readonly sessionId: string;
+  readonly workspace: string;
+}
+
 /** A parent launch is always local; remote launches stay on the legacy task route. */
 export type DurableTaskKind = "process" | "watch";
 
@@ -872,7 +878,7 @@ export class ObservedWaitHost {
   private readonly waitOwners = new Map<string, OwnerIdentity>();
   private readonly stagedCheckpoints = new Map<string, { evidence: JsonRecord; toolCallId: string; checkpointRecorded: boolean }>();
   private readonly branchAnchors = new Map<string, string | null>();
-  private readonly durableChangeListeners = new Set<() => void>();
+  private readonly durableChangeListeners = new Set<(change: DurableTaskChange) => void>();
   private readonly serviceId = `bg-observed-${randomUUID()}`;
   /** Opaque, validation-safe process-instance identity: pid + hashed start token. */
   private readonly hostStartDigest = startTokenDigest(currentProcessStartToken());
@@ -1025,7 +1031,7 @@ export class ObservedWaitHost {
     if (!store) return;
     let names: string[];
     try { names = readdirSync(join(this.directory, "observed")); } catch { return; }
-    let discovered = false;
+    let visibleOwner: OwnerIdentity | undefined;
     for (const name of names) {
       if (!name.endsWith(".json") || name === "host.json") continue;
       const taskId = name.slice(0, -5);
@@ -1033,7 +1039,7 @@ export class ObservedWaitHost {
       const operation = this.operationForTask(taskId);
       if (!operation) continue; // registration may land on the next tick
       this.discoveredTaskSidecars.add(taskId);
-      discovered = true;
+      if (this.activeOwnerRelation(operation.owner) === "match") visibleOwner = operation.owner;
       if (operation.terminalRevision > 0) {
         this.attemptTerminalCallback(
           operation,
@@ -1049,7 +1055,7 @@ export class ObservedWaitHost {
     // A task launched by another Pi process became visible in this host's
     // supervisor directory. The navigator must refresh without waiting for a
     // render to rediscover it, and its cached projections are now stale.
-    if (discovered) this.emitDurableTaskChange();
+    if (visibleOwner) this.emitDurableTaskChange(visibleOwner);
   }
 
   /**
@@ -1098,13 +1104,13 @@ export class ObservedWaitHost {
     this.discoverObservedTasks();
     const running = this.store.listOperations({ phase: "running" });
     const runningIds = new Set(running.map((operation) => operation.taskId));
-    let projectionChanged = false;
+    let changedOwner: OwnerIdentity | undefined;
     for (const taskId of [...this.watchedRunningTasks]) {
       if (runningIds.has(taskId)) continue;
       this.watchedRunningTasks.delete(taskId);
       const operation = this.operationForTask(taskId);
       if (operation && operation.terminalRevision > 0) {
-        projectionChanged = true;
+        if (this.activeOwnerRelation(operation.owner) === "match") changedOwner = operation.owner;
         // Another host may have recorded the terminal result without a live
         // owner context. This host watched the operation, so recover its callback
         // now that the active branch/identity can authorize the handoff.
@@ -1117,7 +1123,7 @@ export class ObservedWaitHost {
         );
       }
     }
-    if (projectionChanged) this.emitDurableTaskChange();
+    if (changedOwner) this.emitDurableTaskChange(changedOwner);
     for (const operation of running) {
       this.watchedRunningTasks.add(operation.taskId);
       this.reconcileOperation(operation);
@@ -1180,7 +1186,7 @@ export class ObservedWaitHost {
       token, taskId, kind: input.kind, params: input.params, prepared, operationId,
     });
     this.launches.set(taskId, launchContext);
-    this.emitDurableTaskChange();
+    this.emitDurableTaskChange(owner);
     const launch: DurableLaunch = {
       id: taskId,
       operationId,
@@ -1413,7 +1419,7 @@ export class ObservedWaitHost {
     const operation = this.operationForTask(taskId);
     if (!operation || !this.belongsToParentOrigin(operation, origin)) return undefined;
     await this.stop(taskId, operation.owner);
-    this.invalidateDurableProjection();
+    this.invalidateDurableProjection(operation.owner);
     return this.projectDurable(operation, this.options.now?.() ?? Date.now());
   }
 
@@ -1435,23 +1441,29 @@ export class ObservedWaitHost {
     context.dismissedAt = Date.now();
     this.launches.set(taskId, context);
     this.writeLaunchContext(taskId, context);
-    this.emitDurableTaskChange();
+    this.emitDurableTaskChange(operation.owner);
     return true;
   }
 
-  onDurableTaskChange(listener: () => void): () => void {
+  onDurableTaskChange(listener: (change: DurableTaskChange) => void): () => void {
     this.durableChangeListeners.add(listener);
     return () => { this.durableChangeListeners.delete(listener); };
   }
 
-  private emitDurableTaskChange(): void {
-    this.invalidateDurableProjection();
+  private emitDurableTaskChange(owner: OwnerIdentity): void {
+    // Navigators and Goal activity only show the active parent session. A
+    // worker, another session, or another workspace must not evict its cache or
+    // request a repaint.
+    if (owner.kind !== "parent-session" || this.activeOwnerRelation(owner) !== "match") return;
+    this.invalidateDurableProjection(owner);
+    const change = { sessionId: owner.sessionId, workspace: owner.workspace };
     for (const listener of [...this.durableChangeListeners]) {
-      try { listener(); } catch { /* a projection listener cannot break supervision */ }
+      try { listener(change); } catch { /* a projection listener cannot break supervision */ }
     }
   }
 
-  private invalidateDurableProjection(): void {
+  private invalidateDurableProjection(owner?: OwnerIdentity): void {
+    if (owner && (owner.kind !== "parent-session" || this.activeOwnerRelation(owner) !== "match")) return;
     this.durableProjectionCache = undefined;
   }
 
@@ -1739,7 +1751,7 @@ export class ObservedWaitHost {
       token, taskId, kind: input.kind, params: input.params, prepared, operationId,
     });
     this.launches.set(taskId, launchContext);
-    this.emitDurableTaskChange();
+    this.emitDurableTaskChange(owner);
     return {
       id: taskId,
       operationId,
@@ -2753,12 +2765,12 @@ export class ObservedWaitHost {
       // The local projection cache may still show this operation as running even
       // though another process committed its terminal revision. Invalidate and
       // notify so the navigator repaints on this reconcile pass.
-      this.emitDurableTaskChange();
+      this.emitDurableTaskChange(recorded.operation.owner);
       return;
     }
     this.options.logger?.(`observed waits: ${operation.taskId} ${status} (revision ${recorded.operation.terminalRevision})`);
     this.attemptTerminalCallback(operation, status, outcome, refs, { pendingWithoutContext: true });
-    this.emitDurableTaskChange();
+    this.emitDurableTaskChange(operation.owner);
     // The parent callback is independent from the worker's wait: a worker may be
     // parked, while the parent session still learns that the supervised task ended.
     void this.dispatchOutbox();
@@ -2939,7 +2951,8 @@ export class ObservedWaitHost {
     delete context.callbackDeferredReason;
     this.launches.set(taskId, context);
     this.writeLaunchContext(taskId, context);
-    this.emitDurableTaskChange();
+    const operation = this.operationForTask(taskId);
+    if (operation) this.emitDurableTaskChange(operation.owner);
   }
 
   private deferTerminalCallback(taskId: string, reason: string, retry = true, claimToken?: string): void {

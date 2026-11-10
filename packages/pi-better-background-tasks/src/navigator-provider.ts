@@ -129,7 +129,9 @@ const provider: BackgroundWorkProvider = {
   },
   onVisibleChanged: (notify) => {
     const offMeta = onMetaChanged(notify);
-    const offDurable = getObservedWaitHost(piRef)?.onDurableTaskChange(() => {
+    const offDurable = getObservedWaitHost(piRef)?.onDurableTaskChange((change) => {
+      const active = activeNavigatorOrigin;
+      if (!active || change.workspace !== active.cwd || change.sessionId !== active.sessionId) return;
       notify();
     });
     return () => {

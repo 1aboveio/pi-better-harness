@@ -131,6 +131,31 @@ function nodeCommand(script: string): string[] {
   return [process.execPath, "-e", script];
 }
 
+function recordTerminalFromChild(
+  root: string,
+  operationId: string,
+  owner: unknown,
+  eventId: string,
+): void {
+  const storeModule = new URL("./shared-operation-coordinator/index.ts", import.meta.url).href;
+  const child = spawnSync(process.execPath, ["--import", "tsx", "-e", `
+    import { openStore } from ${JSON.stringify(storeModule)};
+    const store = openStore({ path: ${JSON.stringify(join(root, "operations.sqlite"))} });
+    try {
+      store.recordTerminalOutcome({
+        operationId: ${JSON.stringify(operationId)},
+        eventId: ${JSON.stringify(eventId)},
+        outcome: "succeeded",
+        owner: ${JSON.stringify(owner)},
+        evidence: [{ kind: "terminal-record", ref: "cross/result.json", summary: "exit 0" }],
+      });
+    } finally {
+      store.close();
+    }
+  `], { cwd: process.cwd(), encoding: "utf8", timeout: 60_000 });
+  expect(child.status, child.stderr || child.stdout).toBe(0);
+}
+
 function textOf(result: { content: Array<{ type: string; text: string }> }): string {
   return result.content.map((entry) => entry.text).join("\n");
 }
@@ -1298,23 +1323,7 @@ describe("durable read-only projections", () => {
       let changes = 0;
       const off = host.onDurableTaskChange(() => { changes += 1; });
       try {
-        const storeModule = new URL("./shared-operation-coordinator/index.ts", import.meta.url).href;
-        const child = spawnSync(process.execPath, ["--import", "tsx", "-e", `
-          import { openStore } from ${JSON.stringify(storeModule)};
-          const store = openStore({ path: ${JSON.stringify(join(root, "operations.sqlite"))} });
-          try {
-            store.recordTerminalOutcome({
-              operationId: ${JSON.stringify(launch.operationId)},
-              eventId: "cross-process-terminal",
-              outcome: "succeeded",
-              owner: ${JSON.stringify(launch.owner)},
-              evidence: [{ kind: "terminal-record", ref: "cross/result.json", summary: "exit 0" }],
-            });
-          } finally {
-            store.close();
-          }
-        `], { cwd: process.cwd(), encoding: "utf8", timeout: 60_000 });
-        expect(child.status, child.stderr || child.stdout).toBe(0);
+        recordTerminalFromChild(root, launch.operationId, launch.owner, "cross-process-terminal");
         const beforeReconcile = changes;
         host.resetDurableProjectionMetrics();
         await host.reconcileNow();
@@ -1327,6 +1336,72 @@ describe("durable read-only projections", () => {
       }
     } finally {
       await host.stopDurableTask(origin, launch.id);
+    }
+  });
+
+  it("leaves a warmed active projection untouched for foreign-session discovery and terminal changes", async () => {
+    const root = workspace("projection-foreign-isolation");
+    const { host } = startHost({ root });
+    const ctx = createCtx(root, "session-current");
+    const origin = { cwd: root, sessionId: "session-current" };
+    const current = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => {}, 30000)"), shell: false, callback: false },
+      ctx,
+    });
+    const foreignTaskId = `bgs_${"f".repeat(20)}`;
+    const foreignOwner = {
+      kind: "parent-session" as const,
+      sessionId: "session-foreign",
+      workspace: root,
+      branchId: "foreign-branch",
+      goalId: null,
+    };
+    try {
+      await host.reconcileNow();
+      expect(host.listDurableTasks(origin).map((task) => task.id)).toEqual([current.id]);
+      host.resetDurableProjectionMetrics();
+      const changes: Array<{ sessionId: string; workspace: string }> = [];
+      const off = host.onDurableTaskChange((change) => { changes.push(change); });
+      try {
+        const store = openStore({ path: join(root, "operations.sqlite") });
+        try {
+          store.registerOperation({
+            operationId: "op-foreign",
+            taskId: foreignTaskId,
+            launchToken: "launch-foreign",
+            owner: foreignOwner,
+            observer: { kind: "background-tasks", version: "1" },
+          });
+        } finally {
+          store.close();
+        }
+        mkdirSync(join(root, "supervisor", "observed"), { recursive: true });
+        writeFileSync(join(root, "supervisor", "observed", `${foreignTaskId}.json`), "{}");
+
+        await host.reconcileNow();
+        expect(changes).toEqual([]);
+        expect(host.listDurableTasks(origin)).toHaveLength(1);
+        expect(host.getDurableProjectionMetrics()).toMatchObject({ queries: 0, rowsRead: 0, cacheHits: 1 });
+
+        recordTerminalFromChild(root, "op-foreign", foreignOwner, "foreign-terminal");
+        host.resetDurableProjectionMetrics();
+        await host.reconcileNow();
+        expect(changes).toEqual([]);
+        expect(host.listDurableTasks(origin)?.map((task) => task.id)).toEqual([current.id]);
+        expect(host.getDurableProjectionMetrics()).toMatchObject({ queries: 0, rowsRead: 0, cacheHits: 1 });
+
+        recordTerminalFromChild(root, current.operationId, current.owner, "own-terminal");
+        host.resetDurableProjectionMetrics();
+        await host.reconcileNow();
+        expect(changes).toEqual([{ sessionId: "session-current", workspace: root }]);
+        expect(host.listDurableTasks(origin)[0]).toMatchObject({ id: current.id, status: "succeeded", terminal: true });
+        expect(host.getDurableProjectionMetrics()).toMatchObject({ queries: 1, rowsRead: 1 });
+      } finally {
+        off();
+      }
+    } finally {
+      await host.stopDurableTask(origin, current.id);
     }
   });
 
