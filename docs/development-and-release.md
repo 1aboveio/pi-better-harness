@@ -211,6 +211,24 @@ stopped immediately. A controlled late-start regression holds two launches
 behind FIFOs and proves that releasing the older Pi cannot create the newer
 launch's readiness.
 
+Before the timed journey, import-only setup populates jiti's per-test module
+cache with a separate 60-second limit. It does not call extension factories or
+session handlers; their first execution remains inside the unchanged 10-second
+readiness budget. This separates cold TypeScript loading from interactive
+readiness. Linux tests under a half-CPU quota reproduced a first-launch timeout
+while Pi was still importing extensions, including on the 0.41.3 release commit.
+The dedicated TUI command runs its test files sequentially because simultaneous
+Pi startups compete for CPU on the same runner.
+For a Node-based `PI_NAVIGATOR_CLI`, setup uses that host's jiti and package
+aliases. Compiled Pi binaries keep the existing timed journey without external
+preloading because their loader is embedded; setup prints that distinction.
+
+On failure the journey records pane state, process liveness and Pi stderr before
+cleanup. Startup timings are available once the SDK finishes loading extensions;
+a timeout earlier in loading may have no completed timing report. A vanished
+tmux server is reported alongside the original failure rather than replacing it
+with a capture error.
+
 The test prints its evidence directory and saves terminal panes plus
 `smoke-results.json`. Set `PI_NAVIGATOR_EVIDENCE_DIR` to choose the directory;
 CI uploads it as `navigator-golden`, including failure captures. Width/grapheme

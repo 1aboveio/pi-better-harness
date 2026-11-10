@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import test, { after } from "node:test";
+import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 import { writeMeta as writeTaskMeta } from "../packages/pi-better-background-tasks/src/registry.ts";
 import { writeMeta as writeSubagentMeta } from "../packages/pi-better-subagents/registry.ts";
@@ -29,6 +29,7 @@ const taskTitle = `background golden path ${"中文任务标题".repeat(8)}`;
 const fixtures = mkdtempSync(join(tmpdir(), "pi-navigator-e2e-"));
 const launches = [];
 let launchSequence = 0;
+const WARMUP_TIMEOUT_MS = 60_000;
 const defaultSubagentId = `sa_navigator_e2e_${process.pid}`;
 const defaultTaskId = `bg_navigator_e2e_${process.pid}`;
 const dummyWorkers = [];
@@ -41,6 +42,25 @@ const skip = hasTmux || process.env.CI || process.env.PI_NAVIGATOR_REQUIRE_TMUX
 const mouseSkip = skip || (mouseRouting || process.env.PI_NAVIGATOR_MOUSE === "1"
   ? false
   : "requires a fullscreen mouse-capable Pi host; set PI_NAVIGATOR_MOUSE=1 and PI_NAVIGATOR_CLI to one");
+
+// Populate only the module cache. Do not run extension factories or session
+// handlers here: their first execution must retain the journey's 10s budget.
+before((t) => {
+  if (skip) return;
+  mkdirSync(evidenceDir, { recursive: true });
+  assertPrivateRegistry();
+  assert.ok(hasTmux, "the navigator warmup requires tmux");
+  if (!/\.[cm]?js$/.test(realpathSync(piBin))) {
+    t.diagnostic("Import setup skipped for a compiled Pi host; its embedded loader owns compilation.");
+    return;
+  }
+  const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "warm-tui-imports.mjs"), extensionRoot, piBin], {
+    cwd: repoRoot, encoding: "utf8", timeout: WARMUP_TIMEOUT_MS,
+  });
+  writeFileSync(join(evidenceDir, "import-setup.log"), `${result.stdout ?? ""}${result.stderr ?? ""}`);
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `extension import setup failed: ${result.stderr}`);
+});
 
 after(() => {
   for (const launch of launches) stopLaunch(launch);
@@ -492,15 +512,82 @@ test("a launch that never becomes ready is stopped immediately", { skip }, () =>
   );
 });
 
+// @covers navigator.detail-overlay
+// @level e2e
+test("a Pi process exiting before readiness retains diagnostics and is cleaned up", { skip }, () => {
+  assertPrivateRegistry();
+  const gate = join(fixtures, "exiting-launch.gate");
+  execFileSync("mkfifo", [gate]);
+  const launch = startPiLaunch(`pi-navigator-exiting-e2e-${process.pid}`, { gatePath: gate });
+  try {
+    process.kill(launch.piPid, "SIGKILL");
+    waitFor(() => !isProcessAlive(launch.piPid), "the killed launch to exit", 2_000);
+    let failure;
+    try { finishPiLaunch(launch); } catch (error) { failure = error; }
+    assert.match(failure?.message ?? "", /Pi launch exited before Pi session probe/);
+    assert.equal(failure.launchDiagnostics.processAlive, false);
+    assert.equal(failure.launchDiagnostics.stateExists, false);
+    const saved = JSON.parse(readFileSync(join(evidenceDir, `${launch.launchId}-failure.json`), "utf8"));
+    assert.equal(saved.launchId, launch.launchId);
+    assert.equal(saved.processAlive, false);
+    assert.notEqual(spawnSync("tmux", [...launch.tmuxArgs, "has-session", "-t", launch.session], { stdio: "ignore" }).status, 0);
+  } finally {
+    stopLaunch(launch);
+  }
+});
+
 function launchPi(name, { multilineDiagnostic = false, gatePath = null, readyTimeoutMs = 10_000 } = {}) {
   const launch = startPiLaunch(name, { multilineDiagnostic, gatePath });
+  return finishPiLaunch(launch, readyTimeoutMs);
+}
+
+function finishPiLaunch(launch, readyTimeoutMs = 10_000) {
   try {
     return waitForLaunchReady(launch, readyTimeoutMs);
   } catch (error) {
+    saveLaunchDiagnostics(launch, error);
     stopLaunch(launch);
     error.launch = launch;
     throw error;
   }
+}
+
+function saveLaunchDiagnostics(launch, error) {
+  const diagnostics = launchDiagnostics(launch);
+  try {
+    writeFileSync(join(evidenceDir, `${launch.launchId}-failure.json`), JSON.stringify(diagnostics, null, 2) + "\n");
+  } catch { /* the evidence directory may not exist for a launch outside a test */ }
+  error.launchDiagnostics = diagnostics;
+}
+
+function launchDiagnostics(launch) {
+  const readTail = (path, lines) => {
+    try { return readFileSync(path, "utf8").split(/\r?\n/).slice(-lines); } catch { return []; }
+  };
+  let paneInfo = "";
+  try {
+    paneInfo = execFileSync("tmux", [...launch.tmuxArgs, "display-message", "-p", "-t", launch.session,
+      "#{pane_pid}|#{pane_current_command}|#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}"], { encoding: "utf8" }).trim();
+  } catch (error) {
+    paneInfo = `unavailable: ${String(error instanceof Error ? error.message : error).split(/\r?\n/)[0]}`;
+  }
+  let pane = "";
+  try { pane = captureScreen(); } catch { /* tmux may already be gone */ }
+  return {
+    launchId: launch.launchId,
+    piPid: launch.piPid,
+    processAlive: launch.piPid ? isProcessAlive(launch.piPid) : false,
+    processInfo: (() => {
+      try { return execFileSync("ps", ["-o", "pid,ppid,stat,pcpu,etime,time,args", "-p", String(launch.piPid)], { encoding: "utf8" }).trim(); } catch { return ""; }
+    })(),
+    paneInfo,
+    paneBlank: pane.replace(/\s/g, "") === "",
+    paneTail: pane.split(/\r?\n/).slice(-40),
+    stateExists: existsSync(launch.statePath),
+    activityExists: existsSync(launch.activityPath),
+    piLogTail: readTail(launch.piLogPath, 200),
+    files: (() => { try { return readdirSync(launch.dir); } catch { return []; } })(),
+  };
 }
 
 function startPiLaunch(name, { multilineDiagnostic = false, gatePath = null } = {}) {
@@ -512,6 +599,7 @@ function startPiLaunch(name, { multilineDiagnostic = false, gatePath = null } = 
     session: name,
     tmuxArgs: ["-L", name],
     launchId,
+    dir,
     probeId: `${launchId}-${process.pid}`,
     probePath: join(dir, "session-probe.mjs"),
     statePath: join(dir, "session-state.json"),
@@ -519,6 +607,7 @@ function startPiLaunch(name, { multilineDiagnostic = false, gatePath = null } = 
     focusStealPath: join(dir, "steal-focus"),
     replacePath: join(dir, "replace-editor"),
     sessionDir: join(dir, "sessions"),
+    piLogPath: join(dir, "pi.log"),
     gatePath,
   };
   // A launch never rewrites another launch's probe or fixtures. The exclusive
@@ -531,6 +620,7 @@ function startPiLaunch(name, { multilineDiagnostic = false, gatePath = null } = 
     startPiSession(launch);
     launch.piPid = panePid(launch);
   } catch (error) {
+    saveLaunchDiagnostics(launch, error);
     stopLaunch(launch);
     throw error;
   }
@@ -543,12 +633,17 @@ function waitForLaunchReady(launch, timeoutMs = 10_000) {
     timeoutMs,
     what: `Pi session probe for ${expected}`,
     validate: (value) => validateLaunchJson(launch, value, "session readiness"),
+    alive: () => isProcessAlive(launch.piPid),
   });
   waitForJson(launch.activityPath, {
     timeoutMs,
     what: `Pi activity probe for ${expected}`,
     validate: (value) => validateLaunchProducer(launch, value, "activity readiness"),
+    alive: () => isProcessAlive(launch.piPid),
   });
+  if (process.env.PI_NAVIGATOR_SAVE_PI_LOGS === "1") {
+    try { writeFileSync(join(evidenceDir, `${launch.launchId}-pi.log`), readFileSync(launch.piLogPath)); } catch { /* optional evidence */ }
+  }
   launch.state = state;
   return {
     state,
@@ -609,7 +704,7 @@ function waitFor(condition, what, timeoutMs = 5_000) {
     if (condition()) return;
     sleep(50);
   }
-  throw new Error(`Timed out waiting for ${what}. Current screen:\n${captureScreen()}`);
+  throw new Error(`Timed out waiting for ${what}.${screenForError()}`);
 }
 
 /** A stand-in process for a run the navigator can stop, in its own process group. */
@@ -639,6 +734,7 @@ function startPiSession(launch) {
     // Explicit, so Pi's registries follow the test's private TMPDIR whatever tmux's global env holds.
     `TMPDIR=${shellQuote(tmpdir())}`,
     "PI_OFFLINE=1",
+    "PI_TIMING=1",
     "OPENAI_API_KEY=sk-tui-e2e-placeholder",
     shellQuote(piBin),
     `-e ${shellQuote(extensionRoot)}`,
@@ -649,6 +745,7 @@ function startPiSession(launch) {
     `--session-dir ${shellQuote(launch.sessionDir)}`,
     "--name navigator-tui-e2e",
     "--model openai/gpt-4o-mini",
+    `2>${shellQuote(launch.piLogPath)}`,
   ].join(" ");
   execFileSync("tmux", [...launch.tmuxArgs, "new-session", "-d", "-s", launch.session, "-x", "100", "-y", "40", command]);
 }
@@ -817,10 +914,18 @@ function waitForScreen(matches, timeoutMs = 5_000) {
   throw new Error(`Timed out waiting for navigator page. Current screen:\n${screen}`);
 }
 
-function waitForJson(path, { timeoutMs = 10_000, what = "Pi session probe", validate = () => true } = {}) {
+function waitForJson(path, {
+  timeoutMs = 10_000,
+  what = "Pi session probe",
+  validate = () => true,
+  alive = undefined,
+} = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastValue = "";
   while (Date.now() < deadline) {
+    if (alive && !alive()) {
+      throw new Error(`Pi launch exited before ${what}.${screenForError()}`);
+    }
     if (!existsSync(path)) {
       sleep(50);
       continue;
@@ -841,7 +946,16 @@ function waitForJson(path, { timeoutMs = 10_000, what = "Pi session probe", vali
     lastValue = JSON.stringify(value).slice(0, 500);
     sleep(50);
   }
-  throw new Error(`Timed out waiting for ${what}${lastValue ? `; last producer: ${lastValue}` : ""}. Current screen:\n${captureScreen()}`);
+  throw new Error(`Timed out waiting for ${what}${lastValue ? `; last producer: ${lastValue}` : ""}.${screenForError()}`);
+}
+
+function screenForError() {
+  try {
+    return ` Current screen:\n${captureScreen()}`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return ` No tmux screen was available: ${message.split(/\r?\n/)[0]}`;
+  }
 }
 
 function sleep(ms) {
