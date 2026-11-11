@@ -13,7 +13,27 @@ const { TIMING_ENV } = await import("../timing.ts");
 const theme = { fg: (_color, text) => text, bg: (_color, text) => text,
     bold: (text) => text, inverse: (text) => text };
 
+function selectedRowText(page) {
+    const line = page.render(300).find((entry) => entry.trimStart().startsWith("> "));
+    return line === undefined ? undefined : line.replace(/\x1b\[[0-9;]*m/g, "").trimStart().slice(2).trim();
+}
+
+/** Select by label so menu-row insertions do not silently retarget this test. */
+function atRow(label, ...keys) {
+    return (page) => {
+        for (let attempt = 0; attempt < 32; attempt++) page.handleInput("\x1b[A");
+        for (let attempt = 0; attempt < 32; attempt++) {
+            const text = selectedRowText(page) ?? "";
+            if (text === label || text.startsWith(label + " ")) return keys;
+            page.handleInput("\x1b[B");
+        }
+        throw new Error(`could not select ${label}; selected ${selectedRowText(page)}`);
+    };
+}
+
 test("subagents contributes the standalone settings opener with shared session and saved state, and removes its listener", async (t) => {
+    const previousMax = process.env[TIMING_ENV.max];
+    process.env[TIMING_ENV.max] = "5";
     const path = join(root, "settings.json");
     setConfigPathForTests(path);
     setConfigForTests({ delegationMode: "manual", maxConcurrent: 3 });
@@ -28,6 +48,8 @@ test("subagents contributes the standalone settings opener with shared session a
         else process.env[TIMING_ENV.toolWait] = previousTimingEnv.toolWait;
         if (previousTimingEnv.stuck === undefined) delete process.env[TIMING_ENV.stuck];
         else process.env[TIMING_ENV.stuck] = previousTimingEnv.stuck;
+        if (previousMax === undefined) delete process.env[TIMING_ENV.max];
+        else process.env[TIMING_ENV.max] = previousMax;
         setConfigPathForTests(undefined);
         rmSync(root, { recursive: true, force: true });
     });
@@ -92,7 +114,8 @@ test("subagents contributes the standalone settings opener with shared session a
                     const page = factory({ requestRender() {} }, theme, {}, done);
                     pages.push(page.render(100).join("\n"));
                     const batch = keyBatches.length > 0 ? keyBatches.shift() : keys;
-                    for (const key of batch) page.handleInput(key);
+                    const selectedKeys = typeof batch === "function" ? batch(page) : batch;
+                    for (const key of selectedKeys) page.handleInput(key);
                     for (let attempt = 0; attempt < 3 && !settled; attempt++) page.handleInput("\x1b");
                 });
             },
@@ -102,6 +125,7 @@ test("subagents contributes the standalone settings opener with shared session a
     await commands.get("subagents").handler("settings", ctx);
     assert.equal(pages.length, 2);
     assert.equal(pages[0], pages[1]);
+    assert.match(pages[0], /Timeout \(minutes\)\s+5/, "the real settings page shows the environment-effective timeout");
     assert.match(pages[0], /Tool-wait alert\s+7 min/, "the real settings page shows the environment-effective value");
     assert.match(pages[0], /No-progress alert\s+13 min/);
     delete process.env[TIMING_ENV.toolWait];
@@ -114,11 +138,16 @@ test("subagents contributes the standalone settings opener with shared session a
     await contribution.open(ctx);
     assert.equal(entries.at(-1).data.mode, "adaptive");
     assert.equal(existsSync(path), false);
+    keys = atRow("Timeout (minutes)", "\r", "\x15", "90", "\r");
+    await contribution.open(ctx);
+    assert.equal(entries.at(-1).data.maxMinutes, 90);
     keys = ["\x13"]; // save via standalone command
     await commands.get("subagents").handler("", ctx);
     assert.match(pages.at(-1), /Delegation mode\s+adaptive/);
+    assert.match(pages.at(-1), /Timeout \(minutes\)\s+90/, "the session timeout wins over the environment");
     assert.equal(loadConfig().delegationMode, "adaptive");
     assert.equal(loadConfig().maxConcurrent, 3);
+    assert.equal(loadConfig().maxMinutes, 90);
     assert.equal(existsSync(path), true);
     keys = [];
     await commands.get("subagents").handler("mode coordinator", ctx);
@@ -136,7 +165,7 @@ test("subagents contributes the standalone settings opener with shared session a
     const beforeAgents = entries.length;
     const openedBefore = pages.length;
     const eventsBefore = uiEvents.length;
-    keyBatches.push(["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r"]); // six rows down from Delegation mode lands on Agents
+    keyBatches.push(atRow("Agents", "\r"));
     await contribution.open(ctx);
     assert.match(pages.at(-2), /Agents/);
     assert.match(pages.at(-2), /Reset to defaults/);

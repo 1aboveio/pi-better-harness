@@ -283,15 +283,18 @@ by the existing harness runtime.
 Timeout control belongs to the harness, not to the prompt or the skill that
 launched the run. A time limit written into a prompt is enforced by nothing, and
 a parent that only notices late tends to kill a child that was still making
-progress. Every run gets a tool-wait alert and stall detection by default.
-Elapsed-time limits are opt-in because total runtime does not distinguish a slow
-agent from a stalled one.
+progress. Every run gets a tool-wait alert, stall detection, and a 60-minute hard
+timeout by default. Soft deadlines remain opt-in because total runtime does not
+distinguish a slow agent from a stalled one.
+Use Timeout (minutes) in `/subagents settings` to change the session default;
+Ctrl+S saves it for future sessions. `0` disables the timeout. Changes apply to
+new attempts, not runs already in progress.
 
 | Control | Default | What happens |
 |---------|---------|--------------|
 | Soft deadline (`deadline_minutes`) | Off | When configured, the child gets one steering message (delivered through Pi's steer queue after its current tool call finishes): stop starting new work, commit or save what is done, and report what is complete, what is not, and where the work is. The parent gets one wake saying so. |
 | Grace (`grace_minutes`) | 5 | Grace starts when the steering message actually reaches the child, which is after its current tool call. While the message is still waiting behind a running tool call, the deadline stop is held, so a test run that began just before the deadline is not killed mid-run. If the child has not finished by the end of grace, the harness stops it; the ordinary completion callback reports `killed; stopped: deadline`. A child that completes inside grace is not stopped; its surfaces say `deadline: finished in grace`. |
-| Hard ceiling (`max_minutes`) | Off | When configured, the run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds the run, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
+| Hard ceiling (`max_minutes`) | 60 | When configured, the run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds the run, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
 | Tool-wait window (`tool_wait_minutes`) | 5 | One tool call that stays open this long sends one factual parent wake for that call, including when it is a normal long test. Parallel calls alert independently. The alert never stops, cancels, or restarts the run, and a later call can alert on its own. |
 | Stuck window (`stuck_minutes`) | 10 | No progress (see below) for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. Time inside a running tool call is excluded, so tool waiting and no-progress are reported separately. |
 
@@ -351,8 +354,9 @@ three times wakes the parent once as an `Action required` incident
 deadline), `deadline: passed` (ended some other way after the deadline, for
 example it crashed or a user stopped it), `stopped: ceiling`, or `stuck`. The spawn response lists the limits in force.
 
-**Global defaults.** Precedence is spawn parameter, then environment, then
-`config.json`, then the built-in default:
+**Global defaults.** Precedence is spawn parameter, then the session timeout
+choice (for `max_minutes`), then environment, then `config.json`, then the
+built-in default:
 
 | Setting | Environment | `config.json` |
 |---------|-------------|---------------|

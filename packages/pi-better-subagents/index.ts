@@ -41,6 +41,7 @@ import { createSubagentSettingsPage } from "./settings-page.ts";
 import { deliverSubagentPrompt, effectiveSubagentSettings, formatSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
 import {
+    continuationTimingParams,
     decideTiming,
     describeTiming,
     DEFAULT_TIMING_MINUTES,
@@ -2082,7 +2083,7 @@ export default function (pi: ExtensionAPI) {
     let catalogModelRegistry: ExtensionContext["modelRegistry"] | undefined;
     let delegationOverride: DelegationMode | undefined;
     let capOverride: number | undefined;
-    let timingOverride: { toolWaitMinutes?: number; stuckMinutes?: number } = {};
+    let timingOverride: { maxMinutes?: number; toolWaitMinutes?: number; stuckMinutes?: number } = {};
     interface SkillSelection { mode: SkillExposureMode; paths: string[] }
     let skillsOverride: SkillSelection | undefined;
     const savedSkills = (): SkillSelection & { source: "config" | "default"; error?: string } => {
@@ -2128,11 +2129,19 @@ export default function (pi: ExtensionAPI) {
     };
     const activeConcurrencyCap = (): number => capOverride ?? normalizeConcurrencyCap(loadConfig().maxConcurrent);
     const timingSettingsFor = (cfg = loadConfig()): TimingSettings => ({ ...cfg, ...timingOverride });
+    /** A per-run max_minutes wins; otherwise a session timeout choice beats the environment. */
+    const launchTimingParams = (params: TimingParams = {}): TimingParams => ({
+        ...params,
+        max_minutes: params.max_minutes ?? timingOverride.maxMinutes,
+    });
     interface TimingMinutesState {
+        maxMinutes: number;
         toolWaitMinutes: number;
         stuckMinutes: number;
+        timeoutSource: "environment" | "session" | "config" | "default";
         toolWaitSource: "environment" | "session" | "config" | "default";
         stuckSource: "environment" | "session" | "config" | "default";
+        defaultMaxMinutes: number;
         defaultToolWaitMinutes: number;
         defaultStuckMinutes: number;
         timingError?: string;
@@ -2147,24 +2156,36 @@ export default function (pi: ExtensionAPI) {
             envFor(key) !== undefined ? "environment"
                 : timingOverride[key] !== undefined ? "session"
                     : cfg[key] !== undefined && cfg[key] !== null ? "config" : "default";
+        const timeoutEnv = process.env[TIMING_ENV.max];
+        const timeoutSource = (): "environment" | "session" | "config" | "default" =>
+            timingOverride.maxMinutes !== undefined ? "session"
+                : timeoutEnv !== undefined && timeoutEnv.trim() !== "" ? "environment"
+                    : cfg.maxMinutes !== undefined && cfg.maxMinutes !== null ? "config" : "default";
         try {
-            const effective = resolveRunTiming({ settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
+            const sessionTimeout = timingOverride.maxMinutes !== undefined ? { max_minutes: timingOverride.maxMinutes } : {};
+            const effective = resolveRunTiming({ params: sessionTimeout, settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
             const defaults = resolveRunTiming({ settings: cfg, env: process.env, startedAt: 0 });
             const minutes = (ms: number | undefined): number => ms === undefined ? 0 : ms / 60_000;
             return {
+                maxMinutes: minutes(effective.ceilingAt),
                 toolWaitMinutes: minutes(effective.toolWaitMs),
                 stuckMinutes: minutes(effective.stuckMs),
+                timeoutSource: timeoutSource(),
                 toolWaitSource: sourceFor("toolWaitMinutes"),
                 stuckSource: sourceFor("stuckMinutes"),
+                defaultMaxMinutes: minutes(defaults.ceilingAt),
                 defaultToolWaitMinutes: minutes(defaults.toolWaitMs),
                 defaultStuckMinutes: minutes(defaults.stuckMs),
             };
         } catch (error) {
             return {
+                maxMinutes: DEFAULT_TIMING_MINUTES.max,
                 toolWaitMinutes: DEFAULT_TIMING_MINUTES.toolWait,
                 stuckMinutes: DEFAULT_TIMING_MINUTES.stuck,
+                timeoutSource: timeoutSource(),
                 toolWaitSource: sourceFor("toolWaitMinutes"),
                 stuckSource: sourceFor("stuckMinutes"),
+                defaultMaxMinutes: DEFAULT_TIMING_MINUTES.max,
                 defaultToolWaitMinutes: DEFAULT_TIMING_MINUTES.toolWait,
                 defaultStuckMinutes: DEFAULT_TIMING_MINUTES.stuck,
                 timingError: error instanceof Error ? error.message : String(error),
@@ -2176,7 +2197,7 @@ export default function (pi: ExtensionAPI) {
         capOverride = cap;
         pi.appendEntry("pi-better-subagents-cap", { version: 1, maxConcurrent: cap });
     };
-    const changeTiming = (key: "toolWaitMinutes" | "stuckMinutes", minutes: number): void => {
+    const changeTiming = (key: "maxMinutes" | "toolWaitMinutes" | "stuckMinutes", minutes: number): void => {
         const value = validatedTimingMinutes(minutes, key);
         timingOverride = { ...timingOverride, [key]: value };
         pi.appendEntry("pi-better-subagents-timing", { version: 1, ...timingOverride });
@@ -2192,7 +2213,7 @@ export default function (pi: ExtensionAPI) {
         skillsOverride = undefined;
         pi.appendEntry("pi-better-subagents-cap", { version: 1, maxConcurrent: null });
         pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: null });
-        pi.appendEntry("pi-better-subagents-timing", { version: 1, toolWaitMinutes: null, stuckMinutes: null });
+        pi.appendEntry("pi-better-subagents-timing", { version: 1, maxMinutes: null, toolWaitMinutes: null, stuckMinutes: null });
         pi.appendEntry("pi-better-subagents-skills", { version: 1, mode: null });
     };
     const activeDelegationMode = (): DelegationMode => delegationOverride ?? normalizeDelegationMode(loadConfig().delegationMode);
@@ -2254,7 +2275,12 @@ export default function (pi: ExtensionAPI) {
             const hasSavedSkillChoice = savedSkillValue !== undefined && savedSkillValue !== null;
             // Like skills, only save a timing key this session overrides or the
             // config already carries; built-in defaults need no stored copy.
-            const savedTiming: { toolWaitMinutes?: number; stuckMinutes?: number } = {};
+            const savedTiming: { maxMinutes?: number; toolWaitMinutes?: number; stuckMinutes?: number } = {};
+            if (timingOverride.maxMinutes !== undefined) {
+                savedTiming.maxMinutes = timingOverride.maxMinutes;
+            } else if (isTimingMinutes(cfg.maxMinutes)) {
+                savedTiming.maxMinutes = cfg.maxMinutes;
+            }
             if (timingOverride.toolWaitMinutes !== undefined) {
                 savedTiming.toolWaitMinutes = timingOverride.toolWaitMinutes;
             } else if (isTimingMinutes(cfg.toolWaitMinutes)) {
@@ -2307,6 +2333,16 @@ export default function (pi: ExtensionAPI) {
         const branch = ctx.sessionManager?.getBranch?.();
         if (!Array.isArray(branch)) return;
         for (const entry of branch) {
+            if (entry.type === "custom" && entry.customType === "pi-better-subagents-timeout") {
+                const data = entry.data as { version?: unknown; maxMinutes?: unknown } | null;
+                if (data?.version === 1) {
+                    const next = { ...timingOverride };
+                    if (data.maxMinutes === null) delete next.maxMinutes;
+                    else if (isTimingMinutes(data.maxMinutes)) next.maxMinutes = data.maxMinutes;
+                    timingOverride = next;
+                }
+                continue;
+            }
             if (entry.type === "custom" && entry.customType === "pi-better-subagents-cap") {
                 const data = entry.data as { version?: unknown; maxConcurrent?: unknown } | null;
                 if (data?.version === 1) {
@@ -2329,10 +2365,11 @@ export default function (pi: ExtensionAPI) {
             }
             if (entry.type === "custom" && entry.customType === "pi-better-subagents-timing") {
                 const data = entry.data as {
-                    version?: unknown; toolWaitMinutes?: unknown; stuckMinutes?: unknown;
+                    version?: unknown; maxMinutes?: unknown; toolWaitMinutes?: unknown; stuckMinutes?: unknown;
                 } | null;
                 if (data?.version !== 1) continue;
-                const next: { toolWaitMinutes?: number; stuckMinutes?: number } = {};
+                const next: { maxMinutes?: number; toolWaitMinutes?: number; stuckMinutes?: number } = {};
+                if (isTimingMinutes(data.maxMinutes)) next.maxMinutes = data.maxMinutes;
                 if (isTimingMinutes(data.toolWaitMinutes)) next.toolWaitMinutes = data.toolWaitMinutes;
                 if (isTimingMinutes(data.stuckMinutes)) next.stuckMinutes = data.stuckMinutes;
                 timingOverride = next;
@@ -2538,7 +2575,7 @@ export default function (pi: ExtensionAPI) {
         }
         const cfg = loadConfig();
         // Harness-owned timing (soft deadline, ceiling, tool-wait and stuck windows); validated before any side effect.
-        resolveRunTiming({ params: p, settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
+        resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
         let model: string | undefined;
         let thinking: ThinkingLevel | undefined;
         if (resume) {
@@ -2935,7 +2972,7 @@ export default function (pi: ExtensionAPI) {
                     authorityReference: "",
                     // The assignment deadline the attempt was admitted with; a
                     // continuation must not silently extend it.
-                    deadlineAt: resolveRunTiming({ params: p, settings: timingSettingsFor(cfg), env: process.env, startedAt: Date.now() }).deadlineAt ?? null,
+                    deadlineAt: resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt: Date.now() }).deadlineAt ?? null,
                     taskPolicy: taskRuntime?.policy ?? null,
                 });
                 const authorityReference = `worker-policy:${createHash("sha256")
@@ -3074,7 +3111,7 @@ export default function (pi: ExtensionAPI) {
                         tools: bridgePlan.tools,
                     },
                 } : {}),
-                timing: resolveRunTiming({ params: p, settings: timingSettingsFor(cfg), env: process.env, startedAt }),
+                timing: resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt }),
             };
             // This instance holds the exit observer for a run it actually
             // started; only it can finalize on the exit event (#625).
@@ -3316,17 +3353,7 @@ export default function (pi: ExtensionAPI) {
     function continuationTiming(prior: RunMeta): TimingParams {
         const timing = prior.timing;
         if (!timing) return {};
-        const minutes = (at: number | undefined): number | undefined => {
-            if (at === undefined) return undefined;
-            return Math.max(1, at - Date.now()) / 60_000;
-        };
-        return {
-            ...(timing.deadlineAt !== undefined ? { deadline_minutes: minutes(timing.deadlineAt) } : {}),
-            ...(timing.ceilingAt !== undefined ? { max_minutes: minutes(timing.ceilingAt) } : {}),
-            ...(timing.graceMs !== undefined ? { grace_minutes: timing.graceMs / 60_000 } : {}),
-            ...(timing.toolWaitMs !== undefined ? { tool_wait_minutes: timing.toolWaitMs / 60_000 } : {}),
-            ...(timing.stuckMs !== undefined ? { stuck_minutes: timing.stuckMs / 60_000 } : {}),
-        };
+        return continuationTimingParams(timing, Date.now());
     }
 
     /**
@@ -3415,7 +3442,7 @@ export default function (pi: ExtensionAPI) {
             "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. When the task already names its SKILL.md by path, pass skills with those absolute paths (or [] for none) so the child does not advertise the whole skills catalog. Without an agent or role, pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
             ...CATALOG_GUIDELINES,
             "Subagent sandboxing defaults to off. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Set sandbox:true to request kernel confinement, including without published settings. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
-            "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. A tool call still open for tool_wait_minutes (default 5) or no progress for stuck_minutes (default 10) sends one factual alert; these alerts never stop, cancel, or restart the run. Elapsed-time limits are opt-in for work with a real wall-clock bound: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace.",
+            "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. A tool call still open for tool_wait_minutes (default 5) or no progress for stuck_minutes (default 10) sends one factual alert; these alerts never stop, cancel, or restart the run. Hard timeouts default to 60 minutes; max_minutes overrides that default (0 disables). Soft deadlines remain opt-in for work with a real wall-clock bound: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace. Do not set elapsed-time limits merely because a task may take a while; use them only when the work needs a real wall-clock bound.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
             "Saved conversations persist automatically. To continue a completed or stopped worker in its own history, call subagent_spawn with session_id (the native session id reported for the saved conversation) and the new feedback as prompt. Omit session_id for a brand-new conversation.",
             "On a continuation, pass prompt, session_id, and only optional model, thinking, callback, or timing overrides. Launch-only options (name, agent, role, alias, tools, exclude_tools, skills, clean, sandbox, sandbox_dir, cwd, git_clone_workspace, approve, allow_nested) keep the saved recipe; repeat them only with the same value, otherwise the launch is refused.",
@@ -3914,6 +3941,7 @@ export default function (pi: ExtensionAPI) {
                     const timing = timingState();
                     return {
                         mode: settings.delegationMode, maxConcurrent: settings.maxConcurrent,
+                        maxMinutes: timing.maxMinutes,
                         modeSource: settings.sources.delegationMode,
                         capSource: settings.sources.maxConcurrent,
                         defaultMode: normalizeDelegationMode(loadConfig().delegationMode),
@@ -3940,7 +3968,8 @@ export default function (pi: ExtensionAPI) {
                 : skills.mode === "none" ? "no skills" : `${skills.paths.length} selected skills`;
             const timing = timingState();
             ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. ` +
-                `Tool-wait alert: ${timing.toolWaitMinutes} min. No-progress alert: ${timing.stuckMinutes} min. Skills: ${skillChoice}. ` +
+                `Timeout: ${timing.maxMinutes} minutes (0 disables). Tool-wait alert: ${timing.toolWaitMinutes} min. ` +
+                `No-progress alert: ${timing.stuckMinutes} min. Skills: ${skillChoice}. ` +
                 `Use /subagents mode <mode>, cap <number>, tool-wait <minutes>, stuck <minutes>, or settings; /subagents save persists them.`, "info");
         }
     };
@@ -3976,7 +4005,8 @@ export default function (pi: ExtensionAPI) {
                     const timing = timingState();
                     if (ctx.hasUI && !(await ctx.ui.confirm("Save subagent defaults?",
                         `Future sessions will start in ${activeDelegationMode()} with a cap of ${activeConcurrencyCap()}, ` +
-                        `tool-wait alert ${timing.toolWaitMinutes} min, no-progress alert ${timing.stuckMinutes} min, and ${skillChoice}.`))) {
+                        `timeout ${timing.maxMinutes} minutes (0 disables), tool-wait alert ${timing.toolWaitMinutes} min, ` +
+                        `no-progress alert ${timing.stuckMinutes} min, and ${skillChoice}.`))) {
                         ctx.ui.notify("Subagent defaults unchanged.", "info");
                         return;
                     }

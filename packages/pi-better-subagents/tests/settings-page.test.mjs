@@ -18,8 +18,9 @@ function skillFile(name) {
 function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
     const savedSkills = { mode: "inherit", paths: [], source: "default" };
     let current = {
-        mode: "adaptive", maxConcurrent: 4, modeSource: "config", capSource: "config",
+        mode: "adaptive", maxConcurrent: 4, maxMinutes: 60, modeSource: "config", capSource: "config",
         defaultMode: "adaptive", defaultCap: 4,
+        timeoutSource: "default",
         toolWaitMinutes: 5, stuckMinutes: 10, toolWaitSource: "default", stuckSource: "default",
         defaultToolWaitMinutes: 5, defaultStuckMinutes: 10,
         skillsMode: "inherit", skillsPaths: [], skillsSource: "default",
@@ -29,15 +30,17 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
     let closed = 0;
     let agents = 0;
     let saveFailure = false;
+    let savedMaxMinutes = current.maxMinutes;
     const handlers = {
         get: () => current,
         changeMode(mode) { current = { ...current, mode, modeSource: "session" }; },
         changeCap(maxConcurrent) { current = { ...current, maxConcurrent, capSource: "session" }; },
         changeTiming(key, minutes) {
             if (!Number.isFinite(minutes) || minutes < 0) throw new Error("Timing must be minutes from 0.");
+            const source = key === "maxMinutes" ? "timeoutSource" : key === "toolWaitMinutes" ? "toolWaitSource" : "stuckSource";
             current = {
                 ...current, [key]: minutes,
-                [key === "toolWaitMinutes" ? "toolWaitSource" : "stuckSource"]: "session",
+                [source]: "session",
             };
         },
         changeSkills(mode, paths) {
@@ -53,6 +56,7 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
                 return { ok: false, message: "Add at least one skill path, or choose No skill catalog to load none." };
             }
             saved++;
+            savedMaxMinutes = current.maxMinutes;
             savedSkills.mode = current.skillsMode;
             savedSkills.paths = [...current.skillsPaths];
             savedSkills.source = "config";
@@ -60,15 +64,17 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
                 ...current, defaultMode: current.mode, defaultCap: current.maxConcurrent,
                 defaultToolWaitMinutes: current.toolWaitMinutes, defaultStuckMinutes: current.stuckMinutes,
                 modeSource: "config", capSource: "config", skillsSource: "config",
+                timeoutSource: "config",
                 toolWaitSource: "config", stuckSource: "config",
             };
             return { ok: true, message: "Subagent defaults saved." };
         },
         reset() {
             current = {
-                ...current, mode: current.defaultMode, maxConcurrent: current.defaultCap,
+                ...current, mode: current.defaultMode, maxConcurrent: current.defaultCap, maxMinutes: savedMaxMinutes,
                 modeSource: "config", capSource: "config",
                 toolWaitMinutes: current.defaultToolWaitMinutes, stuckMinutes: current.defaultStuckMinutes,
+                timeoutSource: "config",
                 toolWaitSource: "config", stuckSource: "config",
                 skillsMode: savedSkills.mode, skillsPaths: [...savedSkills.paths], skillsSource: savedSkills.source,
             };
@@ -82,9 +88,30 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
 }
 
 const LABELS = [
-    "Delegation mode", "Concurrent subagents", "Tool-wait alert", "No-progress alert",
+    "Delegation mode", "Concurrent subagents", "Tool-wait alert", "No-progress alert", "Timeout (minutes)",
     "Skill exposure", "Selected skills", "Agents", "Reset to defaults",
 ];
+
+test("timeout starts at 60 minutes, accepts zero and rejects invalid values, then saves and resets", () => {
+    const h = harness();
+    assert.equal(h.settings().maxMinutes, 60);
+    selectLabel(h.page, "Timeout (minutes)");
+    h.page.handleInput("\r");
+    typeAndSubmit(h.page, "-1");
+    assert.equal(h.settings().maxMinutes, 60);
+    typeAndSubmit(h.page, "10081");
+    assert.equal(h.settings().maxMinutes, 60);
+    typeAndSubmit(h.page, "90");
+    assert.equal(h.settings().maxMinutes, 90);
+    h.page.handleInput("\x13");
+    assert.equal(h.saved(), 1);
+    h.page.handleInput("\r");
+    typeAndSubmit(h.page, "0");
+    assert.equal(h.settings().maxMinutes, 0);
+    selectLabel(h.page, "Reset to defaults");
+    h.page.handleInput("\r");
+    assert.equal(h.settings().maxMinutes, 90, "reset restores the saved timeout default");
+});
 
 function rowLabels(page) {
     return page.render(100).flatMap((line) => {
