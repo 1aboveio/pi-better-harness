@@ -2671,14 +2671,16 @@ export class ObservedWaitHost {
         this.store?.recordSupervision({
           operationId: operation.operationId,
           owner: operation.owner,
+          expectedHostId: operation.supervision?.hostId ?? null,
           supervision: this.supervision(),
           health: "active",
         });
         claimed = true;
       } catch (error) {
-        // Another host can hold the write lock. Leave the observed record alone
-        // and let the next reconciliation tick retry the takeover.
-        if (rpcCode(error) === "store-busy") return;
+        // Another host can hold the write lock, or it can take over between the
+        // snapshot and this write. Leave the observed record alone and let the
+        // next reconciliation tick re-read it.
+        if (rpcCode(error) === "store-busy" || rpcCode(error) === "supervision-conflict") return;
         throw error;
       }
     }
@@ -2713,6 +2715,7 @@ export class ObservedWaitHost {
           this.store?.recordSupervision({
             operationId: operation.operationId,
             owner: operation.owner,
+            expectedHostId: this.hostId,
             health: "unmonitored",
             reason: "no durable supervisor record exists for this operation",
           });
@@ -2731,13 +2734,14 @@ export class ObservedWaitHost {
         this.store?.recordSupervision({
           operationId: operation.operationId,
           owner: operation.owner,
+          expectedHostId: this.hostId,
           supervision: this.supervision(),
           health: "active",
         });
       } catch (error) {
-        // Another host can hold the write lock. Leave health unchanged and let
-        // the next reconciliation tick retry this observational update.
-        if (rpcCode(error) !== "store-busy") throw error;
+        // Another host can hold the write lock or have taken over. Leave health
+        // unchanged and let the next tick re-read the operation.
+        if (rpcCode(error) !== "store-busy" && rpcCode(error) !== "supervision-conflict") throw error;
       }
     }
   }

@@ -151,6 +151,13 @@ export interface RecordSupervisionInput {
     supervision?: SupervisionIdentity | null;
     health?: ObserverHealth;
     reason?: string | null;
+    /**
+     * The host id the caller observed as current, or null when no supervisor was
+     * recorded. Required when supplying `supervision`. The write is refused with
+     * `supervision-conflict` if another host took over after the caller read the
+     * operation, so a stale contender cannot replace a newly live holder.
+     */
+    expectedHostId?: string | null;
 }
 
 export interface ReleaseSupervisionInput {

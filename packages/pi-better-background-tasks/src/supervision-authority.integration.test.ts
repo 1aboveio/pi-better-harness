@@ -112,6 +112,41 @@ function seedOperations(root: string): void {
 }
 
 describe("supervision authority across independent processes", () => {
+  it("serializes simultaneous contenders so no operation is claimed twice", async () => {
+    const root = workspace("multi-process-contenders");
+    seedOperations(root);
+    const db = new DatabaseSync(join(root, "operations.sqlite"));
+    db.exec("CREATE TABLE probe_updates (host TEXT)");
+    db.exec("CREATE TABLE probe_claims (host TEXT)");
+    db.exec(`CREATE TRIGGER probe_update AFTER UPDATE ON operations BEGIN
+      INSERT INTO probe_updates VALUES (json_extract(NEW.supervision_json, '$.hostId'));
+      INSERT INTO probe_claims VALUES (json_extract(NEW.supervision_json, '$.hostId'));
+    END`);
+    const countClaims = (): number => {
+      const row = db.prepare("SELECT count(*) AS count FROM probe_claims").get() as { count?: number } | undefined;
+      return Number(row?.count ?? 0);
+    };
+
+    try {
+      const first = startProbe(root, "owner-a", true);
+      const second = startProbe(root, "unrelated-b", true);
+      const [firstReport, secondReport] = await Promise.all([first.report, second.report]);
+
+      // Each operation belongs to exactly one winner. A lost stale contender
+      // writes nothing, and neither steady host rewrites the claimed rows.
+      expect(firstReport.warmWrites + secondReport.warmWrites).toBe(TASK_COUNT);
+      expect(firstReport.steady.writes + secondReport.steady.writes).toBe(0);
+      expect(firstReport.steady.inspections + secondReport.steady.inspections).toBe(TASK_COUNT * PASSES);
+      expect(countClaims(), "one authority write per operation across both contenders").toBe(TASK_COUNT);
+
+      first.child.kill("SIGKILL");
+      second.child.kill("SIGKILL");
+      await Promise.all([once(first.child, "exit"), once(second.child, "exit")]);
+    } finally {
+      db.close();
+    }
+  }, 60_000);
+
   it("keeps idle unrelated sessions observation-free and recovers a killed authority", async () => {
     const root = workspace("multi-process-authority");
     seedOperations(root);

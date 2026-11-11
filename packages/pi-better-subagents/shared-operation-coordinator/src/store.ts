@@ -120,7 +120,9 @@ export interface Store {
     registerOperation(input: RegisterOperationInput): RegisterOperationResult;
     /**
      * Replace supervision identity and/or report observer health
-     * (`active`/`unmonitored`/`lost`). Ownership stays untouched.
+     * (`active`/`unmonitored`/`lost`). Ownership stays untouched. A supervision
+     * replacement requires `expectedHostId` and is refused with
+     * `supervision-conflict` when another host took over first.
      */
     recordSupervision(input: RecordSupervisionInput): OperationRecord;
     /**

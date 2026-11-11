@@ -654,6 +654,54 @@ describe("supervision authority", () => {
       takenOver.close();
     }
   }, 30_000);
+
+  it("does not let a stale contender replace a newly live authority", async () => {
+    const root = workspace("supervision-race");
+    const storePath = join(root, "operations.sqlite");
+    const ownerSupervisor = fakeRunningSupervisor();
+    const contenderSupervisor = fakeRunningSupervisor();
+    const ownerHost = startHost({
+      root,
+      supervisor: ownerSupervisor,
+      ctx: createCtx(root, "owner-a"),
+    }).host;
+    const contenderHost = startHost({
+      root,
+      supervisor: contenderSupervisor,
+      ctx: createCtx(root, "unrelated-b"),
+    }).host;
+    await ownerHost.reconcileNow();
+    await contenderHost.reconcileNow();
+
+    // Both hosts now hold a snapshot of an operation that has no supervisor.
+    const store = openStore({ path: storePath });
+    let first: string | undefined;
+    try {
+      store.registerOperation({
+        operationId: "op_race",
+        taskId: "bgs_00000000000000000002",
+        launchToken: "launch_race",
+        owner: { kind: "parent-session", sessionId: "owner-a", workspace: root, branchId: null, goalId: null },
+        observer: { kind: "background-tasks", version: "1" },
+      });
+      const stale = store.getOperation("op_race");
+      expect(stale).not.toBeNull();
+      expect(stale?.supervision).toBeNull();
+
+      const ownerBefore = ownerSupervisor.inspections;
+      (ownerHost as unknown as { reconcileOperation(operation: unknown): void }).reconcileOperation(stale);
+      expect(ownerSupervisor.inspections - ownerBefore).toBe(1);
+      first = store.getOperation("op_race")?.supervision?.hostId;
+      expect(first).toBeTruthy();
+
+      const contenderBefore = contenderSupervisor.inspections;
+      (contenderHost as unknown as { reconcileOperation(operation: unknown): void }).reconcileOperation(stale);
+      expect(contenderSupervisor.inspections - contenderBefore).toBe(0);
+      expect(store.getOperation("op_race")?.supervision?.hostId).toBe(first);
+    } finally {
+      store.close();
+    }
+  }, 30_000);
 });
 
 describe("worker operation service", () => {

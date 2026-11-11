@@ -113,6 +113,7 @@ describe("operation registration", () => {
         const updated = harness.store.recordSupervision({
             operationId: "op-build-1",
             owner: workerOwner,
+            expectedHostId: "host-1",
             supervision: { hostId: "host-2" },
             health: "unmonitored",
             reason: "host stopped watching; replacement pending",
@@ -126,6 +127,56 @@ describe("operation registration", () => {
             () => harness.store.recordSupervision({ operationId: "op-build-1", owner: otherWorkerOwner, health: "active" }),
             "foreign-owner",
         );
+    });
+
+    it("refuses a stale supervision replacement after another host takes over", () => {
+        const harness = createHarness();
+        registerOperation(harness.store);
+
+        harness.store.recordSupervision({
+            operationId: "op-build-1",
+            owner: workerOwner,
+            expectedHostId: "host-1",
+            supervision: { hostId: "host-2" },
+            health: "active",
+        });
+        const conflict = expectStoreError(
+            () => harness.store.recordSupervision({
+                operationId: "op-build-1",
+                owner: workerOwner,
+                expectedHostId: "host-1",
+                supervision: { hostId: "host-3" },
+                health: "active",
+            }),
+            "supervision-conflict",
+            /now supervised by host-2/,
+        );
+        assert.match(conflict.message, /stale replacement was refused/);
+        assert.equal(harness.store.getOperation("op-build-1")?.supervision?.hostId, "host-2");
+
+        expectStoreError(
+            () => harness.store.recordSupervision({
+                operationId: "op-build-1",
+                owner: workerOwner,
+                supervision: { hostId: "host-4" },
+                health: "active",
+            }),
+            "validation",
+            /expectedHostId/,
+        );
+
+        // Health-only updates can also be fenced by the observed holder.
+        expectStoreError(
+            () => harness.store.recordSupervision({
+                operationId: "op-build-1",
+                owner: workerOwner,
+                expectedHostId: "host-1",
+                health: "unmonitored",
+                reason: "stale health report",
+            }),
+            "supervision-conflict",
+        );
+        assert.equal(harness.store.getOperation("op-build-1")?.health, "active");
     });
 
     it("releases only the recorded host's running supervision", () => {
@@ -146,6 +197,7 @@ describe("operation registration", () => {
         harness.store.recordSupervision({
             operationId: operation.operationId,
             owner: workerOwner,
+            expectedHostId: null,
             supervision: { hostId: "host-2" },
             health: "active",
         });

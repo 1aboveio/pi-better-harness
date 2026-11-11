@@ -206,12 +206,23 @@ export function recordSupervision(
     const operationId = requireId("operationId", input.operationId);
     const owner = normalizeOwner("owner", input.owner);
     const supervision = normalizeSupervision(input.supervision);
+    const expectedHostId = input.expectedHostId === undefined
+        ? undefined
+        : input.expectedHostId === null
+            ? null
+            : requireId("expectedHostId", input.expectedHostId);
     const health = input.health === undefined
         ? null
         : requireEnum("health", input.health, HEALTH_VALUES);
     const reason = optionalText("reason", input.reason, 1024);
     if (health === null && supervision === null) {
         throw new StoreError("validation", "Invalid supervision update: nothing to record");
+    }
+    if (supervision !== null && expectedHostId === undefined) {
+        throw new StoreError(
+            "validation",
+            "Invalid expectedHostId: replacing supervision requires the observed current host id, or null when no supervisor was recorded.",
+        );
     }
 
     return ctx.transaction(() => {
@@ -221,6 +232,15 @@ export function recordSupervision(
                 "foreign-owner",
                 `Operation ${operationId} belongs to another execution owner (differs in ${describeOwnerDiff(operation.owner, owner)}).`,
             );
+        }
+        if (expectedHostId !== undefined) {
+            const currentHostId = operation.supervision?.hostId ?? null;
+            if (currentHostId !== expectedHostId) {
+                throw new StoreError(
+                    "supervision-conflict",
+                    `Operation ${operationId} is now supervised by ${currentHostId ?? "no host"}, not the observed ${expectedHostId ?? "no host"}; the stale replacement was refused.`,
+                );
+            }
         }
         const nextHealth = health ?? operation.health;
         const nextReason = nextHealth === "active" ? null : (reason ?? operation.healthReason);
