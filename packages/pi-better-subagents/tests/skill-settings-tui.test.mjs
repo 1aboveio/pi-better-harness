@@ -81,7 +81,8 @@ function ctx() {
                     const done = (value) => { if (!settled) { settled = true; resolve(value); } };
                     const page = factory({ requestRender() {} }, theme, {}, done);
                     pages.push(page);
-                    const keys = keyBatches.length > 0 ? keyBatches.shift() : [];
+                    const batch = keyBatches.length > 0 ? keyBatches.shift() : [];
+                    const keys = typeof batch === "function" ? batch(page) : batch;
                     for (const key of keys) {
                         if (settled) break;
                         page.handleInput(key);
@@ -94,8 +95,22 @@ function ctx() {
     };
 }
 
-function keysToSkillsRow() {
-    return ["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B"];
+function selectedRowText(page) {
+    const line = page.render(300).find((entry) => entry.trimStart().startsWith("> "));
+    return line === undefined ? undefined : line.replace(/\x1b\[[0-9;]*m/g, "").trimStart().slice(2).trim();
+}
+
+/** Navigate by label so menu-row insertions do not silently retarget these tests. */
+function atRow(label, ...keys) {
+    return (page) => {
+        for (let attempt = 0; attempt < 32; attempt++) page.handleInput("\x1b[A");
+        for (let attempt = 0; attempt < 32; attempt++) {
+            const text = selectedRowText(page) ?? "";
+            if (text === label || text.startsWith(label + " ")) return keys;
+            page.handleInput("\x1b[B");
+        }
+        throw new Error(`could not select ${label}; selected ${selectedRowText(page)}`);
+    };
 }
 
 function writeRoleDefinition() {
@@ -187,8 +202,8 @@ function createRuntime() {
     return { events, registrations, tools, commands, entries, contribution };
 }
 
-async function openSettings(keys, runtime = createRuntime()) {
-    keyBatches.push(keys);
+async function openSettings(keysOrLabel, runtime = createRuntime()) {
+    keyBatches.push(keysOrLabel);
     await runtime.contribution.open(ctx());
     return pages.at(-1);
 }
@@ -245,9 +260,8 @@ test("the settings page saves selected skills, reloads, and reaches the child ar
     const skill = join(skillDir, "SKILL.md");
     writeFileSync(skill, "---\nname: review\n---\n");
 
-    const page = await openSettings([
-        ...keysToSkillsRow(),
-        "\x1b[B", // Selected skills row
+    const page = await openSettings(atRow(
+        "Selected skills",
         "\r", // open checkbox picker
         "\x1b[B", // apply -> add path
         "\r",
@@ -257,7 +271,7 @@ test("the settings page saves selected skills, reloads, and reaches the child ar
         "\r",
         "\x13", // save default
         "\x1b",
-    ]);
+    ));
     assert.match(page.render(100).join("\n"), /Selected skills/);
     assert.deepEqual(readSkills(), [skill], "the page wrote the global default, not a package fallback");
     assert.deepEqual(reloadedConfig().defaultSkills, [skill], "a later load reads the saved value");
@@ -278,12 +292,12 @@ test("saving discovery replaces a saved path list with an explicit null", async 
     config.setConfigForTests(undefined);
     assert.deepEqual(config.loadConfig().defaultSkills, [skill]);
 
-    const page = await openSettings([
-        ...keysToSkillsRow(),
+    const page = await openSettings(atRow(
+        "Skill exposure",
         "\r", // selected -> discovery
         "\x13",
         "\x1b",
-    ]);
+    ));
     assert.match(page.render(100).join("\n"), /Discover automatically/);
     assert.equal(readSkills(), null, "discovery is stored as null rather than dropping the key");
     assert.equal(reloadedConfig().defaultSkills, null);
@@ -300,12 +314,12 @@ test("saving discovery replaces a saved path list with an explicit null", async 
 });
 
 test("No skill catalog persists [] and launches with --no-skills", async () => {
-    const page = await openSettings([
-        ...keysToSkillsRow(),
+    const page = await openSettings(atRow(
+        "Skill exposure",
         "\r", // discovery -> none
         "\x13",
         "\x1b",
-    ]);
+    ));
     assert.match(page.render(100).join("\n"), /No skill catalog/);
     assert.deepEqual(readSkills(), []);
     assert.deepEqual(reloadedConfig().defaultSkills, []);
@@ -322,9 +336,8 @@ test("save preserves unrelated Pi and harness settings", async () => {
     existing.piBetterHarness.goal = { autoContinue: false };
     writeFileSync(settingsPath, JSON.stringify(existing));
 
-    await openSettings([
-        ...keysToSkillsRow(),
-        "\x1b[B", // Selected skills row
+    await openSettings(atRow(
+        "Selected skills",
         "\r", // open checkbox picker
         "\x1b[B", // apply -> add path
         "\r",
@@ -334,7 +347,7 @@ test("save preserves unrelated Pi and harness settings", async () => {
         "\r",
         "\x13",
         "\x1b",
-    ]);
+    ));
     const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
     assert.equal(saved.theme, "dark");
     assert.deepEqual(saved.packages, ["npm:example"]);
@@ -347,7 +360,7 @@ test("unsaved session skill choices drive the actual child argv", async () => {
     saveConfig([saved]);
     const runtime = createRuntime();
 
-    await openSettings([...keysToSkillsRow(), "\r", "\r", "\x1b"], runtime);
+    await openSettings(atRow("Skill exposure", "\r", "\r", "\x1b"), runtime);
     let run = await spawn(runtime);
     assert.deepEqual(readSkills(), [saved], "the unsaved choice did not rewrite the saved config");
     assert.equal(run.argv.includes("--no-skills"), true);
@@ -357,19 +370,19 @@ test("unsaved session skill choices drive the actual child argv", async () => {
     assert.match(run.text, /source session/);
 
     const chosen = skill("chosen");
-    await openSettings([
-        ...keysToSkillsRow(),
-        "\x1b[B", "\r", // Selected skills -> picker
+    await openSettings(atRow(
+        "Selected skills",
+        "\r", // open picker
         "\x1b[B", "\r", chosen, "\r", // add path
         "\x1b[A", "\r", // apply
         "\x1b",
-    ], runtime);
+    ), runtime);
     run = await spawn(runtime);
     assert.deepEqual(run.meta.skills, [chosen]);
     assert.equal(run.meta.skillsSource, "session");
     assert.deepEqual(run.argv.flatMap((arg, index) => arg === "--skill" ? [run.argv[index + 1]] : []), [chosen]);
 
-    await openSettings([...keysToSkillsRow(), "\r", "\x1b"], runtime);
+    await openSettings(atRow("Skill exposure", "\r", "\x1b"), runtime);
     run = await spawn(runtime);
     assert.equal(run.argv.includes("--no-skills"), false, "session discovery emits no flag");
     assert.equal(run.meta.skills, undefined);
@@ -387,7 +400,7 @@ test("reset restores the saved default and a saved choice reaches later launches
     saveConfig([saved]);
     const runtime = createRuntime();
 
-    await openSettings([...keysToSkillsRow(), "\r", "\r", "\x1b"], runtime);
+    await openSettings(atRow("Skill exposure", "\r", "\r", "\x1b"), runtime);
     let run = await spawn(runtime);
     assert.deepEqual(run.meta.skills, []);
     assert.equal(run.meta.skillsSource, "session");
@@ -397,7 +410,7 @@ test("reset restores the saved default and a saved choice reaches later launches
     assert.deepEqual(run.meta.skills, [saved]);
     assert.equal(run.meta.skillsSource, "config");
 
-    await openSettings([...keysToSkillsRow(), "\r", "\r", "\x13", "\x1b"], runtime);
+    await openSettings(atRow("Skill exposure", "\r", "\r", "\x13", "\x1b"), runtime);
     assert.deepEqual(readSkills(), []);
     run = await spawn(runtime);
     assert.deepEqual(run.meta.skills, []);
@@ -409,12 +422,12 @@ test("zero checked in the settings picker becomes No skill catalog and launches 
     saveConfig([]);
     const runtime = createRuntime();
 
-    const draftPage = await openSettings([
-        ...keysToSkillsRow(),
-        "\x1b[B", "\r", // open picker
+    const draftPage = await openSettings(atRow(
+        "Selected skills",
+        "\r", // open picker
         "\r", // zero checked -> apply
         "\x1b",
-    ], runtime);
+    ), runtime);
     assert.match(draftPage.render(100).join("\n"), /No skills checked\. Skill exposure set to No skill catalog/);
     const run = await spawn(runtime);
     assert.deepEqual(run.meta.skills, []);
@@ -448,7 +461,7 @@ test("Ctrl+S keeps a malformed saved defaultSkills until the user deliberately r
     assert.match(page.render(100).join("\n"), /Config error:.*must be an array/);
     assert.equal(readSkills(), "review", "an unchanged invalid value is not replaced by discovery");
 
-    await openSettings([...keysToSkillsRow(), "\r", "\x13", "\x1b"]);
+    await openSettings(atRow("Skill exposure", "\r", "\x13", "\x1b"));
     assert.deepEqual(readSkills(), [], "a deliberate choice is allowed to replace the invalid value");
 });
 
@@ -458,7 +471,7 @@ test("catalog inspection and the /agents view follow the live session skill defa
     writeRoleDefinition();
     const runtime = createRuntime();
 
-    await openSettings([...keysToSkillsRow(), "\r", "\r", "\x1b"], runtime);
+    await openSettings(atRow("Skill exposure", "\r", "\r", "\x1b"), runtime);
     let view = await inspectRole(runtime);
     assert.deepEqual(view.skills.effective, { mode: "none", paths: [], source: "session" });
     assert.match(await agentsView(runtime), /Skills\s+inherit\s+session/);
@@ -467,7 +480,7 @@ test("catalog inspection and the /agents view follow the live session skill defa
     assert.equal(run.meta.skillsSource, "session");
     assert.equal(run.argv.includes("--no-skills"), true);
 
-    await openSettings([...keysToSkillsRow(), "\r", "\x1b"], runtime);
+    await openSettings(atRow("Skill exposure", "\r", "\x1b"), runtime);
     view = await inspectRole(runtime);
     assert.deepEqual(view.skills.effective, { mode: "discovery", paths: [], source: "session" });
     assert.match(await agentsView(runtime), /Skills\s+inherit\s+session/);
@@ -484,7 +497,7 @@ test("catalog inspection and the /agents view follow the live session skill defa
     assert.deepEqual(run.meta.skills, [saved]);
     assert.equal(run.meta.skillsSource, "config");
 
-    await openSettings([...keysToSkillsRow(), "\r", "\x13", "\x1b"], runtime);
+    await openSettings(atRow("Skill exposure", "\r", "\x13", "\x1b"), runtime);
     view = await inspectRole(runtime);
     assert.deepEqual(view.skills.effective, { mode: "discovery", paths: [], source: "discovery" });
     assert.match(await agentsView(runtime), /Skills\s+inherit\s+discovery/);
@@ -499,7 +512,7 @@ test("the settings picker uses loaded Pi skill metadata from the command context
         baseDir: "/skills/alpha", sourceInfo: { source: "user" },
     }];
     const runtime = createRuntime();
-    await openSettings([...keysToSkillsRow(), "\x1b[B", "\r"], runtime);
+    await openSettings(atRow("Selected skills", "\r"), runtime);
     const picker = renders.at(-1);
     assert.match(picker, /\[ \] alpha\s+Reviews changes\./);
     promptSkills = [];

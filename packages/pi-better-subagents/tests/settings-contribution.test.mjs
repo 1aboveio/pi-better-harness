@@ -13,6 +13,24 @@ const { TIMING_ENV } = await import("../timing.ts");
 const theme = { fg: (_color, text) => text, bg: (_color, text) => text,
     bold: (text) => text, inverse: (text) => text };
 
+function selectedRowText(page) {
+    const line = page.render(300).find((entry) => entry.trimStart().startsWith("> "));
+    return line === undefined ? undefined : line.replace(/\x1b\[[0-9;]*m/g, "").trimStart().slice(2).trim();
+}
+
+/** Select by label so menu-row insertions do not silently retarget this test. */
+function atRow(label, ...keys) {
+    return (page) => {
+        for (let attempt = 0; attempt < 32; attempt++) page.handleInput("\x1b[A");
+        for (let attempt = 0; attempt < 32; attempt++) {
+            const text = selectedRowText(page) ?? "";
+            if (text === label || text.startsWith(label + " ")) return keys;
+            page.handleInput("\x1b[B");
+        }
+        throw new Error(`could not select ${label}; selected ${selectedRowText(page)}`);
+    };
+}
+
 test("subagents contributes the standalone settings opener with shared session and saved state, and removes its listener", async (t) => {
     const previousMax = process.env[TIMING_ENV.max];
     process.env[TIMING_ENV.max] = "5";
@@ -96,7 +114,8 @@ test("subagents contributes the standalone settings opener with shared session a
                     const page = factory({ requestRender() {} }, theme, {}, done);
                     pages.push(page.render(100).join("\n"));
                     const batch = keyBatches.length > 0 ? keyBatches.shift() : keys;
-                    for (const key of batch) page.handleInput(key);
+                    const selectedKeys = typeof batch === "function" ? batch(page) : batch;
+                    for (const key of selectedKeys) page.handleInput(key);
                     for (let attempt = 0; attempt < 3 && !settled; attempt++) page.handleInput("\x1b");
                 });
             },
@@ -119,7 +138,7 @@ test("subagents contributes the standalone settings opener with shared session a
     await contribution.open(ctx);
     assert.equal(entries.at(-1).data.mode, "adaptive");
     assert.equal(existsSync(path), false);
-    keys = ["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r", "\x15", "90", "\r"];
+    keys = atRow("Timeout (minutes)", "\r", "\x15", "90", "\r");
     await contribution.open(ctx);
     assert.equal(entries.at(-1).data.maxMinutes, 90);
     keys = ["\x13"]; // save via standalone command
@@ -146,7 +165,7 @@ test("subagents contributes the standalone settings opener with shared session a
     const beforeAgents = entries.length;
     const openedBefore = pages.length;
     const eventsBefore = uiEvents.length;
-    keyBatches.push(["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r"]); // seven rows down from Delegation mode lands on Agents
+    keyBatches.push(atRow("Agents", "\r"));
     await contribution.open(ctx);
     assert.match(pages.at(-2), /Agents/);
     assert.match(pages.at(-2), /Reset to defaults/);

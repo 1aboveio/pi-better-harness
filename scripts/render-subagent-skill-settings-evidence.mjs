@@ -32,8 +32,10 @@ const discovered = [
 function harness({ skillsMode, skillsPaths, skillsSource = "config" } = {}) {
     const saved = { mode: skillsMode, paths: [...skillsPaths], source: skillsSource };
     let current = {
-        mode: "adaptive", maxConcurrent: 6, modeSource: "config", capSource: "config",
+        mode: "adaptive", maxConcurrent: 6, maxMinutes: 60, modeSource: "config", capSource: "config",
         defaultMode: "adaptive", defaultCap: 6,
+        toolWaitMinutes: 5, stuckMinutes: 10, toolWaitSource: "default", stuckSource: "default",
+        defaultToolWaitMinutes: 5, defaultStuckMinutes: 10,
         skillsMode, skillsPaths: [...skillsPaths], skillsSource,
     };
     const handlers = {
@@ -73,7 +75,12 @@ function write(name, state, width, lines) {
 }
 
 function openPicker(h) {
-    for (let index = 0; index < 3; index++) h.page.handleInput("\x1b[B");
+    for (let attempt = 0; attempt < 32; attempt++) h.page.handleInput("\x1b[A");
+    for (let attempt = 0; attempt < 32; attempt++) {
+        const text = selectedRow(h.page);
+        if (text === "Selected skills" || text.startsWith("Selected skills ")) break;
+        h.page.handleInput("\x1b[B");
+    }
     h.page.handleInput("\r");
     return h.page;
 }
