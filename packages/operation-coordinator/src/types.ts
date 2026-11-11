@@ -150,6 +150,48 @@ export interface RecordSupervisionInput {
     supervision?: SupervisionIdentity | null;
     health?: ObserverHealth;
     reason?: string | null;
+    /**
+     * The host id the caller observed as current, or null when no supervisor was
+     * recorded. Required when supplying `supervision`. The write is refused with
+     * `supervision-conflict` if another host took over after the caller read the
+     * operation, so a stale contender cannot replace a newly live holder.
+     */
+    expectedHostId?: string | null;
+}
+
+export interface ReleaseSupervisionInput {
+    operationId: string;
+    /** Must be the recorded owner; a replacement host acts for the same owner. */
+    owner: OwnerIdentity;
+    /** The exact host whose authority is being released. A newer holder is untouched. */
+    hostId: string;
+    /** Why the host stopped supervising, retained on the unmonitored record. */
+    reason?: string | null;
+}
+
+/** One shared discovery leader for a coordinator database and supervisor scope. */
+export interface DiscoveryClaimRecord {
+    /** Opaque canonical scope computed from the store path and supervisor directory. */
+    scope: string;
+    hostId: string;
+    /** Fences acquisition and release against a stale or ABA competitor. */
+    token: string;
+    claimedAt: number;
+    updatedAt: number;
+}
+
+export interface TryClaimDiscoveryInput {
+    scope: string;
+    /** The exact claim the caller observed, or null when it observed no claim. */
+    expected: Pick<DiscoveryClaimRecord, "hostId" | "token"> | null;
+    hostId: string;
+    token: string;
+}
+
+export interface ReleaseDiscoveryClaimInput {
+    scope: string;
+    hostId: string;
+    token: string;
 }
 
 // ---- terminal outcome ---------------------------------------------------

@@ -24,6 +24,8 @@ export type StoreErrorCode =
     | "task-ownership"
     /** The caller is not the recorded owner of the record it wants to change. */
     | "foreign-owner"
+    /** Another host took supervision after the caller read the operation. */
+    | "supervision-conflict"
     /** A different terminal event is already recorded for this operation. */
     | "terminal-conflict"
     /** The owner already has a pending wait generation. */

@@ -35,6 +35,7 @@ const DDL: readonly string[] = [
         observer_kind TEXT NOT NULL,
         observer_version TEXT NOT NULL,
         supervision_json TEXT,
+        supervision_host_id TEXT,
         authority_ref TEXT,
         intent_ref TEXT,
         phase TEXT NOT NULL,
@@ -51,6 +52,23 @@ const DDL: readonly string[] = [
     )`,
     `CREATE INDEX operations_owner ON operations (owner_kind, owner_session_id)`,
     `CREATE INDEX operations_phase ON operations (phase)`,
+    `CREATE INDEX operations_running_supervisor ON operations (phase, supervision_host_id)`,
+    // Discovery leadership is separate from per-operation supervision. The token
+    // fences stale acquisition and release; the host id is checked with process
+    // identity before a replacement.
+    `CREATE TABLE discovery_claims (
+        scope TEXT PRIMARY KEY,
+        host_id TEXT NOT NULL,
+        token TEXT NOT NULL,
+        claimed_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )`,
+    // Small shared state for change notification. The table is additive so an
+    // older reader that understands schema version 1 can safely ignore it.
+    `CREATE TABLE coordinator_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )`,
     `CREATE TABLE operation_evidence (
         operation_id TEXT NOT NULL REFERENCES operations (operation_id),
         terminal_revision INTEGER NOT NULL,
@@ -235,6 +253,49 @@ export function ensureSchema(ctx: StoreContext): void {
             `The database is at schema version ${recorded}; this build needs version ${SCHEMA_VERSION}. No migration is provided for this pair; records are left in place.`,
         );
     }
+    ensureAdditiveSchema(ctx);
+}
+
+/**
+ * Schema version 1 is extended additively: older readers ignore the new column,
+ * index and tables, so a live session on the previous build does not lose its
+ * records during a rolling upgrade. Missing additions are created once on open.
+ */
+function ensureAdditiveSchema(ctx: StoreContext): void {
+    const hasColumn = (): boolean =>
+        getRows(ctx, "PRAGMA table_info(operations)").some((row) => columnText(row, "name") === "supervision_host_id");
+    const hasIndex = (): boolean =>
+        getRows(ctx, "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", "operations_running_supervisor").length > 0;
+    const hasTable = (name: string): boolean => existingTables(ctx).includes(name);
+    if (
+        hasColumn()
+        && hasIndex()
+        && hasTable("discovery_claims")
+        && hasTable("coordinator_state")
+    ) return;
+
+    ctx.transaction(() => {
+        if (!hasColumn()) {
+            ctx.db.exec("ALTER TABLE operations ADD COLUMN supervision_host_id TEXT");
+            ctx.db.exec(`UPDATE operations
+                SET supervision_host_id = CASE
+                    WHEN json_valid(supervision_json) THEN json_extract(supervision_json, '$.hostId')
+                    ELSE NULL
+                END`);
+        }
+        ctx.db.exec("CREATE INDEX IF NOT EXISTS operations_running_supervisor ON operations (phase, supervision_host_id)");
+        ctx.db.exec(`CREATE TABLE IF NOT EXISTS discovery_claims (
+            scope TEXT PRIMARY KEY,
+            host_id TEXT NOT NULL,
+            token TEXT NOT NULL,
+            claimed_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )`);
+        ctx.db.exec(`CREATE TABLE IF NOT EXISTS coordinator_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )`);
+    });
 }
 
 /** Test and diagnostic seam: read the recorded schema version without opening a store. */

@@ -477,6 +477,294 @@ function fakeSupervisor(root: string, outcome: "lost"): LocalSupervisor {
   };
 }
 
+function fakeRunningSupervisor(): LocalSupervisor & { inspections: number } {
+  let inspections = 0;
+  const inspectionFor = (taskId: string): ReturnType<LocalSupervisor["inspect"]> => {
+    const now = Date.now();
+    return {
+      taskId,
+      token: "fake-running",
+      kind: "process",
+      status: "running",
+      terminal: false,
+      launch: {
+        taskId,
+        token: "fake-running",
+        kind: "process",
+        createdAt: now,
+        argv: [process.execPath, "-e", "process.exit(0)"],
+        cwd: process.cwd(),
+        requestHash: "fake-running",
+      },
+      taskDir: join(tmpdir(), "fake-running"),
+      logs: { stdout: "", stderr: "", events: "" },
+      observedAt: now,
+    };
+  };
+  return {
+    get inspections() {
+      return inspections;
+    },
+    async start() {
+      throw new Error("the reconciliation authority fixture does not launch");
+    },
+    inspect(taskId) {
+      inspections += 1;
+      return inspectionFor(taskId);
+    },
+    snapshot(taskId) {
+      return inspectionFor(taskId);
+    },
+    async stop() {
+      return undefined;
+    },
+  };
+}
+
+describe("supervision authority", () => {
+  it("does not rewrite supervision while overlapping live hosts reconcile unchanged operations", async () => {
+    const root = workspace("supervision-authority");
+    const storePath = join(root, "operations.sqlite");
+    const owner = { kind: "parent-session" as const, sessionId: "owner-a", workspace: root, branchId: "branch-1", goalId: null };
+    const store = openStore({ path: storePath });
+    const taskIds = Array.from({ length: 14 }, (_, index) => `bgs_${(index + 1).toString(16).padStart(20, "0")}`);
+    try {
+      taskIds.forEach((taskId, index) => {
+        store.registerOperation({
+          operationId: `op_authority_${index}`,
+          taskId,
+          launchToken: `launch_authority_${index}`,
+          owner,
+          observer: { kind: "background-tasks", version: "1" },
+        });
+      });
+    } finally {
+      store.close();
+    }
+
+    // The trigger observes every SQLite update, not only this host's cached view.
+    const db = new DatabaseSync(storePath);
+    db.exec("CREATE TABLE probe_updates (host TEXT)");
+    db.exec(`CREATE TRIGGER probe_update AFTER UPDATE ON operations BEGIN
+      INSERT INTO probe_updates VALUES (json_extract(NEW.supervision_json, '$.hostId'));
+    END`);
+    const countUpdates = (): number => {
+      const row = db.prepare("SELECT count(*) AS count FROM probe_updates").get();
+      return Number(row?.count ?? 0);
+    };
+    const clearUpdates = (): void => { db.exec("DELETE FROM probe_updates"); };
+
+    try {
+      const ownerSupervisor = fakeRunningSupervisor();
+      const ownerHost = startHost({
+        root,
+        supervisor: ownerSupervisor,
+        ctx: createCtx(root, "owner-a"),
+      }).host;
+      await ownerHost.reconcileNow();
+      clearUpdates();
+
+      for (let pass = 0; pass < 10; pass += 1) await ownerHost.reconcileNow();
+      expect(countUpdates(), "an unchanged operation under one live host is not rewritten").toBe(0);
+      const ownerInspectionsBefore = ownerSupervisor.inspections;
+
+      const unrelatedSupervisor = fakeRunningSupervisor();
+      const unrelatedHost = startHost({
+        root,
+        supervisor: unrelatedSupervisor,
+        ctx: createCtx(root, "unrelated-b"),
+      }).host;
+      await unrelatedHost.reconcileNow();
+      clearUpdates();
+      const unrelatedInspectionsBefore = unrelatedSupervisor.inspections;
+
+      for (let pass = 0; pass < 5; pass += 1) {
+        await ownerHost.reconcileNow();
+        await unrelatedHost.reconcileNow();
+      }
+
+      expect(countUpdates(), "a live unrelated host must not replace the recorded supervisor").toBe(0);
+      expect(
+        unrelatedSupervisor.inspections - unrelatedInspectionsBefore,
+        "an unrelated host does not inspect another live host's healthy operations",
+      ).toBe(0);
+      expect(
+        ownerSupervisor.inspections - ownerInspectionsBefore,
+        "the recorded supervisor still performs exactly one inspection per operation per pass",
+      ).toBe(taskIds.length * 5);
+    } finally {
+      db.close();
+    }
+  }, 30_000);
+
+  it("releases a closed host's running authority for a replacement host", async () => {
+    const root = workspace("supervision-release");
+    const storePath = join(root, "operations.sqlite");
+    const owner = { kind: "parent-session" as const, sessionId: "owner-a", workspace: root, branchId: null, goalId: null };
+    const store = openStore({ path: storePath });
+    try {
+      store.registerOperation({
+        operationId: "op_release",
+        taskId: "bgs_00000000000000000001",
+        launchToken: "launch_release",
+        owner,
+        observer: { kind: "background-tasks", version: "1" },
+      });
+    } finally {
+      store.close();
+    }
+
+    const ownerHost = startHost({
+      root,
+      supervisor: fakeRunningSupervisor(),
+      ctx: createCtx(root, "owner-a"),
+    }).host;
+    await ownerHost.reconcileNow();
+    const claimed = openStore({ path: storePath });
+    try {
+      expect(claimed.getOperation("op_release")?.health).toBe("active");
+      expect(claimed.getOperation("op_release")?.supervision?.hostId).toBeTruthy();
+    } finally {
+      claimed.close();
+    }
+
+    ownerHost.close();
+    const released = openStore({ path: storePath });
+    try {
+      expect(released.getOperation("op_release")?.supervision).toBeNull();
+      expect(released.getOperation("op_release")?.health).toBe("unmonitored");
+      expect(released.getOperation("op_release")?.healthReason).toMatch(/closed/);
+    } finally {
+      released.close();
+    }
+
+    const replacementSupervisor = fakeRunningSupervisor();
+    const replacement = startHost({
+      root,
+      supervisor: replacementSupervisor,
+      ctx: createCtx(root, "replacement-b"),
+    }).host;
+    await replacement.reconcileNow();
+    expect(replacementSupervisor.inspections).toBeGreaterThan(0);
+    const takenOver = openStore({ path: storePath });
+    try {
+      expect(takenOver.getOperation("op_release")?.health).toBe("active");
+      expect(takenOver.getOperation("op_release")?.supervision?.hostId).toBeTruthy();
+    } finally {
+      takenOver.close();
+    }
+  }, 30_000);
+
+  it("does not let a stale contender replace a newly live authority", async () => {
+    const root = workspace("supervision-race");
+    const storePath = join(root, "operations.sqlite");
+    const ownerSupervisor = fakeRunningSupervisor();
+    const contenderSupervisor = fakeRunningSupervisor();
+    const ownerHost = startHost({
+      root,
+      supervisor: ownerSupervisor,
+      ctx: createCtx(root, "owner-a"),
+    }).host;
+    const contenderHost = startHost({
+      root,
+      supervisor: contenderSupervisor,
+      ctx: createCtx(root, "unrelated-b"),
+    }).host;
+    await ownerHost.reconcileNow();
+    await contenderHost.reconcileNow();
+
+    // Both hosts now hold a snapshot of an operation that has no supervisor.
+    const store = openStore({ path: storePath });
+    let first: string | undefined;
+    try {
+      store.registerOperation({
+        operationId: "op_race",
+        taskId: "bgs_00000000000000000002",
+        launchToken: "launch_race",
+        owner: { kind: "parent-session", sessionId: "owner-a", workspace: root, branchId: null, goalId: null },
+        observer: { kind: "background-tasks", version: "1" },
+      });
+      const stale = store.getOperation("op_race");
+      expect(stale).not.toBeNull();
+      expect(stale?.supervision).toBeNull();
+
+      const ownerBefore = ownerSupervisor.inspections;
+      (ownerHost as unknown as { reconcileOperation(operation: unknown): void }).reconcileOperation(stale);
+      expect(ownerSupervisor.inspections - ownerBefore).toBe(1);
+      first = store.getOperation("op_race")?.supervision?.hostId;
+      expect(first).toBeTruthy();
+
+      const contenderBefore = contenderSupervisor.inspections;
+      (contenderHost as unknown as { reconcileOperation(operation: unknown): void }).reconcileOperation(stale);
+      expect(contenderSupervisor.inspections - contenderBefore).toBe(0);
+      expect(store.getOperation("op_race")?.supervision?.hostId).toBe(first);
+    } finally {
+      store.close();
+    }
+  }, 30_000);
+
+  it("does not let an identityless follower scan or inspect a live foreign operation", async () => {
+    const root = workspace("supervision-identityless-follower");
+    const storePath = join(root, "operations.sqlite");
+    const owner = { kind: "parent-session" as const, sessionId: "owner-a", workspace: root, branchId: null, goalId: null };
+    const store = openStore({ path: storePath });
+    try {
+      store.registerOperation({
+        operationId: "op_identityless",
+        taskId: "bgs_00000000000000000003",
+        launchToken: "launch_identityless",
+        owner,
+        observer: { kind: "background-tasks", version: "1" },
+      });
+    } finally {
+      store.close();
+    }
+
+    const ownerHost = startHost({
+      root,
+      supervisor: fakeRunningSupervisor(),
+      ctx: createCtx(root, "owner-a"),
+    }).host;
+    await ownerHost.reconcileNow();
+
+    const followerSupervisor = fakeRunningSupervisor();
+    const anonymous = {
+      cwd: root,
+      sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
+      isIdle: () => true,
+    } as unknown as ExtensionContext;
+    const follower = startHost({
+      root,
+      supervisor: followerSupervisor,
+      ctx: anonymous,
+    }).host;
+    await follower.reconcileNow();
+    const inspectionsBefore = followerSupervisor.inspections;
+
+    let runningScans = 0;
+    let privateInspections = 0;
+    const privateFollower = follower as unknown as {
+      store: { listOperations(filter?: { phase?: string }): unknown };
+      inspect(taskId: string): unknown;
+    };
+    const originalList = privateFollower.store.listOperations.bind(privateFollower.store);
+    privateFollower.store.listOperations = (filter?: { phase?: string }) => {
+      if (filter?.phase === "running") runningScans += 1;
+      return originalList(filter);
+    };
+    const originalInspect = privateFollower.inspect.bind(privateFollower);
+    privateFollower.inspect = (taskId: string) => {
+      privateInspections += 1;
+      return originalInspect(taskId);
+    };
+
+    for (let pass = 0; pass < 5; pass += 1) await follower.reconcileNow();
+    expect(runningScans, "identityless followers do not enumerate the global running set").toBe(0);
+    expect(privateInspections, "identityless followers do not inspect a live foreign holder").toBe(0);
+    expect(followerSupervisor.inspections - inspectionsBefore).toBe(0);
+  }, 30_000);
+});
+
 describe("worker operation service", () => {
   function runScope(root: string, conversationId = "conv-1"): WorkerRunScope {
     return {
@@ -2110,8 +2398,8 @@ describe("callback origin and delivery receipt", () => {
     watcher.start(ctx);
     await watcher.reconcileNow();
 
-    // A separate launcher registers/starts the task, then another host with no
-    // session identity records terminal while the watcher is not reconciling.
+    // A separate launcher registers/starts the task, then another process
+    // records terminal while the watcher is not reconciling.
     const launcherHarness = createHarness();
     const launcher = createObservedWaitHost(launcherHarness.pi, { ...options, notifyParent: () => {} });
     launcher.start(ctx);
@@ -2121,18 +2409,7 @@ describe("callback origin and delivery receipt", () => {
       ctx,
     });
     launcher.close();
-    const recorderHarness = createHarness();
-    const recorder = createObservedWaitHost(recorderHarness.pi, { ...options, notifyParent: () => {} });
-    cleanups.push(() => recorder.close());
-    const anonymous = {
-      cwd: root,
-      sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
-      isIdle: () => true,
-    } as unknown as ExtensionContext;
-    recorder.start(anonymous);
-    await until(recorder, () => (recorder as unknown as {
-      operationForTask(id: string): { terminalRevision: number } | undefined;
-    }).operationForTask(launch.id)?.terminalRevision === 1);
+    recordTerminalFromChild(root, launch.operationId, launch.owner, "late-terminal");
 
     // The watcher did not see the running phase. Normal reconcile discovers the
     // new shared sidecar/terminal result and hands off exactly once.
@@ -2271,20 +2548,8 @@ describe("callback origin and delivery receipt", () => {
     watcher.start(ctx);
     await watcher.reconcileNow();
 
-    // A different host with no session identity records the terminal revision.
-    const recorderHarness = createHarness();
-    const recorder = createObservedWaitHost(recorderHarness.pi, { ...options, notifyParent: () => {} });
-    cleanups.push(() => recorder.close());
-    const anonymous = {
-      cwd: root,
-      sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
-      isIdle: () => true,
-    } as unknown as ExtensionContext;
-    recorder.start(anonymous);
-    await until(recorder, () => (recorder as unknown as {
-      operationForTask(id: string): { terminalRevision: number } | undefined;
-    }).operationForTask(launch.id)?.terminalRevision === 1);
-    await recorder.reconcileNow();
+    // A different process records the terminal revision.
+    recordTerminalFromChild(root, launch.operationId, launch.owner, "watched-terminal");
     expect(notifier.calls).toHaveLength(0);
 
     // The active watcher sees the task leave the running set and recovers the
