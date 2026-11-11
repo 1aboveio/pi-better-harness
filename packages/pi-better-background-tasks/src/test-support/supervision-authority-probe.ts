@@ -21,6 +21,7 @@ interface ProbeRequest {
   session: string;
   passes: number;
   stay: boolean;
+  identityless?: boolean;
 }
 
 interface ProbeReport {
@@ -155,7 +156,7 @@ async function main(): Promise<void> {
   const ctx = {
     cwd: request.root,
     sessionManager: {
-      getSessionId: () => request.session,
+      getSessionId: () => request.identityless ? undefined : request.session,
       getBranch: () => [],
     },
     isIdle: () => true,

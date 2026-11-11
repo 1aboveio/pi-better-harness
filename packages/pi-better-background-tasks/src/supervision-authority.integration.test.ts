@@ -48,10 +48,10 @@ function workspace(name: string): string {
   return root;
 }
 
-function startProbe(root: string, session: string, stay: boolean): Probe {
+function startProbe(root: string, session: string, stay: boolean, options: { identityless?: boolean } = {}): Probe {
   const child = spawn(process.execPath, [
     "--import", "tsx", probePath,
-    JSON.stringify({ root, session, passes: PASSES, stay }),
+    JSON.stringify({ root, session, passes: PASSES, stay, identityless: options.identityless === true }),
   ], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
@@ -119,6 +119,53 @@ function seedOperations(root: string): void {
 }
 
 describe("supervision authority across independent processes", () => {
+  it("keeps identityless followers behind the discovery holder", async () => {
+    const root = workspace("multi-process-identityless");
+    seedOperations(root);
+    const db = new DatabaseSync(join(root, "operations.sqlite"));
+    db.exec("CREATE TABLE probe_updates (host TEXT)");
+    db.exec(`CREATE TRIGGER probe_update AFTER UPDATE ON operations BEGIN
+      INSERT INTO probe_updates VALUES (json_extract(NEW.supervision_json, '$.hostId'));
+    END`);
+    const countUpdates = (): number => {
+      const row = db.prepare("SELECT count(*) AS count FROM probe_updates").get() as { count?: number } | undefined;
+      return Number(row?.count ?? 0);
+    };
+
+    try {
+      const owner = startProbe(root, "owner-a", true);
+      const ownerReport = await owner.report;
+      expect(ownerReport.steady.globalScans).toBe(PASSES);
+      expect(ownerReport.steady.inspections).toBe(TASK_COUNT * PASSES);
+
+      db.exec("DELETE FROM probe_updates");
+      const identityless = startProbe(root, "unrelated-identityless", false, { identityless: true });
+      const identitylessReport = await identityless.report;
+      expect(identitylessReport.warmWrites).toBe(0);
+      expect(identitylessReport.steady.globalScans, "no global enumeration without the discovery claim").toBe(0);
+      expect(identitylessReport.steady.inspections, "no foreign inspection without operation authority").toBe(0);
+      expect(identitylessReport.steady.writes).toBe(0);
+      expect(identitylessReport.steady.localScans).toBe(PASSES);
+      expect(identitylessReport.steady.processProbes, "one discovery-holder identity check per pass").toBe(PASSES);
+      expect(identitylessReport.steady.directoryReads).toBe(0);
+      expect(identitylessReport.steady.queries).toBe(PASSES * 3);
+      expect(countUpdates(), "identityless follower made no operation writes").toBe(0);
+      expect(
+        ownerReport.steady.globalScans + identitylessReport.steady.globalScans,
+        "identityless follower does not add global scans",
+      ).toBe(PASSES);
+      expect(
+        ownerReport.steady.inspections + identitylessReport.steady.inspections,
+        "identityless follower does not add foreign inspections",
+      ).toBe(TASK_COUNT * PASSES);
+
+      owner.child.kill("SIGKILL");
+      await once(owner.child, "exit");
+    } finally {
+      db.close();
+    }
+  }, 60_000);
+
   it("serializes simultaneous contenders so no operation is claimed twice", async () => {
     const root = workspace("multi-process-contenders");
     seedOperations(root);

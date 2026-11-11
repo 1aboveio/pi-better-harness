@@ -702,6 +702,67 @@ describe("supervision authority", () => {
       store.close();
     }
   }, 30_000);
+
+  it("does not let an identityless follower scan or inspect a live foreign operation", async () => {
+    const root = workspace("supervision-identityless-follower");
+    const storePath = join(root, "operations.sqlite");
+    const owner = { kind: "parent-session" as const, sessionId: "owner-a", workspace: root, branchId: null, goalId: null };
+    const store = openStore({ path: storePath });
+    try {
+      store.registerOperation({
+        operationId: "op_identityless",
+        taskId: "bgs_00000000000000000003",
+        launchToken: "launch_identityless",
+        owner,
+        observer: { kind: "background-tasks", version: "1" },
+      });
+    } finally {
+      store.close();
+    }
+
+    const ownerHost = startHost({
+      root,
+      supervisor: fakeRunningSupervisor(),
+      ctx: createCtx(root, "owner-a"),
+    }).host;
+    await ownerHost.reconcileNow();
+
+    const followerSupervisor = fakeRunningSupervisor();
+    const anonymous = {
+      cwd: root,
+      sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
+      isIdle: () => true,
+    } as unknown as ExtensionContext;
+    const follower = startHost({
+      root,
+      supervisor: followerSupervisor,
+      ctx: anonymous,
+    }).host;
+    await follower.reconcileNow();
+    const inspectionsBefore = followerSupervisor.inspections;
+
+    let runningScans = 0;
+    let privateInspections = 0;
+    const privateFollower = follower as unknown as {
+      store: { listOperations(filter?: { phase?: string }): unknown };
+      inspect(taskId: string): unknown;
+    };
+    const originalList = privateFollower.store.listOperations.bind(privateFollower.store);
+    privateFollower.store.listOperations = (filter?: { phase?: string }) => {
+      if (filter?.phase === "running") runningScans += 1;
+      return originalList(filter);
+    };
+    const originalInspect = privateFollower.inspect.bind(privateFollower);
+    privateFollower.inspect = (taskId: string) => {
+      privateInspections += 1;
+      return originalInspect(taskId);
+    };
+
+    for (let pass = 0; pass < 5; pass += 1) await follower.reconcileNow();
+    expect(runningScans, "identityless followers do not enumerate the global running set").toBe(0);
+    expect(privateInspections, "identityless followers do not inspect a live foreign holder").toBe(0);
+    expect(followerSupervisor.inspections - inspectionsBefore).toBe(0);
+  }, 30_000);
 });
 
 describe("worker operation service", () => {
@@ -2337,8 +2398,8 @@ describe("callback origin and delivery receipt", () => {
     watcher.start(ctx);
     await watcher.reconcileNow();
 
-    // A separate launcher registers/starts the task, then another host with no
-    // session identity records terminal while the watcher is not reconciling.
+    // A separate launcher registers/starts the task, then another process
+    // records terminal while the watcher is not reconciling.
     const launcherHarness = createHarness();
     const launcher = createObservedWaitHost(launcherHarness.pi, { ...options, notifyParent: () => {} });
     launcher.start(ctx);
@@ -2348,18 +2409,7 @@ describe("callback origin and delivery receipt", () => {
       ctx,
     });
     launcher.close();
-    const recorderHarness = createHarness();
-    const recorder = createObservedWaitHost(recorderHarness.pi, { ...options, notifyParent: () => {} });
-    cleanups.push(() => recorder.close());
-    const anonymous = {
-      cwd: root,
-      sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
-      isIdle: () => true,
-    } as unknown as ExtensionContext;
-    recorder.start(anonymous);
-    await until(recorder, () => (recorder as unknown as {
-      operationForTask(id: string): { terminalRevision: number } | undefined;
-    }).operationForTask(launch.id)?.terminalRevision === 1);
+    recordTerminalFromChild(root, launch.operationId, launch.owner, "late-terminal");
 
     // The watcher did not see the running phase. Normal reconcile discovers the
     // new shared sidecar/terminal result and hands off exactly once.
@@ -2498,20 +2548,8 @@ describe("callback origin and delivery receipt", () => {
     watcher.start(ctx);
     await watcher.reconcileNow();
 
-    // A different host with no session identity records the terminal revision.
-    const recorderHarness = createHarness();
-    const recorder = createObservedWaitHost(recorderHarness.pi, { ...options, notifyParent: () => {} });
-    cleanups.push(() => recorder.close());
-    const anonymous = {
-      cwd: root,
-      sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
-      isIdle: () => true,
-    } as unknown as ExtensionContext;
-    recorder.start(anonymous);
-    await until(recorder, () => (recorder as unknown as {
-      operationForTask(id: string): { terminalRevision: number } | undefined;
-    }).operationForTask(launch.id)?.terminalRevision === 1);
-    await recorder.reconcileNow();
+    // A different process records the terminal revision.
+    recordTerminalFromChild(root, launch.operationId, launch.owner, "watched-terminal");
     expect(notifier.calls).toHaveLength(0);
 
     // The active watcher sees the task leave the running set and recovers the

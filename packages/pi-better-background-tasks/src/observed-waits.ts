@@ -1130,8 +1130,7 @@ export class ObservedWaitHost {
     try {
       const role = this.refreshDiscoveryAuthority();
       this.noteDiscoveryRole(role);
-      const identityless = !!this.activeContext && this.sessionIdIfAvailable(this.activeContext) === undefined;
-      if (role === "holder" || identityless) {
+      if (role === "holder") {
         this.discoverObservedTasks();
         this.reconcileGlobalRunning();
       } else {
@@ -2817,17 +2816,7 @@ export class ObservedWaitHost {
   private reconcileOperation(operation: OperationRecord): void {
     if (operation.terminalRevision > 0) return;
     const authority = this.supervisionAuthority(operation);
-    if (authority === "foreign") {
-      // A recovery context without a readable session identity may still witness
-      // a terminal record produced by the live holder. It never takes over
-      // supervision or writes health, so an ordinary unrelated session cannot
-      // use this path to churn the shared records.
-      if (this.activeContext && this.sessionIdIfAvailable(this.activeContext) === undefined) {
-        const inspection = this.inspect(operation.taskId);
-        if (inspection?.terminal) this.recordTerminal(operation, inspection);
-      }
-      return;
-    }
+    if (authority === "foreign") return;
     let claimed = false;
     if (authority === "replace") {
       try {
