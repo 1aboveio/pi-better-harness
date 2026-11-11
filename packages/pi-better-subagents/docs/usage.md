@@ -354,8 +354,9 @@ three times wakes the parent once as an `Action required` incident
 deadline), `deadline: passed` (ended some other way after the deadline, for
 example it crashed or a user stopped it), `stopped: ceiling`, or `stuck`. The spawn response lists the limits in force.
 
-**Global defaults.** Precedence is spawn parameter, then environment, then
-`config.json`, then the built-in default:
+**Global defaults.** Precedence is spawn parameter, then the session timeout
+choice (for `max_minutes`), then environment, then `config.json`, then the
+built-in default:
 
 | Setting | Environment | `config.json` |
 |---------|-------------|---------------|

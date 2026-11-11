@@ -159,6 +159,29 @@ after(() => {
 });
 
 describe("harness timing: launch", () => {
+    it("restores a session timeout over the environment while explicit launch values still win", async () => {
+        const previous = process.env.PI_SUBAGENT_MAX_MINUTES;
+        process.env.PI_SUBAGENT_MAX_MINUTES = "5";
+        const h = makeHarness();
+        h.ctx.sessionManager.getBranch = () => [{
+            type: "custom", customType: "pi-better-subagents-timing", data: { version: 1, maxMinutes: 90 },
+        }];
+        try {
+            await h.handlers.get("session_start")({}, h.ctx);
+            const inherited = await spawnRun(h);
+            const meta = readMeta(inherited.id);
+            assert.equal(meta.timing.ceilingAt, meta.startedAt + 90 * 60_000);
+            await reap(inherited);
+            const disabled = await spawnRun(h, { max_minutes: 0 });
+            assert.equal(readMeta(disabled.id).timing.ceilingAt, undefined);
+            await reap(disabled);
+        } finally {
+            h.shutdown();
+            if (previous === undefined) delete process.env.PI_SUBAGENT_MAX_MINUTES;
+            else process.env.PI_SUBAGENT_MAX_MINUTES = previous;
+        }
+    });
+
     it("defaults to a 60-minute ceiling and stall detection and prepares explicit deadline support", async () => {
         const h = makeHarness();
         try {

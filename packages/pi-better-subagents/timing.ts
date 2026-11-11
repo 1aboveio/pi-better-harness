@@ -111,6 +111,18 @@ export interface TimingParams {
     stuck_minutes?: number | null;
 }
 
+/** Carry a parked run's remaining limits, including an explicitly disabled ceiling. */
+export function continuationTimingParams(timing: RunTiming, now: number): TimingParams {
+    const remaining = (at: number): number => Math.max(1, at - now) / 60_000;
+    return {
+        ...(timing.deadlineAt !== undefined ? { deadline_minutes: remaining(timing.deadlineAt) } : {}),
+        max_minutes: timing.ceilingAt === undefined ? 0 : remaining(timing.ceilingAt),
+        grace_minutes: timing.graceMs / 60_000,
+        ...(timing.toolWaitMs !== undefined ? { tool_wait_minutes: timing.toolWaitMs / 60_000 } : {}),
+        ...(timing.stuckMs !== undefined ? { stuck_minutes: timing.stuckMs / 60_000 } : {}),
+    };
+}
+
 export interface TimingSettings {
     deadlineMinutes?: number | null;
     graceMinutes?: number | null;

@@ -41,6 +41,7 @@ import { createSubagentSettingsPage } from "./settings-page.ts";
 import { deliverSubagentPrompt, effectiveSubagentSettings, formatSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
 import {
+    continuationTimingParams,
     decideTiming,
     describeTiming,
     DEFAULT_TIMING_MINUTES,
@@ -2128,6 +2129,11 @@ export default function (pi: ExtensionAPI) {
     };
     const activeConcurrencyCap = (): number => capOverride ?? normalizeConcurrencyCap(loadConfig().maxConcurrent);
     const timingSettingsFor = (cfg = loadConfig()): TimingSettings => ({ ...cfg, ...timingOverride });
+    /** A per-run max_minutes wins; otherwise a session timeout choice beats the environment. */
+    const launchTimingParams = (params: TimingParams = {}): TimingParams => ({
+        ...params,
+        max_minutes: params.max_minutes ?? timingOverride.maxMinutes,
+    });
     interface TimingMinutesState {
         maxMinutes: number;
         toolWaitMinutes: number;
@@ -2152,11 +2158,12 @@ export default function (pi: ExtensionAPI) {
                     : cfg[key] !== undefined && cfg[key] !== null ? "config" : "default";
         const timeoutEnv = process.env[TIMING_ENV.max];
         const timeoutSource = (): "environment" | "session" | "config" | "default" =>
-            timeoutEnv !== undefined && timeoutEnv.trim() !== "" ? "environment"
-                : timingOverride.maxMinutes !== undefined ? "session"
+            timingOverride.maxMinutes !== undefined ? "session"
+                : timeoutEnv !== undefined && timeoutEnv.trim() !== "" ? "environment"
                     : cfg.maxMinutes !== undefined && cfg.maxMinutes !== null ? "config" : "default";
         try {
-            const effective = resolveRunTiming({ settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
+            const sessionTimeout = timingOverride.maxMinutes !== undefined ? { max_minutes: timingOverride.maxMinutes } : {};
+            const effective = resolveRunTiming({ params: sessionTimeout, settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
             const defaults = resolveRunTiming({ settings: cfg, env: process.env, startedAt: 0 });
             const minutes = (ms: number | undefined): number => ms === undefined ? 0 : ms / 60_000;
             return {
@@ -2568,7 +2575,7 @@ export default function (pi: ExtensionAPI) {
         }
         const cfg = loadConfig();
         // Harness-owned timing (soft deadline, ceiling, tool-wait and stuck windows); validated before any side effect.
-        resolveRunTiming({ params: p, settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
+        resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
         let model: string | undefined;
         let thinking: ThinkingLevel | undefined;
         if (resume) {
@@ -2965,7 +2972,7 @@ export default function (pi: ExtensionAPI) {
                     authorityReference: "",
                     // The assignment deadline the attempt was admitted with; a
                     // continuation must not silently extend it.
-                    deadlineAt: resolveRunTiming({ params: p, settings: timingSettingsFor(cfg), env: process.env, startedAt: Date.now() }).deadlineAt ?? null,
+                    deadlineAt: resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt: Date.now() }).deadlineAt ?? null,
                     taskPolicy: taskRuntime?.policy ?? null,
                 });
                 const authorityReference = `worker-policy:${createHash("sha256")
@@ -3104,7 +3111,7 @@ export default function (pi: ExtensionAPI) {
                         tools: bridgePlan.tools,
                     },
                 } : {}),
-                timing: resolveRunTiming({ params: p, settings: timingSettingsFor(cfg), env: process.env, startedAt }),
+                timing: resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt }),
             };
             // This instance holds the exit observer for a run it actually
             // started; only it can finalize on the exit event (#625).
@@ -3346,17 +3353,7 @@ export default function (pi: ExtensionAPI) {
     function continuationTiming(prior: RunMeta): TimingParams {
         const timing = prior.timing;
         if (!timing) return {};
-        const minutes = (at: number | undefined): number | undefined => {
-            if (at === undefined) return undefined;
-            return Math.max(1, at - Date.now()) / 60_000;
-        };
-        return {
-            ...(timing.deadlineAt !== undefined ? { deadline_minutes: minutes(timing.deadlineAt) } : {}),
-            ...(timing.ceilingAt !== undefined ? { max_minutes: minutes(timing.ceilingAt) } : {}),
-            ...(timing.graceMs !== undefined ? { grace_minutes: timing.graceMs / 60_000 } : {}),
-            ...(timing.toolWaitMs !== undefined ? { tool_wait_minutes: timing.toolWaitMs / 60_000 } : {}),
-            ...(timing.stuckMs !== undefined ? { stuck_minutes: timing.stuckMs / 60_000 } : {}),
-        };
+        return continuationTimingParams(timing, Date.now());
     }
 
     /**

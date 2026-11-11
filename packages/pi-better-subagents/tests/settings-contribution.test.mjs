@@ -14,6 +14,8 @@ const theme = { fg: (_color, text) => text, bg: (_color, text) => text,
     bold: (text) => text, inverse: (text) => text };
 
 test("subagents contributes the standalone settings opener with shared session and saved state, and removes its listener", async (t) => {
+    const previousMax = process.env[TIMING_ENV.max];
+    process.env[TIMING_ENV.max] = "5";
     const path = join(root, "settings.json");
     setConfigPathForTests(path);
     setConfigForTests({ delegationMode: "manual", maxConcurrent: 3 });
@@ -28,6 +30,8 @@ test("subagents contributes the standalone settings opener with shared session a
         else process.env[TIMING_ENV.toolWait] = previousTimingEnv.toolWait;
         if (previousTimingEnv.stuck === undefined) delete process.env[TIMING_ENV.stuck];
         else process.env[TIMING_ENV.stuck] = previousTimingEnv.stuck;
+        if (previousMax === undefined) delete process.env[TIMING_ENV.max];
+        else process.env[TIMING_ENV.max] = previousMax;
         setConfigPathForTests(undefined);
         rmSync(root, { recursive: true, force: true });
     });
@@ -102,6 +106,7 @@ test("subagents contributes the standalone settings opener with shared session a
     await commands.get("subagents").handler("settings", ctx);
     assert.equal(pages.length, 2);
     assert.equal(pages[0], pages[1]);
+    assert.match(pages[0], /Timeout \(minutes\)\s+5/, "the real settings page shows the environment-effective timeout");
     assert.match(pages[0], /Tool-wait alert\s+7 min/, "the real settings page shows the environment-effective value");
     assert.match(pages[0], /No-progress alert\s+13 min/);
     delete process.env[TIMING_ENV.toolWait];
@@ -120,7 +125,7 @@ test("subagents contributes the standalone settings opener with shared session a
     keys = ["\x13"]; // save via standalone command
     await commands.get("subagents").handler("", ctx);
     assert.match(pages.at(-1), /Delegation mode\s+adaptive/);
-    assert.match(pages.at(-1), /Timeout \(minutes\)\s+90/);
+    assert.match(pages.at(-1), /Timeout \(minutes\)\s+90/, "the session timeout wins over the environment");
     assert.equal(loadConfig().delegationMode, "adaptive");
     assert.equal(loadConfig().maxConcurrent, 3);
     assert.equal(loadConfig().maxMinutes, 90);

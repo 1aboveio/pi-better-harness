@@ -18,6 +18,7 @@ import {
     emptyProgress,
     foldProgress,
     resolveRunTiming,
+    continuationTimingParams,
     stuckAlertText,
     stuckAge,
     timingParameterSchemas,
@@ -35,6 +36,16 @@ import { findProviderRejectedKeywords } from "../../../scripts/provider-schema-c
 const MIN = 60_000;
 
 describe("timing policy resolution", () => {
+    it("preserves a disabled ceiling and remaining time across automatic resume", () => {
+        const disabled = resolveRunTiming({ params: { max_minutes: 0 }, startedAt: 0 });
+        const params = continuationTimingParams(disabled, MIN);
+        assert.equal(params.max_minutes, 0);
+        assert.equal(resolveRunTiming({ params, settings: { maxMinutes: 60 }, startedAt: MIN }).ceilingAt, undefined);
+        const enabled = resolveRunTiming({ startedAt: 0 });
+        const resumed = resolveRunTiming({ params: continuationTimingParams(enabled, MIN), startedAt: MIN });
+        assert.equal(resumed.ceilingAt, enabled.ceilingAt);
+    });
+
     it("uses spawn parameter, then environment, then settings, then the built-in default", () => {
         const env = { [TIMING_ENV.deadline]: "20", [TIMING_ENV.stuck]: "4" };
         const settings = { deadlineMinutes: 25, graceMinutes: 2, maxMinutes: 60, toolWaitMinutes: 7 };
