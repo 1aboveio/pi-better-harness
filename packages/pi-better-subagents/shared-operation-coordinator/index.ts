@@ -85,6 +85,7 @@ export type {
     RegisterOperationResult,
     RegisterWaitInput,
     RegisterWaitResult,
+    ReleaseSupervisionInput,
     ReleaseOutboxInput,
     ReleaseResumeClaimInput,
     ReleaseResumeClaimResult,

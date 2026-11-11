@@ -55,6 +55,9 @@ changed task id, launch token, owner or observer is refused, so a store cannot b
 used to prove ownership of a launch that was swapped underneath it.
 `recordSupervision` replaces the supervising host and reports observer health
 (`active`, `unmonitored`, `lost`) separately from the wait phase.
+A host that closes calls `releaseSupervision` with its exact host id; a newer
+takeover is left untouched, and running work becomes explicitly unmonitored for
+the next host.
 
 **Registering a wait.** `registerWait` reads each dependency's current terminal
 revision *inside* its transaction, so a task that finished before registration is
@@ -113,7 +116,7 @@ dependency still resolves for interpretation.
 ## API surface
 
 ```ts
-registerOperation / recordSupervision / recordTerminalOutcome
+registerOperation / recordSupervision / releaseSupervision / recordTerminalOutcome
 getOperation / listOperations / listOperationEvidence
 
 registerWait / transitionWaitPhase / cancelWait
@@ -169,8 +172,8 @@ status text such as `HTTP_STATUS=500` or `AUTH: rejected by upstream` is accepte
   have published, `listWaits({ pendingOnly: true })` for outstanding generations,
   and `listOutbox({ state: "pending" })` for undelivered results. Replaying a
   terminal event with its original `eventId` is safe.
-- A replacement host calls `recordSupervision` with the same owner identity; a
-  different owner is refused.
+- A replacement host calls `recordSupervision` with the same owner identity after
+  the previous authority is released or proven dead; a different owner is refused.
 - Retail decisions the store deliberately avoids: whether an operation may launch,
   how a continuation is admitted, whether a goal or assignment is complete, and
   what a domain adapter must observe.

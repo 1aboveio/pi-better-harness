@@ -987,6 +987,7 @@ export class ObservedWaitHost {
     HOST_INSTANCE_STATE.closed.add(this.hostId);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    this.releaseSupervisionAuthority();
     try { this.store?.close(); } catch { /* already closed */ }
     this.store = undefined;
     this.launches.clear();
@@ -2652,6 +2653,35 @@ export class ObservedWaitHost {
 
   private reconcileOperation(operation: OperationRecord): void {
     if (operation.terminalRevision > 0) return;
+    const authority = this.supervisionAuthority(operation);
+    if (authority === "foreign") {
+      // A recovery context without a readable session identity may still witness
+      // a terminal record produced by the live holder. It never takes over
+      // supervision or writes health, so an ordinary unrelated session cannot
+      // use this path to churn the shared records.
+      if (this.activeContext && this.sessionIdIfAvailable(this.activeContext) === undefined) {
+        const inspection = this.inspect(operation.taskId);
+        if (inspection?.terminal) this.recordTerminal(operation, inspection);
+      }
+      return;
+    }
+    let claimed = false;
+    if (authority === "replace") {
+      try {
+        this.store?.recordSupervision({
+          operationId: operation.operationId,
+          owner: operation.owner,
+          supervision: this.supervision(),
+          health: "active",
+        });
+        claimed = true;
+      } catch (error) {
+        // Another host can hold the write lock. Leave the observed record alone
+        // and let the next reconciliation tick retry the takeover.
+        if (rpcCode(error) === "store-busy") return;
+        throw error;
+      }
+    }
     const inspection = this.inspect(operation.taskId);
     if (!inspection) {
       const now = this.options.now?.() ?? Date.now();
@@ -2679,12 +2709,14 @@ export class ObservedWaitHost {
         return;
       }
       try {
-        this.store?.recordSupervision({
-          operationId: operation.operationId,
-          owner: operation.owner,
-          health: "unmonitored",
-          reason: "no durable supervisor record exists for this operation",
-        });
+        if (claimed || operation.health !== "unmonitored" || operation.healthReason !== "no durable supervisor record exists for this operation") {
+          this.store?.recordSupervision({
+            operationId: operation.operationId,
+            owner: operation.owner,
+            health: "unmonitored",
+            reason: "no durable supervisor record exists for this operation",
+          });
+        }
       } catch { /* the owner may have been superseded; health is observational */ }
       return;
     }
@@ -2692,7 +2724,7 @@ export class ObservedWaitHost {
       this.recordTerminal(operation, inspection);
       return;
     }
-    if (operation.health !== "active" || operation.supervision?.hostId !== this.hostId) {
+    if (!claimed && (operation.health !== "active" || operation.supervision?.hostId !== this.hostId)) {
       // Health is observational; write it only when the supervising host or the
       // reported health actually changed. A 250 ms tick must not churn SQLite.
       try {
@@ -2706,6 +2738,61 @@ export class ObservedWaitHost {
         // Another host can hold the write lock. Leave health unchanged and let
         // the next reconciliation tick retry this observational update.
         if (rpcCode(error) !== "store-busy") throw error;
+      }
+    }
+  }
+
+  /**
+   * Whether this host may inspect the operation. The recorded `supervision`
+   * identity is the cross-process authority marker: a live holder keeps it, and
+   * only a closed or dead holder is replaced. Process identity is checked before
+   * elapsed time, and an unprovable holder is never stolen from.
+   */
+  private supervisionAuthority(operation: OperationRecord): "self" | "foreign" | "replace" {
+    const hostId = operation.supervision?.hostId;
+    if (!hostId) return "replace";
+    if (hostId === this.hostId) return "self";
+    if (HOST_INSTANCE_STATE.closed.has(hostId)) return "replace";
+    const { pid, startTokenDigest: claimedDigest } = parseHostIdentity(hostId);
+    if (!pid) return "foreign";
+    if (pid === process.pid) {
+      const generation = HOST_INSTANCE_STATE.generations.get(hostId);
+      // Another instance in this process still owns its record. Creation order
+      // alone is not death: a reload predecessor is marked closed above.
+      return generation === undefined ? "replace" : "foreign";
+    }
+    if (!processExists(pid)) return "replace";
+    if (!claimedDigest) return "foreign";
+    const current = readProcessStartToken(pid);
+    if (!current) return "foreign";
+    return startTokenDigest(current) === claimedDigest ? "foreign" : "replace";
+  }
+
+  /**
+   * A graceful close releases only this host's running authority. A crash leaves
+   * the same record for the next host to replace after process identity proves it
+   * dead; a newer holder is never cleared by a late close.
+   */
+  private releaseSupervisionAuthority(): void {
+    const store = this.store;
+    if (!store) return;
+    let running: OperationRecord[];
+    try {
+      running = store.listOperations({ phase: "running" });
+    } catch {
+      return;
+    }
+    for (const operation of running) {
+      if (operation.supervision?.hostId !== this.hostId) continue;
+      try {
+        store.releaseSupervision({
+          operationId: operation.operationId,
+          owner: operation.owner,
+          hostId: this.hostId,
+          reason: "the supervising host closed; another host may take over",
+        });
+      } catch {
+        // Closing must not fail on a busy or already replaced record.
       }
     }
   }

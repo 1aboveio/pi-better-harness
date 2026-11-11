@@ -20,6 +20,7 @@ import { createContext, openDatabase, type StoreContext } from "./sqlite.ts";
 import {
     getOperation as readOperationRecord,
     listOperations as readOperationRecords,
+    releaseSupervision as writeSupervisionRelease,
     recordSupervision as writeSupervision,
     recordTerminalOutcome as writeTerminalOutcome,
     registerOperation as writeOperation,
@@ -77,6 +78,7 @@ import {
     type RecordEvidencePinResult,
     type RecordEvidenceReadInput,
     type RecordEvidenceReadResult,
+    type ReleaseSupervisionInput,
     type RecordSupervisionInput,
     type RecordTerminalOutcomeInput,
     type RecordTerminalOutcomeResult,
@@ -121,6 +123,13 @@ export interface Store {
      * (`active`/`unmonitored`/`lost`). Ownership stays untouched.
      */
     recordSupervision(input: RecordSupervisionInput): OperationRecord;
+    /**
+     * Clear a closed host's supervision authority when the recorded host still
+     * matches. A newer holder is left untouched, and a terminal operation keeps
+     * its final supervision record. Returns `null` when another host already took
+     * over.
+     */
+    releaseSupervision(input: ReleaseSupervisionInput): OperationRecord | null;
     /**
      * Record the single terminal revision of an operation and settle every wait
      * that depends on it. Replaying the same event id is idempotent; a different
@@ -274,6 +283,10 @@ export function openStore(options: StoreOptions): Store {
         recordSupervision(input) {
             alive();
             return writeSupervision(ctx, input);
+        },
+        releaseSupervision(input) {
+            alive();
+            return writeSupervisionRelease(ctx, input);
         },
         recordTerminalOutcome(input) {
             alive();

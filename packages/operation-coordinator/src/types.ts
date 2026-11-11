@@ -152,6 +152,16 @@ export interface RecordSupervisionInput {
     reason?: string | null;
 }
 
+export interface ReleaseSupervisionInput {
+    operationId: string;
+    /** Must be the recorded owner; a replacement host acts for the same owner. */
+    owner: OwnerIdentity;
+    /** The exact host whose authority is being released. A newer holder is untouched. */
+    hostId: string;
+    /** Why the host stopped supervising, retained on the unmonitored record. */
+    reason?: string | null;
+}
+
 // ---- terminal outcome ---------------------------------------------------
 
 /**

@@ -24,6 +24,7 @@ import type {
     ObserverHealth,
     OperationFilter,
     OperationRecord,
+    ReleaseSupervisionInput,
     RecordSupervisionInput,
     RecordTerminalOutcomeInput,
     RecordTerminalOutcomeResult,
@@ -236,6 +237,46 @@ export function recordSupervision(
                 : null,
             nextHealth,
             nextReason,
+            ctx.now(),
+            operationId,
+        );
+        return requireOperation(ctx, operationId);
+    });
+}
+
+/**
+ * Release a closed host's supervision authority without clearing a newer
+ * holder. The update is conditional on the exact recorded host, so a host that
+ * shut down while another process already took over cannot erase the takeover.
+ * A terminal operation keeps its final supervision record; only running work
+ * becomes explicitly unmonitored for the next host.
+ */
+export function releaseSupervision(
+    ctx: StoreContext,
+    input: ReleaseSupervisionInput,
+): OperationRecord | null {
+    const operationId = requireId("operationId", input.operationId);
+    const owner = normalizeOwner("owner", input.owner);
+    const hostId = requireId("hostId", input.hostId);
+    const reason = optionalText("reason", input.reason, 1024)
+        ?? "the supervising host closed; another host may take over";
+
+    return ctx.transaction(() => {
+        const operation = requireOperation(ctx, operationId);
+        if (!sameOwner(operation.owner, owner)) {
+            throw new StoreError(
+                "foreign-owner",
+                `Operation ${operationId} belongs to another execution owner (differs in ${describeOwnerDiff(operation.owner, owner)}).`,
+            );
+        }
+        if (operation.supervision?.hostId !== hostId) return null;
+        if (operation.phase === "terminal") return operation;
+        run(
+            ctx,
+            `UPDATE operations
+             SET supervision_json = NULL, health = 'unmonitored', health_reason = ?, updated_at = ?
+             WHERE operation_id = ?`,
+            reason,
             ctx.now(),
             operationId,
         );

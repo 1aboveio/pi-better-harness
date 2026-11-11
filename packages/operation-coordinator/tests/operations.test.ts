@@ -127,6 +127,45 @@ describe("operation registration", () => {
             "foreign-owner",
         );
     });
+
+    it("releases only the recorded host's running supervision", () => {
+        const harness = createHarness();
+        const { operation } = registerOperation(harness.store);
+
+        const released = harness.store.releaseSupervision({
+            operationId: operation.operationId,
+            owner: workerOwner,
+            hostId: "host-1",
+            reason: "the supervising host closed",
+        });
+        assert.equal(released?.supervision, null);
+        assert.equal(released?.health, "unmonitored");
+        assert.match(released?.healthReason ?? "", /closed/);
+
+        // A newer takeover is not erased by the old host's late release.
+        harness.store.recordSupervision({
+            operationId: operation.operationId,
+            owner: workerOwner,
+            supervision: { hostId: "host-2" },
+            health: "active",
+        });
+        assert.equal(harness.store.releaseSupervision({
+            operationId: operation.operationId,
+            owner: workerOwner,
+            hostId: "host-1",
+        }), null);
+        assert.equal(harness.store.getOperation(operation.operationId)?.supervision?.hostId, "host-2");
+
+        // Terminal work keeps the supervisor that observed its final revision.
+        settleOperation(harness.store, operation.operationId);
+        const settled = harness.store.releaseSupervision({
+            operationId: operation.operationId,
+            owner: workerOwner,
+            hostId: "host-2",
+        });
+        assert.equal(settled?.phase, "terminal");
+        assert.equal(settled?.supervision?.hostId, "host-2");
+    });
 });
 
 describe("terminal outcomes", () => {
