@@ -50,9 +50,10 @@ describe("timing policy resolution", () => {
         const defaults = resolveRunTiming({ startedAt: 0 });
         assert.deepEqual(defaults, {
             graceMs: 5 * MIN,
+            ceilingAt: 60 * MIN,
             toolWaitMs: 5 * MIN,
             stuckMs: 10 * MIN,
-        }, "elapsed-time limits are opt-in; tool-wait and stall detection are default-on and independent");
+        }, "hard timeout defaults to 60 minutes; tool-wait and stall detection are default-on and independent");
     });
 
     it("treats null and empty env as unset, 0 as off, and rejects anything else", () => {

@@ -159,17 +159,17 @@ after(() => {
 });
 
 describe("harness timing: launch", () => {
-    it("defaults to stall detection without elapsed-time limits and prepares explicit deadline support", async () => {
+    it("defaults to a 60-minute ceiling and stall detection and prepares explicit deadline support", async () => {
         const h = makeHarness();
         try {
             const run = await spawnRun(h, { deadline_minutes: null, grace_minutes: null, max_minutes: null, stuck_minutes: null });
             const meta = readMeta(run.id);
             assert.equal(meta.timing.deadlineAt, undefined);
             assert.equal(meta.timing.graceMs, 5 * 60_000);
-            assert.equal(meta.timing.ceilingAt, undefined);
+            assert.equal(meta.timing.ceilingAt, meta.startedAt + 60 * 60_000);
             assert.equal(meta.timing.toolWaitMs, 5 * 60_000);
             assert.equal(meta.timing.stuckMs, 10 * 60_000);
-            assert.match(run.out, /Timing: no soft deadline, no ceiling, tool wait after 5m, stuck wake after 10m without progress\./);
+            assert.match(run.out, /Timing: no soft deadline, ceiling 60m, tool wait after 5m, stuck wake after 10m without progress\./);
             const log = await waitFor(() => {
                 const text = existsSync(meta.logPath) ? readFileSync(meta.logPath, "utf8") : "";
                 return text.includes("--extension") ? text : undefined;

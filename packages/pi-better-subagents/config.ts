@@ -195,6 +195,7 @@ export function writeSubagentSettings(
     settings: {
         delegationMode: DelegationMode;
         maxConcurrent: number;
+        maxMinutes?: number;
         /** Omit to preserve the saved value; `null` explicitly records discovery. */
         defaultSkills?: string[] | null;
         /** Omit to preserve the saved value. `0` disables that alert. */
@@ -207,12 +208,15 @@ export function writeSubagentSettings(
     if (!isDelegationMode(settings.delegationMode)) throw new Error("Invalid delegation mode.");
     if (!isConcurrencyCap(settings.maxConcurrent)) throw new Error("Concurrent subagents must be a positive whole number.");
     const next: {
-        delegationMode: DelegationMode; maxConcurrent: number; defaultSkills?: string[] | null;
+        delegationMode: DelegationMode; maxConcurrent: number; maxMinutes?: number; defaultSkills?: string[] | null;
         toolWaitMinutes?: number; stuckMinutes?: number;
     } = {
         delegationMode: settings.delegationMode,
         maxConcurrent: settings.maxConcurrent,
     };
+    if (settings.maxMinutes !== undefined) {
+        next.maxMinutes = validatedTimingMinutes(settings.maxMinutes, "maxMinutes");
+    }
     if (Object.hasOwn(settings, "defaultSkills")) {
         if (settings.defaultSkills === null) {
             next.defaultSkills = null;

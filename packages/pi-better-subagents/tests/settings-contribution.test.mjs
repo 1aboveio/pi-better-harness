@@ -114,11 +114,16 @@ test("subagents contributes the standalone settings opener with shared session a
     await contribution.open(ctx);
     assert.equal(entries.at(-1).data.mode, "adaptive");
     assert.equal(existsSync(path), false);
+    keys = ["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r", "\x15", "90", "\r"];
+    await contribution.open(ctx);
+    assert.equal(entries.at(-1).data.maxMinutes, 90);
     keys = ["\x13"]; // save via standalone command
     await commands.get("subagents").handler("", ctx);
     assert.match(pages.at(-1), /Delegation mode\s+adaptive/);
+    assert.match(pages.at(-1), /Timeout \(minutes\)\s+90/);
     assert.equal(loadConfig().delegationMode, "adaptive");
     assert.equal(loadConfig().maxConcurrent, 3);
+    assert.equal(loadConfig().maxMinutes, 90);
     assert.equal(existsSync(path), true);
     keys = [];
     await commands.get("subagents").handler("mode coordinator", ctx);
@@ -136,7 +141,7 @@ test("subagents contributes the standalone settings opener with shared session a
     const beforeAgents = entries.length;
     const openedBefore = pages.length;
     const eventsBefore = uiEvents.length;
-    keyBatches.push(["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r"]); // six rows down from Delegation mode lands on Agents
+    keyBatches.push(["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r"]); // seven rows down from Delegation mode lands on Agents
     await contribution.open(ctx);
     assert.match(pages.at(-2), /Agents/);
     assert.match(pages.at(-2), /Reset to defaults/);

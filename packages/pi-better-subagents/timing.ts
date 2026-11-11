@@ -58,7 +58,7 @@ export interface OpenCallRecord {
 export const DEFAULT_TIMING_MINUTES = Object.freeze({
     deadline: 0,
     grace: 5,
-    max: 0,
+    max: 60,
     toolWait: 5,
     stuck: 10,
 });
@@ -148,11 +148,6 @@ export function validatedTimingMinutes(value: unknown, label = "minutes"): numbe
     return parsed;
 }
 
-/**
- * One optional minutes value. `undefined`, `null`, and (for env) an empty
- * string mean "not set". Anything else must be a finite number from 0 to a
- * week; `0` disables.
- */
 function minutes(value: unknown, label: string): number | undefined {
     if (value === undefined || value === null) return undefined;
     if (typeof value === "string") {
@@ -212,7 +207,7 @@ export function resolveRunTiming(input: {
 const TIMING_DESCRIPTIONS = {
     deadline_minutes: "Optional soft deadline in minutes (default: none; 0 = none; null or omitted = inherit: in a batch job the shared value, otherwise the default). At the deadline the child is told to stop starting new work, commit what is done, and report, and you get one wake. Grace starts when the message reaches the child (after its current tool call); if it has not finished by then, the harness stops it with reason deadline.",
     grace_minutes: "Minutes after the wrap-up message reaches the child before the run is stopped (default 5; null or omitted = inherit).",
-    max_minutes: "Optional hard ceiling in minutes (default: none; 0 = none; null or omitted = inherit). The run is stopped at once, without grace, with reason ceiling.",
+    max_minutes: "Optional hard ceiling in minutes (default: 60; 0 = none; null or omitted = inherit). The run is stopped at once, without grace, with reason ceiling.",
     tool_wait_minutes: "Tool-call wait alert in minutes (default 5; 0 = off; null or omitted = inherit). While a tool call stays open this long you get one factual wake for that call, including a normal long test. Parallel calls alert independently. The alert does not stop or cancel the run.",
     stuck_minutes: "No-progress window in minutes (default 10; 0 = off; null or omitted = inherit). Progress is any successful tool call that is not an exact repeat of an earlier one (same tool, same arguments); edits, writes, commits, and a success after a failure always count. Time inside a running tool call does not count. Wakes you once per stuck spell; never stops the run.",
 } as const;
