@@ -41,6 +41,11 @@ typed `code` and leaves no partial record.
 | evidence read | who read which terminal revision | one read per revision per owner |
 | evidence pin | retained reference, bounded summary, `detailLost`, release reason | released on consumption or dismissal, never overwritten |
 | outbox event | terminal revision + wait generation + recipient + evidence | one event per revision per generation |
+| discovery claim | one host id and fencing token per store/supervisor scope | compare-and-swap acquisition; an exact-token release cannot erase a successor |
+
+Schema version 1 is extended additively. Older readers ignore the discovery
+tables and the indexed supervision-host column, so a live session on the
+previous build keeps its records during a rolling upgrade.
 
 Wait phases: `registering → parking → waiting → ready → resuming → consumed`,
 plus `held` and `cancelled`. The store refuses any other transition, refuses a
@@ -118,6 +123,8 @@ dependency still resolves for interpretation.
 ```ts
 registerOperation / recordSupervision / releaseSupervision / recordTerminalOutcome
 getOperation / listOperations / listOperationEvidence
+listRunningSupervisedBy / readDiscoveryClaim / tryClaimDiscovery / releaseDiscoveryClaim
+getChangeRevision
 
 registerWait / transitionWaitPhase / cancelWait
 getWait / listWaits / listDependencies / findPendingWait
@@ -142,7 +149,7 @@ too.
 
 `schema-version`, `sqlite-unavailable`, `store-busy`, `store-corruption`,
 `validation`, `unknown-operation`, `operation-conflict`, `task-ownership`,
-`foreign-owner`, `terminal-conflict`, `pending-wait-generation`, `unknown-wait`,
+`foreign-owner`, `supervision-conflict`, `terminal-conflict`, `pending-wait-generation`, `unknown-wait`,
 `wait-phase`, `stale-phase`, `stale-generation`, `stale-cancel-epoch`,
 `dependencies-unsettled`, `checkpoint-proof`, `concurrent-claim`, `claim-state`,
 `attempt-conflict`, `evidence-read-required`, `stale-evidence`, `outbox-state`,

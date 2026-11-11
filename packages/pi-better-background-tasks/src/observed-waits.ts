@@ -836,6 +836,8 @@ export class ObservedWaitHost {
   private store?: Store;
   private readonly supervisor: LocalSupervisor;
   private readonly directory: string;
+  private readonly storePath: string;
+  private readonly discoveryScope: string;
   private readonly pollMs: number;
   private readonly options: ObservedWaitHostOptions;
   private timer?: NodeJS.Timeout;
@@ -884,10 +886,22 @@ export class ObservedWaitHost {
   private readonly hostStartDigest = startTokenDigest(currentProcessStartToken());
   private readonly hostId = `${process.pid}:${this.hostStartDigest}:${randomUUID()}`;
   private hostGeneration = ++HOST_INSTANCE_STATE.next;
+  private discoveryToken?: string;
+  private discoveryRole?: "holder" | "follower";
+  private reconcileInFlight?: Promise<void>;
+  private authorityPassCache?: Map<string, "live" | "dead" | "unknown">;
+  /** Running operations this follower is currently assigned to supervise. */
+  private readonly followerRunningTasks = new Set<string>();
+  private lastChangeRevision = -1;
+  private lastOwnedTerminalAt = 0;
 
   constructor(private readonly pi: ExtensionAPI, options: ObservedWaitHostOptions = {}) {
     this.options = options;
     this.directory = options.supervisorDirectory ?? defaultSupervisorDirectory();
+    this.storePath = options.storePath ?? defaultStorePath();
+    this.discoveryScope = createHash("sha256")
+      .update(`${resolve(this.storePath)}\0${resolve(this.directory)}`)
+      .digest("hex");
     this.supervisor = options.supervisor ?? createLocalSupervisor({ directory: this.directory });
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS;
     const base = {
@@ -943,7 +957,6 @@ export class ObservedWaitHost {
       // The same host instance can be activated for another session without a
       // reload. Re-evaluate pending deliveries against the new active origin.
       this.recoverAbandonedDeliveries();
-      this.discoverObservedTasks();
       void this.reconcileNow();
       this.recoverTerminalNotifications();
       this.terminalRecoveryNeeded = false;
@@ -955,7 +968,7 @@ export class ObservedWaitHost {
     this.unavailableReason = undefined;
     try {
       this.store = openStore({
-        path: this.options.storePath ?? defaultStorePath(),
+        path: this.storePath,
         ...(this.options.now ? { now: this.options.now } : {}),
       });
     } catch (error) {
@@ -971,7 +984,6 @@ export class ObservedWaitHost {
     this.announce();
     this.writeHostDebug();
     this.recoverAbandonedDeliveries();
-    this.discoverObservedTasks();
     void this.reconcileNow();
     this.recoverTerminalNotifications();
     this.terminalRecoveryNeeded = false;
@@ -987,6 +999,7 @@ export class ObservedWaitHost {
     HOST_INSTANCE_STATE.closed.add(this.hostId);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    this.releaseDiscoveryAuthority();
     this.releaseSupervisionAuthority();
     try { this.store?.close(); } catch { /* already closed */ }
     this.store = undefined;
@@ -1101,9 +1114,41 @@ export class ObservedWaitHost {
 
   /** A deterministic, awaitable reconciliation pass for tests and session activation. */
   async reconcileNow(): Promise<void> {
+    if (this.reconcileInFlight) return this.reconcileInFlight;
+    const pass = this.reconcilePass();
+    this.reconcileInFlight = pass;
+    try {
+      await pass;
+    } finally {
+      if (this.reconcileInFlight === pass) this.reconcileInFlight = undefined;
+    }
+  }
+
+  private async reconcilePass(): Promise<void> {
     if (!this.store || this.closed) return;
-    this.discoverObservedTasks();
-    const running = this.store.listOperations({ phase: "running" });
+    this.authorityPassCache = new Map();
+    try {
+      const role = this.refreshDiscoveryAuthority();
+      this.noteDiscoveryRole(role);
+      const identityless = !!this.activeContext && this.sessionIdIfAvailable(this.activeContext) === undefined;
+      if (role === "holder" || identityless) {
+        this.discoverObservedTasks();
+        this.reconcileGlobalRunning();
+      } else {
+        this.reconcileFollowerRunning();
+        this.reconcileOwnerChanges();
+      }
+      this.retryPendingTerminalCallbacks();
+      await this.dispatchOutbox();
+    } finally {
+      this.authorityPassCache = undefined;
+    }
+  }
+
+  private reconcileGlobalRunning(): void {
+    const store = this.store;
+    if (!store) return;
+    const running = store.listOperations({ phase: "running" });
     const runningIds = new Set(running.map((operation) => operation.taskId));
     let changedOwner: OwnerIdentity | undefined;
     for (const taskId of [...this.watchedRunningTasks]) {
@@ -1129,8 +1174,126 @@ export class ObservedWaitHost {
       this.watchedRunningTasks.add(operation.taskId);
       this.reconcileOperation(operation);
     }
-    this.retryPendingTerminalCallbacks();
-    await this.dispatchOutbox();
+  }
+
+  private reconcileFollowerRunning(): void {
+    const store = this.store;
+    if (!store) return;
+    const running = store.listRunningSupervisedBy(this.hostId);
+    const runningIds = new Set(running.map((operation) => operation.taskId));
+    for (const taskId of [...this.followerRunningTasks]) {
+      if (!runningIds.has(taskId)) this.followerRunningTasks.delete(taskId);
+    }
+    for (const operation of running) {
+      this.followerRunningTasks.add(operation.taskId);
+      this.reconcileOperation(operation);
+    }
+  }
+
+  /**
+   * A follower does not scan foreign operations. It refreshes the exact active
+   * owner's terminal records only when the shared change revision advances, so
+   * callback recovery stays correct without multiplying the running-set scan.
+   */
+  private reconcileOwnerChanges(): void {
+    const store = this.store;
+    const ctx = this.activeContext;
+    if (!store || !ctx) return;
+    const sessionId = this.sessionIdIfAvailable(ctx);
+    if (!sessionId) return;
+    let revision: number;
+    try {
+      revision = store.getChangeRevision();
+    } catch {
+      return;
+    }
+    if (revision === this.lastChangeRevision) return;
+    this.lastChangeRevision = revision;
+    let operations: OperationRecord[];
+    try {
+      operations = store.listOperations({
+        ownerScope: { kind: "parent-session", sessionId, workspace: ctx.cwd },
+        phase: "terminal",
+      });
+    } catch {
+      return;
+    }
+    let newest = this.lastOwnedTerminalAt;
+    let visibleOwner: OwnerIdentity | undefined;
+    for (const operation of operations) {
+      newest = Math.max(newest, operation.terminalAt ?? operation.updatedAt);
+      if (this.activeOwnerRelation(operation.owner) === "match") visibleOwner ??= operation.owner;
+      this.attemptTerminalCallback(
+        operation,
+        this.statusOf(operation.operationId),
+        operation.terminalOutcome ?? "failed",
+        [],
+        { pendingWithoutContext: true },
+      );
+    }
+    if (newest > this.lastOwnedTerminalAt) {
+      this.lastOwnedTerminalAt = newest;
+      if (visibleOwner) this.emitDurableTaskChange(visibleOwner);
+    }
+  }
+
+  private noteDiscoveryRole(role: "holder" | "follower"): void {
+    if (this.discoveryRole === role) return;
+    this.discoveryRole = role;
+    this.followerRunningTasks.clear();
+    if (role === "holder") {
+      this.watchedRunningTasks.clear();
+      this.discoveredTaskSidecars.clear();
+    }
+    this.lastChangeRevision = -1;
+  }
+
+  /**
+   * Acquire or confirm the one shared discovery claim. Process identity and
+   * explicit close evidence decide replacement; elapsed time is not a lease.
+   */
+  private refreshDiscoveryAuthority(): "holder" | "follower" {
+    const store = this.store;
+    if (!store) return "follower";
+    let claim;
+    try {
+      claim = store.readDiscoveryClaim(this.discoveryScope);
+    } catch {
+      return "follower";
+    }
+    if (claim?.hostId === this.hostId) {
+      this.discoveryToken = claim.token;
+      return "holder";
+    }
+    if (claim) {
+      const state = this.discoveryHolderState(claim.hostId);
+      if (state === "live" || state === "unknown") {
+        this.discoveryToken = undefined;
+        return "follower";
+      }
+    }
+    const token = `discovery_${randomUUID()}`;
+    try {
+      const claimed = store.tryClaimDiscovery({
+        scope: this.discoveryScope,
+        expected: claim ? { hostId: claim.hostId, token: claim.token } : null,
+        hostId: this.hostId,
+        token,
+      });
+      if (claimed) {
+        this.discoveryToken = claimed.token;
+        return "holder";
+      }
+    } catch {
+      // A busy store or a lost race defers discovery to a later pass.
+    }
+    this.discoveryToken = undefined;
+    return "follower";
+  }
+
+  private discoveryHolderState(hostId: string): "live" | "dead" | "unknown" {
+    if (hostId === this.hostId) return "live";
+    return this.supervisionHolderState(hostId);
   }
 
   isDurableTask(taskId: string): boolean {
@@ -2757,19 +2920,27 @@ export class ObservedWaitHost {
     if (!hostId) return "replace";
     if (hostId === this.hostId) return "self";
     if (HOST_INSTANCE_STATE.closed.has(hostId)) return "replace";
+    const cached = this.authorityPassCache?.get(hostId);
+    const state = cached ?? this.supervisionHolderState(hostId);
+    if (cached === undefined) this.authorityPassCache?.set(hostId, state);
+    return state === "live" || state === "unknown" ? "foreign" : "replace";
+  }
+
+  /** Process-identity check for a recorded holder, cached per pass by callers. */
+  private supervisionHolderState(hostId: string): "live" | "dead" | "unknown" {
     const { pid, startTokenDigest: claimedDigest } = parseHostIdentity(hostId);
-    if (!pid) return "foreign";
+    if (!pid) return "unknown";
     if (pid === process.pid) {
       const generation = HOST_INSTANCE_STATE.generations.get(hostId);
       // Another instance in this process still owns its record. Creation order
       // alone is not death: a reload predecessor is marked closed above.
-      return generation === undefined ? "replace" : "foreign";
+      return generation === undefined ? "dead" : "live";
     }
-    if (!processExists(pid)) return "replace";
-    if (!claimedDigest) return "foreign";
+    if (!processExists(pid)) return "dead";
+    if (!claimedDigest) return "unknown";
     const current = readProcessStartToken(pid);
-    if (!current) return "foreign";
-    return startTokenDigest(current) === claimedDigest ? "foreign" : "replace";
+    if (!current) return "unknown";
+    return startTokenDigest(current) === claimedDigest ? "live" : "dead";
   }
 
   /**
@@ -2798,6 +2969,20 @@ export class ObservedWaitHost {
       } catch {
         // Closing must not fail on a busy or already replaced record.
       }
+    }
+  }
+
+  /** Release only this host's exact discovery claim; a successor keeps its own. */
+  private releaseDiscoveryAuthority(): void {
+    const store = this.store;
+    const token = this.discoveryToken;
+    this.discoveryToken = undefined;
+    this.discoveryRole = undefined;
+    if (!store || !token) return;
+    try {
+      store.releaseDiscoveryClaim({ scope: this.discoveryScope, hostId: this.hostId, token });
+    } catch {
+      // Closing must not fail on a busy or already replaced claim.
     }
   }
 
@@ -3618,7 +3803,10 @@ export class ObservedWaitHost {
     // A tool call or activation for a different session/workspace must seed the
     // terminal callback journal once. Same-session calls keep the live context
     // current without rescanning historical terminal records.
-    if (!previous || previousKey !== nextKey) this.terminalRecoveryNeeded = true;
+    if (!previous || previousKey !== nextKey) {
+      this.terminalRecoveryNeeded = true;
+      this.lastChangeRevision = -1;
+    }
     this.writeHostDebug();
   }
 

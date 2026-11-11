@@ -453,6 +453,140 @@ describe("store guards", () => {
         assert.equal(harness.store.schemaVersion, SCHEMA_VERSION);
     });
 
+    it("adds discovery state to an older version-1 database without losing operations", () => {
+        const harness = createHarness();
+        registerOperation(harness.store);
+        harness.closeStore();
+
+        const raw = new DatabaseSync(harness.path);
+        raw.exec("DROP INDEX operations_running_supervisor");
+        raw.exec("ALTER TABLE operations DROP COLUMN supervision_host_id");
+        raw.exec("DROP TABLE discovery_claims");
+        raw.exec("DROP TABLE coordinator_state");
+        raw.close();
+
+        const reopened = openStore({ path: harness.path });
+        try {
+            assert.deepEqual(reopened.getOperation("op-build-1")?.supervision, {
+                hostId: "host-1",
+                runnerId: "runner-1",
+                processStartToken: null,
+            });
+            assert.equal(reopened.getChangeRevision(), 0);
+            assert.equal(reopened.readDiscoveryClaim("scope-1"), null);
+            assert.equal(reopened.tryClaimDiscovery({
+                scope: "scope-1",
+                expected: null,
+                hostId: "host-a",
+                token: "token-a",
+            })?.hostId, "host-a");
+        } finally {
+            reopened.close();
+        }
+    });
+
+    it("fences discovery leadership with exact host/token compare-and-swap", () => {
+        const harness = createHarness();
+        const first = harness.store.tryClaimDiscovery({
+            scope: "scope-1",
+            expected: null,
+            hostId: "host-a",
+            token: "token-a",
+        });
+        assert.equal(first?.hostId, "host-a");
+
+        assert.equal(harness.store.tryClaimDiscovery({
+            scope: "scope-1",
+            expected: null,
+            hostId: "host-b",
+            token: "token-b",
+        }), null, "a stale empty-snapshot contender does not win");
+
+        const replacement = harness.store.tryClaimDiscovery({
+            scope: "scope-1",
+            expected: { hostId: "host-a", token: "token-a" },
+            hostId: "host-b",
+            token: "token-b",
+        });
+        assert.equal(replacement?.hostId, "host-b");
+
+        assert.equal(harness.store.releaseDiscoveryClaim({
+            scope: "scope-1",
+            hostId: "host-a",
+            token: "token-a",
+        }), false, "a stale close cannot release the successor");
+        assert.equal(harness.store.tryClaimDiscovery({
+            scope: "scope-1",
+            expected: { hostId: "host-a", token: "token-a" },
+            hostId: "host-c",
+            token: "token-c",
+        }), null, "an ABA contender is refused");
+
+        assert.equal(harness.store.releaseDiscoveryClaim({
+            scope: "scope-1",
+            hostId: "host-b",
+            token: "token-b",
+        }), true);
+        assert.equal(harness.store.readDiscoveryClaim("scope-1"), null);
+        assert.equal(harness.store.releaseDiscoveryClaim({
+            scope: "scope-1",
+            hostId: "host-b",
+            token: "token-b",
+        }), false);
+    });
+
+    it("reads only locally supervised running operations through the phase/host index", () => {
+        const harness = createHarness();
+        registerOperation(harness.store, { operationId: "op-host-1", taskId: "bg-host-1" });
+        harness.store.registerOperation({
+            operationId: "op-host-2",
+            taskId: "bg-host-2",
+            launchToken: "launch-host-2",
+            owner: workerOwner,
+            observer,
+            supervision: { hostId: "host-2" },
+        });
+
+        assert.deepEqual(
+            harness.store.listRunningSupervisedBy("host-1").map((operation) => operation.operationId),
+            ["op-host-1"],
+        );
+
+        const raw = new DatabaseSync(harness.path);
+        const plan = raw.prepare(
+            "EXPLAIN QUERY PLAN SELECT * FROM operations WHERE phase = 'running' AND supervision_host_id = ?",
+        ).all("host-1") as Array<{ detail?: string }>;
+        raw.close();
+        assert.ok(
+            plan.some((row) => String(row.detail).includes("operations_running_supervisor")),
+            `expected the phase/host index, got ${JSON.stringify(plan)}`,
+        );
+    });
+
+    it("advances the change revision for registration, authority and terminal publication", () => {
+        const harness = createHarness();
+        assert.equal(harness.store.getChangeRevision(), 0);
+        registerOperation(harness.store);
+        assert.equal(harness.store.getChangeRevision(), 1);
+        harness.store.recordSupervision({
+            operationId: "op-build-1",
+            owner: workerOwner,
+            expectedHostId: "host-1",
+            supervision: { hostId: "host-2" },
+            health: "active",
+        });
+        assert.equal(harness.store.getChangeRevision(), 2);
+        harness.store.recordSupervision({
+            operationId: "op-build-1",
+            owner: workerOwner,
+            health: "unmonitored",
+            reason: "observation only",
+        });
+        assert.equal(harness.store.getChangeRevision(), 2, "health-only changes do not signal discovery");
+        settleOperation(harness.store, "op-build-1");
+        assert.equal(harness.store.getChangeRevision(), 3);
+    });
+
     it("refuses calls after close", () => {
         const harness = createHarness();
         harness.closeStore();

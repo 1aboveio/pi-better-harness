@@ -18,6 +18,13 @@ interface ProbeReport {
     inspections: number;
     writes: number;
     queries: number;
+    globalScans: number;
+    localScans: number;
+    ownerScans: number;
+    claimReads: number;
+    revisionReads: number;
+    processProbes: number;
+    directoryReads: number;
   };
 }
 
@@ -117,10 +124,10 @@ describe("supervision authority across independent processes", () => {
     seedOperations(root);
     const db = new DatabaseSync(join(root, "operations.sqlite"));
     db.exec("CREATE TABLE probe_updates (host TEXT)");
-    db.exec("CREATE TABLE probe_claims (host TEXT)");
+    db.exec("CREATE TABLE probe_claims (host TEXT, operation_id TEXT, health TEXT)");
     db.exec(`CREATE TRIGGER probe_update AFTER UPDATE ON operations BEGIN
       INSERT INTO probe_updates VALUES (json_extract(NEW.supervision_json, '$.hostId'));
-      INSERT INTO probe_claims VALUES (json_extract(NEW.supervision_json, '$.hostId'));
+      INSERT INTO probe_claims VALUES (json_extract(NEW.supervision_json, '$.hostId'), NEW.operation_id, NEW.health);
     END`);
     const countClaims = (): number => {
       const row = db.prepare("SELECT count(*) AS count FROM probe_claims").get() as { count?: number } | undefined;
@@ -137,6 +144,17 @@ describe("supervision authority across independent processes", () => {
       expect(firstReport.warmWrites + secondReport.warmWrites).toBe(TASK_COUNT);
       expect(firstReport.steady.writes + secondReport.steady.writes).toBe(0);
       expect(firstReport.steady.inspections + secondReport.steady.inspections).toBe(TASK_COUNT * PASSES);
+      expect(firstReport.steady.globalScans + secondReport.steady.globalScans).toBe(PASSES);
+      expect(firstReport.steady.localScans + secondReport.steady.localScans).toBe(PASSES);
+      expect(
+        firstReport.steady.processProbes + secondReport.steady.processProbes,
+        "at most one foreign-holder probe by the holder and one discovery-holder probe by the follower per pass",
+      ).toBeLessThanOrEqual(PASSES * 2);
+      expect(firstReport.steady.directoryReads + secondReport.steady.directoryReads).toBe(PASSES);
+      // A concurrent warm-up can advance the change revision during the first
+      // measured pass, adding at most one exact-owner refresh per client.
+      expect(firstReport.steady.queries).toBeLessThanOrEqual(PASSES * 5);
+      expect(secondReport.steady.queries).toBeLessThanOrEqual(PASSES * 5);
       expect(countClaims(), "one authority write per operation across both contenders").toBe(TASK_COUNT);
 
       first.child.kill("SIGKILL");
@@ -168,7 +186,11 @@ describe("supervision authority across independent processes", () => {
       expect(ownerReport.warmWrites).toBe(TASK_COUNT);
       expect(ownerReport.steady.writes).toBe(0);
       expect(ownerReport.steady.inspections).toBe(TASK_COUNT * PASSES);
-      expect(ownerReport.steady.queries, "one running-set read and one pending-outbox read per pass").toBe(PASSES * 2);
+      expect(ownerReport.steady.globalScans, "the discovery holder scans the running set once per pass").toBe(PASSES);
+      expect(ownerReport.steady.localScans).toBe(0);
+      expect(ownerReport.steady.processProbes).toBe(0);
+      expect(ownerReport.steady.directoryReads).toBe(PASSES);
+      expect(ownerReport.steady.queries).toBe(PASSES * 3);
 
       // An unrelated live process sees every running operation but must not
       // inspect, write, or take over any of them.
@@ -178,12 +200,32 @@ describe("supervision authority across independent processes", () => {
       expect(unrelatedReport.warmWrites).toBe(0);
       expect(unrelatedReport.steady.inspections).toBe(0);
       expect(unrelatedReport.steady.writes).toBe(0);
-      expect(unrelatedReport.steady.queries).toBe(ownerReport.steady.queries);
-      expect(countUpdates(), "no operations row changed while both hosts stayed healthy").toBe(0);
+      expect(unrelatedReport.steady.globalScans, "a follower never performs the global running scan").toBe(0);
+      expect(unrelatedReport.steady.localScans, "a follower reads only its indexed assigned operations").toBe(PASSES);
+      expect(unrelatedReport.steady.ownerScans).toBe(0);
+      expect(unrelatedReport.steady.processProbes, "one discovery-holder identity check per follower pass").toBe(PASSES);
+      expect(unrelatedReport.steady.directoryReads).toBe(0);
+      expect(unrelatedReport.steady.queries).toBe(PASSES * 4);
+
+      const secondUnrelated = startProbe(root, "unrelated-c", false);
+      const secondUnrelatedReport = await secondUnrelated.report;
+      expect(secondUnrelatedReport.warmWrites).toBe(0);
+      expect(secondUnrelatedReport.steady.inspections).toBe(0);
+      expect(secondUnrelatedReport.steady.writes).toBe(0);
+      expect(secondUnrelatedReport.steady.globalScans).toBe(0);
+      expect(secondUnrelatedReport.steady.localScans).toBe(PASSES);
+      expect(secondUnrelatedReport.steady.processProbes).toBe(PASSES);
+      expect(secondUnrelatedReport.steady.directoryReads).toBe(0);
+      expect(secondUnrelatedReport.steady.queries).toBe(PASSES * 4);
+      expect(countUpdates(), "no operations row changed while all three hosts stayed healthy").toBe(0);
       expect(
-        ownerReport.steady.inspections + unrelatedReport.steady.inspections,
-        "two live hosts do not double the inspection work",
+        ownerReport.steady.inspections + unrelatedReport.steady.inspections + secondUnrelatedReport.steady.inspections,
+        "three live hosts do not multiply the inspection work",
       ).toBe(TASK_COUNT * PASSES);
+      expect(
+        ownerReport.steady.globalScans + unrelatedReport.steady.globalScans + secondUnrelatedReport.steady.globalScans,
+        "client count does not multiply the global running scan",
+      ).toBe(PASSES);
 
       // Kill the authority without a graceful release. The unrelated process
       // must prove the old pid is gone, take over once, and then stay stable.
@@ -195,6 +237,10 @@ describe("supervision authority across independent processes", () => {
       expect(failoverReport.warmWrites).toBe(TASK_COUNT);
       expect(failoverReport.steady.writes).toBe(0);
       expect(failoverReport.steady.inspections).toBe(TASK_COUNT * PASSES);
+      expect(failoverReport.steady.globalScans).toBe(PASSES);
+      expect(failoverReport.steady.processProbes).toBe(0);
+      expect(failoverReport.steady.directoryReads).toBe(PASSES);
+      expect(failoverReport.steady.queries).toBe(PASSES * 3);
       expect(countUpdates(), "takeover happens once, not on every reconciliation pass").toBe(0);
       failover.child.kill("SIGKILL");
       await once(failover.child, "exit");

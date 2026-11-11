@@ -8,6 +8,8 @@
  * sequence. It never launches a command or touches user state.
  */
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 
@@ -30,6 +32,13 @@ interface ProbeReport {
     inspections: number;
     writes: number;
     queries: number;
+    globalScans: number;
+    localScans: number;
+    ownerScans: number;
+    claimReads: number;
+    revisionReads: number;
+    processProbes: number;
+    directoryReads: number;
   };
 }
 
@@ -45,15 +54,46 @@ const databasePrototype = DatabaseSync.prototype as unknown as {
 };
 const originalPrepare = databasePrototype.prepare;
 let selectQueries = 0;
+let globalScans = 0;
+let localScans = 0;
+let ownerScans = 0;
+let claimReads = 0;
+let revisionReads = 0;
 databasePrototype.prepare = function (this: DatabaseSync, sql: string) {
-  if (/^\s*(select|with)\b/i.test(sql)) selectQueries += 1;
+  const normalized = sql.replace(/\s+/g, " ").trim();
+  if (/^(select|with)\b/i.test(normalized)) selectQueries += 1;
+  if (/FROM operations WHERE phase = 'running' AND supervision_host_id = \?/i.test(normalized)) localScans += 1;
+  else if (/FROM operations WHERE phase = \? ORDER BY/i.test(normalized)) globalScans += 1;
+  else if (/FROM operations WHERE owner_kind = \?/i.test(normalized)) ownerScans += 1;
+  if (/FROM discovery_claims/i.test(normalized)) claimReads += 1;
+  if (/FROM coordinator_state/i.test(normalized)) revisionReads += 1;
   return originalPrepare.call(this, sql);
 };
 
+let processProbes = 0;
+const originalKill = process.kill.bind(process);
+process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+  if (signal === 0) processProbes += 1;
+  return originalKill(pid, signal as NodeJS.Signals);
+}) as typeof process.kill;
+
+let directoryReads = 0;
+const mutableFs = fs as unknown as { readdirSync: (...args: unknown[]) => unknown };
+const originalReaddirSync = mutableFs.readdirSync;
+mutableFs.readdirSync = (...args: unknown[]) => {
+  directoryReads += 1;
+  return originalReaddirSync(...args);
+};
+syncBuiltinESMExports();
+
 const probeDb = new DatabaseSync(join(request.root, "operations.sqlite"));
-const clearWrites = (): void => { probeDb.exec("DELETE FROM probe_updates"); };
+probeDb.exec("PRAGMA busy_timeout = 5000");
+const ownHostPattern = `${process.pid}:%`;
+const clearWrites = (): void => {
+  probeDb.prepare("DELETE FROM probe_updates WHERE host LIKE ?").run(ownHostPattern);
+};
 const countWrites = (): number => {
-  const row = probeDb.prepare("SELECT count(*) AS count FROM probe_updates").get() as { count?: number } | undefined;
+  const row = probeDb.prepare("SELECT count(*) AS count FROM probe_updates WHERE host LIKE ?").get(ownHostPattern) as { count?: number } | undefined;
   return Number(row?.count ?? 0);
 };
 
@@ -128,6 +168,13 @@ async function main(): Promise<void> {
     clearWrites();
     selectQueries = 0;
     inspections = 0;
+    globalScans = 0;
+    localScans = 0;
+    ownerScans = 0;
+    claimReads = 0;
+    revisionReads = 0;
+    processProbes = 0;
+    directoryReads = 0;
     for (let pass = 0; pass < request.passes; pass += 1) await host.reconcileNow();
     const queries = selectQueries;
     const report: ProbeReport = {
@@ -139,6 +186,13 @@ async function main(): Promise<void> {
         inspections,
         writes: countWrites(),
         queries,
+        globalScans,
+        localScans,
+        ownerScans,
+        claimReads,
+        revisionReads,
+        processProbes,
+        directoryReads,
       },
     };
     process.stdout.write(`PROBE_REPORT ${JSON.stringify(report)}\n`);

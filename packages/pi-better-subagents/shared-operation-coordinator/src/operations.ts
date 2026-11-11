@@ -50,6 +50,7 @@ import {
 } from "./validate.ts";
 import { mapOutbox } from "./rows.ts";
 import { settleWaitsForOperation } from "./waits.ts";
+import { bumpChangeRevision } from "./discovery.ts";
 
 const HEALTH_VALUES: readonly ObserverHealth[] = ["active", "unmonitored", "lost"];
 const OUTCOME_VALUES: readonly TerminalOutcome[] = ["succeeded", "failed", "cancelled", "lost"];
@@ -159,9 +160,9 @@ export function registerOperation(
                 `INSERT INTO operations (
                     operation_id, task_id, launch_token,
                     owner_kind, owner_session_id, owner_workspace, owner_branch_id, owner_goal_id,
-                    observer_kind, observer_version, supervision_json, authority_ref, intent_ref,
+                    observer_kind, observer_version, supervision_json, supervision_host_id, authority_ref, intent_ref,
                     phase, health, health_reason, terminal_revision, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'active', NULL, 0, ?, ?)`,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'active', NULL, 0, ?, ?)`,
                 operationId,
                 taskId,
                 launchToken,
@@ -173,6 +174,7 @@ export function registerOperation(
                 observer.kind,
                 observer.version,
                 supervision ? JSON.stringify(supervision) : null,
+                supervision?.hostId ?? null,
                 authorityRef,
                 intentRef,
                 at,
@@ -191,6 +193,7 @@ export function registerOperation(
             assertTaskAvailable();
             throw error;
         }
+        bumpChangeRevision(ctx);
         return { operation: requireOperation(ctx, operationId), created: true };
     });
 }
@@ -250,17 +253,20 @@ export function recordSupervision(
                 "Invalid reason: observer health other than active requires a recorded reason",
             );
         }
+        const nextSupervision = supervision ?? operation.supervision;
+        const nextHostId = nextSupervision?.hostId ?? null;
+        const authorityChanged = (operation.supervision?.hostId ?? null) !== nextHostId;
         run(
             ctx,
-            "UPDATE operations SET supervision_json = ?, health = ?, health_reason = ?, updated_at = ? WHERE operation_id = ?",
-            supervision ? JSON.stringify(supervision) : operation.supervision
-                ? JSON.stringify(operation.supervision)
-                : null,
+            "UPDATE operations SET supervision_json = ?, supervision_host_id = ?, health = ?, health_reason = ?, updated_at = ? WHERE operation_id = ?",
+            nextSupervision ? JSON.stringify(nextSupervision) : null,
+            nextHostId,
             nextHealth,
             nextReason,
             ctx.now(),
             operationId,
         );
+        if (authorityChanged) bumpChangeRevision(ctx);
         return requireOperation(ctx, operationId);
     });
 }
@@ -295,12 +301,14 @@ export function releaseSupervision(
         run(
             ctx,
             `UPDATE operations
-             SET supervision_json = NULL, health = 'unmonitored', health_reason = ?, updated_at = ?
+             SET supervision_json = NULL, supervision_host_id = NULL,
+                 health = 'unmonitored', health_reason = ?, updated_at = ?
              WHERE operation_id = ?`,
             reason,
             ctx.now(),
             operationId,
         );
+        bumpChangeRevision(ctx);
         return requireOperation(ctx, operationId);
     });
 }
@@ -381,6 +389,7 @@ export function recordTerminalOutcome(
             at,
             operationId,
         );
+        bumpChangeRevision(ctx);
         const settledOperation = requireOperation(ctx, operationId);
         const settled = settleWaitsForOperation(ctx, settledOperation, at);
         const outbox = listOutboxForRevision(ctx, operationId, 1);
@@ -426,6 +435,18 @@ export function listOperations(
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     return getRows(ctx, `SELECT * FROM operations ${where} ORDER BY created_at, operation_id`, ...params)
         .map(mapOperation);
+}
+
+/** Running operations assigned to one supervising host, using the phase/host index. */
+export function listRunningSupervisedBy(
+    ctx: StoreContext,
+    hostId: unknown,
+): OperationRecord[] {
+    return getRows(
+        ctx,
+        "SELECT * FROM operations WHERE phase = 'running' AND supervision_host_id = ? ORDER BY created_at, operation_id",
+        requireId("hostId", hostId),
+    ).map(mapOperation);
 }
 
 function listOutboxForRevision(

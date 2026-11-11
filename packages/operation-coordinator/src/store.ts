@@ -19,11 +19,18 @@ import { createContext, openDatabase, type StoreContext } from "./sqlite.ts";
 import {
     getOperation as readOperationRecord,
     listOperations as readOperationRecords,
+    listRunningSupervisedBy as readRunningSupervisedBy,
     releaseSupervision as writeSupervisionRelease,
     recordSupervision as writeSupervision,
     recordTerminalOutcome as writeTerminalOutcome,
     registerOperation as writeOperation,
 } from "./operations.ts";
+import {
+    getChangeRevision as readChangeRevision,
+    readDiscoveryClaim as readClaim,
+    releaseDiscoveryClaim as deleteDiscoveryClaim,
+    tryClaimDiscovery as writeDiscoveryClaim,
+} from "./discovery.ts";
 import {
     acknowledgeResult as writeAcknowledgement,
     cancelWait as writeCancellation,
@@ -60,6 +67,7 @@ import {
     type CancelWaitResult,
     type ClaimOutboxInput,
     type ClaimResumeInput,
+    type DiscoveryClaimRecord,
     type EvidencePinRecord,
     type EvidenceReadRecord,
     type HoldFailedResumeInput,
@@ -85,6 +93,7 @@ import {
     type RegisterOperationResult,
     type RegisterWaitInput,
     type RegisterWaitResult,
+    type ReleaseDiscoveryClaimInput,
     type ReleaseOutboxInput,
     type ReleaseResumeClaimInput,
     type ReleaseResumeClaimResult,
@@ -94,6 +103,7 @@ import {
     type StoreOptions,
     type TransitionWaitPhaseInput,
     type TransitionWaitPhaseResult,
+    type TryClaimDiscoveryInput,
     type WaitDependencyRecord,
     type WaitFilter,
     type WaitRecord,
@@ -140,7 +150,24 @@ export interface Store {
     recordTerminalOutcome(input: RecordTerminalOutcomeInput): RecordTerminalOutcomeResult;
     getOperation(operationId: string): OperationRecord | null;
     listOperations(filter?: OperationFilter): OperationRecord[];
+    /** Running operations currently assigned to this supervising host. */
+    listRunningSupervisedBy(hostId: string): OperationRecord[];
     listOperationEvidence(operationId: string, terminalRevision?: number): OperationEvidenceRecord[];
+
+    // ---- discovery coordination ----
+
+    /** The shared discovery leader for this store/supervisor scope, if recorded. */
+    readDiscoveryClaim(scope: string): DiscoveryClaimRecord | null;
+    /**
+     * Compare-and-swap a discovery claim. The caller must name the exact claim it
+     * observed, or null for none; a stale contender receives null and must not
+     * start a global scan.
+     */
+    tryClaimDiscovery(input: TryClaimDiscoveryInput): DiscoveryClaimRecord | null;
+    /** Delete only this exact host/token claim; a successor is never released. */
+    releaseDiscoveryClaim(input: ReleaseDiscoveryClaimInput): boolean;
+    /** Monotonic revision for registration, authority changes and terminal publication. */
+    getChangeRevision(): number;
 
     // ---- waits ----
 
@@ -301,6 +328,10 @@ export function openStore(options: StoreOptions): Store {
             alive();
             return readOperationRecords(ctx, filter);
         },
+        listRunningSupervisedBy(hostId) {
+            alive();
+            return readRunningSupervisedBy(ctx, hostId);
+        },
         listOperationEvidence(operationId, terminalRevision) {
             alive();
             return readOperationEvidence(
@@ -308,6 +339,22 @@ export function openStore(options: StoreOptions): Store {
                 requireId("operationId", operationId),
                 terminalRevision === undefined ? undefined : requireCounter("terminalRevision", terminalRevision),
             );
+        },
+        readDiscoveryClaim(scope) {
+            alive();
+            return readClaim(ctx, scope);
+        },
+        tryClaimDiscovery(input) {
+            alive();
+            return writeDiscoveryClaim(ctx, input);
+        },
+        releaseDiscoveryClaim(input) {
+            alive();
+            return deleteDiscoveryClaim(ctx, input);
+        },
+        getChangeRevision() {
+            alive();
+            return readChangeRevision(ctx);
         },
         registerWait(input) {
             alive();

@@ -169,6 +169,31 @@ export interface ReleaseSupervisionInput {
     reason?: string | null;
 }
 
+/** One shared discovery leader for a coordinator database and supervisor scope. */
+export interface DiscoveryClaimRecord {
+    /** Opaque canonical scope computed from the store path and supervisor directory. */
+    scope: string;
+    hostId: string;
+    /** Fences acquisition and release against a stale or ABA competitor. */
+    token: string;
+    claimedAt: number;
+    updatedAt: number;
+}
+
+export interface TryClaimDiscoveryInput {
+    scope: string;
+    /** The exact claim the caller observed, or null when it observed no claim. */
+    expected: Pick<DiscoveryClaimRecord, "hostId" | "token"> | null;
+    hostId: string;
+    token: string;
+}
+
+export interface ReleaseDiscoveryClaimInput {
+    scope: string;
+    hostId: string;
+    token: string;
+}
+
 // ---- terminal outcome ---------------------------------------------------
 
 /**
