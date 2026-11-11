@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.43.0] - 2026-11-11
+
+### Changed
+
+- Bundle Subagents 0.30.0 for the 60-minute default hard timeout, its session setting, and preserved timing across resumes.
+
+## [pi-better-subagents@0.30.0] - 2026-11-11
+
+### Added
+
+- Add a hard timeout to `/subagents settings` with a 60-minute default. `0` disables it, and the value is saved for future sessions with **Save**. An explicit `max_minutes` on a launch still wins over the session choice.
+
+### Changed
+
+- Resolve the timeout from the per-run `max_minutes`, then the session choice, then `PI_SUBAGENT_MAX_MINUTES`, then `config.json`, then the 60-minute default. The session choice survives `/reload` and applies to new attempts without changing runs already in progress.
+- Preserve the remaining hard timeout when an automatic continuation resumes a parked run, including an explicitly disabled ceiling, so a resume cannot reintroduce the default or extend the original limit.
+- Reset clears the session timeout along with the other session overrides.
+
 ## [pi-better-harness@0.42.1] - 2026-11-10
 
 ### Changed
