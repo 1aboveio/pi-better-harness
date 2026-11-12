@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { openStore } from "../index.ts";
+import { DatabaseSync } from "node:sqlite";
 import {
     cleanupHarnesses,
     createHarness,
@@ -13,15 +14,17 @@ import {
 afterEach(cleanupHarnesses);
 
 /** A published resume generation: the wait is `resuming` with one active claim. */
-function publishedResume(harness: ReturnType<typeof createHarness>) {
-    registerOperation(harness.store, { operationId: "op-hold", owner: parentOwner, taskId: "bg_hold" });
-    settleOperation(harness.store, "op-hold", "succeeded", parentOwner);
+function publishedResume(harness: ReturnType<typeof createHarness>, assignment = false) {
+    const owner = assignment ? { ...parentOwner, kind: "worker-conversation" as const } : parentOwner;
+    registerOperation(harness.store, { operationId: "op-hold", owner, taskId: "bg_hold" });
+    settleOperation(harness.store, "op-hold", "succeeded", owner);
     const registered = harness.store.registerWait({
         waitId: "wait-hold",
-        owner: parentOwner,
+        owner,
         dependencies: [{ operationId: "op-hold" }],
         continuationNote: "Interpret the result.",
         park: { attemptId: "attempt-a", checkpointId: "checkpoint-a" },
+        ...(assignment ? { origin: { assignmentRef: "assignment-repair" } } : {}),
     });
     assert.equal(registered.wait.phase, "registering");
     harness.store.transitionWaitPhase({
@@ -76,6 +79,59 @@ function holdInput(claim: ReturnType<typeof publishedResume>, overrides: Record<
 }
 
 describe("holding a failed published resume", () => {
+    it("reconciles exact late proof after terminal failure without repair or interpretation", () => {
+        const h = createHarness();
+        const claim = publishedResume(h, true);
+        const owner = { ...parentOwner, kind: "worker-conversation" as const };
+        h.store.registerAssignment({ assignmentId: "assignment-repair", owner, recipient: parentOwner });
+        const terminal = h.store.recordAssignmentOutcome({ assignmentId: "assignment-repair", owner, recipient: parentOwner,
+            revision: 1, outcome: "failed", reason: "Writer safety is unproven", processUncertain: true, evidence: [],
+            waits: [{ waitId: "wait-hold", generation: 1, cancelEpoch: 0 }] });
+        const input = { ...holdInput(claim), checkpointId: "checkpoint-a", expectedCancelEpoch: 0 };
+        for (const changed of [{ claimToken: "wrong-token" }, { attemptId: "wrong-attempt" }, { launchToken: "wrong-launch" }, { checkpointId: "wrong-checkpoint" }, { expectedCancelEpoch: 1 }, { proof: { writerPidGone: false, writerLeaseReleased: true } }, { proof: { writerPidGone: true, writerLeaseReleased: false } }]) {
+            assert.throws(() => h.store.repairFailedResume({ ...input, ...changed }));
+            assert.equal(h.store.listResumeClaims({ waitId: input.waitId, state: "published" }).length, 1);
+        }
+        h.reopen();
+        assert.deepEqual(h.store.repairFailedResume(input), { phase: "held", repaired: false });
+        assert.deepEqual(h.store.repairFailedResume(input), { phase: "held", repaired: false });
+        assert.equal(h.store.listResumeClaims({ waitId: input.waitId, state: "published" }).length, 0);
+        assert.deepEqual(h.store.getAssignmentOutcome("assignment-repair"), terminal);
+        assert.equal(h.store.getWait({ waitId: input.waitId, generation: 1 })?.acknowledgement, null);
+        const db = new DatabaseSync(h.path, { readOnly: true });
+        try { assert.equal(db.prepare("SELECT count(*) AS n FROM assignment_repairs").get()?.n, 0); }
+        finally { db.close(); }
+    });
+    it("persists one repair across restart and delivers recurring fault to the recorded parent", () => {
+        const h = createHarness();
+        const worker = { ...parentOwner, kind: "worker-conversation" as const };
+        const claim = publishedResume(h, true);
+        const input = { ...holdInput(claim), checkpointId: "checkpoint-a", expectedCancelEpoch: 0 };
+        h.store.registerAssignment({ assignmentId: "assignment-repair", owner: worker, recipient: parentOwner });
+        const w = { waitId: "wait-hold" };
+        const publish = (attemptId: string) => {
+            const c = h.store.claimResume({ waitId: w.waitId, generation: 1, expectedCancelEpoch: 0, lease: { ownerId: "replacement-host", pid: 4242 }, reservedCheckpointId: "checkpoint-a" }).claim;
+            h.store.publishResumeAttempt({ waitId: w.waitId, generation: 1, claimId: c.claimId, claimToken: c.claimToken, attemptId, launchToken: attemptId });
+            return { ...input, waitId: w.waitId, claimId: c.claimId, claimToken: c.claimToken, attemptId, launchToken: attemptId };
+        };
+        const first = input;
+        expectStoreError(() => h.store.repairFailedResume({ ...first, checkpointId: "wrong-checkpoint" }), "resume-proof");
+        expectStoreError(() => h.store.repairFailedResume({ ...first, expectedCancelEpoch: 1 }), "stale-cancel-epoch");
+        expectStoreError(() => h.store.repairFailedResume({ ...first, proof: { writerPidGone: false, writerLeaseReleased: true } }), "resume-proof");
+        assert.deepEqual(h.store.repairFailedResume(first), { phase: "ready", repaired: true });
+        h.reopen();
+        expectStoreError(() => h.store.repairFailedResume({ ...first, launchToken: "forged-token" }), "claim-state");
+        assert.equal(h.store.repairFailedResume({ ...first, reason: "reworded exit" }).repaired, false);
+        const second = publish("new-attempt-id");
+        assert.equal(h.store.repairFailedResume(second).phase, "held");
+        const outcome = h.store.getAssignmentOutcome("assignment-repair");
+        assert.equal(outcome?.outcome, "failed");
+        assert.deepEqual(outcome?.recipient, parentOwner);
+        assert.equal(h.store.getWait({ waitId: w.waitId, generation: 1 })?.acknowledgement, null);
+        assert.equal(h.store.listOutbox().filter((e) => e.type === "assignment-outcome").length, 1);
+        assert.equal(h.store.repairFailedResume(second).repaired, false);
+        expectStoreError(() => publish("third-writer"), "wait-phase");
+    });
     it("moves resuming to held, keeps the epoch and pins, and invalidates the claim", () => {
         const harness = createHarness();
         const claim = publishedResume(harness);

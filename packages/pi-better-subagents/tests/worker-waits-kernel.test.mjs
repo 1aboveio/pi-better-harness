@@ -46,6 +46,7 @@ import {
     OPERATION_RESUME_ADMISSION_EVENT,
     createResumeOrchestration,
     finalizeWorkerParkAfterExit,
+    settleResumedAttemptExit,
 } from "../worker-waits.ts";
 import * as registry from "../registry.ts";
 import { readParkRecord } from "../registry.ts";
@@ -148,7 +149,7 @@ function runConfined(child) {
         started.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
         started.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
         started.on("error", (error) => resolve({ code: -1, stdout, stderr: `${stderr}${error.message}` }));
-        started.on("close", (code) => resolve({ code, stdout, stderr }));
+        started.on("close", (code) => resolve({ code, stdout, stderr, pid: started.pid }));
     });
 }
 
@@ -227,7 +228,7 @@ function writeAttempt(stack, { attemptId, sessionDir, workspace }) {
     return { controlDir, runtime };
 }
 
-for (const transition of ["completed", "paused", "cleared", "replaced", "inactive"]) {
+for (const transition of ["completed", "paused", "cleared", "replaced", "inactive", ...(sdkOnly ? ["unacknowledged", "recurring", "failed-test"] : [])]) {
 test(`a real saved worker resumes and acknowledges exact evidence with parent ${transition}`, { timeout: 180_000 }, async (t) => {
     if (!support.supported && !sdkOnly) {
         skipOrFail(t, `kernel sandbox backend unavailable: ${support.reason}`);
@@ -259,6 +260,14 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
     assert.equal(control.code, 0, `the network control must succeed before confinement: ${control.stderr}`);
     assert.equal(networkConnections, 1);
     const { runtime } = writeAttempt(stack, { attemptId, sessionDir, workspace: stack.workspace });
+    const recovery = ["unacknowledged", "recurring"].includes(transition);
+    const binding = { version: 1, assignmentId: `assignment:${attemptId}`,
+        owner: { kind: "worker-conversation", sessionId: attemptId, workspace: stack.workspace, branchId: "branch-1", goalId: "original-goal" },
+        recipient: { kind: "parent-session", sessionId: "parent-session-1", workspace: stack.workspace, branchId: "branch-1", goalId: "original-goal" } };
+    if (recovery) {
+        stack.store.registerAssignment({ ...binding, attemptId });
+        registry.writeMeta({ ...registry.readMeta(attemptId), assignment: binding });
+    }
     const plan = defaultPlan();
     const { handle } = await registerWorker(stack, {
         runId: attemptId,
@@ -275,6 +284,7 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
         env: {
             ...handle.env,
             WORKER_KERNEL_PHASE: "fresh",
+            WORKER_KERNEL_FAILED_TEST: transition === "failed-test" ? "1" : "0",
             WORKER_KERNEL_WORKSPACE: stack.workspace,
             WORKER_KERNEL_OUTSIDE: outside,
             WORKER_KERNEL_NETWORK_URL: networkUrl,
@@ -346,7 +356,7 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
             events: log.events.slice(-400),
         };
     });
-    assert.deepEqual(Object.values(outcomes).sort(), sdkOnly ? ["succeeded"] : ["failed", "failed", "succeeded"], JSON.stringify(diagnostics));
+    assert.deepEqual(Object.values(outcomes).sort(), sdkOnly ? [transition === "failed-test" ? "failed" : "succeeded"] : ["failed", "failed", "succeeded"], JSON.stringify(diagnostics));
     assert.equal(existsSync(outside), false, "a write outside the workspace must never change the host, even when private /tmp scratch is writable");
     assert.equal(existsSync(join(stack.workspace, "blocked-write.txt")), false, "the read-only project mount must refuse the visible write target");
     assert.equal(networkConnections, 1, "the confined network task must not reach the listener that the control reached");
@@ -383,6 +393,8 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
     const resumedId = "sa_kernel_resumed";
     const resumedSession = sessionDir;
     let resumedChild;
+    let launches = 0;
+    let latest;
     const orchestration = createResumeOrchestration({
         pi: stack.pi,
         service: () => stack.service,
@@ -390,6 +402,8 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
         context: () => hostCtx,
         capacity: { tryReserve: () => true, recheck: () => true, commit: () => {}, release: () => {} },
         launch: async (input) => {
+            launches += 1;
+            latest = input;
             assert.equal(readParkRecord(attemptId).phase, "resuming");
             assert.equal(readParkRecord(attemptId).resumedBy, input.assignedRunId);
             const claim = stack.store.listResumeClaims({ waitId, generation }).find((entry) => entry.state === "published");
@@ -427,6 +441,8 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
                 env: {
                     ...resumed.handle.env,
                     WORKER_KERNEL_PHASE: "resume",
+                    WORKER_KERNEL_FAILED_TEST: transition === "failed-test" ? "1" : "0",
+                    WORKER_KERNEL_UNACK: recovery && (launches === 1 || transition === "recurring") ? "1" : "0",
                     WORKER_KERNEL_WORKSPACE: stack.workspace,
                     WORKER_KERNEL_TASKS: taskIds.join(","),
                     WORKER_KERNEL_WAIT_ID: waitId,
@@ -449,8 +465,30 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
     };
     assert.equal(await orchestration.resume(park), "resumed");
     assert.ok(resumedChild, "the resume launcher must start the second confined child");
-    const resumedResult = await resumedChild;
+    let resumedResult = await resumedChild;
     assert.equal(resumedResult.code, 0, `resumed child failed (${resumedResult.code}):\n${resumedResult.stderr}\n${resumedResult.stdout}`);
+    if (recovery) {
+        const reconcileExit = async () => {
+            registry.writeMeta({ ...registry.readMeta(attemptId), id: latest.assignedRunId, park: undefined, assignment: binding,
+                status: "completed", pid: resumedResult.pid, exitCode: 0, endedAt: Date.now(),
+                operations: { ...registry.readMeta(attemptId).operations, resumeLaunchToken: latest.launchToken } });
+            return settleResumedAttemptExit({ attemptId: latest.assignedRunId, service: stack.service, writerLeaseReleased: true });
+        };
+        assert.equal((await reconcileExit()).waitPhase, "ready");
+        assert.equal(stack.store.getWait({ waitId, generation }).acknowledgement, null);
+        assert.equal(await orchestration.resume({ ...park, record: readParkRecord(attemptId) }), "resumed");
+        resumedResult = await resumedChild;
+        assert.equal(resumedResult.code, 0);
+        assert.equal(launches, 2);
+        if (transition === "recurring") {
+            assert.equal((await reconcileExit()).waitPhase, "held");
+            assert.equal(stack.store.getAssignmentOutcome(binding.assignmentId).outcome, "failed");
+            assert.equal(stack.store.getAssignmentOutcome(binding.assignmentId).recipient.sessionId, "parent-session-1");
+            assert.equal(stack.store.getWait({ waitId, generation }).acknowledgement, null);
+            orchestration.stop();
+            return;
+        }
+    }
     const consumed = stack.service.listWorkerWaits(scope, { pendingOnly: true }).find((entry) => entry.waitId === waitId);
     assert.equal(consumed, undefined, "the resumed child must consume the wait");
     assert.equal(readParkRecord(attemptId).phase, "consumed");

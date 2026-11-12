@@ -110,7 +110,7 @@ export default function fakeModel(pi: ExtensionAPI): void {
                     ];
                     if (process.env.WORKER_SDK_ONLY === "1") content = [{
                         type: "toolCall", id: "sdk-spawn", name: "bg_task_spawn",
-                        arguments: { argv: [process.execPath, "-e", "setTimeout(() => console.log('sdk-evidence'), 1500)"], shell: false },
+                        arguments: { argv: [process.execPath, "-e", process.env.WORKER_KERNEL_FAILED_TEST === "1" ? "setTimeout(() => { console.error('test assertion failed'); process.exitCode = 1; }, 1500)" : "setTimeout(() => console.log('sdk-evidence'), 1500)"], shell: false },
                     }];
                 } else if (turn === 2) {
                     const taskIds = discoveredTaskIds(context);
@@ -125,6 +125,8 @@ export default function fakeModel(pi: ExtensionAPI): void {
                 } else {
                     content = [{ type: "text", text: "parked pending the kernel tasks" }];
                 }
+            } else if (process.env.WORKER_KERNEL_UNACK === "1") {
+                content = [{ type: "text", text: "Useful retained output, without interpreting the dependency." }];
             } else if (turn === 1) {
                 const taskIds = (process.env.WORKER_KERNEL_TASKS ?? "").split(",").map((id) => id.trim()).filter(Boolean);
                 content = taskIds.map((id, index) => ({
@@ -144,7 +146,7 @@ export default function fakeModel(pi: ExtensionAPI): void {
                         generation: Number(process.env.WORKER_KERNEL_GENERATION ?? 1),
                         terminal_revisions: JSON.parse(process.env.WORKER_KERNEL_REVISIONS ?? "{}"),
                         disposition: "assignment-complete",
-                        note: process.env.WORKER_SDK_ONLY === "1" ? "The dependency succeeded; I inspected its exact terminal revision." : "The read-only build succeeded; the write and network attempts were denied, which is the expected confined result.",
+                        note: process.env.WORKER_KERNEL_FAILED_TEST === "1" ? "I inspected the failed test's exact terminal revision; this assigned diagnosis is complete." : process.env.WORKER_SDK_ONLY === "1" ? "The dependency succeeded; I inspected its exact terminal revision." : "The read-only build succeeded; the write and network attempts were denied, which is the expected confined result.",
                     },
                 }];
             } else {

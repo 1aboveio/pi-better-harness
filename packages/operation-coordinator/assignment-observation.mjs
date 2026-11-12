@@ -6,7 +6,8 @@ export function readAssignmentWaits(path, owner) {
     try {
         const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
         db = new DatabaseSync(path, { readOnly: true });
-        if (!["1", "2", "3"].includes(db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value)) {
+        // v4 adds repair accounting; the observed wait/outcome fields are unchanged.
+        if (!["1", "2", "3", "4"].includes(db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value)) {
             return { verified: false, waits: [], reason: "Unsupported coordinator schema; assignment state is unverified." };
         }
         const rows = db.prepare(`SELECT wait_id, generation, phase, phase_reason,

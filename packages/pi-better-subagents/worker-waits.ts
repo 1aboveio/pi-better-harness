@@ -377,6 +377,7 @@ export interface WorkerOperationService {
      * live claim instead of cancelling it.
      */
     holdFailedResumeForWorker?(run: WorkerRunScope, input: WorkerHoldResumeInput): WorkerHoldResumeView;
+    repairFailedResumeForWorker?(run: WorkerRunScope, input: WorkerHoldResumeInput & { checkpointId: string; expectedCancelEpoch: number }): { phase: string; repaired: boolean };
     registerContinuationAdapter(adapter: WorkerContinuationAdapter): void;
     unregisterContinuationAdapter(id: string): void;
 }
@@ -1846,6 +1847,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
                 authorityReference: park.meta.operations?.authorityReference ?? `worker:${park.runId}`,
             }, { waitId: park.waitId, generation: park.generation, reason });
         } catch { /* the park record still shows the hold */ }
+        if (park.meta.assignment) commitAssignmentTerminal({ ...park.meta, status: "failed", failureReason: reason }, true);
         try {
             options.notify?.(`Subagent ${park.runId} wait ${park.waitId} is held: ${reason}`, "warning");
         } catch { /* ignore UI failures */ }
@@ -1874,6 +1876,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
             if (!service) return "skipped";
             if (service.assignmentContinuation !== 1) return hold(park, "The Background host does not support assignment-local continuation");
             if (!park.meta.operations?.policy) return hold(park, "The captured assignment permission policy is missing; migration refused");
+            if (park.meta.operations.policy.deadlineAt !== null && park.meta.operations.policy.deadlineAt <= now()) return hold(park, "The assignment-local deadline expired");
             const scope = backgroundScopeForMeta(park.meta, park.record);
             if (!scope) return "skipped";
             if (!park.record.ownerSessionId && !park.meta.callbackOrigin?.sessionId) {
@@ -2021,6 +2024,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
                 // for recovery. Capacity and admission already succeeded, so this is a
                 // spawn-time failure, not a queue condition.
                 updateParkRecord(park.runId, { phase: "held", heldReason: reason });
+                if (park.meta.assignment) commitAssignmentTerminal({ ...park.meta, status: "lost", failureReason: `Published launch could not be proved: ${reason}` }, true);
                 return "held";
             }
             options.capacity.commit();
@@ -2310,7 +2314,8 @@ export function conversationWriterLeaseLive(
  *
  * This is a HOLD, not a cancellation: the store keeps the cancellation epoch and
  * the evidence pins, records the failure reason, and invalidates the publish-only
- * claim so a second automatic attempt can never be published. It requires the exact
+ * claim. Assignment-capable hosts instead atomically admit one bounded repair or
+ * retain terminal failure through the coordinator. This requires the exact
  * published identity (generation, claim id/token persisted with the attempt,
  * attempt id, launch token) and proven writer exit plus a free writer lease. An
  * ambiguous identity (live or unverifiable writer, live lease, missing claim
@@ -2331,7 +2336,11 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
         const reason = input.reason
             ?? `the published resume attempt ${input.attemptId} exited (${input.status ?? attempt?.status ?? "unknown"}) without interpreting the wait`;
         const holdLocally = (cause: string, outcome: "deferred" | "settled" = "deferred"): void => {
-            updateParkRecord(park.runId, { phase: "held", heldReason: `${reason}; ${cause}` });
+            updateParkRecord(park.runId, { phase: park.record.phase === "cancelled" ? "cancelled" : "held", heldReason: `${reason}; ${cause}` });
+            const report = attempt ?? park.meta;
+            if (input.service && report.assignment) {
+                commitAssignmentTerminal({ ...report, status: "lost", failureReason: `${reason}; ${cause}` }, true);
+            }
             result = { outcome, reason };
         };
         // The publication token is what identifies THIS resume of the record.
@@ -2339,7 +2348,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
         const attemptToken = attempt?.operations?.resumeLaunchToken;
         if (recordedToken && attemptToken && recordedToken !== attemptToken) {
             updateParkRecord(park.runId, {
-                phase: "held",
+                phase: park.record.phase === "cancelled" ? "cancelled" : "held",
                 heldReason: `attempt ${input.attemptId} does not match the launch token published for this wait; the wait was left for its owner`,
             });
             input.notify?.(`Subagent ${park.runId}: resume attempt ${input.attemptId} does not match the published launch token; the wait is held for inspection.`, "warning");
@@ -2386,7 +2395,18 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             continue;
         }
         try {
-            const held = input.service.holdFailedResumeForWorker(scope, {
+            const wait = input.service.listWorkerWaits(scope).find((w) => w.waitId === park.waitId && w.generation === park.generation);
+            // A held terminal writer needs proof-only reconciliation, not admission.
+            const reconcileOnly = park.record.phase === "cancelled" || wait?.phase === "held";
+            if (!reconcileOnly && attempt.assignment && !input.service.repairFailedResumeForWorker) {
+                holdLocally("this Background host does not support bounded autonomous repair");
+                continue;
+            }
+            if (!reconcileOnly && park.meta.operations?.policy?.deadlineAt != null && park.meta.operations.policy.deadlineAt <= at) {
+                holdLocally("the assignment-local deadline expired");
+                continue;
+            }
+            const exitInput = {
                 waitId: park.waitId,
                 generation: park.generation,
                 claimId,
@@ -2395,13 +2415,24 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
                 launchToken: park.record.resumeLaunchToken ?? attemptToken ?? "",
                 proof: { writerPidGone: writerPidGone && writer !== "unverified", writerLeaseReleased },
                 reason,
-            });
+            };
+            let held: { phase: string };
+            if (!reconcileOnly && input.service.repairFailedResumeForWorker && attempt.assignment) {
+                if (!park.record.checkpoint) throw new Error("Required saved checkpoint is missing");
+                verifyParkCheckpoint({ ...park.record.checkpoint, version: 1, waitId: park.waitId, generation: park.generation });
+                if (!wait) throw new Error("Required authoritative wait history is missing");
+                held = input.service.repairFailedResumeForWorker(scope, { ...exitInput,
+                    checkpointId: `park:${park.record.attemptId}`,
+                    expectedCancelEpoch: wait.cancelEpoch });
+            } else {
+                held = input.service.holdFailedResumeForWorker(scope, exitInput);
+            }
             const phase = phaseOf(held.phase);
             updateParkRecord(park.runId, {
                 phase: park.record.phase === "cancelled" ? "cancelled" : phase,
                 ...(phase === "held" && park.record.phase !== "cancelled" ? { heldReason: reason } : {}),
             });
-            input.notify?.(`Subagent ${park.runId}: ${reason}. The wait is ${phase}; it will not resume automatically.`, "warning");
+            input.notify?.(`Subagent ${park.runId}: ${reason}. The reconciled wait is ${phase}.`, "warning");
             result = { outcome: "settled", waitPhase: phase, reason };
         } catch (error) {
             // The store refused (stale identity, terminal generation, unproven exit).
@@ -2443,10 +2474,11 @@ export async function reconcileParkedWaits(
                 if (!attemptId || !attempt) {
                     updateParkRecord(park.runId, {
                         phase: "held",
-                        heldReason: `Resume attempt ${attemptId || "(unknown)"} was recorded before spawn but never started; reconcile it manually.`,
+                        heldReason: `Resume attempt ${attemptId || "(unknown)"} was published but launch and writer identity remain unproven.`,
                     });
+                    if (park.meta.assignment) commitAssignmentTerminal({ ...park.meta, status: "lost", failureReason: "Published continuation metadata is missing; launch and writer termination remain unproven." }, true);
                     options.notify?.(
-                        `Subagent ${park.runId}: resume attempt ${attemptId || "(unknown)"} was recorded but never started. The wait is held; take over with subagent_stop ${park.runId}.`,
+                        `Subagent ${park.runId}: resume attempt ${attemptId || "(unknown)"} has no verifiable launch metadata. The writer fence is retained.`,
                         "warning",
                     );
                     held += 1;
@@ -2475,7 +2507,7 @@ export async function reconcileParkedWaits(
                 skipped += 1;
                 continue;
             }
-            const wait = service.listWorkerWaits(scope, { pendingOnly: true })
+            const wait = service.listWorkerWaits(scope)
                 .find((entry) => entry.waitId === park.waitId && entry.generation === park.generation);
             if (!wait) {
                 // The generation was consumed, cancelled or superseded elsewhere.
@@ -2483,7 +2515,7 @@ export async function reconcileParkedWaits(
                 skipped += 1;
                 continue;
             }
-            if (wait.phase === "resuming") {
+            if (wait.phase === "resuming" || (wait.phase === "held" && park.record.resumedBy)) {
                 // A published attempt owns this generation. If it already ended (or
                 // its record vanished), the unconsumed generation is settled
                 // explicitly; nothing else may resume or mirror it.

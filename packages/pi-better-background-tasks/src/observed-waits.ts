@@ -491,6 +491,7 @@ export interface BackgroundOperationService {
    * epoch and evidence pins and invalidates the claim so nothing resumes again.
    */
   holdFailedResumeForWorker(run: WorkerRunScope, input: HoldResumedAttemptInput): HoldResumedAttemptView;
+  repairFailedResumeForWorker(run: WorkerRunScope, input: HoldResumedAttemptInput & { checkpointId: string; expectedCancelEpoch: number }): { phase: string; repaired: boolean };
   listWorkerWaits(run: WorkerRunScope, options?: { pendingOnly?: boolean }): readonly WaitView[];
   cancelWorkerWait(run: WorkerRunScope, input: { waitId: string; generation: number; reason: string }): WaitView;
   registerContinuationAdapter(adapter: ContinuationAdapter): void;
@@ -924,6 +925,10 @@ export class ObservedWaitHost {
       publishResumeForWorker: (run: WorkerRunScope, input: PublishResumeViewInput) => this.publishResumeForWorker(run, input),
       releaseResumeForWorker: (run: WorkerRunScope, input: ReleaseResumeViewInput) => this.releaseResumeForWorker(run, input),
       holdFailedResumeForWorker: (run: WorkerRunScope, input: HoldResumedAttemptInput) => this.holdFailedResumeForWorker(run, input),
+      repairFailedResumeForWorker: (run, input) => {
+        this.ownedWait(this.workerOwner(run), input.waitId, input.generation);
+        return this.requireStore().repairFailedResume(input);
+      },
       listWorkerWaits: (run: WorkerRunScope, listOptions?: { pendingOnly?: boolean }) => this.listWorkerWaits(run, listOptions),
       cancelWorkerWait: (run: WorkerRunScope, input: { waitId: string; generation: number; reason: string }) => this.cancelWorkerWait(run, input),
       registerContinuationAdapter: (adapter: ContinuationAdapter) => this.registerContinuationAdapter(adapter),
