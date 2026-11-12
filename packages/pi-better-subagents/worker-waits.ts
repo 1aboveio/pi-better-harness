@@ -18,8 +18,7 @@
  *   supervisor transport, permission intersection and dispatch. This module never
  *   opens that database and never imports Background code: it consumes the
  *   service object Background publishes on its versioned event channel.
- * - **Goal** answers `pi-better-goal:operation-resume-admission` (v1). A refused
- *   admission holds the wait; it never falls back to launching.
+ * - **Goal** controls parent execution only; assignment admission does not ask it.
  *
  * The service contract mirror below is intentionally structural: it names only
  * the members this module calls, so either package can load first and a missing
@@ -87,7 +86,7 @@ export type { ParkRecord };
  */
 export const OBSERVED_WAITS_SERVICE_CHANNEL = "pi-better-background-tasks:observed-waits-service";
 export const OBSERVED_WAITS_SERVICE_REQUEST_CHANNEL = "pi-better-background-tasks:observed-waits-service-request";
-export const OBSERVED_WAITS_SERVICE_VERSION = 1 as const;
+export const OBSERVED_WAITS_SERVICE_VERSION = 2 as const;
 
 /**
  * Request/reply surface Background publishes for the Subagents coordinator. It
@@ -342,6 +341,7 @@ export interface WorkerOperationService {
     readonly version: typeof OBSERVED_WAITS_SERVICE_VERSION;
     readonly serviceId: string;
     readonly available: true;
+    readonly assignmentContinuation?: 1;
     readonly continuationReady: boolean;
     ownsTask(run: WorkerRunScope, taskId: string): boolean;
     launchForWorker(run: WorkerRunScope, input: { kind: "process" | "watch"; params: JsonRecord; policy?: WorkerSandboxAuthority | null }): Promise<WorkerLaunchResult>;
@@ -425,6 +425,11 @@ function mirrorOf(pi: unknown): { mirror: { service?: WorkerOperationService; re
         bus.on(OBSERVED_WAITS_SERVICE_CHANNEL, (data) => {
             const current = serviceMirrors.get(bus as object);
             if (!current) return;
+            if (data && typeof data === "object" && (data as { version?: unknown }).version !== OBSERVED_WAITS_SERVICE_VERSION) {
+                current.service = undefined;
+                current.reason = "The Background host does not support observed-waits service v2 assignment continuation";
+                return;
+            }
             if (isPublishedService(data)) {
                 current.service = data;
                 current.reason = undefined;
@@ -479,6 +484,7 @@ export function workerOperationsUnavailableReason(pi: unknown): string | undefin
  */
 export interface WorkerRunPolicy {
     version: 1;
+    mandatoryPermissions?: boolean;
     /** Confinement root and levels, or null for the `sandbox:false` opt-out. */
     sandbox: WorkerSandboxAuthority | null;
     /** Effective child tool allowlist (after exclusions). */
@@ -495,6 +501,7 @@ export interface WorkerRunPolicy {
 
 /** Build the policy Background needs; `taskPolicy` is the immutable task launch contract. */
 export function captureWorkerPolicy(input: {
+    mandatoryPermissions?: boolean;
     sandbox: boolean;
     tools: readonly string[];
     clean: boolean;
@@ -516,6 +523,7 @@ export function captureWorkerPolicy(input: {
         : null;
     return {
         version: 1,
+        mandatoryPermissions: input.mandatoryPermissions === true,
         sandbox,
         tools: [...input.tools],
         clean: input.clean,
@@ -523,6 +531,35 @@ export function captureWorkerPolicy(input: {
         authorityReference: input.authorityReference,
         workspace: input.workspace,
     };
+}
+
+/** Refuse permission loss or widening when reconstructing a captured assignment. */
+export function assertAssignmentPermissionScope(
+    captured: { sandbox: unknown; mandatoryPermissions?: boolean } | undefined,
+    current: { sandbox: unknown; mandatoryPermissions: boolean },
+): void {
+    if (!captured) throw new PreSpawnResumeError("Captured assignment permissions are missing");
+    const requiresAuthority = captured.mandatoryPermissions === true
+        || (captured.mandatoryPermissions === undefined && captured.sandbox !== null);
+    if (requiresAuthority && !current.mandatoryPermissions) {
+        throw new PreSpawnResumeError("Expected mandatory permission authority is unavailable");
+    }
+    const normalize = (value: unknown): unknown => {
+        if (Array.isArray(value)) return value.map(normalize);
+        if (value && typeof value === "object") return Object.fromEntries(
+            Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, normalize(entry)]),
+        );
+        return value;
+    };
+    const oldSandbox = captured.sandbox as WorkerSandboxAuthority | null;
+    const newSandbox = current.sandbox as WorkerSandboxAuthority | null;
+    if (oldSandbox?.denyWrite?.some((path) => !newSandbox?.denyWrite?.includes(path))) {
+        throw new PreSpawnResumeError("Current permissions would remove captured assignment protected paths");
+    }
+    const authority = (sandbox: WorkerSandboxAuthority | null) => sandbox ? { root: sandbox.root, permissions: sandbox.permissions } : null;
+    if (JSON.stringify(normalize(authority(oldSandbox))) !== JSON.stringify(normalize(authority(newSandbox)))) {
+        throw new PreSpawnResumeError("Current permissions would change the captured assignment scope");
+    }
 }
 
 // ---- child capability planning -------------------------------------------
@@ -1419,10 +1456,8 @@ export type ResumeAdmission =
     | { allowed: false; reason: string; revision: number };
 
 /**
- * Ask Goal whether this owner may resume now. The owner binding is the one
- * CAPTURED when the worker parked, so an active Goal is matched by id instead of
- * by whatever goal happens to be current; a no-goal session records `null`, which
- * is exactly what Goal compares against when no goal exists.
+ * Legacy parent Goal admission helper. Delegated assignments do not call this.
+ * The owner binding is the one captured when the worker parked.
  */
 export async function requestResumeAdmission(
     pi: unknown,
@@ -1672,38 +1707,22 @@ export interface FinalDispatchInput {
 /**
  * Final dispatch fence.
  *
- * The launch path awaits extension resolution, permission re-resolution, the
- * bridge registration and the writer lease. Any of those can take long enough for
- * the parent to switch branch, pause Goal, tighten permissions, cancel the wait or
- * shrink capacity. Immediately before a child may start, this re-reads the durable
- * claim, the cancellation epoch and the Goal gate, and re-checks the synchronous
- * parent identity and the captured policy. A refusal is a proven pre-spawn
- * failure: nothing was executed, and the caller releases the claim/capacity.
+ * Final dispatch checks the compatible host, captured permission scope, durable
+ * claim, cancellation epoch, launch identity and capacity. Parent Goal, session
+ * and branch changes do not revoke an existing assignment.
  */
 export async function assertFinalResumeDispatch(input: FinalDispatchInput): Promise<DispatchGuard> {
     const refusal = (message: string): never => {
         throw new FinalDispatchRefusal(message);
     };
-    const identityNow = (): WaitOwnerBinding => {
+    const assertIdentity = (_phase: string): void => {
         const ctx = input.context();
-        if (!ctx) refusal("The owning foreground session is no longer active");
-        return ownerBindingFromContext(ctx as ExtensionContext);
-    };
-    const assertIdentity = (phase: string): void => {
-        const ctx = input.context();
-        if (!ctx) refusal("The owning foreground session is no longer active");
-        const current = identityNow();
-        if (current.sessionId !== input.owner.sessionId) {
-            refusal(`The owning parent session changed during ${phase}; the resume was not executed`);
+        if (!ctx) refusal("No compatible supervisor host is available");
+        if (canonical(ctx!.cwd) !== canonical(input.owner.workspace)) {
+            refusal("The supervisor workspace is incompatible with the assignment");
         }
-        if (canonical(current.workspace) !== canonical(input.owner.workspace)) {
-            refusal(`The foreground workspace changed during ${phase}; the resume was not executed`);
-        }
-        if (input.owner.branchId && !branchContains(ctx as ExtensionContext, input.owner.branchId)) {
-            refusal(`The owning branch is no longer active during ${phase}; the resume was not executed`);
-        }
-        if ((current.goalId ?? null) !== (input.owner.goalId ?? null)) {
-            refusal(`The owning Goal binding changed during ${phase}; the resume was not executed`);
+        if (input.service()?.assignmentContinuation !== 1) {
+            refusal("The Background host does not support assignment-local continuation");
         }
     };
     /**
@@ -1737,9 +1756,7 @@ export async function assertFinalResumeDispatch(input: FinalDispatchInput): Prom
             refusal("The wait was cancelled or replaced at dispatch; the continuation was not started");
         }
     };
-    let goalProof: (() => boolean) | undefined;
     const guard = (): void => {
-        if (goalProof && !goalProof()) refusal("Goal admission changed before execution release; the continuation was not started");
         assertIdentity("dispatch");
         if (!input.permissionsUnchanged()) {
             refusal("The worker's permissions changed before dispatch; the continuation was not started");
@@ -1791,20 +1808,7 @@ export async function assertFinalResumeDispatch(input: FinalDispatchInput): Prom
         launchToken: input.claim.launchToken,
     });
 
-    // Goal gate last, because it is the only asynchronous authority check. Its
-    // revision must not move during the fence, and the durable confirmation is
-    // repeated synchronously afterwards: a cancellation performed inside the Goal
-    // handler is caught here, not accepted on an earlier read.
-    const admission = await requestResumeAdmission(input.pi, input.owner, {
-        ...(input.admissionTimeoutMs !== undefined ? { timeoutMs: input.admissionTimeoutMs } : {}),
-    });
-    if (!admission.allowed) {
-        refusal(`Goal refused the resume at dispatch: ${admission.reason}`);
-    }
-    if (admission.revision !== input.admissionRevision) {
-        refusal(`Goal admission advanced from revision ${input.admissionRevision} to ${admission.revision} during preparation; the continuation was not started`);
-    }
-    goalProof = (admission as { isCurrent?: () => boolean }).isCurrent;
+    // Parent workflow state is provenance, not assignment authority.
     // Validate the synchronous guard once here (so the returned guard is known to
     // hold after the last await) and hand it back for the release point.
     guard();
@@ -1814,8 +1818,8 @@ export async function assertFinalResumeDispatch(input: FinalDispatchInput): Prom
 /**
  * One resume at a time, through the existing continuation launch path.
  *
- * Order is fixed: capacity is reserved with the ordinary gate, the owner is
- * admitted (captured parent session/branch binding + Goal), the durable wait is
+ * Order is fixed: capacity is reserved with the ordinary gate, captured assignment
+ * scope is restored, the durable wait is
  * re-read, the attempt id/token are written to the park record, and only then is
  * a child spawned. A full capacity defers delivery without touching the wait, so
  * a queued resume never becomes "held". A proven pre-spawn failure holds the wait
@@ -1855,16 +1859,19 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
             const ctx = options.context();
             if (!ctx) return "skipped";
             const current = ownerBindingFromContext(ctx);
-            if (park.record.ownerSessionId && current.sessionId !== park.record.ownerSessionId) return "skipped";
             if (park.record.ownerWorkspace && canonical(park.record.ownerWorkspace) !== canonical(current.workspace)) return "skipped";
-            if (park.record.ownerBranchId && !branchContains(ctx, park.record.ownerBranchId)) return "skipped";
             const prior = readMeta(park.runId);
             if (prior && prior.status === "running" && processExists(prior.pid)) return "skipped";
 
             const service = options.service();
             if (!service) return "skipped";
+            if (service.assignmentContinuation !== 1) return hold(park, "The Background host does not support assignment-local continuation");
+            if (!park.meta.operations?.policy) return hold(park, "The captured assignment permission policy is missing; migration refused");
             const scope = backgroundScopeForMeta(park.meta, park.record);
             if (!scope) return "skipped";
+            if (!park.record.ownerSessionId && !park.meta.callbackOrigin?.sessionId) {
+                return hold(park, "The captured assignment recipient is missing; migration refused");
+            }
             // Capacity FIRST: a saturated pool leaves the generation ready and the
             // delivery pending, so a queued resume never becomes "held" and no
             // unresumable claim is published.
@@ -1876,20 +1883,14 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
                 return "skipped";
             }
 
-            // The captured binding is the owner: an active Goal must match by id,
-            // and a no-goal session records null.
+            // Captured recipient metadata is never replaced by the host's session.
             const owner: WaitOwnerBinding = {
-                sessionId: park.record.ownerSessionId ?? current.sessionId,
-                workspace: park.record.ownerWorkspace ?? current.workspace,
-                branchId: park.record.ownerBranchId ?? current.branchId,
+                sessionId: park.record.ownerSessionId ?? park.meta.callbackOrigin!.sessionId!,
+                workspace: park.record.ownerWorkspace ?? park.meta.callbackOrigin?.cwd ?? current.workspace,
+                branchId: park.record.ownerBranchId ?? null,
                 goalId: park.record.ownerGoalId ?? null,
             };
-            const admission = await requestResumeAdmission(options.pi, owner);
-            if (!admission.allowed) {
-                options.capacity.release();
-                reserved = false;
-                return hold(park, admission.reason);
-            }
+            const admission = { revision: 0 };
 
             // Rehydrate the parked attempt's run binding: the claim fence is
             // addressed by run id and requires a binding for this conversation.

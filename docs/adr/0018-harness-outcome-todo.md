@@ -13,6 +13,17 @@ explicit session association and recovery contract.
 
 ## Decision
 
+### Delegated execution authority (#708)
+
+Goal controls parent execution, not an already delegated worker assignment.
+Parent Goal pause, completion, clearing and replacement, and parent session or
+branch inactivity, do not revoke that assignment. The captured parent remains
+the result recipient. Worker continuation uses the saved assignment scope,
+current mandatory permissions, cancellation epoch, writer lease, launch identity
+and capacity. Missing required authority fails closed. No host means queued work,
+not provider execution while Pi is shut down. This amends the active-parent/Goal
+restriction in the older observed-waits proposal without changing parent gates.
+
 `pi-better-harness` absorbs Plan as its **Outcome & Todo** runtime. The original
 accepted decision made the runtime off by default behind one human-controlled
 `/harness-settings` toggle. The human has since accepted separate display and

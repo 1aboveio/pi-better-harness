@@ -42,6 +42,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { describeSandboxSupport } from "../shared-sandbox-core.ts";
 import { prepareTaskRuntime } from "../task-policy.ts";
 import {
+    assertFinalResumeDispatch,
     OPERATION_RESUME_ADMISSION_EVENT,
     createResumeOrchestration,
     finalizeWorkerParkAfterExit,
@@ -61,6 +62,7 @@ const durableRoot = mkdtempSync(join(tmpdir(), "worker-kernel-durable-"));
 const volatileRoot = mkdtempSync(join(tmpdir(), "worker-kernel-tmp-"));
 const support = describeSandboxSupport();
 const requireKernel = process.env.PI_WORKER_KERNEL_REQUIRE === "1";
+const sdkOnly = process.env.WORKER_SDK_ONLY === "1";
 
 before(() => {
     process.env.PI_SUBAGENT_DURABLE_DIR = durableRoot;
@@ -87,6 +89,7 @@ const TASK_TOOLS = ["bg_task_spawn", "bg_task_status", "bg_task_log", "wait_for_
 
 /** The real task policy this worker gets: read-only project, no outside writes, no network. */
 function taskRuntimeFor(workspace, controlDir) {
+    if (sdkOnly) return { file: process.execPath, fileArgs: [sdkCliPath()], policy: { root: workspace, permissions: {} } };
     return prepareTaskRuntime({
         root: workspace,
         controlDir,
@@ -156,7 +159,7 @@ function nestedSandboxFailure(output) {
 async function registerWorker(stack, { runId, conversationId, workspace, runtimePolicy, plan }) {
     const policy = {
         version: 1,
-        sandbox: {
+        sandbox: sdkOnly ? null : {
             root: runtimePolicy.root,
             permissions: runtimePolicy.permissions,
             denyWrite: runtimePolicy.denyWrite,
@@ -173,14 +176,19 @@ async function registerWorker(stack, { runId, conversationId, workspace, runtime
         workspace,
         authorityReference: policy.authorityReference,
         branchId: "branch-1",
-        goalId: null,
+        goalId: "original-goal",
         policy,
         capabilities: plan.capabilities,
         tools: plan.tools,
         schemas: schemasFor(stack.pi, plan.tools),
         attemptId: runId,
-        owner: { sessionId: "parent-session-1", workspace, branchId: "branch-1", goalId: null },
+        owner: { sessionId: "parent-session-1", workspace, branchId: "branch-1", goalId: "original-goal" },
     });
+    const meta = registry.readMeta(runId);
+    if (meta) registry.writeMeta({ ...meta, operations: {
+        version: 1, bridgeRunId: runId, conversationId, workspace,
+        authorityReference: policy.authorityReference, policy, tools: plan.tools,
+    } });
     return { handle, policy };
 }
 
@@ -219,8 +227,9 @@ function writeAttempt(stack, { attemptId, sessionDir, workspace }) {
     return { controlDir, runtime };
 }
 
-test("a kernel-confined worker parks on supervised tasks, keeps denied capabilities denied, and resumes on its former task", { timeout: 180_000 }, async (t) => {
-    if (!support.supported) {
+for (const transition of ["completed", "paused", "cleared", "replaced", "inactive"]) {
+test(`a real saved worker resumes and acknowledges exact evidence with parent ${transition}`, { timeout: 180_000 }, async (t) => {
+    if (!support.supported && !sdkOnly) {
         skipOrFail(t, `kernel sandbox backend unavailable: ${support.reason}`);
         return;
     }
@@ -233,7 +242,7 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
         "child-operations.ts exports no default extension factory, so --extension child-operations.ts cannot load and the task guard cannot admit the fixed bridge adapter (parent-owned file).",
     );
     const stack = await startStack();
-    const attemptId = "sa_kernel_fresh";
+    const attemptId = `sa_kernel_fresh_${transition}`;
     const sessionDir = join(durableRoot, "sessions", attemptId);
     mkdirSync(sessionDir, { recursive: true });
     const outside = join(stack.root, "outside.txt");
@@ -283,13 +292,15 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
     const ready = `${fresh.stdout}\n${fresh.stderr}`.split("\n").filter(Boolean)
         .map((line) => { try { return JSON.parse(line); } catch { return undefined; } })
         .find((entry) => entry?.type === "task_sandbox_ready");
-    assert.ok(ready, `the task guard must publish its ready marker\nstdout:\n${fresh.stdout}\nstderr:\n${fresh.stderr}`);
-    assert.equal(ready.root, realpathSync(stack.workspace));
+    assert.ok(sdkOnly || ready, `the task guard must publish its ready marker\nstdout:\n${fresh.stdout}\nstderr:\n${fresh.stderr}`);
+    if (!sdkOnly) assert.equal(ready.root, realpathSync(stack.workspace));
     // The marker lists the guarded builtin selection; bridge tools are activated
     // separately from `policy.operationBridge`. The direct proof that the fixed
     // adapter was admitted is that the child's own bridge calls succeeded below.
-    assert.ok(Array.isArray(ready.tools));
-    assert.equal(ready.tools.includes("read"), true);
+    if (!sdkOnly) {
+        assert.ok(Array.isArray(ready.tools));
+        assert.equal(ready.tools.includes("read"), true);
+    }
 
     // The bridge socket worked from the confined child: a wait was registered and
     // its verified checkpoint staged while the child was still alive.
@@ -298,7 +309,7 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
     assert.equal(stored.phase, "parking");
     const waitId = stored.waitId;
     const generation = stored.generation;
-    const scope = { runId: attemptId, conversationId: attemptId, workspace: stack.workspace, authorityReference: "x", branchId: "branch-1", goalId: null };
+    const scope = { runId: attemptId, conversationId: attemptId, workspace: stack.workspace, authorityReference: "x", branchId: "branch-1", goalId: "original-goal" };
     let view = stack.service.listWorkerWaits(scope, { pendingOnly: true }).find((entry) => entry.waitId === waitId);
     assert.equal(view.phase, "parking", "a live child must not look parked");
     const taskIds = view.taskIds;
@@ -335,7 +346,7 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
             events: log.events.slice(-400),
         };
     });
-    assert.deepEqual(Object.values(outcomes).sort(), ["failed", "failed", "succeeded"], JSON.stringify(diagnostics));
+    assert.deepEqual(Object.values(outcomes).sort(), sdkOnly ? ["succeeded"] : ["failed", "failed", "succeeded"], JSON.stringify(diagnostics));
     assert.equal(existsSync(outside), false, "a write outside the workspace must never change the host, even when private /tmp scratch is writable");
     assert.equal(existsSync(join(stack.workspace, "blocked-write.txt")), false, "the read-only project mount must refuse the visible write target");
     assert.equal(networkConnections, 1, "the confined network task must not reach the listener that the control reached");
@@ -363,7 +374,12 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
     assert.equal(readyWait, true, "the settled tasks must move the durable wait to ready");
 
     // Resume with the real claim fence and a second real confined child.
-    stack.events.on(OPERATION_RESUME_ADMISSION_EVENT, (request) => request.reply({ allowed: true, revision: 1 }));
+    stack.events.on(OPERATION_RESUME_ADMISSION_EVENT, () => assert.fail("parent Goal must not gate delegated execution"));
+    const hostCtx = createCtx(stack.workspace, transition === "inactive" ? "unrelated-session" : "parent-session-1");
+    hostCtx.sessionManager.getBranch = () => transition === "cleared" ? [] : [{
+        type: "custom", customType: "pi-better-goal", id: "different-branch",
+        data: { kind: "set", goal: { goalId: transition === "replaced" ? "new-goal" : "original-goal", status: transition } },
+    }];
     const resumedId = "sa_kernel_resumed";
     const resumedSession = sessionDir;
     let resumedChild;
@@ -371,7 +387,7 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
         pi: stack.pi,
         service: () => stack.service,
         rpc: stack.bridge.rpc,
-        context: () => createCtx(stack.workspace),
+        context: () => hostCtx,
         capacity: { tryReserve: () => true, recheck: () => true, commit: () => {}, release: () => {} },
         launch: async (input) => {
             assert.equal(readParkRecord(attemptId).phase, "resuming");
@@ -379,6 +395,14 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
             const claim = stack.store.listResumeClaims({ waitId, generation }).find((entry) => entry.state === "published");
             assert.ok(claim, "the resume attempt must be published before the second child starts");
             assert.equal(claim.attemptId, input.assignedRunId);
+            const dispatch = await assertFinalResumeDispatch({
+                pi: stack.pi, rpc: stack.bridge.rpc, service: () => stack.service,
+                context: () => hostCtx, park: input.park, claim: input.claim,
+                owner: { sessionId: "parent-session-1", workspace: stack.workspace, branchId: "branch-1", goalId: "original-goal" },
+                admissionRevision: input.admissionRevision, permissionsUnchanged: () => true, capacityAvailable: () => true,
+            });
+            dispatch();
+            assert.equal(input.park.record.ownerSessionId, "parent-session-1");
             const resumedControl = join(stack.root, "control", input.assignedRunId);
             mkdirSync(resumedControl, { recursive: true });
             const resumedRuntime = taskRuntimeFor(stack.workspace, resumedControl);
@@ -390,6 +414,7 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
                 plan,
             });
             const sessionFile = findSessionFile(resumedSession, attemptId);
+            assert.ok(sessionFile, "continuation must reopen the parked native conversation, never create a replacement");
             resumedChild = runConfined({
                 file: resumedRuntime.file,
                 args: [...resumedRuntime.fileArgs, ...childArgs({
@@ -406,7 +431,7 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
                     WORKER_KERNEL_TASKS: taskIds.join(","),
                     WORKER_KERNEL_WAIT_ID: waitId,
                     WORKER_KERNEL_GENERATION: String(generation),
-                    WORKER_KERNEL_REVISIONS: JSON.stringify(Object.fromEntries(operations.map((operation) => [operation.operationId, 1]))),
+                    WORKER_KERNEL_REVISIONS: JSON.stringify(Object.fromEntries(operations.map((operation) => [operation.operationId, operation.terminalRevision]))),
                 },
             });
         },
@@ -431,6 +456,7 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
     assert.equal(readParkRecord(attemptId).phase, "consumed");
     orchestration.stop();
 });
+}
 
 /** The saved session file the fresh child persisted for its conversation. */
 function findSessionFile(sessionDir, sessionId) {

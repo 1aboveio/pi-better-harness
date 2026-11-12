@@ -72,7 +72,7 @@ import {
 import type { BackgroundTaskCallbackOrigin, CommandSpec, Condition, TaskSandboxProvenance } from "./types.js";
 import type { SpawnTaskParams, WatchTaskParams } from "./runtime.js";
 
-export const OBSERVED_WAITS_SERVICE_VERSION = 1 as const;
+export const OBSERVED_WAITS_SERVICE_VERSION = 2 as const;
 export const OBSERVED_WAITS_SERVICE_CHANNEL = "pi-better-background-tasks:observed-waits-service";
 export const OBSERVED_WAITS_SERVICE_REQUEST_CHANNEL = "pi-better-background-tasks:observed-waits-service-request";
 
@@ -470,6 +470,7 @@ export interface BackgroundOperationService {
   readonly serviceId: string;
   readonly available: true;
   /** True when a verified continuation adapter is registered. */
+  readonly assignmentContinuation: 1;
   readonly continuationReady: boolean;
   ownsTask(run: WorkerRunScope, taskId: string): boolean;
   launchForWorker(run: WorkerRunScope, input: WorkerLaunchInput): Promise<DurableLaunch>;
@@ -905,6 +906,7 @@ export class ObservedWaitHost {
     this.supervisor = options.supervisor ?? createLocalSupervisor({ directory: this.directory });
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS;
     const base = {
+      assignmentContinuation: 1 as const,
       version: OBSERVED_WAITS_SERVICE_VERSION,
       serviceId: this.serviceId,
       available: true as const,

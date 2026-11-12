@@ -108,6 +108,10 @@ export default function fakeModel(pi: ExtensionAPI): void {
                             },
                         },
                     ];
+                    if (process.env.WORKER_SDK_ONLY === "1") content = [{
+                        type: "toolCall", id: "sdk-spawn", name: "bg_task_spawn",
+                        arguments: { argv: [process.execPath, "-e", "setTimeout(() => console.log('sdk-evidence'), 1500)"], shell: false },
+                    }];
                 } else if (turn === 2) {
                     const taskIds = discoveredTaskIds(context);
                     content = taskIds.length > 0
@@ -140,7 +144,7 @@ export default function fakeModel(pi: ExtensionAPI): void {
                         generation: Number(process.env.WORKER_KERNEL_GENERATION ?? 1),
                         terminal_revisions: JSON.parse(process.env.WORKER_KERNEL_REVISIONS ?? "{}"),
                         disposition: "assignment-complete",
-                        note: "The read-only build succeeded; the write and network attempts were denied, which is the expected confined result.",
+                        note: process.env.WORKER_SDK_ONLY === "1" ? "The dependency succeeded; I inspected its exact terminal revision." : "The read-only build succeeded; the write and network attempts were denied, which is the expected confined result.",
                     },
                 }];
             } else {
