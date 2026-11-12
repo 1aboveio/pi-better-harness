@@ -52,12 +52,9 @@ import {
 } from "node:fs";
 import { EventEmitter, once } from "node:events";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
 
-const PACKAGE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const REPO_ROOT = dirname(dirname(PACKAGE_DIR));
-const REAL_SDK_URL = pathToFileURL(join(REPO_ROOT, "node_modules/@earendil-works/pi-coding-agent/dist/index.js")).href;
+const REAL_SDK_URL = import.meta.resolve("@earendil-works/pi-coding-agent");
 
 // Hermetic registry + child artifacts: everything this file writes lives under
 // one per-run temp directory, never a checked-in path or the machine registry.
@@ -99,6 +96,7 @@ const {
 const { runDailyCleanupOnce, enforceRegistrySizeCapOnce } = await import("../cleanup.ts");
 const { killProcessTree, processExists } = await import("../spawn.ts");
 const { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } = await import("../permission-policy.ts");
+const { readOutcome, outcomeTranscriptReceipt } = await import("../assignment-outcomes.ts");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WORKSPACE = join(RUNTIME, "workspace");
@@ -184,13 +182,17 @@ function makeHarness(options = {}) {
     const tools = new Map();
     const handlers = new Map();
     const sent = [];
+    const entries = [];
     const pi = {
         events,
         registerTool: (definition) => tools.set(definition.name, definition),
         registerCommand: () => {},
         appendEntry: () => {},
         on: (event, handler) => handlers.set(event, handler),
-        sendMessage: (message, sendOptions) => sent.push({ message, options: sendOptions }),
+        sendMessage: (message, sendOptions) => {
+            sent.push({ message, options: sendOptions });
+            entries.push({ id: `callback-${entries.length}`, type: "custom_message", ...message });
+        },
     };
     const ctx = {
         cwd: options.cwd ?? WORKSPACE,
@@ -198,7 +200,7 @@ function makeHarness(options = {}) {
         hasUI: false,
         isIdle: () => true,
         ui: { notify() {}, setWidget() {} },
-        sessionManager: { getSessionId: () => options.sessionId ?? "owner-session", getBranch: () => [] },
+        sessionManager: { getSessionId: () => options.sessionId ?? "owner-session", getBranch: () => entries },
     };
     betterSubagents(pi);
     return {
@@ -216,6 +218,16 @@ async function waitFor(fn, { timeoutMs = 8000, intervalMs = 20 } = {}) {
         if (Date.now() > deadline) return undefined;
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
+}
+
+async function deliveredOutcome(h, id, timeoutMs) {
+    const receipt = await waitFor(() => readOutcome(readMeta(id))?.deliveryReceipt, { timeoutMs });
+    assert.ok(receipt, "the completion has a durable recipient receipt");
+    const outcome = readOutcome(readMeta(id));
+    assert.equal(outcome.recipient.sessionId, h.ctx.sessionManager.getSessionId());
+    assert.equal(outcomeTranscriptReceipt(h.ctx.sessionManager.getBranch(), outcome.eventId), receipt.entryId);
+    assert.equal(completionCallbacks(h, id).length, 1, "the recorded recipient received exactly one callback");
+    return readMeta(id);
 }
 
 async function waitTerminal(id) {
@@ -348,12 +360,7 @@ describe("completed-subagent continuation", () => {
             const rootResult = await resultText(h, rootId);
             // Let the ordinary completion handoff settle before snapshotting, so the
             // only thing this test can observe changing later is continuation's own work.
-            await waitFor(() => {
-                const current = readMeta(rootId);
-                return current && (current.completionCallbackSentAt !== undefined || current.completionCallbackSuppressedAt !== undefined);
-            }, { timeoutMs: 5000 });
-            const rootSnapshot = readMeta(rootId);
-            assert.equal(typeof rootSnapshot.completionCallbackSentAt, "number", "the root completion was handed off");
+            const rootSnapshot = await deliveredOutcome(h, rootId, 5000);
 
             resumedId = idOf(await resumeRun(h, { id: rootId, prompt: "FIX IT" }));
             assert.notEqual(resumedId, rootId, "continuation allocates a new attempt id");
@@ -473,13 +480,7 @@ describe("completed-subagent continuation", () => {
             // The completion contract (#624) makes the stop owe exactly one
             // terminal callback. Let that handoff settle before snapshotting, so the
             // only thing this test observes changing later is continuation's work.
-            await waitFor(() => {
-                const current = readMeta(killedId);
-                return current && (current.completionCallbackSentAt !== undefined
-                    || current.completionCallbackSuppressedAt !== undefined);
-            }, { timeoutMs: 6000 });
-            assert.equal(typeof readMeta(killedId).completionCallbackSentAt, "number",
-                "the killed attempt's one completion was handed off");
+            await deliveredOutcome(h, killedId, 6000);
 
             // The killed attempt is now a saved conversation, while the other
             // terminal outcomes keep their existing refusal.
@@ -814,9 +815,7 @@ describe("completed-subagent continuation", () => {
             const root = await waitTerminal(rootId);
             // Let the owner's own handoff settle first, so the only handoff this
             // test can observe moving later is the continuation's.
-            await waitFor(() => readMeta(rootId)?.completionCallbackSentAt !== undefined, { timeoutMs: 6000 });
-            const rootSnapshot = readMeta(rootId);
-            assert.equal(typeof rootSnapshot.completionCallbackSentAt, "number", "the owner received the root completion");
+            const rootSnapshot = await deliveredOutcome(owner, rootId, 6000);
             assert.equal(completionCallbacks(owner, rootId).length, 1);
             const rootLog = readFileSync(logPathFor(rootId), "utf-8");
             const rootResult = await evidenceResultText(owner, rootId);
@@ -847,8 +846,7 @@ describe("completed-subagent continuation", () => {
 
             // Callback origin transferred: the successor collects the new attempt,
             // the original owner is not asked to collect it a second time.
-            await waitFor(() => readMeta(resumedId)?.completionCallbackSentAt !== undefined, { timeoutMs: 6000 });
-            assert.equal(typeof readMeta(resumedId).completionCallbackSentAt, "number");
+            await deliveredOutcome(successor, resumedId, 6000);
             assert.equal(completionCallbacks(successor, resumedId).length, 1, "the invoking foreground was notified");
             assert.equal(completionCallbacks(owner, resumedId).length, 0, "the original owner was not notified again");
 
@@ -868,7 +866,8 @@ describe("completed-subagent continuation", () => {
 
             // Prior evidence is untouched by a cross-foreground continuation.
             assert.equal(readFileSync(logPathFor(rootId), "utf-8"), rootLog);
-            assert.equal(await evidenceResultText(successor, rootId), rootResult);
+            await assert.rejects(() => evidenceResultText(successor, rootId), /different parent session or branch/);
+            assert.equal(await evidenceResultText(owner, rootId), rootResult);
             const rootAfter = readMeta(rootId);
             for (const field of ["status", "sessionId", "endedAt", "exitCode", "logPath", "recipe", "callbackOrigin",
                 "completionCallbackSentAt", "completionCallbackSuppressedAt"]) {

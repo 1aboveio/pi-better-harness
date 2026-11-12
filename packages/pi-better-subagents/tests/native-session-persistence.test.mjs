@@ -34,12 +34,9 @@ import { register } from "node:module";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
-import { dirname, join, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join, sep } from "node:path";
 
-const PACKAGE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const REPO_ROOT = dirname(dirname(PACKAGE_DIR));
-const REAL_SDK_URL = pathToFileURL(join(REPO_ROOT, "node_modules/@earendil-works/pi-coding-agent/dist/index.js")).href;
+const REAL_SDK_URL = import.meta.resolve("@earendil-works/pi-coding-agent");
 
 const RUNTIME = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "subagent-persistence-")));
 const WORKSPACE = join(RUNTIME, "workspace");
@@ -288,7 +285,12 @@ describe("durable native-session persistence", () => {
             assert.equal(statSync(archive).mode & 0o777, 0o600, "the durable record is private");
             assert.equal(statSync(DURABLE_ATTEMPTS).mode & 0o777, 0o700, "the durable record directory is private");
 
-            // The daily sweep still bounds the volatile raw log, and keeps durable evidence.
+            // An unconsumed outcome pins evidence without turning retention into an error.
+            sweep(Date.now() + 30 * DAY_MS);
+            assert.equal(existsSync(runDir(id)), true, "unconsumed outcome evidence survives the sweep");
+            const inspected = await h.tools.get("subagent_result").execute("inspect", { id }, undefined, undefined, h.ctx);
+            const outcome = inspected.details.outcome.outcome;
+            await h.tools.get("subagent_result").execute("consume", { id, outcome_revision: outcome.revision, disposition: "consumed", note: "Inspected the durable answer before reclaiming volatile evidence." }, undefined, undefined, h.ctx);
             sweep(Date.now() + 30 * DAY_MS);
             assert.equal(existsSync(runDir(id)), false, "the volatile run directory and its log are reclaimed");
             assert.equal(existsSync(sessionPath), true, "the saved native conversation is durable");

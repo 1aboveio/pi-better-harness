@@ -86,6 +86,25 @@ test("quoted outcome text is not a recipient receipt", () => {
     assert.equal(outcomeTranscriptReceipt([{ id: "quote", type: "message", message: { role: "custom", customType: "background-completion-batch", content: "[outcome:quoted-event]" } }], "quoted-event"), null);
 });
 
+test("a host without transcript access defers retained outcomes without a callback or receipt", async () => {
+    const { store, meta } = failedAssignment("missing-transcript-outcome");
+    const h = host();
+    delete h.ctx.sessionManager.getBranch;
+    try {
+        await h.start();
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 0);
+        assert.equal(readOutcome(meta).deliveryReceipt, null);
+        assert.equal(readOutcome(meta).disposition, null);
+    } finally {
+        await h.close();
+        const request = { assignmentId: meta.assignment.assignmentId, recipient: meta.assignment.recipient, revision: 1 };
+        store.inspectAssignmentOutcome(request);
+        store.consumeAssignmentOutcome({ ...request, disposition: "dismissed", note: "Dispose isolated test evidence without a delivery receipt." });
+        store.close();
+    }
+});
+
 test("native Pi custom_message entries reconcile the exact structured outcome receipt", () => {
     const native = { id: "native-entry", type: "custom_message", customType: "background-completion-batch", content: "Completion", details: { completionEventIds: ["outcome-event"] } };
     assert.equal(outcomeTranscriptReceipt([native], "outcome-event"), "native-entry");
