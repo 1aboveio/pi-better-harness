@@ -9,7 +9,10 @@ standalone package receives a generated copy, not an independent status mapping.
 
 The coordinator remains the authority for wait generations, cancellation and
 interpretation. Its bounded read-only observation API never creates or migrates
-storage. Reads match the recorded worker conversation and workspace. A park
+storage. Reads match the recorded worker conversation, workspace and assignment
+attempt lineage. Wait origin/park attempt identity, published resume claims, or
+an exact park wait/generation reference associate waits with that lineage. A
+conversation-only wait is not evidence for an arbitrary assignment. A park
 cache locates the relationship but cannot prove completion or cancellation.
 Pending authoritative waits take precedence over exited attempts and final prose.
 A consumed wait records interpretation; it does not complete a parked assignment.
@@ -24,6 +27,8 @@ lineage and evidence references produce a new revision; elapsed time, output
 prose, repeated observation and cache timestamps do not. Revision reads write no
 state and cannot race a coordinator transaction or authorize dispatch.
 Only fenced automatic resume attempts share this projection's assignment lineage.
+The exact `resumedFrom` links define that lineage; a shared conversation `rootRunId`
+does not, because it also spans explicit follow-ups.
 An explicit follow-up in the same saved conversation is a new assignment; it
 does not rewrite the earlier assignment's terminal outcome or retained output.
 

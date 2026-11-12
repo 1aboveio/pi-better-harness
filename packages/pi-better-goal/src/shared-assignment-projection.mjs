@@ -56,22 +56,45 @@ export function projectAssignment(meta, processStatus, observation = { verified:
 /** All consumers use the same lineage and authoritative wait read. Park caches are hints only. */
 export function assignmentFor(meta, processStatus = meta.status, options = {}) {
     const base = options.baseDir ?? join(tmpdir(), "pi-better-subagents");
+    const attempts = new Map([[meta.id, meta]]);
     let current = meta;
     try {
         for (const id of (meta.operations || meta.park ? readdirSync(join(base, "runs")) : [])) {
             try {
                 const candidate = JSON.parse(readFileSync(join(base, "runs", id, "meta.json"), "utf8"));
-                if (candidate.operations?.resumeLaunchToken
-                    && (candidate.rootRunId ?? candidate.id) === (meta.rootRunId ?? meta.id)
-                    && candidate.startedAt > current.startedAt) current = candidate;
+                if (candidate.sessionId === meta.sessionId && candidate.cwd === meta.cwd) attempts.set(candidate.id, candidate);
             } catch { /* A partial unrelated record must not hide a continuation. */ }
         }
     } catch { /* Registry gaps cannot establish a newer attempt. */ }
+    // Conversation roots survive explicit follow-ups. Only automatic resume edges
+    // join attempts into one assignment; manual continuation starts a new one.
+    const lineage = new Map([[meta.id, meta]]);
+    let ancestor = meta;
+    while (ancestor.operations?.resumeLaunchToken && attempts.has(ancestor.resumedFrom) && !lineage.has(ancestor.resumedFrom)) {
+        ancestor = attempts.get(ancestor.resumedFrom);
+        lineage.set(ancestor.id, ancestor);
+    }
+    let added;
+    do {
+        added = false;
+        for (const candidate of attempts.values()) {
+            if (candidate.operations?.resumeLaunchToken && lineage.has(candidate.resumedFrom) && !lineage.has(candidate.id)) {
+                lineage.set(candidate.id, candidate);
+                added = true;
+            }
+        }
+    } while (added);
+    for (const candidate of lineage.values()) {
+        if (candidate.startedAt > current.startedAt) current = candidate;
+    }
     const status = current.id === meta.id ? processStatus : current.status;
     const sessionId = current.operations?.conversationId ?? current.sessionId;
     const observation = options.observation ?? (sessionId && (current.operations || current.park)
         ? readAssignmentWaits(options.coordinatorPath ?? join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "operation-coordinator.sqlite"),
-            { sessionId, workspace: current.operations?.workspace ?? current.cwd })
+            { sessionId, workspace: current.operations?.workspace ?? current.cwd,
+                attemptIds: [...lineage.keys()], waitRefs: [...lineage.values()].flatMap((attempt) =>
+                    attempt.park?.waitId && Number.isSafeInteger(attempt.park.generation)
+                        ? [{ waitId: attempt.park.waitId, generation: attempt.park.generation }] : []) })
         : current.park ? { verified: false, waits: [], reason: "Coordinator identity is unavailable; assignment state is unverified." }
             : { verified: true, waits: [] });
     return projectAssignment(current, status, observation);
