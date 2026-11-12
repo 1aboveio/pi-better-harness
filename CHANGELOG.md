@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.45.0] - 2026-11-12
+
+### Changed
+
+- Bundle Subagents 0.32.0 for session-scoped historical wait warnings, original-session inspection, durable cancellation, and dismissal of unchanged notices. (#719)
+
+## [pi-better-subagents@0.32.0] - 2026-11-12
+
+### Added
+
+- Add `/subagents history` to inspect waits from other sessions in the same workspace, identify their original sessions, or cancel them durably. (#719)
+- Add `/subagents history dismiss` to durably dismiss unchanged historical attention notices without changing waits or their evidence. (#719)
+
+### Fixed
+
+- Scope held-wait warnings to their owning session and show separate historical attention notices for waits from other sessions. (#719)
+
 ## [pi-better-harness@0.44.0] - 2026-11-12
 
 ### Changed
