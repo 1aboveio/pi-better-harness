@@ -42,6 +42,7 @@ import * as registry from "../registry.ts";
 import { readParkRecord } from "../registry.ts";
 import { acquireConversationLease } from "../continuation.ts";
 import { captureParkCheckpoint } from "../park-checkpoint.ts";
+import { assignmentRetainsEvidence, coordinatorPath } from "../assignment-outcomes.ts";
 import { cleanupAll, createCtx, defaultPlan, schemasFor, sessionFixture, startStack, writeCoherentLog } from "./worker-waits-support.mjs";
 
 const durableRoot = mkdtempSync(join(tmpdir(), "worker-races-durable-"));
@@ -699,6 +700,37 @@ test("assigned cancellation reconciles its published writer without invoking bou
     assert.equal(stack.store.getWait({ waitId: wait.waitId, generation: 1 }).acknowledgement, null);
     assert.equal(stack.store.getAssignmentOutcome(binding.assignmentId).outcome, "cancelled");
     assert.equal(stack.store.getAssignmentOutcome(binding.assignmentId).processUncertain, true);
+});
+
+test("late exact writer proof reconciles terminal failure after parent consumption and reload", async () => {
+    const stack = await startStack({ storePath: coordinatorPath() });
+    const id = "sa_late_terminal_proof";
+    const resumed = await publishedResumeWithAttempt(stack, id, "running", true);
+    const wait = stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 });
+    const binding = { version: 1, assignmentId: `assignment:${id}`, owner: wait.owner,
+        recipient: { kind: "parent-session", sessionId: "parent-session-1", workspace: stack.workspace, branchId: "branch-1", goalId: null } };
+    for (const runId of [id, resumed.claim.attemptId]) registry.writeMeta({ ...registry.readMeta(runId), assignment: binding });
+    assert.equal((await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service: stack.service })).outcome, "deferred");
+    const terminal = stack.store.getAssignmentOutcome(binding.assignmentId);
+    assert.equal(terminal.outcome, "failed");
+    assert.equal(terminal.processUncertain, true);
+    assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId, state: "published" }).length, 1);
+    const request = { assignmentId: binding.assignmentId, recipient: binding.recipient, revision: terminal.revision };
+    stack.store.inspectAssignmentOutcome(request);
+    stack.store.consumeAssignmentOutcome({ ...request, disposition: "consumed", note: "Inspected uncertain writer failure" });
+    const consumed = stack.store.getAssignmentOutcome(binding.assignmentId);
+    assert.equal(assignmentRetainsEvidence(registry.readMeta(id)), true);
+    registry.writeMeta({ ...registry.readMeta(resumed.claim.attemptId), status: "failed", pid: 999_998, exitCode: 1 });
+    assert.equal((await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service: stack.service, writerLeaseReleased: false })).outcome, "deferred");
+    assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId, state: "published" }).length, 1);
+    const meta = registry.readMeta(id);
+    registry.writeMeta({ ...meta, operations: { ...meta.operations, policy: { ...meta.operations.policy, deadlineAt: 1 } } });
+    const service = { ...stack.service, repairFailedResumeForWorker: () => assert.fail("terminal failure must not enter repair admission") };
+    await reconcileParkedWaits(service, { resume: async () => assert.fail("terminal failure must never launch") });
+    assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId, state: "published" }).length, 0);
+    assert.deepEqual(stack.store.getAssignmentOutcome(binding.assignmentId), consumed);
+    assert.equal(stack.store.getWait({ waitId: wait.waitId, generation: 1 }).acknowledgement, null);
+    assert.equal(assignmentRetainsEvidence(registry.readMeta(id)), false);
 });
 
 test("missing continuation metadata never becomes writer-exit proof across repeated recovery", async () => {
