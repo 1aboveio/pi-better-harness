@@ -571,7 +571,8 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
 async function enqueueAssignmentOutcome(pi: ExtensionAPI, meta: RunMeta): Promise<void> {
     const outcome = readOutcome(meta);
     const ctx = uiCtx;
-    if (!outcome || outcome.deliveryReceipt || outcome.disposition || !ctx || meta.callback === false) return;
+    if (!outcome || outcome.deliveryReceipt || outcome.disposition || !ctx || meta.callback === false
+        || typeof ctx.sessionManager?.getBranch !== "function") return;
     const active = ownerBindingFromContext(ctx);
     if (active.sessionId !== outcome.recipient.sessionId || active.workspace !== outcome.recipient.workspace
         || (outcome.recipient.branchId && !ctx.sessionManager.getBranch().some((entry) => entry.id === outcome.recipient.branchId))) return;
