@@ -8,7 +8,7 @@ import type { ParkRecord, RunMeta } from "./registry.ts";
 export interface OutageObservation {
     version: 1;
     id: string;
-    observedRevision: { generation: number; claimId: string | null; launchToken: string | null };
+    observedRevision: { generation: number; claimId: string | null; launchToken: string | null; cancelled?: true };
     coordinatorEvidence?: ParkRecord["observedCoordinator"];
     meta: RunMeta;
     record: ParkRecord;
@@ -40,7 +40,7 @@ export function assertObservationStorage(): void {
 
 export function retainObservation(meta: RunMeta, record: ParkRecord, attempt?: RunMeta): OutageObservation {
     const observedRevision = { generation: record.generation, claimId: record.resumeClaimId ?? null,
-        launchToken: record.resumeLaunchToken ?? null };
+        launchToken: record.resumeLaunchToken ?? null, ...(record.phase === "cancelled" ? { cancelled: true as const } : {}) };
     const id = createHash("sha256").update(JSON.stringify([meta.assignment?.assignmentId ?? meta.id,
         record.waitId, observedRevision])).digest("hex");
     const path = join(directory(), `${id}.json`);

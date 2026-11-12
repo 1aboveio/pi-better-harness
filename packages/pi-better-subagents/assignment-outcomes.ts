@@ -92,9 +92,11 @@ export function receiptOutcome(meta: RunMeta, entryId: string): void {
 }
 export function outcomeTranscriptReceipt(entries: readonly unknown[], eventId: string): string | null {
     for (const raw of entries) {
-        const entry = raw as { id?: string; type?: string; message?: { role?: string; customType?: string; details?: { completionEventIds?: unknown } } };
-        if (entry.type !== "message" || entry.message?.role !== "custom" || entry.message.customType !== "background-completion-batch") continue;
-        const ids = entry.message.details?.completionEventIds;
+        const entry = raw as { id?: string; type?: string; customType?: string; details?: { completionEventIds?: unknown }; message?: { role?: string; customType?: string; details?: { completionEventIds?: unknown } } };
+        const message = entry.type === "custom_message" ? entry
+            : entry.type === "message" && entry.message?.role === "custom" ? entry.message : null;
+        if (message?.customType !== "background-completion-batch") continue;
+        const ids = message.details?.completionEventIds;
         if (Array.isArray(ids) && ids.includes(eventId)) return entry.id ?? eventId;
     }
     return null;

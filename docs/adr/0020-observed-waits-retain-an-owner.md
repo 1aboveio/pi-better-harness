@@ -59,6 +59,12 @@ and terminal-event identity remain authoritative. Unsupported hosts retain repor
 without claiming repair or durable delivery. Storage schema v4 remains unchanged:
 the separately versioned evidence format adds no coordinator table.
 
+A cancelled-publication observation has a distinct stable cancellation marker.
+It may reconcile only the exact writer's exit and released lease, never repair
+or execution admission. A held/disarmed coordinator wait or advanced cancellation
+epoch does not suppress that proof. The cancelled cache and terminal outcome stay
+immutable; observation receipts do not acknowledge the worker's dependency wait.
+
 ## Bounded Autonomous Repair (#711)
 
 An unacknowledged published worker exit is reconciled against its exact claim,

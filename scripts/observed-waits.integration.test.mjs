@@ -1349,17 +1349,21 @@ test("cancelling a parked assignment after the production continuation CLI is pu
         assert.equal(store.getWait({ waitId: wait.waitId, generation: wait.generation }).phase, "resuming");
 
         // The explicit parked-assignment takeover. Production must follow the
-        // published claim, stop the real child it owns, and cancel the wait.
+        // published claim and stop the real child. Assignment cancellation leaves
+        // the unacknowledged dependency held, with dispatch atomically disarmed.
         const stopped = await callSessionTool(host.session, "subagent_stop", { id: initialId });
         assert.match(stopped, /Cancelled the pending wait of parked subagent/);
 
         await waitUntil(() => {
-            const current = store.getWait({ waitId: wait.waitId, generation: wait.generation });
-            return current?.phase === "cancelled";
-        }, "the durable wait to be cancelled", 30_000);
+            return store.getAssignmentOutcome(parked.meta.assignment.assignmentId)?.outcome === "cancelled";
+        }, "the durable assignment cancellation", 30_000);
+        const outcome = store.getAssignmentOutcome(parked.meta.assignment.assignmentId);
+        assert.equal(outcome.processUncertain, true, "recording cancellation does not prove writer termination");
+        assert.equal(outcome.recipient.sessionId, host.session.sessionManager.getSessionId());
         const cancelled = store.getWait({ waitId: wait.waitId, generation: wait.generation });
-        assert.equal(cancelled.phase, "cancelled");
+        assert.equal(cancelled.phase, "held");
         assert.equal(cancelled.acknowledgement, null, "a cancelled wait is never acknowledged");
+        assert.throws(() => store.transitionWaitPhase({ waitId: wait.waitId, generation: wait.generation, from: "held", to: "ready" }), /terminal outcome/);
         const parkAfter = registry.readParkRecord(initialId);
         assert.equal(parkAfter?.phase, "cancelled");
         assert.match(parkAfter?.cancelReason ?? "", /published continuation .* was stopped|automatic resume is cancelled/);
@@ -1373,17 +1377,27 @@ test("cancelling a parked assignment after the production continuation CLI is pu
         await waitUntil(() => !processExists(stoppedAttempt.pid), "the stopped continuation child to exit", 20_000);
         const stoppedLog = readFileSync(registry.logPathFor(stoppedAttempt.id), "utf8");
         assert.doesNotMatch(stoppedLog, /"toolName":"acknowledge_operation_result"/, "the stopped child never acknowledged");
+        await waitUntil(() => store.listResumeClaims({ waitId: wait.waitId, generation: wait.generation })
+            .every((claim) => claim.state !== "published"), "the proven-exit writer fence to reconcile", 20_000);
+        await callSessionTool(host.session, "subagent_result", { id: initialId, operation_id: operation.operationId });
+        assert.ok(store.listEvidencePins({ waitId: outcome.eventId, generation: 1 }).length > 0, "inspection retains outcome evidence");
+        const claimsBeforeConsumption = store.listResumeClaims({ waitId: wait.waitId, generation: wait.generation });
+        await callSessionTool(host.session, "subagent_result", { id: initialId, outcome_revision: outcome.revision, disposition: "consumed", note: "Inspected cancellation and dependency evidence after explicit stop." });
+        assert.equal(store.listEvidencePins({ waitId: outcome.eventId, generation: 1 }).length, 0);
+        assert.equal(store.getWait({ waitId: wait.waitId, generation: wait.generation }).acknowledgement, null);
+        assert.deepEqual(store.listResumeClaims({ waitId: wait.waitId, generation: wait.generation }), claimsBeforeConsumption, "parent consumption does not resolve writer fences");
 
         // Releasing the fixture gate afterwards cannot resurrect the cancelled
         // generation or start a duplicate continuation.
         writeFileSync(ackGate, "release\n");
         await sleep(1_500);
         assert.equal(successors().length, 1, "no second continuation is launched");
-        assert.equal(store.getWait({ waitId: wait.waitId, generation: wait.generation }).phase, "cancelled");
+        assert.equal(store.getWait({ waitId: wait.waitId, generation: wait.generation }).phase, "held");
+        assert.equal(store.getAssignmentOutcome(parked.meta.assignment.assignmentId).outcome, "cancelled");
         const claimsAfterCancel = store.listResumeClaims({ waitId: wait.waitId, generation: wait.generation });
         assert.equal(claimsAfterCancel.length, 1, "the cancelled generation never gets a second claim");
         assert.equal(claimsAfterCancel.filter((claim) => claim.state === "claimed" || claim.state === "published").length, 0,
-            "cancellation invalidates the published resume claim");
+            "independent exit and lease proof invalidates the published resume claim");
         assert.equal(claimsAfterCancel[0].state, "invalidated");
         assert.equal(registryCapacity([initialId, stoppedAttempt.id]).countRunning(), 0, "both attempts released their slots");
         assert.deepEqual(host.errors, []);

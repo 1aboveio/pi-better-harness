@@ -146,6 +146,13 @@ test("terminal commit before outage report receipt replays once and delivery ret
     } finally { await parent.close(); store.close(); }
 });
 
+test("native Pi custom_message entries reconcile the exact structured outcome receipt", () => {
+    const native = { id: "native-entry", type: "custom_message", customType: "background-completion-batch", content: "Completion", details: { completionEventIds: ["outcome-event"] } };
+    assert.equal(outcomeTranscriptReceipt([native], "outcome-event"), "native-entry");
+    assert.equal(outcomeTranscriptReceipt([native], "another-outcome"), null);
+    assert.equal(outcomeTranscriptReceipt([{ ...native, customType: "quoted-transcript" }], "outcome-event"), null);
+});
+
 test("same-session different branch cannot receive or inspect the outcome", async () => {
     const { store, meta } = failedAssignment("branch-outcome", "captured-branch");
     const wrong = host("parent", { entries: [{ id: "other-branch", type: "custom", customType: "anchor" }] });

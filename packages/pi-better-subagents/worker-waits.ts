@@ -2352,14 +2352,14 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
     const at = (input.now ?? Date.now)();
     let result: ResumedAttemptExitResult = { outcome: "ignored" };
     for (const park of candidates) {
-        if (park.record.phase === "consumed" || park.record.phase === "cancelled") {
+        if (park.record.phase === "consumed" || (park.record.phase === "cancelled" && !park.meta.assignment)) {
             result = { outcome: "ignored", waitPhase: park.record.phase };
             continue;
         }
         const reason = input.reason
             ?? `the published resume attempt ${input.attemptId} exited (${input.status ?? attempt?.status ?? "unknown"}) without interpreting the wait`;
         const holdLocally = (cause: string, outcome: "deferred" | "settled" = "deferred"): void => {
-            updateParkRecord(park.runId, { phase: "held", heldReason: `${reason}; ${cause}` });
+            updateParkRecord(park.runId, { phase: park.record.phase === "cancelled" ? "cancelled" : "held", heldReason: `${reason}; ${cause}` });
             const report = attempt ?? park.meta;
             if (input.service && report.assignment) {
                 commitAssignmentTerminal({ ...report, status: "lost", failureReason: `${reason}; ${cause}` }, true);
@@ -2379,7 +2379,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
         const attemptToken = attempt?.operations?.resumeLaunchToken;
         if (recordedToken && attemptToken && recordedToken !== attemptToken) {
             updateParkRecord(park.runId, {
-                phase: "held",
+                phase: park.record.phase === "cancelled" ? "cancelled" : "held",
                 heldReason: `attempt ${input.attemptId} does not match the launch token published for this wait; the wait was left for its owner`,
             });
             input.notify?.(`Subagent ${park.runId}: resume attempt ${input.attemptId} does not match the published launch token; the wait is held for inspection.`, "warning");
@@ -2394,7 +2394,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             holdLocally("this Background host has no proven-exit hold capability yet");
             continue;
         }
-        if (attempt?.assignment && !input.service.repairFailedResumeForWorker) {
+        if (park.record.phase !== "cancelled" && attempt?.assignment && !input.service.repairFailedResumeForWorker) {
             holdLocally("this Background host does not support bounded autonomous repair");
             continue;
         }
@@ -2430,7 +2430,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             continue;
         }
         try {
-            if (park.meta.operations?.policy?.deadlineAt != null && park.meta.operations.policy.deadlineAt <= at) {
+            if (park.record.phase !== "cancelled" && park.meta.operations?.policy?.deadlineAt != null && park.meta.operations.policy.deadlineAt <= at) {
                 holdLocally("the assignment-local deadline expired");
                 continue;
             }
@@ -2445,7 +2445,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
                 reason,
             };
             let held: { phase: string };
-            if (input.service.repairFailedResumeForWorker && attempt.assignment) {
+            if (park.record.phase !== "cancelled" && input.service.repairFailedResumeForWorker && attempt.assignment) {
                 if (!park.record.checkpoint) throw new Error("Required saved checkpoint is missing");
                 verifyParkCheckpoint({ ...park.record.checkpoint, version: 1, waitId: park.waitId, generation: park.generation });
                 const wait = input.service.listWorkerWaits(scope).find((w) => w.waitId === park.waitId && w.generation === park.generation);
@@ -2458,8 +2458,8 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             }
             const phase = phaseOf(held.phase);
             updateParkRecord(park.runId, {
-                phase,
-                ...(phase === "held" ? { heldReason: reason } : {}),
+                phase: park.record.phase === "cancelled" ? "cancelled" : phase,
+                ...(phase === "held" && park.record.phase !== "cancelled" ? { heldReason: reason } : {}),
             });
             input.notify?.(`Subagent ${park.runId}: ${reason}. The reconciled wait is ${phase}.`, "warning");
             result = { outcome: "settled", waitPhase: phase, reason };
@@ -2502,49 +2502,65 @@ export async function reconcileParkedWaits(
     if (service?.outageReconciliation === 1) {
         try {
             for (const report of pendingObservations()) {
-                const scope = backgroundScopeForMeta(report.meta, report.record);
-                if (!scope) continue;
-                const current = service.listWorkerWaits(scope).find((wait) =>
-                    wait.waitId === report.record.waitId && wait.generation === report.observedRevision.generation);
-                if (!current) {
-                    // Missing required history is assignment failure, not process-exit proof.
-                    if (report.meta.assignment && commitAssignmentTerminal({ ...report.meta, status: "lost",
-                        failureReason: "Required authoritative wait history is missing after coordinator recovery; writer termination remains unproven." }, true)) {
+                try {
+                    const scope = backgroundScopeForMeta(report.meta, report.record);
+                    if (!scope) continue;
+                    const current = service.listWorkerWaits(scope).find((wait) =>
+                        wait.waitId === report.record.waitId && wait.generation === report.observedRevision.generation);
+                    if (!current) {
+                        // Missing required history is assignment failure, not process-exit proof.
+                        if (report.meta.assignment && commitAssignmentTerminal({ ...report.meta, status: "lost",
+                            failureReason: "Required authoritative wait history is missing after coordinator recovery; writer termination remains unproven." }, true)) {
+                            if (!readMeta(report.meta.id)) writeMeta(report.meta, { ifAbsent: true });
+                            resolveObservation(report);
+                        }
+                        continue;
+                    }
+                    const cached = readParkRecord(report.meta.id);
+                    const cancelled = (cached ?? report.record).phase === "cancelled";
+                    if (cancelled && report.attempt && current.publishedClaimId === report.record.resumeClaimId) {
+                        // Cancellation invalidates execution admission, not exact writer-exit proof.
                         if (!readMeta(report.meta.id)) writeMeta(report.meta, { ifAbsent: true });
+                        if (!cached) writeParkRecord(report.meta.id, report.record, { ifAbsent: true });
+                        if (!readMeta(report.attempt.id)) writeMeta(report.attempt, { ifAbsent: true });
+                        const replay = await settleResumedAttemptExit({ attemptId: report.attempt.id, service,
+                            ...(options.notify ? { notify: options.notify } : {}) });
+                        if (replay.outcome !== "deferred") resolveObservation(report);
+                        continue;
+                    }
+                    if ((current.phase === "resuming" && current.publishedClaimId !== report.record.resumeClaimId)
+                        || (report.coordinatorEvidence && current.cancelEpoch !== report.coordinatorEvidence.cancelEpoch)) {
                         resolveObservation(report);
+                        continue;
                     }
-                    continue;
-                }
-                if ((current.phase === "resuming" && current.publishedClaimId !== report.record.resumeClaimId)
-                    || (report.coordinatorEvidence && current.cancelEpoch !== report.coordinatorEvidence.cancelEpoch)) {
-                    resolveObservation(report);
-                    continue;
-                }
-                if (current.phase === "consumed" || current.phase === "cancelled") {
+                    if (current.phase === "consumed" || current.phase === "cancelled") {
+                        const local = readParkRecord(report.meta.id);
+                        if (local?.waitId === current.waitId && local.generation === current.generation) {
+                            updateParkRecord(report.meta.id, { phase: local.phase === "cancelled" ? "cancelled" : phaseOf(current.phase), heldReason: undefined });
+                        }
+                        resolveObservation(report);
+                        continue;
+                    }
+                    // Restore missing conversation evidence, never replace a newer local publication.
+                    if (!readMeta(report.meta.id)) writeMeta(report.meta, { ifAbsent: true });
+                    if (!readParkRecord(report.meta.id)) writeParkRecord(report.meta.id, report.record, { ifAbsent: true });
+                    if (report.attempt && !readMeta(report.attempt.id)) writeMeta(report.attempt, { ifAbsent: true });
                     const local = readParkRecord(report.meta.id);
-                    if (local?.waitId === current.waitId && local.generation === current.generation) {
-                        updateParkRecord(report.meta.id, { phase: phaseOf(current.phase), heldReason: undefined });
+                    if (local?.resumeClaimId !== report.record.resumeClaimId
+                        || local?.resumeLaunchToken !== report.record.resumeLaunchToken) {
+                        resolveObservation(report);
+                        continue;
                     }
+                    if (current.phase === "resuming" && report.attempt) {
+                        const replay = await settleResumedAttemptExit({ attemptId: report.attempt.id, service,
+                            ...(options.notify ? { notify: options.notify } : {}) });
+                        if (replay.outcome === "deferred") continue;
+                    }
+                    updateParkRecord(report.meta.id, { heldReason: undefined });
                     resolveObservation(report);
-                    continue;
+                } catch (error) {
+                    options.notify?.(`Subagent ${report.meta.id}: retained outage observation could not be reconciled (${reasonOf(error)}).`, "warning");
                 }
-                // Restore missing conversation evidence, never replace a newer local publication.
-                if (!readMeta(report.meta.id)) writeMeta(report.meta, { ifAbsent: true });
-                if (!readParkRecord(report.meta.id)) writeParkRecord(report.meta.id, report.record, { ifAbsent: true });
-                if (report.attempt && !readMeta(report.attempt.id)) writeMeta(report.attempt, { ifAbsent: true });
-                const local = readParkRecord(report.meta.id);
-                if (local?.resumeClaimId !== report.record.resumeClaimId
-                    || local?.resumeLaunchToken !== report.record.resumeLaunchToken) {
-                    resolveObservation(report);
-                    continue;
-                }
-                if (current.phase === "resuming" && report.attempt) {
-                    const replay = await settleResumedAttemptExit({ attemptId: report.attempt.id, service,
-                        ...(options.notify ? { notify: options.notify } : {}) });
-                    if (replay.outcome === "deferred") continue;
-                }
-                updateParkRecord(report.meta.id, { heldReason: undefined });
-                resolveObservation(report);
             }
         } catch (error) {
             options.notify?.(`Degraded supervision: outage replay unavailable (${reasonOf(error)}).`, "warning");
