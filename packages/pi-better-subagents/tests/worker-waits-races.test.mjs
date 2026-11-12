@@ -516,6 +516,43 @@ test("cancellation stops the attempt it published and never signals a foreign pi
     try { foreign.kill("SIGKILL"); } catch { /* already gone */ }
 });
 
+test("failed durable cancellation rejects and retains the original wait for inspection", async () => {
+    const stack = await startStack();
+    const attemptId = "sa_cancel_storage_failure";
+    const seeded = await seedPark(stack, { attemptId, target: "ready" });
+    writeParkedAttempt(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
+    const before = readParkRecord(attemptId);
+    await assert.rejects(cancelParkedWait({ cancelWorkerWait() { throw new Error("storage unavailable"); } },
+        parkFor(attemptId, seeded.waitId, seeded.generation), "explicit stop"), /storage unavailable/);
+    const after = readParkRecord(attemptId);
+    assert.equal(after.phase, "held");
+    assert.equal(after.waitId, before.waitId);
+    assert.equal(after.ownerSessionId, before.ownerSessionId);
+    assert.match(after.cancelReason, /storage unavailable/);
+});
+
+test("global reconciliation scopes historical warnings without changing ownership or acknowledging evidence", async () => {
+    const stack = await startStack();
+    const attemptId = "sa_historical_scoped";
+    const seeded = await seedPark(stack, { attemptId, target: "ready", ownerSessionId: "session-A" });
+    writeParkedAttempt(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
+    registry.updateParkRecord(attemptId, { phase: "resuming", resumedBy: "sa_missing_history_attempt" });
+    const original = readParkRecord(attemptId);
+    const notices = [];
+    for (let reload = 0; reload < 2; reload++) {
+        await reconcileParkedWaits(stack.service, { resume: async () => "skipped", notifyWhen: () => false,
+            notify: (message) => notices.push(message) });
+    }
+    assert.deepEqual(notices, []);
+    const retained = readParkRecord(attemptId);
+    assert.equal(retained.ownerSessionId, original.ownerSessionId);
+    assert.equal(retained.waitId, original.waitId);
+    const durable = stack.service.listWorkerWaits(backgroundScopeForMeta(registry.readMeta(attemptId), retained))
+        .find((wait) => wait.waitId === seeded.waitId);
+    assert.ok(!durable.acknowledgement);
+    assert.notEqual(durable.phase, "cancelled");
+});
+
 test("park finalization uses the worker workspace, not the foreground parent workspace", async () => {
     const stack = await startStack();
     const attemptId = "sa_race_workspace";

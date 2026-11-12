@@ -12,6 +12,7 @@
  */
 
 import { assignmentFor } from "./assignment-projection.mjs";
+import { historicalWaits, attentionRevision, attentionDismissed, dismissAttention } from "./historical-attention.ts";
 import { registerAssignmentAttempt, commitAssignmentTerminal, readOutcome, receiptOutcome, outcomeTranscriptReceipt, inspectOutcome, createOutcomeHost, closeOutcomeHost, claimOutcome, type AssignmentBinding } from "./assignment-outcomes.ts";
 import { currentSandboxPermissions } from "./permission-policy.ts";
 import { requestResumeAdmission } from "./worker-waits.ts";
@@ -1438,20 +1439,18 @@ function navigatorDetail(id: string, now: number = Date.now()) {
  * Set by the active extension instance: cancel a parked assignment's pending
  * wait. Returns false when the run is not parked, so the ordinary stop path runs.
  */
-let cancelParkedForUi: ((id: string, reason: string) => boolean) | undefined;
+let cancelParkedForUi: ((id: string, reason: string) => Promise<boolean>) | undefined;
 
 /** Shared #44 stop+dismiss path used by navigator Close (#47). */
 function navigatorCloseRun(id: string) {
     // A parked attempt's child already exited cleanly, so "close" must cancel the
     // pending automatic resume instead of pretending to stop a live process.
-    if (cancelParkedForUi?.(id, "closed from the navigator; the automatic resume is cancelled")) {
-        try { dismissRun(id); } catch { /* dismissal is best effort */ }
-        spendCache.delete(id);
-        healthLogCache.delete(id);
-        resetChildEventLogCursor(id);
-        resetParseRunCursor(id);
-        syncHealthTicker();
-        return { action: "stopped", id };
+    if (parkedWaitForRun(id) && cancelParkedForUi) {
+        void cancelParkedForUi(id, "closed from the navigator; the automatic resume is cancelled")
+            .then(() => { dismissRun(id); uiCtx?.ui.notify(`Cancelled the pending wait of ${id}. Writer termination may remain unproven.`, "info"); })
+            .catch((error) => uiCtx?.ui.notify(`Cancellation failed for ${id}: ${String(error)}. The wait remains available for inspection and retry.`, "warning"));
+        // The synchronous navigator must retain the row until the durable operation settles.
+        return { action: "missing", id };
     }
     const outcome = executeNavigatorClose(id, {
         readMeta,
@@ -2300,18 +2299,21 @@ export default function (pi: ExtensionAPI) {
         childExtensionPath: childBridgeExtensionPath(selfDir()),
     });
     let resumeOrchestration: ResumeOrchestration | undefined;
+    const notifyOwnedWait = (message: string, level: "warning" | "info" = "warning") => {
+        try { uiCtx?.ui?.notify?.(message, level); } catch { /* no UI */ }
+    };
     /**
      * Stop a continuation attempt only when this parent owns it and the token
      * published with it matches. A pid is never signalled on a guess.
      */
     const stopPublishedAttempt = createOwnedAttemptStopper();
-    cancelParkedForUi = (id, reason) => {
+    cancelParkedForUi = async (id, reason) => {
         const parked = parkedWaitForRun(id);
         if (!parked) return false;
-        void cancelParkedWait(workerOperations.service, parked, reason, { stopAttempt: stopPublishedAttempt })
-            .then(() => { if (parked.meta.assignment) enqueueCompletionCallback(pi, id); })
-            .catch(() => { /* the durable record keeps the wait visible */ })
-            .finally(() => syncHealthTicker());
+        try {
+            await cancelParkedWait(workerOperations.service, parked, reason, { stopAttempt: stopPublishedAttempt });
+            if (parked.meta.assignment) enqueueCompletionCallback(pi, id);
+        } finally { syncHealthTicker(); }
         return true;
     };
     const effectiveSettings = () => {
@@ -3482,9 +3484,8 @@ export default function (pi: ExtensionAPI) {
             capacity: resumeCapacity(),
             launch: launchParkedResume,
             stopAttempt: stopPublishedAttempt,
-            notify: (message, level) => {
-                try { uiCtx?.ui?.notify?.(message, level); } catch { /* ignore UI failures */ }
-            },
+            notifyWhen: (meta) => Boolean(activeCallbackOrigin && belongsToOrigin(meta, activeCallbackOrigin)),
+            notify: notifyOwnedWait,
         });
         return resumeOrchestration;
     }
@@ -3509,10 +3510,13 @@ export default function (pi: ExtensionAPI) {
         try {
             await reconcileParkedWaits(service, {
                 resume: (park) => orchestration.resume(park),
-                notify: (message) => {
-                    try { uiCtx?.ui?.notify?.(message, "warning"); } catch { /* ignore UI failures */ }
-                },
+                notifyWhen: (meta) => Boolean(activeCallbackOrigin && belongsToOrigin(meta, activeCallbackOrigin)),
+                notify: notifyOwnedWait,
             });
+            const historical = historicalWaits(activeCallbackOrigin);
+            if (historical.length && activeCallbackOrigin && !attentionDismissed(activeCallbackOrigin.cwd, attentionRevision(historical))) {
+                uiCtx?.ui?.notify?.(`${historical.length} historical subagent waits remain. Inspect or cancel with /subagents history; dismiss this notice with /subagents history dismiss.`, "warning");
+            }
         } catch { /* reconciliation retries on the next session start */ }
     }
 
@@ -3998,15 +4002,19 @@ export default function (pi: ExtensionAPI) {
         ...acceptanceStopTool,
         async execute(toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown) {
             const target = (params as { id?: unknown } | undefined)?.id;
-            if (typeof target === "string" && cancelParkedForUi?.(target, "cancelled by subagent_stop; the automatic resume is cancelled")) {
+            try {
+            if (typeof target === "string" && await cancelParkedForUi?.(target, "cancelled by subagent_stop; the automatic resume is cancelled")) {
                 renderWidget();
                 syncHealthTicker();
                 return {
                     content: [{
                         type: "text",
-                        text: `Cancelled the pending wait of parked subagent ${target}. Its conversation can now be continued with subagent_spawn session_id.`,
+                        text: `Durably cancelled the pending wait of parked subagent ${target}. Writer termination may remain unproven; ordinary continuation admission still applies.`,
                     }],
                 };
+            }
+            } catch (error) {
+                return { isError: true, content: [{ type: "text", text: `Cancellation failed for ${target}: ${String(error)}. The retained wait remains available for inspection and retry.` }] };
             }
             return (acceptanceStopTool.execute as (
                 id: string, p: unknown, s?: AbortSignal, u?: unknown, c?: unknown,
@@ -4100,10 +4108,36 @@ export default function (pi: ExtensionAPI) {
     if (typeof pi.registerCommand === "function") {
         agentOperations.registerCommands(pi);
         pi.registerCommand("subagents", {
-            description: "[settings|mode manual|adaptive|coordinator|cap <number>|tool-wait <minutes>|stuck <minutes>|save|reset] — Subagent settings",
+            description: "[history [dismiss]|settings|mode manual|adaptive|coordinator|cap <number>|tool-wait <minutes>|stuck <minutes>|save|reset] — Subagent management",
             getArgumentCompletions: subagentsArgumentCompletions,
             async handler(args, ctx) {
                 const tokens = args.trim().split(/\s+/).filter(Boolean);
+                if (tokens[0] === "history") {
+                    try {
+                        const origin = { cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() };
+                        const waits = historicalWaits(origin);
+                        if (tokens[1] === "dismiss") {
+                            dismissAttention(ctx.cwd, attentionRevision(waits));
+                            ctx.ui.notify("Historical attention notice dismissed. Waits and evidence are unchanged.", "info");
+                            return;
+                        }
+                        const labels = waits.map((p) => `${p.runId} · session ${p.record.ownerSessionId ?? "unknown"} · ${p.phase}`);
+                        const selected = await ctx.ui.select("Historical subagent waits", labels);
+                        const park = waits[labels.indexOf(selected ?? "")];
+                        if (!park) return;
+                        const action = await ctx.ui.select(`${park.runId} · session ${park.record.ownerSessionId ?? "unknown"}`, ["Inspect", "Cancel pending wait"]);
+                        if (action === "Inspect") {
+                            ctx.ui.notify(JSON.stringify({ runId: park.runId, originatingSession: park.record.ownerSessionId,
+                                workspace: park.record.ownerWorkspace, waitId: park.waitId, generation: park.generation,
+                                phase: park.phase, reason: park.record.heldReason, cancellation: park.record.cancelReason,
+                                resumedBy: park.record.resumedBy, log: park.meta.logPath }), "info");
+                        } else if (action === "Cancel pending wait" && await ctx.ui.confirm("Cancel pending wait?", `${park.runId} belongs to session ${park.record.ownerSessionId ?? "unknown"}. This does not prove its writer has stopped.`)) {
+                            if (!await cancelParkedForUi?.(park.runId, "explicit cancellation from historical management")) throw new Error("The pending wait changed; inspect it again.");
+                            ctx.ui.notify(`Durably cancelled the pending wait of ${park.runId}. Writer termination may remain unproven.`, "info");
+                        }
+                    } catch (error) { ctx.ui.notify(`Historical wait management failed: ${String(error)}. Inspect or retry with /subagents history.`, "warning"); }
+                    return;
+                }
                 if (tokens.length === 0 || (tokens.length === 1 && tokens[0] === "settings")) {
                     await openSettings(ctx);
                     return;
@@ -4153,7 +4187,7 @@ export default function (pi: ExtensionAPI) {
                     changeTiming(key, minutes);
                     ctx.ui.notify(`${tokens[0] === "tool-wait" ? "Tool-wait" : "No-progress"} alert: ${minutes} min (current session). Running subagents are unchanged.`, "info");
                 } else {
-                    ctx.ui.notify("Usage: /subagents [settings|mode manual|adaptive|coordinator|cap <number>|tool-wait <minutes>|stuck <minutes>|save|reset]", "warning");
+                    ctx.ui.notify("Usage: /subagents [history [dismiss]|settings|mode manual|adaptive|coordinator|cap <number>|tool-wait <minutes>|stuck <minutes>|save|reset]", "warning");
                 }
                 refreshBackgroundWorkNavigator(ctx);
             },

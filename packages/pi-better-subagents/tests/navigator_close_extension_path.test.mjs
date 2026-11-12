@@ -166,6 +166,8 @@ async function waitFor(pred, timeoutMs = 3000) {
 function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
     const handlers = {};
     const tools = new Map();
+    const commands = new Map();
+    const notices = [];
     const statusCalls = [];
     const widgetCalls = [];
     const closedOutcomes = [];
@@ -178,7 +180,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
         theme: { fg: (color, s) => `<${color}>${s}</>` },
         setStatus(k, v) { statusCalls.push([k, v]); },
         setWidget(k, v) { widgetCalls.push([k, v]); },
-        notify() {},
+        notify(message, level) { notices.push({ message, level }); },
         factory: undefined,
         getEditorComponent() { return this.factory; },
         setEditorComponent(f) { this.factory = f; },
@@ -204,6 +206,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
 
     const pi = {
         registerTool(tool) { tools.set(tool.name, tool); },
+        registerCommand(name, command) { commands.set(name, command); },
         on(event, fn) { handlers[event] = fn; },
         sendMessage() {},
     };
@@ -245,6 +248,8 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
         pressX() { overlayComponent ? overlayComponent.handleInput("x") : editor.handleInput("x"); },
         async shutdown() { await handlers.session_shutdown({}, ctx); },
         tools,
+        commands,
+        notices,
         statusCalls,
         widgetCalls,
         closedOutcomes,
@@ -301,6 +306,44 @@ describe("registered extension path: main-window navigator actions", () => {
             try { rmSync(registry.runDir(id), { recursive: true, force: true }); } catch { /* best-effort */ }
         }
         try { rmSync(RUNTIME, { recursive: true, force: true }); } catch { /* best-effort */ }
+    });
+
+    // @covers navigator.incident-presentation
+    it("historical management inspects without adopting and retains failed cancellations across reload", async () => {
+        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase, sessionId: "unrelated-B" });
+        const id = nav.seedRun({ id: "sa_historical_attention", callbackOrigin: { cwd: RUNTIME, sessionId: "original-A" } });
+        registry.writeParkRecord(id, { version: 1, phase: "held", waitId: "wait-history", generation: 1,
+            ownerWorkspace: RUNTIME, ownerSessionId: "original-A", heldReason: "retained evidence", attemptId: id, parkedAt: 1, updatedAt: 1 });
+        const original = registry.readParkRecord(id);
+        const history = await import("../historical-attention.ts");
+        try {
+            await nav.start();
+            const { renderRegisteredWorkDetail } = await import("../shared-navigator.ts");
+            assert.ok(!renderRegisteredWorkDetail("subagents", id, 120).listedIds.includes(id));
+            const command = nav.commands.get("subagents");
+            const choices = [0, "Inspect"];
+            nav.ui.select = async (_title, labels) => { const choice = choices.shift(); return typeof choice === "number" ? labels[choice] : choice; };
+            await command.handler("history", nav.ctx);
+            assert.match(nav.notices.at(-1).message, /original-A/);
+            assert.match(nav.notices.at(-1).message, /wait-history/);
+            assert.deepEqual(registry.readParkRecord(id), original);
+            await command.handler("history dismiss", nav.ctx);
+            const waits = history.historicalWaits({ cwd: RUNTIME, sessionId: "unrelated-B" });
+            assert.equal(history.attentionDismissed(RUNTIME, history.attentionRevision(waits)), true);
+            choices.push(0, "Cancel pending wait");
+            nav.ui.confirm = async () => true;
+            await command.handler("history", nav.ctx);
+            assert.match(nav.notices.at(-1).message, /failed.*Durable cancellation unavailable/s);
+            const result = await nav.tools.get("subagent_stop").execute("stop-history", { id });
+            assert.equal(result.isError, true);
+            assert.match(result.content[0].text, /Durable cancellation unavailable/);
+            assert.deepEqual(registry.readParkRecord(id), original);
+            await nav.shutdown();
+            await nav.start();
+            assert.equal(history.attentionDismissed(RUNTIME, history.attentionRevision(history.historicalWaits({ cwd: RUNTIME, sessionId: "unrelated-B" }))), true);
+            registry.updateParkRecord(id, { heldReason: "new attention" });
+            assert.equal(history.attentionDismissed(RUNTIME, history.attentionRevision(history.historicalWaits({ cwd: RUNTIME, sessionId: "unrelated-B" }))), false);
+        } finally { await nav.shutdown(); }
     });
 
     // @covers navigator.incident-presentation
