@@ -1,5 +1,10 @@
 # Observed waits for parent sessions and worker conversations
 
+> Superseded authority restriction (#708): passages below requiring an active
+> parent session/branch or parent Goal admission for worker dispatch are historical.
+> ADR 0018 and ADR 0020 now give delegated assignments independent continuation
+> authority. Parent eligibility still gates parent turns and result delivery.
+
 Status: proposed implementation design for the accepted invariant in [ADR 0020](../adr/0020-observed-waits-retain-an-owner.md). No APIs or states below are shipped by this document. Readers are maintainers implementing and reviewing the lifecycle. Terms follow the root [glossary](../../GLOSSARY.md).
 
 ## Keep ownership while moving observation out of model execution
