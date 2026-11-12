@@ -1,3 +1,4 @@
+import { assignmentFor, assignmentDiagnostic } from "./assignment-projection.mjs";
 import { describeTiming } from "./timing.ts";
 import { fmtElapsed } from "./widget.mjs";
 import { formatListHealthSuffix } from "./health-surface.mjs";
@@ -7,6 +8,8 @@ export const SUBAGENT_LIST_DEFAULT_LIMIT = 10;
 export const SUBAGENT_LIST_MAX_LIMIT = 100;
 /** Effective + durable supervision statuses accepted by subagent_list filters. */
 export const SUBAGENT_LIST_STATUSES = [
+    "waiting",
+    "cancelled",
     "running",
     "completed",
     "failed",
@@ -101,7 +104,10 @@ export function formatSubagentListRow(meta, p) {
     const batch = meta.batchId
         ? `  [batch: ${meta.batchName ? `${bounded(meta.batchName, 40)} ` : ""}${bounded(meta.batchId, 60)}]`
         : "";
-    return `• ${name}${meta.id}  [${status}]  session_id=${meta.sessionId ?? "unavailable"}  ${bounded(meta.model ?? "?", 60)}  ${elapsed}${health}${timing}${batch}${failure}\n    ${promptPreview(meta)}`;
+    const assignment = assignmentFor(meta, p.processStatus ?? meta.status);
+    const diagnostic = meta.operations || meta.park || status !== assignment.processStatus || status === "failed"
+        ? `\n    ${assignmentDiagnostic(assignment)}` : "";
+    return `• ${name}${meta.id}  [${status}]  session_id=${meta.sessionId ?? "unavailable"}  ${bounded(meta.model ?? "?", 60)}  ${elapsed}${health}${timing}${batch}${failure}\n    ${promptPreview(meta)} · r${assignment.revision}${diagnostic}`;
 }
 
 export function collectSubagentList(p) {

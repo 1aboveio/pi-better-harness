@@ -756,6 +756,9 @@ if (!isMainThread) {
   };
   fs.linkSync = function(from, to, ...rest) {
     const result = originalLink.call(this, from, to, ...rest);
+    if (workerData.role === "A" && path.basename(String(to)) === ".meta.lock" && String(from).endsWith(".displaced")) {
+      signal(6);
+    }
     if (workerData.role === "B" && path.basename(String(to)) === ".launch.json" && !held) {
       held = true;
       signal(4); park(5);
@@ -787,16 +790,22 @@ if (!isMainThread) {
     try {
       const a = start("A"); wait(0);
       const b = start("B"); wait(4);
+      const bToken = fs.readFileSync(path.join(run, ".meta.lock"), "utf8");
       release(1); wait(2);
       const c = await start("C");
       const first = JSON.parse(fs.readFileSync(path.join(run, "meta.json"), "utf8"));
       const launchAtFirst = fs.readFileSync(path.join(run, ".launch.json"), "utf8");
-      release(3); release(5);
+      // A must restore B's displaced live token before B attempts its unlock.
+      // Releasing both together can restore an already-released token instead.
+      release(3); wait(6);
+      const lockRestoredBeforeBRelease = fs.readFileSync(path.join(run, ".meta.lock"), "utf8") === bToken;
+      release(5);
       const outcomes = [c, ...await Promise.all([a, b])];
       const finalMeta = JSON.parse(fs.readFileSync(path.join(run, "meta.json"), "utf8"));
       const launch = JSON.parse(fs.readFileSync(path.join(run, ".launch.json"), "utf8"));
       console.log(JSON.stringify({
         first, final: finalMeta, launch, launchUnchanged: launchAtFirst === JSON.stringify(launch), outcomes,
+        lockRestoredBeforeBRelease, lockReleased: !fs.existsSync(path.join(run, ".meta.lock")),
       }));
     } finally {
       await Promise.all(workers.map((w) => w.terminate()));
@@ -822,6 +831,8 @@ if (!isMainThread) {
             assert.equal(reported.launch.name, "B");
             assert.deepEqual(reported.launch.catalog, catalog);
             assert.equal(reported.launchUnchanged, true);
+            assert.equal(reported.lockRestoredBeforeBRelease, true, "A restores B's exact token while B still owns it");
+            assert.equal(reported.lockReleased, true, "all writers release their locks after the coordinated publication");
             assert.equal(reported.first.name, "B");
             assert.deepEqual(reported.first.catalog, catalog);
             assert.equal(reported.first.status, "completed");
@@ -830,7 +841,7 @@ if (!isMainThread) {
             assert.equal(reported.first.completionCallbackSentAt, 3);
             assert.equal(reported.final.name, "B");
             assert.deepEqual(reported.final.catalog, catalog);
-            assert.deepEqual(reported.outcomes.map((item) => item.ok), [true, true, true]);
+            assert.deepEqual(reported.outcomes.map((item) => item.ok), [true, true, true], JSON.stringify(reported.outcomes));
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

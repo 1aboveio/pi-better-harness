@@ -26,7 +26,7 @@ import {
   FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
 } from "./sandbox.js";
 import type { LocalSupervisor, SupervisorStartOptions } from "./supervisor/index.js";
-import { supervisorTaskIdForToken } from "./supervisor/index.js";
+import { createLocalSupervisor, supervisorTaskIdForToken } from "./supervisor/index.js";
 import { advertiseBackgroundAdapter, BACKGROUND_ADAPTER_REQUEST } from "./adapter-contract.js";
 import { readProcessStartToken } from "./process-identity.js";
 import { openStore } from "./shared-operation-coordinator/index.js";
@@ -1793,9 +1793,28 @@ describe("durable read-only projections", () => {
     }
   });
 
-  it("keeps read-only log access from satisfying acknowledgement evidence", async () => {
+  it.each(["natural", "snapshot-before-reconciliation"])("keeps read-only log access from satisfying acknowledgement evidence (%s)", async (timing) => {
     const root = workspace("projection-read");
-    const { host } = startHost({ root });
+    const supervisor = createLocalSupervisor({ directory: join(root, "supervisor") });
+    let terminalProjected = false;
+    let running: ReturnType<LocalSupervisor["inspect"]>;
+    // Expose the real runner result to the read-only snapshot before the next
+    // coordinator pass, the same window that exists between inspect and snapshot.
+    const controlled: LocalSupervisor = {
+      async start(options) {
+        const started = await supervisor.start(options);
+        running = { ...started.inspection, status: "running", terminal: false, result: undefined, lost: undefined };
+        return { ...started, status: "running", inspection: running };
+      },
+      inspect(taskId, options) { return terminalProjected ? supervisor.inspect(taskId, options) : running; },
+      snapshot(taskId) {
+        const snapshot = supervisor.snapshot(taskId);
+        if (snapshot?.terminal) terminalProjected = true;
+        return snapshot;
+      },
+      stop: (taskId, options) => supervisor.stop(taskId, options),
+    };
+    const { host } = startHost({ root, supervisor: timing === "natural" ? supervisor : controlled });
     const ctx = createCtx(root, "session-projection-read");
     const origin = { cwd: root, sessionId: "session-projection-read" };
     const launch = await host.launchParent({
@@ -1805,11 +1824,20 @@ describe("durable read-only projections", () => {
     });
     const wait = host.waitForParent(ctx, [launch.id], "read evidence");
     await until(host, () => host.readDurableTask(origin, launch.id)?.terminal === true);
+    if (timing === "snapshot-before-reconciliation") {
+      expect(host.waitViewForParent(ctx, wait.waitId)?.dependencies[0]?.terminalRevision).toBe(0);
+    }
+    // A runner snapshot can become terminal between reconciliation and projection.
+    // Wait for the coordinator revision without recording an evidence read.
+    await until(host, () => host.waitViewForParent(ctx, wait.waitId)?.settled === true);
 
     const log = host.readDurableTaskLog(origin, launch.id, 10)!;
     expect(log.stdout).toContain("projection-evidence");
     const view = host.waitViewForParent(ctx, wait.waitId) ?? host.listWaitsForParent(ctx, { pendingOnly: true })
       .find((entry) => entry.waitId === wait.waitId)!;
+    expect(view.phase).toBe("ready");
+    expect(view.dependencies).toHaveLength(1);
+    expect(view.dependencies[0]!.terminalRevision).toBeGreaterThan(0);
     expect(() => host.acknowledgeForParent(ctx, {
       waitId: view.waitId,
       generation: view.generation,
@@ -1819,7 +1847,8 @@ describe("durable read-only projections", () => {
     })).toThrow(/has not been read/);
 
     // The real status read is still the evidence read that unlocks acknowledgement.
-    host.statusForParent(ctx, launch.id);
+    const status = host.statusForParent(ctx, launch.id);
+    expect(status.terminalRevision).toBe(view.dependencies[0]!.terminalRevision);
     expect(host.acknowledgeForParent(ctx, {
       waitId: view.waitId,
       generation: view.generation,

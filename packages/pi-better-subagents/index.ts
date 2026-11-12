@@ -11,6 +11,7 @@
  *   launch is the result · completion posts back · the foreground never blocks
  */
 
+import { assignmentFor } from "./assignment-projection.mjs";
 import { execSync } from "node:child_process";
 import { writeFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -1331,7 +1332,7 @@ function navigatorRows(visible?: RunMeta[], at?: number) {
 
 /** Runs that should advertise/open the left-arrow navigator affordance. */
 function navigatorRunningRuns(): RunMeta[] {
-    return sessionVisibleNavigatorRuns().filter((m) => effectiveStatus(m) === "running" || pendingNavigatorPark(m));
+    return sessionVisibleNavigatorRuns().filter((m) => ["running", "waiting"].includes(assignmentFor(m, effectiveStatus(m)).state));
 }
 
 function navigatorRunningCount(): number {
@@ -1352,15 +1353,14 @@ function sessionVisibleNavigatorRuns(now: number = Date.now()): RunMeta[] {
 }
 
 function isExpiredTerminalNavigatorRun(meta: RunMeta, now: number): boolean {
-    if (pendingNavigatorPark(meta)) return false;
-    const status = effectiveStatus(meta);
+    const status = assignmentFor(meta, effectiveStatus(meta)).state;
     if (!isTerminalNavigatorStatus(status)) return false;
     const endedAt = meta.endedAt ?? meta.lostAt;
     return typeof endedAt === "number" && now - endedAt >= TERMINAL_NAVIGATOR_RETENTION_MS;
 }
 
 function isTerminalNavigatorStatus(status: string): boolean {
-    return status !== "running" && status !== "orphaned";
+    return status !== "running" && status !== "waiting" && status !== "orphaned";
 }
 
 /** Live detail snapshot for one run (registry + log parse + health). */
@@ -1423,6 +1423,8 @@ function statusTone(status: string): BackgroundWorkRow["statusTone"] {
         case "failed":
         case "lost": return "failed";
         case "held":
+        case "waiting":
+        case "cancelled":
         case "killed":
         case "orphaned": return "warning";
         default: return "muted";
@@ -1457,7 +1459,7 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
             expiresAt: (() => {
                 const meta = metaById.get(row.id);
                 const endedAt = meta?.endedAt ?? meta?.lostAt;
-                return meta && !pendingNavigatorPark(meta) && isTerminalNavigatorStatus(effectiveStatus(meta)) && typeof endedAt === "number"
+                return meta && isTerminalNavigatorStatus(row.status) && typeof endedAt === "number"
                     ? endedAt + TERMINAL_NAVIGATOR_RETENTION_MS
                     : undefined;
             })(),
@@ -1548,12 +1550,17 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
         { label: "id", value: detail.id },
         ...(detail.role ? [{ label: "role", value: String(detail.role) }] : []),
         { label: "model", value: detail.effort ? `${detail.model} · effort ${detail.effort}` : detail.model },
+        ...(detail.assignment ? [
+            { label: "revision", value: detail.assignment.revision },
+            { label: "reason", value: detail.assignment.reason },
+            { label: "process", value: `${detail.assignment.processStatus}; termination ${detail.assignment.termination}` },
+            { label: "evidence", value: detail.assignment.evidence.join(", ") },
+        ] : []),
         { label: "elapsed", value: detail.elapsed },
         { label: "tools", value: detail.currentTool ? `current ${detail.currentTool}` : (detail.tools || "(none)") },
         { label: "spend", value: detail.spend || "(none)" },
         ...(detail.park ? [
             { label: "wait", value: `${detail.park.waitId} generation ${detail.park.generation}` },
-            { label: "assignment", value: detail.park.heldReason || detail.park.continuationNote || "Waiting for the operation result; assignment unfinished" },
         ] : []),
         { label: "pid", value: detail.pid != null ? String(detail.pid) : "-" },
         { label: "pgid", value: detail.pgid != null ? String(detail.pgid) : "-" },
@@ -1569,7 +1576,7 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
         evidence: { label: "transcript", text: detail.output || "(no transcript yet)" },
         transcript: transcript.entries,
         transcriptDiagnostic: transcript.diagnostic,
-        footerActions: [detail.park ? "x cancel resume" : detail.status === "running" || detail.status === "orphaned" ? "x stop" : "x dismiss"],
+        footerActions: [detail.park ? "x cancel resume" : detail.attemptStatus === "running" || detail.attemptStatus === "orphaned" ? "x stop" : "x dismiss"],
     };
 }
 
