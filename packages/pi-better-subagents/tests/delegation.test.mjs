@@ -206,6 +206,8 @@ test("normalization falls back to adaptive and each prompt expresses its boundar
 
 test("/subagents action completions expose complete mode selections with context", () => {
     assert.deepEqual(subagentsArgumentCompletions(""), [
+        { value: "history", label: "history", description: "Inspect or cancel waits from other sessions" },
+        { value: "history dismiss", label: "history dismiss", description: "Dismiss unchanged historical attention notices" },
         { value: "settings", label: "settings", description: "Open delegation, concurrency, and timing settings" },
         { value: "cap", label: "cap <number>", description: "Set a positive concurrent subagent limit for this session" },
         { value: "tool-wait", label: "tool-wait <minutes>", description: "Set the session tool-wait alert time; 0 turns it off" },

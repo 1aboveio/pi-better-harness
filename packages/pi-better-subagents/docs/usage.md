@@ -1085,3 +1085,17 @@ Near-term:
   twice ([#2](https://github.com/1aboveio/pi-better-subagents/issues/2)) — **done**.
 - Named agent-definition files (per-agent system prompt + tool allowlist) and
   chain/parallel orchestration.
+# Historical Waits
+
+`/subagents history` lists retained waits from other sessions in this workspace.
+Each entry identifies its originating session and offers inspection or explicit
+cancellation. Inspection does not adopt the assignment, acknowledge its evidence,
+or start a continuation. Cancellation confirms the durable result; it does not
+claim that an uncertain writer has stopped. Failures leave the wait available
+for inspection and retry.
+
+`/subagents history dismiss` durably dismisses the current historical-attention
+notice without changing any wait or evidence. A changed wait generation, phase,
+publication or attention reason can produce a new notice. Ordinary task navigation
+remains scoped to the active session.
+

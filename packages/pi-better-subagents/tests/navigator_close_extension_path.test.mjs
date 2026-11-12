@@ -25,6 +25,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(__dirname);
@@ -166,6 +167,8 @@ async function waitFor(pred, timeoutMs = 3000) {
 function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
     const handlers = {};
     const tools = new Map();
+    const commands = new Map();
+    const notices = [];
     const statusCalls = [];
     const widgetCalls = [];
     const closedOutcomes = [];
@@ -178,7 +181,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
         theme: { fg: (color, s) => `<${color}>${s}</>` },
         setStatus(k, v) { statusCalls.push([k, v]); },
         setWidget(k, v) { widgetCalls.push([k, v]); },
-        notify() {},
+        notify(message, level) { notices.push({ message, level }); },
         factory: undefined,
         getEditorComponent() { return this.factory; },
         setEditorComponent(f) { this.factory = f; },
@@ -203,7 +206,9 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
     };
 
     const pi = {
+        events: new EventEmitter(),
         registerTool(tool) { tools.set(tool.name, tool); },
+        registerCommand(name, command) { commands.set(name, command); },
         on(event, fn) { handlers[event] = fn; },
         sendMessage() {},
     };
@@ -245,11 +250,14 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
         pressX() { overlayComponent ? overlayComponent.handleInput("x") : editor.handleInput("x"); },
         async shutdown() { await handlers.session_shutdown({}, ctx); },
         tools,
+        commands,
+        notices,
         statusCalls,
         widgetCalls,
         closedOutcomes,
         ui,
         ctx,
+        pi,
         /** Seed a visible run owned by this parent. */
         seedRun(overrides = {}) {
             const id = trackDisk(overrides.id ?? `sa_t47_ext_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
@@ -301,6 +309,66 @@ describe("registered extension path: main-window navigator actions", () => {
             try { rmSync(registry.runDir(id), { recursive: true, force: true }); } catch { /* best-effort */ }
         }
         try { rmSync(RUNTIME, { recursive: true, force: true }); } catch { /* best-effort */ }
+    });
+
+    // @covers navigator.incident-presentation
+    it("real startup reconciliation does not send session A's held-record warning to unrelated B", async () => {
+        const workspace = join(RUNTIME, "startup-workspace");
+        mkdirSync(workspace, { recursive: true });
+        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase, sessionId: "startup-B" });
+        nav.ctx.cwd = workspace;
+        const id = nav.seedRun({ id: "sa_historical_startup", cwd: workspace, callbackOrigin: { cwd: workspace, sessionId: "startup-A" } });
+        registry.writeParkRecord(id, { version: 1, phase: "resuming", waitId: "wait-startup", generation: 1,
+            ownerWorkspace: workspace, ownerSessionId: "startup-A", resumedBy: "sa_missing_startup_writer", attemptId: id, parkedAt: 1, updatedAt: 1 });
+        const { createObservedWaitHost } = await import("../../pi-better-background-tasks/src/observed-waits.ts");
+        const host = createObservedWaitHost(nav.pi, { storePath: join(RUNTIME, "startup.sqlite"), supervisorDirectory: join(RUNTIME, "supervisor"), pollMs: 0 });
+        host.start(nav.ctx);
+        try {
+            await nav.start();
+            assert.equal(await waitFor(() => nav.notices.some((n) => n.message.includes("/subagents history"))), true);
+            assert.equal(registry.readParkRecord(id).phase, "held", "global reconciliation still runs");
+            assert.ok(!nav.notices.some((n) => n.message.includes(`Subagent ${id}:`)));
+            assert.ok(nav.notices.some((n) => n.message.includes("/subagents history")));
+            assert.equal(registry.readParkRecord(id).ownerSessionId, "startup-A");
+        } finally { await nav.shutdown(); host.close(); registry.dismissRun(id); rmSync(registry.runDir(id), { recursive: true, force: true }); }
+    });
+
+    // @covers navigator.incident-presentation
+    it("historical management inspects without adopting and retains failed cancellations across reload", async () => {
+        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase, sessionId: "unrelated-B" });
+        const id = nav.seedRun({ id: "sa_historical_attention", callbackOrigin: { cwd: RUNTIME, sessionId: "original-A" } });
+        registry.writeParkRecord(id, { version: 1, phase: "held", waitId: "wait-history", generation: 1,
+            ownerWorkspace: RUNTIME, ownerSessionId: "original-A", heldReason: "retained evidence", attemptId: id, parkedAt: 1, updatedAt: 1 });
+        const original = registry.readParkRecord(id);
+        const history = await import("../historical-attention.ts");
+        try {
+            await nav.start();
+            const { renderRegisteredWorkDetail } = await import("../shared-navigator.ts");
+            assert.ok(!renderRegisteredWorkDetail("subagents", id, 120).listedIds.includes(id));
+            const command = nav.commands.get("subagents");
+            const choices = [0, "Inspect"];
+            nav.ui.select = async (_title, labels) => { const choice = choices.shift(); return typeof choice === "number" ? labels[choice] : choice; };
+            await command.handler("history", nav.ctx);
+            assert.match(nav.notices.at(-1).message, /original-A/);
+            assert.match(nav.notices.at(-1).message, /wait-history/);
+            assert.deepEqual(registry.readParkRecord(id), original);
+            await command.handler("history dismiss", nav.ctx);
+            const waits = history.historicalWaits({ cwd: RUNTIME, sessionId: "unrelated-B" });
+            assert.equal(history.attentionDismissed(RUNTIME, history.attentionRevision(waits)), true);
+            choices.push(0, "Cancel pending wait");
+            nav.ui.confirm = async () => true;
+            await command.handler("history", nav.ctx);
+            assert.match(nav.notices.at(-1).message, /failed.*Durable cancellation unavailable/s);
+            const result = await nav.tools.get("subagent_stop").execute("stop-history", { id });
+            assert.equal(result.isError, true);
+            assert.match(result.content[0].text, /Durable cancellation unavailable/);
+            assert.deepEqual(registry.readParkRecord(id), original);
+            await nav.shutdown();
+            await nav.start();
+            assert.equal(history.attentionDismissed(RUNTIME, history.attentionRevision(history.historicalWaits({ cwd: RUNTIME, sessionId: "unrelated-B" }))), true);
+            registry.updateParkRecord(id, { heldReason: "new attention" });
+            assert.equal(history.attentionDismissed(RUNTIME, history.attentionRevision(history.historicalWaits({ cwd: RUNTIME, sessionId: "unrelated-B" }))), false);
+        } finally { await nav.shutdown(); }
     });
 
     // @covers navigator.incident-presentation

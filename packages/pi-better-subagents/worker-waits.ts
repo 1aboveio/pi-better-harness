@@ -1670,6 +1670,7 @@ export interface ResumeOrchestrationOptions {
     /** Follow a cancelled generation to the attempt it already published. */
     stopAttempt?: StopPublishedAttempt;
     notify?(message: string, level: "info" | "warning"): void;
+    notifyWhen?(meta: RunMeta): boolean;
     now?: () => number;
 }
 
@@ -1872,7 +1873,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
         } catch { /* the park record still shows the hold */ }
         if (park.meta.assignment) commitAssignmentTerminal({ ...park.meta, status: "failed", failureReason: reason }, true);
         try {
-            options.notify?.(`Subagent ${park.runId} wait ${park.waitId} is held: ${reason}`, "warning");
+            if (!options.notifyWhen || options.notifyWhen(park.meta)) options.notify?.(`Subagent ${park.runId} wait ${park.waitId} is held: ${reason}`, "warning");
         } catch { /* ignore UI failures */ }
         return "held";
     };
@@ -2117,7 +2118,8 @@ export async function cancelParkedWait(
     const scope = backgroundScopeForMeta(park.meta, park.record);
     const at = (options.now ?? Date.now)();
     if (park.meta.assignment) {
-        commitAssignmentTerminal({ ...park.meta, status: "killed" });
+        const outcome = commitAssignmentTerminal({ ...park.meta, status: "killed" });
+        if (outcome?.outcome !== "cancelled") throw new Error("The assignment already has a non-cancelled terminal outcome; cancellation was not committed.");
         const cancellation = await stopPublishedAttempt(park, reason, options.stopAttempt, options.now);
         updateParkRecord(park.runId, { phase: "cancelled", cancelReason: cancellation === "foreign" ? `${reason} (published writer termination remains unproven)` : reason, cancelledAt: at });
         return;
@@ -2130,10 +2132,10 @@ export async function cancelParkedWait(
             updateParkRecord(park.runId, {
                 phase: "held",
                 cancelReason: `${reason} (the durable cancellation failed: ${reasonOf(error)})`,
-                cancelledAt: at,
             });
-            return;
+            throw new Error(`Durable cancellation failed: ${reasonOf(error)}`);
         }
+        if (view.phase !== "cancelled") throw new Error(`Durable cancellation was not confirmed (wait is ${view.phase}).`);
         const settled = readParkRecord(park.runId);
         if (settled?.phase === "cancelled" && settled.cancelReason) return;
         const cancellation = await stopPublishedAttempt(park, reason, options.stopAttempt, options.now);
@@ -2148,14 +2150,7 @@ export async function cancelParkedWait(
         });
         return;
     }
-    const cancellation = await stopPublishedAttempt(park, reason, options.stopAttempt, options.now);
-    updateParkRecord(park.runId, {
-        phase: "cancelled",
-        cancelReason: cancellation === "foreign"
-            ? `${reason} (the published continuation could not be attributed to this parent and was left running)`
-            : reason,
-        cancelledAt: at,
-    });
+    throw new Error("Durable cancellation unavailable: the original worker scope and observed-waits service are required.");
 }
 
 /**
@@ -2493,17 +2488,22 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
 
 export async function reconcileParkedWaits(
     service: WorkerOperationService | undefined,
-    options: {
+    outerOptions: {
         resume(park: ParkedWait): Promise<"resumed" | "held" | "skipped">;
         notify?(message: string, level: "warning"): void;
+        notifyWhen?(meta: RunMeta): boolean;
     },
 ): Promise<{ resumed: number; held: number; skipped: number }> {
     let resumed = 0;
     let held = 0;
     let skipped = 0;
+    const options = outerOptions;
+    const scopedOptions = (meta: RunMeta) => ({ ...outerOptions,
+        notify: outerOptions.notifyWhen && !outerOptions.notifyWhen(meta) ? undefined : outerOptions.notify });
     if (service?.outageReconciliation === 1) {
         try {
             for (const report of pendingObservations()) {
+                const options = scopedOptions(report.meta);
                 try {
                     const scope = backgroundScopeForMeta(report.meta, report.record);
                     if (!scope) continue;
@@ -2569,6 +2569,7 @@ export async function reconcileParkedWaits(
         }
     }
     for (const park of parkedWaits()) {
+        const options = scopedOptions(park.meta);
         try {
             if (park.record.phase === "resuming") {
                 const attemptId = park.record.resumedBy ?? "";
