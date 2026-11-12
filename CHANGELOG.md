@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.44.0] - 2026-11-12
+
+### Changed
+
+- Bundle Subagents 0.31.0, Background Tasks 0.15.0, and Goal 0.13.0 for autonomous assignment continuation, shared progress, durable outcomes, bounded recovery, and coordinator outage reconciliation. (#707)
+
+## [pi-better-subagents@0.31.0] - 2026-11-12
+
+### Changed
+
+- Continue delegated assignments independently of parent Goal pause, completion, replacement, or session inactivity while preserving captured scope, permissions, recipient, deadlines, and cancellation. (#708)
+- Show one assignment progress state across result tools, lists, navigator details, and Goal activity. Waiting on dependencies no longer appears completed merely because a worker attempt exited. (#709)
+- Retain durable assignment outcomes and deliver scoped evidence to the original parent once, keeping explicit follow-up assignments separate. (#710)
+- Allow one automatic repair per continuing unacknowledged-exit fault and wait generation; retain a failure if the resumed worker repeats it. Dependency commands are not rerun. (#711)
+- Retain coordinator outage observations and reconcile them when a compatible host returns, using current wait and cancellation evidence before resuming work. (#712)
+
+## [pi-better-background-tasks@0.15.0] - 2026-11-12
+
+### Changed
+
+- Supervise assignment continuation independently of parent Goal state, expose shared read-only progress and durable outcomes, and admit bounded repair through existing ownership and launch fences. (#708, #709, #710, #711)
+- Reconcile retained coordinator outage observations against current wait generations without treating outage reports as authority to resume work. (#712)
+
+## [pi-better-goal@0.13.0] - 2026-11-12
+
+### Changed
+
+- Use the shared assignment progress projection for activity, including Waiting when coordinator evidence is unavailable. Parent Goal lifecycle changes no longer gate delegated assignment continuation. (#708, #709)
+
 ## [pi-better-harness@0.43.0] - 2026-11-11
 
 ### Changed
