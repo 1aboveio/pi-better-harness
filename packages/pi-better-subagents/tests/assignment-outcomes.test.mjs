@@ -88,6 +88,31 @@ test("quoted outcome text is not a recipient receipt", () => {
     assert.equal(outcomeTranscriptReceipt([{ id: "quote", type: "message", message: { role: "custom", customType: "background-completion-batch", content: "[outcome:quoted-event]" } }], "quoted-event"), null);
 });
 
+test("verified missing wait history retains failure without claiming writer termination", async () => {
+    const id = "outage-missing-history";
+    const binding = { version: 1, assignmentId: id,
+        owner: { kind: "worker-conversation", sessionId: id, workspace: process.cwd(), branchId: null, goalId: null },
+        recipient: { kind: "parent-session", sessionId: "parent", workspace: process.cwd(), branchId: null, goalId: null } };
+    registerAssignmentAttempt(binding, id);
+    const meta = { id, assignment: binding, status: "lost", pid: 4194304, spawnPid: process.pid,
+        cwd: process.cwd(), sessionId: id, promptPreview: "outage evidence", startedAt: Date.now(), logPath: logPathFor(id) };
+    retainObservation(meta, { version: 1, waitId: "missing-required-wait", generation: 1,
+        attemptId: id, phase: "resuming", parkedAt: 1, updatedAt: 1 });
+    const h = host("unrelated");
+    const background = createObservedWaitHost(h.pi, { storePath: coordinatorPath(),
+        supervisorDirectory: join(process.env.TMPDIR, "missing-history-supervisor"), pollMs: 0 });
+    try {
+        background.start(h.ctx);
+        await reconcileParkedWaits(background.service, { resume: () => assert.fail("missing history cannot launch") });
+        const outcome = readOutcome(meta);
+        assert.equal(outcome.outcome, "failed");
+        assert.match(outcome.reason, /history is missing/);
+        assert.equal(outcome.processUncertain, true);
+        await reconcileParkedWaits(background.service, { resume: () => assert.fail("terminal replay cannot launch") });
+        assert.equal(readOutcome(meta).eventId, outcome.eventId);
+    } finally { background.close(); await h.close(); }
+});
+
 test("terminal commit before outage report receipt replays once and delivery retains pins until exact consumption", async () => {
     const { store, wait, meta, operationId } = failedAssignment("outage-delivery");
     const outcome = readOutcome(meta);

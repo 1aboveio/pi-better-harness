@@ -2506,7 +2506,15 @@ export async function reconcileParkedWaits(
                 if (!scope) continue;
                 const current = service.listWorkerWaits(scope).find((wait) =>
                     wait.waitId === report.record.waitId && wait.generation === report.observedRevision.generation);
-                if (!current) continue; // Absence cannot establish consumption or writer exit.
+                if (!current) {
+                    // Missing required history is assignment failure, not process-exit proof.
+                    if (report.meta.assignment && commitAssignmentTerminal({ ...report.meta, status: "lost",
+                        failureReason: "Required authoritative wait history is missing after coordinator recovery; writer termination remains unproven." }, true)) {
+                        if (!readMeta(report.meta.id)) writeMeta(report.meta, { ifAbsent: true });
+                        resolveObservation(report);
+                    }
+                    continue;
+                }
                 if ((current.phase === "resuming" && current.publishedClaimId !== report.record.resumeClaimId)
                     || (report.coordinatorEvidence && current.cancelEpoch !== report.coordinatorEvidence.cancelEpoch)) {
                     resolveObservation(report);
