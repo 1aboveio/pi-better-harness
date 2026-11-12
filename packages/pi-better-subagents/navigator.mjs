@@ -24,7 +24,7 @@
  * with visible-width-aware truncation.
  */
 
-import { assignmentFor } from "./assignment-projection.mjs";
+import { assignmentFor, createAssignmentProjector } from "./assignment-projection.mjs";
 import {
     formatNavigatorHealthFacts,
     statusThemeColor,
@@ -190,8 +190,9 @@ export function pendingNavigatorPark(meta) {
 
 export function buildNavigatorRows(metas, deps) {
     const now = deps.now ?? Date.now();
+    const project = createAssignmentProjector();
     return metas.map((m) => {
-        const assignment = assignmentFor(m, deps.effectiveStatus(m));
+        const assignment = project(m, deps.effectiveStatus(m));
         const status = assignment.state;
         const health = typeof deps.healthFor === "function" ? deps.healthFor(m) : undefined;
         const effort = typeof deps.effortFor === "function" ? deps.effortFor(m) : (m.effort ?? m.modelEffort);

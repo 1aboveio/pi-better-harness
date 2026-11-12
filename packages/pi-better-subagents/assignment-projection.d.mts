@@ -9,6 +9,7 @@ export interface AssignmentProjection {
     verified: boolean;
 }
 export function assignmentFor(meta: object, processStatus?: string, options?: { baseDir?: string | undefined; coordinatorPath?: string; observation?: object }): AssignmentProjection;
+export function createAssignmentProjector(options?: { baseDir?: string | undefined; coordinatorPath?: string; observation?: object }): (meta: object, processStatus?: string) => AssignmentProjection;
 export function projectAssignment(meta: object, processStatus: string, observation?: object): AssignmentProjection;
 export function assignmentDiagnostic(assignment: AssignmentProjection): string;
 export const ASSIGNMENT_STATES: string[];
