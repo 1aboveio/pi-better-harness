@@ -265,7 +265,7 @@ describe("durable native-session persistence", () => {
                 prompt: "INITIAL TASK", clean: true, sandbox: false, cwd: WORKSPACE,
             }, undefined, undefined, h.ctx));
             const meta = await waitTerminal(id);
-            assert.equal(meta.status, "completed");
+            assert.equal(meta.status, "completed", JSON.stringify({ reason: meta.failureReason, log: readFileSync(meta.logPath, "utf8") }));
 
             // New child sessions live in the durable Pi agent directory, not TMPDIR.
             assert.equal(meta.recipe.sessionDir, sessionsDir());

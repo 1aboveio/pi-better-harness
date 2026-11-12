@@ -18,6 +18,16 @@ denials; `PI_WORKER_KERNEL_REQUIRE=1` makes unsupported kernel execution fail.
 
 ## Bounded Assignment Repair
 
+Coordinator outages retain version-1 reports in the existing durable conversation
+root (`observations-v1`). They preserve the published claim, original checkpoint,
+assignment binding and last observed coordinator evidence. Reports are not wait
+authority. Compatible service hosts advertise `outageReconciliation: 1`; replay
+reads current generations and uses ordinary fenced repair and saved-conversation
+admission. Exact cancellation/consumption wins over stale reports. A report receipt
+releases neither evidence pins nor writer fences. Conversation storage refusal
+reports degraded supervision and refuses new park checkpoints. Legacy hosts cannot
+claim outage replay support. No Harness or Goal installation is required.
+
 Coordinator storage v4 owns one repair allowance per assignment/wait generation
 and structured unacknowledged-exit fault. The key includes the original park
 checkpoint and exact dependency revisions, never attempt IDs, timestamps or prose.

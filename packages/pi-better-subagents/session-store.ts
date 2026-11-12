@@ -55,7 +55,7 @@ const ARCHIVE_META_KEYS = [
     "dismissedAt",
     // A parked attempt's disposition and operation binding outlive the volatile
     // run directory: the resume path and cleanup protection read this record.
-    "park", "operations",
+    "park", "operations", "assignment", "pidStartTime",
 ] as const satisfies readonly (keyof RunMeta)[];
 
 interface ArchivedAttemptRecord {

@@ -39,6 +39,32 @@ This extends [ADR 0016](0016-unified-execution-concurrency.md). That ADR introdu
 
 ## Consequences
 
+## Coordinator Outage Observations (#712)
+
+Conversation storage retains version-1 observation reports under its existing
+durable root. A report identifies the assignment, wait generation, published
+claim and observed revision (cancellation epoch and exact dependency revisions
+when available). Its content-addressed identity excludes error prose and time.
+It is evidence for reconciliation, never a second wait scheduler or terminal
+authority. A local unverified observation means Waiting, not a committed hold.
+
+Compatible hosts advertise `outageReconciliation: 1`. Before parking, conversation
+storage must accept a durable probe; failure refuses parking and reports degraded
+supervision. Reports survive host replacement. Replay consults current coordinator
+records, preserves consumed/cancelled generations, and uses existing fenced repair
+and terminal-outcome transactions. A resolved report is a receipt of reconciliation,
+not worker interpretation or parent consumption. It releases no pins or fences.
+Crashes before that receipt replay the same claim; coordinator repair accounting
+and terminal-event identity remain authoritative. Unsupported hosts retain reports
+without claiming repair or durable delivery. Storage schema v4 remains unchanged:
+the separately versioned evidence format adds no coordinator table.
+
+A cancelled-publication observation has a distinct stable cancellation marker.
+It may reconcile only the exact writer's exit and released lease, never repair
+or execution admission. A held/disarmed coordinator wait or advanced cancellation
+epoch does not suppress that proof. The cancelled cache and terminal outcome stay
+immutable; observation receipts do not acknowledge the worker's dependency wait.
+
 ## Bounded Autonomous Repair (#711)
 
 An unacknowledged published worker exit is reconciled against its exact claim,
