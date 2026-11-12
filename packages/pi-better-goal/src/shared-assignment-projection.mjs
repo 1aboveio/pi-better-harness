@@ -58,18 +58,53 @@ export function projectAssignment(meta, processStatus, observation = { verified:
 
 /** All consumers use the same lineage and authoritative wait read. Park caches are hints only. */
 export function assignmentFor(meta, processStatus = meta.status, options = {}) {
+    return assignmentFromSnapshot(meta, processStatus, options, () => readAttempts(options));
+}
+
+function readAttempts(options) {
     const base = options.baseDir ?? join(tmpdir(), "pi-better-subagents");
-    const attempts = new Map([[meta.id, meta]]);
-    let current = meta;
+    const attempts = [];
     try {
-        for (const id of (meta.operations || meta.park ? readdirSync(join(base, "runs")) : [])) {
+        for (const id of readdirSync(join(base, "runs"))) {
             try {
                 const candidate = JSON.parse(readFileSync(join(base, "runs", id, "meta.json"), "utf8"));
-                if (candidate.sessionId === meta.sessionId && candidate.cwd === meta.cwd
-                    && (!meta.assignment || candidate.assignment?.assignmentId === meta.assignment.assignmentId)) attempts.set(candidate.id, candidate);
-            } catch { /* A partial unrelated record must not hide a continuation. */ }
+                if (candidate && typeof candidate === "object") attempts.push(candidate);
+            }
+            catch { /* A partial unrelated record must not hide a continuation. */ }
         }
     } catch { /* Registry gaps cannot establish a newer attempt. */ }
+    return attempts;
+}
+
+/** One synchronous UI refresh shares a snapshot; the next refresh reads disk again. */
+export function createAssignmentProjector(options = {}) {
+    let snapshot;
+    const readSnapshot = (meta) => {
+        if (!snapshot) {
+            snapshot = new Map();
+            for (const candidate of readAttempts(options)) {
+                let workspaces = snapshot.get(candidate.sessionId);
+                if (!workspaces) snapshot.set(candidate.sessionId, workspaces = new Map());
+                let attempts = workspaces.get(candidate.cwd);
+                if (!attempts) workspaces.set(candidate.cwd, attempts = []);
+                attempts.push(candidate);
+            }
+        }
+        return snapshot.get(meta.sessionId)?.get(meta.cwd) ?? [];
+    };
+    return (meta, processStatus = meta.status) => assignmentFromSnapshot(meta, processStatus, options,
+        () => readSnapshot(meta));
+}
+
+function assignmentFromSnapshot(meta, processStatus, options, readSnapshot) {
+    const attempts = new Map([[meta.id, meta]]);
+    let current = meta;
+    if (meta.operations || meta.park) {
+        for (const candidate of readSnapshot()) {
+            if (candidate.sessionId === meta.sessionId && candidate.cwd === meta.cwd
+                && (!meta.assignment || candidate.assignment?.assignmentId === meta.assignment.assignmentId)) attempts.set(candidate.id, candidate);
+        }
+    }
     // Conversation roots survive explicit follow-ups. Only automatic resume edges
     // join attempts into one assignment; manual continuation starts a new one.
     const lineage = new Map([[meta.id, meta]]);

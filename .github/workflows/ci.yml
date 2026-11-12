@@ -205,6 +205,9 @@ jobs:
     name: workspace-ci
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
 
@@ -236,6 +239,29 @@ jobs:
           bwrap --ro-bind / / -- /bin/true
           npm install --global @openai/codex@0.159.2
           test "$(codex --version)" = "codex-cli 0.159.2"
+
+      - name: Select assignment projection performance checks
+        id: performance-scope
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/performance/ci-selection.mjs
+
+      - name: Assignment projection performance budget
+        id: performance
+        if: steps.performance-scope.outputs.run == 'true'
+        timeout-minutes: 2
+        env:
+          PI_PERF_REPORT: ${{ runner.temp }}/assignment-projection-performance.json
+        run: npm run test:performance
+
+      - name: Upload assignment projection performance metrics
+        if: ${{ always() && (steps.performance.outcome == 'success' || steps.performance.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: assignment-projection-performance
+          path: ${{ runner.temp }}/assignment-projection-performance.json
+          if-no-files-found: warn
 
       - name: Typecheck
         run: npm run typecheck

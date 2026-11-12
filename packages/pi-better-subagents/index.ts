@@ -11,7 +11,7 @@
  *   launch is the result · completion posts back · the foreground never blocks
  */
 
-import { assignmentFor } from "./assignment-projection.mjs";
+import { createAssignmentProjector } from "./assignment-projection.mjs";
 import { historicalWaits, attentionRevision, attentionDismissed, dismissAttention } from "./historical-attention.ts";
 import { registerAssignmentAttempt, commitAssignmentTerminal, readOutcome, receiptOutcome, outcomeTranscriptReceipt, inspectOutcome, createOutcomeHost, closeOutcomeHost, claimOutcome, type AssignmentBinding } from "./assignment-outcomes.ts";
 import { currentSandboxPermissions } from "./permission-policy.ts";
@@ -1391,7 +1391,8 @@ function navigatorRows(visible?: RunMeta[], at?: number) {
 
 /** Runs that should advertise/open the left-arrow navigator affordance. */
 function navigatorRunningRuns(): RunMeta[] {
-    return sessionVisibleNavigatorRuns().filter((m) => ["running", "waiting"].includes(assignmentFor(m, effectiveStatus(m)).state));
+    const project = createAssignmentProjector();
+    return sessionVisibleNavigatorRuns(Date.now(), project).filter((m) => ["running", "waiting"].includes(project(m, effectiveStatus(m)).state));
 }
 
 function navigatorRunningCount(): number {
@@ -1403,16 +1404,16 @@ function navigatorRunningCount(): number {
  * each rebuild still reads owned non-terminal metadata so external status
  * changes are visible immediately without a time-based memo.
  */
-function sessionVisibleNavigatorRuns(now: number = Date.now()): RunMeta[] {
+function sessionVisibleNavigatorRuns(now: number = Date.now(), project = createAssignmentProjector()): RunMeta[] {
     const origin = activeCallbackOrigin;
     if (!origin) return [];
     return navigatorVisibleRuns(listMetasForOrigin(origin))
         .filter(belongsToActiveNavigatorSession)
-        .filter((m) => !isExpiredTerminalNavigatorRun(m, now));
+        .filter((m) => !isExpiredTerminalNavigatorRun(m, now, project));
 }
 
-function isExpiredTerminalNavigatorRun(meta: RunMeta, now: number): boolean {
-    const status = assignmentFor(meta, effectiveStatus(meta)).state;
+function isExpiredTerminalNavigatorRun(meta: RunMeta, now: number, project = createAssignmentProjector()): boolean {
+    const status = project(meta, effectiveStatus(meta)).state;
     if (!isTerminalNavigatorStatus(status)) return false;
     const endedAt = meta.endedAt ?? meta.lostAt;
     return typeof endedAt === "number" && now - endedAt >= TERMINAL_NAVIGATOR_RETENTION_MS;
