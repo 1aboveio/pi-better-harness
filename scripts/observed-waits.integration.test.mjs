@@ -17,7 +17,7 @@
 //
 // No wait phase, checkpoint, park disposition, terminal result, claim or ack is
 // fabricated. The only injected seams are the offline model (it decides which
-// tool to call, never the result), the Goal admission reply in the shared
+// tool to call, never the result), the parent Goal admission listeners in the shared
 // harness (Goal is not loaded there), and the delivery watcher binary itself
 // (stub evidence).
 //
@@ -409,6 +409,12 @@ function installContinuation(stack, options) {
         context,
         capacity,
         launch: async (input) => {
+            assert.equal(processExists(registry.readMeta(attemptId).pid), false, "the parked writer is gone before replacement spawn");
+            const published = stack.store.listResumeClaims({ waitId: input.park.waitId, generation: input.park.generation })
+                .filter((claim) => claim.state === "published");
+            assert.equal(published.length, 1, "exactly one resume claim is published before spawn");
+            assert.equal(published[0].attemptId, input.assignedRunId);
+            assert.equal(published[0].launchToken, input.launchToken);
             launches.push(input);
             const assignedRunId = input.assignedRunId;
             const registration = await stack.bridge.register({
@@ -514,7 +520,7 @@ test("a real worker parks, releases its slot, the runner survives, and the saved
     assert.ok(savedEntries.some((entry) => entry.toolName === "bg_task_spawn"));
     assert.ok(savedEntries.some((entry) => entry.toolName === "wait_for_operations"));
 
-    // --- parent pause + full capacity leave the ready wait queued -------------
+    // --- unavailable host + full capacity leave the ready wait queued ---------
     const occupier = "sa_ow_occupier";
     registry.writeMeta({
         id: occupier,
@@ -532,8 +538,13 @@ test("a real worker parks, releases its slot, the runner survives, and the saved
     assert.equal(capacity.capacity.tryReserve(), false, "the only slot is occupied");
     // The continuation adapter is registered before the wait can become ready,
     // exactly as the Subagents coordinator starts before any worker launches.
-    let parentPaused = true;
-    const goals = allowResume(stack);
+    let supervisorAvailable = false;
+    const supervisorCtx = support.createCtx(stack.workspace, "unrelated-session", "unrelated-branch");
+    const goals = [];
+    stack.events.on(OPERATION_RESUME_ADMISSION_EVENT, (request) => {
+        goals.push(request.owner);
+        request.reply({ allowed: false, reason: "the parent Goal is paused", revision: 1 });
+    });
     const continuation = installContinuation(stack, {
         attemptId,
         sessionDirectory: parked.sessionDirectory,
@@ -542,15 +553,15 @@ test("a real worker parks, releases its slot, the runner survives, and the saved
         authorityReference: parked.authorityReference,
         outcome: "success",
         capacity: capacity.capacity,
-        context: () => parentPaused ? undefined : stack.ctx,
+        context: () => supervisorAvailable ? supervisorCtx : undefined,
     });
 
     await finalizePark(stack, attemptId);
     assertSlotReleased(stack, attemptId);
 
-    // The parent becomes active, but no capacity exists yet: the ready delivery
-    // must be deferred without a claim or a launch. Only now release the task.
-    parentPaused = false;
+    // A compatible supervisor is available, but no capacity exists yet: the ready
+    // delivery must defer without a claim or launch. The parent remains inactive.
+    supervisorAvailable = true;
     releaseControlledTask(parked);
     await waitFor(stack, () => waitOf(stack, parked.scope, parked.waitId, parked.generation)?.phase === "ready", {
         label: "the wait to settle and become ready",
@@ -569,27 +580,37 @@ test("a real worker parks, releases its slot, the runner survives, and the saved
     const taskLog = stack.service.logForWorker(parked.scope, parked.taskId, { lines: 20 });
     assert.match(taskLog.stdout, /controlled-task-complete/);
 
-    // Capacity frees up, but the parent is paused: delivery must defer, not claim.
+    // Capacity frees up, but no compatible host is available: defer, not claim.
     registry.writeMeta({ ...registry.readMeta(occupier), status: "completed" });
-    parentPaused = true;
+    supervisorAvailable = false;
     await stack.host.reconcileNow();
     await sleep(150);
     await stack.host.reconcileNow();
-    assert.equal(continuation.launches.length, 0, "an inactive/paused owner must defer delivery");
+    assert.equal(continuation.launches.length, 0, "an unavailable supervisor must defer worker dispatch");
+    assert.equal(capacity.pending(), 0, "queued work reserves no idle capacity");
     assert.equal(stack.store.listResumeClaims({ waitId: parked.waitId }).length, 0);
     assert.equal(waitOf(stack, parked.scope, parked.waitId, parked.generation).phase, "ready");
 
-    // The parent resumes: the ready delivery continues the SAME native session,
-    // exactly once, and the child interprets the terminal evidence before ack.
-    parentPaused = false;
+    // The unrelated supervisor returns while the parent remains inactive and its
+    // Goal rejects parent execution. Resume the SAME worker session exactly once.
+    supervisorAvailable = true;
     await waitFor(stack, () => continuation.launches.length === 1, { label: "the single continuation launch" });
     assert.equal(continuation.resumed.length, 1);
-    assert.deepEqual(goals, [{
+    assert.deepEqual(goals, [], "delegated execution must never ask the parent's Goal for admission");
+    const captured = registry.readParkRecord(attemptId);
+    assert.deepEqual({
+        sessionId: captured.ownerSessionId,
+        workspace: captured.ownerWorkspace,
+        branchId: captured.ownerBranchId,
+        goalId: captured.ownerGoalId,
+    }, {
         sessionId: PARENT_SESSION,
         workspace: stack.workspace,
         branchId: BRANCH,
         goalId: null,
-    }]);
+    }, "the unrelated supervisor never replaces the captured result recipient");
+    assert.equal(capacity.pending(), 0, "dispatch commits the reservation exactly once");
+    assert.equal(processExists(parked.run.pid), false, "the original conversation writer exited before continuation");
 
     const resumed = continuation.resumed[0];
     assert.equal(resumed.result.sessionId, attemptId, "the continuation keeps the parked conversation id");
