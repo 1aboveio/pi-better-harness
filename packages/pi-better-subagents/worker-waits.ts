@@ -2324,7 +2324,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
     const at = (input.now ?? Date.now)();
     let result: ResumedAttemptExitResult = { outcome: "ignored" };
     for (const park of candidates) {
-        if (park.record.phase === "consumed" || park.record.phase === "cancelled") {
+        if (park.record.phase === "consumed" || (park.record.phase === "cancelled" && !park.meta.assignment)) {
             result = { outcome: "ignored", waitPhase: park.record.phase };
             continue;
         }
@@ -2398,8 +2398,8 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             });
             const phase = phaseOf(held.phase);
             updateParkRecord(park.runId, {
-                phase,
-                ...(phase === "held" ? { heldReason: reason } : {}),
+                phase: park.record.phase === "cancelled" ? "cancelled" : phase,
+                ...(phase === "held" && park.record.phase !== "cancelled" ? { heldReason: reason } : {}),
             });
             input.notify?.(`Subagent ${park.runId}: ${reason}. The wait is ${phase}; it will not resume automatically.`, "warning");
             result = { outcome: "settled", waitPhase: phase, reason };

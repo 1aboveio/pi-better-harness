@@ -79,6 +79,7 @@ const { createAssistantMessageEventStream, InMemoryCredentialStore } = await imp
 // The test's own view of the persisted state: separate module instances from the
 // ones the session loads, sharing only the disk.
 const registry = await import("../packages/pi-better-subagents/registry.ts");
+const { readOutcome, outcomeTranscriptReceipt } = await import("../packages/pi-better-subagents/assignment-outcomes.ts");
 
 const EXTENSIONS = [join(repoRoot, "packages/pi-better-subagents/index.ts")];
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -204,14 +205,24 @@ test("a real /reload keeps a live subagent child running and delivers its comple
     assert.equal(done.lifecycleClassification, "complete");
     await waitFor("the completion callback", () => host.completions(id).length > 0);
     assert.equal(host.completions(id).length, 1);
-    assert.ok(registry.readMeta(id).completionCallbackSentAt > 0);
+    const outcome = await waitFor("the durable assignment delivery receipt", () => {
+      const record = readOutcome(registry.readMeta(id));
+      return record?.deliveryReceipt ? record : undefined;
+    });
+    assert.equal(outcome.outcome, "succeeded");
+    assert.equal(outcome.recipient.sessionId, host.sessionId);
+    assert.equal(outcomeTranscriptReceipt(host.session.sessionManager.getBranch(), outcome.eventId), outcome.deliveryReceipt.entryId);
+    assert.equal(outcome.disposition, null, "delivery alone is not parent consumption");
     assert.match(await host.call("subagent_result", { id }), /reload-survives answer/);
+    await host.call("subagent_result", { id, outcome_revision: outcome.revision, disposition: "consumed", note: "Inspected the retained answer after reload." });
+    assert.equal(readOutcome(registry.readMeta(id)).disposition.kind, "consumed");
 
     // A second reload finds the receipt: the completion is not delivered twice.
     await host.session.reload();
     await delay(600);
     assert.equal(host.completions(id).length, 1, "the completion receipt survives another reload");
     assert.equal(registry.readMeta(id).status, "completed");
+    assert.deepEqual(readOutcome(registry.readMeta(id)).deliveryReceipt, outcome.deliveryReceipt);
     assert.deepEqual(host.errors, []);
   } finally {
     try { writeFileSync(release, ""); } catch { /* ignore */ }
