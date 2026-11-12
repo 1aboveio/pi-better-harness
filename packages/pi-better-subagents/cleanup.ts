@@ -40,6 +40,11 @@ import {
 } from "./continuation.ts";
 import { processExists } from "./spawn.ts";
 import { archiveCompletedAttempt, archivePublicationPending, listArchivedAttempts } from "./session-store.ts";
+import { assignmentRetainsEvidence } from "./assignment-outcomes.ts";
+
+function outcomeProtected(meta: RunMeta): boolean {
+    try { return assignmentRetainsEvidence(meta); } catch { return true; }
+}
 
 export const DEFAULT_CLEANUP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -327,6 +332,11 @@ function planCleanupOccupancy(
 ): CleanupOccupancy {
     const runIds = new Set<string>(protect?.runIds ?? []);
     const paths = [...(protect?.paths ?? [])];
+    for (const meta of metas) {
+        if (outcomeProtected(meta)) {
+            runIds.add(meta.id);
+        }
+    }
 
     // A protected path may be the shared workspace or something inside it. The
     // run whose removal would delete it is protected instead, because
@@ -569,6 +579,7 @@ function ageSweepEligible(
     scope: CleanupScope,
 ): boolean {
     if (!TERMINAL_CLEANUP_STATUSES.has(meta.status)) return false;
+    if (outcomeProtected(meta)) return false;
     if (retained.has(meta.sessionId)) return false;
     // The run directory still holds the only copy of this conversation's recipe.
     if (scope.archivePending.has(meta.id)) return false;
@@ -986,6 +997,7 @@ function removeSizeCappedRun(
         if (!conversationQuiescentUnderLock(meta.sessionId, runIds)) return "retained";
         const fresh = readMeta(id) ?? meta;
         if (!TERMINAL_CLEANUP_STATUSES.has(fresh.status)) return "retained";
+        if (outcomeProtected(fresh)) return "retained";
         if (scope.occupancy.runIds.has(fresh.id)) return "retained";
         if (removeMetaArtifacts(fresh, { keepWorkspace: scope.persistent.has(fresh.sessionId) })) return "removed";
         errors.push(`${runDir(id)}: could not remove run artifacts`);
