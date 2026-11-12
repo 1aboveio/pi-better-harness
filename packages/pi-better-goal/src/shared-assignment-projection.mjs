@@ -13,7 +13,10 @@ export function projectAssignment(meta, processStatus, observation = { verified:
     const pending = waits.find((wait) => !["consumed", "cancelled"].includes(wait.phase));
     let state;
     let reason;
-    if (waits[0]?.phase === "cancelled") {
+    if (observation.outcome) {
+        state = { succeeded: "completed", failed: "failed", cancelled: "cancelled" }[observation.outcome.outcome];
+        reason = observation.outcome.reason;
+    } else if (waits[0]?.phase === "cancelled") {
         state = "cancelled";
         reason = waits[0]?.reason || "Assignment explicitly cancelled.";
     } else if (!observation.verified && (meta.operations || meta.park)) {
@@ -62,6 +65,7 @@ export function assignmentFor(meta, processStatus = meta.status, options = {}) {
             try {
                 const candidate = JSON.parse(readFileSync(join(base, "runs", id, "meta.json"), "utf8"));
                 if (candidate.operations?.resumeLaunchToken
+                    && (!meta.assignment || candidate.assignment?.assignmentId === meta.assignment.assignmentId)
                     && (candidate.rootRunId ?? candidate.id) === (meta.rootRunId ?? meta.id)
                     && candidate.startedAt > current.startedAt) current = candidate;
             } catch { /* A partial unrelated record must not hide a continuation. */ }
@@ -69,9 +73,9 @@ export function assignmentFor(meta, processStatus = meta.status, options = {}) {
     } catch { /* Registry gaps cannot establish a newer attempt. */ }
     const status = current.id === meta.id ? processStatus : current.status;
     const sessionId = current.operations?.conversationId ?? current.sessionId;
-    const observation = options.observation ?? (sessionId && (current.operations || current.park)
+    const observation = options.observation ?? (sessionId && (current.assignment || current.operations || current.park)
         ? readAssignmentWaits(options.coordinatorPath ?? join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "operation-coordinator.sqlite"),
-            { sessionId, workspace: current.operations?.workspace ?? current.cwd })
+            { sessionId, workspace: current.operations?.workspace ?? current.cwd, ...(current.assignment ? { assignmentId: current.assignment.assignmentId } : {}) })
         : current.park ? { verified: false, waits: [], reason: "Coordinator identity is unavailable; assignment state is unverified." }
             : { verified: true, waits: [] });
     return projectAssignment(current, status, observation);

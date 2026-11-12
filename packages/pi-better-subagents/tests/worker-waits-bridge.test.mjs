@@ -30,6 +30,7 @@ after(() => {
 
 import {
     OPERATION_RESUME_ADMISSION_EVENT,
+    createWorkerOperationsHost,
     createResumeOrchestration,
     finalizeWorkerParkAfterExit,
     planWorkerBridgeTools,
@@ -49,6 +50,23 @@ import {
 } from "./worker-waits-support.mjs";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
+test("standalone registration refuses a dependency-only host without assignment outcome capability", async () => {
+    const stack = await startStack();
+    const bridge = createWorkerOperationsHost({ pi: stack.pi, childExtensionPath: join(packageRoot, "child-operations.ts"), rpc: { call: async (method, params) => {
+        const reply = await stack.bridge.rpc.call(method, params);
+        if (method !== "register-run") return reply;
+        const { assignmentOutcomesVersion: _unsupported, ...legacy } = reply;
+        return legacy;
+    } } });
+    try {
+        await bridge.start();
+        const plan = defaultPlan();
+        await assert.rejects(() => bridge.register({ runId: "unsupported-outcomes", conversationId: "unsupported-conversation", workspace: stack.workspace,
+            authorityReference: "policy", policy: { version: 1, sandbox: null, tools: [], clean: false, deadlineAt: null, authorityReference: "policy", workspace: stack.workspace },
+            capabilities: plan.capabilities, tools: plan.tools, schemas: schemasFor(stack.pi, plan.tools), attemptId: "unsupported-outcomes", owner: { sessionId: "parent-session-1", workspace: stack.workspace, branchId: "branch-1", goalId: null } }), /durable assignment outcomes v1/);
+        assert.equal(bridge.getRun("unsupported-outcomes"), undefined);
+    } finally { await bridge.close(); }
+});
 const cleanup = [];
 afterEach(() => cleanupAll());
 

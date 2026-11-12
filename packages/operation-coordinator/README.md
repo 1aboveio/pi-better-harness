@@ -11,6 +11,15 @@ tool execution, no model call, no provider transport and no permission decision.
 
 ## Requirements and configuration
 
+Assignment outcomes use storage schema 3, with transactional upgrades from
+schemas 1 and 2. `registerAssignment` captures immutable worker/recipient and
+attempt bindings before dispatch. `recordAssignmentOutcome` atomically commits
+the terminal decision, typed parent event, dispatch disarming and evidence-pin
+transfer. Published writer claims require independent exit proof; neither delivery
+nor outcome consumption releases them. `receiptAssignmentOutcome`,
+`inspectAssignmentOutcome` and `consumeAssignmentOutcome` record separate facts.
+Dependency-ready and assignment-outcome outbox claims must be routed separately.
+
 - Node 24 or newer: the store uses the built-in `node:sqlite`. On a runtime
   without it, `openStore` refuses with `sqlite-unavailable`; there is no in-memory
   fallback, because these records exist to survive a restart.

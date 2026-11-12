@@ -291,6 +291,22 @@ export function settleWaitsForOperation(
             );
         }
         const phase = columnText(waitRow, "phase") as WaitPhase;
+        const terminalAssignment = getRow(ctx, `SELECT a.event_id, a.record_json FROM assignment_outcomes a
+            JOIN assignment_outcome_waits aw ON aw.assignment_id = a.assignment_id
+            WHERE aw.wait_id = ? AND aw.generation = ?`, waitId, generation);
+        if (terminalAssignment) {
+            const outcome = JSON.parse(columnText(terminalAssignment, "record_json"));
+            if (!outcome.disposition) {
+                outcome.inspectedAt = null;
+                run(ctx, "UPDATE assignment_outcomes SET record_json = ? WHERE assignment_id = ?", JSON.stringify(outcome), outcome.assignmentId);
+                for (const evidence of getRows(ctx, "SELECT * FROM operation_evidence WHERE operation_id = ? AND terminal_revision = ?", operation.operationId, operation.terminalRevision)) {
+                    run(ctx, `INSERT OR IGNORE INTO evidence_pins (pin_id, wait_id, generation, operation_id, terminal_revision, kind, ref, summary, detail_lost, bytes, pinned_at)
+                        VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`, `pin_${randomUUID()}`, columnText(terminalAssignment, "event_id"), operation.operationId, operation.terminalRevision,
+                        columnText(evidence, "kind"), columnText(evidence, "ref"), columnNullableText(evidence, "summary"), columnNumber(evidence, "detail_lost"), evidence.bytes as number | null, at);
+                }
+            }
+            continue;
+        }
         if (phase !== "waiting" || !state.settled) continue;
         run(
             ctx,
@@ -313,11 +329,18 @@ export function registerWait(ctx: StoreContext, input: RegisterWaitInput): Regis
     const dependencies = normalizeDependencies(input.dependencies);
     const continuationNote = requireText("continuationNote", input.continuationNote, 8192);
     const park = normalizePark(input.park);
-    const origin = normalizeOrigin(input.origin);
+    let origin = normalizeOrigin(input.origin);
     const requestedWaitId = input.waitId === undefined ? null : requireId("waitId", input.waitId);
 
     return ctx.transaction(() => {
         const at = ctx.now();
+        if (park) {
+            const binding = getRow(ctx, "SELECT assignment_id FROM assignment_attempts WHERE attempt_id = ?", park.attemptId);
+            if (binding) {
+                if (origin?.assignmentRef && origin.assignmentRef !== binding.assignment_id) throw new StoreError("foreign-owner", "Wait assignment does not match its attempt.");
+                origin = { ...origin, assignmentRef: columnText(binding, "assignment_id") };
+            }
+        }
         if (origin?.assignmentRef && getRow(ctx, "SELECT assignment_id FROM assignment_outcomes WHERE assignment_id = ?", origin.assignmentRef)) {
             throw new StoreError("wait-phase", "A terminal assignment cannot register another wait; delegate a new assignment.");
         }
@@ -369,7 +392,7 @@ export function registerWait(ctx: StoreContext, input: RegisterWaitInput): Regis
                 }
             }
             const pending = existing.find(
-                (row) => !TERMINAL_PHASES.includes(columnText(row, "phase") as WaitPhase),
+                (row) => !TERMINAL_PHASES.includes(columnText(row, "phase") as WaitPhase) && columnNumber(row, "dispatch_disarmed") === 0,
             );
             if (pending) {
                 throw new StoreError(
@@ -384,7 +407,7 @@ export function registerWait(ctx: StoreContext, input: RegisterWaitInput): Regis
                 `SELECT * FROM waits
                  WHERE owner_kind = ? AND owner_session_id = ?
                    AND coalesce(owner_branch_id, '') = ?
-                   AND phase NOT IN ('consumed', 'cancelled')`,
+                   AND phase NOT IN ('consumed', 'cancelled') AND dispatch_disarmed = 0`,
                 owner.kind,
                 owner.sessionId,
                 owner.branchId ?? "",
@@ -641,6 +664,9 @@ export function claimResume(ctx: StoreContext, input: ClaimResumeInput): ResumeC
                 `Wait ${waitId} generation ${generation} already has an active resume claim (${columnText(active, "claim_id")}). One conversation admits one writer; release or invalidate that claim instead of claiming again.`,
             );
         }
+        const priorWriter = getRow(ctx, `SELECT c.claim_id FROM resume_claims c JOIN waits w ON w.wait_id = c.wait_id AND w.generation = c.generation
+            WHERE w.owner_kind = ? AND w.owner_session_id = ? AND w.owner_workspace = ? AND c.state = 'published' LIMIT 1`, wait.owner.kind, wait.owner.sessionId, wait.owner.workspace);
+        if (priorWriter) throw new StoreError("concurrent-claim", "A prior published conversation writer still needs independent exit proof.");
         if (wait.phase !== "ready") {
             throw new StoreError(
                 "wait-phase",
@@ -885,6 +911,15 @@ export function holdFailedResume(
     }
 
     return ctx.transaction(() => {
+        const terminal = getRow(ctx, "SELECT assignment_id FROM assignment_outcome_waits WHERE wait_id = ? AND generation = ?", waitId, generation);
+        if (terminal) {
+            const claim = requireClaim(ctx, claimId);
+            if (claim.waitId !== waitId || claim.generation !== generation || claim.claimToken !== claimToken
+                || claim.attemptId !== attemptId || claim.launchToken !== launchToken) throw new StoreError("claim-state", "Terminal writer exit proof does not match the published attempt.");
+            const applied = claim.state === "published";
+            if (applied) run(ctx, "UPDATE resume_claims SET state = 'invalidated', invalidated_at = ?, reason = ? WHERE claim_id = ?", ctx.now(), reason, claimId);
+            return { wait: requireWait(ctx, waitId, generation), claim: requireClaim(ctx, claimId), applied };
+        }
         assertCurrentGeneration(ctx, waitId, generation);
         const wait = requireWait(ctx, waitId, generation);
         if (TERMINAL_PHASES.includes(wait.phase)) {
@@ -1089,6 +1124,7 @@ export function recordEvidencePin(
 
     return ctx.transaction(() => {
         const wait = requireWait(ctx, waitId, generation);
+        if (getRow(ctx, "SELECT assignment_id FROM assignment_outcome_waits WHERE wait_id = ? AND generation = ?", waitId, generation)) throw new StoreError("wait-phase", "Evidence obligations belong to the terminal outcome, not the old wait.");
         if (TERMINAL_PHASES.includes(wait.phase)) {
             throw new StoreError(
                 "wait-phase",
@@ -1335,7 +1371,7 @@ export function listWaits(ctx: StoreContext, filter: WaitFilter = {}): WaitRecor
         params.push(...phases);
     }
     if (filter.pendingOnly) {
-        clauses.push("phase NOT IN ('consumed', 'cancelled')");
+        clauses.push("phase NOT IN ('consumed', 'cancelled') AND dispatch_disarmed = 0");
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     return getRows(
@@ -1366,7 +1402,7 @@ export function findPendingWaitForOwner(
         ctx,
         `SELECT * FROM waits
          WHERE owner_kind = ? AND owner_session_id = ? AND coalesce(owner_branch_id, '') = ?
-           AND phase NOT IN ('consumed', 'cancelled')`,
+           AND phase NOT IN ('consumed', 'cancelled') AND dispatch_disarmed = 0`,
         owner.kind,
         owner.sessionId,
         owner.branchId ?? "",

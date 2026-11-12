@@ -323,6 +323,10 @@ export function claimOutbox(ctx: StoreContext, input: ClaimOutboxInput): OutboxE
                      AND w.phase IN (${placeholders(DELIVERABLE_WAIT_PHASES.length)})))`,
         ];
         const params: Array<string | number | null> = [...DELIVERABLE_WAIT_PHASES];
+        if (input.eventId !== undefined) {
+            clauses.push("event_id = ?");
+            params.push(requireId("eventId", input.eventId));
+        }
         if (input.type !== undefined) {
             if (!["dependency-ready", "assignment-outcome"].includes(input.type)) throw new StoreError("validation", "Unknown outbox event type.");
             clauses.push("event_type = ?");

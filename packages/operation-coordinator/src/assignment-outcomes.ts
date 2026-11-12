@@ -26,18 +26,25 @@ export interface AssignmentOutcomeRecord extends AssignmentOutcomeInput {
     deliveryReceipt: { entryId: string; at: number } | null;
 }
 
-export function registerAssignment(ctx: StoreContext, input: Pick<AssignmentOutcomeInput, "assignmentId" | "owner" | "recipient">): void {
+export function registerAssignment(ctx: StoreContext, input: Pick<AssignmentOutcomeInput, "assignmentId" | "owner" | "recipient"> & { attemptId?: string }): void {
     const id = requireId("assignmentId", input.assignmentId);
     const owner = normalizeOwner("owner", input.owner);
     const recipient = normalizeOwner("recipient", input.recipient);
-    if (owner.kind !== "worker-conversation" || recipient.kind !== "parent-session" || owner.workspace !== recipient.workspace) throw new StoreError("foreign-owner", "Assignment needs a worker and parent in the same workspace.");
+    if (owner.kind !== "worker-conversation" || recipient.kind !== "parent-session") throw new StoreError("foreign-owner", "Assignment needs a worker and recorded parent.");
     ctx.transaction(() => {
         const existing = getRow(ctx, "SELECT * FROM assignment_bindings WHERE assignment_id = ?", id);
         if (existing) {
             if (!sameOwner(JSON.parse(columnText(existing, "owner_json")), owner) || !sameOwner(JSON.parse(columnText(existing, "recipient_json")), recipient)) throw new StoreError("foreign-owner", "Assignment ownership and recipient are immutable.");
-            return;
+        } else {
+            run(ctx, "INSERT INTO assignment_bindings VALUES (?, ?, ?)", id, JSON.stringify(owner), JSON.stringify(recipient));
         }
-        run(ctx, "INSERT INTO assignment_bindings VALUES (?, ?, ?)", id, JSON.stringify(owner), JSON.stringify(recipient));
+        if (input.attemptId) {
+            const attemptId = requireId("attemptId", input.attemptId);
+            const attempt = getRow(ctx, "SELECT assignment_id FROM assignment_attempts WHERE attempt_id = ?", attemptId);
+            if (attempt && attempt.assignment_id !== id) throw new StoreError("foreign-owner", "Attempt belongs to another assignment.");
+            if (!attempt && getAssignmentOutcome(ctx, id)) throw new StoreError("validation", "A terminal assignment cannot admit a new attempt.");
+            run(ctx, "INSERT OR IGNORE INTO assignment_attempts VALUES (?, ?)", attemptId, id);
+        }
     });
 }
 
@@ -54,7 +61,7 @@ export function recordAssignmentOutcome(ctx: StoreContext, input: AssignmentOutc
     const assignmentId = requireId("assignmentId", input.assignmentId);
     const owner = normalizeOwner("owner", input.owner);
     const recipient = normalizeOwner("recipient", input.recipient);
-    if (owner.kind !== "worker-conversation" || recipient.kind !== "parent-session" || owner.workspace !== recipient.workspace) {
+    if (owner.kind !== "worker-conversation" || recipient.kind !== "parent-session") {
         throw new StoreError("foreign-owner", "An assignment outcome needs its worker and recorded parent in the same workspace.");
     }
     const revision = requireCounter("revision", input.revision);
@@ -98,19 +105,19 @@ export function recordAssignmentOutcome(ctx: StoreContext, input: AssignmentOutc
         const record: AssignmentOutcomeRecord = { ...normalized, eventId, inspectedAt: null, disposition: null, deliveryReceipt: null };
         const at = ctx.now();
         run(ctx, "INSERT INTO assignment_outcomes VALUES (?, ?, ?)", assignmentId, eventId, JSON.stringify(record));
-        const retained = [...evidence];
+        const retained = evidence.map((e) => ({ ...e, operationId: assignmentId, terminalRevision: revision }));
         for (const wait of linked) {
             run(ctx, "INSERT INTO assignment_outcome_waits VALUES (?, ?, ?)", assignmentId, wait.waitId, wait.generation);
-            retained.push(...readPins(ctx, wait.waitId, wait.generation, false).map((pin) => ({ kind: pin.kind, ref: pin.ref, summary: pin.summary ?? undefined, detailLost: pin.detailLost, bytes: pin.bytes ?? undefined })));
+            retained.push(...readPins(ctx, wait.waitId, wait.generation, false).map((pin) => ({ operationId: pin.operationId, terminalRevision: pin.terminalRevision, kind: pin.kind, ref: pin.ref, summary: pin.summary ?? undefined, detailLost: pin.detailLost, bytes: pin.bytes ?? undefined })));
             releaseGenerationPins(ctx, wait.waitId, wait.generation, `transferred:${eventId}`, at);
             voidGenerationOutbox(ctx, wait.waitId, wait.generation, "assignment-terminal", at);
             if (!["consumed", "cancelled"].includes(wait.phase)) {
-                run(ctx, "UPDATE waits SET phase = 'held', phase_reason = ?, updated_at = ? WHERE wait_id = ? AND generation = ?", `assignment-terminal:${outcome}`, at, wait.waitId, wait.generation);
+                run(ctx, "UPDATE waits SET dispatch_disarmed = 1, phase = 'held', phase_reason = ?, updated_at = ? WHERE wait_id = ? AND generation = ?", `assignment-terminal:${outcome}`, at, wait.waitId, wait.generation);
             }
             // A published claim may still own a writer. Keep its lease and launch identity.
             run(ctx, "UPDATE resume_claims SET state = 'invalidated', invalidated_at = ?, reason = 'assignment-terminal' WHERE wait_id = ? AND generation = ? AND state = 'claimed'", at, wait.waitId, wait.generation);
         }
-        for (const e of retained) run(ctx, `INSERT OR IGNORE INTO evidence_pins (pin_id, wait_id, generation, operation_id, terminal_revision, kind, ref, summary, detail_lost, bytes, pinned_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`, `pin_${randomUUID()}`, eventId, assignmentId, revision, e.kind, e.ref, e.summary ?? null, e.detailLost ? 1 : 0, e.bytes ?? null, at);
+        for (const e of retained) run(ctx, `INSERT OR IGNORE INTO evidence_pins (pin_id, wait_id, generation, operation_id, terminal_revision, kind, ref, summary, detail_lost, bytes, pinned_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`, `pin_${randomUUID()}`, eventId, e.operationId, e.terminalRevision, e.kind, e.ref, e.summary ?? null, e.detailLost ? 1 : 0, e.bytes ?? null, at);
         run(ctx, `INSERT INTO outbox_events (event_id, event_type, operation_id, terminal_revision, wait_id, generation, recipient_kind, recipient_session_id, recipient_workspace, recipient_branch_id, recipient_goal_id, state, created_at) VALUES (?, 'assignment-outcome', ?, ?, ?, 1, ?, ?, ?, ?, ?, 'pending', ?)`, eventId, assignmentId, revision, eventId, recipient.kind, recipient.sessionId, recipient.workspace, recipient.branchId ?? null, recipient.goalId ?? null, at);
         return record;
     });

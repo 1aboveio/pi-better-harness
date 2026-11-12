@@ -98,6 +98,7 @@ export type LoadedRun =
     | { kind: "unreadable"; detail: string };
 
 export type SubagentToolSession = {
+    inspectOutcome?: (meta: RunMeta, params: Record<string, unknown>, ctx?: unknown) => unknown;
     /** Current session origin; `ctx` is the tool call's host context when available. */
     getActiveOrigin?: (ctx?: unknown) => RunCallbackOrigin | undefined;
 };

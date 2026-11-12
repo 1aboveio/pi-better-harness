@@ -34,10 +34,29 @@ parent's explicit disposition of the exact inspected outcome revision releases
 that outcome's obligations. Runtime adapters must validate current read authority
 and captured recipient identity before exposing bounded evidence or delivery.
 
-Storage version 2 migrates version 1 transactionally and refuses newer versions.
+Storage version 3 migrates versions 1 and 2 transactionally and refuses newer versions.
 Hosts must advertise outcome support explicitly; a dependency-only host cannot
 claim to provide durable assignment delivery. Repair and outage journals remain
 separate work under #711 and #712.
+
+Each launch records its immutable assignment, attempt, worker and parent binding
+before dispatch. Automatic continuations retain that assignment; explicit
+follow-ups receive a new assignment ID even in the same saved conversation.
+Terminal waits are dispatch-disarmed, not acknowledged. They retain unresolved
+facts without occupying the pending-wait slot of a new assignment. Outcome pins
+preserve their original operation/revision identity, including dependencies that
+settle after the assignment fails.
+
+The Subagents finalizer supplies ordinary terminal decisions to the coordinator.
+The existing callback batcher uses the stable outcome event as its notification
+identity and the attempt as its retrieval identity. Recipient transcript entries
+are reconciled before replay; a callback receipt remains distinct from inspection
+and exact-revision consumption through `subagent_result`. Recorded branch anchors
+must remain on the recipient's branch. Current file-read permissions apply to
+bounded dependency evidence reads; neither foreign-session overrides nor outcome
+inspection confer worker acknowledgement or mutation authority. Standalone
+packages negotiate assignment outcome capability v1 when registering the worker
+bridge, and refuse an incompatible host instead of silently dropping delivery.
 
 Plans retain deliverables rather than watcher processes. A waiting deliverable references its operation and owner; absent supervision is visible as unmonitored work, not reported as healthy waiting. Worker parking releases active capacity without erasing the assignment. Restart, cancellation, permissions and duplicate events must preserve this relationship.
 

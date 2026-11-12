@@ -805,7 +805,7 @@ function evidenceFor(inspection: SupervisorInspection): WaitEvidenceView[] {
         operationId: "",
         terminalRevision: 0,
         kind: "log",
-        ref: `${label}.log`,
+        ref: path,
         summary: `${label} retained (${size} bytes)`,
         detailLost: false,
       });
@@ -2239,6 +2239,7 @@ export class ObservedWaitHost {
   }
 
   private rpcRegisterRun(params: JsonRecord): JsonRecord {
+    if (params.assignmentOutcomesVersion !== undefined && params.assignmentOutcomesVersion !== 1) throw new Error("Unsupported assignment outcome capability; this host supports version 1.");
     const runId = requireRpcString(params, "runId");
     const conversationId = requireRpcString(params, "conversationId");
     const workspace = requireRpcString(params, "workspace");
@@ -2275,7 +2276,7 @@ export class ObservedWaitHost {
       ...(typeof params.writerPid === "number" && params.writerPid > 0 ? { writerPid: params.writerPid } : {}),
       ...(typeof params.writerLeaseId === "string" ? { writerLeaseId: params.writerLeaseId } : {}),
     }));
-    return { runId, conversationId, workspace, attemptId, workerOperations: true };
+    return { runId, conversationId, workspace, attemptId, workerOperations: true, assignmentOutcomesVersion: 1 };
   }
 
   private rpcReleaseRun(params: JsonRecord): JsonRecord {

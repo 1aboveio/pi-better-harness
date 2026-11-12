@@ -1,5 +1,5 @@
 /**
- * Schema v1 for the durable operation coordinator.
+ * Schema v3 for the durable operation coordinator.
  *
  * The store refuses to open a database whose recorded version it does not
  * understand, and leaves the file untouched. An unreadable or newer database
@@ -81,6 +81,7 @@ const DDL: readonly string[] = [
         PRIMARY KEY (operation_id, terminal_revision, ordinal)
     )`,
     `CREATE TABLE waits (
+        dispatch_disarmed INTEGER NOT NULL DEFAULT 0,
         wait_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
         owner_kind TEXT NOT NULL,
@@ -104,7 +105,7 @@ const DDL: readonly string[] = [
     // At most one generation per owner identity (session + branch) may be pending.
     `CREATE UNIQUE INDEX waits_one_pending_per_owner
         ON waits (owner_kind, owner_session_id, coalesce(owner_branch_id, ''))
-        WHERE phase NOT IN ('consumed', 'cancelled')`,
+        WHERE phase NOT IN ('consumed', 'cancelled') AND dispatch_disarmed = 0`,
     `CREATE INDEX waits_owner ON waits (owner_kind, owner_session_id)`,
     `CREATE TABLE wait_dependencies (
         wait_id TEXT NOT NULL,
@@ -204,6 +205,10 @@ const DDL: readonly string[] = [
         owner_json TEXT NOT NULL,
         recipient_json TEXT NOT NULL
     )`,
+    `CREATE TABLE assignment_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        assignment_id TEXT NOT NULL REFERENCES assignment_bindings (assignment_id)
+    )`,
     `CREATE TABLE assignment_outcome_waits (
         assignment_id TEXT NOT NULL REFERENCES assignment_outcomes (assignment_id),
         wait_id TEXT NOT NULL,
@@ -264,11 +269,15 @@ export function ensureSchema(ctx: StoreContext): void {
         );
     }
     if (recorded < SCHEMA_VERSION) {
-        if (recorded === 1) {
+        if (recorded === 1 || recorded === 2) {
             ensureAdditiveSchema(ctx);
             ctx.transaction(() => {
-                ctx.db.exec("ALTER TABLE outbox_events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'dependency-ready'");
-                for (const statement of DDL.filter((sql) => sql.startsWith("CREATE TABLE assignment_"))) ctx.db.exec(statement);
+                if (recorded === 1) ctx.db.exec("ALTER TABLE outbox_events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'dependency-ready'");
+                for (const statement of DDL.filter((sql) => sql.startsWith("CREATE TABLE assignment_"))) ctx.db.exec(statement.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+                ctx.db.exec("ALTER TABLE waits ADD COLUMN dispatch_disarmed INTEGER NOT NULL DEFAULT 0");
+                ctx.db.exec("UPDATE waits SET dispatch_disarmed = 1 WHERE EXISTS (SELECT 1 FROM assignment_outcome_waits aw WHERE aw.wait_id = waits.wait_id AND aw.generation = waits.generation)");
+                ctx.db.exec("DROP INDEX waits_one_pending_per_owner");
+                ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE UNIQUE INDEX waits_one_pending_per_owner"))!);
                 run(ctx, "UPDATE schema_meta SET value = ? WHERE key = ?", String(SCHEMA_VERSION), SCHEMA_VERSION_KEY);
             });
             return;
@@ -279,6 +288,7 @@ export function ensureSchema(ctx: StoreContext): void {
         );
     }
     ensureAdditiveSchema(ctx);
+    ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE assignment_attempts"))!.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
 }
 
 /**
