@@ -385,6 +385,8 @@ export interface ParkRecord {
      */
     resumeClaimId?: string;
     resumeClaimToken?: string;
+    /** Exact claim whose writer exit has been reconciled with the coordinator. */
+    resumeExitReconciledClaimId?: string;
     cancelledAt?: number;
     cancelReason?: string;
 }
@@ -460,7 +462,8 @@ export function writeParkRecord(id: string, record: ParkRecord, options: { ifAbs
     const meta = readMeta(id);
     if (meta && (meta.park?.phase !== record.phase
         || meta.park?.heldReason !== record.heldReason
-        || meta.park?.resumedBy !== record.resumedBy)) {
+        || meta.park?.resumedBy !== record.resumedBy
+        || meta.park?.resumeExitReconciledClaimId !== record.resumeExitReconciledClaimId)) {
         meta.park = record;
         writeMeta(meta);
     }

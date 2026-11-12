@@ -2339,24 +2339,31 @@ export function conversationWriterLeaseLive(
  * ambiguous identity (live or unverifiable writer, live lease, missing claim
  * identity, missing host capability) is reported as a local hold and the durable
  * generation is left untouched with its live writer — never a fallback cancel.
+ * An interpreted generation needs only claim cleanup; its receipt and assignment
+ * remain unchanged, even if writer exit cannot yet be proved.
  */
 export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): Promise<ResumedAttemptExitResult> {
-    const candidates = parkedWaitsForResumedAttempt(input.attemptId);
+    return settleResumedAttemptExitForParks(input, parkedWaitsForResumedAttempt(input.attemptId));
+}
+
+async function settleResumedAttemptExitForParks(input: ResumedAttemptExitInput, candidates: readonly ParkedWait[]): Promise<ResumedAttemptExitResult> {
     if (candidates.length === 0) return { outcome: "ignored" };
     const attempt = readMeta(input.attemptId);
     const at = (input.now ?? Date.now)();
     let result: ResumedAttemptExitResult = { outcome: "ignored" };
     for (const park of candidates) {
-        if (park.record.phase === "consumed" || (park.record.phase === "cancelled" && !park.meta.assignment)) {
+        if ((park.record.phase === "consumed" && park.record.resumeClaimId && park.record.resumeExitReconciledClaimId === park.record.resumeClaimId)
+            || (park.record.phase === "cancelled" && !park.meta.assignment)) {
             result = { outcome: "ignored", waitPhase: park.record.phase };
             continue;
         }
-        const reason = input.reason
-            ?? `the published resume attempt ${input.attemptId} exited (${input.status ?? attempt?.status ?? "unknown"}) without interpreting the wait`;
+        let interpreted = park.record.phase === "consumed";
+        const exitReason = `the published resume attempt ${input.attemptId} exited (${input.status ?? attempt?.status ?? "unknown"})`;
+        let reason = input.reason ?? `${exitReason}${interpreted ? "" : " without interpreting the wait"}`;
         const holdLocally = (cause: string, outcome: "deferred" | "settled" = "deferred"): void => {
-            updateParkRecord(park.runId, { phase: park.record.phase === "cancelled" ? "cancelled" : "held", heldReason: `${reason}; ${cause}` });
+            updateParkRecord(park.runId, { phase: interpreted ? "consumed" : park.record.phase === "cancelled" ? "cancelled" : "held", heldReason: `${reason}; ${cause}` });
             const report = attempt ?? park.meta;
-            if (input.service && report.assignment) {
+            if (!interpreted && input.service && report.assignment) {
                 commitAssignmentTerminal({ ...report, status: "lost", failureReason: `${reason}; ${cause}` }, true);
             }
             result = { outcome, reason };
@@ -2383,6 +2390,20 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
         }
         if (!input.service) {
             retainUnverified("the Background operation service is unavailable");
+            continue;
+        }
+        const scope = backgroundScopeForMeta(park.meta, park.record);
+        if (!scope) {
+            holdLocally("the parked attempt records no worker conversation scope");
+            continue;
+        }
+        let wait: WorkerWaitView | undefined;
+        try {
+            wait = input.service.listWorkerWaits(scope).find((w) => w.waitId === park.waitId && w.generation === park.generation);
+            interpreted = wait?.phase === "consumed" || interpreted;
+            if (interpreted && !input.reason) reason = exitReason;
+        } catch (error) {
+            retainUnverified(`the coordinator could not verify the wait (${reasonOf(error)})`);
             continue;
         }
         if (typeof input.service.holdFailedResumeForWorker !== "function") {
@@ -2415,15 +2436,9 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             holdLocally("a live conversation writer lease still holds the history, so writer exit is unproven");
             continue;
         }
-        const scope = backgroundScopeForMeta(park.meta, park.record);
-        if (!scope) {
-            holdLocally("the parked attempt records no worker conversation scope");
-            continue;
-        }
         try {
-            const wait = input.service.listWorkerWaits(scope).find((w) => w.waitId === park.waitId && w.generation === park.generation);
             // A held terminal writer needs proof-only reconciliation, not admission.
-            const reconcileOnly = park.record.phase === "cancelled" || wait?.phase === "held";
+            const reconcileOnly = interpreted || park.record.phase === "cancelled" || wait?.phase === "held";
             if (!reconcileOnly && attempt.assignment && !input.service.repairFailedResumeForWorker) {
                 holdLocally("this Background host does not support bounded autonomous repair");
                 continue;
@@ -2456,9 +2471,11 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             const phase = phaseOf(held.phase);
             updateParkRecord(park.runId, {
                 phase: park.record.phase === "cancelled" ? "cancelled" : phase,
+                resumeExitReconciledClaimId: claimId,
+                ...(phase === "consumed" ? { heldReason: undefined } : {}),
                 ...(phase === "held" && park.record.phase !== "cancelled" ? { heldReason: reason } : {}),
             });
-            input.notify?.(`Subagent ${park.runId}: ${reason}. The reconciled wait is ${phase}.`, "warning");
+            if (phase !== "consumed") input.notify?.(`Subagent ${park.runId}: ${reason}. The reconciled wait is ${phase}.`, "warning");
             result = { outcome: "settled", waitPhase: phase, reason };
         } catch (error) {
             // The store refused (stale identity, terminal generation, unproven exit).
@@ -2520,8 +2537,8 @@ export async function reconcileParkedWaits(
                     }
                     const cached = readParkRecord(report.meta.id);
                     const cancelled = (cached ?? report.record).phase === "cancelled";
-                    if (cancelled && report.attempt && current.publishedClaimId === report.record.resumeClaimId) {
-                        // Cancellation invalidates execution admission, not exact writer-exit proof.
+                    if ((cancelled || current.phase === "consumed") && report.attempt && current.publishedClaimId === report.record.resumeClaimId) {
+                        // Terminal waits still retain independent writer-exit proof.
                         if (!readMeta(report.meta.id)) writeMeta(report.meta, { ifAbsent: true });
                         if (!cached) writeParkRecord(report.meta.id, report.record, { ifAbsent: true });
                         if (!readMeta(report.attempt.id)) writeMeta(report.attempt, { ifAbsent: true });
@@ -2568,13 +2585,26 @@ export async function reconcileParkedWaits(
             options.notify?.(`Degraded supervision: outage replay unavailable (${reasonOf(error)}).`, "warning");
         }
     }
-    for (const park of parkedWaits()) {
+    // Consumed waits cannot resume, but a missed exit observer may have left
+    // their published writer claim behind. Reconcile that exact claim once.
+    const candidates: ParkedWait[] = [];
+    for (const meta of listMetas()) {
+        const snapshot = meta.park ?? readParkRecord(meta.id);
+        if (!snapshot || (!isPendingPark(snapshot) && !(snapshot.phase === "consumed" && snapshot.resumedBy
+            && snapshot.resumeClaimId && snapshot.resumeExitReconciledClaimId !== snapshot.resumeClaimId))) continue;
+        const record = readParkRecord(meta.id);
+        if (record) candidates.push(parkedEntry(meta, record));
+    }
+    // Release earlier writers before admitting later waits in the conversation.
+    candidates.sort((a, b) => a.record.parkedAt - b.record.parkedAt);
+    for (const park of candidates) {
         const options = scopedOptions(park.meta);
         try {
-            if (park.record.phase === "resuming") {
+            if (park.record.phase === "resuming" || park.record.phase === "consumed") {
                 const attemptId = park.record.resumedBy ?? "";
                 const attempt = attemptId ? readMeta(attemptId) : undefined;
                 if (!attemptId || !attempt) {
+                    if (park.record.phase === "consumed") { skipped += 1; continue; }
                     updateParkRecord(park.runId, {
                         phase: "held",
                         heldReason: `Resume attempt ${attemptId || "(unknown)"} was published but launch and writer identity remain unproven.`,
@@ -2587,19 +2617,21 @@ export async function reconcileParkedWaits(
                     held += 1;
                     continue;
                 }
-                // The published attempt already ended without acknowledging: settle the
-                // unconsumed generation now instead of leaving it `resuming` forever.
-                if (isTerminalAttempt(attempt)) {
-                    const settled = await settleResumedAttemptExit({
+                // A missed exit needs either unconsumed-wait recovery or proof-only
+                // cleanup of a consumed wait's writer claim.
+                const consumedWriterGone = park.record.phase === "consumed" && attempt.pid > 0 && writerPresence(attempt) === "absent";
+                if (isTerminalAttempt(attempt) || consumedWriterGone) {
+                    const settled = await settleResumedAttemptExitForParks({
                         attemptId,
                         service,
                         status: effectiveStatus(attempt),
                         ...(options.notify ? { notify: options.notify } : {}),
-                    });
-                    if (settled.outcome === "settled") held += 1;
+                    }, [park]);
+                    if (settled.outcome === "settled" && settled.waitPhase !== "consumed") held += 1;
                     else skipped += 1;
                     continue;
                 }
+                if (park.record.phase === "consumed") { skipped += 1; continue; }
             }
             if (!service) {
                 let reason = "Coordinator state is unverified; awaiting compatible supervision.";
@@ -2628,6 +2660,10 @@ export async function reconcileParkedWaits(
             }
             if (wait.phase === "consumed" || wait.phase === "cancelled") {
                 updateParkRecord(park.runId, { phase: phaseOf(wait.phase), heldReason: undefined });
+                if (wait.phase === "consumed" && park.record.resumedBy) {
+                    await settleResumedAttemptExitForParks({ attemptId: park.record.resumedBy, service,
+                        ...(options.notify ? { notify: options.notify } : {}) }, [park]);
+                }
                 skipped += 1;
                 continue;
             }
@@ -2638,12 +2674,12 @@ export async function reconcileParkedWaits(
                 const attemptId = park.record.resumedBy ?? "";
                 const attempt = attemptId ? readMeta(attemptId) : undefined;
                 if (!attempt || isTerminalAttempt(attempt)) {
-                    const settled = await settleResumedAttemptExit({
+                    const settled = await settleResumedAttemptExitForParks({
                         attemptId: attemptId || park.runId,
                         service,
                         status: attempt ? effectiveStatus(attempt) : "missing",
                         ...(options.notify ? { notify: options.notify } : {}),
-                    });
+                    }, [park]);
                     // `deferred` means the local record was held while the durable
                     // generation could not be proven (ambiguous identity/capability);
                     // it is never a silent success.

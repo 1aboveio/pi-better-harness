@@ -512,6 +512,15 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
     const consumed = stack.service.listWorkerWaits(scope, { pendingOnly: true }).find((entry) => entry.waitId === waitId);
     assert.equal(consumed, undefined, "the resumed child must consume the wait");
     assert.equal(readParkRecord(attemptId).phase, "consumed");
+    const receipt = stack.store.getWait({ waitId, generation });
+    registry.writeMeta({ ...registry.readMeta(attemptId), id: latest.assignedRunId, park: undefined,
+        status: "completed", pid: resumedResult.pid, exitCode: 0, endedAt: Date.now(),
+        operations: { ...registry.readMeta(attemptId).operations, resumeLaunchToken: latest.launchToken } });
+    assert.equal((await settleResumedAttemptExit({ attemptId: latest.assignedRunId, service: stack.service,
+        writerLeaseReleased: true })).waitPhase, "consumed");
+    assert.equal(stack.store.listResumeClaims({ waitId, generation, state: "published" }).length, 0,
+        "a real resumed Pi's exit must release its consumed wait's writer claim");
+    assert.deepEqual(stack.store.getWait({ waitId, generation }), receipt);
     orchestration.stop();
 });
 }
