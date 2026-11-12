@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.43.1] - 2026-11-11
+
+### Changed
+
+- Bundle Background Tasks 0.15.0 and Subagents 0.30.1 for shared cross-process discovery coordination, indexed supervision-host reads, and exact-host supervision takeover and release. (#704)
+
+## [pi-better-background-tasks@0.15.0] - 2026-11-11
+
+### Changed
+
+- Coordinate cross-process discovery with one shared claim per store and supervisor scope. Only the holder performs the global running scan and sidecar directory walk; followers read the operations indexed to their exact host and the shared change revision. (#704)
+- Record the supervision host id in an indexed column and require the observed host id (`expectedHostId`) on a takeover. Closing releases only the exact host and discovery token, so a stale or late writer cannot replace or clear a newer holder; running work left by a closed host becomes unmonitored for the next host. Existing process-identity failover and fencing rules are unchanged. (#704)
+- Recover follower terminal callbacks from the shared change revision and authoritative owner records. A follower that cannot prove its process identity obeys the same discovery authority instead of assuming the global scan. (#704)
+
+## [pi-better-subagents@0.30.1] - 2026-11-11
+
+### Changed
+
+- Update the vendored operation coordinator with shared cross-process discovery claims, indexed supervision-host reads, and expected-host supervision takeover and exact-host release. Subagent launch policy and behavior are unchanged. (#704)
+
 ## [pi-better-harness@0.43.0] - 2026-11-11
 
 ### Changed
