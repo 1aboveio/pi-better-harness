@@ -4,11 +4,11 @@
  * The child pipeline (launch → wait → checkpoint → park → resume) is covered in
  * `worker-waits-bridge.test.mjs`. These tests use the same real host, store,
  * supervisor and RPC surface to drive the refusal paths: full capacity must leave
- * the generation ready, a Goal refusal must hold it, the captured goal binding is
- * what admission is asked about, and a post-publish failure must be held rather
- * than relaunched.
+ * the generation ready, parent Goal state does not gate delegated work, captured
+ * scope survives migration, and a post-publish failure is held rather than relaunched.
  */
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -16,6 +16,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, afterEach, before, test } from "node:test";
 import {
+    assertAssignmentPermissionScope,
+    createWorkerOperationsHost,
+    getWorkerOperationService,
+    OBSERVED_WAITS_SERVICE_CHANNEL,
+    OBSERVED_WAITS_SERVICE_REQUEST_CHANNEL,
     OPERATION_RESUME_ADMISSION_EVENT,
     PreSpawnResumeError,
     createResumeOrchestration,
@@ -51,6 +56,40 @@ after(() => {
 afterEach(() => cleanupAll());
 
 const OWNER = { sessionId: "parent-session-1", branchId: "branch-1", goalId: null };
+
+test("standalone Subagents refuses parking capability without Background or with a v1 host", async () => {
+    for (const version of [null, 1]) {
+        const events = new EventEmitter();
+        if (version) events.on(OBSERVED_WAITS_SERVICE_REQUEST_CHANNEL, () => events.emit(
+            OBSERVED_WAITS_SERVICE_CHANNEL, { version, available: true, assignmentContinuation: 1 },
+        ));
+        const pi = { events };
+        assert.equal(getWorkerOperationService(pi), undefined);
+        const host = createWorkerOperationsHost({ pi, childExtensionPath: "unused" });
+        assert.equal(await host.start(), false);
+        assert.equal(host.available, false);
+        await host.close();
+    }
+});
+
+test("assignment permissions fail closed on authority loss, tightening and widening", () => {
+    const sandbox = { root: "/assignment", permissions: { network: false, commands: true }, denyWrite: ["/assignment/private"] };
+    const captured = { sandbox, mandatoryPermissions: true };
+    assert.doesNotThrow(() => assertAssignmentPermissionScope(captured, { sandbox: structuredClone(sandbox), mandatoryPermissions: true }));
+    assert.throws(() => assertAssignmentPermissionScope(captured, { sandbox, mandatoryPermissions: false }), /authority is unavailable/);
+    assert.throws(() => assertAssignmentPermissionScope({ sandbox }, { sandbox, mandatoryPermissions: false }), /authority is unavailable/);
+    assert.doesNotThrow(() => assertAssignmentPermissionScope({ sandbox, mandatoryPermissions: false }, { sandbox, mandatoryPermissions: false }));
+    assert.doesNotThrow(() => assertAssignmentPermissionScope(captured, {
+        sandbox: { ...sandbox, denyWrite: [...sandbox.denyWrite, "/runtime/new-control"] }, mandatoryPermissions: true,
+    }));
+    assert.throws(() => assertAssignmentPermissionScope(captured, {
+        sandbox: { ...sandbox, denyWrite: [] }, mandatoryPermissions: true,
+    }), /protected paths/);
+    for (const commands of [true, false]) assert.throws(() => assertAssignmentPermissionScope(captured, {
+        sandbox: { ...sandbox, permissions: { network: true, commands } }, mandatoryPermissions: true,
+    }), /captured assignment scope/);
+    assert.throws(() => assertAssignmentPermissionScope(undefined, { sandbox: null, mandatoryPermissions: false }), /permissions are missing/);
+});
 
 async function workerRun(stack, { runId, conversationId, plan, goalId = null }) {
     const policy = {
@@ -270,7 +309,7 @@ test("full capacity leaves the generation ready and creates no claim", async () 
     assert.equal(stack.store.listResumeClaims({ waitId: seeded.waitId }).length, 0, "no claim is published while queued");
 });
 
-test("a Goal refusal holds the wait with the reason and publishes no claim", async () => {
+test("a parent Goal refusal does not gate the delegated assignment", async () => {
     const stack = await startStack();
     const seeded = await seedReadyPark(stack, { attemptId: "sa_goal_refused" });
     goalGate(stack, () => ({ allowed: false, reason: "Goal has an active permission hold", revision: 9 }));
@@ -280,17 +319,17 @@ test("a Goal refusal holds the wait with the reason and publishes no claim", asy
 
     const outcome = await orchestration.resume(seeded.park);
 
-    assert.equal(outcome, "held");
-    assert.deepEqual(launched, []);
-    assert.equal(cap.calls.release, 1, "the reservation is released");
-    assert.equal(readParkRecord("sa_goal_refused").heldReason, "Goal has an active permission hold");
+    assert.equal(outcome, "resumed");
+    assert.equal(launched.length, 1);
+    assert.equal(cap.calls.commit, 1);
+    assert.equal(readParkRecord("sa_goal_refused").heldReason, undefined);
     const view = stack.service.listWorkerWaits({ runId: "sa_goal_refused", conversationId: "sa_goal_refused", workspace: stack.workspace, authorityReference: "x", branchId: OWNER.branchId, goalId: null }, { pendingOnly: true })
         .find((entry) => entry.waitId === seeded.waitId);
-    assert.equal(view.phase, "held");
-    assert.equal(stack.store.listResumeClaims({ waitId: seeded.waitId }).length, 0);
+    assert.equal(view.phase, "resuming");
+    assert.equal(stack.store.listResumeClaims({ waitId: seeded.waitId }).length, 1);
 });
 
-test("admission is asked about the goal binding captured when the worker parked", async () => {
+test("admission preserves captured Goal provenance without querying the parent's Goal", async () => {
     const stack = await startStack();
     const seeded = await seedReadyPark(stack, { attemptId: "sa_goal_bound", goalId: "goal-7" });
     const seen = goalGate(stack, (owner) => owner.goalId === "goal-7"
@@ -302,12 +341,8 @@ test("admission is asked about the goal binding captured when the worker parked"
     const outcome = await orchestration.resume(seeded.park);
 
     assert.equal(outcome, "resumed");
-    assert.deepEqual(seen[0], {
-        sessionId: OWNER.sessionId,
-        workspace: stack.workspace,
-        branchId: OWNER.branchId,
-        goalId: "goal-7",
-    });
+    assert.deepEqual(seen, [], "parent Goal is provenance only");
+    assert.equal(readParkRecord("sa_goal_bound").ownerGoalId, "goal-7");
 });
 
 test("a failure after the claim is published is held, never relaunched", async () => {
@@ -327,6 +362,43 @@ test("a failure after the claim is published is held, never relaunched", async (
     assert.ok(claim, "the published attempt is retained for reconciliation");
     assert.equal(readParkRecord("sa_publish_fail").phase, "held");
     assert.match(readParkRecord("sa_publish_fail").heldReason, /current permissions refuse/);
+});
+
+test("inactive parents do not gate admission, and migration preserves the captured policy", async () => {
+    const stack = await startStack();
+    const seeded = await seedReadyPark(stack, { attemptId: "sa_migration", goalId: "old-goal" });
+    stack.ctx.sessionManager.getSessionId = () => "unrelated-session";
+    stack.ctx.sessionManager.getBranch = () => [];
+    const captured = structuredClone(seeded.park.meta.operations.policy);
+    const cap = capacity();
+    let launched = 0;
+    const orchestration = orchestrationFor(stack, { capacity: cap.value, launch: async (input) => {
+        launched += 1;
+        assert.deepEqual(input.park.meta.operations.policy, captured);
+        assert.equal(input.park.record.ownerSessionId, OWNER.sessionId);
+        assert.equal(input.park.record.ownerBranchId, OWNER.branchId);
+    } });
+    assert.equal(await orchestration.resume(seeded.park), "resumed");
+    assert.equal(launched, 1);
+});
+
+test("missing host queues without capacity; incompatible hosts and missing migration policy refuse", async () => {
+    for (const mode of ["absent", "legacy", "missing-policy"]) {
+        const stack = await startStack();
+        const seeded = await seedReadyPark(stack, { attemptId: `sa_host_${mode}` });
+        if (mode === "missing-policy") delete seeded.park.meta.operations.policy;
+        const cap = capacity();
+        const orchestration = createResumeOrchestration({
+            pi: stack.pi, rpc: stack.bridge.rpc, context: () => stack.ctx,
+            service: () => mode === "absent" ? undefined : mode === "legacy"
+                ? { ...stack.service, assignmentContinuation: undefined } : stack.service,
+            capacity: cap.value, launch: async () => assert.fail("must not launch"),
+        });
+        assert.equal(await orchestration.resume(seeded.park), mode === "absent" ? "skipped" : "held");
+        assert.equal(cap.calls.reserve, 0);
+        assert.equal(stack.store.listResumeClaims({ waitId: seeded.waitId }).length, 0);
+        if (mode !== "absent") assert.match(readParkRecord(seeded.park.runId).heldReason, /does not support|permission policy is missing/);
+    }
 });
 
 test("production schemas gate bridge tools and sandboxed workers are not withheld", () => {

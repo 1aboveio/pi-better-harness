@@ -203,9 +203,12 @@ import { registerSubagentsGoalProvider } from "./goal-provider.ts";
 import {
     DEFAULT_WORKER_BRIDGE_TOOLS,
     PreSpawnResumeError,
+    type WorkerSandboxAuthority,
+    assertAssignmentPermissionScope,
     assertFinalResumeDispatch,
     releaseChild,
     cancelParkedWait,
+    branchContains,
     captureWorkerPolicy,
     createOwnedAttemptStopper,
     childBridgeExtensionPath,
@@ -365,6 +368,10 @@ function callbackSuppressionReason(meta: RunMeta, active: RunCallbackOrigin | un
         if (origin.sessionId && origin.sessionId !== active.sessionId) {
             return `origin session ${origin.sessionId} does not match active session ${active.sessionId ?? "unknown"}`;
         }
+        if (meta.operations?.resumeLaunchToken && meta.operations.branchId
+            && (!uiCtx || !branchContains(uiCtx, meta.operations.branchId))) {
+            return `origin branch ${meta.operations.branchId} is not active`;
+        }
         return undefined;
     }
 
@@ -475,6 +482,7 @@ let sessionTornDown = false;
 function isConversationIdentityReason(reason: string): boolean {
     return reason === NO_ACTIVE_SESSION_REASON
         || reason.startsWith("origin session ")
+        || reason.startsWith("origin branch ")
         || reason.startsWith("origin cwd ")
         || reason.startsWith("legacy run cwd ");
 }
@@ -492,7 +500,8 @@ function markCompletionCallbackSuppressed(id: string, reason: string, now: numbe
     // attempt but must keep the obligation: the pending marker stays, and A
     // recovers it when it comes back. Records that never lost supervision keep
     // today's durable suppression, so legacy/foreign notifications stay dead.
-    if (meta.supervisionInterruptedAt !== undefined && isConversationIdentityReason(reason)) return;
+    if ((meta.supervisionInterruptedAt !== undefined || meta.operations?.resumeLaunchToken)
+        && isConversationIdentityReason(reason)) return;
     meta.completionCallbackSuppressedAt = now;
     meta.completionCallbackSuppressedReason = reason;
     writeMeta(meta);
@@ -2615,8 +2624,10 @@ export default function (pi: ExtensionAPI) {
             resetChildEventLogCursor(id);
             resetParseRunCursor(id);
         }
-        const callbackOrigin = callbackOriginFromContext(ctx);
-        activeCallbackOrigin = callbackOrigin;
+        const callbackOrigin = internal?.parkOwner
+            ? { cwd: internal.parkOwner.workspace, sessionId: internal.parkOwner.sessionId }
+            : callbackOriginFromContext(ctx);
+        activeCallbackOrigin = callbackOriginFromContext(ctx);
 
         // Sandbox is opt-in. sandbox_dir moves the confinement + working
         // dir elsewhere. git_clone_workspace prepares a disposable clone with
@@ -2915,6 +2926,9 @@ export default function (pi: ExtensionAPI) {
                     ...(bridgeEnabled ? [childBridgeExtensionPath(selfDir())] : []),
                 ],
                 runtimeRoots: [baseDir()],
+                capturedDenyWrite: internal?.resumeWait
+                    ? (resume?.prior.operations?.policy.sandbox as WorkerSandboxAuthority | null)?.denyWrite
+                    : undefined,
             }) : undefined;
             launchScratch = taskRuntime?.policy.scratch;
             if (sandboxEnabled && !taskRuntime) throw new Error("Task sandbox has no workspace; refusing an unconfined child.");
@@ -2966,6 +2980,7 @@ export default function (pi: ExtensionAPI) {
             if (bridgeEnabled) {
                 const workerPolicy = captureWorkerPolicy({
                     sandbox: sandboxEnabled,
+                    mandatoryPermissions: permissionPlan.enforced,
                     tools: selectedTools,
                     clean,
                     workspace: cwd,
@@ -3020,6 +3035,15 @@ export default function (pi: ExtensionAPI) {
             // The fence returns a synchronous release guard that is invoked with no
             // await between it and the spawn, so a cancellation or parent change
             // cannot hide inside a final asynchronous window.
+            if (internal?.resumeWait) {
+                const captured = resume?.prior.operations?.policy;
+                const currentSandbox = taskRuntime ? {
+                    root: taskRuntime.policy.root,
+                    ...(taskRuntime.policy.permissions ? { permissions: taskRuntime.policy.permissions } : {}),
+                    ...(taskRuntime.policy.denyWrite ? { denyWrite: [...taskRuntime.policy.denyWrite] } : {}),
+                } : null;
+                assertAssignmentPermissionScope(captured, { sandbox: currentSandbox, mandatoryPermissions: permissionPlan.enforced });
+            }
             const dispatchGuard = await internal?.beforeSpawn?.({ runId: id, permissionPlan });
             spawned = releaseChild(dispatchGuard, () => spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
                 env: {
@@ -3103,6 +3127,7 @@ export default function (pi: ExtensionAPI) {
                         ...(internal?.launchToken ? { resumeLaunchToken: internal.launchToken } : {}),
                         policy: {
                             version: 1 as const,
+                            mandatoryPermissions: workerBridge.policy.mandatoryPermissions,
                             sandbox: workerBridge.policy.sandbox,
                             tools: workerBridge.policy.tools,
                             clean: workerBridge.policy.clean,
@@ -3257,16 +3282,16 @@ export default function (pi: ExtensionAPI) {
             plan = planContinuation({
                 id: prior.id,
                 prior,
-                origin: callbackOriginFromContext(ctx),
+                origin: { cwd: input.park.record.ownerWorkspace ?? prior.callbackOrigin?.cwd ?? prior.cwd, sessionId: input.park.record.ownerSessionId ?? prior.callbackOrigin?.sessionId },
                 others: listMetas(),
             });
         } catch (error) {
             throw new PreSpawnResumeError(error instanceof Error ? error.message : String(error));
         }
         const owner: WaitOwnerBinding = {
-            sessionId: input.park.record.ownerSessionId ?? ownerBindingFromContext(ctx).sessionId,
-            workspace: input.park.record.ownerWorkspace ?? ctx.cwd,
-            branchId: input.park.record.ownerBranchId ?? ownerBindingFromContext(ctx).branchId,
+            sessionId: input.park.record.ownerSessionId ?? prior.callbackOrigin?.sessionId ?? "",
+            workspace: input.park.record.ownerWorkspace ?? prior.callbackOrigin?.cwd ?? prior.cwd,
+            branchId: input.park.record.ownerBranchId ?? null,
             goalId: input.park.record.ownerGoalId ?? null,
         };
         const target = plan;

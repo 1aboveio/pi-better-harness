@@ -781,7 +781,7 @@ describe("worker operation service", () => {
     const harness = createHarness();
     const { host } = startHost({ root, harness });
     const service = getObservedWaitService(harness.pi);
-    expect(service?.version).toBe(1);
+    expect(service?.version).toBe(2);
     expect(service?.serviceId).toBe(host.service.serviceId);
     expect(service?.available).toBe(true);
     expect(service?.continuationReady).toBe(false);
@@ -798,7 +798,7 @@ describe("worker operation service", () => {
     });
     cleanups.push(() => host.close());
     const service = getObservedWaitService(harness.pi);
-    expect(service?.version).toBe(1);
+    expect(service?.version).toBe(2);
     expect(service?.serviceId).toBe(host.service.serviceId);
     expect(host.available).toBe(false); // the store opens on first use or activation
   });
@@ -1498,7 +1498,7 @@ describe("actual Subagents client integration", () => {
     const harness = createHarness();
     const { host } = startHost({ root, harness });
     const service = sibling.getWorkerOperationService(harness.pi);
-    expect(service?.version).toBe(1);
+    expect(service?.version).toBe(2);
     expect(service?.continuationReady).toBe(false);
     const run = {
       runId: "sa-integration",

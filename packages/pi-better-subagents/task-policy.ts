@@ -174,6 +174,7 @@ export function parseTaskPolicy(value: unknown): TaskPolicy {    if (!value || t
 export function prepareTaskRuntime(options: {
     root: string; controlDir: string; tools: readonly string[]; piBin?: string;
     permissions?: SandboxPermissions & Partial<CommandSettings>; extensionPaths?: readonly string[]; runtimeRoots?: readonly string[];
+    capturedDenyWrite?: readonly string[];
     applyPatch?: boolean; extensionTools?: readonly TaskExtensionTool[];
 }): { file: string; fileArgs: string[]; policy: TaskPolicy; policyPath: string } {
     if (typeof PiCodingAgent.getAgentDir !== "function" || typeof PiCodingAgent.getPackageDir !== "function") {
@@ -205,6 +206,7 @@ export function prepareTaskRuntime(options: {
         version: 1, root, home, agentDir, profilePath: join(controlDir, "task.sb"), scratch: scratch.path,
         permissions,
         denyWrite: [...new Set([
+            ...(options.capturedDenyWrite ?? []),
             controlDir, scratch.anchor, agentDir, ...runtimeDirectories, ...(options.runtimeRoots ?? []), join(root, ".pi"),
             // Outside project = Write does not protect git hooks or config anywhere
             // (ADR 0008): guarding the workspace's hooks would break `git init` there.
