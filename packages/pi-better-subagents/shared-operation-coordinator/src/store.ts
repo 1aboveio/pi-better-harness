@@ -8,6 +8,7 @@
  * and leaves no partial record.
  */
 import { StoreError } from "./errors.ts";
+import { repairFailedResume, type RepairResumeInput } from "./recovery.ts";
 import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.ts";
 import type { AssignmentOutcomeInput, AssignmentOutcomeRecord } from "./assignment-outcomes.ts";
 import {
@@ -235,6 +236,7 @@ export interface Store {
      * refused untouched.
      */
     holdFailedResume(input: HoldFailedResumeInput): HoldFailedResumeResult;
+    repairFailedResume(input: RepairResumeInput): { phase: string; repaired: boolean };
     listResumeClaims(filter?: ResumeClaimFilter): ResumeClaimRecord[];
     /** Active claims a replacement host must reconcile before admitting resumes. */
     listUnreconciledClaims(): ResumeClaimRecord[];
@@ -414,6 +416,10 @@ export function openStore(options: StoreOptions): Store {
         holdFailedResume(input) {
             alive();
             return writeHoldFailedResume(ctx, input);
+        },
+        repairFailedResume(input) {
+            alive();
+            return repairFailedResume(ctx, input);
         },
         listResumeClaims(filter = {}) {
             alive();

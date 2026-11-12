@@ -50,7 +50,7 @@ export function registerAssignmentAttempt(binding: AssignmentBinding, attemptId:
     withStore((store) => store.registerAssignment({ ...binding, attemptId }));
 }
 /** Called before any completion handoff, including callback:false and inactive parents. */
-export function commitAssignmentTerminal(meta: RunMeta): AssignmentOutcomeRecord | null {
+export function commitAssignmentTerminal(meta: RunMeta, recoveryFailure = false): AssignmentOutcomeRecord | null {
     const binding = meta.assignment;
     if (!binding) return null;
     return withStore((store) => {
@@ -58,6 +58,8 @@ export function commitAssignmentTerminal(meta: RunMeta): AssignmentOutcomeRecord
         if (existing) return existing;
         if (!["failed", "completed", "killed", "lost"].includes(meta.status) || (meta.status === "completed" && meta.park)) return null;
         const waits = store.listWaits({ owner: binding.owner }).filter((w) => w.origin?.assignmentRef === binding.assignmentId);
+        // A published automatic attempt's exit belongs to bounded recovery first.
+        if (!recoveryFailure && meta.status !== "killed" && meta.operations?.resumeLaunchToken && waits.some((w) => !w.acknowledgement && ["resuming", "ready"].includes(w.phase))) return null;
         // A coherent attempt exit does not establish interpretation or completion.
         if (meta.status === "completed" && waits.some((w) => !w.acknowledgement)) return null;
         return store.recordAssignmentOutcome({ ...binding, revision: 1,

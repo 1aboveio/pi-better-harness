@@ -39,6 +39,22 @@ This extends [ADR 0016](0016-unified-execution-concurrency.md). That ADR introdu
 
 ## Consequences
 
+## Bounded Autonomous Repair (#711)
+
+An unacknowledged published worker exit is reconciled against its exact claim,
+launch token, cancellation epoch, saved checkpoint and proven writer/lease exit.
+The coordinator records at most one repair per assignment, wait generation and
+structured fault (category, original checkpoint and exact dependency revisions).
+Attempt IDs, prose and observation times never define a new fault. Accounting
+commits before the existing launcher can dispatch; capacity deferral and retries
+of an existing launch token do not spend another allowance. Restart and host
+replacement read the same accounting. Repeated faults commit the #710 terminal
+failure and parent event without manufacturing interpretation. Explicit stop
+disarms repair; uncertain writers retain their fences. No background command is
+rerun. Missing history or authority is failure, not a manual recovery workflow.
+Storage v4 adds durable repair records; older hosts must refuse that version.
+The outage observation journal remains #712's responsibility.
+
 ## Terminal Assignment Outcomes (#710)
 
 The coordinator commits an immutable terminal assignment decision and a typed,

@@ -16,6 +16,22 @@ The real SDK replay uses `WORKER_SDK_ONLY=1` with
 `tests/worker-waits-kernel.test.mjs`. The default lane additionally proves kernel
 denials; `PI_WORKER_KERNEL_REQUIRE=1` makes unsupported kernel execution fail.
 
+## Bounded Assignment Repair
+
+Coordinator storage v4 owns one repair allowance per assignment/wait generation
+and structured unacknowledged-exit fault. The key includes the original park
+checkpoint and exact dependency revisions, never attempt IDs, timestamps or prose.
+`repairFailedResume` fences the exact publication and persists accounting before
+returning `ready`; a repeated notification is idempotent. A new published attempt
+that repeats the fault commits the ordinary retained #710 failure and parent
+event. Background exposes `repairFailedResumeForWorker` with ownership checks.
+Subagents verifies native checkpoint bytes and writer/lease exit before calling
+it, then reuses ordinary continuation admission and capacity. Missing capability,
+history, authority or an expired assignment deadline fails closed; uncertain
+writer fences remain. No command is rerun and no parent Goal gate is added.
+The SDK fixture also covers failed-test interpretation and real unacknowledged
+exits followed by repair success or recurring-fault failure.
+
 ## Glossary
 
 ### Role

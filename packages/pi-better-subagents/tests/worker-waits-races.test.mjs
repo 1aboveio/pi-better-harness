@@ -79,6 +79,7 @@ async function seedPark(stack, {
     ownerSessionId = "parent-session-1",
     goalId = null,
     completed = true,
+    assignment = false,
 } = {}) {
     const plan = defaultPlan();
     const policy = {
@@ -105,6 +106,8 @@ async function seedPark(stack, {
         owner: { sessionId: ownerSessionId, workspace: ownerWorkspace, branchId: "branch-1", goalId },
     });
     const owner = { kind: "worker-conversation", sessionId: attemptId, workspace: stack.workspace, branchId: "branch-1", goalId };
+    if (assignment) stack.store.registerAssignment({ assignmentId: `assignment:${attemptId}`, owner,
+        recipient: { kind: "parent-session", sessionId: ownerSessionId, workspace: ownerWorkspace, branchId: "branch-1", goalId }, attemptId });
     const launch = await stack.bridge.rpc.call("execute-tool", {
         runId: attemptId,
         conversationId: attemptId,
@@ -617,8 +620,8 @@ test("restart reconciliation finalizes a proven staged park and holds an ambiguo
 });
 
 /** A published resume whose attempt already has a run record in `status`. */
-async function publishedResumeWithAttempt(stack, attemptId, status) {
-    const seeded = await seedPark(stack, { attemptId, target: "ready" });
+async function publishedResumeWithAttempt(stack, attemptId, status, assignment = false) {
+    const seeded = await seedPark(stack, { attemptId, target: "ready", assignment });
     writeParkedAttempt(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
     const claim = await publishResume(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
     registry.updateParkRecord(attemptId, {
@@ -649,6 +652,7 @@ async function publishedResumeWithAttempt(stack, attemptId, status) {
             resumeLaunchToken: claim.launchToken,
         },
         logPath: registry.logPathFor(claim.attemptId),
+        ...(assignment ? { assignment: { version: 1, assignmentId: `assignment:${attemptId}` } } : {}),
     });
     return { seeded, claim, scope: workerScope(attemptId, stack.workspace) };
 }
@@ -656,6 +660,24 @@ async function publishedResumeWithAttempt(stack, attemptId, status) {
 function waitState(stack, attemptId, waitId) {
     return stack.store ?? null;
 }
+
+test("assignment unacknowledged exit verifies real checkpoint and permits only one repair across replacement attempts", async () => {
+    const stack = await startStack();
+    const resumed = await publishedResumeWithAttempt(stack, "sa_bounded_repair", "completed", true);
+    const first = await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service: stack.service });
+    assert.equal(first.waitPhase, "ready");
+    assert.equal(stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 }).acknowledgement, null);
+    const replay = await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service: stack.service, reason: "different words" });
+    assert.equal(replay.waitPhase, "ready");
+    const claim = await publishResume(stack, { attemptId: "sa_bounded_repair", waitId: resumed.seeded.waitId, generation: 1 });
+    registry.updateParkRecord("sa_bounded_repair", { phase: "resuming", resumedBy: claim.attemptId, resumeClaimId: claim.claimId, resumeClaimToken: claim.claimToken, resumeLaunchToken: claim.launchToken });
+    registry.writeMeta({ ...registry.readMeta(resumed.claim.attemptId), id: claim.attemptId, operations: { ...registry.readMeta(resumed.claim.attemptId).operations, resumeLaunchToken: claim.launchToken } });
+    const second = await settleResumedAttemptExit({ attemptId: claim.attemptId, service: stack.service });
+    assert.equal(second.waitPhase, "held");
+    assert.equal(stack.store.getAssignmentOutcome("assignment:sa_bounded_repair").outcome, "failed");
+    assert.equal(stack.store.getAssignmentOutcome("assignment:sa_bounded_repair").recipient.sessionId, "parent-session-1");
+    assert.equal(stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 }).acknowledgement, null);
+});
 
 test("missing continuation metadata never becomes writer-exit proof across repeated recovery", async () => {
     const stack = await startStack();

@@ -1,5 +1,5 @@
 /**
- * Schema v3 for the durable operation coordinator.
+ * Schema v4 for the durable operation coordinator.
  *
  * The store refuses to open a database whose recorded version it does not
  * understand, and leaves the file untouched. An unreadable or newer database
@@ -18,6 +18,14 @@ import { StoreError } from "./errors.ts";
 import { columnText, getRow, getRows, run, type StoreContext } from "./sqlite.ts";
 
 const DDL: readonly string[] = [
+    `CREATE TABLE assignment_repairs (
+        fault_key TEXT PRIMARY KEY,
+        assignment_id TEXT NOT NULL,
+        wait_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        fault_json TEXT NOT NULL,
+        claim_id TEXT NOT NULL
+    )`,
     `CREATE TABLE schema_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -269,6 +277,13 @@ export function ensureSchema(ctx: StoreContext): void {
         );
     }
     if (recorded < SCHEMA_VERSION) {
+        if (recorded === 3) {
+            ctx.transaction(() => {
+                ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE assignment_repairs"))!);
+                run(ctx, "UPDATE schema_meta SET value = ? WHERE key = ?", String(SCHEMA_VERSION), SCHEMA_VERSION_KEY);
+            });
+            return;
+        }
         if (recorded === 1 || recorded === 2) {
             ensureAdditiveSchema(ctx);
             ctx.transaction(() => {

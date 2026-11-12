@@ -527,6 +527,8 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
         try {
             const outcome = commitAssignmentTerminal(meta);
             if (outcome) { void enqueueAssignmentOutcome(pi, meta); return; }
+            // An unresolved assignment exit belongs to repair, not legacy delivery.
+            return;
         } catch (error) {
             try { uiCtx?.ui?.notify(`Assignment outcome could not commit: ${String(error)}`, "warning"); } catch { /* no UI */ }
             return;

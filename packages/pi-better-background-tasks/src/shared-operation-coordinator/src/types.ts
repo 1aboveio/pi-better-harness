@@ -20,7 +20,7 @@
  */
 
 /** Schema version this build writes and accepts. Any other version is refused. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** Who receives an operation's result and decides what happens next. */
 export type OwnerKind = "parent-session" | "worker-conversation";
