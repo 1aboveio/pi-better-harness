@@ -1352,7 +1352,7 @@ test("cancelling a parked assignment after the production continuation CLI is pu
         // published claim and stop the real child. Assignment cancellation leaves
         // the unacknowledged dependency held, with dispatch atomically disarmed.
         const stopped = await callSessionTool(host.session, "subagent_stop", { id: initialId });
-        assert.match(stopped, /Cancelled the pending wait of parked subagent/);
+        assert.match(stopped, /Durably cancelled the pending wait of parked subagent/);
 
         await waitUntil(() => {
             return store.getAssignmentOutcome(parked.meta.assignment.assignmentId)?.outcome === "cancelled";
