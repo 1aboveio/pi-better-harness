@@ -22,6 +22,23 @@ This extends [ADR 0016](0016-unified-execution-concurrency.md). That ADR introdu
 
 ## Consequences
 
+## Terminal Assignment Outcomes (#710)
+
+The coordinator commits an immutable terminal assignment decision and a typed,
+parent-addressed outbox event in one transaction. Dependency-ready events remain
+worker admission inputs. A terminal assignment disarms its linked waits without
+inventing interpretation or proving process exit. Published claims and writer
+lease identities remain available for independent reconciliation. Evidence pins
+move to the outcome; delivery receipts do not release them. Only the recorded
+parent's explicit disposition of the exact inspected outcome revision releases
+that outcome's obligations. Runtime adapters must validate current read authority
+and captured recipient identity before exposing bounded evidence or delivery.
+
+Storage version 2 migrates version 1 transactionally and refuses newer versions.
+Hosts must advertise outcome support explicitly; a dependency-only host cannot
+claim to provide durable assignment delivery. Repair and outage journals remain
+separate work under #711 and #712.
+
 Plans retain deliverables rather than watcher processes. A waiting deliverable references its operation and owner; absent supervision is visible as unmonitored work, not reported as healthy waiting. Worker parking releases active capacity without erasing the assignment. Restart, cancellation, permissions and duplicate events must preserve this relationship.
 
 Broad bans on long commands, model subagents used solely as pollers, and child processes kept idle to preserve context are rejected as the default design. Domain watchers retain their own state and evidence contracts: for example, merge observation uses an appropriate stateful delivery watcher, rather than replacing it with a stateless predicate.

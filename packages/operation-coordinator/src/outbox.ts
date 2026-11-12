@@ -317,11 +317,16 @@ export function claimOutbox(ctx: StoreContext, input: ClaimOutboxInput): OutboxE
         assertDispatchTokenUnused(ctx, claimToken);
         const clauses = [
             "state = 'pending'",
-            `EXISTS (SELECT 1 FROM waits w WHERE w.wait_id = outbox_events.wait_id
+            `(event_type = 'assignment-outcome' OR EXISTS (SELECT 1 FROM waits w WHERE w.wait_id = outbox_events.wait_id
                      AND w.generation = outbox_events.generation
-                     AND w.phase IN (${placeholders(DELIVERABLE_WAIT_PHASES.length)}))`,
+                     AND w.phase IN (${placeholders(DELIVERABLE_WAIT_PHASES.length)})))`,
         ];
         const params: Array<string | number | null> = [...DELIVERABLE_WAIT_PHASES];
+        if (input.type !== undefined) {
+            if (!["dependency-ready", "assignment-outcome"].includes(input.type)) throw new StoreError("validation", "Unknown outbox event type.");
+            clauses.push("event_type = ?");
+            params.push(input.type);
+        }
         if (input.waitId !== undefined) {
             clauses.push("wait_id = ?");
             params.push(requireId("waitId", input.waitId));

@@ -142,6 +142,9 @@ function assertWaitOwner(wait: WaitRecord, owner: OwnerIdentity, action: string)
 
 /** Reject a caller that addresses a superseded generation. */
 function assertCurrentGeneration(ctx: StoreContext, waitId: string, generation: number): void {
+    if (getRow(ctx, "SELECT assignment_id FROM assignment_outcome_waits WHERE wait_id = ? AND generation = ?", waitId, generation)) {
+        throw new StoreError("wait-phase", "The assignment has a terminal outcome; automatic dispatch is disarmed.");
+    }
     const latest = latestWaitGeneration(ctx, waitId);
     if (latest !== null && generation < latest) {
         throw new StoreError(
@@ -315,6 +318,9 @@ export function registerWait(ctx: StoreContext, input: RegisterWaitInput): Regis
 
     return ctx.transaction(() => {
         const at = ctx.now();
+        if (origin?.assignmentRef && getRow(ctx, "SELECT assignment_id FROM assignment_outcomes WHERE assignment_id = ?", origin.assignmentRef)) {
+            throw new StoreError("wait-phase", "A terminal assignment cannot register another wait; delegate a new assignment.");
+        }
         const resolved: Array<{
             dependency: WaitDependencyInput;
             terminalRevision: number;

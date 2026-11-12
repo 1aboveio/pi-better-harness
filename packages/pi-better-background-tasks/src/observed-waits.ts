@@ -3373,6 +3373,7 @@ export class ObservedWaitHost {
       let claimed: OutboxEventRecord[];
       try {
         claimed = store.claimOutbox({
+          type: "dependency-ready",
           recipient: owner,
           claimToken,
           claimedBy: this.hostId,

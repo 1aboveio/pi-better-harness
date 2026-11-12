@@ -412,6 +412,7 @@ export function mapOutbox(ctx: StoreContext, row: Record<string, unknown>): Outb
     const terminalRevision = columnNumber(row, "terminal_revision");
     return {
         eventId: columnText(row, "event_id"),
+        type: columnText(row, "event_type") as OutboxEventRecord["type"],
         operationId,
         terminalRevision,
         waitId,

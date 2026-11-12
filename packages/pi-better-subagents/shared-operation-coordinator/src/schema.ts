@@ -171,6 +171,7 @@ const DDL: readonly string[] = [
         ON evidence_pins (wait_id, generation, operation_id, terminal_revision, kind, ref)`,
     `CREATE INDEX evidence_pins_operation ON evidence_pins (operation_id, terminal_revision, released_at)`,
     `CREATE TABLE outbox_events (
+        event_type TEXT NOT NULL DEFAULT 'dependency-ready',
         event_id TEXT PRIMARY KEY,
         operation_id TEXT NOT NULL,
         terminal_revision INTEGER NOT NULL,
@@ -194,6 +195,22 @@ const DDL: readonly string[] = [
     )`,
     `CREATE INDEX outbox_recipient ON outbox_events (recipient_kind, recipient_session_id, state)`,
     `CREATE INDEX outbox_wait ON outbox_events (wait_id, generation)`,
+    `CREATE TABLE assignment_outcomes (
+        assignment_id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL UNIQUE,
+        record_json TEXT NOT NULL
+    )`,
+    `CREATE TABLE assignment_bindings (
+        assignment_id TEXT PRIMARY KEY,
+        owner_json TEXT NOT NULL,
+        recipient_json TEXT NOT NULL
+    )`,
+    `CREATE TABLE assignment_outcome_waits (
+        assignment_id TEXT NOT NULL REFERENCES assignment_outcomes (assignment_id),
+        wait_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        PRIMARY KEY (wait_id, generation)
+    )`,
 ];
 
 const SCHEMA_VERSION_KEY = "schema_version";
@@ -248,6 +265,15 @@ export function ensureSchema(ctx: StoreContext): void {
         );
     }
     if (recorded < SCHEMA_VERSION) {
+        if (recorded === 1) {
+            ensureAdditiveSchema(ctx);
+            ctx.transaction(() => {
+                ctx.db.exec("ALTER TABLE outbox_events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'dependency-ready'");
+                for (const statement of DDL.filter((sql) => sql.startsWith("CREATE TABLE assignment_"))) ctx.db.exec(statement);
+                run(ctx, "UPDATE schema_meta SET value = ? WHERE key = ?", String(SCHEMA_VERSION), SCHEMA_VERSION_KEY);
+            });
+            return;
+        }
         throw new StoreError(
             "schema-version",
             `The database is at schema version ${recorded}; this build needs version ${SCHEMA_VERSION}. No migration is provided for this pair; records are left in place.`,
