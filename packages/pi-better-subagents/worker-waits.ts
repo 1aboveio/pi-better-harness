@@ -2329,14 +2329,14 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
     const at = (input.now ?? Date.now)();
     let result: ResumedAttemptExitResult = { outcome: "ignored" };
     for (const park of candidates) {
-        if (park.record.phase === "consumed" || park.record.phase === "cancelled") {
+        if (park.record.phase === "consumed" || (park.record.phase === "cancelled" && !park.meta.assignment)) {
             result = { outcome: "ignored", waitPhase: park.record.phase };
             continue;
         }
         const reason = input.reason
             ?? `the published resume attempt ${input.attemptId} exited (${input.status ?? attempt?.status ?? "unknown"}) without interpreting the wait`;
         const holdLocally = (cause: string, outcome: "deferred" | "settled" = "deferred"): void => {
-            updateParkRecord(park.runId, { phase: "held", heldReason: `${reason}; ${cause}` });
+            updateParkRecord(park.runId, { phase: park.record.phase === "cancelled" ? "cancelled" : "held", heldReason: `${reason}; ${cause}` });
             const report = attempt ?? park.meta;
             if (input.service && report.assignment) {
                 commitAssignmentTerminal({ ...report, status: "lost", failureReason: `${reason}; ${cause}` }, true);
@@ -2348,7 +2348,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
         const attemptToken = attempt?.operations?.resumeLaunchToken;
         if (recordedToken && attemptToken && recordedToken !== attemptToken) {
             updateParkRecord(park.runId, {
-                phase: "held",
+                phase: park.record.phase === "cancelled" ? "cancelled" : "held",
                 heldReason: `attempt ${input.attemptId} does not match the launch token published for this wait; the wait was left for its owner`,
             });
             input.notify?.(`Subagent ${park.runId}: resume attempt ${input.attemptId} does not match the published launch token; the wait is held for inspection.`, "warning");
@@ -2363,7 +2363,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             holdLocally("this Background host has no proven-exit hold capability yet");
             continue;
         }
-        if (attempt?.assignment && !input.service.repairFailedResumeForWorker) {
+        if (park.record.phase !== "cancelled" && attempt?.assignment && !input.service.repairFailedResumeForWorker) {
             holdLocally("this Background host does not support bounded autonomous repair");
             continue;
         }
@@ -2399,7 +2399,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             continue;
         }
         try {
-            if (park.meta.operations?.policy?.deadlineAt != null && park.meta.operations.policy.deadlineAt <= at) {
+            if (park.record.phase !== "cancelled" && park.meta.operations?.policy?.deadlineAt != null && park.meta.operations.policy.deadlineAt <= at) {
                 holdLocally("the assignment-local deadline expired");
                 continue;
             }
@@ -2414,7 +2414,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
                 reason,
             };
             let held: { phase: string };
-            if (input.service.repairFailedResumeForWorker && attempt.assignment) {
+            if (park.record.phase !== "cancelled" && input.service.repairFailedResumeForWorker && attempt.assignment) {
                 if (!park.record.checkpoint) throw new Error("Required saved checkpoint is missing");
                 verifyParkCheckpoint({ ...park.record.checkpoint, version: 1, waitId: park.waitId, generation: park.generation });
                 const wait = input.service.listWorkerWaits(scope).find((w) => w.waitId === park.waitId && w.generation === park.generation);
@@ -2427,8 +2427,8 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             }
             const phase = phaseOf(held.phase);
             updateParkRecord(park.runId, {
-                phase,
-                ...(phase === "held" ? { heldReason: reason } : {}),
+                phase: park.record.phase === "cancelled" ? "cancelled" : phase,
+                ...(phase === "held" && park.record.phase !== "cancelled" ? { heldReason: reason } : {}),
             });
             input.notify?.(`Subagent ${park.runId}: ${reason}. The reconciled wait is ${phase}.`, "warning");
             result = { outcome: "settled", waitPhase: phase, reason };

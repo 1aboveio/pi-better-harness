@@ -679,6 +679,28 @@ test("assignment unacknowledged exit verifies real checkpoint and permits only o
     assert.equal(stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 }).acknowledgement, null);
 });
 
+test("assigned cancellation reconciles its published writer without invoking bounded repair", async () => {
+    const stack = await startStack();
+    const id = "sa_cancelled_no_repair";
+    const resumed = await publishedResumeWithAttempt(stack, id, "completed", true);
+    const wait = stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 });
+    const binding = { version: 1, assignmentId: `assignment:${id}`, owner: wait.owner,
+        recipient: { kind: "parent-session", sessionId: "parent-session-1", workspace: stack.workspace, branchId: "branch-1", goalId: null } };
+    registry.writeMeta({ ...registry.readMeta(id), assignment: binding });
+    stack.store.recordAssignmentOutcome({ ...binding, revision: 1, outcome: "cancelled", reason: "Explicit stop",
+        processUncertain: true, evidence: [{ kind: "summary", ref: "cancelled-assignment" }],
+        waits: [{ waitId: wait.waitId, generation: 1, cancelEpoch: wait.cancelEpoch }] });
+    registry.updateParkRecord(id, { phase: "cancelled" });
+    const service = { ...stack.service, repairFailedResumeForWorker: () => assert.fail("cancelled assignments must not enter repair") };
+    const result = await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service, writerLeaseReleased: true });
+    assert.equal(result.outcome, "settled");
+    assert.equal(readParkRecord(id).phase, "cancelled");
+    assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId }).filter((c) => c.state === "published").length, 0);
+    assert.equal(stack.store.getWait({ waitId: wait.waitId, generation: 1 }).acknowledgement, null);
+    assert.equal(stack.store.getAssignmentOutcome(binding.assignmentId).outcome, "cancelled");
+    assert.equal(stack.store.getAssignmentOutcome(binding.assignmentId).processUncertain, true);
+});
+
 test("missing continuation metadata never becomes writer-exit proof across repeated recovery", async () => {
     const stack = await startStack();
     const resumed = await publishedResumeWithAttempt(stack, "sa_p2_missing", "failed");
