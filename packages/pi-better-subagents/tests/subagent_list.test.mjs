@@ -12,6 +12,7 @@ import {
     listFolderScopeKey,
 } from "../list.mjs";
 import { isWithinWorkspace, normalizeWorkspacePath } from "../workspace-scope.ts";
+import { assignmentFor } from "../assignment-projection.mjs";
 
 const PARENT = 41001;
 const OTHER_PARENT = 41002;
@@ -192,10 +193,18 @@ describe("subagent_list helper", () => {
             usageById: () => ({ input: 400, output: 800, cacheRead: 0, costUSD: 0.0034, total: 1200 }),
         });
 
+        const revision = output.match(/ · r([a-f0-9]{16})$/)?.[1];
+        assert.ok(revision, "the list exposes a semantic revision, not a fixed digest fixture");
+        assert.equal(revision, assignmentFor(run).revision, "the row uses the shared assignment revision");
         assert.equal(
             output,
-            "• reviewer sa_format  [completed]  session_id=sa_original_conversation  xai/grok-4.5  45s\n    hello world from prompt",
+            `• reviewer sa_format  [completed]  session_id=sa_original_conversation  xai/grok-4.5  45s\n    hello world from prompt · r${revision}`,
         );
+        assert.equal(build([run]), output, "unchanged observation retains the same revision and separate session identity");
+        const failed = build([{ ...run, status: "failed", failureReason: "Assignment failed" }]);
+        const failedRevision = failed.match(/ · r([a-f0-9]{16})(?:\n|$)/)?.[1];
+        assert.ok(failedRevision);
+        assert.notEqual(failedRevision, revision, "a semantic state change changes the exposed revision");
         assert.doesNotMatch(output, /tok|\$/);
     });
 
