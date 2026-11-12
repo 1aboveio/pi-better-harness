@@ -13,6 +13,7 @@
  */
 
 import type { RunTiming } from "./timing.ts";
+import { assignmentRetainsEvidence } from "./assignment-outcomes.ts";
 import type { SkillExposureSource } from "./skills.ts";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -138,6 +139,8 @@ export interface LaunchRecipe {
 }
 
 export interface RunMeta {
+    outcomeSupport?: { version: 1; available: boolean; reason?: string };
+    assignment?: import("./assignment-outcomes.ts").AssignmentBinding;
     id: string;
     name?: string;
     status: RunStatus;
@@ -528,6 +531,8 @@ export function recordTaskRuntimeProvenance(id: string): void {
  * uses this, so no provenance outlives its run. Throws when the run directory cannot be removed.
  */
 export function removeRunDirectory(id: string): void {
+    const meta = readMeta(id);
+    if (meta && assignmentRetainsEvidence(meta)) throw new Error("Assignment outcome or uncertain writer still retains this run's evidence.");
     rmSync(runDir(id), { recursive: true, force: true });
     removeTaskRuntimeProvenance(id);
 }

@@ -8,6 +8,8 @@
  * and leaves no partial record.
  */
 import { StoreError } from "./errors.ts";
+import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.ts";
+import type { AssignmentOutcomeInput, AssignmentOutcomeRecord } from "./assignment-outcomes.ts";
 import {
     describeOwnerDiff,
     normalizeOwner,
@@ -112,6 +114,12 @@ import {
 } from "./types.ts";
 
 export interface Store {
+    registerAssignment(input: Parameters<typeof registerAssignment>[1]): void;
+    receiptAssignmentOutcome(input: Parameters<typeof receiptAssignmentOutcome>[1]): AssignmentOutcomeRecord;
+    recordAssignmentOutcome(input: AssignmentOutcomeInput): AssignmentOutcomeRecord;
+    getAssignmentOutcome(assignmentId: string): AssignmentOutcomeRecord | null;
+    inspectAssignmentOutcome(input: Parameters<typeof inspectAssignmentOutcome>[1]): AssignmentOutcomeRecord;
+    consumeAssignmentOutcome(input: Parameters<typeof consumeAssignmentOutcome>[1]): AssignmentOutcomeRecord;
     /** Schema version this handle verified on open. */
     readonly schemaVersion: number;
     /** Database path this handle opened. */
@@ -298,6 +306,12 @@ export function openStore(options: StoreOptions): Store {
     };
 
     const store: Store = {
+        registerAssignment(input) { alive(); registerAssignment(ctx, input); },
+        receiptAssignmentOutcome(input) { alive(); return receiptAssignmentOutcome(ctx, input); },
+        recordAssignmentOutcome(input) { alive(); return recordAssignmentOutcome(ctx, input); },
+        getAssignmentOutcome(assignmentId) { alive(); return getAssignmentOutcome(ctx, assignmentId); },
+        inspectAssignmentOutcome(input) { alive(); return inspectAssignmentOutcome(ctx, input); },
+        consumeAssignmentOutcome(input) { alive(); return consumeAssignmentOutcome(ctx, input); },
         schemaVersion: SCHEMA_VERSION,
         path,
         close() {

@@ -20,7 +20,7 @@
  */
 
 /** Schema version this build writes and accepts. Any other version is refused. */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 3;
 
 /** Who receives an operation's result and decides what happens next. */
 export type OwnerKind = "parent-session" | "worker-conversation";
@@ -621,6 +621,7 @@ export interface OutboxDispatchClaim {
 }
 
 export interface OutboxEventRecord {
+    type: "dependency-ready" | "assignment-outcome";
     eventId: string;
     operationId: string;
     /** Terminal revision this event delivers. Unique per wait generation. */
@@ -652,6 +653,8 @@ export interface OutboxFilter {
 }
 
 export interface ClaimOutboxInput {
+    eventId?: string;
+    type?: OutboxEventRecord["type"];
     /** Restrict to one wait generation. Omit to claim across a recipient. */
     waitId?: string;
     generation?: number;

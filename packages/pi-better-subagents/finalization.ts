@@ -8,6 +8,7 @@
 import { buildCompletionDelivery } from "./completion.ts";
 import { collectRunFailures, failurePath } from "./failures.ts";
 import { observeFailures } from "./shared-failure-observations.ts";
+import { commitAssignmentTerminal } from "./assignment-outcomes.ts";
 import {
     classifyChildExit,
     type ChildExitOutcome,
@@ -114,6 +115,7 @@ export function finalizeRun(
         }
     }
     writeMeta(meta);
+    commitAssignmentTerminal(meta);
     if (!parked && park.record) {
         // A park disposition existed but could not be proven on exit. Hold it in
         // both durable copies (park.json + metadata) so nothing resumes it; the

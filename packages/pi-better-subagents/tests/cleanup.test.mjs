@@ -202,17 +202,20 @@ describe("enforceRegistrySizeCapOnce", () => {
         assert.equal(entries.length, 3, "every run measured");
         assert.ok(entries.every((e) => e.bytes >= 4000), "bytes counted from disk");
 
-        // 12 KB of logs against a 9 KB cap, with the live run untouchable.
+        // Fit the newer and live directories, including path-dependent metadata.
         // spawnPid is this process, so own-run protection must be overridden to
         // observe the byte bound at all — which is itself the protection's proof.
+        const maxBytes = entries.filter((entry) => entry.id !== old).reduce((sum, entry) => sum + entry.bytes, 0);
         const result = enforceRegistrySizeCapOnce({
             now: DAY,
-            maxBytes: 9000,
+            maxBytes,
             force: true,
             protectedIds: new Set(),
         });
         assert.equal(result.ran, true);
         assert.deepEqual(result.removed, [old], "oldest terminal run retired");
+        assert.equal(result.overBudget, false);
+        assert.ok(result.keptBytes <= maxBytes, "retained directories satisfy the measured byte bound");
         assert.equal(existsSync(runDir(recent)), true, "newer terminal run kept");
         assert.equal(existsSync(runDir(live)), true, "live run kept");
         assert.deepEqual(result.errors, []);

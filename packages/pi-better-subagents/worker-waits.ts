@@ -57,6 +57,7 @@ import {
 } from "./worker-operations-host.ts";
 import { captureParkCheckpoint, verifyParkCheckpoint, type ParkCheckpoint } from "./park-checkpoint.ts";
 import { findSavedConversation, readConversationLease } from "./continuation.ts";
+import { commitAssignmentTerminal } from "./assignment-outcomes.ts";
 import {
     effectiveStatus,
     isPendingPark,
@@ -922,7 +923,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
         // The durable run binding captures the worker's task authority and the
         // conversation identity. Every later tool call, checkpoint and resume fence
         // is checked against it by the Background host.
-        await rpc.call("register-run", {
+        const registered = await rpc.call("register-run", {
             runId: registration.runId,
             conversationId: registration.conversationId,
             attemptId: registration.attemptId,
@@ -931,9 +932,15 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             policy: registration.policy as unknown as JsonRecord,
             tools: [...registration.tools],
             capabilities: registration.capabilities as unknown as JsonRecord,
+            assignmentOutcomesVersion: 1,
             owner,
             ...(registration.writerLeaseId ? { writerLeaseId: registration.writerLeaseId } : {}),
         });
+        if (registered.assignmentOutcomesVersion !== 1) {
+            runs.delete(registration.runId);
+            try { await rpc.call("release-run", { runId: registration.runId, reason: "assignment outcome capability mismatch" }); } catch { /* preserve the capability refusal */ }
+            throw new WorkerOperationsRefusal("service-unavailable", "Background host does not support durable assignment outcomes v1; upgrade the standalone packages together.");
+        }
 
         /**
          * Ownership is re-derived from the durable store (by conversation), so an
@@ -2082,6 +2089,12 @@ export async function cancelParkedWait(
     // same follow-up, so an already-recorded cancellation is left alone.
     const scope = backgroundScopeForMeta(park.meta, park.record);
     const at = (options.now ?? Date.now)();
+    if (park.meta.assignment) {
+        commitAssignmentTerminal({ ...park.meta, status: "killed" });
+        const cancellation = await stopPublishedAttempt(park, reason, options.stopAttempt, options.now);
+        updateParkRecord(park.runId, { phase: "cancelled", cancelReason: cancellation === "foreign" ? `${reason} (published writer termination remains unproven)` : reason, cancelledAt: at });
+        return;
+    }
     if (service && scope) {
         let view;
         try {
@@ -2311,7 +2324,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
     const at = (input.now ?? Date.now)();
     let result: ResumedAttemptExitResult = { outcome: "ignored" };
     for (const park of candidates) {
-        if (park.record.phase === "consumed" || park.record.phase === "cancelled") {
+        if (park.record.phase === "consumed" || (park.record.phase === "cancelled" && !park.meta.assignment)) {
             result = { outcome: "ignored", waitPhase: park.record.phase };
             continue;
         }
@@ -2385,8 +2398,8 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             });
             const phase = phaseOf(held.phase);
             updateParkRecord(park.runId, {
-                phase,
-                ...(phase === "held" ? { heldReason: reason } : {}),
+                phase: park.record.phase === "cancelled" ? "cancelled" : phase,
+                ...(phase === "held" && park.record.phase !== "cancelled" ? { heldReason: reason } : {}),
             });
             input.notify?.(`Subagent ${park.runId}: ${reason}. The wait is ${phase}; it will not resume automatically.`, "warning");
             result = { outcome: "settled", waitPhase: phase, reason };

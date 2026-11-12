@@ -290,7 +290,7 @@ export type { SubagentToolSession };
 function forCall(session: SubagentToolSession, ctx: unknown): SubagentToolSession {
     const provider = session.getActiveOrigin;
     if (typeof provider !== "function") return session;
-    return { getActiveOrigin: () => provider(ctx) };
+    return { ...session, getActiveOrigin: () => provider(ctx) };
 }
 
 /**
@@ -452,8 +452,13 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
         promptGuidelines: [
             "Use subagent_result to collect a finished run's output. If it reports the run is still going, stop — do not poll; you'll be notified when it finishes.",
             "If the response includes nextCursor, call again with that cursor to read the rest of the answer. Do not summarize away unread pages.",
+            "For a durable assignment outcome, inspect its evidence, then call subagent_result with the exact outcome_revision, disposition consumed or dismissed, and an interpretation note. Delivery and reading never acknowledge the worker's dependency wait.",
         ],
         parameters: Type.Object({
+            operation_id: Type.Optional(Type.String({ description: "Assignment dependency whose bounded retained log to inspect." })),
+            outcome_revision: Type.Optional(Type.Number({ description: "Exact assignment outcome revision being disposed." })),
+            disposition: Type.Optional(Type.String({ description: "consumed or dismissed; records parent outcome disposition, never worker acknowledgement." })),
+            note: Type.Optional(Type.String({ description: "Parent interpretation of the inspected outcome." })),
             id: Type.String({ description: "Run id from subagent_spawn." }),
             cursor: Type.Optional(Type.String({ description: "Caller-owned answer page or status cursor from a previous response." })),
             max_bytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 2048 bytes, max 8192 bytes)." })),
@@ -479,10 +484,20 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
             }
             if (access.kind === "denied") return subagentResultText(access.payload);
             const meta = access.meta;
+            const outcome = meta.assignment ? baseSession.inspectOutcome?.(meta, params as Record<string, unknown>, ctx) : undefined;
             const resultText = (body: string) => {
-                const result = subagentResultText(body);
-                return { ...result, details: { ...result.details, assignment: assignmentFor(meta, effectiveStatus(meta)), ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
+                const evidence = outcome as { outcome?: { revision: number; outcome: string; reason: string }; dependencies?: Array<{ dependencies: Array<{ operationId: string }> }> } | null;
+                const operations = evidence?.dependencies?.flatMap((wait) => wait.dependencies.map((dependency) => dependency.operationId)).slice(0, 5) ?? [];
+                const header = evidence?.outcome ? `Outcome r${evidence.outcome.revision}: ${evidence.outcome.outcome}. ${evidence.outcome.reason.slice(0, 256)}${operations.length ? `\nEvidence operations: ${operations.join(", ")}` : ""}\n` : "";
+                const result = subagentResultText(header + body);
+                return { ...result, details: { ...result.details, outcome, outcomeSupport: meta.outcomeSupport, assignment: assignmentFor(meta, effectiveStatus(meta)), ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
             };
+            if ((params as Record<string, unknown>).operation_id && outcome) {
+                const evidence = outcome as { outcome: { revision: number; outcome: string; reason: string }; logs: Array<{ text: string }> };
+                const text = `Assignment outcome r${evidence.outcome.revision}: ${evidence.outcome.outcome}\n${evidence.outcome.reason}\n${evidence.logs.map((log) => log.text).join("\n")}`;
+                const bytes = Buffer.from(text);
+                return resultText(bytes.subarray(0, budgetFor("answer", p.maxBytes)).toString("utf8"));
+            }
             const scopeKey = requestScopeKey(p, session);
             const st = effectiveStatus(meta);
             const healthLine = diagnosticLines(meta);

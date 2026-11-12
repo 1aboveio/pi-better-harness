@@ -19,7 +19,11 @@ A consumed wait records interpretation; it does not complete a parked assignment
 A failed dependency command does not set assignment failure. An ordinary coherent
 completed attempt retains legacy completion semantics when it owes no interpretation.
 Existing attempt failures and explicit stops retain their diagnostic records.
-The atomic assignment terminal decision and delivery contract belongs to #710.
+The atomic assignment terminal decision and delivery contract is defined by
+ADR 0020's #710 extension. A committed coordinator outcome takes precedence over
+held dependency waits without implying those waits were interpreted. New launch
+bindings scope reads by immutable assignment ID; conversation identity alone
+cannot attach a later explicit follow-up's wait to an earlier terminal result.
 
 `revision` is an opaque content-addressed semantic revision, not a timestamp or
 numeric ordering. Consumers compare equality. State, readable reason, attempt

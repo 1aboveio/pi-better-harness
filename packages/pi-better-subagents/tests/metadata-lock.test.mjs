@@ -12,10 +12,11 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const REGISTRY = fileURLToPath(new URL("../registry.ts", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-const TSX_CJS = fileURLToPath(new URL("../../../node_modules/tsx/dist/cjs/index.cjs", import.meta.url));
+const TSX_CJS = createRequire(import.meta.url).resolve("tsx/cjs");
 
 function tempRoot() {
     return mkdtempSync(join(tmpdir(), "meta-lock-"));
@@ -607,7 +608,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const ROOT = ${JSON.stringify(REPO_ROOT)};
 if (!isMainThread) {
-  require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+  require(${JSON.stringify(TSX_CJS)});
   const sync = new Int32Array(workerData.sab);
   const signal = (i) => { Atomics.store(sync, i, 1); Atomics.notify(sync, i); };
   const park = (i) => { if (Atomics.wait(sync, i, 0, 15000) === "timed-out") throw Error("park timeout " + i); };
@@ -737,7 +738,7 @@ function snapshot(role) {
   };
 }
 if (!isMainThread) {
-  require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+  require(${JSON.stringify(TSX_CJS)});
   const sync = new Int32Array(workerData.sab);
   const signal = (i) => { Atomics.store(sync, i, 1); Atomics.notify(sync, i); };
   const park = (i) => { if (Atomics.wait(sync, i, 0, 15000) === "timed-out") throw Error("park timeout " + i); };
@@ -856,7 +857,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const ROOT = ${JSON.stringify(REPO_ROOT)};
 if (process.argv[2] === "child") {
-  require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+  require(${JSON.stringify(TSX_CJS)});
   const original = fs.linkSync;
   fs.linkSync = function(from, to, ...rest) {
     const result = original.call(this, from, to, ...rest);
@@ -867,7 +868,7 @@ if (process.argv[2] === "child") {
   writeMeta(JSON.parse(process.argv[3]));
   process.exit(0);
 }
-require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+require(${JSON.stringify(TSX_CJS)});
 const { writeMeta, readMeta, runDir } = require(ROOT + "/packages/pi-better-subagents/registry.ts");
 function snap(id, role, extra) {
   return Object.assign({

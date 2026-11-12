@@ -12,6 +12,9 @@
  */
 
 import { assignmentFor } from "./assignment-projection.mjs";
+import { registerAssignmentAttempt, commitAssignmentTerminal, readOutcome, receiptOutcome, outcomeTranscriptReceipt, inspectOutcome, createOutcomeHost, closeOutcomeHost, claimOutcome, type AssignmentBinding } from "./assignment-outcomes.ts";
+import { currentSandboxPermissions } from "./permission-policy.ts";
+import { requestResumeAdmission } from "./worker-waits.ts";
 import { execSync } from "node:child_process";
 import { writeFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -474,6 +477,8 @@ function warnInterruptedSubagents(ctx: ExtensionContext, interrupted: RunMeta[],
  * no longer has a session.
  */
 let sessionTornDown = false;
+let outcomeHost = createOutcomeHost();
+const outcomeAdmission = new Map<string, () => boolean>();
 
 /**
  * "The rightful conversation is not the active one", not "this notification is
@@ -518,6 +523,15 @@ function markCompletionCallbackSent(id: string, now: number): void {
 /** Queue one durable ordinary terminal event on the host-shared batch. */
 function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
     const meta = readMeta(id);
+    if (meta?.assignment) {
+        try {
+            const outcome = commitAssignmentTerminal(meta);
+            if (outcome) { void enqueueAssignmentOutcome(pi, meta); return; }
+        } catch (error) {
+            try { uiCtx?.ui?.notify(`Assignment outcome could not commit: ${String(error)}`, "warning"); } catch { /* no UI */ }
+            return;
+        }
+    }
     if (!meta
         || meta.callback === false
         || meta.completionCallbackPendingAt === undefined
@@ -552,6 +566,39 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
     });
 }
 
+async function enqueueAssignmentOutcome(pi: ExtensionAPI, meta: RunMeta): Promise<void> {
+    const outcome = readOutcome(meta);
+    const ctx = uiCtx;
+    if (!outcome || outcome.deliveryReceipt || outcome.disposition || !ctx || meta.callback === false
+        || typeof ctx.sessionManager?.getBranch !== "function") return;
+    const active = ownerBindingFromContext(ctx);
+    if (active.sessionId !== outcome.recipient.sessionId || active.workspace !== outcome.recipient.workspace
+        || (outcome.recipient.branchId && !ctx.sessionManager.getBranch().some((entry) => entry.id === outcome.recipient.branchId))) return;
+    const prior = outcomeTranscriptReceipt(ctx.sessionManager.getBranch(), outcome.eventId);
+    if (prior) { receiptOutcome(meta, prior); return; }
+    const gate = await requestResumeAdmission(pi, active, { timeoutMs: 50 });
+    outcomeAdmission.set(outcome.eventId, () => gate.allowed ? gate.isCurrent?.() !== false : !active.goalId && !outcome.recipient.goalId && gate.revision === -1);
+    if (!gate.allowed && (active.goalId || outcome.recipient.goalId || gate.revision !== -1)) return;
+    if (!claimOutcome(meta, outcomeHost)) return;
+    getCallbackBatcher(pi).enqueue({
+        source: "subagent", id: outcome.eventId, inspectId: meta.id, receiptId: outcome.eventId,
+        label: meta.name ?? meta.id,
+        status: outcome.outcome, outcome: outcome.reason, detailTool: "subagent_result", callback: true,
+        isDelivered: () => Boolean(readOutcome(meta)?.deliveryReceipt),
+        getSuppressionReason: () => {
+            if (!uiCtx || callbackSuppressionReason(meta)) throw new Error("Recorded parent is inactive; retain outcome.");
+            if ((outcome.recipient.branchId && !uiCtx.sessionManager.getBranch().some((entry) => entry.id === outcome.recipient.branchId)) || !outcomeAdmission.get(outcome.eventId)?.()) throw new Error("Parent delivery authority changed; retain outcome.");
+            return undefined;
+        },
+        onDelivered: (at) => {
+            const entry = outcomeTranscriptReceipt(ctx.sessionManager.getBranch(), outcome.eventId);
+            if (!entry) throw new Error("Awaiting durable recipient transcript receipt.");
+            receiptOutcome(meta, entry);
+            markCompletionCallbackSent(meta.id, at);
+        },
+    });
+}
+
 /**
  * Recover only records explicitly marked pending; legacy terminal runs never replay.
  *
@@ -563,7 +610,14 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
  * same `isAbandonedByParent` proof the running-record supervision uses — so this
  * path never takes a live pi's terminal callback (#625, DEV-226 criterion 5).
  */
+function recoverAssignmentOutcomes(pi: ExtensionAPI): void {
+    for (const meta of activeCallbackOrigin ? listMetasForOrigin(activeCallbackOrigin) : []) if (meta.assignment) {
+        try { if (commitAssignmentTerminal(meta)) void enqueueAssignmentOutcome(pi, meta); } catch { /* keep unverified; no legacy handoff */ }
+    }
+}
+
 function recoverCompletionCallbacks(pi: ExtensionAPI): void {
+    recoverAssignmentOutcomes(pi);
     for (const meta of listMetasForParent(process.pid)) {
         if (!ownedByThisParent(meta)) continue;
         enqueueCompletionCallback(pi, meta.id);
@@ -2253,6 +2307,7 @@ export default function (pi: ExtensionAPI) {
         const parked = parkedWaitForRun(id);
         if (!parked) return false;
         void cancelParkedWait(workerOperations.service, parked, reason, { stopAttempt: stopPublishedAttempt })
+            .then(() => { if (parked.meta.assignment) enqueueCompletionCallback(pi, id); })
             .catch(() => { /* the durable record keeps the wait visible */ })
             .finally(() => syncHealthTicker());
         return true;
@@ -3042,6 +3097,15 @@ export default function (pi: ExtensionAPI) {
             // The fence returns a synchronous release guard that is invoked with no
             // await between it and the spawn, so a cancellation or parent change
             // cannot hide inside a final asynchronous window.
+            if (internal?.resumeWait && !resume?.prior.assignment) throw new PreSpawnResumeError("This legacy park has no verified assignment outcome recipient; refusing continuation on an unsupported binding.");
+            const parent = ownerBindingFromContext(ctx);
+            const assignment: AssignmentBinding | undefined = internal?.resumeWait && resume?.prior.assignment
+                ? resume.prior.assignment
+                : parent.sessionId && typeof ctx.sessionManager?.getBranch === "function" ? { version: 1, assignmentId: id,
+                    owner: { kind: "worker-conversation", sessionId, workspace: cwd, branchId: parent.branchId, goalId: parent.goalId },
+                    recipient: { kind: "parent-session", ...parent } } : undefined;
+            if (!assignment && bridgeEnabled) throw new Error("Durable assignment outcomes require a recorded parent session and transcript capability.");
+            if (assignment) registerAssignmentAttempt(assignment, id);
             if (internal?.resumeWait) {
                 const captured = resume?.prior.operations?.policy;
                 const currentSandbox = taskRuntime ? {
@@ -3097,6 +3161,8 @@ export default function (pi: ExtensionAPI) {
             });
 
             const meta: RunMeta = {
+                assignment,
+                outcomeSupport: { version: 1, available: Boolean(assignment), ...(!assignment ? { reason: "Legacy host has no verified parent session/transcript; durable assignment delivery is unavailable." } : {}) },
                 id, name: launchName, status: "running",
                 pid: spawned.pid, spawnPid: process.pid, spawnPidStartTime: parentStartToken(), model,
                 effort: thinking, cwd,
@@ -3892,6 +3958,20 @@ export default function (pi: ExtensionAPI) {
     // The foreground origin from session_start; otherwise the calling context's
     // own session. An unreadable session id stays unavailable (never cwd-wide).
     const toolSession = {
+        inspectOutcome: (meta: RunMeta, params: Record<string, unknown>, callCtx?: unknown) => {
+            if (params.disposition !== undefined && params.disposition !== "consumed" && params.disposition !== "dismissed") throw new Error("Outcome disposition must be consumed or dismissed.");
+            if (!readOutcome(meta)) {
+                if (params.disposition !== undefined || params.operation_id !== undefined) throw new Error("No committed terminal outcome is available for this assignment.");
+                return null;
+            }
+            const context = (callCtx ?? uiCtx) as ExtensionContext;
+            if (!context) throw new Error("Parent identity is unavailable.");
+            return inspectOutcome(meta, { recipient: { kind: "parent-session", ...ownerBindingFromContext(context) }, permissions: currentSandboxPermissions(pi),
+                branchIds: context.sessionManager.getBranch().map((entry) => entry.id),
+                ...(typeof params.operation_id === "string" ? { operationId: params.operation_id } : {}),
+                ...(typeof params.outcome_revision === "number" ? { revision: params.outcome_revision } : {}),
+                ...(params.disposition === "consumed" || params.disposition === "dismissed" ? { disposition: params.disposition, note: String(params.note ?? "") } : {}) });
+        },
         getActiveOrigin: (ctx?: unknown) => activeCallbackOrigin ?? verifiedOriginFromContext(ctx as ExtensionContext | undefined),
     };
     pi.registerTool(subagentListTool(Type, toolSession));
@@ -4012,6 +4092,7 @@ export default function (pi: ExtensionAPI) {
         pi.events?.emit("harness-settings:register", agentsContribution);
     };
     const unsubscribeSettingsRequest = pi.events?.on?.("harness-settings:request", registerSettings);
+    const unsubscribeOutcomeWorkflow = pi.events?.on?.("pi-better-workflow:changed", () => recoverAssignmentOutcomes(pi));
     registerSettings();
 
     if (typeof pi.registerCommand === "function") {
@@ -4129,6 +4210,7 @@ export default function (pi: ExtensionAPI) {
         mainAgentStartedAt = undefined;
         mainAgentTools.clear();
         refreshBackgroundWorkNavigator(ctx);
+        recoverAssignmentOutcomes(pi);
     });
 
     pi.on("session_tree", async (_event, ctx) => {
@@ -4136,6 +4218,7 @@ export default function (pi: ExtensionAPI) {
         agentSessionSettings.restore(ctx);
         try { noteCatalogHost(catalogHostFrom(ctx)); } catch { /* catalog inspection stays undecided */ }
         restoreDelegationMode(ctx);
+        recoverAssignmentOutcomes(pi);
     });
 
     // Capture a UI-bearing context and, if runs from a prior session are still
@@ -4146,6 +4229,7 @@ export default function (pi: ExtensionAPI) {
         // switch), so the previous session's teardown no longer applies: the
         // replacing session owns this instance's supervision loops (#625).
         sessionTornDown = false;
+        outcomeHost = createOutcomeHost();
         setCallbackBatchContext(pi, ctx);
         agentSessionSettings.restore(ctx);
         restoreDelegationMode(ctx);
@@ -4204,6 +4288,8 @@ export default function (pi: ExtensionAPI) {
 
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (event, ctx) => {
+        closeOutcomeHost(outcomeHost);
+        if (typeof unsubscribeOutcomeWorkflow === "function") unsubscribeOutcomeWorkflow();
         if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
         // #625: subagent children are detached process groups that outlive this
         // foreground session. A controlled reload or quit must not destroy

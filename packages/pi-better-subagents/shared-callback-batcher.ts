@@ -119,12 +119,14 @@ export interface CallbackBatchHost {
   /** Older Pi shares this object; newer Pi supplies per-extension wrappers. */
   events?: object;
   sendMessage(
-    message: { customType: string; content: string; display: boolean },
+    message: { customType: string; content: string; display: boolean; details?: unknown },
     options: Record<string, unknown>,
   ): unknown;
 }
 
 export interface CallbackBatchEvent {
+  receiptId?: string;
+  inspectId?: string;
   source: CallbackSource;
   id: string;
   label: string;
@@ -332,8 +334,8 @@ function boundedStatus(value: unknown): string {
   return count < notes.length ? `${kept}${omission(notes.length - count)}` : kept;
 }
 
-function inspectFor(event: Pick<CallbackBatchEvent, "id" | "detailTool">): string {
-  const id = boundedField(event.id, MAX_ID_BYTES);
+function inspectFor(event: Pick<CallbackBatchEvent, "id" | "detailTool" | "inspectId">): string {
+  const id = boundedField(event.inspectId ?? event.id, MAX_ID_BYTES);
   return event.detailTool === "bg_task_status"
     ? `bg_task_status id=${id}`
     : `subagent_result id=${JSON.stringify(id)}`;
@@ -665,6 +667,7 @@ export function createCallbackBatcher(
     const representedItems = deliverable.filter(([, item]) => representedSet.has(item.event));
     const overflowItems = deliverable.filter(([, item]) => !representedSet.has(item.event));
 
+    const receiptDetails = { completionEventIds: representedItems.map(([, item]) => item.event.receiptId).filter((id): id is string => Boolean(id)) };
     try {
       // Pi may defer the requested run while settled handlers finish, leaving
       // isIdle() true. Permit no second handoff until a run starts.
@@ -674,12 +677,14 @@ export function createCallbackBatcher(
           customType: "background-completion-batch",
           content: packed.text,
           display: true,
+          ...(receiptDetails.completionEventIds.length ? { details: receiptDetails } : {}),
         },
         // Newer Pi requires triggerTurn for steering too; false only appends
         // a custom message at the turn boundary without continuing the agent.
         { deliverAs: mode, triggerTurn: true },
       );
     } catch {
+      receiptDetails.completionEventIds.length = 0;
       awaitingRun = false;
       for (const [key] of deliverable) inFlight.delete(key);
       const retryItems = [...deliverable, ...pending.entries()]
