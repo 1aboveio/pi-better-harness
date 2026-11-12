@@ -38,6 +38,10 @@ jobs:
         env:
           PI_WORKER_KERNEL_REQUIRE: "1"
         run: node --import tsx --test packages/pi-better-subagents/tests/worker-waits-kernel.test.mjs
+      - name: Real SDK assignment authority replay
+        env:
+          WORKER_SDK_ONLY: "1"
+        run: node --import tsx --test packages/pi-better-subagents/tests/worker-waits-kernel.test.mjs
 
   windows-verify:
     name: windows-verify

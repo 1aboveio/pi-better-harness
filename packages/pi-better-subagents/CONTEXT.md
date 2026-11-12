@@ -1,5 +1,21 @@
 # Context
 
+## Delegated Assignment Authority
+
+An automatically resumed assignment keeps its captured parent recipient, saved
+conversation, scope and permissions. Parent Goal pause/completion/clearing or
+replacement and parent session/branch inactivity do not gate worker execution.
+The active runtime is a compatible supervisor, not a replacement recipient.
+Observed-waits service v2 advertises `assignmentContinuation: 1`; unsupported
+hosts refuse continuation explicitly. Storage remains compatible: pending records
+with captured policy migrate without changing it, and missing policy is refused.
+Current mandatory authority, cancellation, writer/launch fences and capacity still
+apply. No compatible host means queued work, with no reserved idle capacity.
+
+The real SDK replay uses `WORKER_SDK_ONLY=1` with
+`tests/worker-waits-kernel.test.mjs`. The default lane additionally proves kernel
+denials; `PI_WORKER_KERNEL_REQUIRE=1` makes unsupported kernel execution fail.
+
 ## Glossary
 
 ### Role

@@ -192,6 +192,11 @@ async function registerWorker(stack, { runId, conversationId = WORKER_CONVERSATI
         attemptId,
         owner: { sessionId: OWNER.sessionId, workspace: stack.workspace, branchId: OWNER.branchId, goalId: OWNER.goalId },
     });
+    const meta = registry.readMeta(runId);
+    if (meta) registry.writeMeta({ ...meta, operations: {
+        version: 1, bridgeRunId: runId, conversationId, workspace: stack.workspace,
+        authorityReference: policy.authorityReference, policy, tools: plan.tools,
+    } });
     return { handle, policy };
 }
 
@@ -351,12 +356,7 @@ test("a real worker parks, the exit proof finalizes the wait, and the ready task
     const outcome = await orchestration.resume(park);
     assert.equal(outcome, "resumed");
     assert.equal(launched.length, 1);
-    assert.deepEqual(goals[0], {
-        sessionId: OWNER.sessionId,
-        workspace: stack.workspace,
-        branchId: OWNER.branchId,
-        goalId: null,
-    });
+    assert.deepEqual(goals, [], "parent Goal is not worker authority");
     assert.equal(calls.commit, 1);
     const claim = stack.store.listResumeClaims({ waitId, generation }).find((entry) => entry.state === "published");
     assert.ok(claim);

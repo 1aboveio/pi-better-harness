@@ -12,10 +12,11 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const REGISTRY = fileURLToPath(new URL("../registry.ts", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-const TSX_CJS = fileURLToPath(new URL("../../../node_modules/tsx/dist/cjs/index.cjs", import.meta.url));
+const TSX_CJS = createRequire(import.meta.url).resolve("tsx/cjs");
 
 function tempRoot() {
     return mkdtempSync(join(tmpdir(), "meta-lock-"));
@@ -607,7 +608,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const ROOT = ${JSON.stringify(REPO_ROOT)};
 if (!isMainThread) {
-  require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+  require(${JSON.stringify(TSX_CJS)});
   const sync = new Int32Array(workerData.sab);
   const signal = (i) => { Atomics.store(sync, i, 1); Atomics.notify(sync, i); };
   const park = (i) => { if (Atomics.wait(sync, i, 0, 15000) === "timed-out") throw Error("park timeout " + i); };
@@ -737,7 +738,7 @@ function snapshot(role) {
   };
 }
 if (!isMainThread) {
-  require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+  require(${JSON.stringify(TSX_CJS)});
   const sync = new Int32Array(workerData.sab);
   const signal = (i) => { Atomics.store(sync, i, 1); Atomics.notify(sync, i); };
   const park = (i) => { if (Atomics.wait(sync, i, 0, 15000) === "timed-out") throw Error("park timeout " + i); };
@@ -756,6 +757,9 @@ if (!isMainThread) {
   };
   fs.linkSync = function(from, to, ...rest) {
     const result = originalLink.call(this, from, to, ...rest);
+    if (workerData.role === "A" && path.basename(String(to)) === ".meta.lock" && String(from).endsWith(".displaced")) {
+      signal(6);
+    }
     if (workerData.role === "B" && path.basename(String(to)) === ".launch.json" && !held) {
       held = true;
       signal(4); park(5);
@@ -787,16 +791,22 @@ if (!isMainThread) {
     try {
       const a = start("A"); wait(0);
       const b = start("B"); wait(4);
+      const bToken = fs.readFileSync(path.join(run, ".meta.lock"), "utf8");
       release(1); wait(2);
       const c = await start("C");
       const first = JSON.parse(fs.readFileSync(path.join(run, "meta.json"), "utf8"));
       const launchAtFirst = fs.readFileSync(path.join(run, ".launch.json"), "utf8");
-      release(3); release(5);
+      // A must restore B's displaced live token before B attempts its unlock.
+      // Releasing both together can restore an already-released token instead.
+      release(3); wait(6);
+      const lockRestoredBeforeBRelease = fs.readFileSync(path.join(run, ".meta.lock"), "utf8") === bToken;
+      release(5);
       const outcomes = [c, ...await Promise.all([a, b])];
       const finalMeta = JSON.parse(fs.readFileSync(path.join(run, "meta.json"), "utf8"));
       const launch = JSON.parse(fs.readFileSync(path.join(run, ".launch.json"), "utf8"));
       console.log(JSON.stringify({
         first, final: finalMeta, launch, launchUnchanged: launchAtFirst === JSON.stringify(launch), outcomes,
+        lockRestoredBeforeBRelease, lockReleased: !fs.existsSync(path.join(run, ".meta.lock")),
       }));
     } finally {
       await Promise.all(workers.map((w) => w.terminate()));
@@ -822,6 +832,8 @@ if (!isMainThread) {
             assert.equal(reported.launch.name, "B");
             assert.deepEqual(reported.launch.catalog, catalog);
             assert.equal(reported.launchUnchanged, true);
+            assert.equal(reported.lockRestoredBeforeBRelease, true, "A restores B's exact token while B still owns it");
+            assert.equal(reported.lockReleased, true, "all writers release their locks after the coordinated publication");
             assert.equal(reported.first.name, "B");
             assert.deepEqual(reported.first.catalog, catalog);
             assert.equal(reported.first.status, "completed");
@@ -830,7 +842,7 @@ if (!isMainThread) {
             assert.equal(reported.first.completionCallbackSentAt, 3);
             assert.equal(reported.final.name, "B");
             assert.deepEqual(reported.final.catalog, catalog);
-            assert.deepEqual(reported.outcomes.map((item) => item.ok), [true, true, true]);
+            assert.deepEqual(reported.outcomes.map((item) => item.ok), [true, true, true], JSON.stringify(reported.outcomes));
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -845,7 +857,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const ROOT = ${JSON.stringify(REPO_ROOT)};
 if (process.argv[2] === "child") {
-  require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+  require(${JSON.stringify(TSX_CJS)});
   const original = fs.linkSync;
   fs.linkSync = function(from, to, ...rest) {
     const result = original.call(this, from, to, ...rest);
@@ -856,7 +868,7 @@ if (process.argv[2] === "child") {
   writeMeta(JSON.parse(process.argv[3]));
   process.exit(0);
 }
-require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+require(${JSON.stringify(TSX_CJS)});
 const { writeMeta, readMeta, runDir } = require(ROOT + "/packages/pi-better-subagents/registry.ts");
 function snap(id, role, extra) {
   return Object.assign({

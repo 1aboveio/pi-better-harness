@@ -752,6 +752,35 @@ describe("interrupted supervision handoff (#625)", () => {
         }
     });
 
+    it("an automatic continuation retains its callback until the captured parent branch returns", async () => {
+        const h = makeHarness({ cwd: tmpdir(), sessionId: "assignment-parent" });
+        const id = seedRestartRun({ originSession: "assignment-parent" });
+        const meta = readMeta(id);
+        writeMeta({ ...meta, operations: {
+            version: 1, bridgeRunId: id, conversationId: meta.sessionId,
+            authorityReference: "captured-authority", branchId: "captured-branch",
+            resumeLaunchToken: "published-token",
+            policy: { version: 1, sandbox: null, tools: [], clean: false, deadlineAt: null }, tools: [],
+        } });
+        let branch = "other-branch";
+        h.ctx.sessionManager.getBranch = () => [{ id: branch }];
+        const deliveries = () => h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
+        try {
+            await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
+            await getCallbackBatcher(h.pi).flush();
+            assert.equal(readMeta(id).status, "completed");
+            assert.equal(deliveries().length, 0);
+            assert.equal(readMeta(id).completionCallbackSentAt, undefined);
+            branch = "captured-branch";
+            await h.handlers.get("session_start")({ reason: "resume" }, h.ctx);
+            await getCallbackBatcher(h.pi).flush();
+            assert.equal(deliveries().length, 1);
+            assert.equal(readMeta(id).callbackOrigin.sessionId, "assignment-parent");
+        } finally {
+            await h.shutdown({ reason: "quit" });
+        }
+    });
+
     it("a restart in a different conversation records the truth but never consumes the dead parent's owed callback", async () => {
         const h = makeHarness({ cwd: tmpdir(), sessionId: "different-conversation" });
         const id = seedRestartRun({ originSession: "resumed-conversation" });

@@ -6,6 +6,23 @@ Accepted invariant. The user approved recording this decision after inspecting p
 
 ## Decision
 
+### Assignment-local continuation (#708)
+
+An assigned worker retains execution authority independently of its parent's
+Goal and active session or branch. Its captured recipient is delivery identity,
+not execution authority. A compatible supervisor may resume the same saved
+conversation without activating that parent. Parent Goal pause, completion,
+clearing and replacement affect parent execution only.
+
+Admission preserves captured scope and intersects current mandatory permissions;
+missing expected permission authority is a refusal. Exact wait generation,
+cancellation epoch, launch token, writer safety and capacity remain mandatory.
+Parked workers reserve no slot after proven writer exit. Without a compatible
+host, ready work remains queued. Legacy pending records retain their captured
+policy; absent policy is refused rather than reconstructed from a new parent.
+Cross-package capability negotiation must explicitly refuse incompatible hosts.
+This slice adds no repair loop, terminal outcome store or always-running daemon.
+
 **A workflow waiting for an external event must have a registered observer and an owner to receive its result.** The observer performs mechanical execution or state observation. The owner is the parent session or worker conversation that interprets the terminal evidence and decides what happens next. A registered observer must have a recoverable supervision path; an identifier pointing to an unsupervised task does not satisfy the invariant.
 
 Use background operations for established commands and external waits. Use model execution for judgment before an operation and interpretation after it. A worker may retain necessary synchronous checks, including long ones; duration alone does not determine ownership. A command-only polling assignment does not become model work because its requested final report is detailed.

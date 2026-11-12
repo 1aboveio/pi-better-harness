@@ -411,6 +411,7 @@ export interface RunOperationsBinding {
     /** Worker policy captured at launch; Background intersects it, never the child. */
     policy: {
         version: 1;
+        mandatoryPermissions?: boolean;
         sandbox: unknown;
         tools: readonly string[];
         clean: boolean;

@@ -5,13 +5,15 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { after, before } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeMeta as writeTaskMeta } from "../packages/pi-better-background-tasks/src/registry.ts";
 import { writeMeta as writeSubagentMeta } from "../packages/pi-better-subagents/registry.ts";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const extensionRoot = resolve(process.env.PI_HARNESS_E2E_PACKAGE_ROOT ?? repoRoot);
 const piBin = process.env.PI_NAVIGATOR_CLI ?? join(repoRoot, "node_modules", ".bin", "pi");
+const sdkRequire = createRequire(realpathSync(piBin));
+const { visibleWidth } = await import(pathToFileURL(sdkRequire.resolve("@earendil-works/pi-tui")).href);
 const mouseRouting = existsSync(join(dirname(createRequire(realpathSync(piBin)).resolve("@earendil-works/pi-tui")), "tui-alt-screen.js"));
 const goldenSession = `pi-navigator-e2e-${process.pid}`;
 const closeSession = `pi-navigator-close-e2e-${process.pid}`;
@@ -117,7 +119,10 @@ test("golden path: navigate both providers and read complete Unicode logs withou
     assert.match(subagentPage, /transcript · latest 25 rows/, "subagent detail must default to a 25-row transcript tail");
     assert.match(subagentPage, /← main/, "subagent detail must use the structured transcript renderer");
     assertSubagentMetadata(subagentPage, "40-row subagent detail");
-    assert.deepEqual(transcriptRows(subagentPage), rowRange(18, 30), "a 40-row terminal shows the newest transcript rows that fit below the metadata");
+    // Assignment revision/reason/process/evidence occupy four additional rows.
+    // Metadata always renders; latest 25 is a cap on the remaining transcript space.
+    assert.deepEqual(transcriptRows(subagentPage), rowRange(22, 30), "a 40-row terminal shows the newest transcript rows that fit below the metadata");
+    assertDetailBounds(subagentPage, 100, 40, "40-row subagent detail");
 
     execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-y", "60"]);
     // A resize repaints the whole pane; wait for the input frame too so the capture is not mid-redraw.
@@ -126,14 +131,29 @@ test("golden path: navigate both providers and read complete Unicode logs withou
     saveScreen("expanded-subagent-detail", expandedPage);
     assertSingleInputFrame(expandedPage, "expanded subagent detail");
     assertSubagentMetadata(expandedPage, "60-row subagent detail");
+    assertDetailBounds(expandedPage, 100, 60, "60-row subagent detail");
     // The 25-row cap includes the transcript's closing fence line, so rows 07-30 are the newest 24 content rows.
     assert.deepEqual(transcriptRows(expandedPage), rowRange(7, 30), "a 60-row terminal fits the whole 25-row cap");
     sendKey("l");
     const shortPage = waitForScreen((screen) => screen.includes("transcript · latest 10 rows") && hasSettledInputFrame(screen));
+    saveScreen("short-subagent-detail", shortPage);
     assertSubagentMetadata(shortPage, "10-row subagent detail");
+    assertDetailBounds(shortPage, 100, 60, "10-row subagent detail");
     assert.deepEqual(transcriptRows(shortPage), rowRange(22, 30), "l switches to the latest 10 rows");
     sendKey("l");
-    waitForScreen((screen) => screen.includes("transcript · latest 25 rows") && screen.includes("transcript-row-07"));
+    const restoredPage = waitForScreen((screen) => screen.includes("transcript · latest 25 rows")
+      && screen.includes("transcript-row-07") && hasSettledInputFrame(screen));
+    saveScreen("restored-subagent-detail", restoredPage);
+    assert.deepEqual(transcriptRows(restoredPage), rowRange(7, 30), "switching back restores the whole 25-row cap");
+    assertDetailBounds(restoredPage, 100, 60, "restored subagent detail");
+    execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-y", "40"]);
+    const shrunkPage = waitForScreen((screen) => screen.split(/\r?\n/).length === 41
+      && screen.includes("transcript · latest 25 rows") && !screen.includes("transcript-row-21")
+      && screen.includes("transcript-row-22") && hasSettledInputFrame(screen));
+    saveScreen("shrunk-subagent-detail", shrunkPage);
+    assertSubagentMetadata(shrunkPage, "resized-back subagent detail");
+    assert.deepEqual(transcriptRows(shrunkPage), rowRange(22, 30), "shrinking back preserves the newest rows without overlap");
+    assertDetailBounds(shrunkPage, 100, 40, "resized-back subagent detail");
 
     sendKey("Down");
     for (const width of [100, 80]) {
@@ -145,6 +165,7 @@ test("golden path: navigate both providers and read complete Unicode logs withou
         && screen.split(/\r?\n/).some((line) => line.trimEnd() === "─".repeat(width)));
       saveScreen(`background-detail-${width}`, taskPage);
       assertSingleInputFrame(taskPage, `background-task detail at ${width} columns`);
+      assertDetailBounds(taskPage, width, 40, `background-task detail at ${width} columns`);
       for (const field of ["provider", "kind", "elapsed", "cwd", "pid", "pgid"]) {
         assert.match(taskPage, new RegExp(`^\\s+${field}\\s+\\S`, "m"), `background-task detail at ${width} columns: ${field} metadata must stay visible`);
       }
@@ -974,7 +995,34 @@ function rowRange(first, last) {
 }
 
 function assertSubagentMetadata(screen, label) {
-  for (const field of ["provider", "id", "model", "elapsed", "tools", "spend", "pid", "pgid"]) {
+  const rows = screen.split(/\r?\n/);
+  const transcriptHeading = rows.findIndex((row) => row.includes("transcript · latest"));
+  assert.ok(transcriptHeading >= 0, `${label}: transcript heading must be visible`);
+  for (const field of ["provider", "id", "model", "revision", "reason", "process", "evidence", "elapsed", "tools", "spend", "pid", "pgid"]) {
     assert.match(screen, new RegExp(`^\\s+${field}\\s+\\S`, "m"), `${label}: ${field} metadata must stay visible`);
+    const matches = rows.flatMap((row, index) => new RegExp(`^\\s+${field}\\s+\\S`).test(row) ? [index] : []);
+    assert.equal(matches.length, 1, `${label}: ${field} metadata must occupy exactly one row`);
+    assert.ok(matches[0] < transcriptHeading, `${label}: ${field} metadata must not overlap the transcript`);
+  }
+  assert.match(screen, /^\s+revision [a-f0-9]{16}\s*$/m);
+  assert.match(screen, /^\s+reason\s+Worker is advancing the assignment\.\s*$/m);
+  assert.match(screen, /^\s+process\s+running; termination unproven\s*$/m);
+  assert.match(screen, /^\s+evidence\s+run:sa_navigator_e2e_\d+:output\.log, run:sa_navigator_e2e_\d+:meta\.json\s*$/m);
+}
+
+function assertDetailBounds(screen, width, height, label) {
+  const rows = screen.split(/\r?\n/);
+  if (rows.at(-1) === "") rows.pop();
+  assert.equal(rows.length, height, `${label}: pane must retain its exact terminal height`);
+  for (const row of rows) assert.ok(visibleWidth(row) <= width, `${label}: row exceeds ${width} columns: ${row}`);
+  assert.equal(rows.filter((row) => /^━━ /u.test(row)).length, 1, `${label}: exactly one title must be visible`);
+  assertSingleInputFrame(screen, label);
+  const inputTop = rows.findIndex((row) => /^─{20,}$/u.test(row));
+  const railTop = rows.findIndex((row) => row.trim() === "subagents");
+  assert.ok(railTop > 0 && railTop < inputTop, `${label}: rail and input must remain below the detail`);
+  for (const [index, row] of rows.entries()) {
+    if (/transcript-row-\d{2}|GOLDEN_LOG_(?:BEGIN|END)/.test(row)) {
+      assert.ok(index < railTop, `${label}: transcript/log must not overlap the rail or input`);
+    }
   }
 }
