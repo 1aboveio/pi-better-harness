@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.45.1] - 2026-11-12
+
+### Fixed
+
+- Bundle Background Tasks 0.15.1 to stop unrelated sessions repeatedly claiming and releasing pending parent notifications, reducing shared SQLite writes and lock contention. (#722)
+
+## [pi-better-background-tasks@0.15.1] - 2026-11-12
+
+### Fixed
+
+- Check the active parent session, workspace, branch, and notification channel before claiming pending deliveries. Inactive notifications stay pending until their owner returns instead of causing repeated claim/release transactions on every reconciliation pass. (#722)
+
 ## [pi-better-harness@0.45.0] - 2026-11-12
 
 ### Changed
