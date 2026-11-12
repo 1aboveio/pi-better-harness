@@ -25,6 +25,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(__dirname);
@@ -205,6 +206,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
     };
 
     const pi = {
+        events: new EventEmitter(),
         registerTool(tool) { tools.set(tool.name, tool); },
         registerCommand(name, command) { commands.set(name, command); },
         on(event, fn) { handlers[event] = fn; },
@@ -255,6 +257,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
         closedOutcomes,
         ui,
         ctx,
+        pi,
         /** Seed a visible run owned by this parent. */
         seedRun(overrides = {}) {
             const id = trackDisk(overrides.id ?? `sa_t47_ext_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
@@ -306,6 +309,28 @@ describe("registered extension path: main-window navigator actions", () => {
             try { rmSync(registry.runDir(id), { recursive: true, force: true }); } catch { /* best-effort */ }
         }
         try { rmSync(RUNTIME, { recursive: true, force: true }); } catch { /* best-effort */ }
+    });
+
+    // @covers navigator.incident-presentation
+    it("real startup reconciliation does not send session A's held-record warning to unrelated B", async () => {
+        const workspace = join(RUNTIME, "startup-workspace");
+        mkdirSync(workspace, { recursive: true });
+        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase, sessionId: "startup-B" });
+        nav.ctx.cwd = workspace;
+        const id = nav.seedRun({ id: "sa_historical_startup", cwd: workspace, callbackOrigin: { cwd: workspace, sessionId: "startup-A" } });
+        registry.writeParkRecord(id, { version: 1, phase: "resuming", waitId: "wait-startup", generation: 1,
+            ownerWorkspace: workspace, ownerSessionId: "startup-A", resumedBy: "sa_missing_startup_writer", attemptId: id, parkedAt: 1, updatedAt: 1 });
+        const { createObservedWaitHost } = await import("../../pi-better-background-tasks/src/observed-waits.ts");
+        const host = createObservedWaitHost(nav.pi, { storePath: join(RUNTIME, "startup.sqlite"), supervisorDirectory: join(RUNTIME, "supervisor"), pollMs: 0 });
+        host.start(nav.ctx);
+        try {
+            await nav.start();
+            assert.equal(await waitFor(() => nav.notices.some((n) => n.message.includes("/subagents history"))), true);
+            assert.equal(registry.readParkRecord(id).phase, "held", "global reconciliation still runs");
+            assert.ok(!nav.notices.some((n) => n.message.includes(`Subagent ${id}:`)));
+            assert.ok(nav.notices.some((n) => n.message.includes("/subagents history")));
+            assert.equal(registry.readParkRecord(id).ownerSessionId, "startup-A");
+        } finally { await nav.shutdown(); host.close(); registry.dismissRun(id); rmSync(registry.runDir(id), { recursive: true, force: true }); }
     });
 
     // @covers navigator.incident-presentation

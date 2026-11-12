@@ -239,6 +239,8 @@ import { defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
 import { restrictContextFilesToWorktree } from "./shared-worktree-context.ts";
 
 const SUBAGENT_MODE_ACTIONS: readonly AutocompleteItem[] = [
+    { value: "history", label: "history", description: "Inspect or cancel waits from other sessions" },
+    { value: "history dismiss", label: "history dismiss", description: "Dismiss unchanged historical attention notices" },
     { value: "settings", label: "settings", description: "Open delegation, concurrency, and timing settings" },
     { value: "cap", label: "cap <number>", description: "Set a positive concurrent subagent limit for this session" },
     { value: "tool-wait", label: "tool-wait <minutes>", description: "Set the session tool-wait alert time; 0 turns it off" },
@@ -1447,7 +1449,11 @@ function navigatorCloseRun(id: string) {
     // pending automatic resume instead of pretending to stop a live process.
     if (parkedWaitForRun(id) && cancelParkedForUi) {
         void cancelParkedForUi(id, "closed from the navigator; the automatic resume is cancelled")
-            .then(() => { dismissRun(id); uiCtx?.ui.notify(`Cancelled the pending wait of ${id}. Writer termination may remain unproven.`, "info"); })
+            .then((cancelled) => {
+                if (!cancelled) throw new Error("The pending wait changed; inspect it again.");
+                dismissRun(id);
+                uiCtx?.ui.notify(`Cancelled the pending wait of ${id}. Writer termination may remain unproven.`, "info");
+            })
             .catch((error) => uiCtx?.ui.notify(`Cancellation failed for ${id}: ${String(error)}. The wait remains available for inspection and retry.`, "warning"));
         // The synchronous navigator must retain the row until the durable operation settles.
         return { action: "missing", id };
@@ -3994,25 +4000,23 @@ export default function (pi: ExtensionAPI) {
         enqueueCompletionCallback(pi, id);
     } });
     acceptanceStopToolRef = acceptanceStopTool;
-    // A parked assignment has no live child: `subagent_stop` is the explicit
-    // takeover that cancels its pending automatic resume, so the conversation can
-    // be continued manually. Without this, stop would report "not running" and
-    // leave the automatic resume armed for the same assignment.
+    // A parked attempt may have exited, but its automatic resume is still armed.
+    // Explicit stop must confirm durable cancellation, not just stop a process.
     const acceptanceStopToolWithParked = {
         ...acceptanceStopTool,
         async execute(toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown) {
             const target = (params as { id?: unknown } | undefined)?.id;
             try {
-            if (typeof target === "string" && await cancelParkedForUi?.(target, "cancelled by subagent_stop; the automatic resume is cancelled")) {
-                renderWidget();
-                syncHealthTicker();
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Durably cancelled the pending wait of parked subagent ${target}. Writer termination may remain unproven; ordinary continuation admission still applies.`,
-                    }],
-                };
-            }
+                if (typeof target === "string" && await cancelParkedForUi?.(target, "cancelled by subagent_stop; the automatic resume is cancelled")) {
+                    renderWidget();
+                    syncHealthTicker();
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Durably cancelled the pending wait of parked subagent ${target}. Writer termination may remain unproven; ordinary continuation admission still applies.`,
+                        }],
+                    };
+                }
             } catch (error) {
                 return { isError: true, content: [{ type: "text", text: `Cancellation failed for ${target}: ${String(error)}. The retained wait remains available for inspection and retry.` }] };
             }

@@ -2132,7 +2132,6 @@ export async function cancelParkedWait(
             updateParkRecord(park.runId, {
                 phase: "held",
                 cancelReason: `${reason} (the durable cancellation failed: ${reasonOf(error)})`,
-                cancelledAt: at,
             });
             throw new Error(`Durable cancellation failed: ${reasonOf(error)}`);
         }

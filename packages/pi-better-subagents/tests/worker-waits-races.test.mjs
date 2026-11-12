@@ -553,6 +553,36 @@ test("global reconciliation scopes historical warnings without changing ownershi
     assert.notEqual(durable.phase, "cancelled");
 });
 
+test("cancellation waits for durable cancellation and the deferred writer check before reporting success", async () => {
+    const stack = await startStack();
+    const attemptId = "sa_deferred_cancellation";
+    const seeded = await seedPark(stack, { attemptId, target: "ready" });
+    writeParkedAttempt(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
+    const resumedId = "sa_deferred_writer";
+    registry.writeMeta({ ...registry.readMeta(attemptId), id: resumedId, park: undefined });
+    registry.updateParkRecord(attemptId, { resumedBy: resumedId });
+    let release;
+    let entered;
+    const checking = new Promise((resolve) => { entered = resolve; });
+    const gate = new Promise((resolve) => { release = resolve; });
+    let returned = false;
+    const cancellation = cancelParkedWait(stack.service, parkFor(attemptId, seeded.waitId, seeded.generation), "explicit cancellation", {
+        stopAttempt: async () => { entered(); await gate; return "foreign"; },
+    }).then(() => { returned = true; });
+    await checking;
+    assert.equal(returned, false);
+    const record = readParkRecord(attemptId);
+    const durable = stack.service.listWorkerWaits(backgroundScopeForMeta(registry.readMeta(attemptId), record))
+        .find((wait) => wait.waitId === seeded.waitId);
+    assert.equal(durable.phase, "cancelled");
+    release();
+    await cancellation;
+    assert.equal(returned, true);
+    assert.equal(readParkRecord(attemptId).phase, "cancelled");
+    assert.match(readParkRecord(attemptId).cancelReason, /left running/);
+    assert.ok(!durable.acknowledgement);
+});
+
 test("park finalization uses the worker workspace, not the foreground parent workspace", async () => {
     const stack = await startStack();
     const attemptId = "sa_race_workspace";
