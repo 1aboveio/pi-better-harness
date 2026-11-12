@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.45.2] - 2026-11-13
+
+### Fixed
+
+- Bundle Subagents 0.32.1 and Goal 0.13.1 to share assignment lineage discovery within each Navigator or Goal activity refresh, reducing repeated metadata reads and JSON parsing. (#726, #727)
+
+## [pi-better-subagents@0.32.1] - 2026-11-13
+
+### Fixed
+
+- Read historical assignment metadata once per synchronous Navigator visibility, count, or row rebuild instead of once per displayed run. Each later refresh reads a new snapshot, preserving workspace, assignment, and automatic-resume boundaries. (#726, #727)
+
+## [pi-better-goal@0.13.1] - 2026-11-13
+
+### Fixed
+
+- Share assignment lineage discovery while collecting subagent activity instead of rescanning the run registry for every item. Authoritative observations remain fresh, and subsequent refreshes observe metadata changes. (#726, #727)
+
 ## [pi-better-harness@0.45.1] - 2026-11-12
 
 ### Fixed
