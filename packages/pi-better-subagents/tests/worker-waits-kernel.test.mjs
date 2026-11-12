@@ -47,6 +47,7 @@ import {
     createResumeOrchestration,
     finalizeWorkerParkAfterExit,
     settleResumedAttemptExit,
+    reconcileParkedWaits,
 } from "../worker-waits.ts";
 import * as registry from "../registry.ts";
 import { readParkRecord } from "../registry.ts";
@@ -228,7 +229,7 @@ function writeAttempt(stack, { attemptId, sessionDir, workspace }) {
     return { controlDir, runtime };
 }
 
-for (const transition of ["completed", "paused", "cleared", "replaced", "inactive", ...(sdkOnly ? ["unacknowledged", "recurring", "failed-test"] : [])]) {
+for (const transition of ["completed", "paused", "cleared", "replaced", "inactive", ...(sdkOnly ? ["unacknowledged", "recurring", "failed-test", "outage", "outage-recurring"] : [])]) {
 test(`a real saved worker resumes and acknowledges exact evidence with parent ${transition}`, { timeout: 180_000 }, async (t) => {
     if (!support.supported && !sdkOnly) {
         skipOrFail(t, `kernel sandbox backend unavailable: ${support.reason}`);
@@ -260,7 +261,9 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
     assert.equal(control.code, 0, `the network control must succeed before confinement: ${control.stderr}`);
     assert.equal(networkConnections, 1);
     const { runtime } = writeAttempt(stack, { attemptId, sessionDir, workspace: stack.workspace });
-    const recovery = ["unacknowledged", "recurring"].includes(transition);
+    const outage = transition.startsWith("outage");
+    const recurring = transition === "recurring" || transition === "outage-recurring";
+    const recovery = ["unacknowledged", "recurring"].includes(transition) || outage;
     const binding = { version: 1, assignmentId: `assignment:${attemptId}`,
         owner: { kind: "worker-conversation", sessionId: attemptId, workspace: stack.workspace, branchId: "branch-1", goalId: "original-goal" },
         recipient: { kind: "parent-session", sessionId: "parent-session-1", workspace: stack.workspace, branchId: "branch-1", goalId: "original-goal" } };
@@ -385,7 +388,7 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
 
     // Resume with the real claim fence and a second real confined child.
     stack.events.on(OPERATION_RESUME_ADMISSION_EVENT, () => assert.fail("parent Goal must not gate delegated execution"));
-    const hostCtx = createCtx(stack.workspace, transition === "inactive" ? "unrelated-session" : "parent-session-1");
+    const hostCtx = createCtx(stack.workspace, transition === "inactive" || outage ? "unrelated-session" : "parent-session-1");
     hostCtx.sessionManager.getBranch = () => transition === "cleared" ? [] : [{
         type: "custom", customType: "pi-better-goal", id: "different-branch",
         data: { kind: "set", goal: { goalId: transition === "replaced" ? "new-goal" : "original-goal", status: transition } },
@@ -442,7 +445,7 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
                     ...resumed.handle.env,
                     WORKER_KERNEL_PHASE: "resume",
                     WORKER_KERNEL_FAILED_TEST: transition === "failed-test" ? "1" : "0",
-                    WORKER_KERNEL_UNACK: recovery && (launches === 1 || transition === "recurring") ? "1" : "0",
+                    WORKER_KERNEL_UNACK: recovery && (launches === 1 || recurring) ? "1" : "0",
                     WORKER_KERNEL_WORKSPACE: stack.workspace,
                     WORKER_KERNEL_TASKS: taskIds.join(","),
                     WORKER_KERNEL_WAIT_ID: waitId,
@@ -472,16 +475,25 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
             registry.writeMeta({ ...registry.readMeta(attemptId), id: latest.assignedRunId, park: undefined, assignment: binding,
                 status: "completed", pid: resumedResult.pid, exitCode: 0, endedAt: Date.now(),
                 operations: { ...registry.readMeta(attemptId).operations, resumeLaunchToken: latest.launchToken } });
-            return settleResumedAttemptExit({ attemptId: latest.assignedRunId, service: stack.service, writerLeaseReleased: true });
+            return settleResumedAttemptExit({ attemptId: latest.assignedRunId, service: outage ? undefined : stack.service, writerLeaseReleased: true });
         };
-        assert.equal((await reconcileExit()).waitPhase, "ready");
+        if (outage) {
+            assert.equal((await reconcileExit()).outcome, "deferred");
+            assert.match(readParkRecord(attemptId).heldReason, /unverified/);
+            await reconcileParkedWaits(stack.service, { resume: (candidate) => orchestration.resume(candidate) });
+        } else {
+            assert.equal((await reconcileExit()).waitPhase, "ready");
+            assert.equal(await orchestration.resume({ ...park, record: readParkRecord(attemptId) }), "resumed");
+        }
         assert.equal(stack.store.getWait({ waitId, generation }).acknowledgement, null);
-        assert.equal(await orchestration.resume({ ...park, record: readParkRecord(attemptId) }), "resumed");
         resumedResult = await resumedChild;
         assert.equal(resumedResult.code, 0);
         assert.equal(launches, 2);
-        if (transition === "recurring") {
-            assert.equal((await reconcileExit()).waitPhase, "held");
+        if (recurring) {
+            if (outage) {
+                assert.equal((await reconcileExit()).outcome, "deferred");
+                await reconcileParkedWaits(stack.service, { resume: () => assert.fail("exhausted outage repair must not launch") });
+            } else assert.equal((await reconcileExit()).waitPhase, "held");
             assert.equal(stack.store.getAssignmentOutcome(binding.assignmentId).outcome, "failed");
             assert.equal(stack.store.getAssignmentOutcome(binding.assignmentId).recipient.sessionId, "parent-session-1");
             assert.equal(stack.store.getWait({ waitId, generation }).acknowledgement, null);

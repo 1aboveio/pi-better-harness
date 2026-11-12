@@ -16,6 +16,8 @@ const { commitAssignmentTerminal, outcomeTranscriptReceipt } = await import("../
 const { assignmentFor } = await import("../assignment-projection.mjs");
 const { openStore } = await import("../shared-operation-coordinator/index.ts");
 const { createObservedWaitHost } = await import("../../pi-better-background-tasks/src/observed-waits.ts");
+const { retainObservation, pendingObservations } = await import("../outage-observations.ts");
+const { reconcileParkedWaits } = await import("../worker-waits.ts");
 
 function host(sessionId = "parent", options = {}) {
     const tools = new Map(), handlers = new Map(), entries = options.entries ?? [], sent = [];
@@ -84,6 +86,39 @@ test("ordinary failure uses actual finalizer, callback batcher and result acknow
 
 test("quoted outcome text is not a recipient receipt", () => {
     assert.equal(outcomeTranscriptReceipt([{ id: "quote", type: "message", message: { role: "custom", customType: "background-completion-batch", content: "[outcome:quoted-event]" } }], "quoted-event"), null);
+});
+
+test("terminal commit before outage report receipt replays once and delivery retains pins until exact consumption", async () => {
+    const { store, wait, meta, operationId } = failedAssignment("outage-delivery");
+    const outcome = readOutcome(meta);
+    const claim = store.listResumeClaims({ waitId: wait.waitId })[0];
+    const report = retainObservation(meta, { version: 1, waitId: wait.waitId, generation: 1,
+        attemptId: meta.id, phase: "resuming", resumedBy: claim.attemptId,
+        resumeClaimId: claim.claimId, resumeClaimToken: claim.claimToken, resumeLaunchToken: claim.launchToken,
+        parkedAt: 1, updatedAt: 1 });
+    const inactive = host("unrelated");
+    const background = createObservedWaitHost(inactive.pi, { storePath: coordinatorPath(),
+        supervisorDirectory: join(process.env.TMPDIR, "outage-delivery-supervisor"), pollMs: 0 });
+    try {
+        background.start(inactive.ctx);
+        for (let replay = 0; replay < 2; replay++) await reconcileParkedWaits(background.service,
+            { resume: async () => assert.fail("terminal outcome cannot launch") });
+        assert.equal(pendingObservations().some((entry) => entry.id === report.id), false);
+        assert.equal(readOutcome(meta).eventId, outcome.eventId);
+        await inactive.start(); await getCallbackBatcher(inactive.pi).flush();
+        assert.equal(inactive.sent.length, 0);
+    } finally { background.close(); await inactive.close(); }
+    const parent = host();
+    try {
+        await parent.start(); await getCallbackBatcher(parent.pi).flush();
+        assert.equal(parent.sent.length, 1);
+        assert.ok(store.listEvidencePins({ waitId: outcome.eventId, generation: 1 }).length);
+        await parent.tools.get("subagent_result").execute("inspect", { id: meta.id, operation_id: operationId }, undefined, undefined, parent.ctx);
+        await parent.tools.get("subagent_result").execute("consume", { id: meta.id, outcome_revision: 1, disposition: "consumed", note: "Inspected retained outage evidence" }, undefined, undefined, parent.ctx);
+        assert.equal(store.listEvidencePins({ waitId: outcome.eventId, generation: 1 }).length, 0);
+        assert.equal(store.getWait(wait).acknowledgement, null);
+        assert.equal(store.listResumeClaims({ waitId: wait.waitId })[0].state, "published");
+    } finally { await parent.close(); store.close(); }
 });
 
 test("same-session different branch cannot receive or inspect the outcome", async () => {

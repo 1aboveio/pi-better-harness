@@ -68,6 +68,7 @@ import {
     processStartToken,
     updateParkRecord,
     writeParkRecord,
+    writeMeta,
     type ParkRecord,
     type RunMeta,
 } from "./registry.ts";
@@ -76,6 +77,7 @@ import { realProcessProbe, type ProcessProbe } from "./health.ts";
 import { stopRun } from "./stop.ts";
 
 export type { ParkRecord };
+import { assertObservationStorage, pendingObservations, retainObservation, resolveObservation } from "./outage-observations.ts";
 
 // ---- Background service contract (versioned event bus) --------------------
 
@@ -257,6 +259,7 @@ export interface WorkerWaitView {
     readonly park: boolean;
     /** Cancellation epoch the caller must echo; part of the synchronous release guard. */
     readonly cancelEpoch: number;
+    readonly publishedClaimId?: string | null;
     readonly ownerKind: string;
     readonly continuationNote: string;
     readonly taskIds: readonly string[];
@@ -343,6 +346,7 @@ export interface WorkerOperationService {
     readonly serviceId: string;
     readonly available: true;
     readonly assignmentContinuation?: 1;
+    readonly outageReconciliation?: 1;
     readonly continuationReady: boolean;
     ownsTask(run: WorkerRunScope, taskId: string): boolean;
     launchForWorker(run: WorkerRunScope, input: { kind: "process" | "watch"; params: JsonRecord; policy?: WorkerSandboxAuthority | null }): Promise<WorkerLaunchResult>;
@@ -1052,6 +1056,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
                     throw new OperationBridgeError("checkpoint-invalid", reasonOf(error));
                 }
                 const note = waitNotes.get(`${waitId}:${generation}`);
+                assertObservationStorage();
                 const at = options.now?.() ?? Date.now();
                 // STAGED: the original writer is still alive, so the generation stays
                 // `parking`; Background records the evidence and the exit path proves
@@ -1072,6 +1077,15 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
                     version: 1,
                     waitId,
                     generation,
+                    observedCoordinator: (() => {
+                        try {
+                            const wait = capability.service?.listWorkerWaits({ runId: registration.runId,
+                                conversationId: registration.conversationId, workspace: registration.workspace,
+                                authorityReference: registration.authorityReference }).find((entry) => entry.waitId === waitId && entry.generation === generation);
+                            return wait ? { cancelEpoch: wait.cancelEpoch, dependencies: wait.dependencies.map((entry) => ({
+                                operationId: entry.operationId, terminalRevision: entry.terminalRevision })) } : undefined;
+                        } catch { return undefined; }
+                    })(),
                     phase: "parking",
                     attemptId: registration.attemptId,
                     ...(note ? { continuationNote: note } : {}),
@@ -1338,7 +1352,14 @@ export async function finalizeWorkerParkAfterExit(input: ParkFinalizationInput):
         updateParkRecord(input.runId, { phase: "held", heldReason: reason });
         return { outcome: "held", reason };
     };
-    if (!service) return hold("the Background operation service is unavailable; the park wait cannot be finalized");
+    const unverified = (reason: string): ParkFinalization => {
+        let detail = `Coordinator state is unverified; ${reason}`;
+        try { retainObservation(meta, record); }
+        catch (error) { detail = `Degraded supervision: observation not retained (${reasonOf(error)}); new parking requires durable storage.`; }
+        updateParkRecord(input.runId, { heldReason: detail });
+        return { outcome: "held", reason: detail };
+    };
+    if (!service) return unverified("the Background operation service is unavailable; park finalization awaits compatible supervision");
 
     const scope = backgroundScopeForMeta(meta, record);
     if (!scope) return hold("this run records no conversation workspace for its park wait");
@@ -1386,6 +1407,8 @@ export async function finalizeWorkerParkAfterExit(input: ParkFinalizationInput):
         });
         return { outcome: "parked", wait: view, proof };
     } catch (error) {
+        try { service.listWorkerWaits(scope); }
+        catch { return unverified(`park finalization could not be verified (${reasonOf(error)})`); }
         return hold(`the Background host refused the park checkpoint: ${reasonOf(error)}`);
     }
 }
@@ -2343,6 +2366,14 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             }
             result = { outcome, reason };
         };
+        const retainUnverified = (cause: string): void => {
+            let detail = `Coordinator state is unverified; ${cause}. Awaiting compatible supervision.`;
+            try { retainObservation(park.meta, park.record, attempt); }
+            catch (error) { detail = `Degraded supervision: observation could not be retained (${reasonOf(error)}); new parking requires durable storage.`; }
+            updateParkRecord(park.runId, { heldReason: detail });
+            input.notify?.(`Subagent ${park.runId}: ${detail}`, "warning");
+            result = { outcome: "deferred", reason: detail };
+        };
         // The publication token is what identifies THIS resume of the record.
         const recordedToken = park.record.resumeLaunchToken;
         const attemptToken = attempt?.operations?.resumeLaunchToken;
@@ -2356,7 +2387,7 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             continue;
         }
         if (!input.service) {
-            holdLocally("the Background operation service is unavailable");
+            retainUnverified("the Background operation service is unavailable");
             continue;
         }
         if (typeof input.service.holdFailedResumeForWorker !== "function") {
@@ -2441,6 +2472,10 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
                 durablePhase = input.service.listWorkerWaits(scope)
                     .find((entry) => entry.waitId === park.waitId && entry.generation === park.generation)?.phase;
             } catch { /* durable state unreadable */ }
+            if (!durablePhase) {
+                retainUnverified(`the coordinator could not verify the exit (${reasonOf(error)})`);
+                continue;
+            }
             if (durablePhase === "consumed" || durablePhase === "cancelled") {
                 updateParkRecord(park.runId, { phase: phaseOf(durablePhase) });
                 result = { outcome: "ignored", waitPhase: durablePhase };
@@ -2464,6 +2499,49 @@ export async function reconcileParkedWaits(
     let resumed = 0;
     let held = 0;
     let skipped = 0;
+    if (service?.outageReconciliation === 1) {
+        try {
+            for (const report of pendingObservations()) {
+                const scope = backgroundScopeForMeta(report.meta, report.record);
+                if (!scope) continue;
+                const current = service.listWorkerWaits(scope).find((wait) =>
+                    wait.waitId === report.record.waitId && wait.generation === report.observedRevision.generation);
+                if (!current) continue; // Absence cannot establish consumption or writer exit.
+                if ((current.phase === "resuming" && current.publishedClaimId !== report.record.resumeClaimId)
+                    || (report.coordinatorEvidence && current.cancelEpoch !== report.coordinatorEvidence.cancelEpoch)) {
+                    resolveObservation(report);
+                    continue;
+                }
+                if (current.phase === "consumed" || current.phase === "cancelled") {
+                    const local = readParkRecord(report.meta.id);
+                    if (local?.waitId === current.waitId && local.generation === current.generation) {
+                        updateParkRecord(report.meta.id, { phase: phaseOf(current.phase), heldReason: undefined });
+                    }
+                    resolveObservation(report);
+                    continue;
+                }
+                // Restore missing conversation evidence, never replace a newer local publication.
+                if (!readMeta(report.meta.id)) writeMeta(report.meta, { ifAbsent: true });
+                if (!readParkRecord(report.meta.id)) writeParkRecord(report.meta.id, report.record, { ifAbsent: true });
+                if (report.attempt && !readMeta(report.attempt.id)) writeMeta(report.attempt, { ifAbsent: true });
+                const local = readParkRecord(report.meta.id);
+                if (local?.resumeClaimId !== report.record.resumeClaimId
+                    || local?.resumeLaunchToken !== report.record.resumeLaunchToken) {
+                    resolveObservation(report);
+                    continue;
+                }
+                if (current.phase === "resuming" && report.attempt) {
+                    const replay = await settleResumedAttemptExit({ attemptId: report.attempt.id, service,
+                        ...(options.notify ? { notify: options.notify } : {}) });
+                    if (replay.outcome === "deferred") continue;
+                }
+                updateParkRecord(report.meta.id, { heldReason: undefined });
+                resolveObservation(report);
+            }
+        } catch (error) {
+            options.notify?.(`Degraded supervision: outage replay unavailable (${reasonOf(error)}).`, "warning");
+        }
+    }
     for (const park of parkedWaits()) {
         try {
             if (park.record.phase === "resuming") {
@@ -2497,6 +2575,13 @@ export async function reconcileParkedWaits(
                 }
             }
             if (!service) {
+                let reason = "Coordinator state is unverified; awaiting compatible supervision.";
+                try { retainObservation(park.meta, park.record); }
+                catch (error) {
+                    reason = `Degraded supervision: ${reasonOf(error)}. New parking requires durable storage.`;
+                    options.notify?.(reason, "warning");
+                }
+                updateParkRecord(park.runId, { heldReason: reason });
                 skipped += 1;
                 continue;
             }
@@ -2505,11 +2590,17 @@ export async function reconcileParkedWaits(
                 skipped += 1;
                 continue;
             }
-            const wait = service.listWorkerWaits(scope, { pendingOnly: true })
+            const wait = service.listWorkerWaits(scope)
                 .find((entry) => entry.waitId === park.waitId && entry.generation === park.generation);
             if (!wait) {
-                // The generation was consumed, cancelled or superseded elsewhere.
-                updateParkRecord(park.runId, { phase: "consumed" });
+                // A missing generation is not an interpretation receipt.
+                retainObservation(park.meta, park.record);
+                updateParkRecord(park.runId, { heldReason: "Coordinator generation is unverified; retained observation awaits reconciliation." });
+                skipped += 1;
+                continue;
+            }
+            if (wait.phase === "consumed" || wait.phase === "cancelled") {
+                updateParkRecord(park.runId, { phase: phaseOf(wait.phase), heldReason: undefined });
                 skipped += 1;
                 continue;
             }
@@ -2558,7 +2649,9 @@ export async function reconcileParkedWaits(
             if (phaseOf(wait.phase) !== park.phase) updateParkRecord(park.runId, { phase: phaseOf(wait.phase) });
             skipped += 1;
         } catch (error) {
-            updateParkRecord(park.runId, { phase: "held", heldReason: reasonOf(error) });
+            try { retainObservation(park.meta, park.record, park.record.resumedBy ? readMeta(park.record.resumedBy) : undefined); }
+            catch (storageError) { options.notify?.(`Degraded supervision: observation not retained (${reasonOf(storageError)}).`, "warning"); }
+            updateParkRecord(park.runId, { heldReason: `Coordinator state is unverified (${reasonOf(error)}).` });
             options.notify?.(`Subagent ${park.runId}: wait reconciliation failed (${reasonOf(error)}).`, "warning");
             held += 1;
         }

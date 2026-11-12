@@ -39,7 +39,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PACKAGE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const REPO_ROOT = dirname(dirname(PACKAGE_DIR));
-const REAL_SDK_URL = pathToFileURL(join(REPO_ROOT, "node_modules/@earendil-works/pi-coding-agent/dist/index.js")).href;
+const REAL_SDK_URL = import.meta.resolve("@earendil-works/pi-coding-agent");
 
 const RUNTIME = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "subagent-persistence-")));
 const WORKSPACE = join(RUNTIME, "workspace");
@@ -78,6 +78,7 @@ const {
 } = await import("../continuation.ts");
 const { cleanupStatePath, enforceRegistrySizeCapOnce, runDailyCleanupOnce } = await import("../cleanup.ts");
 const { readRunFailures } = await import("../failures.ts");
+const { inspectOutcome } = await import("../assignment-outcomes.ts");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DURABLE_SESSIONS = join(DURABLE, "sessions");
@@ -89,8 +90,8 @@ after(() => {
 
 // ---- fake `pi` binary (real SDK session writes, no model calls) -----------
 const fakePi = `#!/usr/bin/env node
-const fs = require("node:fs");
-const path = require("node:path");
+import fs from "node:fs";
+import path from "node:path";
 
 (async () => {
     const { SessionManager } = await import(process.env.PI_CONTINUATION_SDK_URL);
@@ -268,7 +269,13 @@ describe("durable native-session persistence", () => {
                 prompt: "INITIAL TASK", clean: true, sandbox: false, cwd: WORKSPACE,
             }, undefined, undefined, h.ctx));
             const meta = await waitTerminal(id);
-            assert.equal(meta.status, "completed");
+            assert.equal(meta.status, "completed", JSON.stringify({ reason: meta.failureReason, log: readFileSync(meta.logPath, "utf8") }));
+            // Terminal outcomes retain evidence until the parent consumes it.
+            if (meta.assignment) {
+                inspectOutcome(meta, { recipient: meta.assignment.recipient });
+                inspectOutcome(meta, { recipient: meta.assignment.recipient, revision: 1,
+                    disposition: "consumed", note: "Inspected persistence fixture result" });
+            }
 
             // New child sessions live in the durable Pi agent directory, not TMPDIR.
             assert.equal(meta.recipe.sessionDir, sessionsDir());

@@ -367,6 +367,8 @@ export interface ParkRecord {
     continuationNote?: string;
     /** Verified saved-conversation checkpoint. */
     checkpoint?: ParkCheckpointIdentity;
+    /** Last verified coordinator evidence; observation only, never admission authority. */
+    observedCoordinator?: { cancelEpoch: number; dependencies: readonly { operationId: string; terminalRevision: number }[] };
     parkedAt: number;
     updatedAt: number;
     /** Why the wait is held instead of continuing. */
@@ -444,13 +446,17 @@ function parseParkRecord(value: unknown): ParkRecord | undefined {
  * The mirror keeps listings, the Goal provider and cleanup from needing a second
  * read; the file remains the authoritative copy for this attempt.
  */
-export function writeParkRecord(id: string, record: ParkRecord): void {
+export function writeParkRecord(id: string, record: ParkRecord, options: { ifAbsent?: boolean } = {}): void {
     if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid run ID.");
     mkdirSync(runDir(id), { recursive: true });
     const path = parkRecordPath(id);
     const temp = join(dirname(path), `.park.${randomBytes(6).toString("hex")}.tmp`);
     writeFileSync(temp, JSON.stringify(record), { mode: 0o600, flag: "wx" });
-    renameSync(temp, path);
+    if (options.ifAbsent) {
+        try { linkSync(temp, path); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return; throw error; }
+        finally { unlinkSync(temp); }
+    } else renameSync(temp, path);
     const meta = readMeta(id);
     if (meta && (meta.park?.phase !== record.phase
         || meta.park?.heldReason !== record.heldReason
@@ -1229,9 +1235,10 @@ export function observeArchivePublication(id: string, error?: unknown): void {
     } catch { /* the journal is best-effort; retaining the run is the safety net */ }
 }
 
-export function writeMeta(meta: RunMeta): void {
+export function writeMeta(meta: RunMeta, options: { ifAbsent?: boolean } = {}): void {
     mkdirSync(runDir(meta.id), { recursive: true });
     withRunMetaLock(meta.id, (owns) => {
+        if (options.ifAbsent && existsSync(metaPathFor(meta.id))) return;
         metaWriteBarrier?.();
         if (!owns()) throw new MetadataLockLost();
         writeMetaFile(meta);

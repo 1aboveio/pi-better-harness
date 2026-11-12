@@ -185,6 +185,7 @@ export interface WaitView {
   readonly park: boolean;
   /** Cancellation epoch the caller must echo when claiming or cancelling. */
   readonly cancelEpoch: number;
+  readonly publishedClaimId?: string | null;
   readonly ownerKind: OwnerIdentity["kind"];
   readonly continuationNote: string;
   readonly taskIds: readonly string[];
@@ -471,6 +472,7 @@ export interface BackgroundOperationService {
   readonly available: true;
   /** True when a verified continuation adapter is registered. */
   readonly assignmentContinuation: 1;
+  readonly outageReconciliation: 1;
   readonly continuationReady: boolean;
   ownsTask(run: WorkerRunScope, taskId: string): boolean;
   launchForWorker(run: WorkerRunScope, input: WorkerLaunchInput): Promise<DurableLaunch>;
@@ -908,6 +910,7 @@ export class ObservedWaitHost {
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS;
     const base = {
       assignmentContinuation: 1 as const,
+      outageReconciliation: 1 as const,
       version: OBSERVED_WAITS_SERVICE_VERSION,
       serviceId: this.serviceId,
       available: true as const,
@@ -3569,6 +3572,7 @@ export class ObservedWaitHost {
       settled: wait.settled,
       park: wait.park !== null,
       cancelEpoch: wait.cancelEpoch,
+      publishedClaimId: store.listResumeClaims({ waitId: wait.waitId, generation: wait.generation, state: "published" })[0]?.claimId ?? null,
       ownerKind: wait.owner.kind,
       continuationNote: wait.continuationNote,
       taskIds: dependencies
