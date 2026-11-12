@@ -3379,6 +3379,12 @@ export class ObservedWaitHost {
       byRecipient.set(key, entry);
     }
     for (const { owner, events } of byRecipient.values()) {
+      // Foreign parents cannot receive a handoff here. Leave their events pending
+      // without taking a write lock on every reconciliation pass.
+      if (owner.kind === "parent-session") {
+        const origin = { cwd: owner.workspace, sessionId: owner.sessionId };
+        if (!this.options.notifyParent || !this.isParentOriginActive(origin, owner.branchId)) continue;
+      }
       if (owner.kind === "worker-conversation" && !this.continuation && this.rpcRuns.size === 0) continue;
       const claimToken = `dispatch_${randomUUID()}`;
       let claimed: OutboxEventRecord[];

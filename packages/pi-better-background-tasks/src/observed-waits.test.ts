@@ -182,6 +182,50 @@ function sandboxPublisher(events: EventEmitter) {
 }
 
 describe("parent durable launches", () => {
+  it.each(["session", "workspace", "branch", "unknown identity", "notification channel"])(
+    "leaves an inactive parent's outbox untouched for a different %s and delivers on return",
+    async (mismatch) => {
+      const root = workspace("foreign-outbox");
+      const store = openStore({ path: join(root, "operations.sqlite") });
+      cleanups.push(() => store.close());
+      const owner = { kind: "parent-session" as const, sessionId: "outbox-owner", workspace: root, branchId: "owner-branch" };
+      store.registerOperation({ operationId: "op", taskId: "fixture-task", launchToken: "token", owner, observer: { kind: "fixture", version: "1" } });
+      store.registerWait({ owner, dependencies: [{ operationId: "op" }], continuationNote: "Inspect result" });
+      store.recordTerminalOutcome({ operationId: "op", owner, eventId: "terminal", outcome: "succeeded", evidence: [{ kind: "summary", ref: "fixture", summary: "done" }] });
+      const ctx = createCtx(
+        mismatch === "workspace" ? join(root, "other") : root,
+        mismatch === "session" ? "other-session" : "outbox-owner",
+        mismatch === "branch" ? "other-branch" : "owner-branch",
+      );
+      if (mismatch === "unknown identity") ctx.sessionManager.getSessionId = () => { throw new Error("unavailable"); };
+      const notifications: ParentNotification[] = [];
+      const options = {
+        storePath: join(root, "operations.sqlite"), supervisorDirectory: join(root, "supervisor"), pollMs: 0,
+      };
+      const notifyParent = (notification: ParentNotification, delivery: ParentDelivery) => { notifications.push(notification); delivery.delivered(); };
+      let host = createObservedWaitHost(createHarness().pi, { ...options,
+        ...(mismatch === "notification channel" ? {} : { notifyParent }),
+      });
+      cleanups.push(() => host.close());
+      host.start(ctx);
+      await host.reconcileNow();
+      for (let i = 0; i < 10; i++) await host.reconcileNow();
+      expect(store.listOutbox({ state: "pending" }).map(event => event.attempts)).toEqual([0]);
+      expect(notifications).toHaveLength(0);
+
+      if (mismatch === "notification channel") {
+        host.close();
+        host = createObservedWaitHost(createHarness().pi, { ...options, notifyParent });
+      }
+      host.start(createBranchCtx(root, "outbox-owner", ["owner-branch", "descendant"]));
+      await host.reconcileNow();
+      expect(notifications).toHaveLength(1);
+      expect(store.listOutbox({ state: "delivered" }).map(event => event.attempts)).toEqual([1]);
+      await host.reconcileNow();
+      expect(notifications).toHaveLength(1);
+    },
+  );
+
   it("retries reconciliation after coordinator write contention", async () => {
     const root = workspace("store-busy");
     const supervisor = fakeSupervisor(root, "lost");
