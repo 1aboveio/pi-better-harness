@@ -29,7 +29,10 @@ export function repairFailedResume(ctx: StoreContext, input: RepairResumeInput) 
         const key = createHash("sha256").update(JSON.stringify([assignmentId, wait.waitId, wait.generation, fault])).digest("hex");
         const prior = getRow(ctx, "SELECT claim_id FROM assignment_repairs WHERE fault_key = ?", key);
         const terminal = getAssignmentOutcome(ctx, assignmentId);
-        if (terminal) return { phase: "held" as const, repaired: false };
+        if (terminal) {
+            holdFailedResume(ctx, input);
+            return { phase: "held" as const, repaired: false };
+        }
         // Duplicate exit notifications cannot exhaust a repair that has not run.
         if (prior && columnText(prior, "claim_id") === input.claimId) return { phase: wait.phase, repaired: false };
         holdFailedResume(ctx, input);

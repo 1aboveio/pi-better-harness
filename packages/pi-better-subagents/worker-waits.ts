@@ -2394,10 +2394,6 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             holdLocally("this Background host has no proven-exit hold capability yet");
             continue;
         }
-        if (park.record.phase !== "cancelled" && attempt?.assignment && !input.service.repairFailedResumeForWorker) {
-            holdLocally("this Background host does not support bounded autonomous repair");
-            continue;
-        }
         const claimId = park.record.resumeClaimId;
         const claimToken = park.record.resumeClaimToken;
         if (!claimId || !claimToken) {
@@ -2430,7 +2426,14 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             continue;
         }
         try {
-            if (park.record.phase !== "cancelled" && park.meta.operations?.policy?.deadlineAt != null && park.meta.operations.policy.deadlineAt <= at) {
+            const wait = input.service.listWorkerWaits(scope).find((w) => w.waitId === park.waitId && w.generation === park.generation);
+            // A held terminal writer needs proof-only reconciliation, not admission.
+            const reconcileOnly = park.record.phase === "cancelled" || wait?.phase === "held";
+            if (!reconcileOnly && attempt.assignment && !input.service.repairFailedResumeForWorker) {
+                holdLocally("this Background host does not support bounded autonomous repair");
+                continue;
+            }
+            if (!reconcileOnly && park.meta.operations?.policy?.deadlineAt != null && park.meta.operations.policy.deadlineAt <= at) {
                 holdLocally("the assignment-local deadline expired");
                 continue;
             }
@@ -2445,10 +2448,9 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
                 reason,
             };
             let held: { phase: string };
-            if (park.record.phase !== "cancelled" && input.service.repairFailedResumeForWorker && attempt.assignment) {
+            if (!reconcileOnly && input.service.repairFailedResumeForWorker && attempt.assignment) {
                 if (!park.record.checkpoint) throw new Error("Required saved checkpoint is missing");
                 verifyParkCheckpoint({ ...park.record.checkpoint, version: 1, waitId: park.waitId, generation: park.generation });
-                const wait = input.service.listWorkerWaits(scope).find((w) => w.waitId === park.waitId && w.generation === park.generation);
                 if (!wait) throw new Error("Required authoritative wait history is missing");
                 held = input.service.repairFailedResumeForWorker(scope, { ...exitInput,
                     checkpointId: `park:${park.record.attemptId}`,
@@ -2628,7 +2630,7 @@ export async function reconcileParkedWaits(
                 skipped += 1;
                 continue;
             }
-            if (wait.phase === "resuming") {
+            if (wait.phase === "resuming" || (wait.phase === "held" && park.record.resumedBy)) {
                 // A published attempt owns this generation. If it already ended (or
                 // its record vanished), the unconsumed generation is settled
                 // explicitly; nothing else may resume or mirror it.
