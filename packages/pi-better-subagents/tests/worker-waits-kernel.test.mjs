@@ -398,6 +398,8 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
     let resumedChild;
     let launches = 0;
     let latest;
+    let signalSecondLaunch;
+    const secondLaunchStarted = new Promise((resolve) => { signalSecondLaunch = resolve; });
     const orchestration = createResumeOrchestration({
         pi: stack.pi,
         service: () => stack.service,
@@ -453,6 +455,7 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
                     WORKER_KERNEL_REVISIONS: JSON.stringify(Object.fromEntries(operations.map((operation) => [operation.operationId, operation.terminalRevision]))),
                 },
             });
+            if (launches === 2) signalSecondLaunch();
         },
     });
     stack.service.registerContinuationAdapter(orchestration.adapter);
@@ -481,6 +484,11 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
             assert.equal((await reconcileExit()).outcome, "deferred");
             assert.match(readParkRecord(attemptId).heldReason, /unverified/);
             await reconcileParkedWaits(stack.service, { resume: (candidate) => orchestration.resume(candidate) });
+            // The registered adapter can win admission concurrently with this replay.
+            await new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error(`Second launch did not arrive: ${JSON.stringify(readParkRecord(attemptId))}`)), 10_000);
+                secondLaunchStarted.then(() => { clearTimeout(timer); resolve(); });
+            });
         } else {
             assert.equal((await reconcileExit()).waitPhase, "ready");
             assert.equal(await orchestration.resume({ ...park, record: readParkRecord(attemptId) }), "resumed");
@@ -488,7 +496,7 @@ test(`a real saved worker resumes and acknowledges exact evidence with parent ${
         assert.equal(stack.store.getWait({ waitId, generation }).acknowledgement, null);
         resumedResult = await resumedChild;
         assert.equal(resumedResult.code, 0);
-        assert.equal(launches, 2);
+        assert.equal(launches, 2, JSON.stringify({ record: readParkRecord(attemptId), wait: stack.store.getWait({ waitId, generation }), outcome: stack.store.getAssignmentOutcome(binding.assignmentId) }));
         if (recurring) {
             if (outage) {
                 assert.equal((await reconcileExit()).outcome, "deferred");
