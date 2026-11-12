@@ -130,7 +130,7 @@ describe("buildNavigatorDetail", () => {
         assert.equal(waiting.status, "waiting", "the attempt exiting must not look like a completed assignment");
         assert.equal(waiting.park.continuationNote, "Read build evidence");
         parked.park.phase = "consumed";
-        assert.equal(buildNavigatorDetail(id, deps).status, "completed");
+        assert.equal(buildNavigatorDetail(id, deps).status, "waiting", "a consumed cache cannot establish completion");
         assert.equal(buildNavigatorDetail(id, deps).park, undefined);
     });
     // @covers navigator.detail

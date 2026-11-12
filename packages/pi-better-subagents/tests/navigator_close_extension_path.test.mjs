@@ -357,11 +357,11 @@ describe("registered extension path: main-window navigator actions", () => {
             registry.writeMeta({ ...registry.readMeta(id), status: "lost", lostAt: now });
             refreshBackgroundWorkNavigator(nav.ctx);
             const lostRail = renderWidgetValue(nav.lastWidget("background-work-list"));
-            assert.match(lostRail, /quiet-failure\s+lost/);
+            assert.match(lostRail, /quiet-failure\s+waiting/);
             assert.doesNotMatch(lostRail, /Action required|ORIGINAL_CHILD_ERROR|model error|MODEL_FAILURE/);
             rmSync(logPath);
             const unreadable = renderRegisteredWorkDetail("subagents", id, 120).detail;
-            assert.equal(unreadable.status, "lost");
+            assert.equal(unreadable.status, "waiting");
             assert.match(unreadable.transcriptDiagnostic, /Log unreadable/);
             assert.doesNotMatch(unreadable.transcriptDiagnostic, /Action required|active failure observations/);
         } finally {

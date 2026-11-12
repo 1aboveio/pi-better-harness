@@ -170,6 +170,19 @@ pi remove npm:pi-better-subagents
 
 ## More Detail
 
+### Assignment Progress
+
+Result tools, lists, navigation and Goal activity share five assignment states:
+Running, Waiting, Completed, Failed and Cancelled. Process status is separate.
+An exited attempt can still be Waiting, and its output remains readable.
+Consuming a dependency wait does not by itself complete the assignment.
+
+The projection exposes an opaque semantic `revision`, readable `reason`, attempt
+identity, process status, termination evidence and retained evidence references.
+Compare revisions for equality; unchanged observations keep the same revision.
+Unavailable or unsupported coordinator reads report Waiting with an unverified
+reason. See the [projection contract](../../docs/adr/0022-assignment-progress-projection.md).
+
 - Repository: https://github.com/1aboveio/pi-better-harness
 - Detailed notes: https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md
 - License: https://github.com/1aboveio/pi-better-harness/blob/main/LICENSE

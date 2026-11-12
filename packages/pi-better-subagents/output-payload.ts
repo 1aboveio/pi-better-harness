@@ -8,6 +8,7 @@
  * omitted. Every cursor is bound to the selected session scope.
  */
 
+import { assignmentFor, assignmentDiagnostic } from "./assignment-projection.mjs";
 import { statSync } from "node:fs";
 import {
     assemblePriorityEnvelope,
@@ -192,6 +193,7 @@ export function ownership(meta: RunMeta, origin: RunCallbackOrigin, parentPid = 
 /** Lifecycle metadata and log identity. A metadata-only transition is a change. */
 function contentRevisionFor(id: string, meta: RunMeta): string {
     return lifecycleContentRevision([
+        assignmentFor(meta, effectiveStatus(meta)).revision,
         meta.status,
         String(effectiveStatus(meta)),
         meta.exitCode ?? null,
@@ -199,6 +201,17 @@ function contentRevisionFor(id: string, meta: RunMeta): string {
         meta.lifecycleClassification ?? null,
         meta.failureReason ?? null,
     ], logPathFor(id));
+}
+
+function assignmentLabel(meta: RunMeta): string {
+    const a = assignmentFor(meta, effectiveStatus(meta));
+    return a.state;
+}
+
+function projectionDiagnostic(meta: RunMeta): string {
+    const assignment = assignmentFor(meta, effectiveStatus(meta));
+    return meta.operations || meta.park || assignment.state !== effectiveStatus(meta)
+        ? assignmentDiagnostic(assignment) : "";
 }
 
 function elapsedFor(meta: RunMeta, now = Date.now()): string {
@@ -523,10 +536,11 @@ export function assembleRunningResult(
     scopeKey = defaultScope(),
     timingLine?: string,
 ): string {
+    timingLine = [timingLine, projectionDiagnostic(meta)].filter(Boolean).join("\n");
     const st = String(effectiveStatus(meta));
     const terminal = st !== "running" && st !== "orphaned";
     const ctx = callContext(id, meta, request, scopeKey, "subagent_result", terminal);
-    const identity = `[${id} · ${st} · ${elapsedFor(meta)}]`;
+    const identity = `[${id} · ${assignmentLabel(meta)} · ${elapsedFor(meta)}]`;
     if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
@@ -554,7 +568,7 @@ function assembleRaw(
 ): string {
     const terminal = status !== "running" && status !== "orphaned";
     const ctx = callContext(id, meta, request, scopeKey, surface === "result" ? "subagent_result" : "subagent_output", terminal);
-    const identity = outputIdentity(id, status, elapsedFor(meta));
+    const identity = outputIdentity(id, assignmentLabel(meta), elapsedFor(meta));
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
     const run = parseRun(id);
@@ -565,7 +579,7 @@ function assembleRaw(
         identity: `${identity} raw retained log${wantsTail(request) ? " · newest first" : ""}`,
         // Raw evidence keeps whole excerpts and evidence paths.
         failure: failureSection(ctx, continuing ? CONTINUATION_FAILURE_BYTES : 1024, "full"),
-        diagnostics: joinSections([changeDiagnostics(ctx), optInFacts(run, request), parserDiagnostics(run)]),
+        diagnostics: joinSections([projectionDiagnostic(meta), changeDiagnostics(ctx), optInFacts(run, request), parserDiagnostics(run)]),
         gaps: logGaps(id),
         verbatim: (remaining) => rawPage(ctx, pageCursorFor(request.cursor), remaining),
         verbatimReserve: Math.floor(maxBytes / 2),
@@ -580,11 +594,12 @@ export function assembleSubagentOutput(
     healthLine = "",
     scopeKey = defaultScope(),
 ): string {
+    healthLine = [healthLine, projectionDiagnostic(meta)].filter(Boolean).join("\n");
     const st = String(effectiveStatus(meta));
     if (isRawMode(request.mode) || cursorKind(request.cursor) === "f") return assembleRaw(id, meta, st, request, "output", scopeKey);
     const terminal = st !== "running" && st !== "orphaned";
     const ctx = callContext(id, meta, request, scopeKey, "subagent_output", terminal);
-    const identity = outputIdentity(id, st, elapsedFor(meta));
+    const identity = outputIdentity(id, assignmentLabel(meta), elapsedFor(meta));
     if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
@@ -633,9 +648,10 @@ export function assembleOrphanedResult(
     request: PayloadRequest = {},
     scopeKey = defaultScope(),
 ): string {
+    healthLine = [healthLine, projectionDiagnostic(meta)].filter(Boolean).join("\n");
     if (isRawMode(request.mode) || cursorKind(request.cursor) === "f") return assembleRaw(id, meta, "orphaned", request, "result", scopeKey);
     const ctx = callContext(id, meta, request, scopeKey, "subagent_result", false);
-    const identity = `[${id} · orphaned · ${elapsedFor(meta)}]`;
+    const identity = `[${id} · ${assignmentLabel(meta)} · ${elapsedFor(meta)}]`;
     if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
@@ -677,13 +693,14 @@ export function assembleSubagentResult(
     healthLine = "",
     scopeKey = defaultScope(),
 ): string {
+    healthLine = [healthLine, projectionDiagnostic(meta)].filter(Boolean).join("\n");
     const st = effectiveStatus(meta);
     if (isRawMode(request.mode) || cursorKind(request.cursor) === "f") return assembleRaw(id, meta, String(st), request, "result", scopeKey);
     const ctx = callContext(id, meta, request, scopeKey, "subagent_result", true);
     const exit = meta.exitCode === undefined ? "?" : String(meta.exitCode);
     const run = parseRunForLifecycle(id);
     const lifecycle = resolveLifecycle(meta, run);
-    const identity = resultIdentity(id, String(st), exit, elapsedFor(meta), lifecycle.classification);
+    const identity = resultIdentity(id, assignmentLabel(meta), exit, elapsedFor(meta), lifecycle.classification);
     if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
@@ -849,6 +866,7 @@ export function listRevisions(
         contentRevision: revisionOf(items.map((item) => [
             item.id,
             item.status,
+            item.meta ? assignmentFor(item.meta, effectiveStatus(item.meta)).revision : null,
             item.meta?.status ?? null,
             item.meta?.exitCode ?? null,
             item.meta?.endedAt ?? null,

@@ -1321,7 +1321,9 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
             const meta = writeFixtureMeta({ status: "lost", artifactLine: artifact });
             const res = await h.tools.get("subagent_result").execute("tc", { id: meta.id }, undefined, undefined, h.ctx);
             const out = toolText(res);
-            assert.match(out, new RegExp(`\\[${meta.id} · lost ·`), `must open a terminal result head with lost:\n${out}`);
+            assert.match(out, new RegExp(`\\[${meta.id} · waiting ·`), `lost process evidence must not complete the assignment:\n${out}`);
+            assert.equal(res.details.assignment.processStatus, "lost");
+            assert.equal(res.details.assignment.termination, "unproven");
             assert.match(out, /Run is lost: no related process remains/i, `must include the lost diagnostic:\n${out}`);
             assert.match(out, /[Bb]est-available/i, `must point at best-available artifacts:\n${out}`);
             assert.match(out, new RegExp(artifact), `must surface available log artifacts:\n${out}`);
@@ -1358,7 +1360,8 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
 
             const res = await h.tools.get("subagent_list").execute("tc", {}, undefined, undefined, h.ctx);
             const out = toolText(res);
-            assert.match(out, new RegExp(`${orphaned.id}[^\n]*\\[orphaned\\]`), `default list must show orphaned runs:\n${out}`);
+            assert.match(out, new RegExp(`${orphaned.id}[^\n]*\\[waiting\\]`), `default list must show orphaned assignments as waiting:\n${out}`);
+            assert.match(out, /Process orphaned; termination unproven/);
             assert.match(out, new RegExp(`${completed.id}[^\n]*\\[completed\\]`), `default list still shows completed runs:\n${out}`);
             // Non-terminal: list is display-only here; result path (above) is the
             // gate that refuses finalization. The list row must not relabel

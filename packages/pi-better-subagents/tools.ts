@@ -14,6 +14,7 @@
  * far as `execute` is concerned).
  */
 
+import { assignmentFor } from "./assignment-projection.mjs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus, type RunCallbackOrigin, type RunMeta, type RunStatus } from "./registry.ts";
 import { buildSubagentResultPayload } from "./finalization.ts";
@@ -351,7 +352,7 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 params: p,
                 cwd,
                 now,
-                statusOf: effectiveStatus,
+                statusOf: (meta: RunMeta) => assignmentFor(meta, effectiveStatus(meta)).state,
                 healthById,
             });
             const items = collected.items as Array<{ meta: RunMeta; status: string }>;
@@ -372,6 +373,7 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 render: (row) => {
                     const incident = incidents.get(row.meta.id);
                     return formatSubagentListRow(row.meta, {
+                        processStatus: effectiveStatus(row.meta),
                         status: row.status,
                         now,
                         health: healthById(row.meta.id),
@@ -434,7 +436,7 @@ export function subagentOutputTool(Type: TypeModule, baseSession: SubagentToolSe
             const healthLine = diagnosticLines(access.meta);
             const result = text(assembleSubagentOutput(p.id, access.meta, p, healthLine, scopeKey));
             const details = permissionDetails(p.id, budgetFor("log", p.maxBytes));
-            return Object.keys(details).length ? { ...result, details } : result;
+            return { ...result, details: { ...details, assignment: assignmentFor(access.meta, effectiveStatus(access.meta)) } };
         },
     } as ToolDefinition;
 }
@@ -479,7 +481,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
             const meta = access.meta;
             const resultText = (body: string) => {
                 const result = subagentResultText(body);
-                return { ...result, details: { ...result.details, ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
+                return { ...result, details: { ...result.details, assignment: assignmentFor(meta, effectiveStatus(meta)), ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
             };
             const scopeKey = requestScopeKey(p, session);
             const st = effectiveStatus(meta);
@@ -488,11 +490,11 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
                 if (st === "orphaned") {
                     return resultText(assembleOrphanedResult(p.id, meta, healthLine, p, scopeKey));
                 }
-                return resultText(assembleRunningResult(p.id, meta, p, scopeKey, describeTiming({ ...meta, status: "running" })?.line));
+                return resultText(assembleRunningResult(p.id, meta, p, scopeKey, healthLine));
             }
             const body = buildSubagentResultPayload(p.id, p, healthLine, scopeKey);
             if (body === null) {
-                return resultText(assembleRunningResult(p.id, meta, p, scopeKey, describeTiming({ ...meta, status: "running" })?.line));
+                return resultText(assembleRunningResult(p.id, meta, p, scopeKey, healthLine));
             }
             return resultText(body);
         },

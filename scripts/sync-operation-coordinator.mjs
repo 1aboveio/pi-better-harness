@@ -16,4 +16,11 @@ for(const target of targets){
   writeFileAtomically(join(target,'src',name),'// Generated from packages/operation-coordinator/src/'+name+'. Do not edit directly.\n'+readFileSync(join(source,'src',name),'utf8'));
  }
  writeFileAtomically(join(target,'index.ts'),'// Generated from packages/operation-coordinator/index.ts. Do not edit directly.\n'+readFileSync(join(source,'index.ts'),'utf8'));
+ writeFileAtomically(join(target,'assignment-observation.mjs'),'// Generated from packages/operation-coordinator/assignment-observation.mjs. Do not edit directly.\n'+readFileSync(join(source,'assignment-observation.mjs'),'utf8'));
 }
+writeFileAtomically(join(root,'packages/pi-better-goal/src/shared-assignment-observation.mjs'),
+ '// Generated from packages/operation-coordinator/assignment-observation.mjs. Do not edit directly.\n'+readFileSync(join(source,'assignment-observation.mjs'),'utf8'));
+writeFileAtomically(join(root,'packages/pi-better-goal/src/shared-assignment-projection.mjs'),
+ '// Generated from packages/pi-better-subagents/assignment-projection.mjs. Do not edit directly.\n'+readFileSync(join(root,'packages/pi-better-subagents/assignment-projection.mjs'),'utf8').replace('./shared-operation-coordinator/assignment-observation.mjs','./shared-assignment-observation.mjs'));
+writeFileAtomically(join(root,'packages/pi-better-goal/src/shared-assignment-projection.d.mts'),
+ '// Generated from packages/pi-better-subagents/assignment-projection.d.mts. Do not edit directly.\n'+readFileSync(join(root,'packages/pi-better-subagents/assignment-projection.d.mts'),'utf8'));

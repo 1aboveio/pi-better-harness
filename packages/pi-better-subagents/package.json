@@ -54,6 +54,7 @@
   "files": [
     "*.ts",
     "*.mjs",
+    "*.d.mts",
     "shared-operation-coordinator/**/*.ts",
     "config.json",
     "README.md",

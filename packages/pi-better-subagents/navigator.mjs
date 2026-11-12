@@ -24,6 +24,7 @@
  * with visible-width-aware truncation.
  */
 
+import { assignmentFor } from "./assignment-projection.mjs";
 import {
     formatNavigatorHealthFacts,
     statusThemeColor,
@@ -41,6 +42,11 @@ export const CLOSE_ARM_MS = 3000;
 export const NAVIGATOR_STATUS_KEY = "subagents-nav";
 
 export const CLOSE_CONFIRM_STATUS_KEY = "subagents-close";
+
+function isStoppableView(row) {
+    const processStatus = row?.assignment?.processStatus ?? row?.attemptStatus ?? row?.status;
+    return processStatus === "running" || processStatus === "orphaned";
+}
 
 /** Legacy footer helpers no longer write status. */
 export function navigatorFooterHint(count) {
@@ -64,7 +70,7 @@ export function applyNavigatorFooter(ui, count) {
 export function closeConfirmHint(row) {
     if (!row) return null;
     const label = (row.name != null && String(row.name).length > 0) ? String(row.name) : String(row.id);
-    const stoppable = row.status === "running" || row.status === "orphaned";
+    const stoppable = isStoppableView(row);
     return stoppable ? `x again to stop ${label}` : `x again to dismiss ${label}`;
 }
 
@@ -182,20 +188,18 @@ export function pendingNavigatorPark(meta) {
     return park?.version === 1 && ["parking", "waiting", "ready", "resuming", "held"].includes(park.phase) ? park : undefined;
 }
 
-function navigatorDisplayStatus(meta, status) {
-    return status === "running" || status === "orphaned" ? status : pendingNavigatorPark(meta)?.phase ?? status;
-}
-
 export function buildNavigatorRows(metas, deps) {
     const now = deps.now ?? Date.now();
     return metas.map((m) => {
-        const status = navigatorDisplayStatus(m, deps.effectiveStatus(m));
+        const assignment = assignmentFor(m, deps.effectiveStatus(m));
+        const status = assignment.state;
         const health = typeof deps.healthFor === "function" ? deps.healthFor(m) : undefined;
         const effort = typeof deps.effortFor === "function" ? deps.effortFor(m) : (m.effort ?? m.modelEffort);
         const tool = typeof deps.toolFor === "function" ? (deps.toolFor(m) || "") : "";
         return {
             id: m.id,
             name: m.name,
+            assignment,
             status,
             model: deps.shortModel(m.model),
             // Optional effort stays adjacent to model when the host exposes it.
@@ -332,7 +336,7 @@ export function buildNavigatorLines(state, opts = {}) {
     const rows = state.rows ?? [];
     const lines = [commandSheetRule(`Subagents · ${rows.length}`, width)];
     const selected = rows.length > 0 ? rows[state.selected] : null;
-    const stoppable = selected?.status === "running" || selected?.status === "orphaned";
+    const stoppable = isStoppableView(selected);
     const action = stoppable ? "x stop" : (selected ? "x dismiss" : null);
     lines.push(`   ${["↑↓ select", "Enter view", action, "Esc close"].filter(Boolean).join(" · ")}`);
     lines.push("");
@@ -383,7 +387,8 @@ export function buildNavigatorDetail(id, deps) {
     const now = deps.now ?? Date.now();
     const parsed = deps.parseRun(id);
     const toolCalls = parsed.toolCalls ?? [];
-    const status = navigatorDisplayStatus(meta, deps.effectiveStatus(meta));
+    const assignment = assignmentFor(meta, deps.effectiveStatus(meta));
+    const status = assignment.state;
     const running = status === "running" || status === "orphaned";
     const health = typeof deps.healthFor === "function" ? deps.healthFor(meta) : undefined;
     const effortRaw = typeof deps.effortFor === "function"
@@ -395,6 +400,7 @@ export function buildNavigatorDetail(id, deps) {
         role: meta.catalog?.roleName || (meta.catalog?.roleId ? String(meta.catalog.roleId).replace(/^role\./, "") : undefined) || undefined,
         park: pendingNavigatorPark(meta),
         attemptStatus: deps.effectiveStatus(meta),
+        assignment,
         status,
         model: deps.shortModel(meta.model),
         effort: effortRaw ? String(effortRaw) : undefined,
@@ -475,11 +481,17 @@ export function buildDetailLines(detail, opts = {}) {
     const statusRaw = String(detail.status ?? "?");
     const statusText = colorize ? fg(statusThemeColor(statusRaw), statusRaw) : statusRaw;
 
-    const stoppable = detail.status === "running" || detail.status === "orphaned";
+    const stoppable = isStoppableView(detail);
     const action = stoppable ? "x stop" : "x dismiss";
     lines.push(`   ← back · ${action} · Esc close`);
     lines.push("");
     lines.push(`   status  ${statusText}`);
+    if (detail.assignment) {
+        lines.push(`   revision ${detail.assignment.revision}`);
+        lines.push(`   reason ${detail.assignment.reason}`);
+        lines.push(`   process ${detail.assignment.processStatus}; termination ${detail.assignment.termination}`);
+        for (const ref of detail.assignment.evidence) lines.push(`   evidence ${ref}`);
+    }
     lines.push(`   id      ${detail.id ?? "?"}`);
     if (detail.role) lines.push(`   role    ${detail.role}`);
 
@@ -509,6 +521,7 @@ export function buildDetailLines(detail, opts = {}) {
     // detail header already shows a non-running effective status (legacy
     // dead-running metadata → effective "exited" must read as terminal).
     let live = h?.process?.liveness;
+    if (detail.assignment) live = `${detail.assignment.processStatus}; termination ${detail.assignment.termination}`;
     if (!live || (detail.status !== "running" && live === "supervised")) {
         live = detail.status === "orphaned" ? "orphaned"
             : detail.status === "lost" ? "lost"
@@ -766,7 +779,7 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
             if (detailId == null) return null;
             // Prefer live detail snapshot (status may have changed while armed).
             if (detail && detail.id === detailId) {
-                return { id: detail.id, name: detail.name, status: detail.status };
+                return { id: detail.id, name: detail.name, status: detail.status, assignment: detail.assignment, attemptStatus: detail.attemptStatus };
             }
             const fromList = (state.rows ?? []).find((r) => r && r.id === detailId);
             return fromList ?? { id: detailId, name: detailId, status: "completed" };
