@@ -58,6 +58,9 @@ contract. This neither reopens the outcome nor spends repair allowance or
 acknowledges dependency interpretation. Held terminal waits remain observable
 for this proof-only reconciliation, including after parent outcome consumption.
 Storage v4 adds durable repair records; older hosts must refuse that version.
+Read-only assignment observers support v4's unchanged wait/outcome fields using
+an explicit version allowlist. Observation never creates or migrates storage;
+unknown versions or unavailable required fields remain unverified.
 The outage observation journal remains #712's responsibility.
 
 ## Terminal Assignment Outcomes (#710)
