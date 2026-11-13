@@ -959,6 +959,11 @@ export interface NormalizedWaitResult {
     continuationNote?: string;
 }
 
+/** Settled dependencies do not bypass a checkpoint while the writer is still parking. */
+export function requiresParkCheckpoint(wait: NormalizedWaitResult): boolean {
+    return wait.park && (wait.phase === "parking" || !wait.settled);
+}
+
 export function normalizeWaitForOperationsResult(value: unknown): { ok: true; result: NormalizedWaitResult } | { ok: false; message: string } {
     if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, message: "wait result must be an object" };
     const record = value as JsonRecord;

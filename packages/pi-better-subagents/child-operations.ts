@@ -51,6 +51,7 @@ import {
     findBridgeEnvironmentKey,
     isLaunchTool,
     normalizeWaitForOperationsResult,
+    requiresParkCheckpoint,
     parseBridgeEndpoint,
     validateJsonSchemaSupport,
     redactSecret,
@@ -1012,7 +1013,7 @@ export function installChildOperationBridge(
                 toolCallId,
             },
         };
-        const shouldPark = normalized.result.park && !normalized.result.settled;
+        const shouldPark = requiresParkCheckpoint(normalized.result);
         if (shouldPark) {
             if (!state.descriptor?.capabilities.parking) {
                 throw new OperationToolError("the parent asked this worker to park without a parking capability");
