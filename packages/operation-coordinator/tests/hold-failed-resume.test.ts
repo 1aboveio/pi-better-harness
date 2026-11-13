@@ -214,8 +214,24 @@ describe("holding a failed published resume", () => {
             note: "interpreted",
             terminalRevisions: [{ operationId: "op-hold", revision: 1 }],
         });
-        expectStoreError(() => consumed.store.holdFailedResume(holdInput(consumedClaim)), "wait-phase");
-        assert.equal(consumed.store.getWait({ waitId: "wait-hold", generation: 1 })?.phase, "consumed");
+        const receipt = consumed.store.getWait({ waitId: "wait-hold", generation: 1 });
+        assert.equal(consumed.store.listResumeClaims({ waitId: "wait-hold", state: "published" }).length, 1,
+            "acknowledgement does not prove the writer has exited");
+        expectStoreError(() => consumed.store.holdFailedResume(holdInput(consumedClaim, { claimToken: "forged" })), "claim-state");
+        expectStoreError(() => consumed.store.holdFailedResume(holdInput(consumedClaim, { attemptId: "other" })), "claim-state");
+        expectStoreError(() => consumed.store.holdFailedResume(holdInput(consumedClaim, { launchToken: "other" })), "claim-state");
+        expectStoreError(() => consumed.store.holdFailedResume(holdInput(consumedClaim,
+            { proof: { writerPidGone: false, writerLeaseReleased: true } })), "resume-proof");
+        expectStoreError(() => consumed.store.holdFailedResume(holdInput(consumedClaim,
+            { proof: { writerPidGone: true, writerLeaseReleased: false } })), "resume-proof");
+        const released = consumed.store.holdFailedResume(holdInput(consumedClaim));
+        assert.equal(released.applied, true);
+        assert.equal(released.claim.state, "invalidated");
+        assert.deepEqual(released.wait, receipt);
+        assert.equal(consumed.store.holdFailedResume(holdInput(consumedClaim)).applied, false);
+        consumed.reopen();
+        assert.deepEqual(consumed.store.getWait({ waitId: "wait-hold", generation: 1 }), receipt);
+        assert.equal(consumed.store.listResumeClaims({ waitId: "wait-hold", state: "published" }).length, 0);
 
         const cancelled = createHarness();
         const cancelledClaim = publishedResume(cancelled);

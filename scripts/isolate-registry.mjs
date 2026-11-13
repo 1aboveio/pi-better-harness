@@ -27,6 +27,8 @@ process.env.TEMP = isolated;
 // Native subagent sessions persist independently of TMPDIR. Keep that store
 // private to this test process as well, including any real child it launches.
 process.env.PI_SUBAGENT_DURABLE_DIR = join(isolated, "durable-subagents");
+// Assignment outcomes use the agent directory independently of both registries.
+process.env.PI_CODING_AGENT_DIR = join(isolated, "agent");
 
 function cleanUp() {
   // Only the process that created the directory removes it.

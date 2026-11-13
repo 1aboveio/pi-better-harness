@@ -484,7 +484,7 @@ export interface ReleaseResumeClaimResult {
 }
 
 /**
- * Proof that the published resume attempt can never interpret the generation:
+ * Proof that the published resume attempt can no longer write the conversation:
  * its writer process is gone and its conversation writer lease is free. A live
  * writer or an unverifiable identity must never be passed here.
  */
@@ -499,6 +499,8 @@ export interface ResumeAttemptExitProof {
  * evidence pins stay, and the generation remains visible to its owner. The claim
  * is invalidated (it can never publish again), which is what makes a second
  * automatic attempt impossible.
+ * If interpretation already consumed the wait, exact exit proof only invalidates
+ * the published writer claim and preserves the interpretation receipt.
  */
 export interface HoldFailedResumeInput {
     waitId: string;
@@ -508,7 +510,7 @@ export interface HoldFailedResumeInput {
     attemptId: string;
     launchToken: string;
     proof: ResumeAttemptExitProof;
-    /** Why the attempt never interpreted the generation; retained on both records. */
+    /** Exit reason; a consumed generation's receipt is preserved. */
     reason: string;
 }
 

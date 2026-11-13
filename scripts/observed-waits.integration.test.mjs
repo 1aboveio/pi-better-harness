@@ -1186,10 +1186,14 @@ test("production subagent_spawn launches a real CLI worker that parks, and the p
         assert.equal(consumed.acknowledgement.disposition, "assignment-complete");
         assert.equal(store.getOperation(operationId).terminalOutcome, "succeeded");
 
-        const claims = store.listResumeClaims({ waitId: wait.waitId, generation: wait.generation })
-            .filter((claim) => claim.state === "published");
+        await waitUntil(() => store.listResumeClaims({ waitId: wait.waitId, generation: wait.generation })
+            .every((claim) => claim.state !== "published"), "the exited continuation's writer claim to reconcile");
+        const claims = store.listResumeClaims({ waitId: wait.waitId, generation: wait.generation });
         assert.equal(claims.length, 1);
         assert.equal(claims[0].attemptId, continuation.id);
+        assert.equal(claims[0].state, "invalidated");
+        assert.deepEqual(store.getWait({ waitId: wait.waitId, generation: wait.generation }), consumed,
+            "writer cleanup preserves the worker's interpretation receipt");
 
         const continuationLog = readFileSync(registry.logPathFor(continuation.id), "utf8");
         assert.match(continuationLog, /bg_task_status/);
@@ -1218,7 +1222,7 @@ test("production subagent_spawn launches a real CLI worker that parks, and the p
         await sleep(1_500);
         assert.equal(successors().length, 1, "exactly one continuation attempt");
         assert.equal(store.listResumeClaims({ waitId: wait.waitId, generation: wait.generation })
-            .filter((claim) => claim.state === "published").length, 1);
+            .filter((claim) => claim.state === "published").length, 0);
         assert.deepEqual(host.errors, []);
     } finally {
         try { writeFileSync(releaseFile, "cleanup\n"); } catch { /* ignore */ }

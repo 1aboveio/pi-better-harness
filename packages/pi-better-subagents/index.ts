@@ -3233,18 +3233,13 @@ export default function (pi: ExtensionAPI) {
             // Register exit supervision before any fallible post-spawn publication.
             // A failed metadata write must not strand a running child without a close
             // handler; the lease stays held until that child has actually exited.
-            void spawned.exit.then((code) => {
+            void spawned.exit.then(async (code) => {
                 try { finalizeRun(pi, ctx, id, code); }
                 finally { lease?.release(); }
                 if (workerBridge) workerOperations.release(id, "attempt-exited");
-                // After the writer lease is free: a clean park may already have a
-                // ready dependency, and a failed park must hold its wait rather
-                // than leave an automatic resume armed.
-                void settleParkedExit(id);
-                // If this attempt was a published resume of an earlier parked
-                // assignment, an exit before acknowledgement must settle that
-                // unconsumed generation explicitly instead of leaving it resuming.
-                void settleResumedAttemptExit({
+                // Reconcile this attempt's earlier published writer before its
+                // next park can admit another continuation of the conversation.
+                await settleResumedAttemptExit({
                     attemptId: id,
                     service: workerOperations.service,
                     status: readMeta(id)?.status ?? "exited",
@@ -3255,6 +3250,7 @@ export default function (pi: ExtensionAPI) {
                         try { uiCtx?.ui?.notify?.(message, "warning"); } catch { /* ignore UI failures */ }
                     },
                 });
+                await settleParkedExit(id);
             });
             writeMeta(meta);
             committed = true;
