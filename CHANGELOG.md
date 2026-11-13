@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.45.4] - 2026-11-13
+
+### Fixed
+
+- Bundle Background Tasks 0.15.3 and Subagents 0.32.3 to reduce idle Pi CPU use from repeated outbox polling. (#732)
+
+## [pi-better-background-tasks@0.15.3] - 2026-11-13
+
+### Fixed
+
+- Poll only recipients with deliverable dependency events, avoiding repeated evidence queries and unsuccessful claims for historical pending events. (#732)
+
+## [pi-better-subagents@0.32.3] - 2026-11-13
+
+### Changed
+
+- Synchronize the shared coordinator's lightweight outbox candidate query with Background Tasks. (#732)
+
 ## [pi-better-harness@0.45.3] - 2026-11-13
 
 ### Fixed
