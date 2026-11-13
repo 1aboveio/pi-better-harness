@@ -503,10 +503,19 @@ export function isPendingPark(record: Pick<ParkRecord, "phase">): boolean {
  * by resume reconciliation; a consumed or cancelled park is not included.
  */
 export function listPendingParkedRuns(metas: readonly RunMeta[] = listMetas()): RunMeta[] {
-    return metas.filter((meta) => {
+    return listParkRecordCandidates(metas).filter((meta) => {
         const record = meta.park ?? readParkRecord(meta.id);
         return record !== undefined && isPendingPark(record);
     });
+}
+
+/** Include a park file that was published just before its metadata mirror was lost. */
+export function listParkRecordCandidates(metas: readonly RunMeta[] = listMetas()): RunMeta[] {
+    let volatileIds: Set<string>;
+    try { volatileIds = new Set(readdirSync(join(baseDir(), "runs"))); }
+    catch { volatileIds = new Set(); }
+    return metas.filter((meta) => meta.park !== undefined
+        || (volatileIds.has(meta.id) && existsSync(parkRecordPath(meta.id))));
 }
 
 /**

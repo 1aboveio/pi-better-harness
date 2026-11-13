@@ -1032,7 +1032,7 @@ export class ObservedWaitHost {
   /** Recover a callback a previous host recorded terminal but never delivered. */
   private recoverTerminalNotifications(): void {
     if (!this.store) return;
-    for (const operation of this.store.listOperations({ phase: "terminal" })) {
+    for (const operation of this.activeParentTerminalOperations()) {
       if (operation.terminalOutcome === null) continue;
       this.attemptTerminalCallback(
         operation,
@@ -1041,6 +1041,15 @@ export class ObservedWaitHost {
         [],
       );
     }
+  }
+
+  private activeParentTerminalOperations(): OperationRecord[] {
+    const origin = this.activeOrigin;
+    if (!this.store || !origin?.sessionId) return [];
+    return this.store.listOperations({
+      phase: "terminal",
+      ownerScope: { kind: "parent-session", sessionId: origin.sessionId, workspace: origin.cwd },
+    });
   }
 
   /**
@@ -3345,7 +3354,7 @@ export class ObservedWaitHost {
         });
       } catch { /* another host already recovered it */ }
     }
-    for (const operation of store.listOperations({ phase: "terminal" })) {
+    for (const operation of this.activeParentTerminalOperations()) {
       const context = this.currentLaunchContext(operation.taskId);
       if (!context?.callbackClaimedBy || context.callbackClaimedBy === this.hostId) continue;
       if (this.claimState(context.callbackClaimedBy) !== "dead") continue;
