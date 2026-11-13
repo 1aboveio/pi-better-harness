@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.45.5] - 2026-11-13
+
+### Fixed
+
+- Bundle Subagents 0.32.4 so a worker checkpoints a settled wait before exiting. (#734)
+
+## [pi-better-subagents@0.32.4] - 2026-11-13
+
+### Fixed
+
+- Checkpoint a worker wait when dependencies settle before parking; allow its parent to accept the checkpoint and finish the wait. (#734)
+
 ## [pi-better-harness@0.45.4] - 2026-11-13
 
 ### Fixed
