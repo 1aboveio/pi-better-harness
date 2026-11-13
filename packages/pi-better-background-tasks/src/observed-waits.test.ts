@@ -566,6 +566,36 @@ function fakeRunningSupervisor(): LocalSupervisor & { inspections: number } {
 }
 
 describe("supervision authority", () => {
+  it("limits startup terminal recovery to the active parent session", () => {
+    const root = workspace("scoped-terminal-recovery");
+    const storePath = join(root, "operations.sqlite");
+    const store = openStore({ path: storePath });
+    try {
+      for (let index = 0; index < 80; index += 1) {
+        const owner = { kind: "parent-session" as const, sessionId: `history-${index}`, workspace: root, branchId: null, goalId: null };
+        const operationId = `history-op-${index}`;
+        store.registerOperation({ operationId, taskId: `bgs_${index.toString(16).padStart(20, "0")}`, launchToken: `history-launch-${index}`, owner, observer: { kind: "fixture", version: "1" } });
+        store.recordTerminalOutcome({ operationId, owner, eventId: `history-terminal-${index}`, outcome: "succeeded", evidence: [{ kind: "summary", ref: "history", summary: "done" }] });
+      }
+    } finally {
+      store.close();
+    }
+
+    const host = createObservedWaitHost(createHarness().pi, { storePath, supervisorDirectory: join(root, "supervisor"), pollMs: 0, notifyParent: () => {} });
+    cleanups.push(() => host.close());
+    host.start();
+    const activeStore = (host as unknown as { store: ReturnType<typeof openStore> }).store;
+    const original = activeStore.listOperations.bind(activeStore);
+    const terminalScans: Array<{ ownerScope?: { sessionId: string }; phase?: string }> = [];
+    activeStore.listOperations = (filter = {}) => {
+      if (filter.phase === "terminal") terminalScans.push(filter);
+      return original(filter);
+    };
+    host.start(createCtx(root, "current-session"));
+    expect(terminalScans.length).toBeGreaterThanOrEqual(2);
+    expect(terminalScans.every((filter) => filter.ownerScope?.sessionId === "current-session")).toBe(true);
+  });
+
   it("does not rewrite supervision while overlapping live hosts reconcile unchanged operations", async () => {
     const root = workspace("supervision-authority");
     const storePath = join(root, "operations.sqlite");

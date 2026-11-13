@@ -1,8 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parkedWaitsForResumedAttempt, reconcileParkedWaits } from "../worker-waits.ts";
 
 const ROOT = mkdtempSync(join(tmpdir(), "subagent-owned-index-"));
 process.env.TMPDIR = ROOT;
@@ -12,7 +13,10 @@ const {
   listActiveMetasForParent,
   listMetasForOrigin,
   listMetasForParent,
+  listMetas,
+  listPendingParkedRuns,
   logPathFor,
+  parkRecordPath,
   resetRegistryIoMetrics,
   writeMeta,
 } = await import("../registry.ts");
@@ -56,6 +60,50 @@ describe("owned subagent registry indexes", () => {
       metadataFileReads: 0,
       indexRevisionChecks: 100,
     });
+  });
+
+  it("does not re-read ordinary history while finding pending parks", () => {
+    const history = Array.from({ length: 200 }, (_, index) => meta(`sa_history_${index}`, 2000 + index, "old-session"));
+    resetRegistryIoMetrics();
+    assert.deepEqual(listPendingParkedRuns(history), []);
+    assert.equal(getRegistryIoMetrics().metadataFileReads, 0);
+  });
+
+  it("does not inspect every ordinary run when resolving a resumed attempt", () => {
+    for (let index = 0; index < 30; index += 1) {
+      writeMeta(meta(`sa_resume_history_${index}`, 3000 + index, "old-session"));
+    }
+    resetRegistryIoMetrics();
+    listMetas();
+    const baselineReads = getRegistryIoMetrics().metadataFileReads;
+    resetRegistryIoMetrics();
+    assert.deepEqual(parkedWaitsForResumedAttempt("sa_unrelated_resume"), []);
+    assert.equal(getRegistryIoMetrics().metadataFileReads, baselineReads);
+  });
+
+  it("does not re-read ordinary history during startup reconciliation", async () => {
+    resetRegistryIoMetrics();
+    listMetas();
+    const baselineReads = getRegistryIoMetrics().metadataFileReads;
+    resetRegistryIoMetrics();
+    await reconcileParkedWaits(undefined, { resume: async () => "skipped" });
+    assert.equal(getRegistryIoMetrics().metadataFileReads, baselineReads);
+  });
+
+  it("recovers a park file published before its metadata mirror", () => {
+    const run = meta("sa_unmirrored_park", 4000, "park-owner");
+    writeMeta(run);
+    writeFileSync(parkRecordPath(run.id), JSON.stringify({
+      version: 1,
+      waitId: "wait-unmirrored",
+      generation: 1,
+      attemptId: run.id,
+      parkedAt: Date.now(),
+      phase: "resuming",
+      resumedBy: "sa_previous_writer",
+    }));
+    assert.deepEqual(listPendingParkedRuns([run]).map((entry) => entry.id), [run.id]);
+    assert.deepEqual(parkedWaitsForResumedAttempt("sa_previous_writer").map((entry) => entry.runId), [run.id]);
   });
 
   it("removes terminal transitions from the active parent index", () => {

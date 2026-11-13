@@ -61,6 +61,7 @@ import { commitAssignmentTerminal } from "./assignment-outcomes.ts";
 import {
     effectiveStatus,
     isPendingPark,
+    listParkRecordCandidates,
     listMetas,
     listPendingParkedRuns,
     readMeta,
@@ -2278,7 +2279,7 @@ export async function recoverStagedPark(
 /** Every park record (any phase) that published `attemptId` as its resume. */
 export function parkedWaitsForResumedAttempt(attemptId: string): ParkedWait[] {
     const found: ParkedWait[] = [];
-    for (const meta of listMetas()) {
+    for (const meta of listParkRecordCandidates()) {
         const record = readParkRecord(meta.id);
         if (!record || record.resumedBy !== attemptId) continue;
         found.push(parkedEntry(meta, record));
@@ -2588,7 +2589,7 @@ export async function reconcileParkedWaits(
     // Consumed waits cannot resume, but a missed exit observer may have left
     // their published writer claim behind. Reconcile that exact claim once.
     const candidates: ParkedWait[] = [];
-    for (const meta of listMetas()) {
+    for (const meta of listParkRecordCandidates()) {
         const snapshot = meta.park ?? readParkRecord(meta.id);
         if (!snapshot || (!isPendingPark(snapshot) && !(snapshot.phase === "consumed" && snapshot.resumedBy
             && snapshot.resumeClaimId && snapshot.resumeExitReconciledClaimId !== snapshot.resumeClaimId))) continue;
