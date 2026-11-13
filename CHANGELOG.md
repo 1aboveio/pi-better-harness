@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.45.6] - 2026-11-14
+
+### Fixed
+
+- Bundle Subagents 0.32.5 to preserve the active session timeout after saving defaults. (#737)
+
+## [pi-better-subagents@0.32.5] - 2026-11-14
+
+### Fixed
+
+- Preserve the explicit session timeout after saving defaults, including `0` to disable it, so an environment default cannot replace the active choice. The choice survives session restoration; Reset to defaults still clears it. (#737)
+
 ## [pi-better-harness@0.45.5] - 2026-11-13
 
 ### Fixed
