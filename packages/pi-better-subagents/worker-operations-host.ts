@@ -45,6 +45,7 @@ import {
     isValidTaskId,
     normalizeToolDescriptors,
     normalizeWaitForOperationsResult,
+    requiresParkCheckpoint,
     operationBridgeErrorBody,
     redactSecret,
     validateCheckpointParams,
@@ -890,7 +891,7 @@ export async function createOperationBridgeHost(
             if (tool === "wait_for_operations") {
                 const wait = normalizeWaitForOperationsResult(cloned);
                 if (!wait.ok) throw new OperationBridgeError("response-invalid", wait.message);
-                if (wait.result.park && !wait.result.settled) {
+                if (requiresParkCheckpoint(wait.result)) {
                     run.issuedWaits.set(wait.result.waitId, {
                         generation: wait.result.generation,
                         requestId: envelope.id,

@@ -112,6 +112,14 @@ try {
             name: "worker-build",
         }, {});
     }
+    if (process.env.CHILD_SETTLE_BEFORE_WAIT === "1") {
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+            out.preWaitStatus = await client.request("bg_task_status", { id: out.spawn.id }, {});
+            if (out.preWaitStatus.terminalOutcome) break;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        if (!out.preWaitStatus.terminalOutcome) throw new Error("background task did not settle before the wait");
+    }
     if (process.env.CHILD_STATUS_TASK) {
         out.status = await client.request("bg_task_status", { id: process.env.CHILD_STATUS_TASK }, {});
     }
@@ -374,6 +382,44 @@ test("a real worker parks, the exit proof finalizes the wait, and the ready task
     assert.equal(secondChild.result.status.taskId, taskId);
     assert.equal(secondChild.result.status.terminalOutcome, "succeeded");
     orchestration.stop();
+});
+
+test("a dependency settled before wait registration still parks and reaches ready after exit proof", async () => {
+    const stack = await startStack();
+    const attemptId = "sa_worker_pre_settled";
+    const { sessionDirectory, sessionFile } = sessionFixture(durableRoot, attemptId);
+    writeAttemptRecord(stack, { attemptId, sessionDirectory, sessionFile });
+    const plan = defaultPlan();
+    const { handle } = await registerWorker(stack, { runId: attemptId, conversationId: attemptId, plan });
+    const directory = tempDirectory("child-pre-settled");
+    const child = await runChild(childProgram(directory), {
+        ...handle.env,
+        CHILD_TASK: "1",
+        CHILD_SETTLE_BEFORE_WAIT: "1",
+        CHILD_WAIT: "1",
+        CHILD_SESSION_FILE: sessionFile,
+        CHILD_SESSION_ID: attemptId,
+        CHILD_WORKSPACE: stack.workspace,
+    });
+    assert.equal(child.code, 0, `child failed: ${child.stderr || child.stdout}`);
+    assert.equal(child.result.fatal, undefined, JSON.stringify(child.result));
+    assert.equal(child.result.wait.settled, true);
+    assert.equal(child.result.wait.phase, "parking");
+    assert.equal(child.result.checkpoint?.staged, true, JSON.stringify(child.result));
+
+    const waitId = child.result.wait.waitId;
+    const generation = child.result.wait.generation;
+    writeCoherentLog(registry.logPathFor(attemptId));
+    assert.equal(finalizeRun(attemptId, 0).park.parked, true);
+    const finalization = await finalizeWorkerParkAfterExit({
+        runId: attemptId,
+        service: stack.service,
+        writerLeaseReleased: true,
+        writerPidGone: true,
+    });
+    assert.equal(finalization.outcome, "parked", JSON.stringify(finalization));
+    assert.equal(finalization.wait.phase, "ready");
+    assert.equal(stack.store.getWait({ waitId, generation }).phase, "ready");
 });
 
 test("a checkpoint that does not describe the trusted saved conversation is refused", async () => {
