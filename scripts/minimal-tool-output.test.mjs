@@ -114,6 +114,10 @@ test("compaction summaries fold to one quiet row, expand original details, and r
   const hook = installMinimalOutputHook(ToolExecutionComponent.prototype, () => themeModule.theme, prototype);
   handles.push(hook);
   const message = { summary: "COMPACTION_SUMMARY_SENTINEL", tokensBefore: 12345 };
+  // The SDK formats the token count with the ambient locale ("12,345" in en,
+  // "12 345" with a narrow no-break space in fr): derive the expectation the
+  // same way instead of assuming an English grouping separator.
+  const expectedTokens = new Intl.NumberFormat().format(12345).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const component = new CompactionSummaryMessageComponent(message);
   const normal = rendered(component);
   hook.setEnabled(true);
@@ -123,7 +127,7 @@ test("compaction summaries fold to one quiet row, expand original details, and r
     assert.ok(lines.every(line => visibleWidth(line) <= width));
     assert.doesNotMatch(lines.join("\n"), /COMPACTION_SUMMARY_SENTINEL|\x1b\[(?:48|4[0-7])[;m]/);
   }
-  assert.match(stripVTControlCharacters(rendered(component)), /Compaction.*12,345 tokens/);
+  assert.match(stripVTControlCharacters(rendered(component)), new RegExp(`Compaction.*${expectedTokens} tokens`));
   assert.equal(component.message, message);
   component.setExpanded(true);
   assert.match(rendered(component), /COMPACTION_SUMMARY_SENTINEL/);
