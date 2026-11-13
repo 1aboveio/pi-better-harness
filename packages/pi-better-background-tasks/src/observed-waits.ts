@@ -3378,16 +3378,9 @@ export class ObservedWaitHost {
   private async dispatchOutbox(): Promise<void> {
     const store = this.store;
     if (!store || this.closed) return;
-    const pending = store.listOutbox({ state: "pending" });
+    const pending = store.listDispatchableOutboxRecipients();
     if (pending.length === 0) return;
-    const byRecipient = new Map<string, { owner: OwnerIdentity; events: OutboxEventRecord[] }>();
-    for (const event of pending) {
-      const key = ownerKey(event.recipient);
-      const entry = byRecipient.get(key) ?? { owner: event.recipient, events: [] };
-      entry.events.push(event);
-      byRecipient.set(key, entry);
-    }
-    for (const { owner, events } of byRecipient.values()) {
+    for (const { recipient: owner, count } of pending) {
       // Foreign parents cannot receive a handoff here. Leave their events pending
       // without taking a write lock on every reconciliation pass.
       if (owner.kind === "parent-session") {
@@ -3403,7 +3396,7 @@ export class ObservedWaitHost {
           recipient: owner,
           claimToken,
           claimedBy: this.hostId,
-          limit: Math.min(events.length, 20),
+          limit: Math.min(count, 20),
         });
       } catch (error) {
         this.options.logger?.(`observed waits: outbox claim failed: ${oneLine(String(error), 160)}`);

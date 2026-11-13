@@ -24,11 +24,12 @@ import { StoreError } from "./errors.ts";
 import {
     dependencyState,
     mapOutbox,
+    ownerFromRow,
     readOperationEvidence,
     readOutboxRow,
     requireWaitRow,
 } from "./rows.ts";
-import { columnJson, columnNullableText, columnText, getRows, run, type StoreContext } from "./sqlite.ts";
+import { columnJson, columnNullableText, columnNumber, columnText, getRows, run, type StoreContext } from "./sqlite.ts";
 import type {
     ClaimOutboxInput,
     OutboxDispatchClaim,
@@ -278,6 +279,23 @@ export function listOutbox(ctx: StoreContext, filter: OutboxFilter = {}): Outbox
         `SELECT * FROM outbox_events ${where} ORDER BY created_at, event_id`,
         ...params,
     ).map((row) => mapOutbox(ctx, row));
+}
+
+/** Find recipients with deliverable dependencies without loading each event's evidence. */
+export function listDispatchableOutboxRecipients(ctx: StoreContext): Array<{ recipient: OwnerIdentity; count: number }> {
+    return getRows(
+        ctx,
+        `SELECT recipient_kind, recipient_session_id, recipient_workspace, recipient_branch_id, recipient_goal_id,
+                count(*) AS pending_count
+         FROM outbox_events
+         WHERE state = 'pending' AND event_type = 'dependency-ready'
+           AND EXISTS (SELECT 1 FROM waits w WHERE w.wait_id = outbox_events.wait_id
+                       AND w.generation = outbox_events.generation
+                       AND w.phase IN (${placeholders(DELIVERABLE_WAIT_PHASES.length)}))
+         GROUP BY recipient_kind, recipient_session_id, recipient_workspace, recipient_branch_id, recipient_goal_id
+         ORDER BY min(created_at), min(event_id)`,
+        ...DELIVERABLE_WAIT_PHASES,
+    ).map((row) => ({ recipient: ownerFromRow(row, "recipient"), count: columnNumber(row, "pending_count") }));
 }
 
 function readDispatchClaim(row: Record<string, unknown>): OutboxDispatchClaim | null {

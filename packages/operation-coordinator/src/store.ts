@@ -57,6 +57,7 @@ import {
 } from "./waits.ts";
 import {
     claimOutbox as writeOutboxClaim,
+    listDispatchableOutboxRecipients as readDispatchableOutboxRecipients,
     listOutbox as readOutbox,
     markOutboxDelivered as writeOutboxDelivery,
     releaseOutbox as writeOutboxRelease,
@@ -271,6 +272,8 @@ export interface Store {
     // ---- outbox ----
 
     listOutbox(filter?: OutboxFilter): OutboxEventRecord[];
+    /** Lightweight dispatch candidates; evidence is read only after a claim succeeds. */
+    listDispatchableOutboxRecipients(): Array<{ recipient: OwnerIdentity; count: number }>;
     /** Claim pending deliveries for a `ready`/`resuming` generation. */
     claimOutbox(input: ClaimOutboxInput): OutboxEventRecord[];
     /** Mark a claimed delivery delivered; the result is still unconsumed. */
@@ -455,6 +458,10 @@ export function openStore(options: StoreOptions): Store {
         listOutbox(filter = {}) {
             alive();
             return readOutbox(ctx, filter);
+        },
+        listDispatchableOutboxRecipients() {
+            alive();
+            return readDispatchableOutboxRecipients(ctx);
         },
         claimOutbox(input) {
             alive();

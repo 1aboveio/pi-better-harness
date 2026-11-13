@@ -21,6 +21,7 @@ function fixture() {
 test("terminal failure atomically disarms dispatch, transfers pins, and preserves unresolved facts and writer fences", () => {
     const { h, wait, claim, input } = fixture();
     const outcome = h.store.recordAssignmentOutcome(input);
+    assert.deepEqual(h.store.listDispatchableOutboxRecipients(), [], "assignment outcomes are delivered through their own path");
     assert.equal(h.store.getWait(wait)?.phase, "held");
     assert.equal(h.store.getWait(wait)?.acknowledgement, null);
     assert.equal(h.store.getWait(wait)?.cancelEpoch, 0);
