@@ -1129,19 +1129,38 @@ function createOverlayComponent(
     requestRender();
   }
 
-  let editorRendersSeen: number | undefined;
+  /**
+   * The editor frame count when this sheet opened. Comparing against it (instead of starting from
+   * `undefined`) makes the first frame report editor progress too, so a wrapper that only renders
+   * inside another extension's wrapper is still counted as live.
+   */
+  let editorRendersSeen: number | undefined = state().editorRenders ?? 0;
+  /** Whether this sheet ever saw our editor wrapper alive, i.e. whether a replacement can happen. */
+  let sawLiveEditor = false;
   /**
    * Our editor wrapper was uninstalled: close, since no key of ours can reach this overlay again and
    * it would cover the editor that replaced ours (#332). An extension that composes the editor inside
    * its own non-container component still renders ours, so the wrapper also counts as live while it
    * rendered since the previous overlay frame (Pi renders the editor before it composites overlays).
+   *
+   * Only a replacement that happens while the sheet is open counts. An extension may replace the
+   * editor before the sheet opens (one that installs its own editor over ours instead of composing
+   * it), and then every repaint looks like a fresh replacement: the sheet would close on the next
+   * hover, so a pointer-opened detail was unreadable. Such a sheet still owns the keyboard through
+   * Pi's overlay focus, and Esc, its back control and the wheel all keep working.
    */
   function closeIfEditorReplaced(): void {
     const rendersBefore = editorRendersSeen;
     const renders = state().editorRenders ?? 0;
     editorRendersSeen = renders;
-    state().editorRenderedLastFrame = rendersBefore === undefined ? undefined : renders !== rendersBefore;
-    if (closed || liveEditorMounted(tui) !== false || rendersBefore === undefined || renders !== rendersBefore) return;
+    const rendered = rendersBefore !== undefined && renders !== rendersBefore;
+    state().editorRenderedLastFrame = rendered;
+    if (closed) return;
+    if (rendered || liveEditorMounted(tui) !== false) {
+      sawLiveEditor = true;
+      return;
+    }
+    if (!sawLiveEditor) return;
     // Not from inside pi-tui's render pass: hiding an overlay there would change the stack it is drawing.
     queueMicrotask(() => {
       if (closed) return;

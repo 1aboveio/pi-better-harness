@@ -2115,6 +2115,80 @@ describe("shared background work navigator", () => {
     }
   });
 
+  it("keeps a pointer-opened detail when an extension replaced the editor before it opened", async () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("background-tasks", "Background Tasks", 20, 100, () => undefined),
+      listRows: () => ["alpha", "beta"].map((id, i) => ({
+        providerId: "background-tasks", id, name: id, status: "running", statusTone: "running" as const,
+        kind: "process", elapsed: "1s", primary: `${id} work`, sortStartedAt: 300 - i,
+      })),
+    });
+    const mounted: any[] = [];
+    const widgets: unknown[] = [];
+    let editorSlot: any;
+    const tui = {
+      requestRender() {},
+      isComponentMounted(component: unknown) { return component === editorSlot; },
+    };
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value, bg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, widget: unknown) { widgets.push(widget); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) {
+        this.factory = factory;
+        editorSlot = factory ? factory(tui, {}, {}) : { render: () => ["default editor"], handleInput() {} };
+      },
+      custom(factory: any, options: any) {
+        let component: any;
+        component = factory(tui, this.theme, {}, () => { mounted.splice(mounted.indexOf(component), 1); });
+        mounted.push(component);
+        options?.onHandle?.({ focus() {}, unfocus() {} });
+        return new Promise(() => undefined);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    /** One pi-tui frame: the base (editor included) renders first, then the overlays. */
+    const frame = () => { editorSlot?.render?.(100); for (const overlay of [...mounted]) overlay.render(100); };
+    const settle = () => new Promise<void>((resolve) => queueMicrotask(resolve));
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", render: () => ["our editor"], handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      editorSlot = ui.factory(tui, {}, {});
+
+      // Another extension installs its own editor instead of composing ours, so pi-tui mounts that
+      // one and never renders our wrapper again. The rail keeps working through the pointer.
+      ui.setEditorComponent(() => ({ render: () => ["foreign editor"], handleInput() {} }));
+      frame(); frame();
+
+      const widget = (widgets.at(-1) as any)({ requestRender() {} }, ui.theme);
+      const lines = widget.render(100);
+      const y = lines.findIndex((line: string) => line.includes("alpha"));
+      assert.ok(y > 0, "the rail still renders a clickable row");
+      widget.handleMouse({ type: "press", button: "left", x: 3, y, width: 100 });
+      widget.handleMouse({ type: "click", button: "left", x: 3, y, width: 100 });
+      assert.equal(mounted.length, 1, "the click opens the detail");
+
+      // A repaint (the pointer hovering a row or the back control) must not dismiss the sheet that
+      // opened without a live editor wrapper: it still owns the keyboard through Pi's overlay focus.
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 1, "a repaint keeps the sheet open");
+      mounted[0].handleMouse({ type: "move", button: "none", x: 5, y: 1, width: 100 });
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 1, "hovering the back control keeps the sheet open");
+      mounted[0].handleInput("escape");
+      assert.equal(mounted.length, 0, "Esc still closes it");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
   it("highlights clickable rows and returns from clicked details without taking editor input", () => {
     const unregisterSubagents = registerBackgroundWorkProvider({
       id: "subagents",
