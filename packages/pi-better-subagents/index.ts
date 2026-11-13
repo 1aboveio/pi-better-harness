@@ -2382,7 +2382,10 @@ export default function (pi: ExtensionAPI) {
                     defaultSkills: skills.mode === "inherit" ? null : [...skills.paths],
                 }),
             });
+            const sessionTimeout = timingOverride.maxMinutes;
             resetSettings();
+            // The session timeout beats the environment, even after saving defaults.
+            if (sessionTimeout !== undefined) changeTiming("maxMinutes", sessionTimeout);
             return { ok: true, message: "Subagent defaults saved." };
         } catch (error) {
             return { ok: false, message: `Could not save subagent defaults: ${error instanceof Error ? error.message : String(error)}` };

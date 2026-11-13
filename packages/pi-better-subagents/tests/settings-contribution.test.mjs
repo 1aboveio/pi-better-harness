@@ -150,6 +150,27 @@ test("subagents contributes the standalone settings opener with shared session a
     assert.equal(loadConfig().maxMinutes, 90);
     assert.equal(existsSync(path), true);
     keys = [];
+    await contribution.open(ctx);
+    assert.match(pages.at(-1), /Timeout \(minutes\)\s+90/, "saving preserves the active session timeout over the environment");
+    await handlers.get("session_tree")({}, ctx);
+    await contribution.open(ctx);
+    assert.match(pages.at(-1), /Timeout \(minutes\)\s+90/, "the saved session timeout survives branch restoration");
+
+    keys = atRow("Timeout (minutes)", "\r", "\x15", "0", "\r", "\x13");
+    await contribution.open(ctx);
+    assert.equal(loadConfig().maxMinutes, 0);
+    keys = [];
+    await contribution.open(ctx);
+    assert.match(pages.at(-1), /Timeout \(minutes\)\s+0/, "saving preserves an explicitly disabled timeout");
+    await handlers.get("session_tree")({}, ctx);
+    await contribution.open(ctx);
+    assert.match(pages.at(-1), /Timeout \(minutes\)\s+0/, "the disabled timeout survives branch restoration");
+
+    keys = atRow("Reset to defaults", "\r");
+    await contribution.open(ctx);
+    keys = [];
+    await contribution.open(ctx);
+    assert.match(pages.at(-1), /Timeout \(minutes\)\s+5/, "an explicit reset restores the environment-effective default");
     await commands.get("subagents").handler("mode coordinator", ctx);
     await contribution.open(ctx);
     assert.match(pages.at(-1), /Delegation mode\s+coordinator/);
