@@ -10,16 +10,18 @@ test("missing preferences default to enabled and changes preserve independent sa
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const seams = { agentDir: () => root };
   assert.equal(goalPreferencesPath(seams), join(root, "settings.json"));
-  assert.deepEqual(readGoalPreferences(seams), { autoContinue: true, conversationalResume: true, pauseOnEscape: true });
+  assert.deepEqual(readGoalPreferences(seams), { autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false });
   assert.equal(existsSync(goalPreferencesPath(seams)), false, "reading defaults does not persist them");
   writeGoalPreference("autoContinue", false, seams);
   writeGoalPreference("conversationalResume", false, seams);
   writeGoalPreference("pauseOnEscape", false, seams);
-  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: false, pauseOnEscape: false });
+  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false });
   writeGoalPreference("autoContinue", true, seams);
-  assert.deepEqual(readGoalPreferences(seams), { autoContinue: true, conversationalResume: false, pauseOnEscape: false });
+  assert.deepEqual(readGoalPreferences(seams), { autoContinue: true, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false });
   writeGoalPreference("pauseOnEscape", true, seams);
-  assert.deepEqual(readGoalPreferences(seams), { autoContinue: true, conversationalResume: false, pauseOnEscape: true });
+  assert.deepEqual(readGoalPreferences(seams), { autoContinue: true, conversationalResume: false, pauseOnEscape: true, autoStartFromOutcome: false });
+  writeGoalPreference("autoStartFromOutcome", true, seams);
+  assert.deepEqual(readGoalPreferences(seams), { autoContinue: true, conversationalResume: false, pauseOnEscape: true, autoStartFromOutcome: true });
 });
 
 test("partial versioned preferences preserve defaults for controls not yet saved", (t) => {
@@ -29,11 +31,11 @@ test("partial versioned preferences preserve defaults for controls not yet saved
   const path = goalPreferencesPath(seams);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify({ piBetterHarness: { goal: { version: 1, autoContinue: false } } }));
-  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: true, pauseOnEscape: true });
+  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false });
   writeFileSync(path, JSON.stringify({ piBetterHarness: { goal: { version: 1, autoContinue: false, conversationalResume: false } } }));
-  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: false, pauseOnEscape: true });
+  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: false, pauseOnEscape: true, autoStartFromOutcome: false });
   writeGoalPreference("pauseOnEscape", false, seams);
-  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: false, pauseOnEscape: false });
+  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false });
 });
 
 test("invalid preferences report an error and are not overwritten by a setting update", (t) => {
@@ -43,7 +45,7 @@ test("invalid preferences report an error and are not overwritten by a setting u
   const path = goalPreferencesPath(seams);
   mkdirSync(dirname(path), { recursive: true });
   for (const raw of ["{", ...[null, { version: 2 }, { version: 1, autoContinue: "off" },
-    { version: 1, conversationalResume: 0 }, { version: 1, pauseOnEscape: "off" }]
+    { version: 1, conversationalResume: 0 }, { version: 1, pauseOnEscape: "off" }, { version: 1, autoStartFromOutcome: "on" }]
     .map((goal) => JSON.stringify({ piBetterHarness: { goal } }))]) {
     writeFileSync(path, raw);
     assert.throws(() => readGoalPreferences(seams), /Goal preferences .* (not valid JSON|must contain version 1)/);
@@ -71,23 +73,23 @@ test("legacy preferences migrate on read and global updates preserve unrelated s
   mkdirSync(dirname(legacyPath), { recursive: true });
   writeFileSync(legacyPath, JSON.stringify({ version: 1, autoContinue: false, pauseOnEscape: false }));
 
-  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: true, pauseOnEscape: false });
+  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: true, pauseOnEscape: false, autoStartFromOutcome: false });
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
     ...unrelated,
     piBetterHarness: { ...unrelated.piBetterHarness, goal: {
-      version: 1, autoContinue: false, conversationalResume: true, pauseOnEscape: false,
+      version: 1, autoContinue: false, conversationalResume: true, pauseOnEscape: false, autoStartFromOutcome: false,
     } },
   });
   writeGoalPreference("conversationalResume", false, seams);
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
     ...unrelated,
     piBetterHarness: { ...unrelated.piBetterHarness, goal: {
-      version: 1, autoContinue: false, conversationalResume: false, pauseOnEscape: false,
+      version: 1, autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false,
     } },
   });
 
   writeFileSync(legacyPath, "{invalid JSON");
-  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: false, pauseOnEscape: false },
+  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false },
     "the global key remains authoritative even when legacy storage changes");
 });
 
@@ -100,9 +102,9 @@ test("a setting update migrates legacy controls before changing one preference",
   const legacy = JSON.stringify({ version: 1, autoContinue: false, conversationalResume: false });
   writeFileSync(legacyPath, legacy);
   assert.deepEqual(writeGoalPreference("pauseOnEscape", false, seams), {
-    autoContinue: false, conversationalResume: false, pauseOnEscape: false,
+    autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false,
   });
-  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: false, pauseOnEscape: false });
+  assert.deepEqual(readGoalPreferences(seams), { autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false });
 });
 
 test("invalid legacy preferences are not migrated or overwritten", (t) => {

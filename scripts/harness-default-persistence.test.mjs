@@ -29,7 +29,7 @@ test("standalone package saves share global settings without replacing each othe
     setConfigForTests(undefined);
     assert.equal(loadConfig().maxConcurrent, 6);
     assert.equal(loadConfig().delegationMode, "coordinator");
-    assert.deepEqual(readGoalPreferences(), { autoContinue: false, conversationalResume: true, pauseOnEscape: false });
+    assert.deepEqual(readGoalPreferences(), { autoContinue: false, conversationalResume: true, pauseOnEscape: false, autoStartFromOutcome: false });
     assert.equal(getCallbackSettings({}).mode, "steer");
     assert.equal(readSandboxDefault(), "on");
     assert.equal(readPermissionSettings().main.enabled, false);

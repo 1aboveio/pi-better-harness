@@ -4,7 +4,29 @@ import type { GoalSnapshot } from "./types.js";
 /** Synchronous request bus shared with an installed `pi-better-harness` runtime. */
 export const TASK_CONTEXT_EVENT = "pi-better-harness:task-context";
 
-export type TaskContextAction = "inspect" | "start" | "pause" | "resume" | "complete";
+export type TaskContextAction = "inspect" | "start" | "bind" | "pause" | "resume" | "complete";
+
+export const OUTCOME_ACCEPTED_EVENT = "pi-better-harness:outcome-accepted";
+
+export interface OutcomeAcceptedEvent {
+  sessionId: string;
+  outcome: {
+    objective: string;
+    doneWhen?: readonly string[];
+    status: string;
+    goalId?: string;
+  };
+}
+
+/** Only explicit, actionable outcomes qualify; prose and restored state do not. */
+export function canStartGoalFromOutcome(value: unknown): value is OutcomeAcceptedEvent["outcome"] {
+  if (!value || typeof value !== "object") return false;
+  const outcome = value as Partial<OutcomeAcceptedEvent["outcome"]>;
+  return outcome.status === "active" && outcome.goalId === undefined &&
+    typeof outcome.objective === "string" && !!outcome.objective.trim() && !outcome.objective.trim().startsWith("/") &&
+    Array.isArray(outcome.doneWhen) && outcome.doneWhen.length > 0 &&
+    outcome.doneWhen.every(item => typeof item === "string" && !!item.trim());
+}
 
 /**
  * Mutable request. A present Harness runtime sets `enabled` to a boolean even
@@ -16,7 +38,7 @@ export interface TaskContextRequest {
   goalId?: string;
   /** Current widget width on a visual ownership inspection. */
   width?: number;
-  /** The raw original goal trigger; only start requests carry it. */
+  /** The raw original goal trigger; only start/bind requests carry it. */
   objective?: string;
   /** Hooks authority: a present Harness runtime sets this even when Outcome & Todo is off. */
   enabled?: boolean;
@@ -43,7 +65,7 @@ export function requestTaskContext(
   if (width !== undefined) request.width = width;
   if (goal) {
     request.goalId = goal.goalId;
-    if (action === "start") request.objective = goal.objective;
+    if (action === "start" || action === "bind") request.objective = goal.objective;
   }
   pi.events.emit(TASK_CONTEXT_EVENT, request);
   return request;

@@ -45,7 +45,7 @@ import { collectSubagentActivity } from "./subagents.js";
 import { currentWorkflowOwner, ISSUE_WORKFLOW_SKILLS, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
 import { completionGate, pauseGate, schedulerWaitUntil, operationResumeSchedulerGate } from "./workflow-gates.js";
 import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
-import { requestTaskContext } from "./task-context.js";
+import { canStartGoalFromOutcome, OUTCOME_ACCEPTED_EVENT, requestTaskContext, type OutcomeAcceptedEvent } from "./task-context.js";
 import {
   EVENT_ACTIVITY,
   EVENT_READY,
@@ -125,10 +125,10 @@ const GOAL_ACTIONS: readonly AutocompleteItem[] = [
   { value: "resume", label: "resume", description: "Resume the paused goal" },
   { value: "clear", label: "clear", description: "Remove the current goal" },
   { value: "complete", label: "complete", description: "Mark the current goal complete" },
-  { value: "settings", label: "settings", description: "Inspect or persist goal continuation, conversational resume, and Escape pause controls" },
+  { value: "settings", label: "settings", description: "Inspect or persist goal continuation, resume, Escape pause, and Outcome auto-start controls" },
 ];
 
-const GOAL_SETTINGS = ["auto-continue", "conversational-resume", "pause-on-escape"] as const;
+const GOAL_SETTINGS = ["auto-continue", "conversational-resume", "pause-on-escape", "auto-start-from-outcome"] as const;
 
 export function goalArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
   const prefix = argumentPrefix.trimStart().toLowerCase();
@@ -244,7 +244,7 @@ function formatGoal(
   goal: GoalSnapshot | null,
   continuation: ReturnType<typeof currentContinuationState> = null,
   stall = observeGoalStall(goal, continuation),
-  preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true },
+  preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false },
   permissions?: PermissionHold | null,
 ): string {
   const settings = formatPreferences(preferences);
@@ -285,6 +285,7 @@ function formatPreferences(preferences: GoalPreferences): string {
     `Automatic continuation setting: ${preferences.autoContinue ? "on" : "off"}${WAKE_DISABLED ? " (disabled by environment)" : ""}`,
     `Conversational resume setting: ${preferences.conversationalResume ? "on" : "off"}`,
     `Pause on Esc setting: ${preferences.pauseOnEscape ? "on" : "off"}`,
+    `Auto-start Goal setting: ${preferences.autoStartFromOutcome ? "on" : "off"}`,
   ].join("\n");
 }
 
@@ -341,7 +342,7 @@ export default function (pi: ExtensionAPI): void {
   let terminalInputIsEditor: (() => boolean) | undefined;
   let uiPromptDepth = 0;
   let lastAgentEvidence: ContinuationEvidence | null = null;
-  let preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true };
+  let preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false };
   /** Background items active when each pending blocking question started, keyed by tool call id. */
   const pendingQuestions = new Map<string, Map<string, BackgroundWorkItem>>();
 
@@ -396,7 +397,7 @@ export default function (pi: ExtensionAPI): void {
     ctx.ui.notify(message, type);
   };
 
-  const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource): void => {
+  const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource, bindOutcome = false): void => {
     executionGeneration += 1;
     lastAgentEvidence = null;
     const previous = getGoal(ctx);
@@ -405,7 +406,7 @@ export default function (pi: ExtensionAPI): void {
     // Bridge lifecycle after the raw Goal entry is durable. Harness may own the
     // structured outcome, but Goal still owns its trigger, clocks, pauses, and wakes.
     if (!previous || previous.goalId !== goal.goalId) {
-      requestTaskContext(pi, "start", goal);
+      requestTaskContext(pi, bindOutcome ? "bind" : "start", goal);
     } else if (goal.status === "complete") {
       requestTaskContext(pi, "complete", goal);
     } else if (goal.status === "paused" || goal.status === "budgetLimited") {
@@ -897,6 +898,21 @@ export default function (pi: ExtensionAPI): void {
     if (latestSnapshot) collectIfPossible();
   });
 
+  const unsubscribeOutcomeAccepted = pi.events.on(OUTCOME_ACCEPTED_EVENT, (value: unknown) => {
+    const ctx = currentCtx;
+    const event = value as Partial<OutcomeAcceptedEvent> | null;
+    if (!preferences.autoStartFromOutcome || !ctx || !event ||
+        typeof event.sessionId !== "string" || event.sessionId !== ctx.sessionManager.getSessionId() ||
+        !canStartGoalFromOutcome(event.outcome)) return;
+    const current = getGoal(ctx);
+    if (current && current.status !== "complete") return;
+    const objective = event.outcome.objective.trim();
+    if (validateObjective(objective)) return;
+    const goal = createGoalSnapshot(objective, null);
+    setGoal(goal, ctx, "runtime", true);
+    resetContinuationState(goal);
+  });
+
   const changePreference = async (ctx: ExtensionCommandContext, key: keyof GoalPreferences, enabled: boolean): Promise<void> => {
     const previous = preferences;
     preferences = writeGoalPreference(key, enabled);
@@ -923,7 +939,20 @@ export default function (pi: ExtensionAPI): void {
     }
   };
   const contribution = { id: "goal", label: "Goal", command: "/goal settings", open: openSettings };
-  const registerSettings = () => pi.events.emit("harness-settings:register", contribution);
+  const autoStartControl = {
+    id: "goal-auto-start",
+    label: "Auto-start Goal",
+    values: ["Off", "On"],
+    get: () => preferences.autoStartFromOutcome ? "On" : "Off",
+    async change(value: string, ctx: ExtensionCommandContext) {
+      if (value !== "On" && value !== "Off") throw new Error("Invalid Auto-start Goal mode.");
+      await changePreference(ctx, "autoStartFromOutcome", value === "On");
+    },
+  };
+  const registerSettings = () => {
+    pi.events.emit("harness-settings:register", contribution);
+    pi.events.emit("harness-settings:register", autoStartControl);
+  };
   const unsubscribeSettingsRequest = pi.events.on("harness-settings:request", registerSettings);
   registerSettings();
 
@@ -943,13 +972,14 @@ export default function (pi: ExtensionAPI): void {
         const [, setting, mode, ...extra] = trimmed.split(/\s+/);
         if (setting !== undefined && (!GOAL_SETTINGS.includes(setting as typeof GOAL_SETTINGS[number]) ||
             (mode !== "on" && mode !== "off") || extra.length > 0)) {
-          notifyGoal(ctx, "Usage: /goal settings [auto-continue|conversational-resume|pause-on-escape on|off]", "warning");
+          notifyGoal(ctx, "Usage: /goal settings [auto-continue|conversational-resume|pause-on-escape|auto-start-from-outcome on|off]", "warning");
           return;
         }
         if (setting !== undefined) {
           try {
             const key = setting === "auto-continue" ? "autoContinue"
-              : setting === "conversational-resume" ? "conversationalResume" : "pauseOnEscape";
+              : setting === "conversational-resume" ? "conversationalResume"
+                : setting === "pause-on-escape" ? "pauseOnEscape" : "autoStartFromOutcome";
             await changePreference(ctx, key, mode === "on");
           } catch (error) {
             notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
@@ -1232,6 +1262,7 @@ export default function (pi: ExtensionAPI): void {
     try {
       preferences = readGoalPreferences();
     } catch (error) {
+      preferences = { ...preferences, autoStartFromOutcome: false };
       notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
     }
     const restoredGoal = getGoal(ctx);
@@ -1559,6 +1590,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
     if (typeof unsubscribeOperationAdmission === "function") unsubscribeOperationAdmission();
+    if (typeof unsubscribeOutcomeAccepted === "function") unsubscribeOutcomeAccepted();
 
     executionGeneration += 1;
     sessionGeneration += 1;

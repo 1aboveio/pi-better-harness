@@ -180,7 +180,7 @@ Goal communicates through the synchronous, mutable event
 
 ```ts
 {
-  action: "inspect" | "start" | "pause" | "resume" | "complete";
+  action: "inspect" | "start" | "bind" | "pause" | "resume" | "complete";
   goalId?: string;
   width?: number; // Current widget width for visual ownership inspection.
   objective?: string;
@@ -191,7 +191,8 @@ Goal communicates through the synchronous, mutable event
 
 - Goal emits `inspect` before assembling a turn prompt.
 - A new goal id emits `start` with the raw `objective` after the Goal entry is
-  appended. Non-start actions never carry `objective`.
+  appended. An opt-in outcome-created Goal emits `bind` instead, retaining the
+  accepted outcome and Todo. Only `start` and `bind` carry `objective`.
 - A completed goal emits `complete`; a paused or budget-limited goal emits
   `pause`; a transition from a non-active goal to the same active goal emits
   `resume`.
@@ -217,6 +218,24 @@ Goal communicates through the synchronous, mutable event
 
 Goal does not import the Harness package, keeping the dependency direction free
 of cycles. Harness consumes the public event contract and remains optional.
+
+### Opt-in Goal Start from an Accepted Outcome
+
+Goal owns the boolean `autoStartFromOutcome` preference, default Off, exposed in
+`/goal settings` and the existing Harness settings link. After a successful
+explicit `update_todo` outcome commit, Harness emits the synchronous
+`pi-better-harness:outcome-accepted` event with the session ID and saved outcome.
+Goal validates the session and requires an active, unbound outcome with objective
+text and nonempty `doneWhen` criteria. Ordinary prose, slash command invocations,
+restore, branch navigation, and preference changes cannot trigger creation.
+
+An existing active, paused or budget-limited Goal prevents automatic creation.
+Goal appends its new state before sending `bind`; Harness accepts only a matching
+active, unbound outcome and preserves its objective, criteria, boundaries and
+Todo. No kickoff message is sent into the current tool turn. Existing continuation
+preferences, workflow gates, permission controls and explicit completion audit
+remain authoritative. A bound outcome is not rearmed by refinement, Goal clear,
+or reload; new unrelated work requires the existing `newTask` contract.
 
 ## Consequences
 
