@@ -3,7 +3,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import test, { after } from "node:test";
+import test, { after, before } from "node:test";
+import { fork } from "node:child_process";
+import { once } from "node:events";
 import {
     createEventBus, discoverAndLoadExtensions, ExtensionRunner, SessionManager,
     type ExtensionAPI, type ModelRegistry, type ToolDefinition, type ToolInfo,
@@ -41,13 +43,27 @@ process.env.TMPDIR = scratch;
 process.env.TEMP = scratch;
 process.env.TMP = scratch;
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT = "off";
-after(() => {
+const transport = mkdtempSync(join(originalTmp, "p759-"));
+let daemon: ReturnType<typeof fork>;
+before(async () => {
+    daemon = fork(new URL("../../pi-better-server/test/support/work-daemon.ts", import.meta.url), [], {
+        execArgv: ["--import", "tsx"], env: { ...process.env, PI_SERVER_DIR: transport },
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+    });
+    let errors = ""; daemon.stderr!.on("data", chunk => { errors += chunk; });
+    await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
+});
+after(async () => {
+    if (daemon && daemon.exitCode === null && daemon.signalCode === null) {
+        const exited = once(daemon, "exit"); daemon.send("stop"); await exited;
+    }
     for (const [name, value] of Object.entries({ PI_CODING_AGENT_DIR: oldEnv.agent, TMPDIR: oldEnv.tmp, TEMP: oldEnv.temp, TMP: oldEnv.tmpAlias,
         PI_SANDBOX_RECOVERY_SNAPSHOT: oldEnv.recovery })) {
         if (value === undefined) delete process.env[name]; else process.env[name] = value;
     }
     rmSync(fixture, { recursive: true, force: true });
     rmSync(scratch, { recursive: true, force: true });
+    rmSync(transport, { recursive: true, force: true });
 });
 const sandboxEntry = fileURLToPath(new URL("../index.ts", import.meta.url));
 const backgroundEntry = fileURLToPath(new URL("../../pi-better-background-tasks/src/index.ts", import.meta.url));
@@ -361,11 +377,39 @@ test("a foreign durable id is refused while the owning session may stop with com
         await owner.policy(settings(true, true, false, false));
         const stopped = await owner.execute("bg_task_stop", { id });
         assert.equal(stopped.blocked, false, stopped.text);
+        assert.match(stopped.text, /cancelled/, stopped.text);
         assert.match(await terminal(owner, id), /cancelled/);
     } finally {
         if (id) await owner.execute("bg_task_stop", { id }).catch(() => {});
         await other.close();
         await owner.close();
+    }
+});
+
+test("commands-off cancellation of existing unconfined work preserves owner authority without enabling launch", async () => {
+    const owner = await harness(settings(false, false));
+    const other = await harness(settings(false, false));
+    let id: string | undefined;
+    try {
+        const launched = await owner.execute("bg_task_spawn", { command: "sleep 60", callback: false });
+        id = extractTaskId(launched.text);
+        assert.ok(id, launched.text);
+        await owner.policy(settings(true, true, false, false));
+        await other.policy(settings(true, true, false, false));
+        const deniedLaunch = await owner.execute("bg_task_spawn", { command: "true" });
+        assert.match(deniedLaunch.text, /disables commands/);
+        assert.equal(extractTaskId(deniedLaunch.text), undefined);
+        const foreign = await other.execute("bg_task_stop", { id });
+        assert.equal(foreign.blocked, true, foreign.text);
+        assert.match(foreign.text, /no verified task execution adapter/);
+        assert.match(await taskStatusText(owner, id), /running/);
+        const stopped = await owner.execute("bg_task_stop", { id });
+        assert.equal(stopped.blocked, false, stopped.text);
+        assert.match(stopped.text, /cancelled/, stopped.text);
+        assert.match(await terminal(owner, id), /cancelled/);
+    } finally {
+        if (id) await owner.execute("bg_task_stop", { id }).catch(() => {});
+        await other.close(); await owner.close();
     }
 });
 
