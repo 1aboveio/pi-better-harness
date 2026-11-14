@@ -1,0 +1,313 @@
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { join } from "node:path";
+import { logPathFor, runDir, taskRuntimeTrust } from "./registry.ts";
+import { activeFailures, actionableFailures, disposeIncidents, failureIdentity, findIncident, formatFailureSummary, formatTerminalFailureFacts, markFailureAttentionDelivered,
+    observeFailures, pendingFailureAttention, readFailureState, type FailureState } from "./shared-failure-observations.ts";
+import { evidenceText, foldToolEnd, foldToolStart, newIncidentModel, toolOperation, type IncidentModel, type IncidentSink } from "./incident-model.ts";
+import { SandboxDiagnostics, isDiagnosticReport } from "./shared-sandbox-diagnostics.ts";
+
+
+let diagnosticsWarned = false;
+const workerDiagnostics = new SandboxDiagnostics({ context: "worker",
+    version: "unknown", policy: () => undefined, backend: () => undefined,
+    onError: () => {
+        if (!diagnosticsWarned) process.stderr.write("Sandbox diagnostics collection gap; enforcement unchanged.\n");
+        diagnosticsWarned = true;
+    },
+});
+
+export { formatFailureSummary, pendingFailureAttention, markFailureAttentionDelivered, toolOperation };
+export const failurePath = (id: string) => join(runDir(id), "failures.jsonl");
+export const readRunFailures = (id: string): FailureState => readFailureState(failurePath(id));
+interface Scan {
+    offset: number; head: string; identity: string; model: IncidentModel; retry?: number;
+    /**
+     * A "run metadata could not be read" gap this trusted rescan inherited, with the tool incidents
+     * that were unresolved when it began (the earlier exact-rule scan's). Re-checked after every scan.
+     */
+    gap?: { id: string; before: Set<string> };
+}
+const scans = new Map<string, Scan>();
+/** When each run's trust first could not be read, for the bounded wait (#325). */
+const trustUnknownSince = new Map<string, number>();
+/** How long a running scan waits for unreadable trust before scanning under the exact-retry rule. */
+export const TRUST_WAIT_MS = 30_000;
+/** Drop an in-memory scan cursor (e.g. on reload); the journal remains authoritative. */
+export function resetFailureScanCursor(id?: string): void {
+    if (id === undefined) { scans.clear(); trustUnknownSince.clear(); }
+    else { scans.delete(id); trustUnknownSince.delete(id); }
+}
+const CHUNK = 64 * 1024;
+const MAX_LINE = 2 * 1024 * 1024;
+function time(event: any): number | undefined {
+    return typeof event.at === "number" && Number.isFinite(event.at) ? event.at :
+        typeof event.message?.timestamp === "number" && Number.isFinite(event.message.timestamp) ? event.message.timestamp : undefined;
+}
+function sinkFor(id: string): IncidentSink {
+    const path = failurePath(id);
+    return {
+        observe: (events) => observeFailures(path, events),
+        dispose: (event) => { disposeIncidents(path, event); },
+        state: () => readFailureState(path),
+    };
+}
+function fold(id: string, scan: Scan, row: any, offset: number, cwd: string): void {
+    const path = failurePath(id);
+    const model = scan.model;
+    if (row.type === "tool_execution_start") {
+        foldToolStart(model, row, cwd, sinkFor(id));
+    } else if (row.type === "tool_execution_end") {
+        foldToolEnd(model, row, cwd, `${logPathFor(id)}#byte=${offset}`, sinkFor(id));
+    } else if (row.type === "message_end" && row.message?.role === "assistant" &&
+        (row.message.stopReason === "error" || typeof row.message.errorMessage === "string")) {
+        const seq = ++model.sequence;
+        const message = evidenceText(row.message.errorMessage) ?? "Model response failed";
+        const failureId = `model:${offset}`;
+        const state = observeFailures(path, [{ id: failureId, operation: "model-call", kind: "failure", at: time(row), category: "model", summary: message }]);
+        model.failed.set("model-call", { id: state.observations[failureIdentity("model-call")]?.id ?? failureId, sequence: seq });
+    } else if (row.type === "auto_retry_start") {
+        const seq = ++model.sequence;
+        if (typeof row.errorMessage === "string") {
+            const failureId = `model-retry:${offset}`;
+            const state = observeFailures(path, [{ id: failureId, operation: "model-call", kind: "failure", at: time(row), category: "model", summary: row.errorMessage }]);
+            model.failed.set("model-call", { id: state.observations[failureIdentity("model-call")]?.id ?? failureId, sequence: seq - 1 });
+        }
+        scan.retry = seq;
+    } else if (row.type === "auto_retry_end" && row.success === false) {
+        const seq = ++model.sequence;
+        const failureId = `model-exhausted:${offset}`;
+        const state = observeFailures(path, [{ id: failureId, operation: "model-call", kind: "failure", at: time(row), category: "model",
+            summary: evidenceText(row.finalError) ?? "Model retry exhausted" }]);
+        model.failed.set("model-call", { id: state.observations[failureIdentity("model-call")]?.id ?? failureId, sequence: seq });
+        scan.retry = undefined;
+    } else if (row.type === "auto_retry_end" && row.success === true && scan.retry !== undefined) {
+        ++model.sequence;
+        const failed = model.failed.get("model-call");
+        if (failed && scan.retry > failed.sequence) {
+            observeFailures(path, [{ id: `model-recovered:${offset}`, operation: "model-call", kind: "recovered", at: time(row), incidents: [failed.id] }]);
+            model.failed.delete("model-call");
+        }
+        scan.retry = undefined;
+    } else {
+        ++model.sequence;
+    }
+}
+/**
+ * Close an inherited metadata gap unless an exact-rule leftover still needs it. A leftover counts only
+ * when its attempt declared intent (operationId, attemptId, or expectedExitCodes): its event id is
+ * already consumed under the exact rule, so this trusted scan cannot re-key it, and a declared retry
+ * or expected exit cannot resolve it. A plain failure reads the same under either rule and never
+ * holds the gap. Once the leftover is resolved (an exact retry or a disposition), the gap closes.
+ */
+function settleMetadataGap(id: string, scan: Scan): void {
+    const gap = scan.gap!;
+    const state = readRunFailures(id);
+    const current = state.observations[failureIdentity("run-metadata")];
+    if (!current || current.id !== gap.id || current.status !== "unresolved") { scan.gap = undefined; return; }
+    const intentBearing = new Set<string>();
+    for (const attempt of scan.model.finished.values()) {
+        if (attempt.incident && gap.before.has(attempt.incident) && Object.keys(attempt.intent).length) intentBearing.add(attempt.incident);
+    }
+    const held = [...intentBearing].some((incident) => findIncident(state, incident)?.status === "unresolved");
+    if (held) return;
+    observeFailures(failurePath(id), [{ id: failureIdentity("run-metadata-readable", gap.id), operation: "run-metadata", kind: "recovered", incidents: [gap.id] }]);
+    scan.gap = undefined;
+}
+/**
+ * Scan-period markers (#332). While a "run metadata could not be read" gap is open, each scan that
+ * starts under a different rule from the last marked one journals a no-op marker (a `delivered`
+ * event naming no incident) whose id records the rule: `run-metadata-scan:<rule>:<journal length>`.
+ * The ids are read back by prefix, so they are plain strings, not `failureIdentity` hashes.
+ */
+const SCAN_MARKER_PREFIX = "run-metadata-scan:";
+type ScanRule = "exact" | "trusted";
+function scanRuleAt(marker: string): ScanRule | undefined {
+    if (!marker.startsWith(SCAN_MARKER_PREFIX)) return undefined;
+    const rule = marker.slice(SCAN_MARKER_PREFIX.length).split(":")[0];
+    return rule === "exact" || rule === "trusted" ? rule : undefined;
+}
+/** Journal that a scan under `rule` begins, unless the last marked period already used it. */
+function markScanPeriod(path: string, state: FailureState, rule: ScanRule): FailureState {
+    let last: ScanRule | undefined;
+    for (let i = state.seen.length - 1; i >= 0 && !last; i -= 1) last = scanRuleAt(state.seen[i]!);
+    if (last === rule) return state;
+    return observeFailures(path, [{ id: `${SCAN_MARKER_PREFIX}${rule}:${state.seen.length}`, operation: "run-metadata", kind: "delivered", incidents: [] }]);
+}
+/**
+ * The unresolved tool incidents first journaled by an exact-rule scan, which a trusted scan cannot
+ * re-key. Each incident belongs to the period of the last marker before it, so a failure from a
+ * trusted period is never mistaken for a leftover, however often the scan is rebuilt (a parent
+ * restart, `/reload`, or cache eviction), and a later exact-rule period's failures always are. An
+ * incident before every marker is a leftover only when the journal has no exact-rule marker at all
+ * (the first trusted scan of a gap, or a journal from before the markers existed).
+ */
+function exactRuleLeftovers(path: string, prior: FailureState): Set<string> {
+    const state = markScanPeriod(path, prior, "trusted");
+    const period = new Map<string, ScanRule | undefined>();
+    let current: ScanRule | undefined;
+    let sawExact = false;
+    for (const id of state.seen) {
+        const rule = scanRuleAt(id);
+        if (rule) { current = rule; sawExact ||= rule === "exact"; continue; }
+        period.set(id, current);
+    }
+    const leftover = (id: string) => {
+        if (!period.has(id)) return false;
+        const rule = period.get(id);
+        return rule === "exact" || (rule === undefined && !sawExact);
+    };
+    return new Set(Object.values(state.observations)
+        .filter((x) => x.category === "tool" && x.status === "unresolved" && leftover(x.id)).map((x) => x.id));
+}
+/** Scan complete source records, independent of the finite progress/transcript tail. */
+export function collectRunFailures(id: string, cwd: string, terminal = false): FailureState {
+    const path = failurePath(id);
+    let fd: number;
+    try { fd = openSync(logPathFor(id), "r"); }
+    catch (error) {
+        const prior = readRunFailures(id);
+        if ((error as NodeJS.ErrnoException).code === "ENOENT" && !terminal && !scans.has(id) && prior.seen.length === 0) return prior;
+        const access = prior.observations[failureIdentity("child-log-access")];
+        if (access && access.status !== "resolved") return prior;
+        return observeFailures(path, [{ id: failureIdentity("source-unreadable", access?.id ?? "initial"), operation: "child-log-access", kind: "incomplete",
+            summary: "Child log is unavailable; observations may be incomplete" }]);
+    }
+    try {
+        const stat = fstatSync(fd);
+        const size = stat.size;
+        const identity = `${stat.dev}:${stat.ino}`;
+        const prefix = Buffer.alloc(Math.min(256, size));
+        readSync(fd, prefix, 0, prefix.length, 0);
+        const head = prefix.toString("latin1");
+        let scan = scans.get(id);
+        const shared = scan ? Math.min(head.length, scan.head.length) : 0;
+        if (scan && (identity !== scan.identity || size < scan.offset || head.slice(0, shared) !== scan.head.slice(0, shared))) {
+            observeFailures(path, [{ id: failureIdentity("log-rewritten", scan.head, scan.offset), operation: "child-log", kind: "incomplete", summary: "Child log was truncated or rewritten; observations may be incomplete" }]);
+            scan = undefined;
+        }
+        // Structured intent and dispositions are honoured only for runs launched on the trusted task
+        // runtime, whose bash and failure_disposition tools are the guarded ones. Trust needs the
+        // parent-authored provenance record as well as `meta.taskRuntime` (#325). It is decided once
+        // per scan model, and only from a definite answer: while metadata or provenance cannot be read
+        // the scan waits (nothing is folded, so a brief read failure pins nothing to the exact rule).
+        // The wait is bounded: at a terminal read, or once trust has been unreadable for
+        // TRUST_WAIT_MS, the log is scanned under the exact-retry rule (untrusted) so real failures
+        // stay visible, and an observation gap says the metadata could not be read.
+        if (!scan) {
+            const trust = taskRuntimeTrust(id);
+            if (trust === "unknown") {
+                const now = Date.now();
+                const since = trustUnknownSince.get(id) ?? now;
+                trustUnknownSince.set(id, since);
+                while (trustUnknownSince.size > 256) trustUnknownSince.delete(trustUnknownSince.keys().next().value!);
+                const prior = readRunFailures(id);
+                const gap = prior.observations[failureIdentity("run-metadata")];
+                const waited = terminal || now - since >= TRUST_WAIT_MS;
+                if (waited && !(gap && gap.status === "unresolved")) {
+                    observeFailures(path, [{ id: failureIdentity("run-metadata-unreadable", gap?.id ?? "initial"), operation: "run-metadata", kind: "incomplete",
+                        summary: "Run metadata could not be read; tool failures are scanned under the exact-retry rule" }]);
+                }
+                if (!waited) return prior;
+                markScanPeriod(path, readRunFailures(id), "exact");
+                scan = { offset: 0, head, identity, model: newIncidentModel(false) };
+            } else {
+                trustUnknownSince.delete(id);
+                scan = { offset: 0, head, identity, model: newIncidentModel(trust === "trusted", id) };
+                // The gap is settled after this scan has folded the log (settleMetadataGap), and again after
+                // every later scan, once no leftover of the exact-rule scan that trust would have read
+                // differently is still unresolved (#332).
+                const prior = readRunFailures(id);
+                const deferred = prior.observations[failureIdentity("run-metadata")];
+                if (deferred && deferred.status === "unresolved") scan.gap = { id: deferred.id, before: exactRuleLeftovers(path, prior) };
+            }
+        }
+        scan.head = head;
+        let position = scan.offset;
+        let start = position;
+        let fragments: Buffer[] = [];
+        let length = 0;
+        let oversized = false;
+        const buffer = Buffer.alloc(CHUNK);
+        while (position < size) {
+            const count = readSync(fd, buffer, 0, Math.min(CHUNK, size - position), position);
+            if (!count) break;
+            let from = 0;
+            for (let i = 0; i < count; i++) {
+                if (buffer[i] !== 10) continue;
+                const part = buffer.subarray(from, i);
+                length += part.length;
+                if (!oversized && length <= MAX_LINE) {
+                    const line = Buffer.concat([...fragments, part]).toString("utf8").trim();
+                    if (line.startsWith("{")) {
+                        try {
+                            const row = JSON.parse(line);
+                            // Separate sampling from the incident model. Even a trusted worker log
+                            // only supplies agent-reported evidence, never a policy decision.
+                            if (row?.type === "sandbox_diagnostic_report") {
+                                if (taskRuntimeTrust(id) === "trusted" && isDiagnosticReport(row)) workerDiagnostics.observeReport(row, id);
+                            } else if (["tool_execution_start", "tool_execution_end", "message_end", "auto_retry_start", "auto_retry_end"].includes(row?.type)) {
+                                if ((row.type.startsWith("tool_execution_") &&
+                                    (typeof row.toolCallId !== "string" || !row.toolCallId || typeof row.toolName !== "string")) ||
+                                    (row.type === "tool_execution_end" && typeof row.isError !== "boolean" && typeof row.result?.isError !== "boolean" && typeof row.result?.exitCode !== "number") ||
+                                    (row.type === "message_end" && (!row.message || typeof row.message.role !== "string")) ||
+                                    (row.type === "auto_retry_end" && typeof row.success !== "boolean")) throw new Error("invalid structured event");
+                                fold(id, scan, row, start, cwd);
+                            }
+                        } catch {
+                            observeFailures(path, [{ id: `malformed:${start}`, operation: "child-log", kind: "incomplete", summary: "Child log contains malformed structured events; observations may be incomplete" }]);
+                        }
+                    }
+                } else {
+                    observeFailures(path, [{ id: `oversized:${start}`, operation: "child-log", kind: "incomplete", summary: "Child log contains an oversized event; observations may be incomplete" }]);
+                }
+                start = position + i + 1;
+                from = i + 1;
+                fragments = []; length = 0; oversized = false;
+            }
+            const rest = buffer.subarray(from, count);
+            length += rest.length;
+            if (length > MAX_LINE) oversized = true;
+            if (!oversized && rest.length) fragments.push(Buffer.from(rest));
+            position += count;
+        }
+        scan.offset = start;
+        if (scan.gap) settleMetadataGap(id, scan);
+        scans.delete(id);
+        scans.set(id, scan);
+        while (scans.size > 64) scans.delete(scans.keys().next().value!);
+        const access = readRunFailures(id).observations[failureIdentity("child-log-access")];
+        if (access && access.status !== "resolved") observeFailures(path, [{ id: `source-readable:${access.id}:${identity}:${size}`,
+            operation: "child-log-access", kind: "recovered", incidents: [access.id] }]);
+        if (terminal && position > start) observeFailures(path, [{ id: `partial:${start}`, operation: "child-log", kind: "incomplete", summary: "Child log ends with a partial event; observations may be incomplete" }]);
+    } catch {
+        observeFailures(path, [{ id: "log-read-error", operation: "child-log", kind: "incomplete", summary: "Child log could not be fully scanned; observations may be incomplete" }]);
+    } finally { closeSync(fd); }
+    return readRunFailures(id);
+}
+/**
+ * The one presentation of a run's reduced incident state for the navigator. Running: prioritized
+ * active rows. Terminal: actionable and incomplete rows, with unclassified agent tool failures
+ * counted rather than presented as the run's outcome (#315).
+ */
+export function runFailureFacts(state: FailureState, terminal: boolean): string {
+    if (!terminal) return formatFailureSummary(state);
+    return formatTerminalFailureFacts(state, activeFailures(state).map((x) => x.id));
+}
+export function failureSummary(id: string, cwd: string, terminal = false): string {
+    return failureView(id, cwd, terminal).text;
+}
+/**
+ * The failure facts plus whether anything needs action. A navigator row leads with failure text only
+ * when something does; a quiet "No failures need action · … (history)" line never displaces the
+ * row's model, tool, and spend columns (#332).
+ */
+export function failureView(id: string, cwd: string, terminal = false): { text: string; actionable: boolean } {
+    const state = collectRunFailures(id, cwd, terminal);
+    return { text: runFailureFacts(state, terminal), actionable: actionableFailures(state).length > 0 };
+}
+export function prependFailureSummary(body: string, summary: string): string {
+    if (!summary) return body;
+    // Keep the established status header first; failure evidence still precedes assistant progress.
+    const header = /^(\[[^\n]+\])\n/.exec(body);
+    return header ? `${header[1]}\n${summary}\n${body.slice(header[0].length)}` : `${summary}\n${body}`;
+}

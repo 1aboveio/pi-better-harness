@@ -22,6 +22,7 @@ import { WorkReadModel } from "./runtime/read-model.ts";
 import { WorkQueries } from "./runtime/queries.ts";
 import { RuntimeCancellation, hasPendingCancellation } from "./runtime/cancellation.ts";
 import { SharedCatalog } from "./runtime/catalog.ts";
+import { createSubagentLaunch, hasSubagentManagement } from "./runtime/subagent-launch.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
   /** Defaults to `~/.pi/agent/server` (or `$PI_SERVER_DIR`). */
@@ -94,6 +95,12 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     await registry.resumeAll();
     const nativeHost = new NativeClientHost(registry);
     const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
+    let launches: Awaited<ReturnType<typeof createSubagentLaunch>> | undefined;
+    let launchInitialization: ReturnType<typeof createSubagentLaunch> | undefined;
+    if (hasSubagentManagement(getAgentDir())) {
+      launchInitialization = createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog);
+      void launchInitialization.then(host => { launches = host; }, error => log(`Subagent supervision unavailable: ${String(error)}`));
+    }
     let workModel: WorkReadModel | undefined;
     let cancellations: RuntimeCancellation | undefined;
     if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
@@ -210,6 +217,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             if (!greeted) throw new Error(`${type} requires hello`);
             catalog.admission.bind(command.authority, socket);
             return reply({ data: { bound: true } });
+          }
+          if (type === "runtime_launch_subagent") {
+            if (!greeted) throw new Error("not_accepted: launch requires hello");
+            launchInitialization ??= createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog);
+            launches = await launchInitialization;
+            const data = await launches.handle(command);
+            await work().reconcile();
+            return reply({ data });
           }
           if (type === "runtime_subscribe_catalog") {
             if (!greeted) throw new Error(`${type} requires hello`);
@@ -397,6 +412,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
     cleanupStartup = async () => {
       await cancellations?.close();
+      await launches?.close();
       await workModel?.close();
       for (const socket of sockets) socket.destroy();
       server.close();
@@ -476,7 +492,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return;
           }
           // No create/open can slip between this check and the synchronous admission fence.
-          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
+          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || launches?.busy || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
           draining = true;
           idleStopping = true;
           log("idle timeout with no active sessions; shutting down");
@@ -506,6 +522,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           for (const socket of sockets) socket.destroy();
           await closed;
           await cancellations?.close();
+          await launches?.close();
           await workModel?.close();
           await registry.shutdown();
           await Promise.allSettled([...dispatches]);

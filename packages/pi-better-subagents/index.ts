@@ -106,7 +106,7 @@ import {
     listMetasForParent,
     onMetaChanged,
     effectiveStatus,
-    ownedByThisParent,
+    ownedByThisParent as ownedByFrontend,
     navigatorVisibleRuns,
     isDismissed,
     dismissRun,
@@ -143,6 +143,9 @@ import {
 } from "./capacity.mjs";
 import { buildHealthCallbackDelivery } from "./completion.ts";
 import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.ts";
+let managementPort: import("./managed-launch-port.ts").ManagedLaunchPort | undefined;
+const ownedByThisParent = (meta: Partial<RunMeta>) => managementPort ? managementPort.owns(meta) : ownedByFrontend(meta as RunMeta);
+const supervisedMetas = () => managementPort ? managementPort.supervised() : listMetasForParent(process.pid);
 import { completionCallbackFields, failureAttentionFields, healthCallbackFields } from "./callback-fields.ts";
 import { collectRunFailures, failurePath, markFailureAttentionDelivered, pendingFailureAttention } from "./failures.ts";
 import { failureAttentionHandled, observeFailures } from "./shared-failure-observations.ts";
@@ -440,6 +443,7 @@ function interruptCurrentSessionSubagents(reason: string, ctx: ExtensionContext)
     const now = Date.now();
     const interrupted: RunMeta[] = [];
     for (const summary of listMetasForParent(process.pid)) {
+        if (summary.management) continue;
         if (!ownedByThisParent(summary)) continue;
         if (summary.status !== "running" && summary.status !== "orphaned") continue;
         if (!belongsToOrigin(summary, origin)) continue;
@@ -532,6 +536,8 @@ function markCompletionCallbackSent(id: string, now: number): void {
 
 /** Queue one durable ordinary terminal event on the host-shared batch. */
 function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
+    // The server persists outcomes but never writes or activates the parent's transcript.
+    if (managementPort) return;
     const meta = readMeta(id);
     if (meta?.assignment) {
         try {
@@ -1178,9 +1184,11 @@ function enforceTiming(pi: ExtensionAPI | undefined, meta: RunMeta, now: number)
 
 /** One reconciliation + durable health-callback recovery pass. */
 function reconcileHealth(): void {
+    if (!managementPort) return;
+    try { managementPort.assertCurrent(); } catch { stopHealthTicker(); return; }
     const ctx = uiCtx;
     const pi = healthPi;
-    for (const summary of listMetasForParent(process.pid)) {
+    for (const summary of supervisedMetas()) {
         if (!ownedByThisParent(summary)) continue;
         // running/orphaned: process reconcile. lost: durable callback recovery only.
         if (summary.status !== "running" && summary.status !== "orphaned" && summary.status !== "lost") continue;
@@ -1254,7 +1262,7 @@ function reconcileHealth(): void {
         try { finalizeInterruptedRunFromLog(pi, meta, Date.now()); } catch { /* the next tick retries */ }
     }
     // Completed runs can still have failed completion handoffs to retry.
-    for (const summary of listMetasForParent(process.pid)) {
+    for (const summary of supervisedMetas()) {
         if (!pi || !ownedByThisParent(summary) || summary.status === "running" || summary.status === "orphaned" || summary.status === "lost") continue;
         const meta = readMeta(summary.id);
         if (meta && meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined) enqueueCompletionCallback(pi!, meta.id);
@@ -1336,6 +1344,7 @@ function reconcileAbandonedRuns(now: number = Date.now()): number {
 
 /** Completion batches own their retry timer; only supervision keeps this one alive. */
 function syncHealthTicker(): void {
+    if (!managementPort) { stopHealthTicker(); return; }
     // A replaced instance never restarts supervision loops for a session it no
     // longer owns; the live instance runs its own. It must still STOP one that is
     // already armed: a run this instance launched before teardown can finish
@@ -1345,12 +1354,13 @@ function syncHealthTicker(): void {
         stopHealthTicker();
         return;
     }
-    if (needsMonitoring(listMetasForParent(process.pid)) || needsInterruptedSupervision()) ensureHealthTicker();
+    if (needsMonitoring(supervisedMetas()) || needsInterruptedSupervision()) ensureHealthTicker();
     else stopHealthTicker();
 }
 
 /** Start the reconciliation loop if it isn't already running. */
 function ensureHealthTicker(): void {
+    if (!managementPort) return;
     // Not gated on `sessionTornDown`: a spawn always means the current session is
     // doing new work. Only `syncHealthTicker` — the path a late child finalizer
     // takes — stays closed in a replaced instance.
@@ -2240,7 +2250,8 @@ function discoveredSkillsFromContext(ctx: { getSystemPromptOptions?: () => { ski
     }
 }
 
-export default function (pi: ExtensionAPI) {
+export default function (pi: ExtensionAPI, managed?: import("./managed-launch-port.ts").ManagedLaunchPort) {
+    managementPort = managed;
     // A standalone Subagents install has no Harness extension, so the parent
     // session applies the same linked-worktree project boundary as its children.
     pi.on("before_agent_start", (event) => {
@@ -2388,7 +2399,9 @@ export default function (pi: ExtensionAPI) {
     };
     const activeDelegationMode = (): DelegationMode => delegationOverride ?? normalizeDelegationMode(loadConfig().delegationMode);
     const countRunning = () =>
-        listActiveMetasForParent(process.pid).filter((meta) => effectiveStatus(meta) === "running").length;
+        listActiveMetasForParent(managed?.owner.pid ?? process.pid).filter((meta) =>
+            (!managed || meta.spawnPidStartTime === managed.owner.start) && effectiveStatus(meta) === "running").length;
+    const capacityGate = () => managed ? managed.capacity(countRunning) : getSharedCapacityGate(countRunning);
     // Supervised worker operations: the Background observed-waits service owns
     // durable records, this extension owns the trusted transport its children
     // talk to. Both are absent in a standalone Subagents install, which is why
@@ -2426,7 +2439,7 @@ export default function (pi: ExtensionAPI) {
                 sources: { toolWaitMinutes: timing.toolWaitSource, stuckMinutes: timing.stuckSource },
                 ...(timing.timingError ? { error: timing.timingError } : {}),
             },
-        }, countRunning(), getSharedCapacityGate(countRunning).pending);
+        }, countRunning(), capacityGate().pending);
     };
     const saveSettings = (): { ok: boolean; message: string } => {
         try {
@@ -2577,7 +2590,14 @@ export default function (pi: ExtensionAPI) {
     const registeredSpawnSchemas = new Map<string, object>();
     const registerSpawnTool: ExtensionAPI["registerTool"] = (definition) => {
         registeredSpawnSchemas.set(definition.name, definition.parameters);
-        pi.registerTool(definition);
+        pi.registerTool(managed ? { ...definition, async execute(key, params, signal, onUpdate, ctx) {
+            restoreDelegationMode(ctx);
+            await workerOperations.start();
+            return definition.execute(key, params, signal, onUpdate, ctx);
+        } } : { ...definition, async execute(key, params, _signal, _onUpdate, ctx) {
+            const { submitManagedLaunch } = await import("./managed-launch-client.ts");
+            return await submitManagedLaunch(pi, ctx, key, definition.name, params) as never;
+        } });
     };
     announceExecutionAdapter(pi, {
         parametersFor: (name) => registeredSpawnSchemas.get(name),
@@ -2597,7 +2617,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     function catalogHostFrom(ctx: ExtensionContext): CatalogHost {
-        noteCatalogHostContext(ctx, () => agentSessionSettings.snapshot());
+        if (!managed) noteCatalogHostContext(ctx, () => agentSessionSettings.snapshot());
         if (typeof ctx.sessionManager?.getBranch === "function") agentSessionSettings.restore(ctx);
         catalogModelRegistry = ctx.modelRegistry;
         const cfg = loadConfig();
@@ -2640,7 +2660,7 @@ export default function (pi: ExtensionAPI) {
         if (!jobs.some((job) => hasCatalogSelector(job))) {
             return { status: "ready", jobs: jobs as SpawnParams[] };
         }
-        const snapshot = await loadSharedLaunchSnapshot(host);
+        const snapshot = managed ? await managed.snapshot(host) : await loadSharedLaunchSnapshot(host);
         const clarified = await clarifyCatalogRequest(jobs, { hasUI: host.hasUI === true, select: host.select });
         if (clarified.status === "clarification-needed") return clarified;
         const prepared: SpawnParams[] = [];
@@ -2809,7 +2829,7 @@ export default function (pi: ExtensionAPI) {
 
         // An auto-resume carries the attempt id the coordinator already published;
         // a fresh or manual launch allocates a new one.
-        const id = internal?.assignedRunId ?? nextRunId();
+        const id = internal?.assignedRunId ?? managed?.attempt() ?? nextRunId();
         // Attempt identity (`id`) and conversation identity (`sessionId`) are
         // separate. A continuation keeps the native session; only the attempt is new.
         const sessionId = resume ? resume.conversation.sessionId : id;
@@ -3133,7 +3153,9 @@ export default function (pi: ExtensionAPI) {
                     try { ctx.ui?.notify?.(`Subagent ${id}: recovery snapshot failed (run continues): ${outcome.detail}`, "warning"); } catch { /* ignore */ }
                 });
             }
-            const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: process.execPath, fileArgs: [join(selfDir(), "child-runtime.mjs"), resolvePiBinary(), ...args] };
+            const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] }
+                : managed ? { file: process.execPath, fileArgs: [join(selfDir(), "managed-worker.mjs"), ...args] }
+                : { file: process.execPath, fileArgs: [join(selfDir(), "child-runtime.mjs"), resolvePiBinary(), ...args] };
             const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
 
             // Reservations prevent competing admissions, but do not grandfather
@@ -3148,7 +3170,7 @@ export default function (pi: ExtensionAPI) {
             // letting two processes rewrite one session file. A fresh launch has a
             // brand-new native session id, so it cannot contend with anyone and
             // needs no lease; every continuation does.
-            if (resume) {
+            if (resume || managed) {
                 lease = acquireConversationLease({ sessionId, attemptId: id });
             }
             // The lease is the first moment no other process can retire this
@@ -3236,13 +3258,27 @@ export default function (pi: ExtensionAPI) {
                 } : null;
                 assertAssignmentPermissionScope(captured, { sandbox: currentSandbox, mandatoryPermissions: permissionPlan.enforced });
             }
+            // Freeze the ordinary recipe before the durable external-launch intent.
+            const recipe = buildLaunchRecipe({
+                attemptId: id, sessionId, sessionDir: childSessionDir, cwd, model, effort: thinking,
+                tools: callerLaunchTools(allow), excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
+                skills: skills.mode === "inherit" ? undefined : [...skills.paths], clean, allowNested, approve,
+                sandbox: sandboxEnabled, sandboxDir: requestedSandboxDir, gitCloneWorkspace, callback: callbackEnabled, name: launchName,
+                agent: resume ? resume.recipe.agent : p.agent, role: resume ? resume.recipe.role : p.role,
+                alias: resume ? resume.recipe.alias : p.alias, catalog: launchCatalog, extensionArgs: extArgs, baseExtensionArgs,
+                trustedExtensions: resume?.recipe.trustedExtensions ?? taskTools?.trusted.map(({ name, package: owner, loadPath }) => ({ name, package: owner, loadPath })),
+            });
             const dispatchGuard = await internal?.beforeSpawn?.({ runId: id, permissionPlan });
+            const managedEnv = managed?.beforeSpawn({ id, sessionId, lease: lease!.token, leasePath: lease!.path,
+                preflightPath, policyPath: taskRuntime?.policyPath, permissions: permissionPlan, recipe });
             spawned = releaseChild(dispatchGuard, () => spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
                 env: {
                     [STEER_FILE_ENV]: steerPathFor(id),
                     [PREFLIGHT_ENV]: preflightPath,
                     ...(workerBridge?.env ?? {}),
+                    ...(managedEnv ?? {}),
                 } }));
+            managed?.spawned(id, spawned.pid);
             internal?.onSpawned?.();
             // Record process identity (pgid, start-time token) so health
             // reconciliation can tell a supervised child from a recycled pid
@@ -3251,41 +3287,11 @@ export default function (pi: ExtensionAPI) {
             // reconciled via the conservative old-metadata path.
             const identity = captureProcessIdentity(spawned.pid, spawnIdentityProbe);
             const startedAt = Date.now();
-            // The effective launch recipe is frozen on the attempt so a later
-            // continuation can reproduce its runtime intent without re-resolving the
-            // catalog or guessing from current configuration.
-            const recipe = buildLaunchRecipe({
-                attemptId: id,
-                sessionId,
-                sessionDir: childSessionDir,
-                cwd,
-                model,
-                effort: thinking,
-                tools: callerLaunchTools(allow),
-                excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
-                skills: skills.mode === "inherit" ? undefined : [...skills.paths],
-                clean,
-                allowNested,
-                approve,
-                sandbox: sandboxEnabled,
-                sandboxDir: requestedSandboxDir,
-                gitCloneWorkspace,
-                callback: callbackEnabled,
-                name: launchName,
-                agent: resume ? resume.recipe.agent : p.agent,
-                role: resume ? resume.recipe.role : p.role,
-                alias: resume ? resume.recipe.alias : p.alias,
-                catalog: launchCatalog,
-                extensionArgs: extArgs,
-                baseExtensionArgs,
-                trustedExtensions: resume?.recipe.trustedExtensions ?? taskTools?.trusted.map(({ name, package: owner, loadPath }) => ({ name, package: owner, loadPath })),
-            });
-
             const meta: RunMeta = {
                 assignment,
                 outcomeSupport: { version: 1, available: Boolean(assignment), ...(!assignment ? { reason: "Legacy host has no verified parent session/transcript; durable assignment delivery is unavailable." } : {}) },
                 id, name: launchName, status: "running",
-                pid: spawned.pid, spawnPid: process.pid, spawnPidStartTime: parentStartToken(), model,
+                pid: spawned.pid, spawnPid: managed?.owner.pid ?? process.pid, spawnPidStartTime: managed?.owner.start ?? parentStartToken(), model,
                 effort: thinking, cwd,
                 ...(skills.mode === "inherit" ? {} : { skills: [...skills.paths] }),
                 skillsSource: skills.source,
@@ -3295,6 +3301,7 @@ export default function (pi: ExtensionAPI) {
                 rootRunId,
                 ...(resume ? { resumedFrom: resume.prior.id } : {}),
                 recipe,
+                ...(managed ? { management: managed.identity } : {}),
                 callbackOrigin,
                 sandbox: sandboxDir, taskRuntime: Boolean(taskRuntime), taskScratch: taskRuntime?.policy.scratch, callback: callbackEnabled,
                 ...batchInfo,
@@ -3403,8 +3410,11 @@ export default function (pi: ExtensionAPI) {
             // must not keep running unsupervised; its log goes with the
             // attempt, because a record without metadata can never be read.
             if (!committed) {
+                if (spawned) {
+                    killProcessTree(spawned.pid, "SIGKILL");
+                    await spawned.exit;
+                }
                 lease?.release();
-                if (spawned) killProcessTree(spawned.pid, "SIGKILL");
                 discardFailedLaunch(id, { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch });
             }
             throw error;
@@ -3578,7 +3588,7 @@ export default function (pi: ExtensionAPI) {
      * unresumable claim; the recheck covers a cap reduced in the meantime.
      */
     function resumeCapacity(): ResumeCapacity {
-        const gate = () => getSharedCapacityGate(countRunning);
+        const gate = capacityGate;
         return {
             tryReserve: () => gate().tryReserve(1, activeConcurrencyCap()),
             recheck: () => countRunning() + gate().pending <= activeConcurrencyCap(),
@@ -3707,7 +3717,7 @@ export default function (pi: ExtensionAPI) {
             const maxConcurrent = activeConcurrencyCap();
             // Shared with batch-spawn: reserve before any async work so an interleaved
             // batch cannot oversubscribe after this check and before writeMeta.
-            const gate = getSharedCapacityGate(countRunning);
+            const gate = capacityGate();
             if (!gate.tryReserve(1, maxConcurrent)) {
                 throw new Error(`Max concurrent subagents (${maxConcurrent}) reached. Stop or let some finish first.`);
             }
@@ -3899,7 +3909,7 @@ export default function (pi: ExtensionAPI) {
             const launchAvailable = p.onCapacity === "launch-available";
             // Shared with single-spawn. Reservations count against maxConcurrent so a
             // concurrent single spawn cannot take a slot the batch already admitted.
-            const gate = getSharedCapacityGate(countRunning);
+            const gate = capacityGate();
 
             // session_id selects one saved conversation, so it is per job: a shared
             // value would point every job at the same conversation writer.
@@ -3923,7 +3933,7 @@ export default function (pi: ExtensionAPI) {
             if (needsCatalog) {
                 catalogHost = catalogHostFrom(ctx);
                 noteCatalogHost(catalogHost);
-                catalogSnapshot = await loadSharedLaunchSnapshot(catalogHost);
+                catalogSnapshot = managed ? await managed.snapshot(catalogHost) : await loadSharedLaunchSnapshot(catalogHost);
                 const clarified = await clarifyCatalogRequest(
                     p.jobs.map((job) => mergeJobOptions(p.shared, job) as CatalogJobFields),
                     { hasUI: catalogHost.hasUI === true, select: catalogHost.select },
@@ -4388,13 +4398,15 @@ export default function (pi: ExtensionAPI) {
         catch { mainAgentStartedAt = undefined; }
         mainAgentTools.clear();
         activeCallbackOrigin = callbackOriginFromContext(ctx);
-        if (activeCallbackOrigin) await startWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => refreshBackgroundWorkNavigator(ctx));
-        recoverCompletionCallbacks(pi);
+        if (!managed && activeCallbackOrigin) await startWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => refreshBackgroundWorkNavigator(ctx));
+        if (!managed) recoverCompletionCallbacks(pi);
         // Admission can defer before batcher enqueue, even after the last child
         // exits. Keep reconciliation independent of the live-run health ticker.
         if (outcomeTicker) clearInterval(outcomeTicker);
-        outcomeTicker = setInterval(() => recoverAssignmentOutcomes(pi), 1000);
-        outcomeTicker.unref?.();
+        if (!managed) {
+            outcomeTicker = setInterval(() => recoverAssignmentOutcomes(pi), 1000);
+            outcomeTicker.unref?.();
+        }
         // Reload / session switch hardening (#48):
         // - Drop any leftover overlay timers/confirm state from a prior session
         //   (defensive if the host skipped session_shutdown before re-start).
@@ -4408,10 +4420,10 @@ export default function (pi: ExtensionAPI) {
         // supervises them until they exit. This runs BEFORE abandonment
         // adoption: a finished child's coherent log is terminal evidence, and
         // `lost` would otherwise win the race and hide the result.
-        recoverInterruptedSubagents(pi);
+        if (managed) recoverInterruptedSubagents(pi);
         // Adopt records left non-terminal by a pi that died without a clean
         // shutdown, so the age sweep can eventually retire them.
-        reconcileAbandonedRuns();
+        if (managed) reconcileAbandonedRuns();
         disposeBackgroundWorkNavigator(ctx, navigatorOwner);
         widgetNavActive = false;
         widgetNavSelectedId = undefined;
@@ -4426,7 +4438,7 @@ export default function (pi: ExtensionAPI) {
         // Supervised worker operations (ADR 0020): the bridge host is bound to this
         // process, and parked generations from a previous session are reconciled
         // against the durable coordinator before anything resumes.
-        void startWorkerOperations();
+        if (managed) void workerOperations.start();
     });
 
     pi.on("session_before_switch", () => {
@@ -4460,7 +4472,7 @@ export default function (pi: ExtensionAPI) {
         // from the child's own log.
         const reason = typeof event?.reason === "string" ? event.reason : "shutdown";
         try {
-            const interrupted = interruptCurrentSessionSubagents(reason, ctx);
+            const interrupted = managed ? [] : interruptCurrentSessionSubagents(reason, ctx);
             warnInterruptedSubagents(ctx, interrupted, reason);
         } catch { /* shutdown cleanup must never block the session teardown */ }
         // Late finalizers of surviving children must not restart supervision

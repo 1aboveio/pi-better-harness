@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, cpSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, cpSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import ts from "typescript";
@@ -6,6 +6,43 @@ import ts from "typescript";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const target = join(root, "packages/pi-better-server/src/runtime/domain");
 mkdirSync(target, { recursive: true });
+// The launch adapter is fixed build content, never a client-selected import.
+const subagents = join(target, "subagents");
+mkdirSync(subagents, { recursive: true });
+function copyLaunchDomain(source, destination) {
+  mkdirSync(destination, { recursive: true });
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const from = join(source, entry.name), to = join(destination, entry.name);
+    if (entry.isDirectory()) {
+      if (["roles", "shared-operation-coordinator", "src"].includes(entry.name)) copyLaunchDomain(from, to);
+      continue;
+    }
+    if (!/\.(ts|mjs|md)$/.test(entry.name) && !["config.json", "package.json"].includes(entry.name)) continue;
+    cpSync(from, to);
+    if (!/\.(ts|mjs)$/.test(entry.name)) continue;
+    const output = ts.transpileModule(readFileSync(from, "utf8"), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+      transformers: { before: [context => node => {
+        const path = value => {
+          if (!ts.isStringLiteral(value) || !value.text.startsWith(".")) return value;
+          if (value.text.endsWith(".ts")) return ts.factory.createStringLiteral(value.text.replace(/\.ts$/, ".domain.mjs"));
+          if (value.text.endsWith(".js") && existsSync(join(source, value.text.replace(/\.js$/, ".ts")))) return ts.factory.createStringLiteral(value.text.replace(/\.js$/, ".domain.mjs"));
+          return value;
+        };
+        const visit = child => {
+          if (ts.isImportDeclaration(child)) return ts.factory.updateImportDeclaration(child, child.modifiers, child.importClause, path(child.moduleSpecifier), child.attributes);
+          if (ts.isExportDeclaration(child) && child.moduleSpecifier) return ts.factory.updateExportDeclaration(child, child.modifiers, child.isTypeOnly, child.exportClause, path(child.moduleSpecifier), child.attributes);
+          if (ts.isCallExpression(child) && child.expression.kind === ts.SyntaxKind.ImportKeyword) return ts.factory.updateCallExpression(child, child.expression, child.typeArguments, child.arguments.map(path));
+          return ts.visitEachChild(child, visit, context);
+        };
+        return ts.visitNode(node, visit);
+      }] },
+    }).outputText;
+    writeFileSync(entry.name.endsWith(".ts") ? to.replace(/\.ts$/, ".domain.mjs") : to,
+      `// Generated fixed launch domain from ${from.slice(root.length)}. Do not edit directly.\n${output}`);
+  }
+}
+copyLaunchDomain(join(root, "packages/pi-better-subagents"), subagents);
 const catalog = join(target, "catalog");
 mkdirSync(catalog, { recursive: true });
 cpSync(join(root, "packages/pi-better-subagents/roles"), join(catalog, "roles"), { recursive: true });
