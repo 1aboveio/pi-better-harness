@@ -30,7 +30,9 @@ When `pi-better-harness` is installed, its optional **Outcome & Todo** runtime o
 
 With **Auto-start Goal** enabled, a successful explicit `update_todo` outcome save can create and bind a Goal. The outcome must be active, unbound, have a nonempty objective and at least one nonempty `doneWhen` acceptance criterion. All criteria must contain text. Slash-shaped command invocations do not qualify; invoke those commands explicitly. Outcome & Todo hooks must also be enabled. The existing outcome, boundaries and Todo stay intact. No kickoff message is queued for the already-running tool turn; subsequent idle/background continuation obeys its existing setting and gates.
 
-Existing active, paused or budget-limited Goals are never replaced or resumed. Refinements of a bound outcome do not create another Goal. A new unbound task can start after the previous Goal completes. Session restore, branch navigation and enabling the preference do not replay saved outcomes; the next explicit qualifying save is the trigger. Completing a checklist or outcome does not complete the Goal. The control is also available through `/harness-settings` → Goal.
+Existing active, paused or budget-limited Goals are never replaced or resumed. Refinements of a bound outcome do not create another Goal. A new unbound task can start after the previous Goal completes. Session restore, branch navigation and enabling the preference do not replay saved outcomes; the next explicit qualifying save is the trigger. Completing a checklist or outcome does not complete the Goal.
+
+When a workflow already owns the session, the new Goal binds its registered coordinator without invoking it again. Its scheduler and completion checks continue to apply. An unavailable or invalid workflow coordinator prevents automatic creation.
 
 ## Settings Storage
 

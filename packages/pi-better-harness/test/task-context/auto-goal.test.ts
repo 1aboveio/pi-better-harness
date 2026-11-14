@@ -8,11 +8,12 @@ import goalExtension from "../../../pi-better-goal/src/index.js";
 import { reconstructGoalSnapshot, goalSetEntry, goalWithStatus } from "../../../pi-better-goal/src/goal-state.js";
 import { OUTCOME_ACCEPTED_EVENT } from "../../../pi-better-goal/src/task-context.js";
 import { EXTENSION_NAME } from "../../../pi-better-goal/src/types.js";
+import { currentWorkflowOwner, workflowEntry, WORKFLOW_ENTRY_TYPE } from "../../../pi-better-goal/src/workflow.js";
 import taskExtension from "../../extensions/task-context/index.js";
 import { createSettingsRegistry } from "../../extensions/settings/registry.js";
 import { OUTCOME_ENTRY, restoreOutcome } from "../../extensions/task-context/outcome-state.js";
 
-async function fixture(t: TestContext, options: { autoStart?: boolean; harnessFirst?: boolean; restored?: boolean } = {}) {
+async function fixture(t: TestContext, options: { autoStart?: boolean; harnessFirst?: boolean; restored?: boolean; workflow?: "available" | "missing" | "invalid" } = {}) {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const dir = mkdtempSync(join(tmpdir(), "outcome-auto-goal-"));
   const previous = process.env.PI_CODING_AGENT_DIR;
@@ -22,6 +23,14 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; harnessFi
     goal: { version: 1, autoStartFromOutcome: options.autoStart ?? true },
   } }));
   const entries: any[] = [];
+  const skillPath = join(dir, "SKILL.md");
+  if (options.workflow) {
+    writeFileSync(skillPath, options.workflow === "invalid" ? "# No workflow metadata\n"
+      : "---\nname: rush-issues\nmetadata:\n  workflow-role: coordinator\n---\n# Rush issues\n");
+    entries.push({ type: "custom", customType: WORKFLOW_ENTRY_TYPE, data: workflowEntry({
+      name: "rush-issues", path: skillPath, role: "coordinator", planOwner: "workflow",
+    }) });
+  }
   if (options.restored) entries.push({ type: "custom", customType: OUTCOME_ENTRY, data: {
     version: 1, outcome: { objective: "Ship checkout", status: "active", doneWhen: ["Checkout succeeds"] },
   } });
@@ -41,7 +50,9 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; harnessFi
     events,
     registerTool(tool: any) { tools.set(tool.name, tool); active.push(tool.name); },
     registerCommand(name: string, command: any) { commands.set(name, command); },
-    registerShortcut() {}, getCommands: () => [],
+    registerShortcut() {},
+    getCommands: () => options.workflow && options.workflow !== "missing"
+      ? [{ name: "skill:rush-issues", source: "skill", sourceInfo: { path: skillPath } }] : [],
     getActiveTools: () => active, setActiveTools(names: string[]) { active = names; },
     appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
     sendMessage(...args: unknown[]) { messages.push(args); },
@@ -67,11 +78,35 @@ async function fixture(t: TestContext, options: { autoStart?: boolean; harnessFi
     outcome: () => restoreOutcome(entries),
     update: (input: unknown) => tools.get("update_todo").execute("update", input, undefined, undefined, ctx),
     getTodo: async () => (await tools.get("get_todo").execute("get", {}, undefined, undefined, ctx)).details,
+    complete: () => tools.get("update_goal").execute("complete", { status: "complete" }, undefined, undefined, ctx),
     command: (args: string) => commands.get("goal").handler(args, ctx),
   };
 }
 
 const accepted = { objective: "Ship checkout", doneWhen: ["Checkout succeeds"], boundaries: ["No production writes"] };
+
+test("automatic Goals retain the current workflow's completion gates", async t => {
+  const h = await fixture(t, { workflow: "available" });
+  await h.update({ outcome: accepted });
+  assert.equal(h.goal()?.status, "active");
+  assert.equal(h.goal()?.command?.name, "skill:rush-issues");
+  const result = await h.complete();
+  assert.equal(result.details.ok, false, "an unverified workflow cannot be completed through the automatic Goal");
+  assert.equal(h.goal()?.status, "active");
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+  assert.deepEqual(h.messages, [], "binding the active workflow must not invoke the skill again");
+});
+
+for (const workflow of ["missing", "invalid"] as const) {
+  test(`automatic Goals wait when the current workflow is ${workflow}`, async t => {
+    const h = await fixture(t, { workflow });
+    await h.update({ outcome: accepted });
+    assert.equal(h.goal(), null);
+    assert.equal(h.outcome()?.goalId, undefined);
+    assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+    assert.deepEqual(h.messages, []);
+  });
+}
 
 for (const harnessFirst of [false, true]) {
   test(`accepted outcome binds one Goal without losing Todo or sending kickoff (Harness first: ${harnessFirst})`, async t => {

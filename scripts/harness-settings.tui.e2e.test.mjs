@@ -90,6 +90,14 @@ export default function(pi){
     wait(pane => pane.includes("Callback default saved"));
     assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.callbacks.mode, "steer");
     key("Down");
+    wait(pane => /^> Auto-start Goal\s+Off/m.test(pane));
+    key("Space");
+    wait(pane => /Auto-start Goal\s+On/.test(pane) && pane.includes("Setting saved"));
+    assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.goal.autoStartFromOutcome, true);
+    key("Space");
+    wait(pane => /Auto-start Goal\s+Off/.test(pane) && pane.includes("Setting saved"));
+    assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.goal.autoStartFromOutcome, false);
+    key("Down");
     wait(pane => /Sticky navigator\s+On/.test(pane));
     key("Down");
     wait(pane => /Tool animation\s+Shimmer/.test(pane));
@@ -141,6 +149,9 @@ export default function(pi){
     assert.equal((reloaded.match(/Tool output/g) ?? []).length, 1, "reload must not duplicate the tool-output contribution");
     assert.equal((reloaded.match(/Tool animation/g) ?? []).length, 1);
     assert.match(reloaded, /Tool animation\s+Off/);
+    assert.equal((reloaded.match(/Auto-start Goal/g) ?? []).length, 1);
+    assert.match(reloaded, /Auto-start Goal\s+Off/);
+    key("Down");
     key("Down");
     key("Down");
     key("Down");
@@ -162,7 +173,7 @@ export default function(pi){
     wait(pane => pane.includes("Harness settings") && pane.includes("Steer active run") && pane.includes("User default") && /Tool output\s+Minimal/.test(pane));
     key("Enter");
     wait(pane => pane.includes("Wait until idle") && pane.includes("Session setting saved"));
-    key("Down"); key("Down"); key("Down"); key("Space");
+    key("Down"); key("Down"); key("Down"); key("Down"); key("Space");
     wait(pane => /Tool output\s+Normal/.test(pane) && pane.includes("Setting saved"));
     assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.toolOutput.enabled, false);
     key("Escape");

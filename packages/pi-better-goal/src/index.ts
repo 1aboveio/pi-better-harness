@@ -908,7 +908,10 @@ export default function (pi: ExtensionAPI): void {
     if (current && current.status !== "complete") return;
     const objective = event.outcome.objective.trim();
     if (validateObjective(objective)) return;
-    const goal = createGoalSnapshot(objective, null);
+    const owner = getWorkflow(ctx);
+    if (owner && !workflowAvailable(owner)) return;
+    const command = owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null;
+    const goal = createGoalSnapshot(objective, null, undefined, command ?? undefined);
     setGoal(goal, ctx, "runtime", true);
     resetContinuationState(goal);
   });

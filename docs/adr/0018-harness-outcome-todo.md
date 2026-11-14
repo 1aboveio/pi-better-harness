@@ -222,7 +222,8 @@ of cycles. Harness consumes the public event contract and remains optional.
 ### Opt-in Goal Start from an Accepted Outcome
 
 Goal owns the boolean `autoStartFromOutcome` preference, default Off, exposed in
-`/goal settings` and the existing Harness settings link. After a successful
+`/goal settings` and directly on the `/harness-settings` main page as
+**Auto-start Goal**. After a successful
 explicit `update_todo` outcome commit, Harness emits the synchronous
 `pi-better-harness:outcome-accepted` event with the session ID and saved outcome.
 Goal validates the session and requires an active, unbound outcome with objective
@@ -236,6 +237,9 @@ Todo. No kickoff message is sent into the current tool turn. Existing continuati
 preferences, workflow gates, permission controls and explicit completion audit
 remain authoritative. A bound outcome is not rearmed by refinement, Goal clear,
 or reload; new unrelated work requires the existing `newTask` contract.
+If a workflow already owns the session, the new Goal binds that registered
+coordinator without reinvoking it. An unavailable or invalid coordinator prevents
+automatic creation, preserving workflow scheduler and completion checks.
 
 ## Consequences
 
