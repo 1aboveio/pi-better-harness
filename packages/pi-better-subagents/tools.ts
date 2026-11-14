@@ -26,6 +26,7 @@ import {
     collectSubagentList,
     formatSubagentListRow,
     listFolderScopeKey,
+    normalizeSubagentListOptions,
 } from "./list.ts";
 import {
     assembleOrphanedResult,
@@ -330,6 +331,33 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 all?: boolean; limit?: number; status?: string[] | string; cursor?: string; maxBytes?: unknown;
             };
             const now = Date.now();
+            if (session.observeList) {
+                const options = normalizeSubagentListOptions(p);
+                const cwd = listCwd(ctx, resolveActiveOrigin(session).origin);
+                const statusCursor = p.cursor?.startsWith("work-status:") ? p.cursor.slice("work-status:".length) : undefined;
+                const snapshot = await session.observeList({ ...(options.all ? {} : { cwd }),
+                    ...(options.statuses ? { statuses: [...options.statuses] } : {}), limit: Math.max(1, options.limit),
+                    ...(p.cursor && !statusCursor ? { cursor: p.cursor } : {}) });
+                const status = `work-status:${snapshot.scopeRevision}`;
+                if (statusCursor === snapshot.scopeRevision && snapshot.status === "ready") return text(`Subagents unchanged. statusCursor=${status}`);
+                const budget = budgetFor("list", p.maxBytes);
+                const header = [...options.warnings, `Subagents: ${snapshot.totalMatching} matching${snapshot.status === "ready" ? "" : `; ${snapshot.status}: ${snapshot.reason ?? "source verification pending"}`}.`].join("\n");
+                const lines = [header];
+                let last: any;
+                for (const row of options.limit === 0 ? [] : snapshot.rows) {
+                    const incident = listIncidentCount(row.meta.id, row.meta.cwd, !["running", "orphaned"].includes(row.meta.status));
+                    const line = formatSubagentListRow(row.meta, { assignment: row.assignment, status: row.assignment.state,
+                        processStatus: row.assignment.processStatus, now, compact: true,
+                        failure: formatIncidentLabel(incident.count, incident.actionRequired) });
+                    const footer = `\nnextCursor=${row.cursor}\nstatusCursor=${status}`;
+                    if (Buffer.byteLength([...lines, line].join("\n") + footer) > budget) break;
+                    lines.push(line); last = row;
+                }
+                if (!last && snapshot.rows.length && options.limit > 0) throw new Error("The list row and cursor cannot fit max_bytes; retry with a larger budget.");
+                if (last && (snapshot.nextCursor || last !== snapshot.rows.at(-1))) lines.push(`nextCursor=${last.cursor}`);
+                lines.push(`statusCursor=${status}`);
+                return { ...text(lines.join("\n")), details: { snapshot: { ...snapshot, rows: snapshot.rows.slice(0, last ? snapshot.rows.indexOf(last) + 1 : 0) } } };
+            }
             const index = listRunRecords();
             const metas = index.metas;
             const resolved = resolveActiveOrigin(session);

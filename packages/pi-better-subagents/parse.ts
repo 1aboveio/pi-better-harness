@@ -1312,15 +1312,16 @@ function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
  * rotated, truncated, or rewritten log is detected and re-read from a bounded
  * tail (see log-cursor.ts).
  */
-export function parseRun(id: string): ParsedRun {
-    const previous = parseStates.get(id);
-    const read = readAppendedLines(logPathFor(id), previous?.cursor, maxParseBytes());
+export function parseRun(id: string, options: { logPath?: string } = {}): ParsedRun {
+    const key = options.logPath ?? id;
+    const previous = parseStates.get(key);
+    const read = readAppendedLines(options.logPath ?? logPathFor(id), previous?.cursor, maxParseBytes());
     const state = read.restarted || !previous ? freshState(read.cursor) : previous;
     state.cursor = read.cursor;
     if (read.totalBytes > 0) state.totalBytes = read.totalBytes;
     if (read.truncated) state.windowTruncated = true;
     state.error = read.error;
-    rememberParseState(id, state);
+    rememberParseState(key, state);
 
     if (read.error !== undefined) {
         return {

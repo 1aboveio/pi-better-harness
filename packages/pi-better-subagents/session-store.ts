@@ -182,7 +182,7 @@ export function archiveCompletedAttempt(meta: RunMeta): boolean {
  * that does not match is treated as absent: guessing a conversation identity
  * from a damaged or foreign record would continue the wrong history.
  */
-function parseArchivedAttempt(raw: string, id: string): RunMeta | undefined {
+export function parseArchivedAttempt(raw: string, id: string, sessionRoot = durableSessionsDir()): RunMeta | undefined {
     let parsed: unknown;
     try {
         parsed = JSON.parse(raw);
@@ -204,7 +204,7 @@ function parseArchivedAttempt(raw: string, id: string): RunMeta | undefined {
     const recipe = meta.recipe as Partial<LaunchRecipe> | undefined;
     if (!recipe || typeof recipe !== "object" || recipe.version !== 1) return undefined;
     if (recipe.sessionId !== meta.sessionId) return undefined;
-    if (typeof recipe.sessionDir !== "string" || !isDurableSessionsPath(recipe.sessionDir)) return undefined;
+    if (typeof recipe.sessionDir !== "string" || !(recipe.sessionDir === sessionRoot || recipe.sessionDir.startsWith(sessionRoot.endsWith(sep) ? sessionRoot : `${sessionRoot}${sep}`))) return undefined;
     if (typeof recipe.cwd !== "string" || recipe.cwd === "") return undefined;
     return meta as RunMeta;
 }
@@ -350,7 +350,7 @@ function stateSignature(path: string): string {
 }
 
 /** Anything that does not match the requested conversation is treated as absent. */
-function parseState(raw: string, sessionId: string): ArchivedSessionState | undefined {
+export function parseArchivedSessionState(raw: string, sessionId: string): ArchivedSessionState | undefined {
     let parsed: unknown;
     try {
         parsed = JSON.parse(raw);
@@ -378,7 +378,7 @@ function readArchivedSessionState(sessionId: string): ArchivedSessionState | und
     if (cached && cached.signature === signature) return cached.state;
     let state: ArchivedSessionState | undefined;
     try {
-        state = parseState(readFileSync(path, "utf-8"), sessionId);
+        state = parseArchivedSessionState(readFileSync(path, "utf-8"), sessionId);
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         state = undefined;

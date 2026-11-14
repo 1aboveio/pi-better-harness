@@ -8,7 +8,7 @@ export function workScope(input: unknown): WorkScope {
   if (value.sessionId && !value.cwd) throw new Error("Session scope requires cwd");
   if (value.limit !== undefined && (!Number.isSafeInteger(value.limit) || Number(value.limit) < 1 || Number(value.limit) > 200)) throw new Error("Runtime limit must be from 1 to 200");
   if (value.active !== undefined && typeof value.active !== "boolean") throw new Error("Invalid active scope");
-  if (value.statuses !== undefined && (!Array.isArray(value.statuses) || value.statuses.length > 5 || value.statuses.some(s => !["running", "waiting", "completed", "failed", "cancelled"].includes(String(s))))) throw new Error("Invalid assignment status filter");
+  if (value.statuses !== undefined && (!Array.isArray(value.statuses) || value.statuses.length > 9 || value.statuses.some(s => !["running", "waiting", "completed", "failed", "cancelled", "killed", "exited", "orphaned", "lost"].includes(String(s))))) throw new Error("Invalid assignment status filter");
   return { cwd: value.cwd as string | undefined, sessionId: value.sessionId as string | undefined, id: value.id as string | undefined,
     cursor: value.cursor as string | undefined, limit: value.limit as number | undefined, active: value.active as boolean | undefined, statuses: value.statuses as string[] | undefined };
 }
@@ -32,13 +32,20 @@ export class WorkQueries {
   private event(event: unknown) {
     if (this.socket.destroyed || this.paused) return;
     if (this.socket.writableLength > this.maxQueuedBytes) { this.paused = true; return; }
-    this.socket.write(JSON.stringify({ type: "event", event }) + "\n");
+    const line = JSON.stringify({ type: "event", event }) + "\n";
+    if (Buffer.byteLength(line) > 4 * 1024 * 1024) {
+      this.close();
+      this.socket.write(JSON.stringify({ type: "event", event: { type: "resync_required", reason: "snapshot-too-large: narrow the scope or limit" } }) + "\n");
+      return;
+    }
+    this.socket.write(line);
   }
   handle(command: Record<string, unknown>) {
     if (command.type === "runtime_unsubscribe") { this.close(); return { unsubscribed: true }; }
     if (command.type === "runtime_get_metrics") return { ...this.model.metrics };
     const scope = workScope(command.scope);
     const snapshot = this.model.snapshot(scope);
+    if (Buffer.byteLength(JSON.stringify(snapshot)) > 4 * 1024 * 1024) throw new Error("state-degraded: snapshot exceeds 4 MiB; narrow the scope or limit");
     if (command.type === "runtime_subscribe") {
       this.close();
       this.dispose = this.model.onChange(() => this.event({ type: "runtime_snapshot", snapshot: this.model.snapshot({ ...scope, cursor: undefined }) }));

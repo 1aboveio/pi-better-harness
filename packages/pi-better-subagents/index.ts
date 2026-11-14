@@ -24,7 +24,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { initializeNavigatorPanels } from "./shared-navigator-panels.ts";
-import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment } from "./work-observation.ts";
+import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment, observedList } from "./work-observation.ts";
 import { matchesKey, Key, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
 import {
@@ -1449,7 +1449,9 @@ function navigatorRunningRuns(): RunMeta[] {
 }
 
 function navigatorRunningCount(): number {
-    return workObservation()?.rows.filter((row: any) => ["running", "waiting"].includes(row.assignment.state)).length ?? 0;
+    const snapshot = workObservation();
+    return (snapshot?.rows.filter((row: any) => ["running", "waiting"].includes(row.assignment.state)).length ?? 0) +
+        (!snapshot || snapshot.status !== "ready" ? 1 : 0);
 }
 
 /**
@@ -1555,8 +1557,9 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
         const terminal = !["running", "waiting"].includes(row.assignment.state);
         return { providerId: "subagents", id: meta.id, name: meta.name || meta.id,
             model: shortModel(meta.model), effort: meta.effort, status: row.assignment.state,
+            tool: row.display?.tool, tokens: row.display?.spend,
             statusTone: statusTone(row.assignment.state), kind: "subagent", elapsed: fmtElapsed((meta.endedAt ?? now) - meta.startedAt),
-            primary: row.assignment.reason, facts: [], sortStartedAt: meta.startedAt,
+            primary: [shortModel(meta.model), meta.effort, row.display?.tool, row.display?.spend].filter(Boolean).join(" ") || "subagent run", facts: [], sortStartedAt: meta.startedAt,
             expiresAt: terminal && typeof meta.endedAt === "number" ? meta.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS : undefined };
     });
     if (!snapshot || snapshot.status !== "ready") rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Subagents",
@@ -1773,7 +1776,7 @@ function ensureSubagentProvider(): void {
         label: "Subagents",
         priority: 10,
         visibleCount: () => navigatorRunningCount(),
-        showSection: (rows) => rows.some((row) => row.status === "running" || ["parking", "waiting", "ready", "resuming", "held"].includes(row.status)),
+        showSection: (rows) => rows.some((row) => row.status === "running" || ["parking", "waiting", "ready", "resuming", "held", "degraded", "rebuilding"].includes(row.status)),
         parentRow: (now) => mainAgentWorkRow(now),
         listRows: (now) => subagentWorkRows(now),
         detail: (id, now, options) => subagentWorkDetail(id, now, options),
@@ -4063,6 +4066,7 @@ export default function (pi: ExtensionAPI) {
     // own session. An unreadable session id stays unavailable (never cwd-wide).
     const toolSession = {
         observeAssignment: observedAssignment,
+        observeList: observedList,
         inspectOutcome: (meta: RunMeta, params: Record<string, unknown>, callCtx?: unknown) => {
             if (params.disposition !== undefined && params.disposition !== "consumed" && params.disposition !== "dismissed") throw new Error("Outcome disposition must be consumed or dismissed.");
             if (!readOutcome(meta)) {

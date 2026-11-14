@@ -99,6 +99,7 @@ export type LoadedRun =
 
 export type SubagentToolSession = {
     observeAssignment?: (id: string) => Promise<{ assignment: ReturnType<typeof assignmentFor>; snapshot: unknown }>;
+    observeList?: (scope: object) => Promise<any>;
     inspectOutcome?: (meta: RunMeta, params: Record<string, unknown>, ctx?: unknown) => unknown;
     /** Current session origin; `ctx` is the tool call's host context when available. */
     getActiveOrigin?: (ctx?: unknown) => RunCallbackOrigin | undefined;

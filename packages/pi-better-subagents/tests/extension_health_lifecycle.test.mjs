@@ -57,6 +57,9 @@ register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 // suite run must never see a developer's live one.
 const HERMETIC_TMPDIR = mkdtempSync(join(tmpdir(), "subagent-ext-health-"));
 process.env.TMPDIR = HERMETIC_TMPDIR;
+const { startWorkRuntimeFixture } = await import("./work-runtime-fixture.mjs");
+const stopWorkRuntime = await startWorkRuntimeFixture();
+after(stopWorkRuntime);
 
 const { default: betterSubagents, setIdentityProbeForTests, isHealthTickerActive } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
@@ -430,6 +433,7 @@ describe("navigator rows keep incident summaries out of the work rail", () => {
     it("keeps model/tool/tokens columns for both history-only and actionable failures", async () => {
         const h = makeHarness();
         try {
+            await h.handlers.get("session_start")({}, h.ctx);
             const { id, pid } = await spawnRun(h, { model: "openai/gpt-test" });
             const log = join(runDir(id), "output.log");
             const fail = (callId) => [
@@ -437,7 +441,7 @@ describe("navigator rows keep incident summaries out of the work rail", () => {
                 { type: "tool_execution_end", toolCallId: callId, toolName: "bash", isError: true, result: { content: [{ type: "text", text: "1 failing" }] } },
             ];
             appendFileSync(log, fail("once").map((e) => JSON.stringify(e)).join("\n") + "\n");
-            let row = providerRows().find((x) => x.id === id);
+            let row = await waitFor(() => providerRows().find((x) => x.id === id));
             assert.ok(row, "the running run is listed");
             assert.doesNotMatch(row.primary, /No failures need action|unclassified|history/, "a quiet history line never replaces the columns");
             assert.match(row.primary, /gpt-test/, "the row shows its normal model column");
@@ -1387,7 +1391,11 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
             // completed fixture also needs endedAt for a sensible row; rewrite.
             writeMeta({ ...readMeta(completed.id), endedAt: Date.now(), exitCode: 0 });
 
-            const res = await h.tools.get("subagent_list").execute("tc", {}, undefined, undefined, h.ctx);
+            const res = await waitFor(async () => {
+                const result = await h.tools.get("subagent_list").execute("tc", {}, undefined, undefined, h.ctx);
+                return toolText(result).includes(orphaned.id) && toolText(result).includes(completed.id) ? result : undefined;
+            });
+            assert.ok(res, "shared list observes both newly published fixtures");
             const out = toolText(res);
             assert.match(out, new RegExp(`${orphaned.id}[^\n]*\\[waiting\\]`), `default list must show orphaned assignments as waiting:\n${out}`);
             assert.match(out, /Process orphaned; termination unproven/);

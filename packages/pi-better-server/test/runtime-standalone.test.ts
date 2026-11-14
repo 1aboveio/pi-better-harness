@@ -26,6 +26,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
   const agentDir = join(evidence, "agent"), serverDir = realpathSync(mkdtempSync("/tmp/p752-"));
   const socketFixtures = [serverDir];
   const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_SERVER_DIR: serverDir, npm_config_cache: join(workspace, ".work/npm-cache") };
+  env.TMPDIR = env.TMP = env.TEMP = join(evidence, "volatile"); mkdirSync(env.TMPDIR);
   delete env.PI_SERVER_COMMAND; delete env.PI_SERVER_LAUNCHER;
   const downloadTrace = join(evidence, "node-downloads");
   if (env.PI_TEST_NODE_ARCHIVE) {
@@ -76,6 +77,34 @@ test("packed standalone packages use one pinned socket runtime, including cached
   const status = JSON.parse(first.stdout);
   assert.equal(status.hostedSessions, 0); assert.equal(status.agentDir, agentDir); assert.equal(status.nodeVersion.split(".")[0], "24");
   const coldStartMs = performance.now() - started;
+  const snapshotRun = join(env.TMPDIR, "pi-better-subagents/runs/sa_packed_snapshot"); mkdirSync(snapshotRun, { recursive: true });
+  const snapshotMeta = { id: "sa_packed_snapshot", cwd: evidence, sessionId: "packed-worker", status: "completed", startedAt: Date.now(), name: "packed snapshot" };
+  const snapshotPath = join(snapshotRun, "meta.json"); writeFileSync(snapshotPath, JSON.stringify(snapshotMeta));
+  const packedApi = pathToFileURL(clients[0]!.replace("status-cli.mjs", "client.mjs")).href;
+  const snapshotScript = `
+    const {WorkClient}=await import(${JSON.stringify(packedApi)});
+    const {writeFileSync}=await import('node:fs');
+    const client=new WorkClient(${JSON.stringify(join(serverDir, "pi-server.sock"))}, process.env.PI_CODING_AGENT_DIR);
+    const wait=predicate=>new Promise((resolve,reject)=>{ const timer=setTimeout(()=>{off();reject(Error('snapshot update timed out'))},5000); const off=client.onChange(snapshot=>{if(predicate(snapshot)){clearTimeout(timer);off();resolve(snapshot)}}); });
+    try {
+      await client.subscribe({cwd:${JSON.stringify(evidence)},limit:10});
+      if(client.snapshot.status==='rebuilding') await wait(snapshot=>snapshot.status!=='rebuilding');
+      const initial=client.snapshot;
+      const update=wait(snapshot=>snapshot.rows[0]?.meta.name==='external packed writer');
+      writeFileSync(${JSON.stringify(snapshotPath)},JSON.stringify({...${JSON.stringify(snapshotMeta)},name:'external packed writer'}));
+      const updated=await update;
+      console.log(JSON.stringify({initial,updated}));
+    } finally {client.close()}
+  `;
+  const packedSnapshot = await execute(process.execPath, ["--input-type=module", "-e", snapshotScript], workspace, env);
+  writeFileSync(join(evidence, "packed-snapshot.log"), packedSnapshot.stdout + packedSnapshot.stderr);
+  assert.equal(packedSnapshot.code, 0, packedSnapshot.stderr);
+  const observations = JSON.parse(packedSnapshot.stdout);
+  assert.equal(observations.initial.instanceId, status.instanceId);
+  assert.equal(observations.initial.status, "ready");
+  assert.equal(observations.initial.rows[0].assignment.state, "completed");
+  assert.equal(observations.updated.rows[0].meta.name, "external packed writer");
+  assert.notEqual(observations.updated.scopeRevision, observations.initial.scopeRevision);
   const alias = join(evidence, "alias"); symlinkSync(agentDir, alias);
   const second = await execute(process.execPath, [clients[1]!], workspace, { ...env, PI_CODING_AGENT_DIR: alias, PI_SERVER_DIR: join(evidence, "other-transport") });
   assert.equal(second.code, 0, second.stderr);

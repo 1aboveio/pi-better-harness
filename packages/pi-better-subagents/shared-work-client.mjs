@@ -56,7 +56,13 @@ export class WorkClient {
     }
     accept(snapshot) {
         if (this.snapshot?.instanceId === snapshot.instanceId && snapshot.seq < this.snapshot.seq) return;
-        if (this.snapshot?.instanceId && this.snapshot.instanceId !== snapshot.instanceId) this.degrade("instance-changed: resync required");
+        if (this.snapshot?.instanceId && this.snapshot.instanceId !== snapshot.instanceId) {
+            this.degrade("instance-changed: resync required");
+            snapshot = { ...snapshot, resyncRequired: true, resyncReason: "instance-changed" };
+        } else if (this.snapshot?.seq !== undefined && snapshot.seq > this.snapshot.seq + 1) {
+            this.degrade("sequence-gap: replacing with a full authoritative snapshot");
+            snapshot = { ...snapshot, resyncRequired: true, resyncReason: "sequence-gap" };
+        }
         // Every event contains a complete bounded snapshot; gaps do not require inferred deltas.
         this.snapshot = Object.freeze(snapshot); this.notify();
     }

@@ -129,6 +129,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       const control = new ConnectionControl(send);
       let greeted = false;
       let workQueries: WorkQueries | undefined;
+      let runtimeInFlight = 0;
 
       const dispatch = async (line: string): Promise<void> => {
         let command: Record<string, unknown>;
@@ -174,8 +175,18 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (type === "runtime_upgrade_status") return reply({ data: readActivationJournal(serverDir) ?? null });
           if (["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_metrics"].includes(type)) {
             if (!greeted) throw new Error(`${type} requires hello`);
-            workQueries ??= new WorkQueries(work(), socket);
-            return reply({ data: workQueries.handle(command) });
+            if (runtimeInFlight >= 32) throw new Error("runtime-unhealthy: too many in-flight queries; resync and retry");
+            if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+            runtimeInFlight++;
+            try {
+              workQueries ??= new WorkQueries(work(), socket);
+              if (type === "runtime_get_snapshot" && command.scope && typeof command.scope === "object" && typeof (command.scope as { id?: unknown }).id === "string") {
+                await work().ensureId((command.scope as { id: string }).id);
+              }
+              return reply({ data: workQueries.handle(command) });
+            } finally {
+              runtimeInFlight--;
+            }
           }
           if (type === "runtime_upgrade") {
             if (!safeUpgrade || !build) throw new Error("This daemon cannot safely activate managed runtimes");

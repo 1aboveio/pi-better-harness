@@ -239,6 +239,6 @@ function assignmentFromSnapshot(meta, processStatus, options, readSnapshot) {
     return projectAssignment(current, status, observation);
 }
 
-export function assignmentDiagnostic(assignment) {
-    return `Assignment ${assignment.state} r${assignment.revision}: ${assignment.reason} Process ${assignment.processStatus}; termination ${assignment.termination}. Evidence: ${assignment.evidence.join(", ")}`;
+export function assignmentDiagnostic(assignment, options = {}) {
+    return `Assignment ${assignment.state} r${assignment.revision}: ${assignment.reason} Process ${assignment.processStatus}; termination ${assignment.termination}.${options.includeEvidence === false ? "" : ` Evidence: ${assignment.evidence.join(", ")}`}`;
 }

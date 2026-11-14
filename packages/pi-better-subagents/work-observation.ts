@@ -1,5 +1,6 @@
-import { readFileSync, realpathSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { WorkClient } from "./shared-work-client.mjs";
 
 let client: WorkClient | undefined;
@@ -13,6 +14,7 @@ export async function startWorkObservation(agentDir: string, origin: { cwd: stri
     stopWorkObservation();
     const current = generation;
     try {
+        mkdirSync(agentDir, { recursive: true, mode: 0o700 });
         agentDir = realpathSync(agentDir);
         let registration;
         try { registration = JSON.parse(readFileSync(join(agentDir, "server-registration-v1.json"), "utf8")); }
@@ -29,6 +31,12 @@ export async function startWorkObservation(agentDir: string, origin: { cwd: stri
         client = new WorkClient(join(registration.serverDir, "pi-server.sock"), agentDir);
         client.onChange(changed);
         await client.subscribe({ ...origin, limit: 200 });
+        if (client.snapshot?.status === "rebuilding") await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => { stop(); reject(new Error("Runtime scope is still rebuilding; retry the observation.")); }, 5000);
+            const stop = client!.onChange(snapshot => {
+                if (snapshot.status !== "rebuilding") { stop(); clearTimeout(timer); resolve(); }
+            });
+        });
     } catch (error) {
         if (current !== generation) return;
         failure = `Shared runtime observation unavailable: ${String(error)}`;
@@ -37,11 +45,21 @@ export async function startWorkObservation(agentDir: string, origin: { cwd: stri
 }
 
 export async function observedAssignment(id: string) {
-    if (!client) throw new Error(workObservationFailure());
-    const snapshot = await client.get({ id, limit: 1 });
+    await ensureObservation();
+    const snapshot = await client!.get({ id, limit: 1 });
     const row = snapshot.rows[0];
     if (!row) throw new Error(snapshot.status === "ready" ? `No shared observation for ${id}` : snapshot.reason);
     return { assignment: row.assignment, snapshot };
+}
+
+export async function observedList(scope: object) {
+    await ensureObservation();
+    return client!.get(scope);
+}
+
+async function ensureObservation() {
+    if (!client) await startWorkObservation(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), { cwd: process.cwd() }, () => {});
+    if (!client) throw new Error(workObservationFailure());
 }
 
 export function stopWorkObservation() {
