@@ -16,8 +16,15 @@ conversation-only wait is not evidence for an arbitrary assignment. A park
 cache locates the relationship but cannot prove completion or cancellation.
 Pending authoritative waits take precedence over exited attempts and final prose.
 A consumed wait records interpretation; it does not complete a parked assignment.
-A failed dependency command does not set assignment failure. An ordinary coherent
-completed attempt retains legacy completion semantics when it owes no interpretation.
+A failed dependency command does not set assignment failure. Legacy attempts without
+an immutable assignment binding retain their ordinary completion semantics. For bound
+assignments (#744), exit zero alone cannot establish assignment completion. An exact
+`assignment-complete` dependency acknowledgement supplies that decision. Otherwise an
+ended attempt with no outstanding interpretation commits `failed` with an explicit
+completion-unverified reason, preserving its separate completed process status. This
+uses the existing terminal contract to report failure to establish completion, not
+failure of the child process. Parent inspection and acceptance remain separate;
+an explicit follow-up can continue the same conversation as a new assignment.
 Existing attempt failures and explicit stops retain their diagnostic records.
 The atomic assignment terminal decision and delivery contract is defined by
 ADR 0020's #710 extension. A committed coordinator outcome takes precedence over

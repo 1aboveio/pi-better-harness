@@ -482,6 +482,8 @@ function warnInterruptedSubagents(ctx: ExtensionContext, interrupted: RunMeta[],
 let sessionTornDown = false;
 let outcomeHost = createOutcomeHost();
 const outcomeAdmission = new Map<string, () => boolean>();
+const outcomeEnqueuing = new Set<string>();
+let outcomeTicker: ReturnType<typeof setInterval> | undefined;
 
 /**
  * "The rightful conversation is not the active one", not "this notification is
@@ -572,31 +574,69 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
 }
 
 async function enqueueAssignmentOutcome(pi: ExtensionAPI, meta: RunMeta): Promise<void> {
+    if (outcomeEnqueuing.has(meta.id)) return;
+    outcomeEnqueuing.add(meta.id);
+    try { await tryEnqueueAssignmentOutcome(pi, meta); }
+    catch (error) {
+        try { deferOutcome(meta, `Outcome reconciliation failed: ${String(error)}`); } catch { /* storage remains unavailable; next reconciliation retries */ }
+    }
+    finally { outcomeEnqueuing.delete(meta.id); }
+}
+
+function deferOutcome(meta: RunMeta, reason?: string): void {
+    const current = readMeta(meta.id);
+    if (!current || current.outcomeDeliveryDeferredReason === reason) return;
+    current.outcomeDeliveryDeferredReason = reason;
+    writeMeta(current);
+}
+
+async function tryEnqueueAssignmentOutcome(pi: ExtensionAPI, meta: RunMeta): Promise<void> {
     const outcome = readOutcome(meta);
     const ctx = uiCtx;
-    if (!outcome || outcome.deliveryReceipt || outcome.disposition || !ctx || meta.callback === false
-        || typeof ctx.sessionManager?.getBranch !== "function") return;
+    if (!outcome || outcome.deliveryReceipt || outcome.disposition) return;
+    if (!ctx || meta.callback === false || typeof ctx.sessionManager?.getBranch !== "function") {
+        deferOutcome(meta, meta.callback === false ? "Assignment callbacks are disabled."
+            : "Recorded parent transcript is unavailable; automatic reconciliation will retry.");
+        return;
+    }
     const active = ownerBindingFromContext(ctx);
     if (active.sessionId !== outcome.recipient.sessionId || active.workspace !== outcome.recipient.workspace
-        || (outcome.recipient.branchId && !ctx.sessionManager.getBranch().some((entry) => entry.id === outcome.recipient.branchId))) return;
+        || (outcome.recipient.branchId && !ctx.sessionManager.getBranch().some((entry) => entry.id === outcome.recipient.branchId))) {
+        deferOutcome(meta, "Recorded parent session, workspace or branch is inactive; automatic reconciliation will retry.");
+        return;
+    }
     const prior = outcomeTranscriptReceipt(ctx.sessionManager.getBranch(), outcome.eventId);
     if (prior) { receiptOutcome(meta, prior); return; }
+    const deliveryHost = outcomeHost;
     const gate = await requestResumeAdmission(pi, active, { timeoutMs: 50 });
     outcomeAdmission.set(outcome.eventId, () => gate.allowed ? gate.isCurrent?.() !== false : !active.goalId && !outcome.recipient.goalId && gate.revision === -1);
-    if (!gate.allowed && (active.goalId || outcome.recipient.goalId || gate.revision !== -1)) return;
-    if (!claimOutcome(meta, outcomeHost)) return;
+    if (!gate.allowed && (active.goalId || outcome.recipient.goalId || gate.revision !== -1)) {
+        deferOutcome(meta, gate.reason ?? "Parent admission refused; automatic reconciliation will retry.");
+        return;
+    }
+    // Admission may yield across a session switch or Goal/workflow change.
+    if (sessionTornDown || outcomeHost !== deliveryHost || !uiCtx || callbackSuppressionReason(meta)
+        || !outcomeAdmission.get(outcome.eventId)?.()) {
+        deferOutcome(meta, "Parent delivery authority changed; automatic reconciliation will retry.");
+        return;
+    }
+    if (!claimOutcome(meta, outcomeHost)) {
+        deferOutcome(meta, "Outcome dispatch is owned by another host; automatic reconciliation will retry.");
+        return;
+    }
+    deferOutcome(meta);
     getCallbackBatcher(pi).enqueue({
         source: "subagent", id: outcome.eventId, inspectId: meta.id, receiptId: outcome.eventId,
         label: meta.name ?? meta.id,
         status: outcome.outcome, outcome: outcome.reason, detailTool: "subagent_result", callback: true,
         isDelivered: () => Boolean(readOutcome(meta)?.deliveryReceipt),
         getSuppressionReason: () => {
-            if (!uiCtx || callbackSuppressionReason(meta)) throw new Error("Recorded parent is inactive; retain outcome.");
+            if (outcomeHost !== deliveryHost || !uiCtx || callbackSuppressionReason(meta)) throw new Error("Recorded parent is inactive; retain outcome.");
             if ((outcome.recipient.branchId && !uiCtx.sessionManager.getBranch().some((entry) => entry.id === outcome.recipient.branchId)) || !outcomeAdmission.get(outcome.eventId)?.()) throw new Error("Parent delivery authority changed; retain outcome.");
             return undefined;
         },
         onDelivered: (at) => {
-            const entry = outcomeTranscriptReceipt(ctx.sessionManager.getBranch(), outcome.eventId);
+            const entry = uiCtx && outcomeTranscriptReceipt(uiCtx.sessionManager.getBranch(), outcome.eventId);
             if (!entry) throw new Error("Awaiting durable recipient transcript receipt.");
             receiptOutcome(meta, entry);
             markCompletionCallbackSent(meta.id, at);
@@ -4284,6 +4324,11 @@ export default function (pi: ExtensionAPI) {
         mainAgentTools.clear();
         activeCallbackOrigin = callbackOriginFromContext(ctx);
         recoverCompletionCallbacks(pi);
+        // Admission can defer before batcher enqueue, even after the last child
+        // exits. Keep reconciliation independent of the live-run health ticker.
+        if (outcomeTicker) clearInterval(outcomeTicker);
+        outcomeTicker = setInterval(() => recoverAssignmentOutcomes(pi), 1000);
+        outcomeTicker.unref?.();
         // Reload / session switch hardening (#48):
         // - Drop any leftover overlay timers/confirm state from a prior session
         //   (defensive if the host skipped session_shutdown before re-start).
@@ -4332,6 +4377,9 @@ export default function (pi: ExtensionAPI) {
 
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (event, ctx) => {
+        if (outcomeTicker) clearInterval(outcomeTicker);
+        outcomeTicker = undefined;
+        outcomeAdmission.clear();
         closeOutcomeHost(outcomeHost);
         if (typeof unsubscribeOutcomeWorkflow === "function") unsubscribeOutcomeWorkflow();
         if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();

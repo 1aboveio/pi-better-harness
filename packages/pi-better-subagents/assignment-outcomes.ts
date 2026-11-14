@@ -62,9 +62,12 @@ export function commitAssignmentTerminal(meta: RunMeta, recoveryFailure = false)
         if (!recoveryFailure && meta.status !== "killed" && meta.operations?.resumeLaunchToken && waits.some((w) => !w.acknowledgement && ["resuming", "ready"].includes(w.phase))) return null;
         // A coherent attempt exit does not establish interpretation or completion.
         if (meta.status === "completed" && waits.some((w) => !w.acknowledgement)) return null;
+        const complete = meta.status === "completed" && waits.some((w) => w.acknowledgement?.disposition === "assignment-complete");
         return store.recordAssignmentOutcome({ ...binding, revision: 1,
-            outcome: meta.status === "completed" ? "succeeded" : meta.status === "killed" ? "cancelled" : "failed",
-            reason: meta.failureReason || (meta.status === "completed" ? "Assigned work and required interpretation are complete." : `Assignment ended ${meta.status}; retained attempt evidence is available.`),
+            outcome: complete ? "succeeded" : meta.status === "killed" ? "cancelled" : "failed",
+            reason: meta.failureReason || (complete ? "Assigned work and required interpretation are complete."
+                : meta.status === "completed" ? "Assignment completion is unverified: the attempt exited without an evidence-backed completion decision. Inspect retained output and continue unfinished work or report a concrete blocker."
+                : `Assignment ended ${meta.status}; retained attempt evidence is available.`),
             processUncertain: meta.status === "lost" || typeof meta.exitCode !== "number"
                 || waits.some((w) => w.dependencies.some((d) => d.terminalRevision === 0)
                     || store.listResumeClaims({ waitId: w.waitId, generation: w.generation, state: "published" }).length > 0),

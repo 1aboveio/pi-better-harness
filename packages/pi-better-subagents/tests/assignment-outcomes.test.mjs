@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import { register } from "node:module";
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
@@ -54,6 +54,117 @@ function failedAssignment(id, branchId = null) {
     return { store, wait, meta: readMeta(id), operationId: `op-${id}` };
 }
 
+function endedAssignment(id, conversationId, complete = false) {
+    const binding = { version: 1, assignmentId: id,
+        owner: { kind: "worker-conversation", sessionId: conversationId, workspace: process.cwd(), branchId: null, goalId: null },
+        recipient: { kind: "parent-session", sessionId: "parent", workspace: process.cwd(), branchId: null, goalId: null } };
+    registerAssignmentAttempt(binding, id);
+    const store = openStore({ path: coordinatorPath() });
+    if (complete) {
+        store.registerOperation({ operationId: `proof-${id}`, taskId: id, launchToken: id, owner: binding.owner, observer: { kind: "test", version: "1" } });
+        store.recordTerminalOutcome({ operationId: `proof-${id}`, eventId: `proof-event-${id}`, owner: binding.owner, outcome: "succeeded", evidence: [{ kind: "summary", ref: "assessment", summary: "All unit assessments populated and checked" }] });
+        const { wait } = store.registerWait({ owner: binding.owner, dependencies: [{ operationId: `proof-${id}` }], continuationNote: "Check assessments", origin: { assignmentRef: id, attemptId: id } });
+        store.recordEvidenceRead({ ...wait, owner: binding.owner, operationId: `proof-${id}`, terminalRevision: 1 });
+        store.acknowledgeResult({ ...wait, owner: binding.owner, disposition: "assignment-complete", terminalRevisions: [{ operationId: `proof-${id}`, revision: 1 }], note: "Checked all requested assessments; assigned assessment is complete." });
+    }
+    mkdirSync(runDir(id), { recursive: true });
+    writeFileSync(logPathFor(id), `${JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: complete ? "Assessments completed; broader proof gaps remain." : "The unit assessments are not completed." }] })}\n`);
+    writeMeta({ id, assignment: binding, status: "running", pid: 4194304, spawnPid: process.pid, cwd: process.cwd(), sessionId: conversationId,
+        promptPreview: "assess units", startedAt: 1, logPath: logPathFor(id), callback: true, callbackOrigin: { cwd: process.cwd(), sessionId: "parent" } });
+    finalizeRun(id, 0);
+    return { store, meta: readMeta(id) };
+}
+
+test("ended assignment retries admission without input, including an explicit same-conversation follow-up", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const options = { allowed: false };
+    const h = host("parent", options);
+    const fixtures = [];
+    try {
+        await h.start();
+        const first = endedAssignment("retry-ended-first", "same-assessment-conversation");
+        fixtures.push(first);
+        // The exit happens after session startup, while the parent is busy.
+        h.ctx.isIdle = () => false;
+        await h.handlers.get("agent_start")({}, h.ctx);
+        mock.timers.tick(1000);
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(first.store.listOutbox().find((e) => e.eventId === readOutcome(first.meta).eventId).attempts, 0);
+        assert.equal(h.sent.length, 0);
+        const firstDeferral = readMeta(first.meta.id).outcomeDeliveryDeferredReason;
+        options.allowed = true; // No workflow event, human input or result poll.
+        h.ctx.isIdle = () => true;
+        await h.handlers.get("agent_settled")({}, h.ctx);
+        await new Promise((resolve) => setImmediate(resolve));
+        await getCallbackBatcher(h.pi).flush();
+        assert.ok(readOutcome(first.meta).deliveryReceipt);
+        // The first callback triggers a parent interpretation turn.
+        h.ctx.isIdle = () => false;
+        await h.handlers.get("agent_start")({}, h.ctx);
+        const call = (meta, params) => h.tools.get("subagent_result").execute("result", { id: meta.id, ...params }, undefined, undefined, h.ctx);
+        const unfinished = await call(first.meta, {});
+        await assert.rejects(() => call(first.meta, { outcome_revision: 2, disposition: "dismissed", note: "Incomplete" }), /revision/);
+        await call(first.meta, { outcome_revision: 1, disposition: "dismissed", note: "Incomplete; continue same conversation" });
+        options.allowed = false;
+        h.ctx.isIdle = () => true;
+        await h.handlers.get("agent_settled")({}, h.ctx);
+        const second = endedAssignment("retry-ended-followup", first.meta.sessionId, true);
+        fixtures.push(second);
+        assert.equal(second.meta.sessionId, first.meta.sessionId);
+        options.allowed = false;
+        mock.timers.tick(1000);
+        await new Promise((resolve) => setImmediate(resolve));
+        const secondDeferral = readMeta(second.meta.id).outcomeDeliveryDeferredReason;
+        options.allowed = true;
+        mock.timers.tick(1000);
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(readMeta(second.meta.id).outcomeDeliveryDeferredReason, undefined, "retry obtains fresh admission");
+        await getCallbackBatcher(h.pi).flush();
+        assert.ok(readOutcome(second.meta).deliveryReceipt, "ended follow-up must retry even with no running children or lifecycle event");
+        assert.match(firstDeferral, /Goal refused/);
+        assert.match(secondDeferral, /Goal refused/);
+        assert.equal(unfinished.details.assignment.state, "failed");
+        assert.match(unfinished.details.assignment.reason, /continue unfinished work/);
+        assert.equal(readOutcome(second.meta).outcome, "succeeded");
+        assert.notEqual(readOutcome(first.meta).eventId, readOutcome(second.meta).eventId);
+        assert.equal((await call(second.meta, {})).details.assignment.state, "completed");
+        await call(second.meta, { outcome_revision: 1, disposition: "consumed", note: "Assessment evidence inspected" });
+        assert.equal(readOutcome(first.meta).disposition.kind, "dismissed");
+        assert.equal(readOutcome(second.meta).disposition.kind, "consumed");
+        assert.equal(h.sent.length, 2);
+        await h.close();
+        const replay = host("parent", { entries: h.entries });
+        try {
+            await replay.start();
+            mock.timers.tick(2000);
+            await new Promise((resolve) => setImmediate(resolve));
+            await getCallbackBatcher(replay.pi).flush();
+            assert.equal(replay.sent.length, 0, "reload and duplicate reconciliation do not deliver again");
+        } finally { await replay.close(); }
+    } finally {
+        await h.close();
+        for (const fixture of fixtures) fixture.store.close();
+        mock.timers.reset();
+    }
+});
+
+test("exit zero with an unfinished final answer does not establish assignment success", () => {
+    const id = "unfinished-exit-zero";
+    const binding = { version: 1, assignmentId: id,
+        owner: { kind: "worker-conversation", sessionId: id, workspace: process.cwd(), branchId: null, goalId: null },
+        recipient: { kind: "parent-session", sessionId: "parent", workspace: process.cwd(), branchId: null, goalId: null } };
+    registerAssignmentAttempt(binding, id);
+    mkdirSync(runDir(id), { recursive: true });
+    writeFileSync(logPathFor(id), `${JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: "The unit assessments are not completed." }] })}\n`);
+    writeMeta({ id, assignment: binding, status: "running", pid: 4194304, spawnPid: process.pid, cwd: process.cwd(), sessionId: id,
+        promptPreview: "assess units", startedAt: 1, logPath: logPathFor(id), callback: true, callbackOrigin: { cwd: process.cwd(), sessionId: "parent" } });
+    finalizeRun(id, 0);
+    assert.equal(readMeta(id).status, "completed", "process classification stays separate");
+    assert.equal(readOutcome(readMeta(id)).outcome, "failed");
+    assert.match(readOutcome(readMeta(id)).reason, /completion.*unverified/i);
+    assert.equal(assignmentFor(readMeta(id)).state, "failed");
+});
+
 test("ordinary failure uses actual finalizer, callback batcher and result acknowledgement without consuming worker interpretation", async () => {
     const { store, wait, meta, operationId } = failedAssignment("ordinary-outcome");
     const outcome = readOutcome(meta);
@@ -86,6 +197,26 @@ test("ordinary failure uses actual finalizer, callback batcher and result acknow
 
 test("quoted outcome text is not a recipient receipt", () => {
     assert.equal(outcomeTranscriptReceipt([{ id: "quote", type: "message", message: { role: "custom", customType: "background-completion-batch", content: "[outcome:quoted-event]" } }], "quoted-event"), null);
+});
+
+test("admission returning after parent teardown cannot claim a retained outcome", async () => {
+    const { store, meta } = failedAssignment("late-parent-admission");
+    const h = host("parent", { noGoal: true });
+    let request;
+    h.pi.events.on("pi-better-goal:operation-resume-admission", (value) => { request = value; });
+    try {
+        await h.start();
+        assert.ok(request);
+        await h.close();
+        request.reply({ allowed: true, revision: 1, isCurrent: () => true });
+        await new Promise((resolve) => setImmediate(resolve));
+        await getCallbackBatcher(h.pi).flush();
+        const event = store.listOutbox().find((e) => e.eventId === readOutcome(meta).eventId);
+        assert.equal(event.attempts, 0);
+        assert.equal(event.state, "pending");
+        assert.equal(readOutcome(meta).deliveryReceipt, null);
+        assert.equal(h.sent.length, 0);
+    } finally { await h.close(); store.close(); }
 });
 
 test("verified missing wait history retains failure without claiming writer termination", async () => {
@@ -222,7 +353,7 @@ test("parent reads enforce current permissions, membership and exact disposition
     } finally { await h.close(); store.close(); }
 });
 
-test("busy parent queues a safe handoff and successful/cancelled standalone outcomes retain separate assignment identities", async () => {
+test("busy parent queues a safe handoff and unverified/cancelled outcomes retain separate assignment identities", async () => {
     const { store, meta } = failedAssignment("busy-outcome");
     const h = host();
     try {
@@ -235,7 +366,7 @@ test("busy parent queues a safe handoff and successful/cancelled standalone outc
         h.ctx.isIdle = () => true;
         await getCallbackBatcher(h.pi).flush();
         assert.equal(h.sent.length, 1);
-        for (const [id, status, outcome] of [["success-outcome", "completed", "succeeded"], ["cancel-outcome", "killed", "cancelled"]]) {
+        for (const [id, status, outcome] of [["success-outcome", "completed", "failed"], ["cancel-outcome", "killed", "cancelled"]]) {
             const binding = { ...meta.assignment, assignmentId: id };
             registerAssignmentAttempt(binding, id);
             mkdirSync(runDir(id), { recursive: true });
@@ -250,7 +381,7 @@ test("busy parent queues a safe handoff and successful/cancelled standalone outc
             }
             assert.equal(commitAssignmentTerminal(next).outcome, outcome);
             const other = store.registerWait({ owner: binding.owner, dependencies: [{ operationId: "op-busy-outcome" }], continuationNote: "Explicit follow-up", origin: { assignmentRef: `follow-up-${id}` } });
-            assert.equal(assignmentFor(next).state, status === "completed" ? "completed" : "cancelled");
+            assert.equal(assignmentFor(next).state, status === "completed" ? "failed" : "cancelled");
             store.cancelWait({ ...other.wait, expectedCancelEpoch: other.wait.cancelEpoch, owner: binding.owner, reason: "End isolated fixture" });
         }
     } finally { await h.close(); store.close(); }
