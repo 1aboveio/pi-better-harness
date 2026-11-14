@@ -41,7 +41,10 @@ process.env.TMPDIR = scratch;
 process.env.TEMP = scratch;
 process.env.TMP = scratch;
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT = "off";
-after(() => {
+const { startWorkRuntime } = await import(new URL("../../pi-better-background-tasks/src/test-support/work-runtime.ts", import.meta.url).href);
+const stopWorkRuntime = await startWorkRuntime();
+after(async () => {
+    await stopWorkRuntime();
     for (const [name, value] of Object.entries({ PI_CODING_AGENT_DIR: oldEnv.agent, TMPDIR: oldEnv.tmp, TEMP: oldEnv.temp, TMP: oldEnv.tmpAlias,
         PI_SANDBOX_RECOVERY_SNAPSHOT: oldEnv.recovery })) {
         if (value === undefined) delete process.env[name]; else process.env[name] = value;

@@ -55,6 +55,50 @@ function renderWidget(value: unknown, width: number, theme: unknown = { fg: (_co
 }
 
 describe("shared background work navigator", () => {
+  it("refreshes an open loading detail when its observation arrives without another key or list change", () => {
+    let ready = false;
+    let paints = 0;
+    let component: any;
+    const base = provider("subagents", "Subagents", 10, 100, () => undefined);
+    const unregister = registerBackgroundWorkProvider({
+      ...base,
+      detail: id => ready ? base.detail(id, Date.now()) : {
+        providerId: "subagents", id, title: "Loading observation", status: "rebuilding",
+        statusTone: "warning", metadata: [], evidence: { label: "observation", text: "Waiting for snapshot" },
+      },
+    });
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {}, setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() { paints++; } }, this.theme, {}, () => undefined);
+        return new Promise(() => {});
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: data => data === "left", matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left"); editor.handleInput("enter");
+      assert.match(component.render(100).join("\n"), /Waiting for snapshot/);
+      const before = paints;
+      ready = true;
+      refreshBackgroundWorkNavigator(ctx);
+      assert.match(component.render(100).join("\n"), /Subagents output/);
+      assert.ok(paints > before, "observation arrival must request an overlay repaint even when list rows are unchanged");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
   it("keeps the persistent footer clear while sharing one editor host and dispatching close by provider", () => {
     const closed: string[] = [];
     const unregisterSubagents = registerBackgroundWorkProvider(provider("subagents", "Subagents", 10, 200, (id) => closed.push(`subagents:${id}`)));
