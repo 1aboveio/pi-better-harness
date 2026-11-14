@@ -210,12 +210,15 @@ function parseArchivedAttempt(raw: string, id: string): RunMeta | undefined {
 }
 
 /** One published archived completed attempt, ignoring staleness. */
-function readPublishedAttempt(id: string): RunMeta | undefined {
+function readPublishedAttempt(id: string, requireReadable = false): RunMeta | undefined {
     if (!isSafeRunId(id)) return undefined;
     let raw: string;
     try {
         raw = readFileSync(attemptPath(id), "utf-8");
-    } catch {
+    } catch (error) {
+        // A direct lookup can refuse continuation as absent. A list also
+        // authorizes tombstone/cleanup decisions, so partial history is unsafe.
+        if (requireReadable) throw error;
         return undefined;
     }
     return parseArchivedAttempt(raw, id);
@@ -256,7 +259,11 @@ function archivedAttempts(): RunMeta[] {
     let names: string[] = [];
     try {
         names = readdirSync(durableAttemptsDir());
-    } catch {
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        // A missing directory (or a file at that path) contains no archives.
+        // Permission and I/O refusals cannot establish that same absence.
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
         names = [];
     }
     const metas: RunMeta[] = [];
@@ -268,8 +275,11 @@ function archivedAttempts(): RunMeta[] {
         const cached = archiveFiles.get(path);
         const entry = cached?.signature === fileSignature ? cached : {
             signature: fileSignature,
-            meta: readPublishedAttempt(name.slice(0, -".json".length)),
+            meta: readPublishedAttempt(name.slice(0, -".json".length), true),
         };
+        // Retain successful observations even if a later file refuses a read.
+        // The list signature is committed only after the entire scan succeeds.
+        archiveFiles.set(path, entry);
         files.set(path, entry);
         if (entry.meta) metas.push(entry.meta);
     }
@@ -369,7 +379,8 @@ function readArchivedSessionState(sessionId: string): ArchivedSessionState | und
     let state: ArchivedSessionState | undefined;
     try {
         state = parseState(readFileSync(path, "utf-8"), sessionId);
-    } catch {
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         state = undefined;
     }
     stateCache.set(path, { signature, state });
