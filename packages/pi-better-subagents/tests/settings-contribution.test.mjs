@@ -171,6 +171,13 @@ test("subagents contributes the standalone settings opener with shared session a
     keys = [];
     await contribution.open(ctx);
     assert.match(pages.at(-1), /Timeout \(minutes\)\s+5/, "an explicit reset restores the environment-effective default");
+    keys = ["\x13"];
+    await contribution.open(ctx);
+    assert.equal(loadConfig().maxMinutes, 5, "saving an unchanged page persists the displayed environment timeout");
+    delete process.env[TIMING_ENV.max];
+    keys = [];
+    await contribution.open(ctx);
+    assert.match(pages.at(-1), /Timeout \(minutes\)\s+5/, "the saved timeout survives removal of the environment variable");
     await commands.get("subagents").handler("mode coordinator", ctx);
     await contribution.open(ctx);
     assert.match(pages.at(-1), /Delegation mode\s+coordinator/);
