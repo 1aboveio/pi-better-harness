@@ -26,7 +26,14 @@ cp "$ROOT_DIR/scripts/isolate-registry.mjs" "$PREFIX/scripts/"
 cp -R "$PKG_DIR/src" "$PKG_DIR/test" "$PKG_DIR/scripts" "$PKG_DIR/package.json" "$PKG_DIR/tsconfig.json" "$PREFIX/packages/pi-better-server/"
 [ -d "$PKG_DIR/codex-plugin" ] && cp -R "$PKG_DIR/codex-plugin" "$PREFIX/packages/pi-better-server/"
 # Background-activity regressions load the real sibling provider against this SDK.
-cp -R "$ROOT_DIR/packages/pi-better-subagents" "$PREFIX/packages/pi-better-subagents"
+node --input-type=module - "$ROOT_DIR/packages/pi-better-subagents" "$PREFIX/packages/pi-better-subagents" <<'NODE'
+import { cpSync } from "node:fs";
+import { basename } from "node:path";
+cpSync(process.argv[2], process.argv[3], { recursive: true, filter: path => basename(path) !== "node_modules" });
+NODE
+# Install the consumer's declared runtime closure, not just the host's transitives.
+# Its host-provided peers must keep resolving to the requested Pi above.
+(cd "$PREFIX/packages/pi-better-subagents" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
 
 cd "$PREFIX/packages/pi-better-server"
 installed="$(node -p "require('$PREFIX/node_modules/@earendil-works/pi-coding-agent/package.json').version")"

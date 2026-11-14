@@ -400,6 +400,16 @@ export async function runActivationWorker(request: UpgradeRequest, ports: Activa
         save(journal);
         return result(journal);
       }
+      // Once scheduled, this exact daemon owns the durable stop transition.
+      // Repeated hellos can time out during activity observation and abandon its coordinator.
+      if (scheduled && journal.phase === "prepared") {
+        const owner = inspectDaemonOwner(serverDir);
+        if (owner.status === "live" && sameOwner(owner.owner, journal.previousOwner)) {
+          await ports.pause();
+          journal = readActivationJournal(serverDir)!;
+          continue;
+        }
+      }
       const probe = await ports.probe(serverDir);
       journal = readActivationJournal(serverDir)!;
       if (committed(journal.phase)) break;
