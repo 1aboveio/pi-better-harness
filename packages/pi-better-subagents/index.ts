@@ -24,6 +24,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { initializeNavigatorPanels } from "./shared-navigator-panels.ts";
+import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment } from "./work-observation.ts";
 import { matchesKey, Key, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
 import {
@@ -1448,7 +1449,7 @@ function navigatorRunningRuns(): RunMeta[] {
 }
 
 function navigatorRunningCount(): number {
-    return navigatorRunningRuns().length;
+    return workObservation()?.rows.filter((row: any) => ["running", "waiting"].includes(row.assignment.state)).length ?? 0;
 }
 
 /**
@@ -1546,6 +1547,24 @@ function statusTone(status: string): BackgroundWorkRow["statusTone"] {
 }
 
 function subagentWorkRows(now: number): BackgroundWorkRow[] {
+    const snapshot = workObservation();
+    const rows: BackgroundWorkRow[] = (snapshot?.rows ?? []).filter((row: any) => !row.meta.dismissedAt &&
+        (["running", "waiting"].includes(row.assignment.state) || typeof (row.meta.endedAt ?? row.meta.lostAt) !== "number" ||
+            now - (row.meta.endedAt ?? row.meta.lostAt) < TERMINAL_NAVIGATOR_RETENTION_MS)).map((row: any) => {
+        const meta = row.meta;
+        const terminal = !["running", "waiting"].includes(row.assignment.state);
+        return { providerId: "subagents", id: meta.id, name: meta.name || meta.id,
+            model: shortModel(meta.model), effort: meta.effort, status: row.assignment.state,
+            statusTone: statusTone(row.assignment.state), kind: "subagent", elapsed: fmtElapsed((meta.endedAt ?? now) - meta.startedAt),
+            primary: row.assignment.reason, facts: [], sortStartedAt: meta.startedAt,
+            expiresAt: terminal && typeof meta.endedAt === "number" ? meta.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS : undefined };
+    });
+    if (!snapshot || snapshot.status !== "ready") rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Subagents",
+        status: snapshot?.status ?? "degraded", statusTone: "warning", kind: "observation", elapsed: "", primary: workObservationFailure(), sortStartedAt: now });
+    return rows;
+}
+
+function legacySubagentWorkRows(now: number): BackgroundWorkRow[] {
     // One registry scan per rebuild: both the start times and the rows below are
     // built from this snapshot.
     const project = createNavigatorProjector();
@@ -4043,6 +4062,7 @@ export default function (pi: ExtensionAPI) {
     // The foreground origin from session_start; otherwise the calling context's
     // own session. An unreadable session id stays unavailable (never cwd-wide).
     const toolSession = {
+        observeAssignment: observedAssignment,
         inspectOutcome: (meta: RunMeta, params: Record<string, unknown>, callCtx?: unknown) => {
             if (params.disposition !== undefined && params.disposition !== "consumed" && params.disposition !== "dismissed") throw new Error("Outcome disposition must be consumed or dismissed.");
             if (!readOutcome(meta)) {
@@ -4352,6 +4372,7 @@ export default function (pi: ExtensionAPI) {
         catch { mainAgentStartedAt = undefined; }
         mainAgentTools.clear();
         activeCallbackOrigin = callbackOriginFromContext(ctx);
+        if (activeCallbackOrigin) await startWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => refreshBackgroundWorkNavigator(ctx));
         recoverCompletionCallbacks(pi);
         // Admission can defer before batcher enqueue, even after the last child
         // exits. Keep reconciliation independent of the live-run health ticker.
@@ -4406,6 +4427,7 @@ export default function (pi: ExtensionAPI) {
 
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (event, ctx) => {
+        stopWorkObservation();
         if (outcomeTicker) clearInterval(outcomeTicker);
         outcomeTicker = undefined;
         outcomeAdmission.clear();

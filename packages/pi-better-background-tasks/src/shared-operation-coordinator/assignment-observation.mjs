@@ -2,11 +2,11 @@
 import { createRequire } from "node:module";
 
 /** Read-only, bounded projection input. Never creates/migrates a database. */
-export function readAssignmentWaits(path, owner) {
+export function readAssignmentWaits(path, owner, connection) {
     let db;
     try {
         const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
-        db = new DatabaseSync(path, { readOnly: true });
+        db = connection ?? new DatabaseSync(path, { readOnly: true });
         // v4 adds repair accounting; the observed wait/outcome fields are unchanged.
         if (!["1", "2", "3", "4"].includes(db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value)) {
             return { verified: false, waits: [], reason: "Unsupported coordinator schema; assignment state is unverified." };
@@ -38,6 +38,41 @@ export function readAssignmentWaits(path, owner) {
     } catch {
         return { verified: false, waits: [], reason: "Coordinator state is unverified; compatible supervision is unavailable." };
     } finally {
-        db?.close();
+        if (!connection) db?.close();
     }
+}
+
+/** A root read model owns this connection; ordinary observers remain one-shot. */
+export function createAssignmentReader(path) {
+    let db;
+    let identity;
+    const statements = new Map();
+    return {
+        revision() {
+            const { statSync } = createRequire(import.meta.url)("node:fs");
+            const stat = statSync(path, { bigint: true });
+            const next = `${stat.dev}:${stat.ino}`;
+            if (identity !== next) {
+                db?.close();
+                db = undefined;
+                statements.clear();
+                identity = next;
+            }
+            const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+            db ??= new DatabaseSync(path, { readOnly: true });
+            return `${identity}:${db.prepare("PRAGMA data_version").get().data_version}`;
+        },
+        read(owner) {
+            try {
+                this.revision();
+                return readAssignmentWaits(path, owner, { prepare(sql) {
+                    if (!statements.has(sql)) statements.set(sql, db.prepare(sql));
+                    return statements.get(sql);
+                } });
+            } catch {
+                return { verified: false, waits: [], reason: "Coordinator state is unverified; compatible supervision is unavailable." };
+            }
+        },
+        close() { db?.close(); db = undefined; statements.clear(); identity = undefined; },
+    };
 }

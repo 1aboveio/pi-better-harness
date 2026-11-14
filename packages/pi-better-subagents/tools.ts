@@ -14,7 +14,7 @@
  * far as `execute` is concerned).
  */
 
-import { assignmentFor, createAssignmentProjector } from "./assignment-projection.mjs";
+import { assignmentFor, createAssignmentProjector, withAssignmentObservations } from "./assignment-projection.mjs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus, type RunCallbackOrigin, type RunMeta, type RunStatus } from "./registry.ts";
 import { buildSubagentResultPayload } from "./finalization.ts";
@@ -497,13 +497,15 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
             }
             if (access.kind === "denied") return subagentResultText(access.payload);
             const meta = access.meta;
+            const observed = await session.observeAssignment?.(meta.id);
+            return withAssignmentObservations(observed ? [{ meta, assignment: observed.assignment }] : [], () => {
             const outcome = meta.assignment ? baseSession.inspectOutcome?.(meta, params as Record<string, unknown>, ctx) : undefined;
             const resultText = (body: string) => {
                 const evidence = outcome as { outcome?: { revision: number; outcome: string; reason: string }; dependencies?: Array<{ dependencies: Array<{ operationId: string }> }> } | null;
                 const operations = evidence?.dependencies?.flatMap((wait) => wait.dependencies.map((dependency) => dependency.operationId)).slice(0, 5) ?? [];
                 const header = evidence?.outcome ? `Outcome r${evidence.outcome.revision}: ${evidence.outcome.outcome}. ${evidence.outcome.reason.slice(0, 256)}${operations.length ? `\nEvidence operations: ${operations.join(", ")}` : ""}\n` : "";
                 const result = subagentResultText(header + body);
-                return { ...result, details: { ...result.details, outcome, outcomeSupport: meta.outcomeSupport, assignment: assignmentFor(meta, effectiveStatus(meta)), ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
+                return { ...result, details: { ...result.details, outcome, outcomeSupport: meta.outcomeSupport, assignment: observed?.assignment ?? assignmentFor(meta, effectiveStatus(meta)), snapshot: observed?.snapshot, ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
             };
             if ((params as Record<string, unknown>).operation_id && outcome) {
                 const evidence = outcome as { outcome: { revision: number; outcome: string; reason: string }; logs: Array<{ text: string }> };
@@ -525,6 +527,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
                 return resultText(assembleRunningResult(p.id, meta, p, scopeKey, healthLine));
             }
             return resultText(body);
+            });
         },
     } as ToolDefinition;
 }

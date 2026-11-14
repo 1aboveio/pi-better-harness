@@ -17,6 +17,8 @@ import type { IdleSessionsLease, UpgradeRequest } from "./startup/managed-types.
 import { HostedSession } from "./hosted-session.ts";
 import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts";
 import { runtimeRoot } from "./runtime/root.ts";
+import { WorkReadModel } from "./runtime/read-model.ts";
+import { WorkQueries } from "./runtime/queries.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
   /** Defaults to `~/.pi/agent/server` (or `$PI_SERVER_DIR`). */
@@ -84,6 +86,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     cleanupStartup = () => registry.shutdown();
     await registry.resumeAll();
     const nativeHost = new NativeClientHost(registry);
+    let workModel: WorkReadModel | undefined;
+    const work = () => {
+      if (!workModel) {
+        workModel = new WorkReadModel(realpathSync(getAgentDir()), instanceId!);
+        void workModel.reconcile();
+      }
+      return workModel;
+    };
     // Structural port permits independent integration with the shared maintenance owner.
     const sessionMaintenance = (registry as SessionRegistry & { maintenance?: {
       readonly busy: boolean;
@@ -118,6 +128,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       };
       const control = new ConnectionControl(send);
       let greeted = false;
+      let workQueries: WorkQueries | undefined;
 
       const dispatch = async (line: string): Promise<void> => {
         let command: Record<string, unknown>;
@@ -161,6 +172,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount } });
           }
           if (type === "runtime_upgrade_status") return reply({ data: readActivationJournal(serverDir) ?? null });
+          if (["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_metrics"].includes(type)) {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            workQueries ??= new WorkQueries(work(), socket);
+            return reply({ data: workQueries.handle(command) });
+          }
           if (type === "runtime_upgrade") {
             if (!safeUpgrade || !build) throw new Error("This daemon cannot safely activate managed runtimes");
             if (typeof command.operationId !== "string" || typeof command.runtime !== "object" || !command.runtime) throw new Error("Invalid upgrade request");
@@ -283,6 +299,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       socket.on("data", (chunk: string) => decoder.push(chunk));
       socket.on("error", () => undefined);
       socket.on("close", () => {
+        workQueries?.close();
         sockets.delete(socket);
         reconnectControllers.delete(control);
         control.dispose();
@@ -290,6 +307,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     });
 
     cleanupStartup = async () => {
+      await workModel?.close();
       for (const socket of sockets) socket.destroy();
       server.close();
       await registry.shutdown();
@@ -380,6 +398,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           const closed = new Promise<void>((resolve) => server.close(() => resolve()));
           for (const socket of sockets) socket.destroy();
           await closed;
+          await workModel?.close();
           await registry.shutdown();
           await Promise.allSettled([...dispatches]);
           if (existsSync(socketPath)) unlinkSync(socketPath);

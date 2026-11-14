@@ -3,6 +3,7 @@ import ts from "typescript";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServerArtifact } from "../packages/pi-better-server/src/startup/artifact.ts";
+import "./sync-runtime-domain.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const source = join(root, "packages/pi-better-server");
@@ -19,6 +20,7 @@ for (const name of ["pi-better-subagents", "pi-better-background-tasks"]) {
     writeFileSync(join(target, path.replace(/\.ts$/, ".mjs")), output);
   }
   mkdirSync(join(target, "artifacts"), { recursive: true });
+  writeFileSync(join(target, "src/runtime/work-client.mjs"), readFileSync(join(source, "src/runtime/work-client.mjs")));
   for (const { build, bytes, sha256 } of artifacts) {
     writeFileSync(join(target, "artifacts", `${build.platform}.gz`), bytes);
     writeFileSync(join(target, "artifacts", `${build.platform}.json`), JSON.stringify({ build, sha256 }));
