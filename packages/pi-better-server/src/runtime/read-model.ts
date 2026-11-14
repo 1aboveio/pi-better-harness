@@ -253,6 +253,7 @@ export class WorkReadModel {
 
   snapshot(scope: WorkScope = {}): WorkSnapshot {
     if (scope.background) {
+      if (scope.backgroundHistory && this.background.refresh()) this.publish();
       const index = scope.backgroundHistory ? this.background.historyIndex(scope) : undefined;
       const tasks = this.background.read(scope, index);
       this.metrics.coordinatorConnections = 1 + this.background.connectionCount;
