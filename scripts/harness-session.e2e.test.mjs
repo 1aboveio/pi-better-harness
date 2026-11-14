@@ -17,12 +17,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test, { after, before } from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describeSandboxSupport } from "../packages/sandbox-core/index.ts";
+import { inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+import { removeOwnedFixture } from "./test-support/remove-owned-fixture.mjs";
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT ??= "off"; // never create real APFS snapshots from tests
 
 const repoRoot = resolve(import.meta.dirname, "..");
@@ -61,16 +63,47 @@ writeFileSync(join(outside, "readable.txt"), "readable from inside the sandbox\n
 const agentDir = join(fixtures, "agent");
 mkdirSync(agentDir, { recursive: true });
 process.env.PI_CODING_AGENT_DIR = agentDir;
+const serverDir = join(agentDir, "server");
+process.env.PI_SERVER_DIR = serverDir;
+let runtimeOwner;
+
+async function stopOwnedRuntime() {
+  const owner = inspectDaemonOwner(serverDir);
+  if (owner.status === "missing" || owner.status === "dead") return;
+  assert.equal(owner.status, "live", "fixture runtime ownership must be known before cleanup");
+  assert.deepEqual(owner.owner, runtimeOwner, "cleanup must not stop a replacement runtime");
+  try { process.kill(owner.owner.pid, "SIGTERM"); }
+  catch (error) { if (error.code !== "ESRCH") throw error; }
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const current = inspectDaemonOwner(serverDir);
+    if (current.status === "missing" || current.status === "dead") return;
+    assert.deepEqual(current, owner, "runtime ownership changed during fixture shutdown");
+    assert.ok(Date.now() < deadline, `fixture runtime ${owner.owner.pid} did not stop`);
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
 
 const originalCwd = process.cwd();
 const sessionShutdownHandlers = [];
 after(async () => {
+  const errors = [];
   try {
-    for (const handler of [...sessionShutdownHandlers].reverse()) await handler({ type: "session_shutdown" }, ctx);
+    for (const handler of [...sessionShutdownHandlers].reverse()) {
+      try { await handler({ type: "session_shutdown" }, ctx); }
+      catch (error) { errors.push(error); }
+    }
   } finally {
     process.chdir(originalCwd);
-    rmSync(fixtures, { recursive: true, force: true });
   }
+  try {
+    await stopOwnedRuntime();
+    removeOwnedFixture(fixtures);
+    assert.equal(existsSync(fixtures), false, "the exact owned fixture is removed");
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length) throw new AggregateError(errors, "session shutdown or owned fixture cleanup failed");
 });
 
 /**
@@ -156,6 +189,8 @@ before(async () => {
 
   for (const handler of sessionStartHandlers) {
     await handler({ type: "session_start", reason: "startup" }, ctx);
+    const owner = inspectDaemonOwner(serverDir);
+    if (owner.status === "live") runtimeOwner = owner.owner;
   }
 
   const { currentForegroundSandboxPolicy } = await import(

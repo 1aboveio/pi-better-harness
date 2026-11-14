@@ -10,8 +10,14 @@ import { WorkClient } from "../src/runtime/work-client.mjs";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
 
+function fixtureRoot(name: string) {
+  const parent = resolve("../../.work/753");
+  mkdirSync(parent, { recursive: true });
+  return mkdtempSync(join(parent, `${name}-`));
+}
+
 test("one real daemon shares unchanged scope observations across 1, 5 and 10 socket clients", { timeout: 30000 }, async () => {
-  const root = mkdtempSync(resolve("../../.work/753/runtime-"));
+  const root = fixtureRoot("runtime");
   const transport = mkdtempSync("/tmp/p753-");
   const agent = join(root, "agent");
   const runs = join(root, "pi-better-subagents/runs");
@@ -244,7 +250,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
 });
 
 test("10000 durable records use bounded indexed history pages; a single archive replacement projects only its family", { timeout: 60000 }, async () => {
-  const root = mkdtempSync(resolve("../../.work/753/history-"));
+  const root = fixtureRoot("history");
   const durable = join(root, "durable"), archives = join(durable, "attempts"), sessions = join(durable, "sessions");
   mkdirSync(archives, { recursive: true });
   const meta = (i: number) => ({ id: `sa_history_${i}`, sessionId: `conversation-${i}`, cwd: root, status: "completed", startedAt: i,
@@ -282,7 +288,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
 });
 
 test("watch overflow and lost notifications reconcile external writes once and retain stale degraded rows", { timeout: 10000 }, async () => {
-  const root = mkdtempSync(resolve("../../.work/753/inventory-"));
+  const root = fixtureRoot("inventory");
   const runs = join(root, "runs"); mkdirSync(runs);
   const model = new WorkReadModel(root, "instance", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 50 });
   const meta = { id: "sa_external", cwd: root, sessionId: "worker", status: "completed", startedAt: 1 };
@@ -327,7 +333,7 @@ test("watch overflow and lost notifications reconcile external writes once and r
 });
 
 test("a paused real socket has bounded queued snapshots and receives explicit resync after draining", { timeout: 10000 }, async () => {
-  const root = mkdtempSync(resolve("../../.work/753/slow-"));
+  const root = fixtureRoot("slow");
   const transport = mkdtempSync("/tmp/p753-");
   const runs = join(root, "runs", "sa_slow"); mkdirSync(runs, { recursive: true });
   writeFileSync(join(runs, "meta.json"), JSON.stringify({ id: "sa_slow", cwd: root, status: "completed", startedAt: 1, promptPreview: "x".repeat(100000) }));
