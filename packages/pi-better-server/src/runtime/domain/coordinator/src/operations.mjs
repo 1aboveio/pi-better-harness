@@ -29,6 +29,7 @@ function normalizeSupervision(value) {
     const supervision = value;
     return {
         hostId: requireId("supervision.hostId", supervision.hostId),
+        ...(supervision.resultAdapter === 1 ? { resultAdapter: 1 } : {}),
         runnerId: supervision.runnerId === undefined || supervision.runnerId === null
             ? null
             : requireId("supervision.runnerId", supervision.runnerId),

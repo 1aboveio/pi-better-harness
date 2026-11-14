@@ -63,6 +63,7 @@ function normalizeSupervision(value: unknown): SupervisionIdentity | null {
     const supervision = value as Partial<SupervisionIdentity>;
     return {
         hostId: requireId("supervision.hostId", supervision.hostId),
+        ...(supervision.resultAdapter === 1 ? { resultAdapter: 1 as const } : {}),
         runnerId: supervision.runnerId === undefined || supervision.runnerId === null
             ? null
             : requireId("supervision.runnerId", supervision.runnerId),

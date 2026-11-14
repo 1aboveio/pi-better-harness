@@ -1402,11 +1402,12 @@ export class ObservedWaitHost {
     // replacement host can still notify the right parent and never re-route a
     // worker-owned operation to the parent's callback.
     this.writeLaunchContext(taskId, launchContext);
+    this.launches.set(taskId, launchContext);
+    if (this.options.serverOwnedResults) await this.handoffResults([store.getOperation(operationId)!]);
     const started = await this.startSupervisor({
       token, taskId, kind: input.kind, params: input.params, prepared, operationId,
     });
     this.launches.set(taskId, launchContext);
-    if (this.options.serverOwnedResults) await this.handoffResults([store.getOperation(operationId)!]);
     this.emitDurableTaskChange(owner);
     const launch: DurableLaunch = {
       id: taskId,
@@ -1996,8 +1997,11 @@ export class ObservedWaitHost {
     }
     for (const operation of this.requireStore().listOperations({ phase: "running" })) {
       if (!existsSync(this.sidecarPath(operation.taskId)) || this.requireStore().resultSupervision(operation.operationId)) continue;
+      // A compatible peer may be between registration and its grant transaction.
+      // It cannot start a runner until that grant commits and never discovers globally.
+      if (operation.supervision?.resultAdapter === 1) continue;
       if (this.supervisionAuthority(operation) === "foreign") {
-        throw new Error("permission-unavailable: a live or unknown original operation holder prevents scope handoff");
+        throw new Error("permission-unavailable: a live or unknown legacy operation holder prevents scope handoff");
       }
     }
   }
@@ -2128,11 +2132,12 @@ export class ObservedWaitHost {
       branchId: owner.branchId ?? null,
     };
     this.writeLaunchContext(taskId, launchContext);
+    this.launches.set(taskId, launchContext);
+    if (this.options.serverOwnedResults) await this.handoffResults([store.getOperation(operationId)!]);
     const started = await this.startSupervisor({
       token, taskId, kind: input.kind, params: input.params, prepared, operationId,
     });
     this.launches.set(taskId, launchContext);
-    if (this.options.serverOwnedResults) await this.handoffResults([store.getOperation(operationId)!]);
     this.emitDurableTaskChange(owner);
     return {
       id: taskId,
@@ -4194,7 +4199,8 @@ export class ObservedWaitHost {
   }
 
   private supervision(): SupervisionIdentity {
-    return { hostId: this.hostId, runnerId: null, processStartToken: null };
+    return { hostId: this.hostId, runnerId: null, processStartToken: null,
+      ...(this.options.serverOwnedResults ? { resultAdapter: 1 as const } : {}) };
   }
 
   private parentAuthority(owner: OwnerIdentity, plan: ForegroundSandboxPlan): string {

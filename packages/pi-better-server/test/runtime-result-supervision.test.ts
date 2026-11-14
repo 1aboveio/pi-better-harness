@@ -11,17 +11,21 @@ import { WorkClient } from "../src/runtime/work-client.mjs";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 const { createLocalSupervisor, supervisorPaths } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
 
-for (const crash of ["none", "before-terminal", "after-terminal", "missing-current-authority", "missing-captured-authority", "missing-launch-evidence"]) {
+for (const crash of ["none", "concurrent-frontends", "before-terminal", "after-terminal", "missing-current-authority", "missing-captured-authority", "missing-launch-evidence"]) {
 test(`SDK frontend exits; server imports independent evidence with ${crash} server crash and retains exact delivery`, { timeout: 30000 }, async () => {
   mkdirSync(resolve(".work/760"), { recursive: true });
   const root = mkdtempSync(resolve(".work/760/flow-"));
+  const runnerRoot = join(root, "frontend-volatile");
+  mkdirSync(runnerRoot);
+  const directory = join(runnerRoot, process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor");
   const transport = mkdtempSync("/tmp/p760-");
   const children: ReturnType<typeof fork>[] = [];
   const clients: WorkClient[] = [];
   let taskId: string | undefined;
+  const taskIds: string[] = [];
   const start = async (file: string) => {
     const child = fork(new URL(file, import.meta.url), [], { execArgv: ["--import", "tsx"],
-      env: { ...process.env, TMPDIR: root, PI_CODING_AGENT_DIR: root, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+      env: { ...process.env, TMPDIR: file.includes("result-frontend") ? runnerRoot : root, PI_CODING_AGENT_DIR: root, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
     children.push(child);
     let errors = ""; child.stderr!.on("data", chunk => { errors += chunk; });
     const [ready] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(errors); })]);
@@ -29,11 +33,37 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
   };
   try {
     let server = await start("./support/work-daemon.ts");
-    const frontend = await start("./support/result-frontend.ts");
+    const frontends = await Promise.all(Array.from({ length: crash === "concurrent-frontends" ? 2 : 1 }, () => start("./support/result-frontend.ts")));
+    const frontend = frontends[0]!;
+    taskIds.push(...frontends.map(frontend => frontend.ready.taskId));
     taskId = frontend.ready.taskId;
     const wait = frontend.ready.wait;
-    const exited = once(frontend.child, "exit"); frontend.child.kill("SIGKILL"); await exited;
-    const directory = join(root, process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor");
+    for (const frontend of frontends) {
+      const exited = once(frontend.child, "exit"); frontend.child.kill("SIGKILL"); await exited;
+    }
+    const executions = "start\n".repeat(frontends.length);
+    if (crash === "none") {
+      const client = new WorkClient(server.ready.ready, root); clients.push(client); await client.ready;
+      const scope = { background: true, cwd: root, sessionId: frontend.ready.sessionId };
+      const deadline = Date.now() + 5000;
+      let status: any;
+      do {
+        await client.get(scope);
+        status = await client.request("runtime_get_status");
+        if (status.livenessReasons.some((reason: any) => reason.kind === "runner" && reason.id === taskId)) break;
+        await delay(20);
+      } while (Date.now() < deadline);
+      if (!status.livenessReasons.some((reason: any) => reason.kind === "runner" && reason.id === taskId)) {
+        const claim = JSON.parse(readFileSync(supervisorPaths(directory, taskId!).claim, "utf8"));
+        writeFileSync(resolve(".work/760/runner-identity-gap.json"), JSON.stringify({
+          claimPid: claim.pid, claimPidStartTime: claim.pidStartTime ?? null,
+          runtimeReasons: status.livenessReasons, capturedDirectory: directory,
+        }, null, 2));
+      }
+      assert.ok(status.livenessReasons.some((reason: any) => reason.kind === "runner" && reason.id === taskId),
+        "Exact runner start identity must retain the server after every frontend exits, using the captured non-default supervisor directory");
+      client.close();
+    }
     const negative = crash.startsWith("missing-");
     if (crash === "before-terminal" || negative) {
       const stopped = once(server.child, "exit"); server.child.kill("SIGKILL"); await stopped;
@@ -77,10 +107,21 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       assert.equal(operation.terminalOutcome, "succeeded");
       assert.equal(operation.terminalRevision, 1);
       assert.equal(operation.owner.sessionId, frontend.ready.sessionId);
-      const events = store.listOutbox({ owner: operation.owner });
+      const events = store.listOutbox({ recipient: operation.owner });
       assert.equal(events.length, 1);
+      assert.deepEqual(events[0].recipient, operation.owner);
+      assert.equal(store.listOutbox({ recipient: { ...operation.owner, sessionId: "foreign-recipient" } }).length, 0);
       assert.equal(events[0].deliveredAt, null);
-      assert.equal(readFileSync(join(root, "executions"), "utf8"), "start\n");
+      assert.equal(readFileSync(join(root, "executions"), "utf8"), executions);
+      for (const other of frontends.slice(1)) {
+        const deadline = Date.now() + 5000;
+        while (store.getWait({ waitId: other.ready.wait.waitId })?.phase !== "ready" && Date.now() < deadline) await delay(20);
+        assert.equal(store.getWait({ waitId: other.ready.wait.waitId })?.phase, "ready");
+        const operation = store.listOperations({ taskId: other.ready.taskId })[0]!;
+        assert.equal(operation.terminalRevision, 1);
+        assert.equal(operation.owner.sessionId, other.ready.sessionId);
+        assert.equal(store.listOutbox({ recipient: operation.owner }).length, 1);
+      }
       if (crash === "after-terminal") {
         const stopped = once(server.child, "exit"); server.child.kill("SIGKILL"); await stopped;
         server = await start("./support/work-daemon.ts");
@@ -90,15 +131,15 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
         await client.ready; await client.request("runtime_result_supervision"); client.close();
       }
       assert.equal(store.getOperation(operation.operationId)?.terminalRevision, 1);
-      assert.equal(store.listOutbox({ owner: operation.owner }).length, 1);
-      assert.equal(readFileSync(join(root, "executions"), "utf8"), "start\n");
+      assert.equal(store.listOutbox({ recipient: operation.owner }).length, 1);
+      assert.equal(readFileSync(join(root, "executions"), "utf8"), executions);
     } finally { store.close(); }
   } finally {
     for (const client of clients) client.close();
     for (const child of children) if (child.exitCode === null && child.signalCode === null) {
       const exited = once(child, "exit"); child.send("stop"); await exited;
     }
-    if (taskId) await createLocalSupervisor({ directory: join(root, process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor") }).stop(taskId);
+    for (const id of taskIds) await createLocalSupervisor({ directory }).stop(id);
     rmSync(transport, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
   }
 });
