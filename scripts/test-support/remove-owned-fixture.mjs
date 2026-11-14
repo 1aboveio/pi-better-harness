@@ -2,6 +2,14 @@ import { chmodSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { inspectDaemonOwner } from "../../packages/pi-better-server/src/daemon-owner.ts";
+import { ensureRuntime } from "../../packages/pi-better-subagents/runtime-client/src/runtime/client.mjs";
+
+export async function prepareOwnedRuntime(agentDir) {
+  await ensureRuntime({ agentDir });
+  const owner = inspectDaemonOwner(join(agentDir, "server"));
+  assert.equal(owner.status, "live", "fixture runtime must have a verified owner");
+  return owner.owner;
+}
 
 /** The caller captures the daemon identity when its private runtime becomes ready. */
 export async function stopOwnedRuntime(serverDir, expectedOwner) {
