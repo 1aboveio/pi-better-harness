@@ -297,9 +297,13 @@ export const defaultActivationPorts: ActivationPorts = {
 /** Executed in a detached host process; the exclusive lock is never aged out. */
 export async function runActivationWorker(request: UpgradeRequest, ports: ActivationPorts = defaultActivationPorts): Promise<ActivationResult> {
   const serverDir = canonicalStateDir(request.serverDir);
+  // Contending claims are transient coordinator metadata, not existing daemon
+  // state. Keep them out of the root inventory used for empty-namespace proof.
+  const stagingDir = join(serverDir, RESERVATIONS);
+  mkdirSync(stagingDir, { recursive: true, mode: 0o700 });
   let release: () => void;
   for (let attempt = 0; ; attempt++) {
-    try { release = claimDaemonOwner(serverDir, LOCK); break; }
+    try { release = claimDaemonOwner(serverDir, LOCK, stagingDir); break; }
     catch (error) {
       const journal = readActivationJournal(serverDir);
       // A staged journal can still name the abandoned build while the coordinator

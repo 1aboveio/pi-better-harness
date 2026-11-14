@@ -423,11 +423,13 @@ for (const otherCaller of [false, true]) {
   test(`precommit cancellation ${otherCaller ? "preserves a coalesced timeout reservation" : "removes the last reservation without launching"}`, { timeout: 30_000 }, async t => {
     const env = fixture(t);
     const runtime = staged(env, `cancel-${otherCaller}`);
+    if (otherCaller) env.vars.NODE_OPTIONS = `--import=${new URL("./fixtures/activation-claim-race.mjs", import.meta.url).href}`;
     const release = await holdCoordinator(t, env);
     if (otherCaller) {
       const timeout = await run(env, runtime, [...activationArgs(runtime, env.agentDir, env.serverDir, "same-operation"), "--timeout-ms", "1"]).result;
       assert.equal(timeout.status, "deferred");
       assert.equal(reservations(env).length, 1);
+      await waitFor("timed-out worker retains its contended scratch claim", gate(env, "claim").started);
     }
     const caller = run(env, runtime, activationArgs(runtime, env.agentDir, env.serverDir, "same-operation"), 1);
     await waitFor("observer reservation", () => reservations(env).length === (otherCaller ? 2 : 1));
