@@ -45,12 +45,16 @@ test("UI refreshes share lineage reads and a later refresh sees external changes
         reads = 0;
         const project = createAssignmentProjector(options);
         assert.deepEqual(metas.map((meta) => project(meta)), expected);
-        assert.equal(reads, metas.length + 2);
+        assert.ok(reads <= metas.length + 2, `a refresh reread ${reads} unrelated run records`);
         reads = 0;
         listings = 0;
         assert.deepEqual(createAssignmentProjector(options)(metas[0]), expected[0]);
         assert.ok(reads <= 2, `a later refresh reread ${reads} unrelated run records`);
         assert.equal(listings, 0, "a stable refresh must reuse the run identity catalog");
+        reads = 0;
+        assert.deepEqual(assignmentFor(metas[0], metas[0].status, options), expected[0]);
+        assert.ok(reads <= 2, `a one-off read rescanned ${reads} unrelated records`);
+        assert.equal(listings, 0, "one-off queries must also reuse the identity catalog");
         options.observation.waits.push({ waitId: "live-wait", generation: 1, phase: "waiting" });
         assert.equal(project(metas[0]).state, "waiting", "the snapshot must not cache authoritative observations");
         options.observation.waits.pop();

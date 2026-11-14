@@ -199,6 +199,7 @@ function installTimerSpies() {
 
     return {
         pendingTimeouts: () => liveTimeouts.size,
+        timeoutIds: () => [...liveTimeouts],
         pendingIntervals: () => liveIntervals.size,
         restore() {
             globalThis.setTimeout = realSetTimeout;
@@ -431,7 +432,8 @@ describe("registered extension path: session_start reload cleanup", () => {
         const component = await nav.openDetailViaEnter();
         nav.press("x");
         assert.equal(timerSpies.pendingIntervals(), 1, "health is the only live interval");
-        assert.equal(timerSpies.pendingTimeouts(), 2, "detail refresh and close-arm deadlines are live");
+        assert.equal(timerSpies.pendingTimeouts(), 3, "main-list polling, detail refresh and close-arm deadlines are live");
+        const deadlinesBeforeReload = new Set(timerSpies.timeoutIds());
         assert.match(component.render(120).join("\n"), /x again to stop reload-job/);
         assert.deepEqual(nav.statusCalls, []);
 
@@ -444,7 +446,8 @@ describe("registered extension path: session_start reload cleanup", () => {
         // 5a) Prior overlay timers + confirmation cleared by the registered
         // session_start path (disposeBackgroundWorkNavigator).
         assert.equal(timerSpies.pendingIntervals(), 1, "reload keeps only the domain health interval");
-        assert.equal(timerSpies.pendingTimeouts(), 0, "reload clears detail refresh and close-arm deadlines");
+        assert.equal(timerSpies.pendingTimeouts(), 1, "reload keeps only the new session's main-list poll");
+        assert.ok(timerSpies.timeoutIds().every(id => !deadlinesBeforeReload.has(id)), "reload clears every old session deadline");
         assert.deepEqual(nav.statusCalls, []);
         // Dispose clears arm/detail state; the host would drop the focused
         // overlay on session switch. We only assert the production cleanup

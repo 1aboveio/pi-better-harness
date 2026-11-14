@@ -90,6 +90,7 @@ type NavigatorState = {
   lastHint?: string | null;
   lastMainListLines?: string[];
   lastMainListSignature?: string;
+  mainListRows?: InternalRow[];
   mainListWidgetInstalled?: boolean;
   mainListRequestRender?: () => void;
   mainListSelectedId?: string;
@@ -121,6 +122,7 @@ export const NAVIGATOR_STATUS_KEY = "background-work-nav";
 export const CLOSE_CONFIRM_STATUS_KEY = "background-work-close";
 export const MAIN_LIST_WIDGET_KEY = "background-work-list";
 export const DETAIL_TICK_MS = 10_000;
+export const MAIN_LIST_REFRESH_MS = 1_000;
 export const CLOSE_ARM_MS = 3000;
 export const DEFAULT_LOG_TAIL_ROWS = 25;
 export const LOG_TAIL_ROW_CHOICES = [10, 25] as const;
@@ -208,6 +210,7 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
   try { setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   s.mainListWidgetInstalled = false;
   s.mainListRequestRender = undefined;
+  s.mainListRows = undefined;
   s.mainListDeadlineScheduler?.dispose();
   s.mainListDeadlineScheduler = createRenderScheduler(() => refreshMainListWidget());
   installNavigatorEditor(ctx.ui as any, deps);
@@ -242,6 +245,7 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext, owner?: s
   s.lastHint = undefined;
   s.lastMainListLines = undefined;
   s.lastMainListSignature = undefined;
+  s.mainListRows = undefined;
   s.mainListDeadlineScheduler?.dispose();
   s.mainListDeadlineScheduler = undefined;
   s.mainListWidgetInstalled = false;
@@ -290,13 +294,15 @@ function refreshMainListWidget(): void {
   if (!ctx || !deps || !isNavigatorUiAvailable(ctx)) return;
   const now = Date.now();
   const rows = listRows(now);
+  s.mainListRows = rows;
   s.mainListDeadlineScheduler?.cancel();
   const nextExpiry = rows.reduce<number | undefined>((next, row) => {
     if (row.expiresAt === undefined || row.expiresAt <= now) return next;
     return next === undefined ? row.expiresAt : Math.min(next, row.expiresAt);
   }, undefined);
-  if (nextExpiry !== undefined) {
-    s.mainListDeadlineScheduler?.schedule(nextExpiry - now);
+  if (rows.length) {
+    // External writers cannot notify this host. Refresh independently of paint frequency.
+    s.mainListDeadlineScheduler?.schedule(Math.min(MAIN_LIST_REFRESH_MS, nextExpiry === undefined ? Infinity : nextExpiry - now));
   }
   syncMainListSelection(rows);
   const nextSignature = rows.length ? mainListSignature(rows, {
@@ -409,12 +415,12 @@ function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, d
     if (!Number.isFinite(event.x) || event.x < 0 || event.x >= width) return undefined;
     if (!Number.isInteger(event.y) || event.y < 0 || event.y >= lineOwners.length) return undefined;
     const id = lineOwners[event.y];
-    return id && listRows().some((row) => row.navigatorId === id) ? id : undefined;
+    return id && state().mainListRows?.some((row) => row.navigatorId === id) ? id : undefined;
   };
   const pointer = createPointerNavigation(rowAt, openNavigatorRow);
   return {
     render(width: number): string[] {
-      const rows = listRows();
+      const rows = state().mainListRows ?? [];
       syncMainListSelection(rows);
       if (!rows.length) {
         state().lastMainListLines = undefined;
