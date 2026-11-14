@@ -4,6 +4,31 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.45.8] - 2026-11-14
+
+### Fixed
+
+- Bundle Subagents 0.32.7, Background Tasks 0.15.4 and Goal 0.13.3 to avoid assignment I/O during unchanged Navigator paints and repeated full-registry scans in tool queries. (#742, #743)
+
+## [pi-better-subagents@0.32.7] - 2026-11-14
+
+### Fixed
+
+- Reuse assignment projections across list filtering, formatting and cursor revisions, and use the run identity index for one-off assignment reads. (#742, #743)
+- Render unchanged Navigator frames from retained rows, with provider events and bounded polling keeping external state changes visible. (#742, #743)
+
+## [pi-better-background-tasks@0.15.4] - 2026-11-14
+
+### Fixed
+
+- Synchronize the shared Navigator to keep provider and coordinator reads out of unchanged paints while preserving external refresh, component remount and session cleanup. (#742, #743)
+
+## [pi-better-goal@0.13.3] - 2026-11-14
+
+### Fixed
+
+- Synchronize the assignment projection so one-off reads reuse the run identity index while refreshing the current conversation's state. (#742, #743)
+
 ## [pi-better-harness@0.45.7] - 2026-11-14
 
 ### Fixed
