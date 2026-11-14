@@ -31,4 +31,6 @@ cp -R "$ROOT_DIR/packages/pi-better-subagents" "$PREFIX/packages/pi-better-subag
 cd "$PREFIX/packages/pi-better-server"
 installed="$(node -p "require('$PREFIX/node_modules/@earendil-works/pi-coding-agent/package.json').version")"
 echo "testing against pi-coding-agent $installed"
-node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 test/*.test.ts
+tests=("${@:3}")
+if [ "${#tests[@]}" -eq 0 ]; then tests=(test/*.test.ts); fi
+PI_RUNTIME_PACK_WORKSPACE="$ROOT_DIR" node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 "${tests[@]}"

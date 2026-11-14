@@ -8,13 +8,14 @@ export const SERVER_VERSION = "0.2.4";
 
 export const SERVER_EXTENSION_VERSIONS: Readonly<Record<string, string>> = { "pi-better-server": SERVER_VERSION };
 
-export interface HelloIdentity { build?: ServerBuild; instanceId?: string; safeUpgrade?: boolean }
+export interface HelloIdentity { build?: ServerBuild; instanceId?: string; safeUpgrade?: boolean; agentDir?: string }
 
 export function serverHello(identity: HelloIdentity = {}): HelloData {
   const build = identity.build ?? readOwnBuild();
   return { protocolVersion: PROTOCOL_VERSION, piVersion: PI_VERSION, extensionVersions: { ...SERVER_EXTENSION_VERSIONS },
+    ...(identity.agentDir ? { agentDir: identity.agentDir, nodeVersion: process.versions.node } : {}),
     ...(build ? { build } : {}), ...(identity.instanceId ? { instanceId: identity.instanceId } : {}),
-    capabilities: ["native-client-v1", "package-sync-v1", "global-package-sync-v1", "session-browser-v1", "folder-browser-v1", "session-transfer-v1", "compressed-bundle-v1", "remote-reload-v1",
+    capabilities: [...(identity.agentDir ? ["runtime-status-v1"] : []), "native-client-v1", "package-sync-v1", "global-package-sync-v1", "session-browser-v1", "folder-browser-v1", "session-transfer-v1", "compressed-bundle-v1", "remote-reload-v1",
       ...(identity.safeUpgrade && build && identity.instanceId ? ["safe-upgrade-v1"] : [])] };
 }
 
@@ -31,6 +32,9 @@ function majorMinor(version: string): string | undefined {
  */
 export function checkHello(command: Record<string, unknown>, identity: HelloIdentity = {}): { ok: true; data: HelloData } | { ok: false; error: string } {
   const server = serverHello(identity);
+  if (command.runtimeRoot !== undefined && command.runtimeRoot !== identity.agentDir) return { ok: false, error: "capability-mismatch: canonical agent root differs" };
+  if (command.requiredCapabilities !== undefined && (!Array.isArray(command.requiredCapabilities)
+    || !command.requiredCapabilities.every(value => typeof value === "string" && server.capabilities?.includes(value)))) return { ok: false, error: "capability-mismatch: required runtime capability is unavailable" };
   const { protocolVersion, piVersion, extensionVersions } = command as Partial<HelloCommand>;
   if (typeof protocolVersion !== "number" || !Number.isInteger(protocolVersion)) {
     return { ok: false, error: `hello requires an integer protocolVersion; this daemon speaks protocol ${server.protocolVersion}` };

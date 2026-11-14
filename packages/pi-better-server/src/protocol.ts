@@ -64,6 +64,8 @@ export interface HelloCommand {
 }
 
 export interface HelloData {
+  agentDir?: string;
+  nodeVersion?: string;
   protocolVersion: number;
   piVersion: string;
   extensionVersions: Record<string, string>;

@@ -1,21 +1,11 @@
 import { chmodSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+export { socketPathFor } from "./runtime/socket.ts";
 
 /** Directory that owns the socket and the session index. Override for tests with PI_SERVER_DIR. */
 export function defaultServerDir(): string {
   return process.env.PI_SERVER_DIR || join(getAgentDir(), "server");
-}
-
-/** sockaddr_un.sun_path is 104 bytes on macOS and 108 on Linux; leave room for the NUL. */
-const MAX_SOCKET_PATH_BYTES = 103;
-
-export function socketPathFor(serverDir: string): string {
-  const path = join(serverDir, "pi-server.sock");
-  if (Buffer.byteLength(path) > MAX_SOCKET_PATH_BYTES) {
-    throw new Error(`Socket path is too long for a unix socket (${Buffer.byteLength(path)} > ${MAX_SOCKET_PATH_BYTES} bytes): ${path}. Set PI_SERVER_DIR to a shorter directory.`);
-  }
-  return path;
 }
 
 export function indexPathFor(serverDir: string): string {

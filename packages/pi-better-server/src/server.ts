@@ -16,6 +16,7 @@ import { admitDaemonStartup, startupIntentFromEnv } from "./startup/admission.ts
 import type { IdleSessionsLease, UpgradeRequest } from "./startup/managed-types.ts";
 import { HostedSession } from "./hosted-session.ts";
 import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts";
+import { runtimeRoot } from "./runtime/root.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
   /** Defaults to `~/.pi/agent/server` (or `$PI_SERVER_DIR`). */
@@ -56,7 +57,7 @@ function socketIsLive(path: string): Promise<boolean> {
 }
 
 export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> {
-  const serverDir = canonicalStateDir(options.serverDir ?? defaultServerDir());
+  const serverDir = runtimeRoot(getAgentDir(), canonicalStateDir(options.serverDir ?? defaultServerDir())).serverDir;
   const socketPath = socketPathFor(serverDir);
   const log = options.log ?? (() => undefined);
   ensureServerDir(serverDir);
@@ -143,7 +144,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return;
           }
           if (type === "hello") {
-            const verdict = checkHello(command, { build, instanceId, safeUpgrade });
+            const verdict = checkHello(command, { build, instanceId, safeUpgrade, agentDir: realpathSync(getAgentDir()) });
             if (verdict.ok) {
               reconnectControllers.set(control, Array.isArray(command.capabilities) && command.capabilities.includes("runtime-reconnect-v1"));
               if (!greeted) startupUntil = Math.max(startupUntil, now() + startupGraceMs);
@@ -153,6 +154,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             send(failure(id, type, verdict.error));
             socket.end(); // an incompatible client gets the reason, then the door
             return;
+          }
+          if (type === "runtime_get_status") {
+            if (!greeted) throw new Error("runtime_get_status requires hello");
+            return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
+              capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount } });
           }
           if (type === "runtime_upgrade_status") return reply({ data: readActivationJournal(serverDir) ?? null });
           if (type === "runtime_upgrade") {

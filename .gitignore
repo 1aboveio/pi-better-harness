@@ -25,3 +25,6 @@ pi-compat-golden-*
 
 # pi-better-server Pi-version compatibility runs (scripts/test-on-pi.sh)
 .pi-compat/
+packages/pi-better-subagents/runtime-client/
+packages/pi-better-background-tasks/runtime-client/
+.work/
