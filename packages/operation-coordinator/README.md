@@ -63,7 +63,7 @@ generation (`stale-generation`).
 
 ## Lifecycle contract
 
-### Cancellation Intent Checkpoint (#759)
+### Server Cancellation (#759)
 
 `acceptTaskCancellation` stores the fixed `cancel_task` request in the existing
 coordinator database. An immediate transaction checks the operation's full owner,
@@ -78,13 +78,34 @@ requirement from ADR 0023 without creating another operation or terminal authori
 acceptance. Neither state proves process exit, publishes a terminal outcome,
 changes waits or releases evidence and writer fences.
 
-This API is an internal storage checkpoint, not enabled server admission. The host
-must authenticate the caller, verify current management and cancellation epochs,
-stop old admission before transfer, and refuse live legacy or unknown supervisors.
-The existing supervisor must execute and recover the exact recorded launch token.
-Those checks cannot be replaced by supplying an owner or host ID string to this
-library. No tool or socket route uses this API yet; end-to-end cancellation and
-process-action crash recovery remain outstanding in #759.
+The registered Background stop tool obtains authority from `ObservedWaitHost`'s
+actual tool context. The host refuses foreign ownership and a live legacy or
+unknown supervisor, drains local cancellation admission, and records a hashed,
+exact-request credential before handing cancellation to the server. Subsequent
+local stop calls refuse that managed task. Launch and wait supervision stay with
+their existing hosts. An owner string or socket access grants no authority.
+
+`acceptAuthorizedTaskCancellation` verifies the current management epoch, the
+task cancellation epoch and an opaque semantic revision in the same transaction
+as journal acceptance. Health timestamps do not change that revision. Accepted
+requests are looked up before epoch checks, so reconnecting clients recover the
+original receipt rather than submitting an old envelope in a new epoch.
+
+The fixed server adapter calls the canonical supervisor's stop implementation.
+Before a file or process action, the journal is durable. Recovery verifies the
+original launch token. An existing durable stop file is observed rather than
+replayed, because its process action may already have happened. Unverifiable
+identity records `outcome_unknown`, retaining existing fences. Terminal evidence
+uses the host's shared publication contract and commits with the request receipt
+through the existing coordinator terminal transaction. No callback receipt or
+wait interpretation is manufactured.
+
+The wire commands are `runtime_cancellation_status`, `runtime_cancel_task` and
+`runtime_query_cancellation`; they require hello and accept only the fixed
+credential-bearing schema. The tool displays its request identity and accepts
+`request_id` for reconnect retries. A timeout before submission is `not_accepted`;
+a lost response after submission is `outcome_unknown`. A durable accepted request
+without a result remains `accepted`, and must be queried with the same key.
 
 **Launch.** `registerOperation` records the launch intent and unique execution
 token before a runner starts. Re-registering the same launch is idempotent; a

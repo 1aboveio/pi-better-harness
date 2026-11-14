@@ -19,11 +19,17 @@ import { StoreError } from "./errors.ts";
 import { columnText, getRow, getRows, run, type StoreContext } from "./sqlite.ts";
 
 const DDL: readonly string[] = [
+    `CREATE TABLE task_cancellation_authorities (
+        credential_hash TEXT PRIMARY KEY,
+        request_json TEXT NOT NULL,
+        directory TEXT NOT NULL
+    )`,
     `CREATE TABLE task_cancellation_requests (
         owner_key TEXT NOT NULL,
         request_key TEXT NOT NULL,
         operation_id TEXT NOT NULL REFERENCES operations (operation_id),
         intent_json TEXT NOT NULL,
+        result_json TEXT,
         state TEXT NOT NULL CHECK (state IN ('accepted', 'stop-requested')),
         PRIMARY KEY (owner_key, request_key)
     )`,
@@ -332,10 +338,14 @@ function ensureAdditiveSchema(ctx: StoreContext): void {
         && hasTable("discovery_claims")
         && hasTable("coordinator_state")
         && hasTable("task_cancellation_requests")
+        && hasTable("task_cancellation_authorities")
+        && getRows(ctx, "PRAGMA table_info(task_cancellation_requests)").some(row => row.name === "result_json")
     ) return;
 
     ctx.transaction(() => {
         ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE task_cancellation_requests"))!.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+        if (!getRows(ctx, "PRAGMA table_info(task_cancellation_requests)").some(row => row.name === "result_json")) ctx.db.exec("ALTER TABLE task_cancellation_requests ADD COLUMN result_json TEXT");
+        ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE task_cancellation_authorities"))!.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
         if (!hasColumn()) {
             ctx.db.exec("ALTER TABLE operations ADD COLUMN supervision_host_id TEXT");
             ctx.db.exec(`UPDATE operations

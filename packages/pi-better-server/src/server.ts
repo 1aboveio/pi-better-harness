@@ -20,6 +20,7 @@ import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts
 import { runtimeRoot } from "./runtime/root.ts";
 import { WorkReadModel } from "./runtime/read-model.ts";
 import { WorkQueries } from "./runtime/queries.ts";
+import { RuntimeCancellation, hasPendingCancellation } from "./runtime/cancellation.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
   /** Defaults to `~/.pi/agent/server` (or `$PI_SERVER_DIR`). */
@@ -36,6 +37,8 @@ export interface DaemonOptions extends Partial<LifecycleConfig> {
   startupGraceMs?: number;
   /** CLI-owned process shutdown budget; never used to reclaim a different owner. */
   onDraining?: () => void;
+  /** Trusted fault-injection seam; never exposed through the socket protocol. */
+  cancellationFault?: (stage: import("./runtime/cancellation.ts").CancellationStage) => void;
 }
 
 export interface Daemon {
@@ -90,6 +93,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     await registry.resumeAll();
     const nativeHost = new NativeClientHost(registry);
     let workModel: WorkReadModel | undefined;
+    let cancellations: RuntimeCancellation | undefined;
+    if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
     const work = () => {
       if (!workModel) {
         workModel = new WorkReadModel(realpathSync(getAgentDir()), instanceId!);
@@ -186,6 +191,16 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               nextIdleDeadline: runtimeClients.size > 0 || registry.activeCount > 0 ? null
                 : hostedUsed ? config.daemonIdleMs === 0 || zeroSince === undefined ? null : zeroSince + config.daemonIdleMs
                 : runtimeZeroSince === undefined ? null : runtimeZeroSince + config.runtimeIdleMs } });
+          }
+          if (type === "runtime_cancel_task" || type === "runtime_query_cancellation" || type === "runtime_cancellation_status") {
+            if (!greeted) throw new Error("not_accepted: cancellation requires hello");
+            if (runtimeInFlight >= 32) throw new Error("not_accepted: too many in-flight runtime requests");
+            if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+            runtimeInFlight++;
+            try {
+              cancellations ??= new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
+              return reply({ data: await cancellations.handle(command) });
+            } finally { runtimeInFlight--; }
           }
           if (type === "runtime_register_client") {
             if (!greeted) throw new Error("runtime_register_client requires hello");
@@ -356,6 +371,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     });
 
     cleanupStartup = async () => {
+      await cancellations?.close();
       await workModel?.close();
       for (const socket of sockets) socket.destroy();
       server.close();
@@ -435,7 +451,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return;
           }
           // No create/open can slip between this check and the synchronous admission fence.
-          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
+          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
           draining = true;
           idleStopping = true;
           log("idle timeout with no active sessions; shutting down");
@@ -464,6 +480,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           const closed = new Promise<void>((resolve) => server.close(() => resolve()));
           for (const socket of sockets) socket.destroy();
           await closed;
+          await cancellations?.close();
           await workModel?.close();
           await registry.shutdown();
           await Promise.allSettled([...dispatches]);

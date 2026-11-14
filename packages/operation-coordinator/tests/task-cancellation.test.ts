@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, it } from "node:test";
-import { openStore, type TaskCancellationRequest } from "../index.ts";
+import { openStore, cancellationCredential, type TaskCancellationRequest } from "../index.ts";
 import { cleanupHarnesses, createHarness, expectStoreError, otherWorkerOwner, registerOperation, settleOperation, workerOwner } from "./support.ts";
 
 afterEach(cleanupHarnesses);
@@ -18,6 +18,52 @@ const request: TaskCancellationRequest = {
 };
 
 describe("durable task cancellation intent", () => {
+    it("fences stale management epochs before acceptance, but recovers accepted requests journal-first", () => {
+        const harness = createHarness();
+        registerOperation(harness.store);
+        const epoch = harness.store.cancellationRuntimeEpoch("server-1");
+        const proof = cancellationCredential();
+        harness.store.admitTaskCancellation({ credentialHash: proof.hash, request, directory: "/supervisor" });
+        assert.equal(harness.store.taskCancellationManaged(request.operationId), true);
+        assert.equal(harness.store.cancellationRuntimeEpoch("server-2"), epoch + 1);
+        expectStoreError(() => harness.store.acceptAuthorizedTaskCancellation({ credential: proof.credential, runtimeEpoch: epoch }), "supervision-conflict", /stale-runtime-epoch/);
+        assert.equal(harness.store.getTaskCancellation(request), null);
+        const current = cancellationCredential();
+        harness.store.admitTaskCancellation({ credentialHash: current.hash, request, directory: "/supervisor" });
+        const accepted = harness.store.acceptAuthorizedTaskCancellation({ credential: current.credential, runtimeEpoch: epoch + 1 });
+        harness.store.cancellationRuntimeEpoch("server-3");
+        assert.deepEqual(harness.store.acceptAuthorizedTaskCancellation({ credential: current.credential, runtimeEpoch: epoch + 1 }), accepted);
+    });
+
+    it("checks cancellation epoch and semantic revision in the accepting transaction", () => {
+        const harness = createHarness();
+        registerOperation(harness.store);
+        const epoch = harness.store.cancellationRuntimeEpoch("server-1");
+        const first = cancellationCredential();
+        const stale = cancellationCredential();
+        harness.store.admitTaskCancellation({ credentialHash: first.hash, request, directory: "/supervisor" });
+        harness.store.admitTaskCancellation({ credentialHash: stale.hash, request: { ...request, idempotencyKey: "second-request" }, directory: "/supervisor" });
+        harness.store.acceptAuthorizedTaskCancellation({ credential: first.credential, runtimeEpoch: epoch });
+        expectStoreError(() => harness.store.acceptAuthorizedTaskCancellation({ credential: stale.credential, runtimeEpoch: epoch }), "operation-conflict", /cancellation epoch/);
+        assert.equal(harness.store.getTaskCancellation({ ...request, idempotencyKey: "second-request" }), null);
+        const changed = cancellationCredential();
+        harness.store.admitTaskCancellation({ credentialHash: changed.hash, request: { ...request, idempotencyKey: "changed-revision" }, directory: "/supervisor" });
+        settleOperation(harness.store, request.operationId);
+        expectStoreError(() => harness.store.acceptAuthorizedTaskCancellation({ credential: changed.credential, runtimeEpoch: epoch }), "operation-conflict", /stale-revision/);
+        assert.equal(harness.store.getTaskCancellation({ ...request, idempotencyKey: "changed-revision" }), null);
+    });
+
+    it("does not confuse current health timestamps with semantic revision or session names with authority", () => {
+        const harness = createHarness();
+        registerOperation(harness.store);
+        const epoch = harness.store.cancellationRuntimeEpoch("server-1");
+        const proof = cancellationCredential();
+        harness.store.admitTaskCancellation({ credentialHash: proof.hash, request, directory: "/supervisor" });
+        harness.store.recordSupervision({ operationId: request.operationId, owner: workerOwner, health: "unmonitored", reason: "observation unavailable" });
+        expectStoreError(() => harness.store.authorizedTaskCancellation(workerOwner.sessionId), "foreign-owner", /permission-unavailable/);
+        assert.equal(harness.store.acceptAuthorizedTaskCancellation({ credential: proof.credential, runtimeEpoch: epoch }).state, "accepted");
+    });
+
     it("recovers the same receipt through another connection after terminal publication", () => {
         const harness = createHarness();
         registerOperation(harness.store);
@@ -47,6 +93,30 @@ describe("durable task cancellation intent", () => {
             expectStoreError(() => harness.store.acceptTaskCancellation({ ...request, ...changed }), "request-conflict");
         }
         assert.deepEqual(harness.store.getTaskCancellation(request), original);
+        expectStoreError(() => harness.store.admitTaskCancellation({ credentialHash: cancellationCredential().hash,
+            request: { ...request, reason: "changed admission payload" }, directory: "/supervisor" }), "request-conflict");
+    });
+
+    it("commits terminal publication and the request receipt atomically", () => {
+        const harness = createHarness();
+        registerOperation(harness.store);
+        harness.store.acceptTaskCancellation(request);
+        const publication = { operationId: request.operationId, eventId: "cancel-terminal", owner: workerOwner,
+            outcome: "cancelled" as const, evidence: [{ kind: "terminal-record" as const, ref: "result.json" }] };
+        const db = new DatabaseSync(harness.path);
+        try {
+            db.exec("CREATE TRIGGER reject_receipt BEFORE UPDATE OF result_json ON task_cancellation_requests BEGIN SELECT RAISE(ABORT, 'injected receipt fault'); END");
+            assert.throws(() => harness.store.finishTaskCancellationIntent({ request, status: "cancelled", terminal: true, publication }), /injected receipt fault/);
+            assert.equal(harness.store.getOperation(request.operationId)?.terminalRevision, 0);
+            assert.equal(harness.store.getTaskCancellation(request)?.state, "accepted");
+            assert.equal(harness.store.getTaskCancellation(request)?.result, undefined);
+            db.exec("DROP TRIGGER reject_receipt");
+            const receipt = harness.store.finishTaskCancellationIntent({ request, status: "cancelled", terminal: true, publication });
+            harness.reopen();
+            assert.equal(harness.store.getOperation(request.operationId)?.terminalOutcome, "cancelled");
+            assert.equal(harness.store.getOperation(request.operationId)?.terminalRevision, 1);
+            assert.deepEqual(harness.store.getTaskCancellation(request), receipt);
+        } finally { db.close(); }
     });
 
     it("does not expose or accept another owner's intent even with the same key", () => {
