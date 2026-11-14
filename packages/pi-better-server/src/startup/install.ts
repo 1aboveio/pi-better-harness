@@ -11,6 +11,7 @@ export interface StageRuntimeOptions {
   signal?: AbortSignal;
   installRoot?: string;
   onProgress?: (stage: string) => void;
+  offline?: boolean;
 }
 
 async function download(url: string, integrity: string, signal?: AbortSignal): Promise<Buffer> {
@@ -125,6 +126,7 @@ printf 'reuse\\n'`, undefined, 120_000);
     if (cachedState === "absent" && archiveState !== "absent") throw new Error("Runtime staging: cached release disappeared during verification");
     const reuse = cachedState === "reuse";
     if (!reuse) {
+      if (options.offline) throw new Error(`Offline cache miss: pinned Node ${artifact.build.nodeVersion} and runtime ${artifact.build.contentId} are not cached at ${finalRoot}; connect once to install them`);
       onProgress?.("node-download");
       signal?.throwIfAborted();
       const archive = `node-v${artifact.build.nodeVersion}-${probe.platform}`;

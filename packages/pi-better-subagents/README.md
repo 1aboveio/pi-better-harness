@@ -6,6 +6,19 @@
 
 Use `pi-better-subagents` when you want Pi to launch independent agent work without blocking the current conversation. Each subagent runs in its own `pi -p` child process, reports back when finished, and keeps durable logs for later inspection.
 
+## Runtime Status
+
+Run `pi-subagents-runtime-status` to ensure the manifest-pinned local server and
+print its canonical agent root, build, Node version, instance and capabilities as JSON.
+This command does not create a hosted Pi session or require Harness.
+The first use installs a verified private Node 24 and locked server dependencies.
+Set `PI_OFFLINE=1` to require the cached runtime without downloads.
+`PI_CODING_AGENT_DIR` selects the agent root; `PI_SERVER_DIR` selects the initial
+transport directory. Later calls for the same canonical root reuse the registered
+transport, including calls from Background Tasks or another package installation.
+An incompatible or unhealthy live owner is an error, not a reason to replace it.
+The API is `runtime-client/src/runtime/client.mjs`, exporting `ensureRuntime`.
+
 ## Screenshots
 
 <p><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-subagents.png" alt="pi-better-subagents rendered in Pi" width="49%" /><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/overview/pi-better-subagents.png" alt="pi-better-subagents package overview" width="49%" /></p>
