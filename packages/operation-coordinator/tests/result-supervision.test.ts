@@ -1,0 +1,56 @@
+import assert from "node:assert/strict";
+import { afterEach, test } from "node:test";
+import { cleanupHarnesses, createHarness, registerOperation, workerOwner } from "./support.ts";
+
+afterEach(cleanupHarnesses);
+const transfer = (operationId: string) => ({ operationId, expectedHostId: "host-1", directory: "/supervisor", hostId: "server:epoch-1", epoch: "epoch-1" });
+
+test("a failed dependency handoff rolls back every owner change and grant", () => {
+    const { store } = createHarness();
+    registerOperation(store);
+    registerOperation(store, { operationId: "other" });
+    assert.throws(() => store.handoffResultSupervisions([transfer("op-build-1"), { ...transfer("other"), expectedHostId: "foreign" }]), /exact supervision owner changed/);
+    assert.equal(store.resultSupervision("op-build-1"), null);
+    assert.equal(store.getOperation("op-build-1")?.supervision?.hostId, "host-1");
+    assert.equal(store.getOperation("other")?.supervision?.hostId, "host-1");
+    const grants = store.handoffResultSupervisions([transfer("op-build-1"), transfer("other")]);
+    assert.equal(grants.length, 2);
+    assert.deepEqual(store.handoffResultSupervisions([transfer("op-build-1"), transfer("other")]), grants);
+});
+
+test("restart preserves captured execution authority and fences the preceding epoch", () => {
+    const harness = createHarness();
+    registerOperation(harness.store);
+    const grant = harness.store.handoffResultSupervision(transfer("op-build-1"));
+    harness.reopen();
+    const store = harness.store;
+    assert.deepEqual(store.resultSupervision(grant.operationId), grant);
+    assert.throws(() => store.recoverResultSupervision({ ...grant, authorityRef: "another-frontend" }), /captured authority changed/);
+    assert.throws(() => store.recoverResultSupervision({ ...grant, directory: "/another-directory" }), /captured authority changed/);
+    assert.throws(() => store.recoverResultSupervision({ ...grant, owner: { ...workerOwner, sessionId: "another-recipient" } }), /captured authority changed/);
+    assert.throws(() => store.recoverResultSupervision({ ...grant, launchToken: "replacement-command" }), /captured authority changed/);
+    const publication = { operationId: grant.operationId, eventId: "exact-terminal", outcome: "succeeded" as const, owner: workerOwner,
+        evidence: [{ kind: "terminal-record" as const, ref: "/supervisor/result.json" }] };
+    store.recoverResultSupervision({ ...grant, epoch: "epoch-2", hostId: "server:epoch-2" });
+    assert.throws(() => store.publishSupervisedResult({ operationId: grant.operationId, epoch: "epoch-1", publication }), /stale-runtime-epoch/);
+    assert.equal(store.getOperation(grant.operationId)?.terminalRevision, 0);
+    store.publishSupervisedResult({ operationId: grant.operationId, epoch: "epoch-2", publication });
+    store.publishSupervisedResult({ operationId: grant.operationId, epoch: "epoch-2", publication });
+    assert.equal(store.getOperation(grant.operationId)?.terminalRevision, 1);
+    assert.equal(store.resultSupervisions(true).length, 0, "completed supervision must leave the active reconcile query");
+    assert.equal(store.resultSupervisions().length, 1, "history remains durable without being polled");
+});
+
+test("scope handoff fences discovery transactionally without stealing a changed owner", () => {
+    const { store } = createHarness();
+    registerOperation(store);
+    const claim = store.tryClaimDiscovery({ scope: "scope-760", hostId: "host-1", token: "discovery-1", expected: null })!;
+    assert.throws(() => store.handoffResultScope({ scope: claim.scope, expectedDiscovery: null, grants: [transfer("op-build-1")] }), /discovery owner changed/);
+    assert.equal(store.resultScopeManaged(claim.scope), false);
+    assert.equal(store.resultSupervision("op-build-1"), null);
+    store.handoffResultScope({ scope: claim.scope, expectedDiscovery: claim, grants: [transfer("op-build-1")] });
+    assert.equal(store.resultScopeManaged(claim.scope), true);
+    assert.equal(store.readDiscoveryClaim(claim.scope), null);
+    assert.equal(store.tryClaimDiscovery({ scope: claim.scope, expected: null, hostId: "old-host", token: "discovery-2" }), null);
+    assert.equal(store.getOperation("op-build-1")?.supervision?.hostId, "server:epoch-1");
+});

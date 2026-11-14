@@ -3,8 +3,11 @@ import { getRow, run } from "./sqlite.mjs";
 import { getOperation, recordSupervision, recordTerminalOutcome } from "./operations.mjs";
 import { requireId, requirePath } from "./validate.mjs";
 const PREFIX = "result-supervision-v1:";
-export function resultSupervisions(ctx) {
-    return ctx.db.prepare("SELECT value FROM coordinator_state WHERE key LIKE ?").all(`${PREFIX}%`)
+export function resultSupervisions(ctx, activeOnly = false) {
+    const rows = activeOnly
+        ? ctx.db.prepare("SELECT s.value FROM operations o JOIN coordinator_state s ON s.key = ? || o.operation_id WHERE o.phase = 'running'").all(PREFIX)
+        : ctx.db.prepare("SELECT value FROM coordinator_state WHERE key LIKE ?").all(`${PREFIX}%`);
+    return rows
         .map(row => JSON.parse(String(row.value)));
 }
 export function resultSupervision(ctx, operationId) {
@@ -25,19 +28,41 @@ export function handoffResultSupervision(ctx, input) {
         if (!operation || operation.supervision?.hostId !== input.expectedHostId)
             throw new Error("permission-unavailable: exact supervision owner changed");
         const grant = { operationId, directory, hostId, epoch, launchToken: operation.launchToken,
-            authorityRef: operation.authorityRef };
+            authorityRef: operation.authorityRef, owner: operation.owner, ...(input.capability ? { capability: input.capability } : {}) };
         recordSupervision(ctx, { operationId, owner: operation.owner, expectedHostId: input.expectedHostId,
             supervision: { hostId }, health: "active" });
         run(ctx, "INSERT INTO coordinator_state (key, value) VALUES (?, ?)", PREFIX + operationId, JSON.stringify(grant));
         return grant;
     });
 }
+/** A wait's dependency set transfers together, or none of it does. */
+export function handoffResultSupervisions(ctx, inputs) {
+    return ctx.transaction(() => inputs.map(input => handoffResultSupervision(ctx, input)));
+}
+export function resultScopeManaged(ctx, scope) {
+    return !!getRow(ctx, "SELECT value FROM coordinator_state WHERE key = ?", "result-scope-v1:" + requireId("scope", scope));
+}
+export function handoffResultScope(ctx, input) {
+    return ctx.transaction(() => {
+        const claim = getRow(ctx, "SELECT host_id, token FROM discovery_claims WHERE scope = ?", requireId("scope", input.scope));
+        if (claim ? !input.expectedDiscovery || claim.host_id !== input.expectedDiscovery.hostId || claim.token !== input.expectedDiscovery.token : input.expectedDiscovery !== null) {
+            throw new Error("supervision-conflict: discovery owner changed during handoff");
+        }
+        const grants = handoffResultSupervisions(ctx, input.grants);
+        run(ctx, "DELETE FROM discovery_claims WHERE scope = ?", input.scope);
+        run(ctx, "INSERT OR IGNORE INTO coordinator_state (key, value) VALUES (?, 'managed')", "result-scope-v1:" + input.scope);
+        return grants;
+    });
+}
 /** Called by the singleton server after proving the preceding server has exited. */
 export function recoverResultSupervision(ctx, input) {
     ctx.transaction(() => {
         const previous = resultSupervision(ctx, input.operationId);
-        if (!previous || previous.launchToken !== input.launchToken)
-            throw new Error("supervision-conflict: execution changed");
+        if (!previous || previous.launchToken !== input.launchToken || previous.directory !== input.directory
+            || previous.authorityRef !== input.authorityRef || JSON.stringify(previous.owner) !== JSON.stringify(input.owner)
+            || JSON.stringify(previous.capability) !== JSON.stringify(input.capability)) {
+            throw new Error("supervision-conflict: execution or captured authority changed");
+        }
         const operation = getOperation(ctx, input.operationId);
         if (operation.terminalRevision > 0)
             return;

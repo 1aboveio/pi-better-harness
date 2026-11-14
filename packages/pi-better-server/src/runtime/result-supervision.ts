@@ -34,9 +34,14 @@ export class RuntimeResultSupervision {
   }
   reconcile() {
     try {
-      for (let grant of this.store.resultSupervisions()) {
+      this.reason = undefined;
+      for (let grant of this.store.resultSupervisions(true)) {
         const operation = this.store.getOperation(grant.operationId);
         if (!operation || operation.terminalRevision > 0) continue;
+        if (grant.capability?.adapter !== "background-results-v1" || !grant.capability.captured || !grant.capability.current) {
+          this.reason = "permission-unavailable: captured Background adapter or permission source unavailable";
+          continue;
+        }
         if (grant.epoch !== this.epoch) {
           // Daemon startup has already proved the preceding root owner exited.
           grant = { ...grant, hostId: this.hostId, epoch: this.epoch };

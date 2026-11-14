@@ -97,6 +97,15 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     let cancellations: RuntimeCancellation | undefined;
     let resultSupervision: RuntimeResultSupervision | undefined;
     if (hasResultSupervision(getAgentDir())) resultSupervision = new RuntimeResultSupervision(realpathSync(getAgentDir()), instanceId!);
+    const resultPortKey = Symbol.for("pi-better-server:result-supervision-ports-v1");
+    const resultPorts: Map<string, any> = (globalThis as any)[resultPortKey] ??= new Map();
+    const resultRoot = realpathSync(getAgentDir());
+    const resultPort = { status() {
+      resultSupervision ??= new RuntimeResultSupervision(resultRoot, instanceId!);
+      resultSupervision.reconcile();
+      return { hostId: resultSupervision.hostId, epoch: resultSupervision.epoch, reason: resultSupervision.reason };
+    } };
+    resultPorts.set(resultRoot, resultPort);
     if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
     const work = () => {
       if (!workModel) {
@@ -198,9 +207,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (type === "runtime_result_supervision") {
             if (!greeted) throw new Error("not_accepted: supervision requires hello");
             if (Object.keys(command).some(key => !["id", "type"].includes(key))) throw new Error("not_accepted: unsupported supervision field");
-            resultSupervision ??= new RuntimeResultSupervision(realpathSync(getAgentDir()), instanceId!);
-            resultSupervision.reconcile();
-            return reply({ data: { hostId: resultSupervision.hostId, epoch: resultSupervision.epoch, reason: resultSupervision.reason } });
+            return reply({ data: resultPort.status() });
           }
           if (type === "runtime_cancel_task" || type === "runtime_query_cancellation" || type === "runtime_cancellation_status") {
             if (!greeted) throw new Error("not_accepted: cancellation requires hello");
@@ -383,6 +390,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     cleanupStartup = async () => {
       await cancellations?.close();
       resultSupervision?.close();
+      if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
       await workModel?.close();
       for (const socket of sockets) socket.destroy();
       server.close();
@@ -493,6 +501,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           await closed;
           await cancellations?.close();
           resultSupervision?.close();
+          if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
           await workModel?.close();
           await registry.shutdown();
           await Promise.allSettled([...dispatches]);

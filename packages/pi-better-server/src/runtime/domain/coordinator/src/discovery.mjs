@@ -42,6 +42,8 @@ export function tryClaimDiscovery(ctx, input) {
     const expectedHostId = input.expected === null ? null : requireId("expected.hostId", input.expected.hostId);
     const expectedToken = input.expected === null ? null : requireId("expected.token", input.expected.token);
     return ctx.transaction(() => {
+        if (getRow(ctx, "SELECT value FROM coordinator_state WHERE key = ?", "result-scope-v1:" + scope))
+            return null;
         const current = readClaim(ctx, scope);
         if (input.expected === null) {
             if (current)

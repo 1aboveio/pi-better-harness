@@ -8,7 +8,7 @@
  * and leaves no partial record.
  */
 import { StoreError } from "./errors.ts";
-import { resultSupervision, resultSupervisions, handoffResultSupervision, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
+import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.ts";
 import type { TaskCancellationIntent, TaskCancellationRequest } from "./task-cancellation.ts";
 import { repairFailedResume, type RepairResumeInput } from "./recovery.ts";
@@ -119,9 +119,12 @@ import {
 } from "./types.ts";
 
 export interface Store {
+    resultScopeManaged(scope: string): boolean;
+    handoffResultScope(input: Parameters<typeof handoffResultScope>[1]): ReturnType<typeof handoffResultScope>;
     resultSupervision(operationId: string): ReturnType<typeof resultSupervision>;
-    resultSupervisions(): ReturnType<typeof resultSupervisions>;
+    resultSupervisions(activeOnly?: boolean): ReturnType<typeof resultSupervisions>;
     handoffResultSupervision(input: Parameters<typeof handoffResultSupervision>[1]): ReturnType<typeof handoffResultSupervision>;
+    handoffResultSupervisions(input: Parameters<typeof handoffResultSupervisions>[1]): ReturnType<typeof handoffResultSupervisions>;
     recoverResultSupervision(input: Parameters<typeof recoverResultSupervision>[1]): void;
     publishSupervisedResult(input: Parameters<typeof publishSupervisedResult>[1]): ReturnType<typeof publishSupervisedResult>;
     unknownTaskCancellation(input: TaskCancellationRequest): TaskCancellationIntent;
@@ -331,9 +334,12 @@ export function openStore(options: StoreOptions): Store {
     };
 
     const store: Store = {
+        resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
+        handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
-        resultSupervisions() { alive(); return resultSupervisions(ctx); },
+        resultSupervisions(activeOnly) { alive(); return resultSupervisions(ctx, activeOnly); },
         handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
+        handoffResultSupervisions(input) { alive(); return handoffResultSupervisions(ctx, input); },
         recoverResultSupervision(input) { alive(); recoverResultSupervision(ctx, input); },
         publishSupervisedResult(input) { alive(); return publishSupervisedResult(ctx, input); },
         unknownTaskCancellation(input) { alive(); return unknownTaskCancellation(ctx, input); },

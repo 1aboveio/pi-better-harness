@@ -42,6 +42,7 @@ import {
   backgroundExecutionLimits,
   confineCommandSpec,
   resolveForegroundSandboxPlan,
+  currentForegroundSandboxPolicy,
   resolveWorkerSandboxPlan,
   sandboxProvenance,
   type ForegroundSandboxPlan,
@@ -556,6 +557,8 @@ function rpcCode(error: unknown): string {
 }
 
 export interface ObservedWaitHostOptions {
+  /** Production adapters leave global discovery and terminal import to the server. */
+  serverOwnedResults?: boolean;
   /** SQLite path. Defaults under the Pi agent directory. */
   storePath?: string;
   /** Durable supervisor record directory. Defaults beside the task registry. */
@@ -658,6 +661,7 @@ interface LaunchContext {
   readonly cwd?: string;
   /** Launch-time sandbox provenance; never recomputed from the current profile. */
   readonly sandbox?: TaskSandboxProvenance;
+  readonly supervisionPolicy?: ForegroundSandboxPlan;
   /** Owner branch anchor captured at launch (undefined when unavailable). */
   readonly branchId?: string | null;
   callbackPendingAt?: number;
@@ -973,6 +977,8 @@ export class ObservedWaitHost {
     return this.store !== undefined && !this.closed;
   }
 
+  get usesServerResults(): boolean { return this.options.serverOwnedResults === true; }
+
   get reason(): string | undefined {
     return this.unavailableReason;
   }
@@ -1164,6 +1170,14 @@ export class ObservedWaitHost {
     if (!this.store || this.closed) return;
     this.authorityPassCache = new Map();
     try {
+      if (this.options.serverOwnedResults || this.store.resultScopeManaged(this.discoveryScope)) {
+        this.releaseDiscoveryAuthority();
+        if (!this.options.serverOwnedResults) this.reconcileFollowerRunning();
+        this.reconcileOwnerChanges();
+        this.retryPendingTerminalCallbacks();
+        await this.dispatchOutbox();
+        return;
+      }
       const role = this.refreshDiscoveryAuthority();
       this.noteDiscoveryRole(role);
       if (role === "holder") {
@@ -1290,6 +1304,7 @@ export class ObservedWaitHost {
   private refreshDiscoveryAuthority(): "holder" | "follower" {
     const store = this.store;
     if (!store) return "follower";
+    if (store.resultScopeManaged(this.discoveryScope)) return "follower";
     let claim;
     try {
       claim = store.readDiscoveryClaim(this.discoveryScope);
@@ -1352,6 +1367,11 @@ export class ObservedWaitHost {
     }
     const owner = this.ownerFor(input.ctx);
     const prepared = this.prepareLaunch(input.kind, input.params, "bg_task_spawn", owner, undefined);
+    if (this.options.serverOwnedResults) {
+      this.assertResultAdmission(prepared.provenance);
+      const client = await this.resultSupervisionClient();
+      client.close();
+    }
     const operationId = `op_${randomUUID()}`;
     const token = `launch_${randomUUID()}`;
     const taskId = supervisorTaskIdForToken(token);
@@ -1375,6 +1395,7 @@ export class ObservedWaitHost {
       ...(prepared.spec.argv ? { argv: [...prepared.spec.argv] } : {}),
       cwd: prepared.cwd,
       sandbox: prepared.provenance,
+      supervisionPolicy: prepared.plan,
       branchId: owner.branchId ?? null,
     };
     // Persist supervision metadata outside the task execution record so a
@@ -1385,6 +1406,7 @@ export class ObservedWaitHost {
       token, taskId, kind: input.kind, params: input.params, prepared, operationId,
     });
     this.launches.set(taskId, launchContext);
+    if (this.options.serverOwnedResults) await this.handoffResults([store.getOperation(operationId)!]);
     this.emitDurableTaskChange(owner);
     const launch: DurableLaunch = {
       id: taskId,
@@ -1503,7 +1525,8 @@ export class ObservedWaitHost {
   authorizeCancellationForParent(ctx: ExtensionContext, taskId: string, requestId: string): string {
     if (this.localCancels.has(taskId)) throw new Error("not_accepted: old cancellation admission is still draining");
     const operation = this.ownedOperation(taskId, this.ownerFor(ctx));
-    if (this.supervisionAuthority(operation) === "foreign") throw new Error("permission-unavailable: live legacy or unknown supervisor prevents cancellation handoff");
+    const managed = this.requireStore().resultSupervision(operation.operationId);
+    if (this.supervisionAuthority(operation) === "foreign" && !(managed?.launchToken === operation.launchToken && managed.hostId === operation.supervision?.hostId)) throw new Error("permission-unavailable: live legacy or unknown supervisor prevents cancellation handoff");
     const proof = cancellationCredential();
     const previous = this.requireStore().getTaskCancellation({ owner: operation.owner, idempotencyKey: requestId });
     if (previous && previous.operationId !== operation.operationId) throw new Error("not_accepted: request-conflict: cancellation key belongs to another task");
@@ -1934,31 +1957,95 @@ export class ObservedWaitHost {
     return this.waitView(store.getWait({ waitId: result.wait.waitId }) ?? result.wait);
   }
 
+  private async resultSupervisionClient(): Promise<any> {
+    const root = realpathSync(dirname(this.storePath));
+    const ports = (globalThis as any)[Symbol.for("pi-better-server:result-supervision-ports-v1")];
+    const port = ports?.get(root);
+    if (port) return { request: async (type: string) => {
+      if (type !== "runtime_result_supervision") throw new Error("not_accepted: unsupported in-process supervision operation");
+      return port.status();
+    }, close() {} };
+    // @ts-expect-error Generated standalone lightweight socket client.
+    const { WorkClient } = await import("./shared-work-client.mjs");
+    const connect = async () => {
+      const registration = JSON.parse(readFileSync(join(root, "server-registration-v1.json"), "utf8"));
+      const connection = new WorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-result-supervision-v1"]);
+      try { await connection.ready; return connection; }
+      catch (error) { connection.close(); throw error; }
+    };
+    let client;
+    try { client = await connect(); }
+    catch (error) {
+      if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      // The packaged canonical client owns artifact verification, owner checks and startup.
+      // @ts-expect-error Generated by sync-runtime-client during package preparation.
+      const { ensureRuntime } = await import("../runtime-client/src/runtime/client.mjs");
+      await ensureRuntime({ agentDir: root });
+      client = await connect();
+    }
+    return client;
+  }
+
+  private assertResultAdmission(captured: TaskSandboxProvenance): void {
+    const discovery = this.requireStore().readDiscoveryClaim(this.discoveryScope);
+    if (discovery && discovery.hostId !== this.hostId && this.discoveryHolderState(discovery.hostId) !== "dead") {
+      throw new Error("permission-unavailable: live or unknown original discovery holder prevents scope handoff");
+    }
+    if (captured.policySource !== "no-publisher" && !currentForegroundSandboxPolicy(this.pi)) {
+      throw new Error("permission-unavailable: expected current Background permission source is unavailable");
+    }
+    for (const operation of this.requireStore().listOperations({ phase: "running" })) {
+      if (!existsSync(this.sidecarPath(operation.taskId)) || this.requireStore().resultSupervision(operation.operationId)) continue;
+      if (this.supervisionAuthority(operation) === "foreign") {
+        throw new Error("permission-unavailable: a live or unknown original operation holder prevents scope handoff");
+      }
+    }
+  }
+
+  private async handoffResults(operations: readonly OperationRecord[]): Promise<void> {
+    const client = await this.resultSupervisionClient();
+    try {
+      const manager = await client.request("runtime_result_supervision");
+      const discovery = this.requireStore().readDiscoveryClaim(this.discoveryScope);
+      if (discovery && discovery.hostId !== this.hostId && this.discoveryHolderState(discovery.hostId) !== "dead") {
+        throw new Error("permission-unavailable: live or unknown original discovery holder prevents scope handoff");
+      }
+      const transfers = [];
+      for (const operation of operations) {
+        if (this.requireStore().resultSupervision(operation.operationId)) continue;
+        if (this.supervisionAuthority(operation) === "foreign" || this.localCancels.has(operation.taskId)) {
+          throw new Error("permission-unavailable: original supervision owner is live, unknown or draining");
+        }
+        const context = this.launchContext(operation.taskId);
+        if (!context?.sandbox || !context.supervisionPolicy || !operation.authorityRef) throw new Error("permission-unavailable: captured Background authority is unavailable");
+        this.assertResultAdmission(context.sandbox);
+        const current = currentForegroundSandboxPolicy(this.pi);
+        if (context.sandbox.policySource !== "no-publisher" && !current) throw new Error("permission-unavailable: expected current Background permission source is unavailable");
+        transfers.push({ operationId: operation.operationId,
+          expectedHostId: operation.supervision?.hostId ?? "unavailable", directory: this.directory, hostId: manager.hostId, epoch: manager.epoch,
+          capability: { adapter: "background-results-v1", captured: { provenance: context.sandbox, policy: context.supervisionPolicy }, current: current ?? { state: "legacy-unconfined", policySource: "no-publisher" } } });
+      }
+      // Validate the whole batch, then stop admission before the durable CAS.
+      for (const transfer of transfers) this.resultHandoffs.add(transfer.operationId);
+      try {
+        this.requireStore().handoffResultScope({ scope: this.discoveryScope,
+          expectedDiscovery: discovery ? { hostId: discovery.hostId, token: discovery.token } : null, grants: transfers });
+        this.discoveryToken = undefined;
+        this.discoveryRole = "follower";
+      } catch (error) {
+        // The transaction rolled back; only these uncommitted local fences may reopen.
+        for (const transfer of transfers) this.resultHandoffs.delete(transfer.operationId);
+        throw error;
+      }
+      await client.request("runtime_result_supervision");
+    } finally { client.close(); }
+  }
+
   async superviseParentWait(ctx: ExtensionContext, taskIds: readonly string[], note: string): Promise<WaitView> {
     this.noteParentContext(ctx);
     const operations = this.operationsForTaskIds(this.ownerFor(ctx), taskIds);
-    const root = dirname(this.storePath);
-    const registration = JSON.parse(readFileSync(join(root, "server-registration-v1.json"), "utf8"));
-    // @ts-expect-error Generated standalone lightweight socket client.
-    const { WorkClient } = await import("./shared-work-client.mjs");
-    const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-result-supervision-v1"]);
-    try {
-      await client.ready;
-      const manager = await client.request("runtime_result_supervision");
-      for (const operation of operations) {
-        if (this.requireStore().resultSupervision(operation.operationId)) continue;
-        if (this.supervisionAuthority(operation) !== "self" || this.localCancels.has(operation.taskId)) {
-          throw new Error("permission-unavailable: original supervision owner is live, unknown or draining");
-        }
-        // Stop admission before committing the durable exact-owner handoff.
-        this.resultHandoffs.add(operation.operationId);
-        this.requireStore().handoffResultSupervision({ operationId: operation.operationId,
-          expectedHostId: this.hostId, directory: this.directory, hostId: manager.hostId, epoch: manager.epoch });
-      }
-      const wait = this.waitForParent(ctx, taskIds, note);
-      await client.request("runtime_result_supervision");
-      return this.waitViewForParent(ctx, wait.waitId, wait.generation) ?? wait;
-    } finally { client.close(); }
+    await this.handoffResults(operations);
+    return this.waitForParent(ctx, taskIds, note);
   }
 
   waitViewForParent(ctx: ExtensionContext, waitId: string, generation?: number): WaitView | undefined {
@@ -2001,6 +2088,10 @@ export class ObservedWaitHost {
     const store = this.requireStore();
     if (input.params.ssh) throw new Error("Worker background launches are local-only; structured SSH is unavailable through this service.");
     const owner = this.workerOwner(run);
+    if (this.options.serverOwnedResults) {
+      const client = await this.resultSupervisionClient();
+      client.close();
+    }
     const prepared = this.prepareLaunch(
       input.kind,
       input.params,
@@ -2009,6 +2100,7 @@ export class ObservedWaitHost {
       input.policy,
       run.workspace,
     );
+    if (this.options.serverOwnedResults) this.assertResultAdmission(prepared.provenance);
     const operationId = `op_${randomUUID()}`;
     const token = `launch_${randomUUID()}`;
     const taskId = supervisorTaskIdForToken(token);
@@ -2032,6 +2124,7 @@ export class ObservedWaitHost {
       ...(prepared.spec.argv ? { argv: [...prepared.spec.argv] } : {}),
       cwd: prepared.cwd,
       sandbox: prepared.provenance,
+      supervisionPolicy: prepared.plan,
       branchId: owner.branchId ?? null,
     };
     this.writeLaunchContext(taskId, launchContext);
@@ -2039,6 +2132,7 @@ export class ObservedWaitHost {
       token, taskId, kind: input.kind, params: input.params, prepared, operationId,
     });
     this.launches.set(taskId, launchContext);
+    if (this.options.serverOwnedResults) await this.handoffResults([store.getOperation(operationId)!]);
     this.emitDurableTaskChange(owner);
     return {
       id: taskId,
@@ -2942,6 +3036,7 @@ export class ObservedWaitHost {
   private reconcileOperation(operation: OperationRecord): void {
     if (operation.terminalRevision > 0) return;
     if (this.resultHandoffs.has(operation.operationId) || this.store?.resultSupervision(operation.operationId)) return;
+    if (this.options.serverOwnedResults) return;
     const authority = this.supervisionAuthority(operation);
     if (authority === "foreign") return;
     let claimed = false;
@@ -3107,6 +3202,7 @@ export class ObservedWaitHost {
   }
 
   private recordTerminal(operation: OperationRecord, inspection: SupervisorInspection): void {
+    if (this.options.serverOwnedResults) return;
     if (this.resultHandoffs.has(operation.operationId) || this.store?.resultSupervision(operation.operationId)) return;
     const store = this.requireStore();
     const status = inspection.status;
@@ -3955,6 +4051,7 @@ export class ObservedWaitHost {
         hostId: this.hostId,
         storeOpen: !!this.store,
         closed: this.closed,
+        managementMode: this.options.serverOwnedResults ? "server-client" : "legacy",
         activeContext: !!ctx,
         activeSessionId: ctx ? this.sessionIdIfAvailable(ctx) ?? this.sessionId(ctx) : undefined,
         activeCwd: ctx ? ctx.cwd : undefined,
@@ -4004,6 +4101,8 @@ export class ObservedWaitHost {
         ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
         ...(value.sandbox && typeof value.sandbox === "object" && !Array.isArray(value.sandbox)
           ? { sandbox: value.sandbox as TaskSandboxProvenance } : {}),
+        ...(value.supervisionPolicy && typeof value.supervisionPolicy === "object"
+          ? { supervisionPolicy: value.supervisionPolicy } : {}),
         ...(typeof value.branchId === "string" || value.branchId === null ? { branchId: value.branchId } : {}),
         ...(typeof value.callbackPendingAt === "number" ? { callbackPendingAt: value.callbackPendingAt } : {}),
         ...(typeof value.callbackDeliveredAt === "number" ? { callbackDeliveredAt: value.callbackDeliveredAt }

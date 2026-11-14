@@ -496,7 +496,9 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
           ?? "Observed waits are unavailable in this session; inspect tasks directly and continue without a durable wait.");
       }
       try {
-        const wait = await host.superviseParentWait(ctx, params.task_ids, params.continuation_note);
+        const wait = host.usesServerResults
+          ? await host.superviseParentWait(ctx, params.task_ids, params.continuation_note)
+          : host.waitForParent(ctx, params.task_ids, params.continuation_note);
         return text(formatWaitView(wait), wait);
       } catch (error) {
         return text(`Wait was not registered: ${readableError(error)}`);
