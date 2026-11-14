@@ -221,7 +221,9 @@ export async function executeAgentsCommand(args: string, host: AgentCommandHost,
                 void write.then(() => writes.delete(write), () => writes.delete(write));
                 return write;
             } };
-            await remote.subscribe(snapshot => {
+            let subscriptionChanged = false;
+            const initialSnapshot = await remote.subscribe(snapshot => {
+                subscriptionChanged = true;
                 if (snapshot) { state.snapshot = snapshot; state.revoked = false; }
                 else {
                     state.revoked = true;
@@ -230,6 +232,8 @@ export async function executeAgentsCommand(args: string, host: AgentCommandHost,
                 }
                 for (const changed of listeners) changed();
             });
+            // A queued update or revocation can arrive before subscribe resolves.
+            if (!subscriptionChanged) state.snapshot = initialSnapshot;
             return await executeAgentsCommand(args, host, { ...deps, sharedState: state });
         }
         finally { await Promise.allSettled(writes); remote.close(); }
