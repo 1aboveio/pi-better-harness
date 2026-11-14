@@ -199,7 +199,7 @@ import {
     createLaunchEnricher,
     blankCatalogSelector,
     hasCatalogSelector,
-    loadLaunchSnapshot,
+    loadSharedLaunchSnapshot,
     noteCatalogHost,
     prepareCatalogJob,
     catalogDefaultNote,
@@ -2638,7 +2638,7 @@ export default function (pi: ExtensionAPI) {
         if (!jobs.some((job) => hasCatalogSelector(job))) {
             return { status: "ready", jobs: jobs as SpawnParams[] };
         }
-        const snapshot = loadLaunchSnapshot(host);
+        const snapshot = await loadSharedLaunchSnapshot(host);
         const clarified = await clarifyCatalogRequest(jobs, { hasUI: host.hasUI === true, select: host.select });
         if (clarified.status === "clarification-needed") return clarified;
         const prepared: SpawnParams[] = [];
@@ -3921,7 +3921,7 @@ export default function (pi: ExtensionAPI) {
             if (needsCatalog) {
                 catalogHost = catalogHostFrom(ctx);
                 noteCatalogHost(catalogHost);
-                catalogSnapshot = loadLaunchSnapshot(catalogHost);
+                catalogSnapshot = await loadSharedLaunchSnapshot(catalogHost);
                 const clarified = await clarifyCatalogRequest(
                     p.jobs.map((job) => mergeJobOptions(p.shared, job) as CatalogJobFields),
                     { hasUI: catalogHost.hasUI === true, select: catalogHost.select },

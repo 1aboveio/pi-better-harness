@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork, execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { WorkClient } from "../src/runtime/work-client.mjs";
@@ -60,13 +60,40 @@ test("real daemon catalog isolates two projects, freezes branch reads, rejects s
       const shown = await executeAgentsCommand("inspect role.fixture", { ...host, hasUI: false, ui: {} as never }, deps);
       assert.deepEqual(inspected.details.view?.identity, (shown.data as any).identity);
     }
+    const settingsPath = new URL("../../pi-better-subagents/agent-session-settings.ts", import.meta.url).href;
+    const runtimePath = new URL("../../pi-better-subagents/catalog-runtime.ts", import.meta.url).href;
+    const { createAgentSessionSettings } = await import(settingsPath);
+    const { loadSharedLaunchSnapshot } = await import(runtimePath);
+    const branchEntries: unknown[] = [];
+    const sessionSettings = createAgentSessionSettings({ appendEntry: (...entry: unknown[]) => branchEntries.push(entry) });
+    sessionSettings.change("role.fixture", "model", "openai/gpt-6.1-sol");
+    sessionSettings.change("role.fixture", "effort", "medium");
+    const uiSaved = await executeAgentsCommand("inspect role.fixture", {
+      cwd: projects[0], isProjectTrusted: () => true, hasUI: true, mode: "tui",
+      ui: { setWidget() {}, notify() {}, custom(factory: Function) {
+        return new Promise(resolve => {
+          let component: any;
+          component = factory({ requestRender() {
+            if (component.render(100).join("\n").includes("Defaults saved")) resolve(undefined);
+          } }, { fg: (_color: string, text: string) => text }, {}, resolve);
+          component.handleInput("\x13");
+        });
+      } },
+    }, { userRoot: agent, sharedCatalog: true, sessionSettings });
+    assert.equal(uiSaved.wrote, true, "real catalog UI Ctrl+S committed through the server");
+    assert.equal((await get(1)).savedSettings["role.fixture"].effort, "medium");
+    assert.equal(branchEntries.length, 2, "saving defaults does not append or rewrite another branch");
+    const frozen = await loadSharedLaunchSnapshot({ cwd: projects[0], projectTrusted: true, userRoot: agent });
+    assert.equal(frozen.savedSettings["role.fixture"].effort, "medium");
+    assert.throws(() => frozen.roles.clear(), /immutable/);
     const overlay = await get(0, { "role.fixture": { model: "openai/gpt-6.1-sol", effort: "high" } });
     assert.notEqual(overlay.revision, first.revision);
     assert.equal((await get(1)).sessionSettings, undefined);
-    const edit = { action: "preferences", catalogId: "role.fixture", expectedRevision: first.revision, preferences: { model: "openai/gpt-6.1-sol", effort: "high" } };
+    const edit = { action: "preferences", catalogId: "role.fixture", expectedRevision: (await get(0)).revision, preferences: { model: "openai/gpt-6.1-sol", effort: "high" } };
     assert.equal((await clients[0]!.request("runtime_edit_catalog", edit)).ok, true);
     await assert.rejects(clients[1]!.request("runtime_edit_catalog", edit), /catalog-conflict/);
     assert.equal((await get(1)).savedSettings["role.fixture"].effort, "high");
+    assert.equal(frozen.savedSettings["role.fixture"].effort, "medium", "edits only affect future batch admission");
     writeFileSync(join(projects[0], ".pi/agents/roles/fixture.md"), markdown("External"));
     assert.equal(role(await get(1)).definition.name, "External");
     assert.equal(role(first).definition.name, "Project0", "admitted snapshots do not change");
@@ -75,6 +102,26 @@ test("real daemon catalog isolates two projects, freezes branch reads, rejects s
     assert.equal(role(revoked).definition.name, "Personal");
     await assert.rejects(clients[0]!.request("runtime_edit_catalog", { action: "definition", catalogId: "role.fixture", scope: "project", markdown: markdown("Denied"), expectedRevision: revoked.revision }), /catalog-untrusted/);
     await assert.rejects(get(1, { "role.fixture": { apiKey: "refused" } }), /Invalid catalog preference/);
+    await clients[1]!.request("runtime_register_catalog", { cwd: projects[0], sessionId: "forged-session", projectTrusted: true, hostId: "forged-host" });
+    assert.equal(role(await get(1)).scope, "user", "wire host/session/trust claims cannot elevate a revoked project");
+    const current = await get(2);
+    await assert.rejects(clients[2]!.request("runtime_edit_catalog", { action: "definition", scope: "bundled", catalogId: "role.fixture", markdown: markdown("Denied"), expectedRevision: current.revision }), /builtins are read-only/);
+    await assert.rejects(clients[2]!.request("runtime_edit_catalog", { action: "definition", scope: "project", catalogId: "role.fixture", markdown: markdown("Secret").replace("name: Secret", "name: Secret\nextensions:\n  apiKey: refused"), expectedRevision: current.revision }), /credential/);
+    writeFileSync(join(projects[1], ".pi/agents/roles/duplicate.md"), markdown("Duplicate"));
+    const duplicate = await get(2);
+    assert.equal(duplicate.blocked.some((entry: any) => entry.id === "role.fixture" && entry.duplicate), true);
+    const refused = await clients[2]!.request("runtime_edit_catalog", { action: "preferences", catalogId: "role.fixture", preferences: { effort: "high" }, expectedRevision: duplicate.revision });
+    assert.equal(refused.ok, false, "duplicates cannot be repaired or edited through preferences");
+    rmSync(join(projects[1], ".pi/agents/roles/duplicate.md"));
+    const outside = join(root, "outside"); mkdirSync(outside);
+    writeFileSync(join(outside, "escape.md"), markdown("Escaped").replace("role.fixture", "role.escape"));
+    symlinkSync(join(outside, "escape.md"), join(projects[1], ".pi/agents/roles/escape.md"));
+    assert.equal(new Map((await get(2)).roles).has("role.escape"), false, "symlink escape is never admitted");
+    const create = await executeAgentsCommand('create --role fixture --id agent.created --name Created --instructions "Owned fixture"', {
+      cwd: projects[1], isProjectTrusted: () => true, hasUI: false, ui: {} as never,
+    }, { userRoot: agent, sharedCatalog: true });
+    assert.equal(create.wrote, true);
+    assert.equal(new Map((await get(2)).agents).has("agent.created"), true, "slash create is visible through the shared server");
   } finally {
     for (const client of clients) client.close();
     if (child.exitCode === null) { const exited = once(child, "exit"); child.send("stop"); await exited; }

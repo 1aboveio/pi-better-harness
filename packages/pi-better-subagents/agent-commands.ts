@@ -18,6 +18,7 @@ import {
     EFFORT_LEVELS,
     canonicalRoleId,
     parseDefinition,
+    serializeDefinition,
     shortRoleName,
     type AgentDefinition,
     type Diagnostic,
@@ -70,6 +71,8 @@ const USAGE = [
 
 export interface AgentCommandDeps {
     sharedCatalog?: boolean;
+    /** Invocation-local server state; never reused across workspaces or branches. */
+    sharedState?: { snapshot: CatalogSnapshot; edit: (edit: Record<string, unknown>) => Promise<any> };
     userRoot?: string;
     bundledRoot?: string;
     projectConfigDirName?: string;
@@ -198,12 +201,26 @@ export async function executeAgentsCommand(args: string, host: AgentCommandHost,
         return finish(host, result("ok", "help", false, USAGE));
     }
     const command = parsed.positionals[0]!;
-    const loc = location(host, deps);
-    if ((deps.sharedCatalog ?? !deps.userRoot) && ["list", "show", "inspect", "reload"].includes(command)) {
+    if ((deps.sharedCatalog ?? !deps.userRoot) && !deps.sharedState) {
+        const loc = location(host, deps);
         const remote = await openSharedCatalog(host.cwd, loc.userRoot, "agents-command", loc.projectTrusted);
-        try { loc.snapshot = await remote.get(loc.sessionSettings); }
-        finally { remote.close(); }
+        const writes = new Set<Promise<unknown>>();
+        try {
+            const state = { snapshot: await remote.get(), edit(edit: Record<string, unknown>) {
+                const write = (async () => {
+                    const result = await remote.edit({ ...edit, expectedRevision: state.snapshot.revision });
+                    state.snapshot = await remote.get();
+                    return result;
+                })();
+                writes.add(write);
+                void write.then(() => writes.delete(write), () => writes.delete(write));
+                return write;
+            } };
+            return await executeAgentsCommand(args, host, { ...deps, sharedState: state });
+        }
+        finally { await Promise.allSettled(writes); remote.close(); }
     }
+    const loc = location(host, deps);
     if (command === "list") return finishInspection(host, await runList(parsed, loc, deps), deps);
     if (command === "show" || command === "inspect") return finishInspection(host, await runShow(command, parsed, host, loc, deps), deps);
     if (command === "reload") return finish(host, await runReload(parsed, loc, deps));
@@ -388,7 +405,9 @@ async function runCreate(
         provenance: { origin: "local" },
         body: instructions ?? "",
     };
-    const saved = createDefinition({ ...loc, definition, scope: scope.value, replace: false });
+    const saved = deps.sharedState ? await deps.sharedState.edit({ action: "definition", catalogId: definition.id, markdown: serializeDefinition(definition).markdown, scope: scope.value, replace: false })
+        : createDefinition({ ...loc, definition, scope: scope.value, replace: false });
+    if (deps.sharedState) loc.snapshot = withAgentSessionSettings(deps.sharedState.snapshot, loc.sessionSettings);
     if (!saved.ok || !saved.path) {
         return { ...result("error", "create", false, saved.diagnostics.map((item) => item.message).join("\n") || "Create did not write a file."), diagnostics: saved.diagnostics };
     }
@@ -536,9 +555,10 @@ async function runImport(
             return clarification("import-codex", `${preview.text}\nReplacement was not confirmed. The existing definition was left unchanged.`);
         }
     }
-    const saved = existingLookup.match
+    const saved = deps.sharedState ? await deps.sharedState.edit({ action: "definition", catalogId: built.definition.id, markdown: serializeDefinition(built.definition).markdown, scope: scope.value, replace: !!existingLookup.match }) : existingLookup.match
         ? saveDefinition({ ...loc, definition: built.definition, scope: scope.value, replace: true })
         : createDefinition({ ...loc, definition: built.definition, scope: scope.value, replace: false });
+    if (deps.sharedState) loc.snapshot = withAgentSessionSettings(deps.sharedState.snapshot, loc.sessionSettings);
     if (!saved.ok || !saved.path) {
         return { ...result("error", "import-codex", false, saved.diagnostics.map((item) => item.message).join("\n") || "Import did not write a file."), diagnostics: [...parsedSource.diagnostics, ...built.diagnostics, ...saved.diagnostics] };
     }
@@ -700,6 +720,7 @@ function scopeLabel(scope: "user" | "project"): string {
 
 function location(host: AgentCommandHost, deps: AgentCommandDeps): CatalogLocation {
     return {
+        snapshot: deps.sharedState ? withAgentSessionSettings(deps.sharedState.snapshot, deps.sessionSettings?.snapshot()) : undefined,
         cwd: host.cwd,
         userRoot: deps.userRoot ?? defaultUserRoot(),
         projectTrusted: host.isProjectTrusted(),
@@ -769,6 +790,10 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
                     settings: () => deps.sessionSettings!.snapshot(),
                     change: (id, key, value) => deps.sessionSettings!.change(id, key, value),
                     changeSkills(entry, edit) {
+                        if (deps.sharedState) return deps.sharedState.edit({ action: "skills", catalogId: entry.id, edit }).then(saved => {
+                            if (saved.ok && saved.path) { commandResult.wrote = true; commandResult.path = saved.path; commandResult.scope = saved.scope; }
+                            return { ok: saved.ok, message: saved.message };
+                        });
                         const result = saveSkillExposure({ ...location(host, deps), entry }, edit);
                         if (result.ok && result.path) {
                             commandResult.wrote = true;
@@ -779,6 +804,10 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
                     },
                     discoverSkills: () => deps.discoveredSkills ?? [],
                     save(id) {
+                        if (deps.sharedState) return deps.sharedState.edit({ action: "preferences", catalogId: id, preferences: deps.sessionSettings!.snapshot()[id] ?? {} }).then(saved => {
+                            if (saved.ok) { commandResult.wrote = true; commandResult.path = saved.path; commandResult.scope = saved.scope; }
+                            return { ok: saved.ok, message: saved.ok ? `Defaults saved (${saved.scope}): ${id}.` : saved.diagnostics.map((item: Diagnostic) => item.message).join(" ") };
+                        });
                         const loc = location(host, deps);
                         const saved = saveAgentSessionDefaults(loadCatalog(loc), id, deps.sessionSettings!.snapshot(), loc);
                         if (saved.ok) {
@@ -789,6 +818,10 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
                         return { ok: saved.ok, message: saved.ok ? `Defaults saved (${saved.scope}): ${id}.` : saved.diagnostics.map((item) => item.message).join(" ") };
                     },
                     resetToBundled(entry) {
+                        if (deps.sharedState) return deps.sharedState.edit({ action: "reset-runtime", catalogId: entry.id }).then(saved => {
+                            if (saved.ok) { commandResult.wrote = true; commandResult.path = saved.path; commandResult.scope = saved.scope; deps.sessionSettings!.reset(entry.id); }
+                            return { ok: saved.ok, message: saved.ok ? `Bundled model/effort restored: ${entry.id}. Role instructions unchanged.` : saved.diagnostics.map((item: Diagnostic) => item.message).join(" ") };
+                        });
                         const source = entry.winningSource;
                         if (!source) return { ok: false, message: "The definition source is unavailable. Reopen its settings." };
                         const reset = resetRuntimeToBundled({ ...location(host, deps), id: entry.id, expectedPath: source.path, expectedDigest: source.contentDigest });
@@ -806,6 +839,10 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
                             : reset.diagnostics.map(item => item.message).join(" ") };
                     },
                     resetDefinition(entry) {
+                        if (deps.sharedState) return deps.sharedState.edit({ action: "reset-definition", catalogId: entry.id }).then(saved => {
+                            if (saved.ok) { commandResult.wrote = true; commandResult.path = saved.path; commandResult.scope = saved.scope; }
+                            return { ok: saved.ok, message: saved.ok ? `Bundled instructions restored: ${entry.id}. Model/effort kept. Backup: ${saved.backupPath}.` : saved.diagnostics.map((item: Diagnostic) => item.message).join(" ") };
+                        });
                         if (entry.identity.scope === "bundled") return { ok: true, message: `Already using bundled instructions: ${entry.id}. Model/effort unchanged.` };
                         const source = entry.winningSource;
                         if (!source) return { ok: false, message: "The definition source is unavailable. Reopen its settings." };

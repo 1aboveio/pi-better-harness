@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { loadCatalog, saveDefinition } from "./domain/catalog/catalog-store.mjs";
+import { loadCatalog, saveDefinition, resetRuntimeToBundled, resetUserDefinition } from "./domain/catalog/catalog-store.mjs";
 import { withAgentSessionSettings, saveAgentSessionDefaults } from "./domain/catalog/agent-session-settings.mjs";
 import { saveSkillExposure } from "./domain/catalog/catalog-skill-edits.mjs";
 import { parseDefinition } from "./domain/catalog/catalog-schema.mjs";
@@ -36,6 +36,11 @@ export class SharedCatalog {
       const id = command.catalogId;
       if (typeof id !== "string") throw new Error("Invalid catalog id");
       const entry = snapshot.roles.get(id) ?? snapshot.agents.get(id);
+      if (command.action === "reset-runtime" || command.action === "reset-definition") {
+        if (!entry) throw new Error("Catalog definition not found");
+        const reset = command.action === "reset-runtime" ? resetRuntimeToBundled : resetUserDefinition;
+        return reset({ ...loc, id, expectedPath: entry.path, expectedDigest: entry.contentDigest });
+      }
       if (command.action === "preferences") {
         return saveAgentSessionDefaults(snapshot, id, validateOverlay({ [id]: command.preferences }), loc);
       }
@@ -65,7 +70,7 @@ function validateOverlay(value: unknown): import("./domain/catalog/agent-session
     if (!/^(role|agent)\.[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(id) || !patch || typeof patch !== "object" || Array.isArray(patch)) throw new Error("Invalid catalog overlay");
     for (const [key, item] of Object.entries(patch)) {
       if (key === "model" ? item !== null && (typeof item !== "string" || !/^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(item))
-        : key !== "effort" || item !== null && !["off", "minimal", "low", "medium", "high", "xhigh"].includes(item as string)) throw new Error("Invalid catalog preference");
+        : key !== "effort" || item !== null && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(item as string)) throw new Error("Invalid catalog preference");
     }
   }
   return value as import("./domain/catalog/agent-session-settings.mjs").AgentSessionOverrides;

@@ -25,6 +25,7 @@ import { configureTierPolicy, DEFAULT_TIER_POLICY, type TierPolicy, type TierSpe
 import { canonicalAgentId, canonicalRoleId, shortRoleName, type Diagnostic, type ThinkingLevel } from "./catalog-schema.ts";
 import { withAgentSessionSettings, type AgentSessionOverrides } from "./agent-session-settings.ts";
 import { currentSandboxPermissions } from "./permission-policy.ts";
+import { openSharedCatalog } from "./shared-catalog.ts";
 
 export interface CatalogHost {
     cwd: string;
@@ -164,9 +165,16 @@ export function loadLaunchSnapshot(host: CatalogHost): CatalogSnapshot {
     }), host.getSessionSettings?.() ?? host.sessionSettings);
 }
 
+/** Admit once per launch/batch; callers retain this frozen value for every job. */
+export async function loadSharedLaunchSnapshot(host: CatalogHost): Promise<CatalogSnapshot> {
+    const remote = await openSharedCatalog(host.cwd, host.userRoot, "catalog-launch", host.projectTrusted);
+    try { return await remote.get(host.getSessionSettings?.() ?? host.sessionSettings); }
+    finally { remote.close(); }
+}
+
 export function createLaunchEnricher(pi?: unknown): LaunchEnricher {
     let cache: { key: string; rows: Map<string, CatalogResolutionAttachment> } | undefined;
-    return ({ inspection, snapshotDigest }) => {
+    return ({ inspection, snapshotDigest, snapshot: admittedSnapshot }) => {
         const host = notedHost.current;
         if (!host?.cwd || !host.registry || typeof host.registry.getAvailable !== "function") return undefined;
         const config = loadConfig();
@@ -185,7 +193,7 @@ export function createLaunchEnricher(pi?: unknown): LaunchEnricher {
             availability: availability.key,
         });
         if (!cache || cache.key !== key) {
-            const snapshot = loadLaunchSnapshot({ ...host, userRoot: host.userRoot ?? defaultUserRoot() });
+            const snapshot = admittedSnapshot ?? loadLaunchSnapshot({ ...host, userRoot: host.userRoot ?? defaultUserRoot() });
             if (snapshot.digest !== snapshotDigest) return undefined;
             const registry = availability.models === undefined
                 ? host.registry

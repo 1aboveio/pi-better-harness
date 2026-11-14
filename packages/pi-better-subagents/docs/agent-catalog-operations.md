@@ -4,6 +4,22 @@ Commands, the read-only discovery tool, and the Codex importer for `pi-agent/v1`
 
 ## Commands
 
+### Shared runtime writes
+
+Production catalog reads and persistent edits use the canonical agent directory's
+server. Each edit submits the content revision read by that invocation. If another
+client changed the catalog, the server returns `catalog-conflict`; reopen the view
+before trying again. A conflict does not overwrite the newer definition or discard
+the current session branch's temporary choices. Model/effort still use the existing
+`agents/settings.json`; skill changes still use the original Markdown definition.
+
+The server serializes cooperating clients' comparison and atomic writes. A direct
+external editor does not participate in this transaction and can race the revision
+comparison and rename. This is not a filesystem-wide compare-and-swap guarantee.
+External changes are visible on the next catalog request. An admitted launch or
+batch retains its frozen snapshot; later changes affect future admission only,
+not an existing attempt, continuation recipe, tools, or sandbox permissions.
+
 `/agents` is one Pi command. Dialogs use `ctx.ui.select`, `confirm`, `input`, and `editor`. `ctx.hasUI` is false in print and JSON mode. When a choice or confirmation is required there, the command returns `clarification-needed` and writes nothing.
 
 In an interactive TUI, `/agents`, `/agents list`, and `/agents show` open a focused catalog view instead of leaving the listing in a persistent widget. Rows align name, effective model, source, and launch state; narrow terminals retain name and model. The model is the resolved actual model when available, otherwise the requested or inherited preference, or `not resolved`. Type to filter by id, name, description, or base role; use Up/Down and Enter to inspect. The detail view opens **Settings**, with Model, Effort, Skills, launch resolution, and diagnostics. **Instructions** contains the complete effective prompt (role plus agent in add mode, agent text in replace mode); this is not the task-specific launch prompt. **Files** shows definition and saved-config sources plus current session edits. Tab and Shift+Tab cycle between these pages; `p` opens Instructions. Up/Down selects settings or scrolls the current page. Left or Escape returns to Settings, then list, clears the filter, then closes. `/agents show <id>` opens that definition directly. Print/JSON callers still receive the complete text and structured result; bare `/agents` still returns help outside the custom TUI.
