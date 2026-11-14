@@ -232,21 +232,23 @@ export function readArchivedAttempt(id: string): RunMeta | undefined {
 }
 
 let archiveListCache: { signature: string; metas: RunMeta[]; ids: Set<string> } | undefined;
+let archiveFiles = new Map<string, { signature: string; meta?: RunMeta }>();
 
 function attemptsSignature(): string {
     try {
         const stat = statSync(durableAttemptsDir());
-        return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}`;
-    } catch {
-        return "missing";
+        return `${durableAttemptsDir()}:${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        return `${durableAttemptsDir()}:missing`;
     }
 }
 
 /**
  * Every published compact record, staleness not applied. The directory
  * signature (which changes when a record is atomically replaced) keeps repeated
- * `listMetas` calls cheap; staleness is decided per record because a marker
- * written since the listing must take effect without re-listing.
+ * `listMetas` calls cheap. After a publication, reuse unchanged file identities
+ * rather than parsing the entire history again. Markers have their own boundary.
  */
 function archivedAttempts(): RunMeta[] {
     const signature = attemptsSignature();
@@ -258,11 +260,20 @@ function archivedAttempts(): RunMeta[] {
         names = [];
     }
     const metas: RunMeta[] = [];
+    const files = new Map<string, { signature: string; meta?: RunMeta }>();
     for (const name of names) {
         if (!name.endsWith(".json")) continue;
-        const meta = readPublishedAttempt(name.slice(0, -".json".length));
-        if (meta) metas.push(meta);
+        const path = join(durableAttemptsDir(), name);
+        const fileSignature = stateSignature(path);
+        const cached = archiveFiles.get(path);
+        const entry = cached?.signature === fileSignature ? cached : {
+            signature: fileSignature,
+            meta: readPublishedAttempt(name.slice(0, -".json".length)),
+        };
+        files.set(path, entry);
+        if (entry.meta) metas.push(entry.meta);
     }
+    archiveFiles = files;
     archiveListCache = { signature, metas, ids: new Set(metas.map((meta) => meta.id)) };
     return metas;
 }
@@ -272,9 +283,28 @@ function publishedAttemptIds(): ReadonlySet<string> {
     return archiveListCache!.ids;
 }
 
+let visibleArchiveCache: { metas: RunMeta[]; signature: string; visible: RunMeta[] } | undefined;
+
 /** Every archived completed attempt that may still speak for its conversation. */
 export function listArchivedAttempts(): RunMeta[] {
-    return archivedAttempts().filter((meta) => !archiveSuperseded(meta));
+    const metas = archivedAttempts();
+    const directory = durableSessionStateDir();
+    const signature = `${directory}:${stateSignature(directory)}`;
+    if (visibleArchiveCache?.metas === metas && visibleArchiveCache.signature === signature) {
+        return visibleArchiveCache.visible;
+    }
+    // Atomic marker add/replace/delete changes the directory identity. Enumerate
+    // published markers once; missing markers never need one stat per archive.
+    let names: string[];
+    try { names = readdirSync(directory); }
+    catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        names = [];
+    }
+    const sessions = new Set(names.filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -5)));
+    const visible = metas.filter((meta) => !sessions.has(meta.sessionId) || !archiveSuperseded(meta));
+    visibleArchiveCache = { metas, signature, visible };
+    return visible;
 }
 
 /** Whether this conversation has any published compact record at all. */
@@ -302,8 +332,9 @@ function statePath(sessionId: string): string {
 function stateSignature(path: string): string {
     try {
         const stat = statSync(path);
-        return `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
-    } catch {
+        return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         return "missing";
     }
 }
@@ -333,7 +364,7 @@ function readArchivedSessionState(sessionId: string): ArchivedSessionState | und
     if (!isSafeRunId(sessionId)) return undefined;
     const path = statePath(sessionId);
     const signature = stateSignature(path);
-    const cached = stateCache.get(sessionId);
+    const cached = stateCache.get(path);
     if (cached && cached.signature === signature) return cached.state;
     let state: ArchivedSessionState | undefined;
     try {
@@ -341,7 +372,7 @@ function readArchivedSessionState(sessionId: string): ArchivedSessionState | und
     } catch {
         state = undefined;
     }
-    stateCache.set(sessionId, { signature, state });
+    stateCache.set(path, { signature, state });
     return state;
 }
 

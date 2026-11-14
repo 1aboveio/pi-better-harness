@@ -1242,7 +1242,7 @@ function reconcileHealth(): void {
     // is the human's own interrupted work, not another session's live run, and
     // `finalizeInterruptedRunFromLog` still requires all process evidence to be
     // absent, so a live writer is never touched.
-    for (const summary of listMetas()) {
+    for (const summary of listMetas({ includeArchived: false })) {
         if (summary.status !== "running" && summary.status !== "orphaned") continue;
         if (ownedByThisParent(summary) || !ownsInterruptedSupervision(summary)) continue;
         const meta = readMeta(summary.id);
@@ -1931,7 +1931,7 @@ function ownsInterruptedSupervision(summary: Pick<RunMeta, "spawnPid" | "spawnPi
 /** True while an interrupted record still needs this process's supervision loop. */
 function needsInterruptedSupervision(): boolean {
     try {
-        for (const summary of listMetas()) {
+        for (const summary of listMetas({ includeArchived: false })) {
             if (summary.status !== "running" && summary.status !== "orphaned") continue;
             if (ownsInterruptedSupervision(summary)) return true;
         }
