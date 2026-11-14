@@ -130,6 +130,7 @@ export async function runGuardian(serverDir: string, rebind?: DaemonOwnerIdentit
       try { checkpoint = JSON.parse(readFileSync(join(serverDir, "clean-stop.json"), "utf8")); } catch { /* Missing proof is a crash. */ }
       if (checkpoint?.token === rebind.token && checkpoint?.pid === rebind.pid) return;
       fault(rebind);
+      await delay(1000 * 2 ** Math.min(2, Math.max(0, failures.length - 1)));
     }
     const previous = inspectDaemonOwner(serverDir);
     if (previous.status === "dead") {
