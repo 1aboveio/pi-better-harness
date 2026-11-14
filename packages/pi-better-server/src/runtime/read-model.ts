@@ -15,6 +15,7 @@ import { effectiveStatus } from "./domain/process-status.mjs";
 import { extractChildEventFactsFromLog, healthThresholdsForConfig } from "./domain/health-observation.mjs";
 import { BackgroundObservation } from "./background.ts";
 import { readHealthConfig } from "./health-config.ts";
+import { processMatchesStart } from "../daemon-owner.ts";
 
 export interface WorkScope { backgroundAll?: boolean; background?: boolean; backgroundHistory?: boolean; cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; detail?: boolean; limit?: number; cursor?: string }
 export interface WorkSnapshot {
@@ -88,6 +89,14 @@ export class WorkReadModel {
 
   onChange(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   get backgroundMetrics() { return { ...this.background.metrics }; }
+  livenessReasons() {
+    return [
+      ...[...this.projected.values()].filter(row => row.meta.status === "running"
+        && processMatchesStart(row.meta.pid, row.meta.pidStartTime))
+        .map(row => ({ kind: "worker", id: row.meta.id, owner: row.meta.callbackOrigin })),
+      ...this.background.livenessReasons(),
+    ];
+  }
   async ensureId(id: string) {
     if (!safeId.test(id)) throw new Error("Invalid run ID");
     if (this.state === "rebuilding") await this.reconcile();

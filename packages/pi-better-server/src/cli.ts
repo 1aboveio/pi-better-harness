@@ -70,9 +70,24 @@ async function main(): Promise<void> {
   }
 
   const serverDir = process.env.PI_SERVER_DIR ? { serverDir: process.env.PI_SERVER_DIR } : {};
+  if (agent === "pi" && !process.env.PI_SERVER_GUARDED_CHILD) {
+    const { runtimeRoot } = await import("./runtime/root.ts");
+    const root = runtimeRoot(process.env.PI_CODING_AGENT_DIR!, process.env.PI_SERVER_DIR!);
+    const { runGuardian } = await import("./runtime/guardian.ts");
+    await runGuardian(root.serverDir);
+    return;
+  }
   const daemon = agent === "codex"
     ? await (await import("./codex/daemon.ts")).startCodexDaemon({ ...serverDir, log })
     : await (await import("./server.ts")).startDaemon({ ...serverDir, log });
+  if ("closed" in daemon) {
+    const { inspectDaemonOwner } = await import("./daemon-owner.ts");
+    const owner = inspectDaemonOwner(daemon.serverDir);
+    const token = owner.status === "live" ? owner.owner.token : undefined;
+    void daemon.closed.then(() => {
+      if (process.connected) process.send?.({ type: "runtime-clean-stop", token }, () => process.disconnect?.());
+    });
+  }
 
   let stopping = false;
   const shutdown = (): void => {

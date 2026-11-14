@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, realpathSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, realpathSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
+import { join } from "node:path";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { getAgentDir, type RpcCommand } from "@earendil-works/pi-coding-agent";
 import { CompanionManager, type CompanionManagerOptions } from "./companion.ts";
@@ -119,6 +120,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const dispatches = new Set<Promise<void>>();
     let inFlight = 0;
     let draining = false;
+    const runtimeClients = new Map<Socket, string>();
+    let runtimeZeroSince: number | undefined = now();
+    let hostedUsed = registry.activeCount > 0;
     let zeroSince: number | undefined = registry.activeCount === 0 ? now() : undefined;
     let startupUntil = 0;
     const server: Server = createServer((socket) => {
@@ -159,7 +163,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             const verdict = checkHello(command, { build, instanceId, safeUpgrade, agentDir: realpathSync(getAgentDir()) });
             if (verdict.ok) {
               reconnectControllers.set(control, Array.isArray(command.capabilities) && command.capabilities.includes("runtime-reconnect-v1"));
-              if (!greeted) startupUntil = Math.max(startupUntil, now() + startupGraceMs);
+              if (!greeted && command.runtimeRoot === undefined) startupUntil = Math.max(startupUntil, now() + startupGraceMs);
               greeted = true;
               return reply({ data: verdict.data });
             }
@@ -170,7 +174,18 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (type === "runtime_get_status") {
             if (!greeted) throw new Error("runtime_get_status requires hello");
             return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
-              capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount } });
+              capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, lifecycle: config,
+              livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
+                ...registry.list().filter(session => session.live).map(session => ({ kind: "hosted-session", id: session.sessionId })),
+                ...(workModel?.livenessReasons() ?? [])],
+              nextIdleDeadline: runtimeZeroSince === undefined ? null : runtimeZeroSince + config.runtimeIdleMs } });
+          }
+          if (type === "runtime_register_client") {
+            if (!greeted) throw new Error("runtime_register_client requires hello");
+            if (typeof command.clientId !== "string" || !command.clientId || command.clientId.length > 256) throw new Error("Invalid runtime client identity");
+            runtimeClients.set(socket, command.clientId);
+            runtimeZeroSince = undefined;
+            return reply({ data: { clientId: command.clientId } });
           }
           if (type === "runtime_upgrade_status") return reply({ data: readActivationJournal(serverDir) ?? null });
           if (["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_metrics"].includes(type)) {
@@ -287,7 +302,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         } finally {
           releaseSessionOperation?.();
           inFlight--;
-          if (registry.activeCount > 0) zeroSince = undefined;
+          if (registry.activeCount > 0) { zeroSince = undefined; hostedUsed = true; }
           else zeroSince ??= now();
         }
       };
@@ -312,6 +327,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       socket.on("close", () => {
         workQueries?.close();
         sockets.delete(socket);
+        runtimeClients.delete(socket);
+        if (runtimeClients.size === 0) runtimeZeroSince ??= now();
         reconnectControllers.delete(control);
         control.dispose();
       });
@@ -385,9 +402,19 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return;
           }
           zeroSince ??= now();
-          if (config.daemonIdleMs === 0 || now() - zeroSince < config.daemonIdleMs || now() < startupUntil) return;
+          if (runtimeClients.size > 0) return;
+          runtimeZeroSince ??= now();
+          if (hostedUsed ? (config.daemonIdleMs === 0 || now() - zeroSince < config.daemonIdleMs || now() < startupUntil)
+            : (now() - runtimeZeroSince < config.runtimeIdleMs || now() < startupUntil)) return;
+          // Recheck durable activity before fencing admission; observation never adopts a writer.
+          await work().reconcile();
+          if (draining) return;
+          if (work().livenessReasons().length > 0) {
+            runtimeZeroSince = undefined;
+            return;
+          }
           // No create/open can slip between this check and the synchronous admission fence.
-          if (inFlight > 0 || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
+          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
           draining = true;
           log("idle timeout with no active sessions; shutting down");
         })().finally(() => { maintenance = undefined; });
@@ -413,16 +440,19 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           await registry.shutdown();
           await Promise.allSettled([...dispatches]);
           if (existsSync(socketPath)) unlinkSync(socketPath);
+          const checkpoint = join(serverDir, `clean-stop-${instanceId}.tmp`);
+          writeFileSync(checkpoint, JSON.stringify({ pid: process.pid, token: instanceId, reason: "clean-stop" }), { mode: 0o600 });
+          renameSync(checkpoint, join(serverDir, "clean-stop.json"));
           releaseOwner();
           finishClosed();
         })();
         return stopped;
       },
     };
-    const durations = [config.sessionIdleMs, config.daemonIdleMs].filter(value => value > 0);
+    const durations = [config.sessionIdleMs, config.daemonIdleMs, config.runtimeIdleMs].filter(value => value > 0);
     if (safeUpgrade) durations.push(1_000);
     if (durations.length) {
-      timer = setInterval(() => { void daemon.sweepIdle().catch(error => log(`lifecycle maintenance failed: ${String(error)}`)); }, Math.max(5, Math.min(30_000, ...durations)));
+      timer = setInterval(() => { void daemon.sweepIdle().catch(error => log(`lifecycle maintenance failed: ${String(error)}`)); }, Math.max(5, Math.min(1_000, ...durations)));
       timer.unref();
     }
     return daemon;

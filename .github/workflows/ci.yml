@@ -452,6 +452,9 @@ jobs:
       - name: Require the macOS Seatbelt backend
         run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
 
+      - name: Prove runtime lifecycle with real processes and sockets
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 packages/pi-better-server/test/runtime-lifecycle.test.ts packages/pi-better-server/test/daemon-owner.test.ts
+
       - name: Run macOS compatibility golden paths
         timeout-minutes: 5
         env:

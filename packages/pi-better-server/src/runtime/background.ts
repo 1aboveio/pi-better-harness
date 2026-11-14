@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { processMatchesStart } from "../daemon-owner.ts";
 // @ts-expect-error Generated canonical passive runner observation.
 import { snapshot } from "./domain/background/snapshot.mjs";
 // @ts-expect-error Generated canonical registry queries.
@@ -19,6 +20,16 @@ export class BackgroundObservation {
   status: "ready" | "degraded" = "ready";
   reason?: string;
   get connectionCount() { return this.db ? 1 : 0; }
+  livenessReasons() {
+    this.enabled = true;
+    this.refresh();
+    return this.rows.filter(row => row.active).flatMap(row => {
+      const inspection = snapshot(this.directory, row.id);
+      const claim = inspection?.claim;
+      return claim && processMatchesStart(claim.pid, claim.pidStartTime)
+        ? [{ kind: "runner", id: row.id, owner: row.owner, operationId: row.operationId }] : [];
+    });
+  }
   readonly metrics = { runnerSnapshots: 0, activeQueries: 0, historyQueries: 0 };
   constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor")) {
     this.root = root; this.directory = directory;

@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 export interface DaemonOwnerIdentity {
   pid: number;
@@ -17,6 +18,14 @@ export function currentOwnerIdentity(token = randomUUID()): DaemonOwnerIdentity 
 
 export function ownerIsAlive(owner: DaemonOwnerIdentity): boolean {
   return alive(owner);
+}
+
+/** Matches the existing runner/worker start-token representation, without releasing fences. */
+export function processMatchesStart(pid: number, start: unknown): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || typeof start !== "string") return false;
+  const identity = linuxIdentity(pid);
+  const expected = process.platform === "darwin" ? String(Date.parse(start)) : start;
+  return identity.start !== undefined && identity.start === expected && alive({ pid, token: "observation", start: identity.start });
 }
 
 export type OwnerInspection =
@@ -59,6 +68,13 @@ function validateOwner(previous: Owner, name: string, lock: string): void {
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 
 function linuxIdentity(pid: number): Pick<Owner, "boot" | "start"> {
+  if (process.platform === "darwin") {
+    try {
+      const start = execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" }, timeout: 1000 }).trim();
+      const stamp = Date.parse(start);
+      return Number.isFinite(stamp) ? { start: String(stamp) } : {};
+    } catch { return {}; }
+  }
   if (process.platform !== "linux") return {};
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
