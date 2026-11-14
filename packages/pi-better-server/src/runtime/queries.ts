@@ -26,6 +26,8 @@ export class WorkQueries {
   private maxQueuedBytes: number;
   constructor(model: WorkReadModel, socket: Socket, maxQueuedBytes = 4 * 1024 * 1024) {
     this.model = model; this.socket = socket; this.maxQueuedBytes = maxQueuedBytes;
+    // A failed peer owns no usable subscription; terminate its queued writes too.
+    socket.on("error", () => { this.close(); socket.destroy(); });
     socket.once("close", () => this.close());
     socket.on("drain", () => {
       if (!this.paused) return;
