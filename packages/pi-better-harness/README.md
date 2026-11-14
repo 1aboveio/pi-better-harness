@@ -55,6 +55,13 @@ changes. It does not rebuild reminders before each model call. Turning hooks off
 hooks without deleting saved state or starting a turn. `/goal` and skills never
 enable them.
 
+In `/harness-settings`, **Auto-start Goal** optionally starts
+a Goal after a successful explicit outcome save with an objective and nonempty
+`doneWhen` criteria. It defaults Off; `/goal settings auto-start-from-outcome on`
+enables it. Existing active, paused or budget-limited Goals stay unchanged, and
+restoring state or toggling settings never starts work. The outcome and Todo are
+preserved; subsequent continuation follows the existing Goal controls.
+
 Existing Plan session histories restore as Todo. Workflow task-plan files and
 revision checks stay unchanged; skills continue using their own records when the
 optional interface is off. See the [usage guide](docs/usage.md#outcome--todo).

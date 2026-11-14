@@ -11,6 +11,7 @@ export interface GoalPreferences {
   autoContinue: boolean;
   conversationalResume: boolean;
   pauseOnEscape: boolean;
+  autoStartFromOutcome: boolean;
 }
 
 export interface GoalPreferenceSeams extends HarnessSettingsSeams {}
@@ -39,19 +40,21 @@ export function readGoalPreferences(seams: GoalPreferenceSeams = {}): GoalPrefer
 
 function parseGoalPreferences(parsed: unknown, path: string): GoalPreferences {
   if (parsed === undefined) {
-    return { autoContinue: true, conversationalResume: true, pauseOnEscape: true };
+    return { autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false };
   }
   const value = parsed as Partial<GoalPreferences> & { version?: unknown } | null;
   if (value?.version !== 1 ||
       (value.autoContinue !== undefined && typeof value.autoContinue !== "boolean") ||
       (value.conversationalResume !== undefined && typeof value.conversationalResume !== "boolean") ||
-      (value.pauseOnEscape !== undefined && typeof value.pauseOnEscape !== "boolean")) {
-    throw new Error(`Goal preferences at ${path} must contain version 1 and boolean autoContinue/conversationalResume/pauseOnEscape settings.`);
+      (value.pauseOnEscape !== undefined && typeof value.pauseOnEscape !== "boolean") ||
+      (value.autoStartFromOutcome !== undefined && typeof value.autoStartFromOutcome !== "boolean")) {
+    throw new Error(`Goal preferences at ${path} must contain version 1 and boolean autoContinue/conversationalResume/pauseOnEscape/autoStartFromOutcome settings.`);
   }
   return {
     autoContinue: value.autoContinue ?? true,
     conversationalResume: value.conversationalResume ?? true,
     pauseOnEscape: value.pauseOnEscape ?? true,
+    autoStartFromOutcome: value.autoStartFromOutcome ?? false,
   };
 }
 

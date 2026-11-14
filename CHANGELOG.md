@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.46.0] - 2026-11-15
+
+### Added
+
+- Offer an **Auto-start Goal** switch directly in `/harness-settings`, defaulting Off. With Outcome & Todo hooks enabled, explicitly saving an active outcome with an objective and acceptance criteria creates and binds a Goal while preserving its Todo and boundaries.
+
+## [pi-better-goal@0.14.0] - 2026-11-15
+
+### Added
+
+- Add the opt-in **Auto-start Goal** preference to `/harness-settings` and `/goal settings`. Existing active, paused, or budget-limited Goals are preserved; restored outcomes and preference changes do not trigger a Goal. Automatic continuation keeps its existing settings and gates.
+
 ## [pi-better-harness@0.45.8] - 2026-11-14
 
 ### Fixed
