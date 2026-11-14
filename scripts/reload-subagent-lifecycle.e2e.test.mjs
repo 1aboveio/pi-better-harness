@@ -32,6 +32,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
+import { inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+import { removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 // Stay outside the preload's exit-swept directory so failed cleanup can retain fixtures.
@@ -40,6 +42,8 @@ const fixtures = realpathSync(mkdtempSync(join(fixtureRoot, "pi-reload-subagent-
 const dir = (name) => { const path = join(fixtures, name); mkdirSync(path, { recursive: true }); return path; };
 const tmp = dir("tmp");
 const agentDir = dir("agent");
+const serverDir = join(agentDir, "server");
+let runtimeOwner;
 const fakeBin = dir("fake-bin");
 const release = join(fixtures, "child-release");
 
@@ -66,9 +70,10 @@ writeFileSync(join(fakeBin, "package.json"), JSON.stringify({ type: "commonjs" }
 chmodSync(join(fakeBin, "pi"), 0o755);
 
 const originalPath = process.env.PATH ?? "";
-after(() => {
+after(async () => {
   process.env.PATH = originalPath;
-  rmSync(fixtures, { recursive: true, force: true });
+  await stopOwnedRuntime(serverDir, runtimeOwner);
+  removeOwnedFixture(fixtures);
 });
 
 const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
@@ -157,7 +162,13 @@ async function openSession(project) {
     errors,
     releaseParent: () => releaseParent?.(),
     sessionId: session.sessionManager.getSessionId(),
-    start: () => session.bindExtensions({ onError: (error) => errors.push(error) }),
+    start: async () => {
+      await session.bindExtensions({ onError: (error) => errors.push(error) });
+      const owner = inspectDaemonOwner(serverDir);
+      assert.equal(owner.status, "live", "fixture runtime must have a verified owner");
+      runtimeOwner ??= owner.owner;
+      assert.deepEqual(owner.owner, runtimeOwner, "fixture runtime must not be replaced between sessions");
+    },
     // Tools are looked up per call: after a reload they belong to the new extension instances.
     async call(name, params) {
       const tool = session.agent.state.tools.find((candidate) => candidate.name === name);
@@ -244,6 +255,7 @@ test(verified ? "a real /reload keeps a live subagent child running and delivers
     assert.deepEqual(host.errors, []);
   } finally {
     try { writeFileSync(release, ""); } catch { /* ignore */ }
+    await host.session._extensionRunner.emit({ type: "session_shutdown" });
     host.session.dispose();
     process.env.PATH = originalPath;
   }
@@ -292,6 +304,7 @@ test("a real /reload finalizes interrupted work from the child's own log, not as
     assert.ok(existsSync(registry.logPathFor(seededId)));
     assert.deepEqual(host.errors, []);
   } finally {
+    await host.session._extensionRunner.emit({ type: "session_shutdown" });
     host.session.dispose();
     rmSync(registry.runDir(seededId), { recursive: true, force: true });
     process.env.PATH = originalPath;
@@ -349,6 +362,7 @@ test("ordinary child reports incomplete then completes a real saved-conversation
   } finally {
     host.releaseParent();
     if (busy) await busy;
+    await host.session._extensionRunner.emit({ type: "session_shutdown" });
     host.session.dispose();
     process.env.PATH = originalPath;
   }
