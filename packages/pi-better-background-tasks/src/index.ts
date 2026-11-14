@@ -8,6 +8,7 @@ import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { observeForegroundSandboxPolicy } from "./sandbox.js";
 import { registerTools } from "./tools.js";
 import { deliverBackgroundTasksPrompt } from "./prompt.js";
+import { closeBackgroundObservation } from "./work-observation.js";
 
 export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   // Each cached factory invocation owns its runtime, failure timers, navigator
@@ -55,10 +56,12 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     navigator.ensureBackgroundTasksNavigator(ctx);
   });
   pi.on("session_before_switch", async () => {
+    closeBackgroundObservation(pi);
     observedWaits.close();
     navigator.clearBackgroundTasksNavigatorSession();
   });
   pi.on("session_shutdown", async (_event, ctx) => {
+    closeBackgroundObservation(pi);
     // /reload, session replacement, and quit load a fresh instance; stop this one's timers (#324).
     observedWaits.close();
     runtime.suspendScheduledWork();

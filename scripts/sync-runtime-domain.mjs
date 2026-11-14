@@ -6,7 +6,26 @@ import ts from "typescript";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const target = join(root, "packages/pi-better-server/src/runtime/domain");
 mkdirSync(target, { recursive: true });
+const background = join(target, "background");
+mkdirSync(join(background, "supervisor"), { recursive: true });
+for (const name of ["conditions.ts", "registry.ts", "types.ts", "supervisor/store.ts", "supervisor/types.ts"]) {
+  const source = readFileSync(join(root, "packages/pi-better-background-tasks/src", name), "utf8");
+  writeFileSync(join(background, name.replace(/\.ts$/, ".mjs")), ts.transpileModule(source.replaceAll(/(from\s+["'][^"']+)\.(ts|js)(["'])/g, "$1.mjs$3"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText);
+}
+// Carry only the canonical passive snapshot, not supervisor management methods.
+const supervisor = ts.createSourceFile("supervisor.ts", readFileSync(join(root, "packages/pi-better-background-tasks/src/supervisor/supervisor.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+const snapshotPrinter = ts.createPrinter();
+const summary = supervisor.statements.find(s => ts.isFunctionDeclaration(s) && s.name?.text === "launchSummary");
+const klass = supervisor.statements.find(s => ts.isClassDeclaration(s) && s.members.some(m => m.name?.getText(supervisor) === "snapshot"));
+const snapshotMethod = klass.members.find(m => m.name?.getText(supervisor) === "snapshot");
+writeFileSync(join(background, "snapshot.mjs"), ts.transpileModule(
+  'import { supervisorPaths, readLaunchRecord, readTerminalRecord, readLostRecord, readClaimRecord, readCommandRecord, readStopRequest, readCleanupRecord } from "./supervisor/store.mjs";\n' +
+  snapshotPrinter.printNode(ts.EmitHint.Unspecified, summary, supervisor) + '\nexport function snapshot(directory, taskId) ' + snapshotMethod.body.getText(supervisor).replaceAll("this.directory", "directory"),
+  { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText);
 writeFileSync(join(root, "packages/pi-better-subagents/shared-work-client.mjs"), readFileSync(join(root, "packages/pi-better-server/src/runtime/work-client.mjs")));
+writeFileSync(join(root, "packages/pi-better-background-tasks/src/shared-work-client.mjs"), readFileSync(join(root, "packages/pi-better-server/src/runtime/work-client.mjs")));
 for (const [name, source] of [
   ["assignment-projection.mjs", "packages/pi-better-subagents/assignment-projection.mjs"],
   ["assignment-observation.mjs", "packages/operation-coordinator/assignment-observation.mjs"],

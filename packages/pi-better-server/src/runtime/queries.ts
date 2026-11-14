@@ -10,7 +10,10 @@ export function workScope(input: unknown): WorkScope {
   if (value.active !== undefined && typeof value.active !== "boolean") throw new Error("Invalid active scope");
   if (value.detail !== undefined && (typeof value.detail !== "boolean" || (value.detail && !value.id))) throw new Error("Detail requires an exact run ID");
   if (value.statuses !== undefined && (!Array.isArray(value.statuses) || value.statuses.length > 9 || value.statuses.some(s => !["running", "waiting", "completed", "failed", "cancelled", "killed", "exited", "orphaned", "lost"].includes(String(s))))) throw new Error("Invalid assignment status filter");
-  return { cwd: value.cwd as string | undefined, sessionId: value.sessionId as string | undefined, id: value.id as string | undefined,
+  if (value.background !== undefined && typeof value.background !== "boolean") throw new Error("Invalid background scope");
+  if (value.backgroundHistory !== undefined && typeof value.backgroundHistory !== "boolean") throw new Error("Invalid background history scope");
+  if (value.backgroundAll !== undefined && (typeof value.backgroundAll !== "boolean" || value.backgroundAll && !value.backgroundHistory)) throw new Error("All backgrounds requires an explicit history query");
+  return { backgroundAll: value.backgroundAll as boolean | undefined, backgroundHistory: value.backgroundHistory as boolean | undefined, background: value.background as boolean | undefined, cwd: value.cwd as string | undefined, sessionId: value.sessionId as string | undefined, id: value.id as string | undefined,
     cursor: value.cursor as string | undefined, limit: value.limit as number | undefined, active: value.active as boolean | undefined, detail: value.detail as boolean | undefined, statuses: value.statuses as string[] | undefined };
 }
 

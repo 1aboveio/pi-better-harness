@@ -813,8 +813,7 @@ function compactRow(meta: BackgroundTaskMeta, incidents: number): string {
   return `${meta.id} ${meta.status} ${meta.kind} ${age}${incident}${remote}${label}`;
 }
 
-export function formatList(options: OutputOptions = {}): string {
-  const index = listTaskRecords();
+export function formatList(options: OutputOptions = {}, index = listTaskRecords()): string {
   if (index.indexError) {
     return assembleBackgroundContent({
       surface: "list",
