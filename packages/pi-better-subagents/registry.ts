@@ -1352,7 +1352,7 @@ export function removeMetaArtifacts(meta: RunMeta, options: RemoveMetaArtifactsO
  * whose raw log/run directory was already reclaimed. The volatile record wins
  * whenever both exist, so a reclaimed log never hides the live one.
  */
-export function listMetas(): RunMeta[] {
+export function listMetas(options: { includeArchived?: boolean } = {}): RunMeta[] {
     let ids: string[] = [];
     try {
         registryIo.fullDirectoryReads += 1;
@@ -1368,7 +1368,7 @@ export function listMetas(): RunMeta[] {
         if (!meta) continue;
         metas.push(meta);
     }
-    for (const meta of listArchivedAttempts()) {
+    for (const meta of options.includeArchived === false ? [] : listArchivedAttempts()) {
         if (seen.has(meta.id)) continue;
         seen.add(meta.id);
         metas.push(meta);

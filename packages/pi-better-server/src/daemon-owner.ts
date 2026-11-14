@@ -75,11 +75,11 @@ function alive(owner: Owner): boolean {
 }
 
 /** Claim ownership before reading the index. A live owner is never reclaimed on a timer. */
-export function claimDaemonOwner(serverDir: string, lockName = "daemon-owner"): () => void {
+export function claimDaemonOwner(serverDir: string, lockName = "daemon-owner", stagingDir = serverDir): () => void {
   const token = randomUUID();
   const owner = currentOwnerIdentity(token);
   const lock = join(serverDir, lockName);
-  const candidate = join(serverDir, `.${lockName}-${token}`);
+  const candidate = join(stagingDir, `.${lockName}-${token}`);
   const name = `owner-${token}.json`;
   mkdirSync(candidate, { mode: 0o700 });
   let claimed = false;

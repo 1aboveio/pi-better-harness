@@ -181,6 +181,7 @@ export function isNavigatorUiAvailable(ctx) {
  * @param {(m: object) => string} [deps.toolFor] - current/used tool label or ""
  * @param {(m: object) => string|undefined} [deps.effortFor] - model effort when available
  * @param {(m: object) => object|undefined} [deps.healthFor] - #66 HealthObservation
+ * @param {(m: object, status: string) => object} [deps.project] - refresh-local assignment results shared with expiry filtering
  * @param {number} [deps.now]
  */
 export function pendingNavigatorPark(meta) {
@@ -190,7 +191,7 @@ export function pendingNavigatorPark(meta) {
 
 export function buildNavigatorRows(metas, deps) {
     const now = deps.now ?? Date.now();
-    const project = createAssignmentProjector();
+    const project = deps.project ?? createAssignmentProjector();
     return metas.map((m) => {
         const assignment = project(m, deps.effectiveStatus(m));
         const status = assignment.state;

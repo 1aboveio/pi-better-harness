@@ -1242,7 +1242,7 @@ function reconcileHealth(): void {
     // is the human's own interrupted work, not another session's live run, and
     // `finalizeInterruptedRunFromLog` still requires all process evidence to be
     // absent, so a live writer is never touched.
-    for (const summary of listMetas()) {
+    for (const summary of listMetas({ includeArchived: false })) {
         if (summary.status !== "running" && summary.status !== "orphaned") continue;
         if (ownedByThisParent(summary) || !ownsInterruptedSupervision(summary)) continue;
         const meta = readMeta(summary.id);
@@ -1409,10 +1409,21 @@ function observeNavigatorHealth(meta: RunMeta, now: number = Date.now()): Health
     return observeWidgetHealth(meta, now, effectiveStatus(meta));
 }
 
+/** Keep expiry and formatting on one observation, only for this refresh. */
+function createNavigatorProjector() {
+    const project = createAssignmentProjector();
+    const results = new Map<string, ReturnType<typeof project>>();
+    return (meta: RunMeta, status: string = meta.status) => {
+        if (!results.has(meta.id)) results.set(meta.id, project(meta, status));
+        return results.get(meta.id)!;
+    };
+}
+
 /** Rows for the overlay: visible current-parent runs, newest first (#44 seam). */
-function navigatorRows(visible?: RunMeta[], at?: number) {
+function navigatorRows(visible?: RunMeta[], at?: number, project = createNavigatorProjector()) {
     const now = at ?? Date.now();
-    return buildNavigatorRows(visible ?? sessionVisibleNavigatorRuns(now), {
+    return buildNavigatorRows(visible ?? sessionVisibleNavigatorRuns(now, project), {
+        project,
         effectiveStatus,
         shortModel,
         fmtElapsed,
@@ -1537,9 +1548,10 @@ function statusTone(status: string): BackgroundWorkRow["statusTone"] {
 function subagentWorkRows(now: number): BackgroundWorkRow[] {
     // One registry scan per rebuild: both the start times and the rows below are
     // built from this snapshot.
-    const visible = sessionVisibleNavigatorRuns(now);
+    const project = createNavigatorProjector();
+    const visible = sessionVisibleNavigatorRuns(now, project);
     const metaById = new Map(visible.map((m) => [m.id, m]));
-    return navigatorRows(visible, now).map((row) => {
+    return navigatorRows(visible, now, project).map((row) => {
         const bits = [];
         if (row.model) bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
         if (row.tool) bits.push(row.tool);
@@ -1931,7 +1943,7 @@ function ownsInterruptedSupervision(summary: Pick<RunMeta, "spawnPid" | "spawnPi
 /** True while an interrupted record still needs this process's supervision loop. */
 function needsInterruptedSupervision(): boolean {
     try {
-        for (const summary of listMetas()) {
+        for (const summary of listMetas({ includeArchived: false })) {
             if (summary.status !== "running" && summary.status !== "orphaned") continue;
             if (ownsInterruptedSupervision(summary)) return true;
         }
