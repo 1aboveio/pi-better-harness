@@ -78,6 +78,11 @@ async function main(): Promise<void> {
     const rebind = process.env.PI_SERVER_GUARDIAN_REBIND ? JSON.parse(process.env.PI_SERVER_GUARDIAN_REBIND) : undefined;
     if (rebind) {
       validateDaemonOwnerIdentity(rebind);
+    } else {
+      const { checkStartupAdmission, startupIntentFromEnv } = await import("./startup/admission.ts");
+      const { readOwnBuild } = await import("./startup/artifact.ts");
+      checkStartupAdmission({ canonicalServerDir: root.serverDir, agentDir: root.agentDir,
+        build: readOwnBuild(), intent: startupIntentFromEnv(process.env) });
     }
     await runGuardian(root.serverDir, rebind);
     return;
@@ -106,7 +111,10 @@ async function main(): Promise<void> {
   const shutdown = (): void => {
     if (stopping) return;
     stopping = true;
-    void daemon.stop().finally(() => process.exit(0));
+    void daemon.stop().catch(error => {
+      log(`shutdown failed: ${String(error)}`);
+      process.exitCode = 1;
+    });
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -145,9 +145,16 @@ export async function runGuardian(serverDir: string, rebind?: DaemonOwnerIdentit
       const owner = inspectDaemonOwner(serverDir);
       if (owner.status === "live" || owner.status === "ambiguous") throw new Error("runtime-unhealthy: existing server owner was not replaced");
       let cleanToken: string | undefined;
-      const child = spawn(process.execPath, [...process.execArgv, fileURLToPath(new URL("../cli.ts", import.meta.url)), "--agent", "pi"], {
-        env: { ...process.env, PI_SERVER_GUARDED_CHILD: "1", PI_SERVER_GUARDIAN_REBIND: "" }, stdio: ["ignore", "inherit", "inherit", "ipc"],
-      });
+      // The server survives guardian loss. It must not inherit a caller's pipe,
+      // otherwise an exited guardian can leave that caller waiting forever for EOF.
+      const inheritedLog = fstatSync(2).isFile();
+      const output = inheritedLog ? 2 : openSync(join(serverDir, "daemon.log"), "a", 0o600);
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn(process.execPath, [...process.execArgv, fileURLToPath(new URL("../cli.ts", import.meta.url)), "--agent", "pi"], {
+          env: { ...process.env, PI_SERVER_GUARDED_CHILD: "1", PI_SERVER_GUARDIAN_REBIND: "" }, stdio: ["ignore", output, output, "ipc"],
+        });
+      } finally { if (!inheritedLog) closeSync(output); }
       child.on("message", message => {
         const record = message as { type?: string; token?: string };
         if (record?.type === "runtime-clean-stop" && typeof record.token === "string") cleanToken = record.token;

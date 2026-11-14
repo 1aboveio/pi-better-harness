@@ -70,6 +70,25 @@ async function liveServer(env: ReturnType<typeof makeEnv>) {
   });
 }
 
+test("guardian signal shutdown closes captured pipes and releases both owners naturally", { timeout: 15_000 }, async t => {
+  const env = makeEnv();
+  const fixture = runtime(env);
+  const closed = once(fixture.child, "close");
+  t.after(async () => {
+    if (fixture.child.exitCode === null && fixture.child.signalCode === null) fixture.child.kill("SIGTERM");
+    await closed;
+  });
+  const server = await liveServer(env);
+  fixture.child.kill("SIGTERM");
+  const [code, signal] = await closed;
+  assert.equal(code, 0, fixture.log());
+  assert.equal(signal, null);
+  assert.equal(ownerIsAlive(server), false);
+  assert.equal(inspectDaemonOwner(env.serverDir).status, "missing");
+  assert.equal(inspectDaemonOwner(env.serverDir, "guardian-owner").status, "missing");
+  assert.equal(JSON.parse(readFileSync(join(env.serverDir, "clean-stop.json"), "utf8")).token, server.token);
+});
+
 test("idle shutdown fault gets one bounded recovery within the shutdown budget", { timeout: 25_000 }, async t => {
   const env = makeEnv(); mkdirSync(env.serverDir);
   // A real persistence fault, not a replaced obligation provider.
@@ -80,7 +99,7 @@ test("idle shutdown fault gets one bounded recovery within the shutdown budget",
   const [code] = await fixture.exited;
   assert.equal(code, 1, fixture.log());
   assert.ok(Date.now() - started < 15000, fixture.log());
-  assert.match(fixture.log(), /EISDIR/);
+  assert.match(readFileSync(join(env.serverDir, "daemon.log"), "utf8"), /EISDIR/);
   assert.match(fixture.log(), /idle recovery budget exhausted/);
   assert.equal(JSON.parse(readFileSync(join(env.serverDir, "guardian-idle-restarts.json"), "utf8")).length, 1);
   assert.equal(inspectDaemonOwner(env.serverDir).status, "dead");
@@ -98,7 +117,8 @@ test("guardian loss binds exact live server without replacing its owner, then fo
   });
   const server = await liveServer(env);
   assert.ok(server.start, "Process-start identity is required for qualified guardian binding; local ps denial must remain visible");
-  original.child.kill("SIGKILL"); await original.exited;
+  const closed = once(original.child, "close");
+  original.child.kill("SIGKILL"); await closed;
   const binding = await waitFor("replacement guardian handshake", async () => {
     const probe = await Client.connect(join(env.serverDir, "pi-server.sock"));
     try {
