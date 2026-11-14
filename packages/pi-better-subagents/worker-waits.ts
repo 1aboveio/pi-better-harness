@@ -872,6 +872,7 @@ function scopeOf(registration: {
  */
 export function createWorkerOperationsHost(options: WorkerOperationsHostOptions): WorkerOperationsHost {
     const created: { host?: OperationBridgeHost } = {};
+    const hosting: { promise?: Promise<OperationBridgeHost> } = {};
     const starting: { promise?: Promise<boolean> } = {};
     const capability: { available: boolean; service?: WorkerOperationService } = { available: false };
     const runs = new Map<string, WorkerRunScope>();
@@ -881,12 +882,15 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
 
     const ensureHost = async (): Promise<OperationBridgeHost> => {
         if (created.host) return created.host;
-        const factory = options.hostFactory ?? createOperationBridgeHost;
-        created.host = await factory({
-            ...(options.logger ? { logger: options.logger } : {}),
-            ...(options.now ? { now: options.now } : {}),
-        });
-        return created.host;
+        if (!hosting.promise) {
+            const factory = options.hostFactory ?? createOperationBridgeHost;
+            hosting.promise = factory({
+                ...(options.logger ? { logger: options.logger } : {}),
+                ...(options.now ? { now: options.now } : {}),
+            }).then((host) => { created.host = host; return host; })
+                .finally(() => { hosting.promise = undefined; });
+        }
+        return hosting.promise;
     };
 
     const start = async (): Promise<boolean> => {
@@ -1190,6 +1194,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
     };
 
     const close = async (): Promise<void> => {
+        try { await hosting.promise; } catch { /* failed creation has no host to close */ }
         const host = created.host;
         created.host = undefined;
         starting.promise = undefined;

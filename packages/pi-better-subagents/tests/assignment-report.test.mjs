@@ -7,12 +7,13 @@ import { EventEmitter } from "node:events";
 import { createWorkerOperationsHost } from "../worker-waits.ts";
 import { createOperationBridgeClient } from "../child-operations.ts";
 import { createToolDescriptor } from "../operation-bridge-types.ts";
+import { createOperationBridgeHost } from "../worker-operations-host.ts";
 import { registerAssignmentAttempt, commitAssignmentTerminal, readOutcome, coordinatorPath } from "../assignment-outcomes.ts";
 import { readAssignmentReport } from "../assignment-report.ts";
 import { openStore } from "../shared-operation-coordinator/index.ts";
 import { writeMeta, readMeta, runDir, logPathFor } from "../registry.ts";
 
-async function fixture(id, registration = {}) {
+async function fixture(id, registration = {}, shared) {
   const workspace = mkdtempSync(join(tmpdir(), "assignment-report-"));
   const binding = { version: 1, assignmentId: id,
     owner: { kind: "worker-conversation", sessionId: id, workspace, branchId: null, goalId: null },
@@ -23,8 +24,8 @@ async function fixture(id, registration = {}) {
   writeFileSync(join(workspace, "work.txt"), "actual synchronous work\n");
   writeMeta({ id, assignment: binding, status: "running", sessionId: id, cwd: workspace, logPath: logPathFor(id),
     pid: process.pid, spawnPid: process.pid, startedAt: 1, promptPreview: "work" });
-  const pi = { events: new EventEmitter() };
-  const host = createWorkerOperationsHost({ pi, childExtensionPath: new URL("../child-operations.ts", import.meta.url).pathname });
+  const pi = shared?.pi ?? { events: new EventEmitter() };
+  const host = shared?.host ?? createWorkerOperationsHost({ pi, childExtensionPath: new URL("../child-operations.ts", import.meta.url).pathname });
   const handle = await host.register({ assignment: binding, runId: id, attemptId: id, conversationId: id, workspace, authorityReference: id,
     ...registration,
     policy: { version: 1, sandbox: null, tools: [], clean: true, deadlineAt: null, authorityReference: id, workspace },
@@ -69,6 +70,21 @@ test("report-only bridge retains actual bytes, retries identically, and rejects 
     const stale = createOperationBridgeClient({ endpoint: f.handle.endpoint, token: "x".repeat(40), runId: f.id, conversationId: f.id });
     try { await assert.rejects(() => stale.handshake(), (error) => ["run-unknown", "run-revoked"].includes(error.code)); } finally { await stale.close(); }
   } finally { await f.close(); }
+});
+
+test("concurrent report-only children share one authenticated transport and teardown", async () => {
+  const pi = { events: new EventEmitter() };
+  const transports = [];
+  const host = createWorkerOperationsHost({ pi, childExtensionPath: new URL("../child-operations.ts", import.meta.url).pathname,
+    hostFactory: async (options) => { const transport = await createOperationBridgeHost(options); transports.push(transport); return transport; } });
+  const [a, b] = await Promise.all([fixture("report-parallel-a", {}, { host, pi }), fixture("report-parallel-b", {}, { host, pi })]);
+  try {
+    assert.equal(a.handle.endpoint, b.handle.endpoint, "one parent host owns both ordinary children");
+    await Promise.all([a.send(), b.send()]);
+    await host.close();
+    await assert.rejects(() => a.send(), (error) => error.code === "closed");
+    await assert.rejects(() => b.send(), (error) => error.code === "closed");
+  } finally { await a.close(); await b.close(); await Promise.all(transports.map((transport) => transport.close())); }
 });
 
 test("a superseded conversation writer lease cannot publish an assignment report", async () => {
