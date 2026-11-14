@@ -151,6 +151,14 @@ class FrozenMap<K, V> extends Map<K, V> {
     }
 }
 
+/** Rebuild the same immutable domain value after a JSON socket round trip. */
+export function catalogSnapshotFromWire(wire: Omit<CatalogSnapshot, "roles" | "agents"> & {
+    roles: Iterable<readonly [string, CatalogEntry]>;
+    agents: Iterable<readonly [string, CatalogEntry]>;
+}): CatalogSnapshot {
+    return deepFreeze({ ...wire, roles: FrozenMap.fill(wire.roles), agents: FrozenMap.fill(wire.agents) });
+}
+
 export function defaultUserRoot(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
     const configured = env.PI_CODING_AGENT_DIR?.trim();
     return configured ? configured : join(home, ".pi", "agent");

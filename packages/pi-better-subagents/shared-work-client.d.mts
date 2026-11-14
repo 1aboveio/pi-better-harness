@@ -1,5 +1,7 @@
 export class WorkClient {
-    constructor(socketPath: string, agentDir: string);
+    constructor(socketPath: string, agentDir: string, requiredCapabilities?: string[]);
+    ready: Promise<any>;
+    request(type: string, params?: object): Promise<any>;
     snapshot?: any;
     onChange(listener: (...args: any[]) => void): () => void;
     subscribe(scope: object): Promise<any>;

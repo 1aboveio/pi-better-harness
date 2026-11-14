@@ -53,6 +53,7 @@ import { resolveRoleAssignment } from "./role-assignment.ts";
 import { saveAgentSessionDefaults, withAgentSessionSettings, type AgentSessionOverrides, type AgentSessionSettings } from "./agent-session-settings.ts";
 import { saveSkillExposure } from "./catalog-skill-edits.ts";
 import type { DiscoveredSkill } from "./skill-picker.ts";
+import { openSharedCatalog } from "./shared-catalog.ts";
 
 const MODEL_PATTERN = /^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 const TIER_PATTERN = /^[a-z][a-z0-9-]{0,32}$/;
@@ -68,6 +69,7 @@ const USAGE = [
 ].join("\n");
 
 export interface AgentCommandDeps {
+    sharedCatalog?: boolean;
     userRoot?: string;
     bundledRoot?: string;
     projectConfigDirName?: string;
@@ -127,6 +129,7 @@ export interface AgentCommandResult {
 }
 
 interface CatalogLocation {
+    snapshot?: CatalogSnapshot;
     cwd: string;
     userRoot: string;
     projectTrusted: boolean;
@@ -196,6 +199,11 @@ export async function executeAgentsCommand(args: string, host: AgentCommandHost,
     }
     const command = parsed.positionals[0]!;
     const loc = location(host, deps);
+    if ((deps.sharedCatalog ?? !deps.userRoot) && ["list", "show", "inspect", "reload"].includes(command)) {
+        const remote = await openSharedCatalog(host.cwd, loc.userRoot, "agents-command", loc.projectTrusted);
+        try { loc.snapshot = await remote.get(loc.sessionSettings); }
+        finally { remote.close(); }
+    }
     if (command === "list") return finishInspection(host, await runList(parsed, loc, deps), deps);
     if (command === "show" || command === "inspect") return finishInspection(host, await runShow(command, parsed, host, loc, deps), deps);
     if (command === "reload") return finish(host, await runReload(parsed, loc, deps));
@@ -250,7 +258,7 @@ async function runList(parsed: ParsedArgs, loc: CatalogLocation, deps: AgentComm
 
 async function runReload(parsed: ParsedArgs, loc: CatalogLocation, deps: AgentCommandDeps): Promise<AgentCommandResult> {
     if (parsed.positionals.length > 1) return result("error", "reload", false, "reload does not take extra arguments.");
-    const listed = presentCatalog(withAgentSessionSettings(refreshCatalog(loc), loc.sessionSettings), deps.enrich, deps.readSkillDefaults);
+    const listed = presentCatalog(loc.snapshot ?? withAgentSessionSettings(refreshCatalog(loc), loc.sessionSettings), deps.enrich, deps.readSkillDefaults);
     return {
         ...result("ok", "reload", false, `Reloaded revision ${listed.revision} for inspection. The next launch reads the files again on its own; this command is not a prerequisite.\n${listed.text}`),
         diagnostics: listed.diagnostics,
@@ -702,6 +710,7 @@ function location(host: AgentCommandHost, deps: AgentCommandDeps): CatalogLocati
 }
 
 function readCatalog(loc: CatalogLocation): CatalogSnapshot {
+    if (loc.snapshot) return loc.snapshot;
     return withAgentSessionSettings(loadCatalog(loc), loc.sessionSettings);
 }
 

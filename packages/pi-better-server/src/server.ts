@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, realpathSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { connect, createServer, type Server, type Socket } from "node:net";
-import { getAgentDir, type RpcCommand } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, ProjectTrustStore, SettingsManager, type RpcCommand } from "@earendil-works/pi-coding-agent";
 import { CompanionManager, type CompanionManagerOptions } from "./companion.ts";
 import { ConnectionControl } from "./control.ts";
 import { checkHello } from "./handshake.ts";
@@ -20,6 +20,7 @@ import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts
 import { runtimeRoot } from "./runtime/root.ts";
 import { WorkReadModel } from "./runtime/read-model.ts";
 import { WorkQueries } from "./runtime/queries.ts";
+import { SharedCatalog } from "./runtime/catalog.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
   /** Defaults to `~/.pi/agent/server` (or `$PI_SERVER_DIR`). */
@@ -89,6 +90,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     cleanupStartup = () => registry.shutdown();
     await registry.resumeAll();
     const nativeHost = new NativeClientHost(registry);
+    const catalog = new SharedCatalog(realpathSync(getAgentDir()), cwd => {
+      const settings = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
+      if (settings.drainErrors().length) throw new Error("Cannot verify project trust");
+      return new ProjectTrustStore(getAgentDir()).get(cwd) ?? settings.getDefaultProjectTrust() === "always";
+    });
     let workModel: WorkReadModel | undefined;
     const work = () => {
       if (!workModel) {
@@ -136,6 +142,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       };
       const control = new ConnectionControl(send);
       let greeted = false;
+      const catalogCommand = catalog.connection();
       let workQueries: WorkQueries | undefined;
       let runtimeInFlight = 0;
 
@@ -186,6 +193,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               nextIdleDeadline: runtimeClients.size > 0 || registry.activeCount > 0 ? null
                 : hostedUsed ? config.daemonIdleMs === 0 || zeroSince === undefined ? null : zeroSince + config.daemonIdleMs
                 : runtimeZeroSince === undefined ? null : runtimeZeroSince + config.runtimeIdleMs } });
+          }
+          if (["runtime_register_catalog", "runtime_get_catalog", "runtime_edit_catalog"].includes(type)) {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            return reply({ data: catalogCommand(command) });
           }
           if (type === "runtime_register_client") {
             if (!greeted) throw new Error("runtime_register_client requires hello");
