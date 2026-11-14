@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { WorkClient } from "./shared-work-client.mjs";
 import { catalogSnapshotFromWire, defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
 import type { AgentSessionOverrides } from "./agent-session-settings.ts";
+import { catalogHostAuthority } from "./catalog-host-admission.ts";
 
 /** Short-lived catalog connection. No transcript or permission authority travels here. */
 export async function openSharedCatalog(cwd: string, userRoot = defaultUserRoot(), sessionId = "catalog", projectAccess?: boolean) {
@@ -18,16 +19,32 @@ export async function openSharedCatalog(cwd: string, userRoot = defaultUserRoot(
     }
     if (registration.version !== 1 || registration.agentDir !== agentDir) throw new Error("Invalid canonical runtime registration");
     const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), agentDir, ["runtime-catalog-v1"]);
+    const register = async () => {
+        const authority = await catalogHostAuthority(agentDir, cwd, join(registration.serverDir, "pi-server.sock"));
+        await client.request("runtime_register_catalog", { cwd, sessionId: authority?.sessionId ?? sessionId, authority, projectAccess: projectAccess === false ? "deny" : undefined });
+    };
     try {
         await client.ready;
-        await client.request("runtime_register_catalog", { cwd, sessionId, projectAccess: projectAccess === false ? "deny" : undefined });
+        await register();
     } catch (error) { client.close(); throw error; }
     return {
         async get(overlay?: AgentSessionOverrides): Promise<CatalogSnapshot> {
+            await register();
             const wire = await client.request("runtime_get_catalog", { overlay });
             return catalogSnapshotFromWire(wire);
         },
-        edit: (edit: Record<string, unknown>) => client.request("runtime_edit_catalog", edit),
+        async edit(edit: Record<string, unknown>) { await register(); return client.request("runtime_edit_catalog", edit); },
+        async scopedAgents(scope: "user" | "project") { await register(); return client.request("runtime_get_catalog_scope", { scope }); },
+        async subscribe(changed: (snapshot: CatalogSnapshot | undefined) => void) {
+            await register();
+            client.onCatalog(wire => {
+                if (wire.status !== "revoked") { changed(catalogSnapshotFromWire(wire)); return; }
+                changed(undefined);
+                if (!client.closed) void register().then(() => client.request("runtime_subscribe_catalog"))
+                    .then(next => changed(catalogSnapshotFromWire(next)), () => changed(undefined));
+            });
+            return catalogSnapshotFromWire(await client.request("runtime_subscribe_catalog"));
+        },
         close: () => client.close(),
     };
 }

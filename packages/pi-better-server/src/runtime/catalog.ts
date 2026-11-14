@@ -1,35 +1,91 @@
 import { realpathSync } from "node:fs";
-import { loadCatalog, saveDefinition, resetRuntimeToBundled, resetUserDefinition } from "./domain/catalog/catalog-store.mjs";
+import { loadCatalog, saveDefinition, resetRuntimeToBundled, resetUserDefinition, listScopedAgents } from "./domain/catalog/catalog-store.mjs";
 import { withAgentSessionSettings, saveAgentSessionDefaults } from "./domain/catalog/agent-session-settings.mjs";
 import { saveSkillExposure } from "./domain/catalog/catalog-skill-edits.mjs";
 import { parseDefinition } from "./domain/catalog/catalog-schema.mjs";
+import { CatalogAdmission } from "./catalog-admission.ts";
+import { createHash } from "node:crypto";
+import { watch, type FSWatcher } from "node:fs";
+import { dirname } from "node:path";
 
 /** One server-owned filesystem catalog; registrations belong to the live socket. */
 export class SharedCatalog {
   private agentDir: string;
-  private trusted: (cwd: string) => boolean;
-  constructor(agentDir: string, trusted: (cwd: string) => boolean) { this.agentDir = agentDir; this.trusted = trusted; }
+  readonly admission: CatalogAdmission;
+  private observers = new Set<() => void>();
+  private timer?: ReturnType<typeof setInterval>;
+  private pending?: ReturnType<typeof setTimeout>;
+  private watchers = new Map<string, { watcher: FSWatcher; references: number }>();
+  constructor(agentDir: string, instanceId: string) { this.agentDir = agentDir; this.admission = new CatalogAdmission(agentDir, instanceId); }
+
+  observe(read: () => any, emit: (snapshot: any) => void) {
+    if (this.observers.size >= 64) throw new Error("catalog-subscription-limit");
+    let revision: string | undefined, seq = 0;
+    const watched: string[] = [];
+    const initial = read();
+    const paths = new Set<string>([this.agentDir, ...[...initial.roles, ...initial.agents].map(([, entry]: any) => dirname(entry.path))]);
+    const notify = () => { this.pending ??= setTimeout(() => { this.pending = undefined; for (const reconcile of this.observers) reconcile(); }, 50); this.pending.unref(); };
+    for (const path of paths) {
+      const existing = this.watchers.get(path);
+      if (existing) { existing.references++; watched.push(path); continue; }
+      try {
+        const watcher = watch(path, { persistent: false }, notify); watcher.on("error", notify);
+        this.watchers.set(path, { watcher, references: 1 }); watched.push(path);
+      } catch { /* Bounded reconciliation also discovers newly created paths. */ }
+    }
+    const reconcile = () => {
+      let snapshot;
+      try { snapshot = read(); } catch { snapshot = { revision: "revoked", status: "revoked", roles: [], agents: [], diagnostics: [] }; }
+      if (snapshot.revision === revision) return;
+      revision = snapshot.revision;
+      emit({ ...snapshot, seq: ++seq });
+    };
+    revision = initial.revision;
+    this.observers.add(reconcile);
+    this.timer ??= setInterval(() => { for (const reconcile of this.observers) reconcile(); }, 1000);
+    this.timer.unref();
+    return { snapshot: { ...initial, seq }, close: () => {
+      this.observers.delete(reconcile);
+      for (const path of watched) { const entry = this.watchers.get(path); if (entry && --entry.references === 0) { entry.watcher.close(); this.watchers.delete(path); } }
+      if (!this.observers.size) { clearInterval(this.timer); this.timer = undefined; clearTimeout(this.pending); this.pending = undefined; }
+    } };
+  }
 
   connection() {
-    let registration: { cwd: string; sessionId: string; projectAccess: boolean } | undefined;
+    let registration: { cwd: string; sessionId: string; projectAccess: boolean; authority?: unknown } | undefined;
     const location = () => {
       if (!registration) throw new Error("catalog-unregistered: register a workspace first");
       if (realpathSync(registration.cwd) !== registration.cwd) throw new Error("catalog-workspace-changed");
-      return { cwd: registration.cwd, userRoot: this.agentDir, projectTrusted: registration.projectAccess && this.trusted(registration.cwd) };
+      if (!registration.authority) throw new Error("catalog-authority-refused: register through the Pi host adapter");
+      const grant = this.admission.verify(registration.authority);
+      if (grant && (grant.cwd !== registration.cwd || grant.sessionId !== registration.sessionId)) throw new Error("catalog-scope-refused");
+      return { cwd: registration.cwd, userRoot: this.agentDir, projectTrusted: registration.projectAccess && grant.projectTrusted === true };
     };
     return (command: Record<string, unknown>) => {
       if (command.type === "runtime_register_catalog") {
         if (typeof command.cwd !== "string" || typeof command.sessionId !== "string" || !command.sessionId) throw new Error("Invalid catalog registration");
-        registration = { cwd: realpathSync(command.cwd), sessionId: command.sessionId, projectAccess: command.projectAccess !== "deny" };
-        return { ...registration, projectTrusted: this.trusted(registration.cwd) };
+        registration = { cwd: realpathSync(command.cwd), sessionId: command.sessionId, projectAccess: command.projectAccess !== "deny", authority: command.authority };
+        location();
+        return { cwd: registration.cwd, sessionId: registration.sessionId, projectTrusted: location().projectTrusted };
       }
       const loc = location();
+      if (command.type === "runtime_get_catalog_scope") {
+        if (command.scope !== "user" && command.scope !== "project") throw new Error("Invalid catalog scope");
+        return listScopedAgents(loc, command.scope);
+      }
       const snapshot = loadCatalog(loc);
       if (command.type === "runtime_get_catalog") {
-        const view = withAgentSessionSettings(snapshot, validateOverlay(command.overlay));
+        const overlay = validateOverlay(command.overlay);
+        if (registration?.authority && command.overlay !== undefined) {
+          const grant = this.admission.verify(registration.authority);
+          const digest = createHash("sha256").update(JSON.stringify(Object.fromEntries(Object.keys(overlay).sort().map(id => [id, Object.fromEntries(Object.entries(overlay[id]!).sort(([a], [b]) => a.localeCompare(b)))])))).digest("hex");
+          if (digest !== grant.overlayDigest) throw new Error("catalog-overlay-refused");
+        }
+        const view = withAgentSessionSettings(snapshot, overlay);
         return { ...view, roles: [...view.roles], agents: [...view.agents] };
       }
       if (command.type !== "runtime_edit_catalog") throw new Error("Unknown catalog command");
+      if (!registration?.authority) throw new Error("catalog-authority-refused: edits require a live host grant");
       // No await between comparison and atomic domain write: cooperating clients
       // serialize here. External writers do not participate in this transaction.
       if (typeof command.expectedRevision !== "string" || command.expectedRevision !== snapshot.revision) throw new Error("catalog-conflict: content revision changed; reload before editing");

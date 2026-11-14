@@ -8,5 +8,6 @@ export class WorkClient {
   resync(): Promise<WorkSnapshot>;
   get(scope: WorkScope): Promise<WorkSnapshot>;
   onChange(listener: (snapshot: WorkSnapshot) => void): () => void;
+  onCatalog(listener: (snapshot: any) => void): () => void;
   close(): void;
 }

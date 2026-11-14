@@ -59,6 +59,21 @@ export function userCatalogPaths(userRoot) {
 export function contentDigest(raw) {
     return createHash("sha256").update(raw).digest("hex");
 }
+/** Import matching needs every source in the destination scope, including shadowed IDs. */
+export function listScopedAgents(input, scope) {
+    const diagnostics = [];
+    if (scope === "project" && !input.projectTrusted)
+        throw new Error("Project catalog access requires a trusted host.");
+    const config = input.projectConfigDirName ?? DEFAULT_PROJECT_CONFIG_DIR_NAME;
+    if (!isSafeConfigDirName(config))
+        throw new Error("Unsafe project config directory");
+    const directory = scope === "project" ? projectCatalogPaths(input.cwd, config).agents : userCatalogPaths(input.userRoot).agents;
+    const occurrences = new Map();
+    collectDirectory(directory, scope, "agent", occurrences, diagnostics);
+    const agents = [...occurrences.values()].flat().flatMap(item => item.parse.definition?.kind === "agent"
+        ? [{ path: item.path, definition: item.parse.definition }] : []);
+    return { agents, diagnostics };
+}
 /** Read every source again. Identical bytes produce the same digest and a new object. */
 export function loadCatalog(input) {
     const loadedAt = new Date().toISOString();

@@ -16,9 +16,31 @@ the current session branch's temporary choices. Model/effort still use the exist
 The server serializes cooperating clients' comparison and atomic writes. A direct
 external editor does not participate in this transaction and can race the revision
 comparison and rename. This is not a filesystem-wide compare-and-swap guarantee.
-External changes are visible on the next catalog request. An admitted launch or
+Open catalog views subscribe to source revisions. The server shares filesystem
+watches and reconciles at most 64 subscribed scopes once per second, including
+paths created after subscription. Revoked subscriptions discard project data;
+the fixed host revalidates its current context before resubscribing. A disconnected
+or missing host requires reopening the view. External changes are
+also visible on the next explicit catalog request. An admitted launch or
 batch retains its frozen snapshot; later changes affect future admission only,
 not an existing attempt, continuation recipe, tools, or sandbox permissions.
+
+The fixed Pi host adapter reads the actual workspace, session, branch, overlay
+revision, and `ctx.isProjectTrusted()` decision. It creates an unguessable grant
+in the canonical agent directory's private `catalog-host-admission` directory
+(0700; records 0600). The server checks the record, secret hash, generation,
+exact scope, and live host connection on every request using that grant.
+Issuance is not a socket operation or a tool. Session strings and wire trust
+booleans cannot issue a grant. The CLI's fixed adapter uses the existing SDK
+trust store rather than accepting a project trust argument.
+
+The host revalidates its context before catalog operations and at a bounded
+interval while connected. Trust or branch changes invalidate the old grant.
+Host shutdown and connection loss revoke it; reconnect requires current host
+validation and a new grant. Session-only trust does not update the user's trust
+store. Grants remain control metadata, never definition fields, index rows,
+protocol logs, or launch recipes. As in the server's existing security model,
+a process fully controlling the same UID is outside this boundary.
 
 `/agents` is one Pi command. Dialogs use `ctx.ui.select`, `confirm`, `input`, and `editor`. `ctx.hasUI` is false in print and JSON mode. When a choice or confirmation is required there, the command returns `clarification-needed` and writes nothing.
 

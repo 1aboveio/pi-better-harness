@@ -28,6 +28,7 @@ import {
 } from "./catalog-schema.ts";
 import {
     createDefinition,
+    catalogSnapshotFromWire,
     defaultUserRoot,
     loadCatalog,
     projectCatalogPaths,
@@ -72,7 +73,7 @@ const USAGE = [
 export interface AgentCommandDeps {
     sharedCatalog?: boolean;
     /** Invocation-local server state; never reused across workspaces or branches. */
-    sharedState?: { snapshot: CatalogSnapshot; edit: (edit: Record<string, unknown>) => Promise<any> };
+    sharedState?: { snapshot: CatalogSnapshot; edit: (edit: Record<string, unknown>) => Promise<any>; scopedAgents: (scope: "user" | "project") => Promise<ReturnType<typeof listScopeAgents>>; beginEdit?: (id: string) => void; onChange?: (changed: () => void) => void; revoked?: boolean };
     userRoot?: string;
     bundledRoot?: string;
     projectConfigDirName?: string;
@@ -205,10 +206,14 @@ export async function executeAgentsCommand(args: string, host: AgentCommandHost,
         const loc = location(host, deps);
         const remote = await openSharedCatalog(host.cwd, loc.userRoot, "agents-command", loc.projectTrusted);
         const writes = new Set<Promise<unknown>>();
+        const listeners = new Set<() => void>();
+        const editRevisions = new Map<string, string>();
         try {
-            const state = { snapshot: await remote.get(), edit(edit: Record<string, unknown>) {
+            const state = { snapshot: await remote.get(), revoked: false, scopedAgents: remote.scopedAgents, beginEdit(id: string) { editRevisions.set(id, state.snapshot.revision); }, onChange(changed: () => void) { listeners.add(changed); }, edit(edit: Record<string, unknown>) {
+                if (state.revoked) return Promise.reject(new Error("catalog-host-revoked: reopen the catalog"));
                 const write = (async () => {
-                    const result = await remote.edit({ ...edit, expectedRevision: state.snapshot.revision });
+                    const result = await remote.edit({ expectedRevision: editRevisions.get(edit.catalogId as string) ?? state.snapshot.revision, ...edit });
+                    if (result.ok) editRevisions.delete(edit.catalogId as string);
                     state.snapshot = await remote.get();
                     return result;
                 })();
@@ -216,6 +221,15 @@ export async function executeAgentsCommand(args: string, host: AgentCommandHost,
                 void write.then(() => writes.delete(write), () => writes.delete(write));
                 return write;
             } };
+            await remote.subscribe(snapshot => {
+                if (snapshot) { state.snapshot = snapshot; state.revoked = false; }
+                else {
+                    state.revoked = true;
+                    state.snapshot = catalogSnapshotFromWire({ schema: state.snapshot.schema, revision: "revoked", digest: "revoked", loadedAt: new Date().toISOString(),
+                        roles: [], agents: [], blocked: [], diagnostics: [diagnostic("catalog-host-revoked", "Catalog access changed. Reopen the catalog.")] });
+                }
+                for (const changed of listeners) changed();
+            });
             return await executeAgentsCommand(args, host, { ...deps, sharedState: state });
         }
         finally { await Promise.allSettled(writes); remote.close(); }
@@ -487,7 +501,8 @@ async function runImport(
         return result("error", "import-codex", false, `Unknown role ${shortRoleName(roleId)}. Valid roles: ${roles.map((role) => shortRoleName(role.id)).join(", ")}. Nothing was imported.`);
     }
     const sourceRef = codexSourceRef(resolved);
-    const existingLookup = matchExisting(listScopeAgents(loc, scope.value).agents, document.proposedId, sourceRef);
+    const scoped = deps.sharedState ? await deps.sharedState.scopedAgents(scope.value) : listScopeAgents(loc, scope.value);
+    const existingLookup = matchExisting(scoped.agents, document.proposedId, sourceRef);
     if (existingLookup.conflict) return clarification("import-codex", `${existingLookup.conflict} Nothing was imported.`);
     if (!roleId) {
         if (!host.hasUI) {
@@ -784,6 +799,8 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
             let viewportHeight = 30;
             await host.ui.custom<void>((tui, theme, _keys, done) =>
                 createCatalogComponent(entries, theme, () => tui.requestRender(), () => done(), view?.id, deps.sessionSettings ? {
+                    onChange: deps.sharedState?.onChange,
+                    beginEdit: deps.sharedState?.beginEdit,
                     get: () => presentCatalog(readCatalog(location(host, deps)), deps.enrich, deps.readSkillDefaults),
                     models: () => deps.editableModels?.() ?? [],
                     scopedModels: () => host.scopedModels ?? [],

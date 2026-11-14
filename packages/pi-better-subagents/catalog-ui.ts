@@ -15,6 +15,8 @@ function settleEdit(result: PendingEdit, done: (result: EditResult) => void, fai
 }
 
 export interface CatalogEditor {
+    beginEdit?(id: string): void;
+    onChange?(changed: () => void): void;
     get(): OperationList;
     /** Available foreground models, used only when the session scope is empty. */
     models(): readonly string[];
@@ -215,6 +217,7 @@ export function createCatalogComponent(
     const highlight = (text: string, width: number) => theme.bg?.("selectedBg", theme.bold?.(cell(text, width)) ?? cell(text, width)) ?? theme.fg("accent", text);
     function report(text: string, failed = false) { message = text; error = failed; requestRender(); }
     function refresh() { if (editor) catalog = editor.get(); }
+    editor?.onChange?.(() => { refresh(); requestRender(); });
     function save() {
         if (!editor || !selected()) return;
         try {
@@ -332,6 +335,7 @@ export function createCatalogComponent(
     function edit() {
         const current = selected();
         if (!current || !editor) return;
+        editor.beginEdit?.(current.id);
         const keys = settingKeys(current);
         const key = keys[settingRow];
         if (!key) { settingRow = 0; return; }

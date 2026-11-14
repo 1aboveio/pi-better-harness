@@ -1,5 +1,5 @@
 import type { AgentSessionOverrides } from "./agent-session-settings.mjs";
-import { CATALOG_SCHEMA_VERSION, type CatalogDefinition, type CatalogKind, type CatalogScope, type Diagnostic, type ParseResult } from "./catalog-schema.mjs";
+import { CATALOG_SCHEMA_VERSION, type CatalogDefinition, type AgentDefinition, type CatalogKind, type CatalogScope, type Diagnostic, type ParseResult } from "./catalog-schema.mjs";
 export type { CatalogScope, CatalogKind, CatalogDefinition, Diagnostic, ParseResult };
 export declare const DEFAULT_PROJECT_CONFIG_DIR_NAME = ".pi";
 export declare const SOURCE_PRECEDENCE: readonly ["project", "user", "bundled"];
@@ -95,6 +95,14 @@ export declare function userCatalogPaths(userRoot: string): {
     agents: string;
 };
 export declare function contentDigest(raw: string): string;
+/** Import matching needs every source in the destination scope, including shadowed IDs. */
+export declare function listScopedAgents(input: LoadCatalogInput, scope: "user" | "project"): {
+    agents: {
+        path: string;
+        definition: AgentDefinition;
+    }[];
+    diagnostics: Diagnostic[];
+};
 /** Read every source again. Identical bytes produce the same digest and a new object. */
 export declare function loadCatalog(input: LoadCatalogInput): CatalogSnapshot;
 export declare function refreshCatalog(input: LoadCatalogInput): CatalogSnapshot;

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork, execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, symlinkSync, chmodSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { WorkClient } from "../src/runtime/work-client.mjs";
@@ -28,19 +28,31 @@ test("real daemon catalog isolates two projects, freezes branch reads, rejects s
   });
   let errors = ""; child.stderr!.on("data", data => { errors += data; });
   const clients: WorkClient[] = [];
+  const adapters: any[] = [];
   try {
     const toolPath = new URL("../../pi-better-subagents/agents-catalog-tool.ts", import.meta.url).href;
     const commandPath = new URL("../../pi-better-subagents/agent-commands.ts", import.meta.url).href;
     const { agentsCatalogTool } = await import(toolPath);
     const { executeAgentsCommand } = await import(commandPath);
+    const admissionPath = new URL("../../pi-better-subagents/catalog-host-admission.ts", import.meta.url).href;
+    const { createCatalogHostAdapter, noteCatalogHostContext, closeCatalogHost } = await import(admissionPath);
     const [message] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(`startup failed: ${errors}`); })]);
     for (const cwd of [projects[0], projects[0], projects[1]]) {
       const client = new WorkClient(message.ready, agent, ["runtime-catalog-v1"]); clients.push(client);
+      const adapter = createCatalogHostAdapter(); adapters.push(adapter);
+      adapter.noteCatalogHostContext({ cwd, isProjectTrusted: () => trust.get(cwd) === true, sessionManager: { getSessionId: () => `pi-${clients.length}` } }, () => ({}));
       await client.ready;
-      await client.request("runtime_register_catalog", { cwd, sessionId: `pi-${clients.length}`, projectTrusted: true });
+      const authority = await adapter.catalogHostAuthority(agent, cwd, message.ready);
+      await client.request("runtime_register_catalog", { cwd, sessionId: authority.sessionId, authority });
     }
     writeFileSync(join(agent, "server-registration-v1.json"), JSON.stringify({ version: 1, agentDir: agent, serverDir: transport }));
-    const get = (index: number, overlay?: object) => clients[index]!.request("runtime_get_catalog", { overlay });
+    const get = async (index: number, overlay?: object) => {
+      const cwd = index === 2 ? projects[1] : projects[0];
+      adapters[index].noteCatalogHostContext({ cwd, isProjectTrusted: () => trust.get(cwd) === true, sessionManager: { getSessionId: () => `pi-${index + 1}` } }, () => overlay ?? {});
+      const authority = await adapters[index].catalogHostAuthority(agent, cwd, message.ready);
+      await clients[index]!.request("runtime_register_catalog", { cwd, sessionId: authority.sessionId, authority });
+      return clients[index]!.request("runtime_get_catalog", { overlay });
+    };
     const role = (snapshot: any) => new Map(snapshot.roles).get("role.fixture") as any;
     const first = await get(0);
     assert.equal(role(first).definition.name, "Project0");
@@ -49,6 +61,7 @@ test("real daemon catalog isolates two projects, freezes branch reads, rejects s
     for (const cwd of projects) {
       const deps = { userRoot: agent, sharedCatalog: true };
       const host = { cwd, isProjectTrusted: () => true };
+      noteCatalogHostContext(host, () => ({}));
       const Type = { Object: (v: unknown) => v, String: (v?: unknown) => v, Optional: (v: unknown) => v };
       const tool = agentsCatalogTool(Type, deps);
       const listed = await tool.execute("list", { action: "list" }, undefined, undefined, host);
@@ -68,6 +81,7 @@ test("real daemon catalog isolates two projects, freezes branch reads, rejects s
     const sessionSettings = createAgentSessionSettings({ appendEntry: (...entry: unknown[]) => branchEntries.push(entry) });
     sessionSettings.change("role.fixture", "model", "openai/gpt-6.1-sol");
     sessionSettings.change("role.fixture", "effort", "medium");
+    noteCatalogHostContext({ cwd: projects[0], isProjectTrusted: () => true }, () => sessionSettings.snapshot());
     const uiSaved = await executeAgentsCommand("inspect role.fixture", {
       cwd: projects[0], isProjectTrusted: () => true, hasUI: true, mode: "tui",
       ui: { setWidget() {}, notify() {}, custom(factory: Function) {
@@ -102,8 +116,8 @@ test("real daemon catalog isolates two projects, freezes branch reads, rejects s
     assert.equal(role(revoked).definition.name, "Personal");
     await assert.rejects(clients[0]!.request("runtime_edit_catalog", { action: "definition", catalogId: "role.fixture", scope: "project", markdown: markdown("Denied"), expectedRevision: revoked.revision }), /catalog-untrusted/);
     await assert.rejects(get(1, { "role.fixture": { apiKey: "refused" } }), /Invalid catalog preference/);
-    await clients[1]!.request("runtime_register_catalog", { cwd: projects[0], sessionId: "forged-session", projectTrusted: true, hostId: "forged-host" });
-    assert.equal(role(await get(1)).scope, "user", "wire host/session/trust claims cannot elevate a revoked project");
+    await assert.rejects(clients[1]!.request("runtime_register_catalog", { cwd: projects[0], sessionId: "forged-session", projectTrusted: true, hostId: "forged-host" }), /catalog-authority-refused/);
+    await assert.rejects(clients[1]!.request("runtime_get_catalog"), /catalog-authority-refused/);
     const current = await get(2);
     await assert.rejects(clients[2]!.request("runtime_edit_catalog", { action: "definition", scope: "bundled", catalogId: "role.fixture", markdown: markdown("Denied"), expectedRevision: current.revision }), /builtins are read-only/);
     await assert.rejects(clients[2]!.request("runtime_edit_catalog", { action: "definition", scope: "project", catalogId: "role.fixture", markdown: markdown("Secret").replace("name: Secret", "name: Secret\nextensions:\n  apiKey: refused"), expectedRevision: current.revision }), /credential/);
@@ -117,12 +131,49 @@ test("real daemon catalog isolates two projects, freezes branch reads, rejects s
     writeFileSync(join(outside, "escape.md"), markdown("Escaped").replace("role.fixture", "role.escape"));
     symlinkSync(join(outside, "escape.md"), join(projects[1], ".pi/agents/roles/escape.md"));
     assert.equal(new Map((await get(2)).roles).has("role.escape"), false, "symlink escape is never admitted");
+    noteCatalogHostContext({ cwd: projects[1], isProjectTrusted: () => true }, () => ({}));
     const create = await executeAgentsCommand('create --role fixture --id agent.created --name Created --instructions "Owned fixture"', {
       cwd: projects[1], isProjectTrusted: () => true, hasUI: false, ui: {} as never,
     }, { userRoot: agent, sharedCatalog: true });
     assert.equal(create.wrote, true);
     assert.equal(new Map((await get(2)).agents).has("agent.created"), true, "slash create is visible through the shared server");
+    let ephemeralTrusted = true;
+    const ephemeral = createCatalogHostAdapter(); adapters.push(ephemeral);
+    ephemeral.noteCatalogHostContext({ cwd: projects[0], isProjectTrusted: () => ephemeralTrusted,
+      sessionManager: { getSessionId: () => "ephemeral", getLeafId: () => "branch-a" } }, () => ({}));
+    const authority = await ephemeral.catalogHostAuthority(agent, projects[0], message.ready);
+    const observer = new WorkClient(message.ready, agent, ["runtime-catalog-v1"]); clients.push(observer); await observer.ready;
+    await observer.request("runtime_register_catalog", { cwd: projects[0], sessionId: "ephemeral", authority });
+    assert.equal(role(await observer.request("runtime_get_catalog")).scope, "project", "session-only host trust overrides no persisted grant");
+    await assert.rejects(observer.request("runtime_get_catalog", { overlay: { "role.fixture": { effort: "high" } } }), /catalog-overlay-refused/);
+    const grantFile = join(agent, "catalog-host-admission", `${authority.id}.json`);
+    chmodSync(grantFile, 0o644);
+    await assert.rejects(observer.request("runtime_get_catalog"), /catalog-authority-refused/);
+    chmodSync(grantFile, 0o600);
+    for (const forged of [{ ...authority, branchId: "branch-b" }, { ...authority, sessionId: "foreign" }, { ...authority, cwd: projects[1] }, { ...authority, secret: "forged" }, { ...authority, generation: "foreign" }]) {
+      await assert.rejects(observer.request("runtime_register_catalog", { cwd: projects[0], sessionId: "ephemeral", authority: forged }));
+    }
+    await observer.request("runtime_register_catalog", { cwd: projects[0], sessionId: "ephemeral", authority });
+    const changed = new Promise<void>(resolve => {
+      const stop = observer.onCatalog((snapshot: any) => { if (snapshot.roles?.some(([id, entry]: any) => id === "role.fixture" && entry.definition?.name === "Observed")) { stop(); resolve(); } });
+    });
+    await observer.request("runtime_subscribe_catalog");
+    writeFileSync(join(projects[0], ".pi/agents/roles/fixture.md"), markdown("Observed"));
+    await changed;
+    const revokedEvent = new Promise<void>(resolve => { const stop = observer.onCatalog((snapshot: any) => { if (snapshot.status === "revoked") { assert.deepEqual(snapshot.roles, []); stop(); resolve(); } }); });
+    ephemeralTrusted = false;
+    const revalidated = await ephemeral.catalogHostAuthority(agent, projects[0], message.ready);
+    await assert.rejects(observer.request("runtime_get_catalog"));
+    await assert.rejects(observer.request("runtime_bind_catalog_host", { authority }), "a revoked grant cannot be rebound or replayed");
+    await revokedEvent;
+    await observer.request("runtime_register_catalog", { cwd: projects[0], sessionId: "ephemeral", authority: revalidated });
+    assert.equal(role(await observer.request("runtime_get_catalog")).scope, "user");
+    ephemeral.closeCatalogHost();
+    await assert.rejects(observer.request("runtime_get_catalog"), "host shutdown revokes even an otherwise well-scoped grant");
   } finally {
+    for (const adapter of adapters) adapter.closeCatalogHost();
+    const admissionPath = new URL("../../pi-better-subagents/catalog-host-admission.ts", import.meta.url).href;
+    (await import(admissionPath)).closeCatalogHost();
     for (const client of clients) client.close();
     if (child.exitCode === null) { const exited = once(child, "exit"); child.send("stop"); await exited; }
     rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });

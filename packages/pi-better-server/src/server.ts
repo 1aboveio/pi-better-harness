@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, realpathSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { connect, createServer, type Server, type Socket } from "node:net";
-import { getAgentDir, ProjectTrustStore, SettingsManager, type RpcCommand } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type RpcCommand } from "@earendil-works/pi-coding-agent";
 import { CompanionManager, type CompanionManagerOptions } from "./companion.ts";
 import { ConnectionControl } from "./control.ts";
 import { checkHello } from "./handshake.ts";
@@ -90,11 +90,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     cleanupStartup = () => registry.shutdown();
     await registry.resumeAll();
     const nativeHost = new NativeClientHost(registry);
-    const catalog = new SharedCatalog(realpathSync(getAgentDir()), cwd => {
-      const settings = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
-      if (settings.drainErrors().length) throw new Error("Cannot verify project trust");
-      return new ProjectTrustStore(getAgentDir()).get(cwd) ?? settings.getDefaultProjectTrust() === "always";
-    });
+    const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
     let workModel: WorkReadModel | undefined;
     const work = () => {
       if (!workModel) {
@@ -143,6 +139,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       const control = new ConnectionControl(send);
       let greeted = false;
       const catalogCommand = catalog.connection();
+      let catalogSubscription: { close(): void } | undefined;
       let workQueries: WorkQueries | undefined;
       let runtimeInFlight = 0;
 
@@ -194,7 +191,22 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                 : hostedUsed ? config.daemonIdleMs === 0 || zeroSince === undefined ? null : zeroSince + config.daemonIdleMs
                 : runtimeZeroSince === undefined ? null : runtimeZeroSince + config.runtimeIdleMs } });
           }
-          if (["runtime_register_catalog", "runtime_get_catalog", "runtime_edit_catalog"].includes(type)) {
+          if (type === "runtime_bind_catalog_host") {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            catalog.admission.bind(command.authority, socket);
+            return reply({ data: { bound: true } });
+          }
+          if (type === "runtime_subscribe_catalog") {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            catalogSubscription?.close();
+            const subscription = catalog.observe(() => catalogCommand({ type: "runtime_get_catalog", overlay: command.overlay }), snapshot => {
+              if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+              send({ type: "event", event: { type: "runtime_catalog_snapshot", snapshot } } as unknown as ServerMessage);
+            });
+            catalogSubscription = subscription;
+            return reply({ data: subscription.snapshot });
+          }
+          if (["runtime_register_catalog", "runtime_get_catalog", "runtime_get_catalog_scope", "runtime_edit_catalog"].includes(type)) {
             if (!greeted) throw new Error(`${type} requires hello`);
             return reply({ data: catalogCommand(command) });
           }
@@ -356,6 +368,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       socket.on("data", (chunk: string) => decoder.push(chunk));
       socket.on("error", () => undefined);
       socket.on("close", () => {
+        catalogSubscription?.close();
+        catalog.admission.close(socket);
         workQueries?.close();
         sockets.delete(socket);
         runtimeClients.delete(socket);

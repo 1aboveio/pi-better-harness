@@ -241,6 +241,7 @@ import {
 } from "./worker-waits.ts";
 import { defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
 import { restrictContextFilesToWorktree } from "./shared-worktree-context.ts";
+import { noteCatalogHostContext, closeCatalogHost } from "./catalog-host-admission.ts";
 
 const SUBAGENT_MODE_ACTIONS: readonly AutocompleteItem[] = [
     { value: "history", label: "history", description: "Inspect or cancel waits from other sessions" },
@@ -2596,6 +2597,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     function catalogHostFrom(ctx: ExtensionContext): CatalogHost {
+        noteCatalogHostContext(ctx, () => agentSessionSettings.snapshot());
         if (typeof ctx.sessionManager?.getBranch === "function") agentSessionSettings.restore(ctx);
         catalogModelRegistry = ctx.modelRegistry;
         const cfg = loadConfig();
@@ -4428,6 +4430,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("session_before_switch", () => {
+        closeCatalogHost();
         agentSessionSettings.clear();
         catalogModelRegistry = undefined;
         activeCallbackOrigin = undefined;
@@ -4441,6 +4444,7 @@ export default function (pi: ExtensionAPI) {
 
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (event, ctx) => {
+        closeCatalogHost();
         stopWorkObservation();
         if (outcomeTicker) clearInterval(outcomeTicker);
         outcomeTicker = undefined;
