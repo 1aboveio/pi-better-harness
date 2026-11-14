@@ -73,7 +73,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
   const started = performance.now();
   // Exercise the real extension entrypoints before a CLI or fixture registers the root.
   const backgroundSource = join(evidence, "pi-better-background-tasks/node_modules/pi-better-background-tasks/src");
-  const coldScript = `
+  const entryScript = `
     import assert from 'node:assert/strict';
     import {createJiti} from 'jiti';
     import {pathToFileURL} from 'node:url';
@@ -84,6 +84,8 @@ test("packed standalone packages use one pinned socket runtime, including cached
     const {registerTools}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "tools.ts"))}).href);
     const {registerBackgroundTasksGoalProvider}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "goal-provider.ts"))}).href);
     const {closeBackgroundObservation}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "work-observation.ts"))}).href);
+  `;
+  const coldScript = entryScript + `
     try {
       registerTools(pi); registerBackgroundTasksGoalProvider(pi);
       const listed=await tools.get('bg_task_list').execute('cold',{},undefined,undefined,ctx);
@@ -175,8 +177,51 @@ test("packed standalone packages use one pinned socket runtime, including cached
     writeFileSync(`${artifactBase}.json`, originalManifest); writeFileSync(`${artifactBase}.gz`, originalArchive);
   }
   await stop();
+  // R1: durable transport registration survives both clean exit and a crashed cached connection.
+  const recoveryScript = entryScript + `
+    import {readFileSync} from 'node:fs';
+    const {inspectDaemonOwner}=await import(${JSON.stringify(new URL("../daemon-owner.mjs", pathToFileURL(clients[1]!)).href)});
+    const transport=process.env.PI_SERVER_DIR;
+    const registration=readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8');
+    const owner=()=>{const current=inspectDaemonOwner(transport);assert.equal(current.status,'live');return current.owner};
+    const stop=async()=>{const previous=owner();process.kill(previous.pid,'SIGTERM');const deadline=Date.now()+10000;
+      while(inspectDaemonOwner(transport).status==='live'&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));
+      assert.notEqual(inspectDaemonOwner(transport).status,'live');return previous.pid;};
+    const listed=async(name='bg_task_list')=>{const result=await tools.get(name).execute('recovery',{action:'list'},undefined,undefined,ctx);assert.match(result.content[0].text,/No background tasks found/);};
+    let paused;
+    try {
+      registerTools(pi);registerBackgroundTasksGoalProvider(pi);
+      await listed();const first=owner().pid;
+      await provider.getActivity(ctx); // retain this exact production client's connection
+      await stop();assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
+      assert.deepEqual((await provider.getActivity(ctx)).items,[]);assert.notEqual(owner().pid,first);await listed();
+      const crashed=owner().pid;process.kill(crashed,'SIGSTOP');
+      const interrupted=provider.getActivity(ctx);await new Promise(r=>setImmediate(r));process.kill(crashed,'SIGKILL');
+      assert.deepEqual((await interrupted).items,[]);assert.notEqual(owner().pid,crashed);await listed();
+      await stop();closeBackgroundObservation(pi);await listed('bg_status');
+      assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
+      assert.deepEqual((await provider.getActivity({...ctx,sessionManager:{getSessionId:()=> 'foreign'}})).items,[]);
+      paused=owner().pid;process.kill(paused,'SIGSTOP');closeBackgroundObservation(pi);
+      await assert.rejects(listed(),/runtime-unhealthy:.*timed out/);assert.equal(owner().pid,paused);
+      assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
+      console.log(JSON.stringify({healthyRecovery:true,cachedDisconnectRecovered:true,interruptedQueryRecovered:true,liveOwnerRefused:true}));
+    } finally {if(paused)process.kill(paused,'SIGCONT');closeBackgroundObservation(pi)}
+  `;
+  const recovery = await execute(process.execPath, ["--input-type=module", "-e", recoveryScript], workspace, env);
+  writeFileSync(join(evidence, "background-recovery.log"), recovery.stdout + recovery.stderr);
+  assert.equal(recovery.code, 0, recovery.stderr);
+  assert.equal(JSON.parse(recovery.stdout).healthyRecovery, true);
+  await stop();
   const releaseOwner = claimDaemonOwner(serverDir);
   try {
+    const ownerBefore = inspectDaemonOwner(serverDir);
+    const backgroundRefusal = await execute(process.execPath, ["--input-type=module", "-e", entryScript + `
+      try {registerTools(pi);await assert.rejects(tools.get('bg_task_list').execute('live-owner',{},undefined,undefined,ctx),/existing live owner/)}
+      finally {closeBackgroundObservation(pi)}
+    `], workspace, env);
+    writeFileSync(join(evidence, "background-live-owner-refusal.log"), backgroundRefusal.stdout + backgroundRefusal.stderr);
+    assert.equal(backgroundRefusal.code, 0, backgroundRefusal.stderr);
+    assert.deepEqual(inspectDaemonOwner(serverDir), ownerBefore);
     const live = await execute(process.execPath, [clients[1]!], workspace, { ...env, PI_SERVER_DIR: join(evidence, "third-transport") });
     assert.notEqual(live.code, 0); assert.match(live.stderr, /existing live owner/);
   } finally { releaseOwner(); }

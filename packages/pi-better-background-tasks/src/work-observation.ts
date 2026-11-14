@@ -14,6 +14,20 @@ export function onBackgroundObservation(pi: ExtensionAPI, notify: () => void): (
 /** A query connection grants no supervisor, transcript writer or retention authority. */
 export function backgroundObservation(pi: ExtensionAPI, ctx: ExtensionContext, history = false, all = false): Promise<any> {
   const scope = { background: true, cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId() };
+  const read = async (retry: boolean): Promise<any> => {
+    const connection = observationClient(pi, scope);
+    const client = await connection;
+    try { return await client.get({ ...scope, backgroundHistory: history, backgroundAll: all }); }
+    catch (error) {
+      if (!retry || !client.closed) throw error;
+      if (clients.get(pi) === connection) clients.delete(pi);
+      return read(false);
+    }
+  };
+  return read(true);
+}
+
+function observationClient(pi: ExtensionAPI, scope: { background: boolean; cwd: string; sessionId?: string }): Promise<any> {
   let pending = clients.get(pi);
   if (!pending) {
     pending = (async () => {
@@ -34,23 +48,31 @@ export function backgroundObservation(pi: ExtensionAPI, ctx: ExtensionContext, h
       if (registration.version !== 1 || registration.agentDir !== root) throw new Error("Invalid canonical runtime registration");
       const module = new URL("./shared-work-client.mjs", import.meta.url).href;
       const { WorkClient } = await import(module);
-      const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-background-state-v1"]);
-      let subscribed = false;
-      client.onChange(() => {
-        if (clients.get(pi) !== pending) return;
-        if (client.closed) clients.delete(pi);
-        if (!subscribed) return;
-        for (const notify of listeners.get(pi) ?? []) notify();
-      });
-      try { await client.subscribe(scope); }
-      catch (error) { client.close(); throw error; }
-      subscribed = true;
-      return client;
+      const connect = async () => {
+        const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-background-state-v1"]);
+        let subscribed = false;
+        client.onChange(() => {
+          if (!subscribed || clients.get(pi) !== pending) return;
+          if (client.closed) clients.delete(pi);
+          for (const notify of listeners.get(pi) ?? []) notify();
+        });
+        try { await client.subscribe(scope); }
+        catch (error) { client.close(); throw error; }
+        subscribed = true;
+        return client;
+      };
+      try { return await connect(); }
+      catch (error) {
+        if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+        // Registration chooses transport; only the owner-safe installer may recover it.
+        await ensure();
+        return connect();
+      }
     })();
     clients.set(pi, pending);
     pending.catch(() => { if (clients.get(pi) === pending) clients.delete(pi); });
   }
-  return pending.then(client => client.get({ ...scope, backgroundHistory: history, backgroundAll: all }));
+  return pending;
 }
 
 export function closeBackgroundObservation(pi: ExtensionAPI): void {
