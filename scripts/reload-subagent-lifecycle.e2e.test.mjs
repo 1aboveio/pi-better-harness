@@ -50,21 +50,26 @@ process.env.TMP = tmp;
 process.env.TEMP = tmp;
 process.env.PI_CODING_AGENT_DIR = agentDir;
 
-// Fake `pi` child: one assistant message, wait for the release marker, then a
-// coherent terminal event (agent_end) and exit 0.
+// Fake `pi` child: retain an answer across reload, then explicitly acknowledge
+// its checked evidence (positive case) before agent_end. The negative case
+// exits coherently without that decision, just like the original #744 report.
 const FAKE_CHILD = [
   `#!${process.execPath}`,
   'const { existsSync } = require("node:fs");',
-  'const message = { role: "assistant", content: [{ type: "text", text: "reload-survives answer" }] };',
+  'const unfinished = process.argv.includes("reload unfinished");',
+  'const message = { role: "assistant", content: [{ type: "text", text: unfinished ? "Assessment unfinished" : "reload-survives answer" }] };',
   'console.log(JSON.stringify({ type: "message_end", message }));',
   'const timer = setInterval(() => {',
   `  if (!existsSync(${JSON.stringify(release)})) return;`,
   '  clearInterval(timer);',
+  `  if (!unfinished) require(${JSON.stringify(join(repoRoot, "scripts/fixtures/reload-subagent-completion.cjs"))})(process.argv[process.argv.indexOf("--session-id") + 1]);`,
   '  console.log(JSON.stringify({ type: "agent_end", messages: [message] }));',
   '}, 50);',
   "",
 ].join("\n");
 writeFileSync(join(fakeBin, "pi"), FAKE_CHILD);
+// A workspace-local TMPDIR may otherwise inherit the repository's ESM mode.
+writeFileSync(join(fakeBin, "package.json"), JSON.stringify({ type: "commonjs" }));
 chmodSync(join(fakeBin, "pi"), 0o755);
 
 const originalPath = process.env.PATH ?? "";
@@ -80,6 +85,8 @@ const { createAssistantMessageEventStream, InMemoryCredentialStore } = await imp
 // ones the session loads, sharing only the disk.
 const registry = await import("../packages/pi-better-subagents/registry.ts");
 const { readOutcome, outcomeTranscriptReceipt } = await import("../packages/pi-better-subagents/assignment-outcomes.ts");
+const { openStore } = await import("../packages/pi-better-subagents/shared-operation-coordinator/index.ts");
+const { coordinatorPath } = await import("../packages/pi-better-subagents/assignment-outcomes.ts");
 
 const EXTENSIONS = [join(repoRoot, "packages/pi-better-subagents/index.ts")];
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -165,19 +172,25 @@ async function openSession(project) {
   };
 }
 
-test("a real /reload keeps a live subagent child running and delivers its completion once", async () => {
+for (const verified of [true, false]) {
+test(verified ? "a real /reload keeps a live subagent child running and delivers its completion once"
+  : "a real /reload delivers unfinished exit-zero work once without a success decision", async () => {
+  rmSync(release, { force: true });
   process.env.PATH = `${fakeBin}:${originalPath}`;
   process.env.PI_BETTER_CALLBACK_BATCH_MS = "50";
-  const project = dir("live-project");
+  const answer = verified ? "reload-survives answer" : "Assessment unfinished";
+  const project = dir(verified ? "live-project" : "unfinished-project");
   const host = await openSession(project);
   try {
     await host.start();
-    const spawned = await host.call("subagent_spawn", { prompt: "reload survives", clean: true, sandbox: false, cwd: project });
+    const spawned = await host.call("subagent_spawn", { prompt: verified ? "reload survives" : "reload unfinished", clean: true, sandbox: false, cwd: project });
     const id = spawned.match(/id=(\S+)/)?.[1];
     const pid = Number(spawned.match(/\(pid (\d+)\)/)?.[1]);
     assert.ok(id && pid);
     await waitFor("the child to start writing", () => {
-      try { return readFileSync(registry.logPathFor(id), "utf8").includes("reload-survives answer"); } catch { return false; }
+      const meta = registry.readMeta(id);
+      assert.ok(!meta || meta.status === "running", `child exited before fixture output: ${JSON.stringify(meta)}\n${readFileSync(registry.logPathFor(id), "utf8")}`);
+      try { return readFileSync(registry.logPathFor(id), "utf8").includes(answer); } catch { return false; }
     });
     assert.equal(registry.readMeta(id).status, "running");
 
@@ -209,11 +222,18 @@ test("a real /reload keeps a live subagent child running and delivers its comple
       const record = readOutcome(registry.readMeta(id));
       return record?.deliveryReceipt ? record : undefined;
     });
-    assert.equal(outcome.outcome, "succeeded");
+    assert.equal(outcome.outcome, verified ? "succeeded" : "failed");
+    const store = openStore({ path: coordinatorPath() });
+    try {
+      const waits = store.listWaits({ owner: done.assignment.owner }).filter((wait) => wait.origin?.assignmentRef === done.assignment.assignmentId);
+      assert.equal(waits.length, verified ? 1 : 0);
+      if (verified) assert.equal(waits[0].acknowledgement.disposition, "assignment-complete", "success has a real completion decision, not only exit zero");
+      else assert.match(outcome.reason, /completion is unverified.*continue unfinished work/i);
+    } finally { store.close(); }
     assert.equal(outcome.recipient.sessionId, host.sessionId);
     assert.equal(outcomeTranscriptReceipt(host.session.sessionManager.getBranch(), outcome.eventId), outcome.deliveryReceipt.entryId);
     assert.equal(outcome.disposition, null, "delivery alone is not parent consumption");
-    assert.match(await host.call("subagent_result", { id }), /reload-survives answer/);
+    assert.ok((await host.call("subagent_result", { id })).includes(answer));
     await host.call("subagent_result", { id, outcome_revision: outcome.revision, disposition: "consumed", note: "Inspected the retained answer after reload." });
     assert.equal(readOutcome(registry.readMeta(id)).disposition.kind, "consumed");
 
@@ -230,6 +250,7 @@ test("a real /reload keeps a live subagent child running and delivers its comple
     process.env.PATH = originalPath;
   }
 });
+}
 
 test("a real /reload finalizes interrupted work from the child's own log, not as lost", async () => {
   process.env.PATH = `${fakeBin}:${originalPath}`;
