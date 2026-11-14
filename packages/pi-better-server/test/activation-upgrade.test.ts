@@ -320,21 +320,25 @@ test("pending session creation defers activation and finishes before successor a
   assert.deepEqual((await ready.client.call({ type: "list_sessions" })).data.sessions.map((item: any) => item.sessionId), [created.sessionId]);
 });
 
-test("pending dialog stays answerable and its result persists through automatic activation", { timeout: 45_000 }, async t => {
-  const env = fixture(t);
-  const before = staged(env, "dialog-before"), after = staged(env, "dialog-after");
-  const client = await connected(t, env, (await activate(env, before, "initial")).readiness);
-  const sessionId = await session(client, env);
-  const prompt = client.call({ type: "prompt", sessionId, message: "ask upgrade answer" });
-  const dialog = await waitFor("pending dialog", async () => (await client.call({ type: "get_state", sessionId })).data.needsInput[0]);
-  assert.equal((await activate(env, after, "dialog-upgrade")).status, "deferred");
-  await waiting(env, /Wait for remote dialogs to finish/);
-  assert.equal((await client.call({ type: "extension_ui_response", sessionId, requestId: dialog.id, value: "keep this answer" })).success, true);
-  assert.equal((await prompt).success, true);
-  const ready = await successor(t, env, after);
-  const snapshot = await ready.client.call({ type: "client_snapshot", sessionId });
-  assert.match(JSON.stringify(snapshot.data.messages), /answer:keep this answer/);
-});
+for (const publicationRace of [false, true]) {
+  test(`pending dialog stays answerable and its result persists through automatic activation${publicationRace ? " with a concurrent stop publication" : ""}`, { timeout: 45_000 }, async t => {
+    const env = fixture(t);
+    if (publicationRace) env.vars.NODE_OPTIONS = `--import=${new URL("./fixtures/activation-publication-race.mjs", import.meta.url).href}`;
+    const before = staged(env, "dialog-before"), after = staged(env, "dialog-after");
+    const client = await connected(t, env, (await activate(env, before, "initial")).readiness);
+    const sessionId = await session(client, env);
+    const prompt = client.call({ type: "prompt", sessionId, message: "ask upgrade answer" });
+    const dialog = await waitFor("pending dialog", async () => (await client.call({ type: "get_state", sessionId })).data.needsInput[0]);
+    assert.equal((await activate(env, after, "dialog-upgrade")).status, "deferred");
+    await waiting(env, /Wait for remote dialogs to finish/);
+    if (publicationRace) await waitFor("worker observes prepared activation", gate(env, "publication").started);
+    assert.equal((await client.call({ type: "extension_ui_response", sessionId, requestId: dialog.id, value: "keep this answer" })).success, true);
+    assert.equal((await prompt).success, true);
+    const ready = await successor(t, env, after);
+    const snapshot = await ready.client.call({ type: "client_snapshot", sessionId });
+    assert.match(JSON.stringify(snapshot.data.messages), /answer:keep this answer/);
+  });
+}
 
 test("pending background observation and active background work protect the owner without holding admission", { timeout: 45_000 }, async t => {
   const env = fixture(t);
@@ -419,11 +423,13 @@ for (const otherCaller of [false, true]) {
   test(`precommit cancellation ${otherCaller ? "preserves a coalesced timeout reservation" : "removes the last reservation without launching"}`, { timeout: 30_000 }, async t => {
     const env = fixture(t);
     const runtime = staged(env, `cancel-${otherCaller}`);
+    if (otherCaller) env.vars.NODE_OPTIONS = `--import=${new URL("./fixtures/activation-claim-race.mjs", import.meta.url).href}`;
     const release = await holdCoordinator(t, env);
     if (otherCaller) {
       const timeout = await run(env, runtime, [...activationArgs(runtime, env.agentDir, env.serverDir, "same-operation"), "--timeout-ms", "1"]).result;
       assert.equal(timeout.status, "deferred");
       assert.equal(reservations(env).length, 1);
+      await waitFor("timed-out worker retains its contended scratch claim", gate(env, "claim").started);
     }
     const caller = run(env, runtime, activationArgs(runtime, env.agentDir, env.serverDir, "same-operation"), 1);
     await waitFor("observer reservation", () => reservations(env).length === (otherCaller ? 2 : 1));
