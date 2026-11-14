@@ -41,7 +41,7 @@ test("goal action completions expose selectable actions with context", () => {
     { value: "resume", label: "resume", description: "Resume the paused goal" },
     { value: "clear", label: "clear", description: "Remove the current goal" },
     { value: "complete", label: "complete", description: "Mark the current goal complete" },
-    { value: "settings", label: "settings", description: "Inspect or persist goal continuation, conversational resume, and Escape pause controls" },
+    { value: "settings", label: "settings", description: "Inspect or persist goal continuation, resume, Escape pause, and Outcome auto-start controls" },
   ]);
   assert.deepEqual(
     goalArgumentCompletions("  c")?.map((entry) => entry.value),
@@ -49,7 +49,7 @@ test("goal action completions expose selectable actions with context", () => {
   );
   assert.equal(goalArgumentCompletions("ship the release"), null);
   assert.deepEqual(goalArgumentCompletions("settings ")?.map((item) => item.value), [
-    "settings auto-continue", "settings conversational-resume", "settings pause-on-escape",
+    "settings auto-continue", "settings conversational-resume", "settings pause-on-escape", "settings auto-start-from-outcome",
   ]);
   assert.deepEqual(goalArgumentCompletions("settings auto-continue o")?.map((item) => item.value), [
     "settings auto-continue on", "settings auto-continue off",
@@ -2259,7 +2259,7 @@ test("TUI goal settings opens the interactive page and its toggles persist", asy
   const next = createContinuationHarness();
   await next.handlers.get("session_start")?.({}, next.ctx);
   const inspected = await next.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(next.ctx));
-  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false, pauseOnEscape: false });
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false });
   assert.equal(h.entries.length, 0);
   await h.handlers.get("session_shutdown")?.({}, h.ctx);
   await next.handlers.get("session_shutdown")?.({}, next.ctx);
@@ -2279,7 +2279,7 @@ test("all settings persist across extension recreation without disabling kickoff
   const h = createContinuationHarness();
   await h.handlers.get("session_start")?.({}, h.ctx);
   const inspected = await h.tools.get("get_goal")!.execute("settings", {}, undefined, undefined, toolContext(h.ctx));
-  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false, pauseOnEscape: false });
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false });
   await h.commands.get("goal")?.handler("settings", h.ctx);
   assert.match(h.notifications.at(-1)?.message ?? "", /Automatic continuation setting: off/);
   assert.match(h.notifications.at(-1)?.message ?? "", /Conversational resume setting: off/);
@@ -2423,7 +2423,7 @@ test("invalid settings commands cannot replace the goal or modify preferences", 
   }
   assert.equal(h.entries.length, before);
   const inspected = await h.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(h.ctx));
-  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: true, conversationalResume: true, pauseOnEscape: true });
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false });
   await h.handlers.get("session_shutdown")?.({}, h.ctx);
 });
 
