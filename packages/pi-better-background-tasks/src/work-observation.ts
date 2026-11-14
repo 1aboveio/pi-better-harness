@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 const clients = new WeakMap<object, Promise<any>>();
+const generations = new WeakMap<object, number>();
 const listeners = new WeakMap<object, Set<() => void>>();
 export function onBackgroundObservation(pi: ExtensionAPI, notify: () => void): () => void {
   let set = listeners.get(pi);
@@ -14,12 +15,15 @@ export function onBackgroundObservation(pi: ExtensionAPI, notify: () => void): (
 /** A query connection grants no supervisor, transcript writer or retention authority. */
 export function backgroundObservation(pi: ExtensionAPI, ctx: ExtensionContext, history = false, all = false): Promise<any> {
   const scope = { background: true, cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId() };
+  const generation = generations.get(pi) ?? 0;
   const read = async (retry: boolean): Promise<any> => {
+    if ((generations.get(pi) ?? 0) !== generation) throw new Error("runtime-unavailable: client closed");
     const connection = observationClient(pi, scope);
     const client = await connection;
+    if ((generations.get(pi) ?? 0) !== generation) throw new Error("runtime-unavailable: client closed");
     try { return await client.get({ ...scope, backgroundHistory: history, backgroundAll: all }); }
     catch (error) {
-      if (!retry || !client.closed) throw error;
+      if (!retry || !client.closed || (generations.get(pi) ?? 0) !== generation) throw error;
       if (clients.get(pi) === connection) clients.delete(pi);
       return read(false);
     }
@@ -28,6 +32,10 @@ export function backgroundObservation(pi: ExtensionAPI, ctx: ExtensionContext, h
 }
 
 function observationClient(pi: ExtensionAPI, scope: { background: boolean; cwd: string; sessionId?: string }): Promise<any> {
+  const generation = generations.get(pi) ?? 0;
+  const checkOpen = () => {
+    if ((generations.get(pi) ?? 0) !== generation) throw new Error("runtime-unavailable: client closed");
+  };
   let pending = clients.get(pi);
   if (!pending) {
     pending = (async () => {
@@ -35,8 +43,11 @@ function observationClient(pi: ExtensionAPI, scope: { background: boolean; cwd: 
       mkdirSync(requestedRoot, { recursive: true, mode: 0o700 });
       const root = realpathSync(requestedRoot);
       const ensure = async () => {
+        checkOpen();
         const installer = new URL("../runtime-client/src/runtime/client.mjs", import.meta.url).href;
-        await (await import(installer)).ensureRuntime({ agentDir: root, serverDir: process.env.PI_SERVER_DIR });
+        const { ensureRuntime } = await import(installer);
+        checkOpen();
+        await ensureRuntime({ agentDir: root, serverDir: process.env.PI_SERVER_DIR });
       };
       let registration;
       try { registration = JSON.parse(readFileSync(join(root, "server-registration-v1.json"), "utf8")); }
@@ -49,6 +60,7 @@ function observationClient(pi: ExtensionAPI, scope: { background: boolean; cwd: 
       const module = new URL("./shared-work-client.mjs", import.meta.url).href;
       const { WorkClient } = await import(module);
       const connect = async () => {
+        checkOpen();
         const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-background-state-v1"]);
         let subscribed = false;
         client.onChange(() => {
@@ -76,6 +88,7 @@ function observationClient(pi: ExtensionAPI, scope: { background: boolean; cwd: 
 }
 
 export function closeBackgroundObservation(pi: ExtensionAPI): void {
+  generations.set(pi, (generations.get(pi) ?? 0) + 1);
   const pending = clients.get(pi); clients.delete(pi);
   void pending?.then(client => client.close(), () => {});
 }
