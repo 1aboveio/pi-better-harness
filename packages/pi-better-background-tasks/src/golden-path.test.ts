@@ -1,7 +1,12 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { startWorkRuntime } from "./test-support/work-runtime.js";
+
+let stopRuntime: () => Promise<void>;
+beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
+afterAll(async () => { await stopRuntime(); });
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
 

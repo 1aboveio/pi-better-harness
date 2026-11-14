@@ -13,7 +13,7 @@ export async function startWorkRuntime() {
   const { WorkReadModel } = await import(new URL("../../../pi-better-server/src/runtime/read-model.ts", import.meta.url).href);
   const { WorkQueries } = await import(new URL("../../../pi-better-server/src/runtime/queries.ts", import.meta.url).href);
   const { checkHello } = await import(new URL("../../../pi-better-server/src/handshake.ts", import.meta.url).href);
-  const model = new WorkReadModel(root, "output-tests", { baseDir: join(root, "runs"), durableDir: join(root, "archives"), intervalMs: 60000 });
+  const model = new WorkReadModel(root, "output-tests", { baseDir: join(root, "runs"), durableDir: join(root, "archives") });
   const sockets = new Set<import("node:net").Socket>();
   const server = createServer(socket => {
     sockets.add(socket); socket.once("close", () => sockets.delete(socket));
