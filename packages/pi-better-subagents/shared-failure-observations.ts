@@ -198,6 +198,7 @@ export function findIncident(state: FailureState, id: string): FailureObservatio
  * operation; other producer failures (exit, model, supervision, watch) are actionable at once.
  */
 export function requiresAction(x: FailureObservation): boolean {
+  if (x.category === "stall") return false;
   if (x.status !== "unresolved" || x.category === "observation-incomplete") return false;
   if (x.category !== AGENT_TOOL_CATEGORY && x.category !== REJECTED_INTENT_CATEGORY) return true;
   return x.disposition?.disposition === "open" || x.count >= REPEATED_FAILURE_THRESHOLD;
@@ -208,6 +209,7 @@ export function failureLabel(x: FailureObservation): string {
   if (x.status === "expected") return "Expected failure";
   if (x.status === "resolved") return "Recovered";
   if (x.status === "superseded") return "Superseded";
+  if (x.category === "stall") return "Suspected stall";
   return requiresAction(x) ? "Action required" : "Unclassified failure observation";
 }
 
@@ -373,6 +375,7 @@ export interface FailureCounts {
 export function failureCounts(state: FailureState): FailureCounts {
   const counts: FailureCounts = { actionRequired: 0, unclassified: 0, expected: 0, incomplete: 0, recovered: 0, superseded: 0 };
   for (const x of failureHistory(state)) {
+    if (x.category === "stall") continue;
     if (x.status === "resolved") counts.recovered += 1;
     else if (x.status === "superseded") counts.superseded += 1;
     else if (x.category === "observation-incomplete") counts.incomplete += 1;
@@ -542,7 +545,7 @@ export function pendingAttentionRows(state: FailureState, incidents: readonly st
 /** Count of other active incidents, which a notification references but never re-lists. */
 export function pendingAttentionNote(state: FailureState, incidents: readonly string[]): string | undefined {
   const wanted = new Set(incidents);
-  const others = activeFailures(state).filter((x) => !wanted.has(x.id)).length;
+  const others = activeFailures(state).filter((x) => x.category !== "stall" && !wanted.has(x.id)).length;
   return others > 0 ? `${others} other active failure observation${others === 1 ? " was" : "s were"} reported earlier or not actionable; not repeated here.` : undefined;
 }
 /**
@@ -1034,7 +1037,7 @@ export function formatTerminalIncidentSummary(state: FailureState, options: Inci
  */
 export function pendingFailureAttention(state: FailureState, now: number,
   options: { terminal?: boolean; graceMs?: number; deferObservationGaps?: boolean } = {}): { key: string; incidents: string[]; summary: string } | undefined {
-  const due = activeFailures(state).filter((x) => x.status === "unresolved" && !Object.hasOwn(state.delivered, x.id) &&
+  const due = activeFailures(state).filter((x) => x.category !== "stall" && x.status === "unresolved" && !Object.hasOwn(state.delivered, x.id) &&
     (options.terminal || (x.category === "observation-incomplete" ? !options.deferObservationGaps
       : requiresAction(x) && now - x.firstObservedAt >= (options.graceMs ?? 60_000))));
   if (!due.length) return undefined;

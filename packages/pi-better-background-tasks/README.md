@@ -159,10 +159,9 @@ stationary watch.
 A status cursor changes when the observation crosses either threshold, even if
 metadata and log bytes have not changed. Within the same observation state,
 unchanged status still shows the current silence duration. A suspected stall
-records an observation, not a process failure. After the existing 60-second
-attention grace, callback-enabled tasks wake the parent once per silent spell.
-New progress closes the observation and a later spell can notify again. Quiet
-work does not alert, `callback:false` suppresses notification, and no silence
+records an observation for inspection, not a process failure or a notification.
+New progress closes the observation and a later spell can be recorded. Quiet
+work does not alert, and no silence
 threshold stops a task or changes its lifecycle. The active session's runtime
 checks observations once per second, including an in-flight watch poll. Reload
 restores monitoring and the persisted attention receipts. Log-retention writes

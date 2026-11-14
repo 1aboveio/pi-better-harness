@@ -1460,7 +1460,7 @@ function scheduleLogRetention(pi: ExtensionAPI, id: string, getActiveSession?: A
       return;
     }
     if (meta.kind === "process") enforceLogRetention(meta);
-    if (observeTaskStallAttention(meta)) scheduleFailureAttention(pi, id, getActiveSession);
+    observeTaskStallAttention(meta);
   }, LOG_RETENTION_CHECK_MS);
   timer.unref();
   logRetentionTimers.set(id, timer);

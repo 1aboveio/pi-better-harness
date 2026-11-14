@@ -190,7 +190,7 @@ function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActiveSession
     return;
   }
   const due = Object.values(state.observations)
-    .filter((x) => x.status === "unresolved" && state.delivered[x.id] === undefined)
+    .filter((x) => x.status === "unresolved" && x.category !== "stall" && state.delivered[x.id] === undefined)
     .map((x) => x.firstObservedAt + 60_000 - Date.now());
   if (due.length) {
     const timer = setTimeout(() => scheduleFailureAttention(pi, id, getActiveSession), Math.max(1, Math.min(...due)));

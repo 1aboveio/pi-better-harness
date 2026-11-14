@@ -3111,6 +3111,21 @@ export class ObservedWaitHost {
       skip("a registered wait owns delivery");
       return;
     }
+    // A consumed wait no longer appears in pendingOnly, but its delivered
+    // terminal revision must not be emitted again as a standalone callback.
+    const deliveredByWait = this.store?.listOutbox({
+      operationId: operation.operationId,
+      recipient: operation.owner,
+    }).some((event) =>
+      event.type === "dependency-ready"
+      && event.terminalRevision === operation.terminalRevision
+      && event.deliveredAt !== null
+    ) ?? false;
+    if (deliveredByWait) {
+      this.pendingTerminalCallbacks.delete(operation.taskId);
+      skip("terminal revision already delivered by a wait");
+      return;
+    }
     if (claim === "self") return; // this host's event is already in flight
     if (!this.activeContext) {
       // This host recorded terminal before a session context was restored. Keep

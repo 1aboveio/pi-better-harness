@@ -5,7 +5,7 @@ import { failurePath } from "./failures.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir, writeMeta } from "./registry.js";
 import { resumeRunningTask, resumeScheduledWork, spawnTask, startWatchTask, stopTask, suspendScheduledWork } from "./runtime.js";
-import { actionableFailures, readFailureState } from "./shared-failure-observations.js";
+import { actionableFailures, failureHistory, readFailureState } from "./shared-failure-observations.js";
 import { formatLaunch } from "./tools.js";
 import type { CommandResult } from "./types.js";
 import { failedResult, FakeRemoteRunner, successfulResult } from "./test-support/fake-remote-runner.js";
@@ -1148,7 +1148,8 @@ describe("command watch progress evidence", () => {
   }
 
   function incidents(id: string) {
-    return actionableFailures(readFailureState(failurePath(id)));
+    return failureHistory(readFailureState(failurePath(id)))
+      .filter((incident) => incident.category === "stall" && incident.status === "unresolved");
   }
 
   it("holds the state clock while polls keep reporting the same outcome", async () => {
@@ -1165,6 +1166,7 @@ describe("command watch progress evidence", () => {
     expect(stalled.lastProgressAt).toBe(watchStartedAt);
     expect(stalled.lastCheckedAt).toBe(watchStartedAt + 11 * WATCH_POLL_MS);
     expect(incidents(watch.meta.id)).toHaveLength(1);
+    expect(actionableFailures(readFailureState(failurePath(watch.meta.id)))).toHaveLength(0);
 
     // Polls keep running, and the same silent spell stays a single observation.
     const journal = readFileSync(failurePath(watch.meta.id), "utf8");
@@ -1176,7 +1178,7 @@ describe("command watch progress evidence", () => {
     expect(incidents(watch.meta.id)).toHaveLength(1);
   });
 
-  it("recovers on a real state change and alerts again in a later stationary phase", async () => {
+  it("recovers on a real state change and records a new later stationary phase", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(watchStartedAt);
     let state = "pending";
