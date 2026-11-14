@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startWorkRuntime } from "./test-support/work-runtime.js";
-import { closeBackgroundObservation } from "./work-observation.js";
+import { backgroundObservation, closeBackgroundObservation } from "./work-observation.js";
 import { failurePath, recordFailure } from "./failures.js";
 import { markFailureAttentionDelivered, pendingFailureAttention, readFailureState } from "./shared-failure-observations.js";
 import { packCallbackBatch } from "./shared-callback-batcher.js";
@@ -897,6 +897,9 @@ describe("review regressions (#312)", () => {
     const list = textOf(await tools.bg_task_list.execute("tc", { limit: 100, max_bytes: 4096 }, undefined, undefined, sessionless));
     expect(list).not.toContain(`${legacy.id} `);
     expect(list).toContain(`${ours.id} `);
+    const observed = await backgroundObservation(apis.at(-1), sessionless as any, true);
+    expect(observed.rows.some((row: any) => row.meta.id === legacy.id)).toBe(false);
+    expect(observed.rows.some((row: any) => row.meta.id === ours.id)).toBe(true);
   });
 });
 

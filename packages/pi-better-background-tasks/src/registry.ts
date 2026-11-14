@@ -241,7 +241,7 @@ export function observeMetasForOrigin(origin: BackgroundTaskCallbackOrigin, acti
     const record = inspectMeta(id);
     if (record.found && !record.meta) throw new Error(`Unverified background task ${id}: ${record.error}`);
     return record.meta;
-  }).filter((meta): meta is BackgroundTaskMeta => !!meta && belongsToOrigin(meta, origin)
+  }).filter((meta): meta is BackgroundTaskMeta => !!meta && !!meta.callbackOrigin && belongsToOrigin(meta, origin)
     && (!activeOnly || meta.status === "running")).sort((a, b) => b.startedAt - a.startedAt);
 }
 

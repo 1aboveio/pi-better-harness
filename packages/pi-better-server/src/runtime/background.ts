@@ -102,7 +102,7 @@ export class BackgroundObservation {
       WHERE owner_kind = 'parent-session' AND observer_kind = 'local-supervisor' AND owner_workspace = ? AND owner_session_id = ?`).all(scope.cwd, scope.sessionId), true) : this.rows;
     return [...rows.filter(row => row.owner.kind === "parent-session" && row.dismissedAt === undefined
       && (scope.backgroundAll || row.owner.workspace === scope.cwd && row.owner.sessionId === scope.sessionId) && (!scope.active || row.active)),
-      ...legacyRows.filter((row: any) => !scope.active || row.status === "running")];
+      ...legacyRows.filter((row: any) => (scope.backgroundAll || row.callbackOrigin && belongsToOrigin(row, legacy.origin)) && (!scope.active || row.status === "running"))];
   }
   close() { this.db?.close(); }
   historyIndex(scope: { cwd?: string; sessionId?: string; backgroundAll?: boolean }) {
