@@ -3,9 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import test, { after, before } from "node:test";
-import { fork } from "node:child_process";
-import { once } from "node:events";
+import test, { after } from "node:test";
 import {
     createEventBus, discoverAndLoadExtensions, ExtensionRunner, SessionManager,
     type ExtensionAPI, type ModelRegistry, type ToolDefinition, type ToolInfo,
@@ -43,27 +41,16 @@ process.env.TMPDIR = scratch;
 process.env.TEMP = scratch;
 process.env.TMP = scratch;
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT = "off";
-const transport = mkdtempSync(join(originalTmp, "p759-"));
-let daemon: ReturnType<typeof fork>;
-before(async () => {
-    daemon = fork(new URL("../../pi-better-server/test/support/work-daemon.ts", import.meta.url), [], {
-        execArgv: ["--import", "tsx"], env: { ...process.env, PI_SERVER_DIR: transport },
-        stdio: ["ignore", "ignore", "pipe", "ipc"],
-    });
-    let errors = ""; daemon.stderr!.on("data", chunk => { errors += chunk; });
-    await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
-});
+const { startWorkRuntime } = await import(new URL("../../pi-better-background-tasks/src/test-support/work-runtime.ts", import.meta.url).href);
+const stopWorkRuntime = await startWorkRuntime();
 after(async () => {
-    if (daemon && daemon.exitCode === null && daemon.signalCode === null) {
-        const exited = once(daemon, "exit"); daemon.send("stop"); await exited;
-    }
+    await stopWorkRuntime();
     for (const [name, value] of Object.entries({ PI_CODING_AGENT_DIR: oldEnv.agent, TMPDIR: oldEnv.tmp, TEMP: oldEnv.temp, TMP: oldEnv.tmpAlias,
         PI_SANDBOX_RECOVERY_SNAPSHOT: oldEnv.recovery })) {
         if (value === undefined) delete process.env[name]; else process.env[name] = value;
     }
     rmSync(fixture, { recursive: true, force: true });
     rmSync(scratch, { recursive: true, force: true });
-    rmSync(transport, { recursive: true, force: true });
 });
 const sandboxEntry = fileURLToPath(new URL("../index.ts", import.meta.url));
 const backgroundEntry = fileURLToPath(new URL("../../pi-better-background-tasks/src/index.ts", import.meta.url));

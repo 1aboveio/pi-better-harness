@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { once } from "node:events";
 import { fork } from "node:child_process";
 
-/** A real query endpoint for tools tests; never starts the user's managed runtime. */
+/** The actual daemon owns registration, query dispatch and socket drain in tests. */
 export async function startWorkRuntime() {
   mkdirSync(resolve(".work/754"), { recursive: true });
   const root = mkdtempSync(resolve(".work/754/output-"));
@@ -16,12 +16,19 @@ export async function startWorkRuntime() {
   });
   let errors = "";
   daemon.stderr!.on("data", chunk => { errors += chunk; });
-  await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
-  return async () => {
+  let shutdown: Promise<void> | undefined;
+  const stop = () => shutdown ??= (async () => {
     if (daemon.exitCode === null && daemon.signalCode === null) {
       const exited = once(daemon, "exit"); daemon.send("stop"); await exited;
     }
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
     rmSync(transport, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
-  };
+  })();
+  try {
+    await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
+    return stop;
+  } catch (error) {
+    await stop();
+    throw error;
+  }
 }
