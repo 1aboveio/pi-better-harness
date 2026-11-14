@@ -6,6 +6,7 @@ export class WorkClient {
     snapshot;
     pending = new Map();
     listeners = new Set();
+    catalogListeners = new Set();
     sequence = 0;
     scope;
     buffer = "";
@@ -23,6 +24,7 @@ export class WorkClient {
                 try {
                     const message = JSON.parse(line);
                     if (message.type === "event") {
+                        if (message.event.type === "runtime_catalog_snapshot") { for (const listener of this.catalogListeners) listener(message.event.snapshot); continue; }
                         if (message.event.type === "resync_required") { this.degrade(message.event.reason); void this.resync().catch(error => this.degrade(String(error))); }
                         else if (message.event.type === "runtime_snapshot") this.accept(message.event.snapshot);
                     } else {
@@ -50,6 +52,7 @@ export class WorkClient {
         });
     }
     onChange(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+    onCatalog(listener) { this.catalogListeners.add(listener); return () => this.catalogListeners.delete(listener); }
     notify() { for (const listener of this.listeners) listener(this.snapshot); }
     degrade(reason) {
         this.snapshot = { ...this.snapshot, status: "degraded", reason, rows: this.snapshot?.rows ?? [] };
@@ -83,6 +86,7 @@ export class WorkClient {
         this.closed = true;
         for (const request of this.pending.values()) { clearTimeout(request.timer); request.reject(error); }
         this.pending.clear(); this.socket.destroy(); this.degrade(String(error));
+        for (const listener of this.catalogListeners) listener({ status: "revoked" });
     }
-    close() { this.fail(new Error("runtime-unavailable: client closed")); this.listeners.clear(); }
+    close() { this.fail(new Error("runtime-unavailable: client closed")); this.listeners.clear(); this.catalogListeners.clear(); }
 }

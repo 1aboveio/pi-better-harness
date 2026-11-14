@@ -3,6 +3,30 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export async function runCli(args = process.argv.slice(2), input = () => readFileSync(0, 'utf8')) {
+    if (args[0] === 'list' || args[0] === 'inspect') {
+        let remote, closeHost;
+        try {
+            if (args.length > (args[0] === 'list' ? 1 : 2) || args[0] === 'inspect' && !args[1]) throw new Error('Usage: pi-agent-catalog list | inspect <id>');
+            const { register } = await import('tsx/esm/api');
+            register();
+            const { openSharedCatalog } = await import('./shared-catalog.ts');
+            const { noteCatalogHostContext, closeCatalogHost } = await import('./catalog-host-admission.ts');
+            closeHost = closeCatalogHost;
+            const { getAgentDir, ProjectTrustStore, SettingsManager } = await import('@earendil-works/pi-coding-agent');
+            const cwd = realpathSync(process.cwd());
+            const settings = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
+            if (settings.drainErrors().length) throw new Error('Cannot verify CLI project trust');
+            noteCatalogHostContext({ cwd, isProjectTrusted: () => new ProjectTrustStore(getAgentDir()).get(cwd) ?? settings.getDefaultProjectTrust() === 'always' }, () => ({}));
+            const { presentCatalog, presentCatalogEntry } = await import('./agent-inspection.ts');
+            remote = await openSharedCatalog(process.cwd());
+            const snapshot = await remote.get();
+            const view = args[0] === 'list' ? presentCatalog(snapshot) : presentCatalogEntry(snapshot, args[1]);
+            console.log(JSON.stringify(view));
+            closeCatalogHost();
+            return view.found === false ? 2 : 0;
+        } catch (error) { console.error(`pi-agent-catalog: ${error.message}`); return 2; }
+        finally { remote?.close(); closeHost?.(); }
+    }
     if (args.includes('--help')) {
         console.log('pi-agent-catalog [resolve-workers] < request.json\nResolves shared agent roles against explicit host model and effort capabilities. No workers are launched.');
         return 0;

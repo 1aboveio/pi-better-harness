@@ -37,6 +37,7 @@ import {
     parseDefinition,
     serializeDefinition,
     type CatalogDefinition,
+    type AgentDefinition,
     type CatalogKind,
     type CatalogScope,
     type Diagnostic,
@@ -151,6 +152,14 @@ class FrozenMap<K, V> extends Map<K, V> {
     }
 }
 
+/** Rebuild the same immutable domain value after a JSON socket round trip. */
+export function catalogSnapshotFromWire(wire: Omit<CatalogSnapshot, "roles" | "agents"> & {
+    roles: Iterable<readonly [string, CatalogEntry]>;
+    agents: Iterable<readonly [string, CatalogEntry]>;
+}): CatalogSnapshot {
+    return deepFreeze({ ...wire, roles: FrozenMap.fill(wire.roles), agents: FrozenMap.fill(wire.agents) });
+}
+
 export function defaultUserRoot(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
     const configured = env.PI_CODING_AGENT_DIR?.trim();
     return configured ? configured : join(home, ".pi", "agent");
@@ -176,6 +185,20 @@ export function userCatalogPaths(userRoot: string): { root: string; roles: strin
 
 export function contentDigest(raw: string): string {
     return createHash("sha256").update(raw).digest("hex");
+}
+
+/** Import matching needs every source in the destination scope, including shadowed IDs. */
+export function listScopedAgents(input: LoadCatalogInput, scope: "user" | "project"): { agents: { path: string; definition: AgentDefinition }[]; diagnostics: Diagnostic[] } {
+    const diagnostics: Diagnostic[] = [];
+    if (scope === "project" && !input.projectTrusted) throw new Error("Project catalog access requires a trusted host.");
+    const config = input.projectConfigDirName ?? DEFAULT_PROJECT_CONFIG_DIR_NAME;
+    if (!isSafeConfigDirName(config)) throw new Error("Unsafe project config directory");
+    const directory = scope === "project" ? projectCatalogPaths(input.cwd, config).agents : userCatalogPaths(input.userRoot).agents;
+    const occurrences = new Map<string, Occurrence[]>();
+    collectDirectory(directory, scope, "agent", occurrences, diagnostics);
+    const agents = [...occurrences.values()].flat().flatMap(item => item.parse.definition?.kind === "agent"
+        ? [{ path: item.path, definition: item.parse.definition }] : []);
+    return { agents, diagnostics };
 }
 
 /** Read every source again. Identical bytes produce the same digest and a new object. */

@@ -33,6 +33,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { describe, it, before, beforeEach, after } from "node:test";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import assert from "node:assert/strict";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -315,10 +316,15 @@ describe("subagent_spawn_batch end-to-end", () => {
     let registry;
     let capacity;
     let config;
+    let stopRuntime;
+    let originalAgentDir;
 
     before(async () => {
         origPath = process.env.PATH;
         setupStubs();
+        originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+        process.env.PI_CODING_AGENT_DIR = join(RUNTIME, "agent");
+        stopRuntime = await startWorkRuntimeFixture();
         assertCheckoutNodeModulesUntouched();
         const binDir = makeMockPi();
         process.env.PATH = `${binDir}:${origPath}`;
@@ -349,6 +355,9 @@ describe("subagent_spawn_batch end-to-end", () => {
             .map((meta) => waitForFinished(registry.readMeta, meta.id)));
         process.env.PATH = origPath;
         config.setConfigForTests(undefined);
+        await stopRuntime?.();
+        if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
         // Cleanup owns only the temp RUNTIME tree created by this suite.
         rmSync(RUNTIME, { recursive: true, force: true });
         assertCheckoutNodeModulesUntouched();
