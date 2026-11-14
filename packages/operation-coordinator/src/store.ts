@@ -7,6 +7,8 @@
  * and leaves no partial record.
  */
 import { StoreError } from "./errors.ts";
+import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested } from "./task-cancellation.ts";
+import type { TaskCancellationIntent, TaskCancellationRequest } from "./task-cancellation.ts";
 import { repairFailedResume, type RepairResumeInput } from "./recovery.ts";
 import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.ts";
 import type { AssignmentOutcomeInput, AssignmentOutcomeRecord } from "./assignment-outcomes.ts";
@@ -115,6 +117,9 @@ import {
 } from "./types.ts";
 
 export interface Store {
+    acceptTaskCancellation(input: TaskCancellationRequest): TaskCancellationIntent;
+    getTaskCancellation(input: { owner: OwnerIdentity; idempotencyKey: string }): TaskCancellationIntent | null;
+    recordTaskStopRequested(input: TaskCancellationRequest): TaskCancellationIntent;
     registerAssignment(input: Parameters<typeof registerAssignment>[1]): void;
     receiptAssignmentOutcome(input: Parameters<typeof receiptAssignmentOutcome>[1]): AssignmentOutcomeRecord;
     recordAssignmentOutcome(input: AssignmentOutcomeInput): AssignmentOutcomeRecord;
@@ -378,6 +383,18 @@ export function openStore(options: StoreOptions): Store {
         registerWait(input) {
             alive();
             return writeWait(ctx, input);
+        },
+        acceptTaskCancellation(input) {
+            alive();
+            return acceptTaskCancellation(ctx, input);
+        },
+        getTaskCancellation(input) {
+            alive();
+            return getTaskCancellation(ctx, input);
+        },
+        recordTaskStopRequested(input) {
+            alive();
+            return recordTaskStopRequested(ctx, input);
         },
         transitionWaitPhase(input) {
             alive();

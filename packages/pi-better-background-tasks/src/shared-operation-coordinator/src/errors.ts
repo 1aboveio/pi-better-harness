@@ -21,6 +21,8 @@ export type StoreErrorCode =
     | "unknown-operation"
     /** An operation already exists with different immutable launch identity. */
     | "operation-conflict"
+    /** An idempotency key was reused with different request content. */
+    | "request-conflict"
     /** The background task id belongs to a different owner. */
     | "task-ownership"
     /** The caller is not the recorded owner of the record it wants to change. */

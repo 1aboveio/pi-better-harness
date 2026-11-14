@@ -44,6 +44,7 @@
  * to be durable.
  */
 export { SCHEMA_VERSION, TERMINAL_WAIT_PHASES } from "./src/types.ts";
+export type { TaskCancellationIntent, TaskCancellationRequest } from "./src/task-cancellation.ts";
 export type { AssignmentOutcomeInput, AssignmentOutcomeRecord } from "./src/assignment-outcomes.ts";
 export type {
     AcknowledgeDisposition,

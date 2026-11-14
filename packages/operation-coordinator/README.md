@@ -63,6 +63,29 @@ generation (`stale-generation`).
 
 ## Lifecycle contract
 
+### Cancellation Intent Checkpoint (#759)
+
+`acceptTaskCancellation` stores the fixed `cancel_task` request in the existing
+coordinator database. An immediate transaction checks the operation's full owner,
+launch token, terminal revision and supervision host before accepting the intent.
+The owner and idempotency key identify the receipt. Identical retries return that
+receipt before checking current operation state; changed content raises
+`request-conflict`. `getTaskCancellation` reads the same receipt after reconnect.
+
+The additive `task_cancellation_requests` table implements the persisted-intent
+requirement from ADR 0023 without creating another operation or terminal authority.
+`recordTaskStopRequested` records the host's durable stop-file publication after
+acceptance. Neither state proves process exit, publishes a terminal outcome,
+changes waits or releases evidence and writer fences.
+
+This API is an internal storage checkpoint, not enabled server admission. The host
+must authenticate the caller, verify current management and cancellation epochs,
+stop old admission before transfer, and refuse live legacy or unknown supervisors.
+The existing supervisor must execute and recover the exact recorded launch token.
+Those checks cannot be replaced by supplying an owner or host ID string to this
+library. No tool or socket route uses this API yet; end-to-end cancellation and
+process-action crash recovery remain outstanding in #759.
+
 **Launch.** `registerOperation` records the launch intent and unique execution
 token before a runner starts. Re-registering the same launch is idempotent; a
 changed task id, launch token, owner or observer is refused, so a store cannot be
