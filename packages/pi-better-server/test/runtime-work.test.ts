@@ -23,7 +23,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
   const runs = join(root, "pi-better-subagents/runs");
   mkdirSync(agent); mkdirSync(runs, { recursive: true });
   writeFileSync(join(agent, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: { healthLongToolMs: 1 } } }));
-  const coordinatorPath = new URL("../../operation-coordinator/index.ts", import.meta.url).href;
+  const coordinatorPath = new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href;
   const { openStore } = await import(coordinatorPath);
   openStore({ path: join(agent, "operation-coordinator.sqlite") }).close();
   for (let i = 0; i < 50; i++) {
@@ -246,6 +246,92 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     if (child.exitCode === null) { child.send("stop"); await once(child, "exit"); }
     rmSync(transport, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("registered Navigator preserves older active rows and the same consumers recover across daemon replacement", { timeout: 30000 }, async () => {
+  const root = fixtureRoot("consumer");
+  const transport = mkdtempSync("/tmp/p753-");
+  const agent = join(root, "agent"), runs = join(root, "pi-better-subagents/runs");
+  mkdirSync(agent); mkdirSync(runs, { recursive: true });
+  const saved = new Map(["PI_CODING_AGENT_DIR", "TMPDIR", "PI_CATALOG_ACCEPTANCE_PROBE"].map(key => [key, process.env[key]]));
+  process.env.PI_CODING_AGENT_DIR = agent; process.env.TMPDIR = root; process.env.PI_CATALOG_ACCEPTANCE_PROBE = "1";
+  const launch = async () => {
+    const worker = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execArgv: ["--import", "tsx"],
+      env: { ...process.env, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "inherit", "ipc"] });
+    await once(worker, "message"); return worker;
+  };
+  let child = await launch();
+  const stop = async () => { if (child.exitCode === null) { const exited = once(child, "exit"); child.send("stop"); await exited; } };
+  const until = async (check: () => boolean | Promise<boolean>) => {
+    const deadline = Date.now() + 10000;
+    while (!await check()) { assert.ok(Date.now() < deadline, "production observation did not converge"); await new Promise(resolve => setTimeout(resolve, 10)); }
+  };
+  const handlers = new Map<string, Function>(), tools = new Map<string, any>();
+  const ctx = { cwd: root, mode: "tui", hasUI: true, isIdle: () => true,
+    sessionManager: { getSessionId: () => "parent", getBranch: () => [] },
+    ui: { theme: { fg: (_c: string, s: string) => s }, notify() {}, setStatus() {}, setWidget() {}, getEditorComponent() {}, setEditorComponent() {} } };
+  try {
+    register(new URL("../../pi-better-subagents/tests/pi_host_stub_hooks.mjs", import.meta.url));
+    const { default: extension } = await import(new URL("../../pi-better-subagents/index.ts", import.meta.url).href);
+    const observation = await import(new URL("../../pi-better-subagents/work-observation.ts", import.meta.url).href);
+    extension({ on: (name: string, fn: Function) => handlers.set(name, fn), registerTool: (tool: any) => tools.set(tool.name, tool), sendMessage() {} });
+    await handlers.get("session_start")!({}, ctx);
+    for (let i = 0; i < 201; i++) {
+      const id = `sa_review_${i}`; mkdirSync(join(runs, id));
+      writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, sessionId: `worker-${i}`,
+        callbackOrigin: { cwd: root, sessionId: "parent" }, spawnPid: process.pid, pid: process.pid,
+        status: i === 0 ? "running" : "completed", startedAt: i, ...(i ? { endedAt: 1 } : {}) }));
+    }
+    await until(() => observation.workObservation()?.activity.active === 1);
+    await until(async () => (await observation.observedList({ cwd: root })).totalMatching === 201);
+    assert.equal((await observation.observedList({ cwd: root })).totalMatching, 201);
+    const hooks = (globalThis as any)[Symbol.for("pi-better-subagents.acceptance-hooks")];
+    const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("subagents");
+    assert.equal(hooks.listRows().find((row: any) => row.id === "sa_review_0")?.status, "running");
+    assert.equal(provider.visibleCount(), 1, "expired terminal history never hides the older active row or its count");
+    for (let i = 0; i < 201; i++) {
+      const id = `sa_active_page_${i}`; mkdirSync(join(runs, id));
+      writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, sessionId: `active-${i}`,
+        callbackOrigin: { cwd: root, sessionId: "parent" }, spawnPid: process.pid, pid: process.pid, status: "running", startedAt: 1000 + i }));
+    }
+    await until(() => observation.workObservation()?.activity.active === 202);
+    assert.equal(provider.visibleCount(), 202, "active pages are complete beyond the transport page size");
+    assert.ok(hooks.listRows().some((row: any) => row.id === "sa_review_0"));
+    for (const mode of ["tool-retry", "subscription-only"]) {
+      const previous = observation.workObservation().instanceId;
+      await stop();
+      await until(() => observation.workObservation()?.status === "degraded");
+      assert.ok(observation.workObservation().rows.some((row: any) => row.meta.id === "sa_review_0"));
+      child = await launch();
+      if (mode === "tool-retry") {
+        const listed = await observation.observedList({ cwd: root, active: true });
+        assert.equal(listed.totalMatching, 202);
+        const assignment = await observation.observedAssignment("sa_review_0");
+        assert.equal(assignment.assignment.state, "running");
+      }
+      await until(() => observation.workObservation()?.status === "ready" && observation.workObservation()?.instanceId !== previous);
+      assert.equal(provider.visibleCount(), 202);
+      assert.ok(hooks.listRows().some((row: any) => row.id === "sa_review_0"));
+      const result = await tools.get("subagent_result").execute("review", { id: "sa_review_0", all: true }, undefined, undefined, ctx);
+      assert.equal(result.details.assignment.state, "running");
+      assert.equal(result.details.snapshot.instanceId, observation.workObservation().instanceId);
+    }
+    writeFileSync(join(runs, "sa_review_0", "meta.json"), JSON.stringify({ id: "sa_review_0", cwd: root, sessionId: "worker-0",
+      callbackOrigin: { cwd: root, sessionId: "parent" }, spawnPid: process.pid, pid: process.pid,
+      status: "completed", startedAt: 0, endedAt: Date.now() }));
+    await until(() => hooks.listRows().find((row: any) => row.id === "sa_review_0")?.status === "completed");
+    assert.equal(provider.visibleCount(), 201, "recent completion remains visible without counting it as active");
+    const beforeClose = observation.workObservation().seq;
+    assert.equal(provider.close("sa_review_0").action, "dismissed");
+    assert.equal(observation.workObservation().seq, beforeClose, "the server snapshot has not advanced synchronously");
+    assert.ok(!hooks.listRows().some((row: any) => row.id === "sa_review_0"), "confirmed dismissal must hide a stale cached row before the next server observation");
+    await until(() => Boolean(observation.workObservation()?.rows.find((row: any) => row.meta.id === "sa_review_0")?.meta.dismissedAt));
+    assert.ok(!hooks.listRows().some((row: any) => row.id === "sa_review_0"), "the acknowledged dismissal must not reappear");
+  } finally {
+    await handlers.get("session_shutdown")?.({}, ctx); await stop();
+    for (const [key, value] of saved) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
   }
 });
 

@@ -47,6 +47,52 @@ function fixture(t: TestContext) {
   return { root, serverDir, agentDir, desired, previous, request, ports, serve, stop, get probe() { return probe; }, set probe(value) { probe = value; }, get launches() { return launches; }, get schedules() { return schedules; } };
 }
 
+for (const replaced of [false, true]) {
+  test(`scheduled upgrade retains its coordinator without redundant owner probes; replaced=${replaced}`, async t => {
+    const f = fixture(t);
+    f.serve(f.previous);
+    let pending: UpgradeRequest | undefined;
+    let pauses = 0;
+    let schedules = 0;
+    let preparedProbes = 0;
+    const probe = f.ports.probe;
+    f.ports.probe = async dir => {
+      if (pending && readActivationJournal(dir)?.phase === "prepared") {
+        preparedProbes++;
+        return { kind: "ambiguous", reason: "The operation was aborted" };
+      }
+      return probe(dir);
+    };
+    f.ports.schedule = async request => { pending = request; schedules++; };
+    f.ports.pause = async () => {
+      assert.ok(pending);
+      assert.ok(++pauses <= 2, "must not wait on a changed owner");
+      if (replaced) {
+        const previous = inspectDaemonOwner(f.serverDir);
+        f.stop(); f.serve(f.previous);
+        assert.notDeepEqual(inspectDaemonOwner(f.serverDir), previous);
+      } else if (pauses === 2) {
+        commitActivationStop(pending, { assertIdle() {}, refreshIdle: async () => {}, commitStop() {} }, f.stop);
+      }
+    };
+    const outcome = await activateStagedRuntime({ ...f.request, ports: f.ports });
+    assert.equal(schedules, 1);
+    if (replaced) {
+      assert.equal(outcome.status, "deferred");
+      assert.match(outcome.reason!, /Owner is ambiguous/);
+      assert.equal(preparedProbes, 1);
+      assert.equal(f.launches, 0);
+      assert.equal(readActivationJournal(f.serverDir)?.phase, "prepared");
+    } else {
+      assert.equal(outcome.status, "ready");
+      assert.equal(outcome.readiness!.hello.build!.contentId, f.desired.build.contentId);
+      assert.equal(pauses, 2);
+      assert.equal(preparedProbes, 0);
+      assert.equal(f.launches, 1);
+    }
+  });
+}
+
 test("empty namespace adopts before readiness and preserves agent files", async t => {
   const f = fixture(t);
   writeFileSync(join(f.agentDir, "auth.json"), "private-auth");
