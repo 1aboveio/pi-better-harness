@@ -93,7 +93,8 @@ export class WorkReadModel {
     return [
       ...[...this.projected.values()].filter(row => row.meta.status === "running"
         && processMatchesStart(row.meta.pid, row.meta.pidStartTime))
-        .map(row => ({ kind: "worker", id: row.meta.id, owner: row.meta.callbackOrigin })),
+        .map(row => ({ kind: "worker", id: row.meta.id, owner: row.meta.callbackOrigin,
+          lastProgressAt: row.meta.startedAt, nextDeadline: null, recovery: "observe-existing-worker" })),
       ...this.background.livenessReasons(),
     ];
   }

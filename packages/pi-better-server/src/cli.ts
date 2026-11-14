@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { parseManagedStartupArgs, resolveAgent, type ServerAgent } from "./cli-args.ts";
 import { absolutePath, launcherRuntime, registeredRuntime } from "./startup/runtime.ts";
+import { validateDaemonOwnerIdentity } from "./daemon-owner.ts";
 
 const log = (message: string): void => void process.stderr.write(`[pi-better-server] ${message}\n`);
 
@@ -74,17 +75,29 @@ async function main(): Promise<void> {
     const { runtimeRoot } = await import("./runtime/root.ts");
     const root = runtimeRoot(process.env.PI_CODING_AGENT_DIR!, process.env.PI_SERVER_DIR!);
     const { runGuardian } = await import("./runtime/guardian.ts");
-    await runGuardian(root.serverDir);
+    const rebind = process.env.PI_SERVER_GUARDIAN_REBIND ? JSON.parse(process.env.PI_SERVER_GUARDIAN_REBIND) : undefined;
+    if (rebind) {
+      validateDaemonOwnerIdentity(rebind);
+    }
+    await runGuardian(root.serverDir, rebind);
     return;
   }
+  let shutdownBudget: ReturnType<typeof setTimeout> | undefined;
   const daemon = agent === "codex"
     ? await (await import("./codex/daemon.ts")).startCodexDaemon({ ...serverDir, log })
-    : await (await import("./server.ts")).startDaemon({ ...serverDir, log });
+    : await (await import("./server.ts")).startDaemon({ ...serverDir, log, onDraining: () => {
+      shutdownBudget ??= setTimeout(() => { log("runtime-unavailable: shutdown exceeded 5000ms; writer state remains unverified"); process.exit(1); }, 5000);
+      shutdownBudget.unref();
+    } });
   if ("closed" in daemon) {
     const { inspectDaemonOwner } = await import("./daemon-owner.ts");
     const owner = inspectDaemonOwner(daemon.serverDir);
     const token = owner.status === "live" ? owner.owner.token : undefined;
+    const { maintainGuardian } = await import("./runtime/guardian.ts");
+    const stopRecovery = owner.status === "live" ? maintainGuardian(daemon.serverDir, owner.owner) : () => undefined;
     void daemon.closed.then(() => {
+      if (shutdownBudget) clearTimeout(shutdownBudget);
+      stopRecovery();
       if (process.connected) process.send?.({ type: "runtime-clean-stop", token }, () => process.disconnect?.());
     });
   }

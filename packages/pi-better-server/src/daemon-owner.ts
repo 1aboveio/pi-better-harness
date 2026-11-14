@@ -20,6 +20,18 @@ export function ownerIsAlive(owner: DaemonOwnerIdentity): boolean {
   return alive(owner);
 }
 
+export function sameOwner(left: DaemonOwnerIdentity, right: DaemonOwnerIdentity): boolean {
+  return typeof left.start === "string" && left.pid === right.pid && left.token === right.token
+    && left.start === right.start && left.boot === right.boot;
+}
+
+export function ownerIdentityVerified(owner: DaemonOwnerIdentity): boolean {
+  const observed = linuxIdentity(owner.pid);
+  return typeof owner.start === "string" && observed.start === owner.start
+    && (process.platform !== "linux" || typeof owner.boot === "string" && owner.boot === observed.boot)
+    && alive(owner);
+}
+
 /** Matches the existing runner/worker start-token representation, without releasing fences. */
 export function processMatchesStart(pid: number, start: unknown): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0 || typeof start !== "string") return false;

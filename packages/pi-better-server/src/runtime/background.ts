@@ -16,6 +16,7 @@ export class BackgroundObservation {
   private root: string;
   private directory: string;
   private enabled = false;
+  private schemaReady = false;
   private legacy = new Map<string, { origin: { cwd: string; sessionId?: string }; rows: any[] }>();
   status: "ready" | "degraded" = "ready";
   reason?: string;
@@ -23,11 +24,20 @@ export class BackgroundObservation {
   livenessReasons() {
     this.enabled = true;
     this.refresh();
-    return this.rows.filter(row => row.active).flatMap(row => {
-      const inspection = snapshot(this.directory, row.id);
-      const claim = inspection?.claim;
-      return claim && processMatchesStart(claim.pid, claim.pidStartTime)
-        ? [{ kind: "runner", id: row.id, owner: row.owner, operationId: row.operationId }] : [];
+    if (!this.schemaReady) return [];
+    let operations: any[] = [];
+    try { operations = this.db ? this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor' AND terminal_revision = 0").all() : []; }
+    catch (error) { this.status = "degraded"; this.reason = String(error); return []; }
+    return operations.flatMap((op: any) => {
+      try {
+        const inspection = snapshot(this.directory, op.task_id);
+        const claim = inspection?.claim;
+        return claim && !inspection.terminal && inspection.token === op.launch_token && processMatchesStart(claim.pid, claim.pidStartTime)
+          ? [{ kind: "runner", id: op.task_id, owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace }, operationId: op.operation_id,
+            lastProgressAt: inspection.command?.startedAt ?? claim.claimedAt,
+            nextDeadline: inspection.launch.timeoutSeconds ? inspection.launch.createdAt + inspection.launch.timeoutSeconds * 1000 : null,
+            recovery: "observe-existing-runner" }] : [];
+      } catch (error) { this.status = "degraded"; this.reason = String(error); return []; }
     });
   }
   readonly metrics = { runnerSnapshots: 0, activeQueries: 0, historyQueries: 0 };
@@ -41,7 +51,8 @@ export class BackgroundObservation {
       if (existsSync(join(this.root, "operation-coordinator.sqlite"))) {
         this.db ??= new DatabaseSync(join(this.root, "operation-coordinator.sqlite"), { readOnly: true });
         const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
-        if (!["1", "2", "3", "4"].includes(version)) throw new Error("Unsupported coordinator schema");
+        this.schemaReady = ["1", "2", "3", "4"].includes(version);
+        if (!this.schemaReady) throw new Error("Unsupported coordinator schema");
       }
       this.metrics.activeQueries++;
       const operations = this.db ? this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor'").all() : [];

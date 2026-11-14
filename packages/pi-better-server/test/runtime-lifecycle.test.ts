@@ -1,15 +1,187 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { inspectDaemonOwner, ownerIsAlive } from "../src/daemon-owner.ts";
 import { startDaemon } from "../src/server.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
+import { OwnershipStore } from "../src/core/ownership.ts";
+import { ownershipPathFor } from "../src/paths.ts";
 import { Client, makeEnv, waitFor } from "./helpers.ts";
+
+test("real SQLite runner obligations exclude terminal history, unread waits and corrupt records", { timeout: 25_000 }, async t => {
+  const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
+  const { createLocalSupervisor, supervisorTaskIdForToken } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
+  mkdirSync(resolve(".work/755"), { recursive: true });
+  const root = mkdtempSync(resolve(".work/755/runner-"));
+  const directory = join(root, "supervisor");
+  const store = openStore({ path: join(root, "operation-coordinator.sqlite") });
+  const supervisor = createLocalSupervisor({ directory });
+  const model = new WorkReadModel(root, "runner-instance", { supervisorDirectory: directory,
+    baseDir: join(root, "subagents"), durableDir: join(root, "archives") });
+  let taskId: string | undefined;
+  t.after(async () => {
+    if (taskId && !supervisor.snapshot(taskId)?.terminal) await supervisor.stop(taskId);
+    await model.close(); store.close(); rmSync(root, { recursive: true, force: true });
+  });
+  const started = await supervisor.start({ token: "755-real-runner", kind: "process", cwd: root,
+    argv: [process.execPath, "-e", "const fs=require('fs'); const t=setInterval(()=>{if(fs.existsSync('finish')){clearInterval(t)}},20)"] });
+  taskId = started.taskId;
+  assert.ok(supervisor.snapshot(taskId)?.claim?.pidStartTime, "Qualified runner identity requires process-start evidence; ps denial must remain visible");
+  const owner = { kind: "parent-session" as const, sessionId: "parent", workspace: root, branchId: null, goalId: null };
+  store.registerOperation({ operationId: "live-operation", taskId, launchToken: started.token, owner, observer: { kind: "local-supervisor", version: "1" } });
+  store.registerWait({ waitId: "retained-wait", owner, dependencies: [{ operationId: "live-operation" }], continuationNote: "Interpret the real command" });
+  for (let index = 0; index < 25; index++) {
+    const id = `history-${index}`;
+    store.registerOperation({ operationId: id, taskId: supervisorTaskIdForToken(id), launchToken: id, owner, observer: { kind: "local-supervisor", version: "1" } });
+    store.recordTerminalOutcome({ operationId: id, eventId: id, outcome: "succeeded", owner, evidence: [{ kind: "terminal-record", ref: id }] });
+  }
+  store.registerOperation({ operationId: "missing-runner", taskId: supervisorTaskIdForToken("missing"), launchToken: "missing", owner, observer: { kind: "local-supervisor", version: "1" } });
+  const { supervisorPaths } = await import(new URL("../../pi-better-background-tasks/src/supervisor/store.ts", import.meta.url).href);
+  const corrupt = supervisorPaths(directory, supervisorTaskIdForToken("missing"));
+  mkdirSync(corrupt.dir, { recursive: true }); writeFileSync(corrupt.launch, "{");
+  await model.reconcile();
+  assert.deepEqual(model.livenessReasons().map(reason => reason.id), [taskId]);
+  writeFileSync(join(root, "finish"), "done");
+  await waitFor("runner terminal record", () => supervisor.snapshot(taskId!)?.terminal);
+  await model.reconcile();
+  assert.deepEqual(model.livenessReasons(), []);
+  assert.equal(store.listWaits({ owner })[0]!.phase, "waiting", "idle observation does not consume unread waits");
+  assert.equal(store.getOperation("live-operation")!.terminalRevision, 0, "idle observation does not become terminal authority");
+  assert.equal(model.backgroundMetrics.historyQueries, 0);
+});
+
+function runtime(env: ReturnType<typeof makeEnv>) {
+  const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "--agent", "pi"], {
+    env: { ...process.env, ...env.vars }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let log = ""; child.stderr.on("data", chunk => { log += chunk; }); child.stdout.resume();
+  return { child, exited: once(child, "exit"), log: () => log };
+}
+
+async function liveServer(env: ReturnType<typeof makeEnv>) {
+  return waitFor("runtime owner", () => {
+    const owner = inspectDaemonOwner(env.serverDir);
+    return owner.status === "live" && existsSync(join(env.serverDir, "pi-server.sock")) ? owner.owner : undefined;
+  });
+}
+
+test("idle shutdown fault gets one bounded recovery within the shutdown budget", { timeout: 25_000 }, async t => {
+  const env = makeEnv(); mkdirSync(env.serverDir);
+  // A real persistence fault, not a replaced obligation provider.
+  mkdirSync(join(env.serverDir, "clean-stop.json"));
+  const fixture = runtime({ ...env, vars: { ...env.vars, PI_SERVER_RUNTIME_IDLE_MS: "100" } });
+  const started = Date.now();
+  t.after(async () => { if (fixture.child.exitCode === null && fixture.child.signalCode === null) { fixture.child.kill("SIGTERM"); await fixture.exited; } });
+  const [code] = await fixture.exited;
+  assert.equal(code, 1, fixture.log());
+  assert.ok(Date.now() - started < 15000, fixture.log());
+  assert.match(fixture.log(), /EISDIR/);
+  assert.match(fixture.log(), /idle recovery budget exhausted/);
+  assert.equal(JSON.parse(readFileSync(join(env.serverDir, "guardian-idle-restarts.json"), "utf8")).length, 1);
+  assert.equal(inspectDaemonOwner(env.serverDir).status, "dead");
+});
+
+test("guardian loss binds exact live server without replacing its owner, then follows clean idle exit", { timeout: 40_000 }, async t => {
+  const env = makeEnv();
+  const original = runtime(env);
+  t.after(async () => {
+    const server = inspectDaemonOwner(env.serverDir);
+    if (server.status === "live") process.kill(server.owner.pid, "SIGTERM");
+    await waitFor("server cleanup", () => inspectDaemonOwner(env.serverDir).status !== "live");
+    const guardian = inspectDaemonOwner(env.serverDir, "guardian-owner");
+    if (guardian.status === "live") process.kill(guardian.owner.pid, "SIGTERM");
+  });
+  const server = await liveServer(env);
+  assert.ok(server.start, "Process-start identity is required for qualified guardian binding; local ps denial must remain visible");
+  original.child.kill("SIGKILL"); await original.exited;
+  const binding = await waitFor("replacement guardian handshake", async () => {
+    const probe = await Client.connect(join(env.serverDir, "pi-server.sock"));
+    try {
+      await probe.request({ type: "hello", protocolVersion: 1, runtimeRoot: env.agentDir });
+      return (await probe.request({ type: "runtime_get_status" })).data.guardianBinding;
+    } finally { probe.close(); }
+  });
+  assert.notEqual(binding.pid, original.child.pid);
+  assert.ok(binding.start);
+  const current = inspectDaemonOwner(env.serverDir);
+  assert.equal(current.status, "live");
+  if (current.status === "live") assert.deepEqual(current.owner, server);
+  await waitFor("server and rebound guardian idle exit", () => inspectDaemonOwner(env.serverDir).status === "missing"
+    && inspectDaemonOwner(env.serverDir, "guardian-owner").status === "missing", 35_000);
+});
+
+test("all recovery processes lost require explicit restart and preserve durable state", { timeout: 20_000 }, async t => {
+  const env = makeEnv(); const first = runtime(env);
+  t.after(async () => { if (first.child.exitCode === null && first.child.signalCode === null) { first.child.kill("SIGTERM"); await first.exited; } });
+  const server = await liveServer(env);
+  const client = await Client.connect(join(env.serverDir, "pi-server.sock"));
+  const created = await client.request({ type: "create_session", cwd: env.cwd });
+  client.close(); assert.equal(created.success, true);
+  const ownership = new OwnershipStore(ownershipPathFor(env.serverDir));
+  const fenced = ownership.fence(created.sessionId, "unverified-move-writer");
+  const evidence = join(env.agentDir, "retained-evidence.json");
+  writeFileSync(evidence, JSON.stringify({ revision: 9, unread: true }));
+  first.child.kill("SIGKILL"); process.kill(server.pid, "SIGKILL"); await first.exited;
+  await waitFor("old server death", () => !ownerIsAlive(server));
+  const second = runtime(env);
+  t.after(async () => { second.child.kill("SIGTERM"); await second.exited; });
+  const replacement = await liveServer(env);
+  assert.notEqual(replacement.token, server.token);
+  assert.notEqual(replacement.pid, server.pid);
+  assert.deepEqual(JSON.parse(readFileSync(evidence, "utf8")), { revision: 9, unread: true });
+  const retained = new OwnershipStore(ownershipPathFor(env.serverDir));
+  assert.deepEqual(retained.get(created.sessionId), fenced, "recovery cannot release an unresolved execution fence");
+  const probe = await Client.connect(join(env.serverDir, "pi-server.sock"));
+  try {
+    const refused = await probe.request({ type: "open_session", sessionId: created.sessionId });
+    assert.equal(refused.success, false); assert.match(refused.error, /fenced/);
+  } finally { probe.close(); }
+});
+
+test("restart budget survives guardian reconstruction and stops repeated crash spin", { timeout: 25_000 }, async t => {
+  const env = makeEnv(); const first = runtime(env);
+  t.after(async () => { if (first.child.exitCode === null && first.child.signalCode === null) { first.child.kill("SIGTERM"); await first.exited; } });
+  for (let index = 0; index < 3; index++) {
+    const server = await liveServer(env);
+    process.kill(server.pid, "SIGKILL");
+    await waitFor("persisted failure", () => {
+      try { return JSON.parse(readFileSync(join(env.serverDir, "guardian-restarts.json"), "utf8")).length >= index + 1; } catch { return false; }
+    });
+    await waitFor("old owner death", () => !ownerIsAlive(server));
+  }
+  const [code] = await first.exited;
+  assert.equal(code, 1); assert.match(first.log(), /budget exhausted/);
+  const before = readFileSync(join(env.serverDir, "guardian-restarts.json"), "utf8");
+  const reconstructed = runtime(env);
+  const [nextCode] = await reconstructed.exited;
+  assert.equal(nextCode, 1); assert.match(reconstructed.log(), /budget exhausted/);
+  assert.equal(inspectDaemonOwner(env.serverDir).status, "dead");
+  assert.equal(readFileSync(join(env.serverDir, "guardian-restarts.json"), "utf8"), before);
+});
+
+test("concurrent alias launches converge and an unresponsive live owner is not reclaimed", { timeout: 20_000 }, async t => {
+  const env = makeEnv(); const alias = join(env.root, "alias"); symlinkSync(env.agentDir, alias);
+  const launches = Array.from({ length: 5 }, (_, index) => runtime({ ...env, vars: { ...env.vars, PI_CODING_AGENT_DIR: index % 2 ? alias : env.agentDir } }));
+  t.after(async () => {
+    const server = inspectDaemonOwner(env.serverDir);
+    if (server.status === "live") { process.kill(server.owner.pid, "SIGCONT"); process.kill(server.owner.pid, "SIGTERM"); }
+    for (const launch of launches) if (launch.child.exitCode === null && launch.child.signalCode === null) launch.child.kill("SIGTERM");
+    await Promise.all(launches.map(launch => launch.exited));
+  });
+  const server = await liveServer(env);
+  const guardian = inspectDaemonOwner(env.serverDir, "guardian-owner"); assert.equal(guardian.status, "live");
+  process.kill(server.pid, "SIGSTOP");
+  const competing = runtime(env); const [code] = await competing.exited;
+  assert.equal(code, 1); assert.match(competing.log(), /already running/);
+  const still = inspectDaemonOwner(env.serverDir);
+  assert.equal(still.status, "live"); if (still.status === "live") assert.deepEqual(still.owner, server);
+  process.kill(server.pid, "SIGCONT");
+});
 
 test("real process start evidence retains a worker; a running label alone does not", async t => {
   const env = makeEnv();

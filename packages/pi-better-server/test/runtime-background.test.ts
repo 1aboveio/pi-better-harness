@@ -81,7 +81,9 @@ test("shared query observes real runner and wait without taking supervision auth
       while (buffer.includes("\n")) {
         const end = buffer.indexOf("\n");
         const command = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
-        const result = command.type === "hello" ? checkHello(command, { agentDir: root }) : { ok: true, data: queries.handle(command) };
+        const result = command.type === "hello" ? checkHello(command, { agentDir: root })
+          : command.type === "runtime_register_client" ? { ok: true, data: { clientId: command.clientId } }
+          : { ok: true, data: queries.handle(command) };
         socket.write(JSON.stringify({ id: command.id, type: "response", success: result.ok, ...result }) + "\n");
       }
     });
