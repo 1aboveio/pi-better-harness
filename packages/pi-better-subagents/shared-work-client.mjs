@@ -11,7 +11,7 @@ export class WorkClient {
     buffer = "";
     closed = false;
 
-    constructor(socketPath, agentDir) {
+    constructor(socketPath, agentDir, requiredCapabilities = []) {
         this.socket = connect(socketPath);
         this.socket.setEncoding("utf8");
         this.socket.on("data", chunk => {
@@ -36,7 +36,7 @@ export class WorkClient {
         });
         this.socket.on("error", error => this.fail(error));
         this.socket.on("close", () => this.fail(new Error("runtime-unavailable: disconnected; resync required")));
-        this.ready = this.request("hello", { protocolVersion: 1, runtimeRoot: agentDir, requiredCapabilities: ["runtime-state-v1", "runtime-subscriptions-v1"] });
+        this.ready = this.request("hello", { protocolVersion: 1, runtimeRoot: agentDir, requiredCapabilities: ["runtime-state-v1", "runtime-subscriptions-v1", ...requiredCapabilities] });
     }
     request(type, params = {}) {
         if (this.closed) return Promise.reject(new Error("runtime-unavailable: disconnected; resync required"));

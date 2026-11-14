@@ -24,6 +24,7 @@ import {
   type DurableTaskKind,
   type WaitView,
 } from "./observed-waits.js";
+import { backgroundObservation } from "./work-observation.js";
 import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
 import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask, type WatchTaskParams, type BackgroundTaskRuntime } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
@@ -397,7 +398,7 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     parameters: ListParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return text(durableAwareList(pi, params, activeSession));
+      return text(await durableAwareList(pi, params, activeSession, ctx));
     },
   });
 
@@ -686,7 +687,7 @@ async function runAction(
       return withNavigatorRefresh(ctx, await launchWatch(pi, params as unknown as WatchTaskParams, ctx.cwd, callbackOrigin, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal, runtime));
     }
     case "list":
-      return durableAwareList(pi, params, callbackOrigin);
+      return durableAwareList(pi, params, callbackOrigin, ctx);
     case "status": {
       if (!params.id) return "Invalid parameters: status requires id.";
       const durable = durableStatusText(pi, String(params.id), ctx);
@@ -727,19 +728,22 @@ async function runAction(
  * supervised operation. Cursors stay legacy-only; durable rows are all shown on
  * the first page.
  */
-function durableAwareList(
+async function durableAwareList(
   pi: ExtensionAPI,
   params: Record<string, unknown>,
   origin: BackgroundTaskCallbackOrigin | undefined,
-): string {
-  const legacy = formatList(listOptions(params, origin));
+  ctx: ExtensionContext,
+): Promise<string> {
+  const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, true, params.all === true) : undefined;
+  if (snapshot && snapshot.status !== "ready") throw new Error(snapshot.reason ?? "Background activity is unverified");
+  const legacy = formatList(listOptions(params, origin), snapshot?.backgroundIndex);
   const host = getObservedWaitHost(pi);
-  if (!host?.available || !origin || typeof params.cursor === "string") return legacy;
+  if ((!snapshot && !host?.available) || !origin || typeof params.cursor === "string") return legacy;
   const wanted = Array.isArray(params.status) && params.status.length > 0
     ? new Set(params.status.filter((status): status is string => typeof status === "string"))
     : undefined;
   const limit = Math.max(1, Math.min(Math.floor(typeof params.limit === "number" ? params.limit : 10), 100));
-  const durable = host.listDurableTasks(origin)
+  const durable = (snapshot ? snapshot.rows.filter((row: any) => row.meta.durable).map((row: any) => row.meta) as import("./observed-waits.js").DurableTaskProjection[] : host?.listDurableTasks(origin) ?? [])
     .filter((task) => !wanted || (task.active ? wanted.has("running") : wanted.has(task.status)))
     .slice(0, limit);
   if (durable.length === 0) return legacy;

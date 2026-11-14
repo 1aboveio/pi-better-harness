@@ -47,6 +47,7 @@
     "runtime-client/**",
     "src/**/*.ts",
     "src/shared-operation-coordinator/assignment-observation.mjs",
+    "src/shared-work-client.mjs",
     "src/supervisor/**/*.mjs",
     "src/supervisor/**/*.js",
     "!src/**/*.test.ts",

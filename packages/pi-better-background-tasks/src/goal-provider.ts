@@ -1,9 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { listMetas, listMetasForOrigin, onMetaChanged } from "./registry.js";
+import { listMetas, onMetaChanged } from "./registry.js";
 import { getObservedWaitHost, type DurableTaskProjection } from "./observed-waits.js";
 import type { BackgroundTaskMeta } from "./types.js";
 import { isTerminalStatus } from "./types.js";
 import { backgroundTaskProgressAt, observeBackgroundTaskStall } from "./stall.js";
+import { backgroundObservation, onBackgroundObservation } from "./work-observation.js";
 
 const GOAL_READY_EVENT = "pi-better-goal:ready";
 const GOAL_REGISTER_PROVIDER_EVENT = "pi-better-goal:register-provider";
@@ -53,19 +54,22 @@ export function registerBackgroundTasksGoalProvider(pi: ExtensionAPI): void {
     pi.events?.emit(GOAL_REGISTER_PROVIDER_EVENT, {
       id: "background-tasks",
       label: "Background Tasks",
-      getActivity: (ctx: ExtensionContext) => {
-        const origin = getGoalActivityOrigin(ctx);
-        const durable = getObservedWaitHost(pi)?.listDurableTasks(origin, {
-          retentionMs: TERMINAL_GOAL_ACTIVITY_RETENTION_MS,
-        }) ?? [];
-        return collectBackgroundTaskGoalActivity(listMetasForOrigin(origin), ctx, Date.now(), durable);
+      scope: "session",
+      getActivity: async (ctx: ExtensionContext) => {
+        const snapshot = await backgroundObservation(pi, ctx);
+        if (snapshot.status !== "ready") throw new Error(snapshot.reason ?? "Background activity is unverified");
+        const durable = snapshot.rows.filter((row: any) => row.meta.durable).map((row: any) => row.meta);
+        const legacy = snapshot.rows.filter((row: any) => !row.meta.durable).map((row: any) => row.meta);
+        return collectBackgroundTaskGoalActivity(legacy, ctx, Date.now(), durable);
       },
       // A durable operation change must refresh Goal activity even though it
       // never writes a mutable legacy registry meta.
       onActivityChanged: (notify: () => void) => {
+        const offRuntime = onBackgroundObservation(pi, notify);
         const offMeta = onMetaChanged(notify);
         const offDurable = getObservedWaitHost(pi)?.onDurableTaskChange(notify);
         return () => {
+          offRuntime();
           offMeta();
           offDurable?.();
         };
