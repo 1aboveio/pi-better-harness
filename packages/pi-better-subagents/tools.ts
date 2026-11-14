@@ -14,7 +14,7 @@
  * far as `execute` is concerned).
  */
 
-import { assignmentFor } from "./assignment-projection.mjs";
+import { assignmentFor, createAssignmentProjector } from "./assignment-projection.mjs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus, type RunCallbackOrigin, type RunMeta, type RunStatus } from "./registry.ts";
 import { buildSubagentResultPayload } from "./finalization.ts";
@@ -337,6 +337,16 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
             // are listed even when they were spawned by another foreground.
             const cwd = listCwd(ctx, resolved.origin);
             const scopeKey = listFolderScopeKey(p.all === true, cwd);
+            const project = createAssignmentProjector();
+            const assignments = new Map<string, ReturnType<typeof assignmentFor>>();
+            const assignmentOf = (meta: RunMeta) => {
+                let assignment = assignments.get(meta.id);
+                if (!assignment) {
+                    assignment = project(meta, effectiveStatus(meta));
+                    assignments.set(meta.id, assignment);
+                }
+                return assignment;
+            };
             const healthCache = new Map<string, HealthObservation>();
             const healthById = (id: string) => {
                 const hit = healthCache.get(id);
@@ -352,7 +362,8 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 params: p,
                 cwd,
                 now,
-                statusOf: (meta: RunMeta) => assignmentFor(meta, effectiveStatus(meta)).state,
+                statusOf: (meta: RunMeta) => assignmentOf(meta).state,
+                assignmentOf,
                 healthById,
             });
             const items = collected.items as Array<{ meta: RunMeta; status: string }>;
@@ -364,6 +375,7 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
             const revisions = listRevisions(
                 items.map((row) => ({ id: row.meta.id, status: String(row.status), meta: row.meta })),
                 items.map((row) => incidents.get(row.meta.id)?.revision ?? ""),
+                assignmentOf,
             );
             const statusesKey = Array.isArray(p.status) ? [...p.status].map(String).sort().join(",") : String(p.status ?? "");
             const incidentRuns = items.filter((row) => (incidents.get(row.meta.id)?.count ?? 0) > 0).length;
@@ -373,6 +385,7 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 render: (row) => {
                     const incident = incidents.get(row.meta.id);
                     return formatSubagentListRow(row.meta, {
+                        assignment: assignmentOf(row.meta),
                         processStatus: effectiveStatus(row.meta),
                         status: row.status,
                         now,
