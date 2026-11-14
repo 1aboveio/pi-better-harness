@@ -348,6 +348,7 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                     const incident = listIncidentCount(row.meta.id, row.meta.cwd, !["running", "orphaned"].includes(row.meta.status));
                     const line = formatSubagentListRow(row.meta, { assignment: row.assignment, status: row.assignment.state,
                         processStatus: row.assignment.processStatus, now, compact: true,
+                        health: row.health ? observeRunHealth({ ...row.health, status: row.assignment.processStatus === "exited" ? row.meta.status : row.assignment.processStatus, now, startedAt: row.meta.startedAt }) : undefined,
                         failure: formatIncidentLabel(incident.count, incident.actionRequired) });
                     const footer = `\nnextCursor=${row.cursor}\nstatusCursor=${status}`;
                     if (Buffer.byteLength([...lines, line].join("\n") + footer) > budget) break;

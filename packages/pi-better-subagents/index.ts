@@ -24,7 +24,9 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { initializeNavigatorPanels } from "./shared-navigator-panels.ts";
-import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment, observedList } from "./work-observation.ts";
+import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail } from "./work-observation.ts";
+import { withAssignmentObservations } from "./assignment-projection.mjs";
+import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
 import {
@@ -1554,12 +1556,13 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
         (["running", "waiting"].includes(row.assignment.state) || typeof (row.meta.endedAt ?? row.meta.lostAt) !== "number" ||
             now - (row.meta.endedAt ?? row.meta.lostAt) < TERMINAL_NAVIGATOR_RETENTION_MS)).map((row: any) => {
         const meta = row.meta;
+        const health = row.health ? observeRunHealth({ ...row.health, status: row.assignment.processStatus === "exited" ? meta.status : row.assignment.processStatus, now, startedAt: meta.startedAt }) : undefined;
         const terminal = !["running", "waiting"].includes(row.assignment.state);
         return { providerId: "subagents", id: meta.id, name: meta.name || meta.id,
             model: shortModel(meta.model), effort: meta.effort, status: row.assignment.state,
             tool: row.display?.tool, tokens: row.display?.spend,
             statusTone: statusTone(row.assignment.state), kind: "subagent", elapsed: fmtElapsed((meta.endedAt ?? now) - meta.startedAt),
-            primary: [shortModel(meta.model), meta.effort, row.display?.tool, row.display?.spend].filter(Boolean).join(" ") || "subagent run", facts: [], sortStartedAt: meta.startedAt,
+            primary: [shortModel(meta.model), meta.effort, row.display?.tool, row.display?.spend].filter(Boolean).join(" ") || "subagent run", facts: formatNavigatorHealthFacts(health), sortStartedAt: meta.startedAt,
             expiresAt: terminal && typeof meta.endedAt === "number" ? meta.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS : undefined };
     });
     if (!snapshot || snapshot.status !== "ready") rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Subagents",
@@ -1678,12 +1681,19 @@ function mainAgentWorkDetail(now: number): BackgroundWorkDetail {
 
 function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
     if (id === "main") return mainAgentWorkDetail(now);
-    const detail = navigatorDetail(id, now);
+    const row = requestWorkDetail(id);
+    if (!row?.detail) return { providerId: "subagents", id, title: id, status: row?.observationError ? "degraded" : "rebuilding", statusTone: "warning", metadata: [], evidence: { label: "observation", text: row?.observationError ?? workObservationFailure() } };
+    const health = row.health ? observeRunHealth({ ...row.health, status: row.assignment.processStatus === "exited" ? row.meta.status : row.assignment.processStatus, now, startedAt: row.meta.startedAt }) : undefined;
+    const detail = withAssignmentObservations([row], () => buildNavigatorDetail(id, {
+        readMeta: () => row.meta, effectiveStatus: () => row.assignment.processStatus, parseRun: () => row.detail.parsed,
+        shortModel, fmtElapsed, fmtSpend, now, effortFor: (meta: RunMeta) => meta.effort, healthFor: () => health,
+    }));
     if (!detail) return null;
     void options;
-    const transcript = readRunTranscript(id);
+    const transcript = row.detail.transcript;
     const metadata = [
         { label: "provider", value: "Subagents" },
+        ...(row.observationError ? [{ label: "observation", value: row.observationError }] : []),
         { label: "id", value: detail.id },
         ...(detail.role ? [{ label: "role", value: String(detail.role) }] : []),
         { label: "model", value: detail.effort ? `${detail.model} · effort ${detail.effort}` : detail.model },

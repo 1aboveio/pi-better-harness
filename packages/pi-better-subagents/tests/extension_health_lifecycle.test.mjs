@@ -231,7 +231,11 @@ describe("structured failure attention", () => {
                 assert.ok(result.indexOf("Action required") < result.indexOf("still running") || result.indexOf("Action required") < result.indexOf("still working"));
                 assert.match(list, /incident/i);
                 assert.doesNotMatch(list, /assertion failed/);
-                const detail = renderRegisteredWorkDetail("subagents", id, 120);
+                const detail = await waitFor(() => {
+                    const rendered = renderRegisteredWorkDetail("subagents", id, 120);
+                    return rendered.detail.transcript?.some((entry) => entry.type === "tool" && entry.isError) ? rendered : undefined;
+                });
+                assert.ok(detail, "shared detail receives the original tool error transcript");
                 assert.doesNotMatch(detail.lines.join("\n"), /Action required/);
                 assert.ok(detail.detail.transcript.some((entry) => entry.type === "tool" && entry.isError), "original error results stay in the transcript");
                 mock.timers.tick(HEALTH_TICK_MS);

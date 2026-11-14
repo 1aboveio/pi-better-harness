@@ -6,6 +6,9 @@ import { WorkClient } from "./shared-work-client.mjs";
 let client: WorkClient | undefined;
 let failure = "Shared runtime observation is connecting.";
 let generation = 0;
+const details = new Map<string, any>();
+const pendingDetails = new Set<string>();
+let refresh = () => {};
 
 export function workObservation() { return client?.snapshot; }
 export function workObservationFailure() { return client?.snapshot?.reason ?? failure; }
@@ -13,6 +16,7 @@ export function workObservationFailure() { return client?.snapshot?.reason ?? fa
 export async function startWorkObservation(agentDir: string, origin: { cwd: string; sessionId?: string }, changed: () => void) {
     stopWorkObservation();
     const current = generation;
+    refresh = changed;
     try {
         mkdirSync(agentDir, { recursive: true, mode: 0o700 });
         agentDir = realpathSync(agentDir);
@@ -63,5 +67,24 @@ async function ensureObservation() {
 }
 
 export function stopWorkObservation() {
-    generation++; client?.close(); client = undefined;
+    generation++; client?.close(); client = undefined; details.clear(); pendingDetails.clear();
+}
+
+export function requestWorkDetail(id: string) {
+    const cached = details.get(id);
+    if (cached?.seq === client?.snapshot?.seq || pendingDetails.has(id) || !client) return cached?.row;
+    pendingDetails.add(id);
+    const current = generation;
+    void client.get({ id, detail: true, limit: 1 }).then(snapshot => {
+        if (current !== generation) return;
+        details.set(id, { seq: snapshot.seq, row: snapshot.rows[0] });
+        if (details.size > 16) details.delete(details.keys().next().value!);
+        refresh();
+    }).catch(error => {
+        if (current !== generation) return;
+        failure = String(error);
+        details.set(id, { seq: client?.snapshot?.seq, row: { ...cached?.row, observationError: failure } });
+        refresh();
+    }).finally(() => { pendingDetails.delete(id); });
+    return cached?.row;
 }

@@ -2,20 +2,23 @@ import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { setImmediate as yieldTurn } from "node:timers/promises";
 import { createAssignmentProjector } from "./domain/assignment-projection.mjs";
 import { createAssignmentReader } from "./domain/assignment-observation.mjs";
 import { parseArchivedAttempt, parseArchivedSessionState } from "./domain/session-store.mjs";
-import { parseRun } from "./domain/parse.mjs";
+import { parseRun, readRunTranscript } from "./domain/parse.mjs";
 import { fmtSpend } from "./domain/widget.mjs";
+import { effectiveStatus } from "./domain/process-status.mjs";
+import { extractChildEventFactsFromLog, healthThresholdsForConfig } from "./domain/health-observation.mjs";
+import { readHealthConfig } from "./health-config.ts";
 
-export interface WorkScope { cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; limit?: number; cursor?: string }
+export interface WorkScope { cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; detail?: boolean; limit?: number; cursor?: string }
 export interface WorkSnapshot {
   instanceId: string; runtimeEpoch: string; scopeRevision: string; seq: number;
-  observedRevisionVector: { inventory: number; coordinator: string };
+  observedRevisionVector: { inventory: number; coordinator: string; healthConfig: string };
   status: "ready" | "rebuilding" | "degraded"; reason?: string;
   rows: Array<{ meta: any; assignment: any; sourceRevision: string }>;
   nextCursor?: string; activity: { active: number }; nextDeadline: number | null;
@@ -30,8 +33,11 @@ export class WorkReadModel {
   private db: any;
   private reader: ReturnType<typeof createAssignmentReader>;
   private files = new Map<string, { signature: string; meta: any }>();
-  private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string } }>();
+  private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string }; health?: any }>();
   private logs = new Map<string, string>();
+  private processes = new Map<string, string>();
+  private healthRevision = "";
+  private details = new Map<string, { revision: string; value: any }>();
   private watchers: FSWatcher[] = [];
   private listeners = new Set<() => void>();
   private timer?: ReturnType<typeof setInterval>;
@@ -150,11 +156,12 @@ export class WorkReadModel {
       let coordinator: string;
       try { coordinator = this.reader.revision(); } catch { coordinator = "unknown"; }
       const logs = new Map<string, string>();
+      const processes = new Map<string, string>();
       const logFamilies = new Set<string>();
       for (const [path, entry] of next) {
         if (!path.startsWith(this.runs + sep)) continue;
         let signature = this.logs.get(entry.meta.id);
-        if (!signature || ["running", "orphaned"].includes(entry.meta.status) || this.files.get(path)?.signature !== entry.signature) {
+        {
           try {
             const info = await stat(join(this.runs, entry.meta.id, "output.log"), { bigint: true });
             signature = `${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
@@ -162,9 +169,12 @@ export class WorkReadModel {
         }
         logs.set(entry.meta.id, signature);
         if (signature !== this.logs.get(entry.meta.id)) logFamilies.add(JSON.stringify([entry.meta.sessionId, entry.meta.cwd]));
+        const status = effectiveStatus(entry.meta); processes.set(entry.meta.id, status);
+        if (status !== this.processes.get(entry.meta.id)) logFamilies.add(JSON.stringify([entry.meta.sessionId, entry.meta.cwd]));
       }
+      const healthConfig = readHealthConfig(this.agentDir);
       const changed = next.size !== this.files.size || [...next].some(([path, entry]) => this.files.get(path)?.signature !== entry.signature);
-      if (!changed && !logFamilies.size && coordinator === this.coordinator && this.state === "ready") return;
+      if (!changed && !logFamilies.size && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && this.state === "ready") return;
       const metas = new Map<string, any>();
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
       for (const [path, entry] of next) {
@@ -183,12 +193,13 @@ export class WorkReadModel {
       const rows = [];
       for (const meta of attempts) {
         let row = this.projected.get(meta.id);
-        if (!row || coordinator !== this.coordinator || affected.has(family(meta))) {
+        if (!row || coordinator !== this.coordinator || healthConfig.revision !== this.healthRevision || affected.has(family(meta))) {
           this.metrics.projections++;
-          const assignment = project(meta, meta.status);
+          const assignment = project(meta, processes.get(meta.id) ?? meta.status);
           const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRun(meta.id, { logPath: join(this.runs, meta.id, "output.log") }) : undefined;
           const display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.toolCalls.at(-1) ?? "" };
-          row = { meta, assignment, display, sourceRevision: hash([meta, assignment.revision, display]) };
+          const health = logs.has(meta.id) ? { ...extractChildEventFactsFromLog(meta.id, { logPath: join(this.runs, meta.id, "output.log") }), thresholds: healthThresholdsForConfig(healthConfig.config) } : undefined;
+          row = { meta, assignment, display, health, sourceRevision: hash([meta, assignment.revision, display, health]) };
         }
         rows.push(row);
         if (++batch % 256 === 0) await yieldTurn();
@@ -221,7 +232,7 @@ export class WorkReadModel {
         }
         this.db.exec("COMMIT");
       } catch (error) { this.db.exec("ROLLBACK"); throw error; }
-      this.files = next; this.logs = logs; this.coordinator = coordinator; this.inventory++;
+      this.files = next; this.logs = logs; this.processes = processes; this.healthRevision = healthConfig.revision; this.coordinator = coordinator; this.inventory++;
       this.projected = new Map(rows.map(row => [row.meta.id, row]));
       const previousState = this.state;
       const previousReason = this.reason;
@@ -253,9 +264,30 @@ export class WorkReadModel {
     const records = this.db.prepare(`SELECT payload, started, id FROM rows ${clauses.length ? "WHERE " + clauses.join(" AND ") : ""} ORDER BY started DESC, id DESC LIMIT ?`).all(...args, limit + 1);
     const page = records.slice(0, limit), last = page.at(-1);
     return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([key, this.revision]), seq: this.revision,
-      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator }, status: this.state, reason: this.reason,
+      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, status: this.state, reason: this.reason,
       totalMatching,
-      rows: page.map((record: any) => ({ ...JSON.parse(record.payload), cursor: Buffer.from(JSON.stringify([key, this.instanceId, this.revision, record.started, record.id])).toString("base64url") })),
+      rows: page.map((record: any) => {
+        const row = JSON.parse(record.payload);
+        if (scope.detail && scope.id) {
+          let cached = this.details.get(row.meta.id);
+          if (!cached || cached.revision !== row.sourceRevision) {
+            const logPath = join(this.runs, row.meta.id, "output.log");
+            const expectedLog = this.logs.get(row.meta.id) ?? "missing";
+            const signature = () => {
+              try { const info = statSync(logPath, { bigint: true }); return `${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`; }
+              catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unverified"; }
+            };
+            if (signature() !== expectedLog) throw new Error("state-degraded: log changed since the indexed observation; resync required");
+            const value = { parsed: parseRun(row.meta.id, { logPath }), transcript: readRunTranscript(row.meta.id, { logPath }) };
+            if (signature() !== expectedLog) throw new Error("state-degraded: log changed during detail observation; resync required");
+            if (Buffer.byteLength(JSON.stringify(value)) > 3 * 1024 * 1024) throw new Error("state-degraded: detail exceeds the bounded snapshot allowance");
+            cached = { revision: row.sourceRevision, value }; this.details.set(row.meta.id, cached);
+            if (this.details.size > 16) this.details.delete(this.details.keys().next().value!);
+          }
+          row.detail = cached.value;
+        }
+        return { ...row, cursor: Buffer.from(JSON.stringify([key, this.instanceId, this.revision, record.started, record.id])).toString("base64url") };
+      }),
       ...(records.length > limit ? { nextCursor: Buffer.from(JSON.stringify([key, this.instanceId, this.revision, last.started, last.id])).toString("base64url") } : {}),
       activity: { active: Number(this.db.prepare("SELECT count(*) AS n FROM rows WHERE active = 1").get().n) }, nextDeadline: null };
   }

@@ -183,11 +183,11 @@ function transcriptContent(msg: Msg | undefined): ContentBlock[] {
 /** Bounded, display-oriented transcript fold for the subagent detail view. */
 export function readRunTranscript(
     id: string,
-    options: { maxBytes?: number; maxEntries?: number } = {},
+    options: { maxBytes?: number; maxEntries?: number; logPath?: string } = {},
 ): RunTranscript {
     const maxBytes = Math.max(1024, options.maxBytes ?? DEFAULT_TRANSCRIPT_TAIL_BYTES);
     const maxEntries = Math.max(1, options.maxEntries ?? DEFAULT_TRANSCRIPT_ENTRIES);
-    const tail = readTail(logPathFor(id), maxBytes);
+    const tail = readTail(options.logPath ?? logPathFor(id), maxBytes);
     if (tail.error) return { entries: [], truncated: false, diagnostic: `Log unreadable: ${tail.error}` };
 
     const lines = tail.text.split(/\r?\n/);

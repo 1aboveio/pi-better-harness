@@ -71,6 +71,10 @@ export function resolveHealthThresholds(
 
 /** Load thresholds from extension config.json (best-effort). */
 export function loadHealthThresholdsFromConfig(config: SubagentConfig = loadConfig()): HealthThresholds {
+    return healthThresholdsForConfig(config);
+}
+
+export function healthThresholdsForConfig(config: SubagentConfig): HealthThresholds {
     return resolveHealthThresholds({
         ...config,
         healthQuietMs: config.healthQuietMs ?? envDuration("PI_BETTER_STALL_QUIET_MS"),
@@ -525,9 +529,9 @@ function trimToBudget(state: FactLogState): void {
  */
 export function extractChildEventFactsFromLog(
     id: string,
-    opts: { now?: number; logText?: string } = {},
+    opts: { now?: number; logText?: string; logPath?: string } = {},
 ): { facts: ChildEventFacts; rawLog: RawLogDiagnostic } {
-    const path = logPathFor(id);
+    const path = opts.logPath ?? logPathFor(id);
     const rawLog: RawLogDiagnostic = {};
     try {
         const st = statSync(path);
@@ -548,7 +552,8 @@ export function extractChildEventFactsFromLog(
         return { facts: extractChildEventFacts(events), rawLog };
     }
 
-    const previous = factLogStates.get(id);
+    const key = opts.logPath ?? id;
+    const previous = factLogStates.get(key);
     const read = readAppendedLines(path, previous?.cursor, maxHealthReadBytes());
     if (read.error !== undefined) {
         rawLog.error = rawLog.error ?? read.error;
@@ -568,7 +573,7 @@ export function extractChildEventFactsFromLog(
         for (const size of parsed.sizes) state.bytes += size;
         trimToBudget(state);
     }
-    rememberState(id, state);
+    rememberState(key, state);
 
     if (state.truncated) rawLog.windowTruncated = true;
     if (state.dropped) rawLog.eventsDropped = true;

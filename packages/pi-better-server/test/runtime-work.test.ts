@@ -5,7 +5,7 @@ import { createServer, connect, type Socket } from "node:net";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
-import { register, createRequire } from "node:module";
+import { register, createRequire, syncBuiltinESMExports } from "node:module";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
@@ -16,6 +16,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
   const agent = join(root, "agent");
   const runs = join(root, "pi-better-subagents/runs");
   mkdirSync(agent); mkdirSync(runs, { recursive: true });
+  writeFileSync(join(agent, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: { healthLongToolMs: 1 } } }));
   const coordinatorPath = new URL("../../operation-coordinator/index.ts", import.meta.url).href;
   const { openStore } = await import(coordinatorPath);
   openStore({ path: join(agent, "operation-coordinator.sqlite") }).close();
@@ -27,7 +28,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       operations: { conversationId: `worker-${i}`, workspace: root } }));
   }
   writeFileSync(join(runs, "sa_shared_0", "output.log"), [
-    { type: "tool_execution_start", toolCallId: "display-proof", toolName: "bash", args: {} },
+    { type: "tool_execution_start", toolCallId: "display-proof", toolName: "bash", at: Date.now() - 1000, args: {} },
     { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], usage: { input: 100, output: 20, cost: { total: 0.01 } } } },
   ].map(event => JSON.stringify(event)).join("\n") + "\n");
   const child = fork(new URL("./support/work-daemon.ts", import.meta.url), [], {
@@ -113,6 +114,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       const displayed = hooks.listRows().find((row: any) => row.id === "sa_shared_0");
       assert.equal(displayed.tool, "bash");
       assert.match(displayed.tokens, /120/);
+      assert.ok(displayed.facts.some((fact: string) => /bash/.test(fact)), "cached health facts preserve configured long-tool diagnostics without client I/O");
       assert.equal(localConnections, 0, "actual registered provider paints never open the coordinator");
       const result = await tools.get("subagent_result").execute("result", { id: "sa_shared_0", all: true }, undefined, undefined, ctx);
       assert.equal(result.details.assignment.revision, first.snapshot!.rows.find(row => row.meta.id === "sa_shared_0")!.assignment.revision);
@@ -128,6 +130,32 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       const next = await list.execute("list-next", { all: true, limit: 2, max_bytes: 4096, status: ["completed"], cursor }, undefined, undefined, ctx);
       assert.notEqual(page.details.snapshot.rows[0].meta.id, next.details.snapshot.rows[0].meta.id);
       assert.equal(localConnections, 0, "actual list handler consumes the server index without opening local SQLite");
+      let detail;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        detail = hooks.renderDetail("sa_shared_0").detail;
+        if (detail.status !== "rebuilding") break;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(detail.status, "completed");
+      assert.match(detail.evidence.text, /done/);
+      assert.equal(detail.metadata.find((item: any) => item.label === "revision").value, result.details.assignment.revision);
+      const registryPath = new URL("../../pi-better-subagents/registry.ts", import.meta.url).href;
+      const registryIo = await import(registryPath);
+      registryIo.resetRegistryIoMetrics();
+      const filesystem = createRequire(import.meta.url)("node:fs");
+      const originalIo = new Map(["readFileSync", "statSync", "openSync"].map(name => [name, filesystem[name]]));
+      let paintIo = 0;
+      for (const [name, read] of originalIo) filesystem[name] = (...args: any[]) => { paintIo++; return read(...args); };
+      syncBuiltinESMExports();
+      try {
+        for (let frame = 0; frame < 60; frame++) { hooks.renderDetail("sa_shared_0"); hooks.listRows(); }
+      } finally {
+        for (const [name, read] of originalIo) filesystem[name] = read;
+        syncBuiltinESMExports();
+      }
+      assert.equal(paintIo, 0, "60 actual registered list/detail draws perform no filesystem reads, stats or opens");
+      assert.equal(registryIo.getRegistryIoMetrics().metadataFileReads, 0, "registered detail draws consume the cached server snapshot");
+      assert.equal(localConnections, 0, "registered detail draws never open a local coordinator");
     } finally {
       sqlite.DatabaseSync = OriginalDatabase;
       await handlers.get("session_shutdown")?.({}, ctx);
@@ -195,6 +223,12 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     assert.equal(disconnected.snapshot!.status, "degraded");
     assert.ok(disconnected.snapshot!.rows.length > 0, "disconnect preserves stale observations rather than faking an empty scope");
     await assert.rejects(disconnected.resync(), /disconnected/);
+    const reconnected = new WorkClient(socket, agent); clients.push(reconnected);
+    const fresh = await reconnected.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
+    assert.equal(fresh.status, "ready");
+    assert.equal(fresh.instanceId, first.snapshot!.instanceId);
+    assert.equal(fresh.seq, first.snapshot!.seq, "a new transport takes a fresh atomic snapshot after disconnect");
+    assert.equal(fresh.rows.find(row => row.meta.id === "sa_shared_0")!.meta.name, "gap-two");
   } finally {
     await Promise.all(readers.map(async reader => {
       if (reader.exitCode !== null) return;
@@ -247,10 +281,10 @@ test("10000 durable records use bounded indexed history pages; a single archive 
   } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("inventory reconciliation rereads changed records only and retains stale rows on corrupt external writes", async () => {
+test("watch overflow and lost notifications reconcile external writes once and retain stale degraded rows", { timeout: 10000 }, async () => {
   const root = mkdtempSync(resolve("../../.work/753/inventory-"));
   const runs = join(root, "runs"); mkdirSync(runs);
-  const model = new WorkReadModel(root, "instance", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  const model = new WorkReadModel(root, "instance", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 50 });
   const meta = { id: "sa_external", cwd: root, sessionId: "worker", status: "completed", startedAt: 1 };
   mkdirSync(join(runs, meta.id));
   const path = join(runs, meta.id, "meta.json");
@@ -262,17 +296,33 @@ test("inventory reconciliation rereads changed records only and retains stale ro
     await model.reconcile();
     assert.equal(model.metrics.metadataReads, reads);
     assert.equal(model.metrics.projections, projections);
-    execFileSync(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], process.argv[2])", path, JSON.stringify({ ...meta, status: "failed" })]);
+    const watchers = (model as unknown as { watchers: import("node:fs").FSWatcher[] }).watchers;
+    assert.ok(watchers.length > 0);
+    watchers[0]!.emit("error", new Error("injected kernel watcher overflow"));
+    assert.equal(model.snapshot().status, "degraded", "the production watcher error callback exposes unknown freshness");
     await model.reconcile();
+    watchers.forEach(watcher => watcher.close());
+    const recovered = new Promise<void>(resolve => {
+      const off = model.onChange(() => {
+        if (model.snapshot().rows[0]?.assignment.state === "failed") { off(); resolve(); }
+      });
+    });
+    execFileSync(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], process.argv[2])", path, JSON.stringify({ ...meta, status: "failed" })]);
+    await recovered;
     assert.equal(model.snapshot().rows[0]!.assignment.state, "failed");
+    assert.equal(model.metrics.metadataReads - reads, 1, "lost notifications require only one shared changed-record import");
+    assert.equal(model.metrics.projections - projections, 1);
     writeFileSync(path, "not json");
     await model.reconcile();
     assert.equal(model.snapshot().status, "degraded");
     assert.equal(model.snapshot().rows[0]!.assignment.state, "failed");
-    model.invalidate("watcher overflow");
     writeFileSync(path, JSON.stringify(meta));
     await model.reconcile();
     assert.equal(model.snapshot().rows[0]!.assignment.state, "completed");
+    writeFileSync(path, JSON.stringify({ ...meta, status: "running", pid: 4194304 }));
+    await model.reconcile();
+    assert.equal(model.snapshot().rows[0]!.assignment.processStatus, "exited");
+    assert.equal(model.snapshot().rows[0]!.assignment.state, "waiting", "a dead PID does not manufacture assignment completion");
   } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
