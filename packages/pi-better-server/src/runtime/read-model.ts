@@ -15,7 +15,7 @@ import { effectiveStatus } from "./domain/process-status.mjs";
 import { extractChildEventFactsFromLog, healthThresholdsForConfig } from "./domain/health-observation.mjs";
 import { readHealthConfig } from "./health-config.ts";
 
-export interface WorkScope { cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; detail?: boolean; limit?: number; cursor?: string }
+export interface WorkScope { cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; endedAfter?: number; detail?: boolean; limit?: number; cursor?: string }
 export interface WorkSnapshot {
   instanceId: string; runtimeEpoch: string; scopeRevision: string; seq: number;
   observedRevisionVector: { inventory: number; coordinator: string; healthConfig: string };
@@ -61,10 +61,11 @@ export class WorkReadModel {
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
-      started REAL, state TEXT, active INTEGER, payload TEXT);
+      started REAL, state TEXT, active INTEGER, ended REAL, payload TEXT);
       CREATE INDEX work_folder ON rows(cwd, started DESC, id DESC);
       CREATE INDEX work_origin ON rows(origin_cwd, origin_session, started DESC, id DESC);
       CREATE INDEX work_active ON rows(active, started DESC, id DESC);
+      CREATE INDEX work_terminal ON rows(active, ended, started DESC, id DESC);
       CREATE INDEX work_state ON rows(state, started DESC, id DESC);`);
     this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"));
     this.runs = join(options.baseDir ?? join(realpathSync(tmpdir()), "pi-better-subagents"), "runs");
@@ -218,7 +219,7 @@ export class WorkReadModel {
       }
       if (this.closed) return;
       this.db.exec("BEGIN");
-      const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+      const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");
       let semanticChange = false;
       try {
@@ -228,7 +229,7 @@ export class WorkReadModel {
           semanticChange = true;
           const m = row.meta;
           insert.run(m.id, m.cwd, m.callbackOrigin?.cwd ?? m.cwd, m.callbackOrigin?.sessionId ?? null,
-            m.startedAt, row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, JSON.stringify(row));
+            m.startedAt, row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, m.endedAt ?? m.lostAt ?? null, JSON.stringify(row));
         }
         this.db.exec("COMMIT");
       } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -250,7 +251,8 @@ export class WorkReadModel {
     if (scope.id) { clauses.push("id = ?"); args.push(scope.id); }
     if (scope.sessionId) { clauses.push("origin_session = ? AND origin_cwd = ?"); args.push(scope.sessionId, scope.cwd); }
     else if (scope.cwd) { const cwd = resolve(scope.cwd); clauses.push("(cwd = ? OR substr(cwd, 1, ?) = ?)"); args.push(cwd, (cwd.endsWith(sep) ? cwd : cwd + sep).length, cwd.endsWith(sep) ? cwd : cwd + sep); }
-    if (scope.active) clauses.push("active = 1");
+    if (scope.active !== undefined) { clauses.push("active = ?"); args.push(scope.active ? 1 : 0); }
+    if (scope.endedAfter !== undefined) { clauses.push("(ended IS NULL OR ended >= ?)"); args.push(scope.endedAfter); }
     if (scope.statuses?.length) { clauses.push(`state IN (${scope.statuses.map(() => "?").join(",")})`); args.push(...scope.statuses); }
     const key = hash({ ...scope, cursor: undefined });
     const totalMatching = Number(this.db.prepare(`SELECT count(*) AS n FROM rows ${clauses.length ? "WHERE " + clauses.join(" AND ") : ""}`).get(...args).n);

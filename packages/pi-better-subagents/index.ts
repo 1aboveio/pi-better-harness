@@ -24,7 +24,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { initializeNavigatorPanels } from "./shared-navigator-panels.ts";
-import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail } from "./work-observation.ts";
+import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail, TERMINAL_NAVIGATOR_RETENTION_MS } from "./work-observation.ts";
 import { withAssignmentObservations } from "./assignment-projection.mjs";
 import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
@@ -1397,7 +1397,6 @@ let unregisterSubagentProvider: (() => void) | undefined;
 let acceptanceProviderRef: BackgroundWorkProvider | undefined;
 let acceptanceSpawnToolRef: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
 let acceptanceStopToolRef: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
-const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 let mainAgentStartedAt: number | undefined;
 const mainAgentTools = new Map<string, string>();
 
