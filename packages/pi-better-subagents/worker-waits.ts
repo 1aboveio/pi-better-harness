@@ -57,7 +57,10 @@ import {
 } from "./worker-operations-host.ts";
 import { captureParkCheckpoint, verifyParkCheckpoint, type ParkCheckpoint } from "./park-checkpoint.ts";
 import { findSavedConversation, readConversationLease } from "./continuation.ts";
-import { commitAssignmentTerminal } from "./assignment-outcomes.ts";
+import { commitAssignmentTerminal, readOutcome, coordinatorPath, type AssignmentBinding } from "./assignment-outcomes.ts";
+import { openStore } from "./shared-operation-coordinator/index.ts";
+import { recordAssignmentReport } from "./assignment-report.ts";
+import { currentSandboxPermissions } from "./permission-policy.ts";
 import {
     effectiveStatus,
     isPendingPark,
@@ -770,6 +773,7 @@ export const recipeCheckpointEvidenceValidator: CheckpointEvidenceValidator = (i
 };
 
 export interface WorkerOperationRegistration {
+    assignment?: AssignmentBinding;
     /** Subagent attempt id. Equal to the bridge run id. */
     runId: string;
     /** Native conversation id (the saved session). */
@@ -868,6 +872,7 @@ function scopeOf(registration: {
  */
 export function createWorkerOperationsHost(options: WorkerOperationsHostOptions): WorkerOperationsHost {
     const created: { host?: OperationBridgeHost } = {};
+    const hosting: { promise?: Promise<OperationBridgeHost> } = {};
     const starting: { promise?: Promise<boolean> } = {};
     const capability: { available: boolean; service?: WorkerOperationService } = { available: false };
     const runs = new Map<string, WorkerRunScope>();
@@ -877,12 +882,15 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
 
     const ensureHost = async (): Promise<OperationBridgeHost> => {
         if (created.host) return created.host;
-        const factory = options.hostFactory ?? createOperationBridgeHost;
-        created.host = await factory({
-            ...(options.logger ? { logger: options.logger } : {}),
-            ...(options.now ? { now: options.now } : {}),
-        });
-        return created.host;
+        if (!hosting.promise) {
+            const factory = options.hostFactory ?? createOperationBridgeHost;
+            hosting.promise = factory({
+                ...(options.logger ? { logger: options.logger } : {}),
+                ...(options.now ? { now: options.now } : {}),
+            }).then((host) => { created.host = host; return host; })
+                .finally(() => { hosting.promise = undefined; });
+        }
+        return hosting.promise;
     };
 
     const start = async (): Promise<boolean> => {
@@ -911,11 +919,12 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
     };
 
     const register = async (registration: WorkerOperationRegistration): Promise<WorkerOperationHandle> => {
-        if (!capability.available) {
+        const supervised = registration.tools.some((name) => name !== "report_assignment_result");
+        if (supervised && !capability.available) {
             const ready = await start();
             if (!ready) throw new WorkerOperationsHostUnavailable(workerOperationsUnavailableReason(options.pi) ?? "The Background observed-waits service is not available.");
         }
-        const service = requireService();
+        const service = supervised ? requireService() : undefined;
         const host = await ensureHost();
         const scope = scopeOf(registration);
         runs.set(registration.runId, scope);
@@ -929,7 +938,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
         // The durable run binding captures the worker's task authority and the
         // conversation identity. Every later tool call, checkpoint and resume fence
         // is checked against it by the Background host.
-        const registered = await rpc.call("register-run", {
+        const registered = supervised ? await rpc.call("register-run", {
             runId: registration.runId,
             conversationId: registration.conversationId,
             attemptId: registration.attemptId,
@@ -941,7 +950,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             assignmentOutcomesVersion: 1,
             owner,
             ...(registration.writerLeaseId ? { writerLeaseId: registration.writerLeaseId } : {}),
-        });
+        }) : { assignmentOutcomesVersion: 1 };
         if (registered.assignmentOutcomesVersion !== 1) {
             runs.delete(registration.runId);
             try { await rpc.call("release-run", { runId: registration.runId, reason: "assignment outcome capability mismatch" }); } catch { /* preserve the capability refusal */ }
@@ -955,12 +964,39 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
          */
         const ownsTask = (taskId: string): boolean => {
             try {
-                return service.ownsTask(scope, taskId);
+                return service?.ownsTask(scope, taskId) ?? false;
             } catch {
                 return false;
             }
         };
         const handlers: OperationRunHandlers = {};
+        if (registration.capabilities.reportAssignment && registration.assignment) {
+            handlers.report_assignment_result = async (params, context) => recordAssignmentReport(registration.runId, params, () => {
+                const live = host.getRun(registration.runId);
+                const meta = readMeta(registration.runId);
+                if (!live || live.revoked || live.tokenGeneration !== context.tokenGeneration || context.signal.aborted
+                    || !runs.has(registration.runId) || !meta || meta.status !== "running" || meta.park
+                    || meta.sessionId !== registration.conversationId
+                    || JSON.stringify(meta.assignment) !== JSON.stringify(registration.assignment) || readOutcome(meta)) throw new Error("Assignment report writer is no longer authoritative.");
+                if (!processExists(meta.pid) || (meta.pidStartTime && processStartToken(meta.pid) !== meta.pidStartTime)) throw new Error("Assignment report writer has exited or changed identity.");
+                if (registration.writerLeaseId) {
+                    const lease = readConversationLease(registration.conversationId);
+                    if (!lease || lease.attemptId !== meta.id || lease.token !== registration.writerLeaseId) throw new Error("Assignment report writer lease changed.");
+                }
+                if (meta.operations?.resumeLaunchToken) {
+                    const store = openStore({ path: coordinatorPath() });
+                    try {
+                        const claims = store.listResumeClaims({ state: "published" });
+                        if (!claims.some((c) => {
+                            const wait = store.getWait({ waitId: c.waitId, generation: c.generation });
+                            return c.attemptId === meta.id && c.launchToken === meta.operations!.resumeLaunchToken
+                                && wait && wait.cancelEpoch === c.cancelEpoch && !["cancelled", "held"].includes(wait.phase);
+                        })) throw new Error("Assignment resume writer fence changed.");
+                    } finally { store.close(); }
+                }
+                return meta;
+            }, currentSandboxPermissions(options.pi as never)) as unknown as JsonRecord;
+        }
         const execute = (tool: string, params: JsonRecord): Promise<JsonRecord> => rpc.call("execute-tool", {
             runId: registration.runId,
             conversationId: registration.conversationId,
@@ -1154,10 +1190,11 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
     const release = (runId: string, reason: string): void => {
         runs.delete(runId);
         try { created.host?.unregisterRun(runId); } catch { /* already gone */ }
-        void rpc.call("release-run", { runId, reason }).catch(() => {});
+        if (capability.service) void rpc.call("release-run", { runId, reason }).catch(() => {});
     };
 
     const close = async (): Promise<void> => {
+        try { await hosting.promise; } catch { /* failed creation has no host to close */ }
         const host = created.host;
         created.host = undefined;
         starting.promise = undefined;

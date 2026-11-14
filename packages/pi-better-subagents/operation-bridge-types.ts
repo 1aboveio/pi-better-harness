@@ -72,6 +72,7 @@ export const OPERATION_BRIDGE_TOOL_NAMES = [
     "bg_task_log",
     "wait_for_operations",
     "acknowledge_operation_result",
+    "report_assignment_result",
 ] as const;
 
 export type OperationBridgeToolName = (typeof OPERATION_BRIDGE_TOOL_NAMES)[number];
@@ -102,6 +103,7 @@ export const OPERATION_BRIDGE_METHODS: readonly OperationBridgeMethod[] = [
 export type JsonRecord = Record<string, unknown>;
 
 export interface OperationBridgeCapabilities {
+    reportAssignment?: boolean;
     background: {
         spawn: boolean;
         watch: boolean;
@@ -628,6 +630,17 @@ const HANDSHAKE_SCHEMA: JsonRecord = object({
 
 export function canonicalToolSchema(name: OperationBridgeToolName): JsonRecord {
     switch (name) {
+        case "report_assignment_result": return {
+            type: "object", additionalProperties: false, required: ["status", "reason", "evidence"],
+            properties: {
+                status: { type: "string", enum: ["complete", "incomplete"] },
+                reason: { type: "string", minLength: 1, maxLength: 2048 },
+                evidence: { type: "array", minItems: 1, maxItems: 4, items: {
+                    type: "object", additionalProperties: false, required: ["path", "explanation"],
+                    properties: { path: { type: "string", minLength: 1, maxLength: 1024 }, explanation: { type: "string", minLength: 1, maxLength: 1024 } },
+                } },
+            },
+        };
         case "wait_for_operations": return WAIT_FOR_OPERATIONS_SCHEMA;
         case "acknowledge_operation_result": return ACKNOWLEDGE_OPERATION_RESULT_SCHEMA;
         default: return LOOSE_BACKGROUND_SCHEMA;
@@ -635,6 +648,7 @@ export function canonicalToolSchema(name: OperationBridgeToolName): JsonRecord {
 }
 
 const TOOL_LABELS: Record<OperationBridgeToolName, string> = {
+    report_assignment_result: "Report Assignment Result",
     bg_task_spawn: "BG Spawn",
     bg_task_watch: "BG Watch",
     bg_task_status: "BG Status",
@@ -644,6 +658,7 @@ const TOOL_LABELS: Record<OperationBridgeToolName, string> = {
 };
 
 const TOOL_DESCRIPTIONS: Record<OperationBridgeToolName, string> = {
+    report_assignment_result: "Record your complete or incomplete assignment judgment with retained workspace artifact evidence before your final answer. Does not terminalize the assignment, interpret waits or record parent acceptance. Report once; identical retries are allowed, conflicting reports are refused.",
     bg_task_spawn: "Start one long-running background operation through the trusted parent supervisor. Returns immediately. The operation is owned by the parent, not by this worker process.",
     bg_task_watch: "Start one background command watch through the trusted parent supervisor. Returns immediately. The operation is owned by the parent, not by this worker process.",
     bg_task_status: "Inspect one operation owned by this worker conversation. Only task ids accepted by the parent ownership check are readable.",
@@ -664,7 +679,7 @@ export function createToolDescriptor(
 ): OperationToolDescriptor {
     // The wait/acknowledge schemas are fixed here; a parent descriptor may not
     // loosen the contract that decides when a worker parks or consumes evidence.
-    const parameters = name === WAIT_OPERATIONS_TOOL || name === ACKNOWLEDGE_OPERATION_TOOL
+    const parameters = name === WAIT_OPERATIONS_TOOL || name === ACKNOWLEDGE_OPERATION_TOOL || name === "report_assignment_result"
         ? canonicalToolSchema(name)
         : (overrides.parameters ?? canonicalToolSchema(name));
     return deepFreeze({
@@ -679,6 +694,7 @@ export function createToolDescriptor(
 
 export function descriptorsForCapabilities(capabilities: OperationBridgeCapabilities): OperationToolDescriptor[] {
     return deepFreeze([
+        ...(capabilities.reportAssignment === true ? [createToolDescriptor("report_assignment_result")] : []),
         ...(capabilities.background.spawn ? [createToolDescriptor("bg_task_spawn")] : []),
         ...(capabilities.background.watch ? [createToolDescriptor("bg_task_watch")] : []),
         ...(capabilities.background.status ? [createToolDescriptor("bg_task_status")] : []),
@@ -720,6 +736,7 @@ export function normalizeToolDescriptors(
 
 export function capabilityForTool(name: OperationBridgeToolName, capabilities: OperationBridgeCapabilities): boolean {
     switch (name) {
+        case "report_assignment_result": return capabilities.reportAssignment === true;
         case "bg_task_spawn": return capabilities.background.spawn;
         case "bg_task_watch": return capabilities.background.watch;
         case "bg_task_status": return capabilities.background.status;

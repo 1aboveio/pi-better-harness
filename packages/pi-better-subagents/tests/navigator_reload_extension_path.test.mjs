@@ -201,6 +201,7 @@ function installTimerSpies() {
         pendingTimeouts: () => liveTimeouts.size,
         timeoutIds: () => [...liveTimeouts],
         pendingIntervals: () => liveIntervals.size,
+        intervalIds: () => [...liveIntervals],
         restore() {
             globalThis.setTimeout = realSetTimeout;
             globalThis.clearTimeout = realClearTimeout;
@@ -426,12 +427,13 @@ describe("registered extension path: session_start reload cleanup", () => {
         nav.focusViaLeftKey();
 
         // 3) Main is selected by default; Down selects the run, then Enter opens
-        // detail and x arms close confirmation. Health remains the
-        // only interval; UI refresh and arm expiry are cancellable one-shots.
+        // detail and x arms close confirmation. Domain health and assignment
+        // reconciliation have intervals; UI deadlines remain one-shots.
         nav.pressEditor("down");
         const component = await nav.openDetailViaEnter();
         nav.press("x");
-        assert.equal(timerSpies.pendingIntervals(), 1, "health is the only live interval");
+        assert.equal(timerSpies.pendingIntervals(), 2, "health and assignment reconciliation each retain one interval");
+        const intervalsBeforeReload = new Set(timerSpies.intervalIds());
         assert.equal(timerSpies.pendingTimeouts(), 3, "main-list polling, detail refresh and close-arm deadlines are live");
         const deadlinesBeforeReload = new Set(timerSpies.timeoutIds());
         assert.match(component.render(120).join("\n"), /x again to stop reload-job/);
@@ -445,7 +447,9 @@ describe("registered extension path: session_start reload cleanup", () => {
 
         // 5a) Prior overlay timers + confirmation cleared by the registered
         // session_start path (disposeBackgroundWorkNavigator).
-        assert.equal(timerSpies.pendingIntervals(), 1, "reload keeps only the domain health interval");
+        assert.equal(timerSpies.pendingIntervals(), 2, "reload keeps exactly health and assignment reconciliation");
+        assert.equal(timerSpies.intervalIds().filter((id) => intervalsBeforeReload.has(id)).length, 1,
+            "health remains attached while the previous outcome reconciliation interval is replaced");
         assert.equal(timerSpies.pendingTimeouts(), 1, "reload keeps only the new session's main-list poll");
         assert.ok(timerSpies.timeoutIds().every(id => !deadlinesBeforeReload.has(id)), "reload clears every old session deadline");
         assert.deepEqual(nav.statusCalls, []);

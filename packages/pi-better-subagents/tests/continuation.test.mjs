@@ -163,6 +163,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 `;
 
 const binDir = mkdtempSync(join(RUNTIME, "fake-bin-"));
+// Workspace-local temp directories must not inherit the repository's ESM mode.
+writeFileSync(join(binDir, "package.json"), JSON.stringify({ type: "commonjs" }));
 const fakePiPath = join(binDir, "pi");
 writeFileSync(fakePiPath, fakePi);
 chmodSync(fakePiPath, 0o755);
@@ -1272,6 +1274,36 @@ describe("completed-subagent continuation", () => {
             await reap([discoveryId, noneId, noneReplayId, legacyId].filter(Boolean));
             h.shutdown();
         }
+    });
+
+    it("keeps reporting internal across current and older recipes without accepting real tool or exclusion conflicts", async () => {
+        const h = makeHarness();
+        const ids = [];
+        try {
+            const rootId = await spawnRun(h, { tools: "read,bash" });
+            ids.push(rootId);
+            const root = await waitTerminal(rootId);
+            assert.equal(root.recipe.tools, "read,bash");
+            assert.ok(root.operations.tools.includes("report_assignment_result"), "reporting remains a runtime capability");
+            const preflight = JSON.parse(readFileSync(join(runDir(rootId), "child-preflight.json"), "utf8"));
+            assert.ok(preflight.tools.includes("report_assignment_result"));
+            // Reproduce the frozen shape already written by 41a09a8.
+            writeMeta({ ...root, recipe: { ...root.recipe, tools: "read,bash,report_assignment_result" } });
+            await assert.rejects(resumeRun(h, { id: rootId, prompt: "WIDEN", tools: "read,write" }), /`tools` conflicts with the saved launch recipe/);
+            await assert.rejects(resumeRun(h, { id: rootId, prompt: "EXCLUDE BASH", exclude_tools: "bash" }), /`exclude_tools` conflicts with the saved launch recipe/);
+            await assert.rejects(resumeRun(h, { id: rootId, prompt: "EXCLUDE REPORT", exclude_tools: "report_assignment_result" }), /`exclude_tools` conflicts with the saved launch recipe/);
+            const receipt = await h.tools.get("subagent_spawn_batch").execute("tc-legacy-report", {
+                shared: { tools: "read,bash" }, jobs: [{ session_id: rootId, prompt: "MATCH ORIGINAL CALLER TOOLS" }],
+            }, undefined, undefined, h.ctx);
+            assert.equal(receipt.details.status, "launched", JSON.stringify(receipt.details));
+            const continuedId = receipt.details.launched[0].id;
+            ids.push(continuedId);
+            const continued = await waitTerminal(continuedId);
+            assert.equal(continued.status, "completed");
+            assert.equal(continued.sessionId, root.sessionId);
+            assert.equal(continued.recipe.tools, "read,bash");
+            assert.ok(continued.operations.tools.includes("report_assignment_result"));
+        } finally { await reap(ids); h.shutdown(); }
     });
 
     it("continues per-job session ids in a batch alongside fresh jobs without sharing one writer", async () => {

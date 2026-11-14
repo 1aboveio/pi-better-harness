@@ -240,6 +240,8 @@ export interface RunMeta {
     completionCallbackSentAt?: number;
     completionCallbackSuppressedAt?: number;
     completionCallbackSuppressedReason?: string;
+    outcomeDeliveryDeferredReason?: string;
+    assignmentReport?: { version: 1; assignmentId: string; attemptId: string; digest: string; path: string };
     orphanedCallbackSuppressedAt?: number;
     orphanedCallbackSuppressedReason?: string;
     lostCallbackSuppressedAt?: number;

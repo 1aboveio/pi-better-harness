@@ -108,6 +108,7 @@ export type OperationCheckpointEvidenceCheck = (
 ) => boolean | Promise<boolean>;
 
 export interface OperationRunHandlers {
+    report_assignment_result?: OperationToolHandler;
     bg_task_spawn?: OperationToolHandler;
     bg_task_watch?: OperationToolHandler;
     bg_task_status?: OperationToolHandler;
@@ -1132,6 +1133,7 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
 
 function normalizeCapabilities(value: OperationBridgeCapabilities): OperationBridgeCapabilities {
     if (!value || typeof value !== "object") throw new Error("capabilities are required");
+    if (value.reportAssignment !== undefined && typeof value.reportAssignment !== "boolean") throw new Error("capabilities.reportAssignment must be boolean");
     const background = value.background;
     if (!background || typeof background !== "object") throw new Error("capabilities.background is required");
     const booleans = ["spawn", "watch", "status", "log"] as const;
@@ -1142,6 +1144,7 @@ function normalizeCapabilities(value: OperationBridgeCapabilities): OperationBri
         if (typeof value[key] !== "boolean") throw new Error(`capabilities.${key} must be boolean`);
     }
     return Object.freeze({
+        ...(value.reportAssignment !== undefined ? { reportAssignment: value.reportAssignment } : {}),
         background: Object.freeze({
             spawn: background.spawn,
             watch: background.watch,

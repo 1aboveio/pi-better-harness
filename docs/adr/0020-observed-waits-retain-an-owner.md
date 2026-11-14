@@ -115,6 +115,16 @@ preserve their original operation/revision identity, including dependencies that
 settle after the assignment fails.
 
 The Subagents finalizer supplies ordinary terminal decisions to the coordinator.
+For ordinary work without dependencies, `report_assignment_result` uses the same
+authenticated child bridge independently of Background capability. Subagents retains
+a versioned exact-attempt report and bounded artifact snapshots under captured and
+current read authority. Reports derive identity from registration, reject conflicting
+retries and stale writers, and do not terminalize live work. Ordinary finalization
+validates the retained report after coherent exit and required wait interpretation;
+incomplete reports cannot be overridden by earlier completion acknowledgements.
+Missing reports remain unverified. Crash, cancellation and writer fences retain
+precedence. Explicit follow-ups receive a fresh assignment and never copy reports.
+Parent delivery and exact-revision disposition remain separate from worker judgment.
 The existing callback batcher uses the stable outcome event as its notification
 identity and the attempt as its retrieval identity. Recipient transcript entries
 are reconciled before replay; a callback receipt remains distinct from inspection
