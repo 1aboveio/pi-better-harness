@@ -2355,11 +2355,15 @@ export default function (pi: ExtensionAPI) {
             const cfg = loadConfig();
             const savedSkillValue = cfg.defaultSkills;
             const hasSavedSkillChoice = savedSkillValue !== undefined && savedSkillValue !== null;
-            // Like skills, only save a timing key this session overrides or the
-            // config already carries; built-in defaults need no stored copy.
+            // An environment timeout shown on the page becomes the saved
+            // default; an untouched built-in default still needs no key.
             const savedTiming: { maxMinutes?: number; toolWaitMinutes?: number; stuckMinutes?: number } = {};
+            const timeout = timingState();
             if (timingOverride.maxMinutes !== undefined) {
                 savedTiming.maxMinutes = timingOverride.maxMinutes;
+            } else if (timeout.timeoutSource === "environment") {
+                if (timeout.timingError) return { ok: false, message: `Could not save subagent defaults: ${timeout.timingError}` };
+                savedTiming.maxMinutes = timeout.maxMinutes;
             } else if (isTimingMinutes(cfg.maxMinutes)) {
                 savedTiming.maxMinutes = cfg.maxMinutes;
             }
