@@ -263,9 +263,9 @@ test("registered Navigator preserves older active rows and the same consumers re
   };
   let child = await launch();
   const stop = async () => { if (child.exitCode === null) { const exited = once(child, "exit"); child.send("stop"); await exited; } };
-  const until = async (check: () => boolean) => {
+  const until = async (check: () => boolean | Promise<boolean>) => {
     const deadline = Date.now() + 10000;
-    while (!check()) { assert.ok(Date.now() < deadline, "production observation did not converge"); await new Promise(resolve => setTimeout(resolve, 10)); }
+    while (!await check()) { assert.ok(Date.now() < deadline, "production observation did not converge"); await new Promise(resolve => setTimeout(resolve, 10)); }
   };
   const handlers = new Map<string, Function>(), tools = new Map<string, any>();
   const ctx = { cwd: root, mode: "tui", hasUI: true, isIdle: () => true,
@@ -284,6 +284,7 @@ test("registered Navigator preserves older active rows and the same consumers re
         status: i === 0 ? "running" : "completed", startedAt: i, ...(i ? { endedAt: 1 } : {}) }));
     }
     await until(() => observation.workObservation()?.activity.active === 1);
+    await until(async () => (await observation.observedList({ cwd: root })).totalMatching === 201);
     assert.equal((await observation.observedList({ cwd: root })).totalMatching, 201);
     const hooks = (globalThis as any)[Symbol.for("pi-better-subagents.acceptance-hooks")];
     const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("subagents");
@@ -321,6 +322,12 @@ test("registered Navigator preserves older active rows and the same consumers re
       status: "completed", startedAt: 0, endedAt: Date.now() }));
     await until(() => hooks.listRows().find((row: any) => row.id === "sa_review_0")?.status === "completed");
     assert.equal(provider.visibleCount(), 201, "recent completion remains visible without counting it as active");
+    const beforeClose = observation.workObservation().seq;
+    assert.equal(provider.close("sa_review_0").action, "dismissed");
+    assert.equal(observation.workObservation().seq, beforeClose, "the server snapshot has not advanced synchronously");
+    assert.ok(!hooks.listRows().some((row: any) => row.id === "sa_review_0"), "confirmed dismissal must hide a stale cached row before the next server observation");
+    await until(() => Boolean(observation.workObservation()?.rows.find((row: any) => row.meta.id === "sa_review_0")?.meta.dismissedAt));
+    assert.ok(!hooks.listRows().some((row: any) => row.id === "sa_review_0"), "the acknowledged dismissal must not reappear");
   } finally {
     await handlers.get("session_shutdown")?.({}, ctx); await stop();
     for (const [key, value] of saved) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
