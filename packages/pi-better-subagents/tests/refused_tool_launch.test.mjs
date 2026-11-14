@@ -307,13 +307,16 @@ describe("refused task tools never reach the child loadout (#669)", () => {
         const preflight = readJson(join(runPath(id), "child-preflight.json"));
         const policy = readJson(join(runPath(id), "control", "task-policy.json"));
         const meta = registry.readMeta(id);
-        assert.deepEqual(preflight.tools, ["read", "edit", "apply_patch"],
+        assert.deepEqual(preflight.tools, ["read", "edit", "report_assignment_result", "apply_patch"],
             "the child preflight must list only tools the task boundary can provide");
         assert.deepEqual(policy.tools, preflight.tools,
             "the immutable task policy must admit exactly the preflight loadout");
         assert.equal(meta.recipe.tools, "read,edit,apply_patch",
-            "the frozen recipe must describe the effective loadout, not the requested one");
-        assert.ok(!meta.recipe.tools.split(",").includes("tool_search"));
+            "the frozen caller loadout excludes the supervisor's reporting capability");
+        for (const loadout of [preflight.tools, policy.tools, meta.recipe.tools.split(",")]) {
+            assert.ok(!loadout.includes("tool_search"));
+            assert.ok(!loadout.includes("web_fetch"));
+        }
 
         // The drop is reported, with the reason, where the operator can act.
         assert.match(text, /Task sandbox: /);
@@ -363,7 +366,15 @@ describe("refused task tools never reach the child loadout (#669)", () => {
         await waitForTerminal(id);
 
         const preflight = readJson(join(runPath(id), "child-preflight.json"));
-        assert.deepEqual(preflight.tools, ["read"], "an excluded tool is never planned or admitted");
+        assert.deepEqual(preflight.tools, ["read", "report_assignment_result"], "only the caller's read tool and internal reporter are admitted");
+        const policy = readJson(join(runPath(id), "control", "task-policy.json"));
+        const meta = registry.readMeta(id);
+        assert.deepEqual(policy.tools, preflight.tools);
+        assert.equal(meta.recipe.tools, "read,tool_search", "the caller's original selection stays frozen");
+        assert.equal(meta.recipe.excludeTools, "tool_search", "the frozen denylist still overrides that selection");
+        for (const loadout of [preflight.tools, policy.tools]) {
+            assert.ok(!loadout.includes("tool_search"), "excluded user tool stays absent from runtime authority");
+        }
         assert.doesNotMatch(text, /tool_search/, "an excluded tool is not reported as disabled");
     });
 

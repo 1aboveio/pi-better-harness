@@ -2018,8 +2018,14 @@ function sameLaunchPath(left: unknown, right: string | undefined): boolean {
     try { return canonicalizePath(left) === canonicalizePath(right); } catch { return false; }
 }
 
+/** Reporting is injected by the supervisor, not part of the caller's tool intent.
+ * Older recipes included it; remove only this internal name when reading them. */
+function callerLaunchTools(tools: string): string {
+    return normalizeTools(tools).split(",").filter((name) => name !== "report_assignment_result").join(",");
+}
+
 function sameLaunchTools(left: unknown, right: string): boolean {
-    return typeof left === "string" && normalizeTools(left) === normalizeTools(right);
+    return typeof left === "string" && callerLaunchTools(left) === callerLaunchTools(right);
 }
 
 /**
@@ -2828,7 +2834,7 @@ export default function (pi: ExtensionAPI) {
 
             // A continuation keeps the recipe's launch intent; only current
             // permission-driven adjustments are re-derived from it.
-            const requestedTools = resume ? resume.recipe.tools : p.tools;
+            const requestedTools = resume ? callerLaunchTools(resume.recipe.tools) : p.tools;
             const requestedExcludeTools = resume ? resume.recipe.excludeTools ?? "" : p.exclude_tools ?? "";
             const clean = resume ? resume.recipe.clean : p.clean === true;
             const allowNested = resume ? resume.recipe.allowNested : p.allow_nested === true;
@@ -3209,7 +3215,7 @@ export default function (pi: ExtensionAPI) {
                 cwd,
                 model,
                 effort: thinking,
-                tools: allow,
+                tools: callerLaunchTools(allow),
                 excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
                 skills: skills.mode === "inherit" ? undefined : [...skills.paths],
                 clean,
