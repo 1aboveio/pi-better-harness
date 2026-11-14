@@ -223,7 +223,7 @@ export function observeMetasForOrigin(origin, activeOnly = true) {
         if (record.found && !record.meta)
             throw new Error(`Unverified background task ${id}: ${record.error}`);
         return record.meta;
-    }).filter((meta) => !!meta && belongsToOrigin(meta, origin)
+    }).filter((meta) => !!meta && !!meta.callbackOrigin && belongsToOrigin(meta, origin)
         && (!activeOnly || meta.status === "running")).sort((a, b) => b.startedAt - a.startedAt);
 }
 function readMetaForSweep(id) {
