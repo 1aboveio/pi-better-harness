@@ -18,8 +18,13 @@ Pending authoritative waits take precedence over exited attempts and final prose
 A consumed wait records interpretation; it does not complete a parked assignment.
 A failed dependency command does not set assignment failure. Legacy attempts without
 an immutable assignment binding retain their ordinary completion semantics. For bound
-assignments (#744), exit zero alone cannot establish assignment completion. An exact
-`assignment-complete` dependency acknowledgement supplies that decision. Otherwise an
+assignments (#744), exit zero alone cannot establish assignment completion. An explicit
+`report_assignment_result` judgment with retained actual workspace evidence supplies
+that decision without requiring Background or a dependency wait. The authenticated
+child bridge derives the immutable assignment and attempt; the versioned report is
+attempt evidence, not a terminal outcome. The existing exact `assignment-complete`
+dependency acknowledgement remains compatible when there is no explicit report.
+An explicit incomplete report takes precedence over that acknowledgement. Otherwise an
 ended attempt with no outstanding interpretation commits `failed` with an explicit
 completion-unverified reason, preserving its separate completed process status. This
 uses the existing terminal contract to report failure to establish completion, not

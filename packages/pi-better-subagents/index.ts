@@ -15,6 +15,7 @@ import { createAssignmentProjector } from "./assignment-projection.mjs";
 import { historicalWaits, attentionRevision, attentionDismissed, dismissAttention } from "./historical-attention.ts";
 import { registerAssignmentAttempt, commitAssignmentTerminal, readOutcome, receiptOutcome, outcomeTranscriptReceipt, inspectOutcome, createOutcomeHost, closeOutcomeHost, claimOutcome, type AssignmentBinding } from "./assignment-outcomes.ts";
 import { currentSandboxPermissions } from "./permission-policy.ts";
+import { createToolDescriptor } from "./operation-bridge-types.ts";
 import { requestResumeAdmission } from "./worker-waits.ts";
 import { execSync } from "node:child_process";
 import { writeFileSync, mkdirSync, renameSync, statSync } from "node:fs";
@@ -2869,7 +2870,22 @@ export default function (pi: ExtensionAPI) {
                 explicitTools: requestedTools !== undefined,
                 productionSchemas: new Set(productionBridgeSchemas.schemas.keys()),
             });
-            const bridgeEnabled = workerOperations.available && bridgePlan.tools.length > 0;
+            const parent = ownerBindingFromContext(ctx);
+            const assignment: AssignmentBinding | undefined = internal?.resumeWait && resume?.prior.assignment
+                ? resume.prior.assignment
+                : parent.sessionId && typeof ctx.sessionManager?.getBranch === "function" ? { version: 1, assignmentId: id,
+                    owner: { kind: "worker-conversation", sessionId, workspace: cwd, branchId: parent.branchId, goalId: parent.goalId },
+                    recipient: { kind: "parent-session", ...parent } } : undefined;
+            if (!workerOperations.available) {
+                bridgePlan.tools = [];
+                bridgePlan.capabilities = { background: { spawn: false, watch: false, status: false, log: false }, wait: false, acknowledge: false, parking: false };
+            }
+            if (assignment && !requestedExcludes.has("report_assignment_result")) {
+                bridgePlan.tools = [...bridgePlan.tools, "report_assignment_result"];
+                bridgePlan.capabilities = { ...bridgePlan.capabilities, reportAssignment: true };
+                productionBridgeSchemas.schemas.set("report_assignment_result", createToolDescriptor("report_assignment_result"));
+            }
+            const bridgeEnabled = bridgePlan.tools.length > 0;
             if (bridgeEnabled) {
                 allow = [...new Set([...allow.split(",").filter(Boolean), ...bridgePlan.tools])].join(",");
             }
@@ -3097,6 +3113,7 @@ export default function (pi: ExtensionAPI) {
             // already captured. A resume requires the bridge: without it the
             // attempt could not read evidence or acknowledge its wait.
             let workerBridge: { env: Record<string, string>; policy: ReturnType<typeof captureWorkerPolicy>; authorityReference: string } | undefined;
+            if (assignment) registerAssignmentAttempt(assignment, id);
             if (bridgeEnabled) {
                 const workerPolicy = captureWorkerPolicy({
                     sandbox: sandboxEnabled,
@@ -3119,6 +3136,7 @@ export default function (pi: ExtensionAPI) {
                 const owner = internal?.parkOwner ?? ownerBindingFromContext(ctx);
                 try {
                     const handle = await workerOperations.register({
+                        assignment,
                         runId: id,
                         conversationId: sessionId,
                         workspace: cwd,
@@ -3156,14 +3174,7 @@ export default function (pi: ExtensionAPI) {
             // await between it and the spawn, so a cancellation or parent change
             // cannot hide inside a final asynchronous window.
             if (internal?.resumeWait && !resume?.prior.assignment) throw new PreSpawnResumeError("This legacy park has no verified assignment outcome recipient; refusing continuation on an unsupported binding.");
-            const parent = ownerBindingFromContext(ctx);
-            const assignment: AssignmentBinding | undefined = internal?.resumeWait && resume?.prior.assignment
-                ? resume.prior.assignment
-                : parent.sessionId && typeof ctx.sessionManager?.getBranch === "function" ? { version: 1, assignmentId: id,
-                    owner: { kind: "worker-conversation", sessionId, workspace: cwd, branchId: parent.branchId, goalId: parent.goalId },
-                    recipient: { kind: "parent-session", ...parent } } : undefined;
             if (!assignment && bridgeEnabled) throw new Error("Durable assignment outcomes require a recorded parent session and transcript capability.");
-            if (assignment) registerAssignmentAttempt(assignment, id);
             if (internal?.resumeWait) {
                 const captured = resume?.prior.operations?.policy;
                 const currentSandbox = taskRuntime ? {

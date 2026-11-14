@@ -54,28 +54,21 @@ function failedAssignment(id, branchId = null) {
     return { store, wait, meta: readMeta(id), operationId: `op-${id}` };
 }
 
-function endedAssignment(id, conversationId, complete = false) {
+function endedAssignment(id, conversationId) {
     const binding = { version: 1, assignmentId: id,
         owner: { kind: "worker-conversation", sessionId: conversationId, workspace: process.cwd(), branchId: null, goalId: null },
         recipient: { kind: "parent-session", sessionId: "parent", workspace: process.cwd(), branchId: null, goalId: null } };
     registerAssignmentAttempt(binding, id);
     const store = openStore({ path: coordinatorPath() });
-    if (complete) {
-        store.registerOperation({ operationId: `proof-${id}`, taskId: id, launchToken: id, owner: binding.owner, observer: { kind: "test", version: "1" } });
-        store.recordTerminalOutcome({ operationId: `proof-${id}`, eventId: `proof-event-${id}`, owner: binding.owner, outcome: "succeeded", evidence: [{ kind: "summary", ref: "assessment", summary: "All unit assessments populated and checked" }] });
-        const { wait } = store.registerWait({ owner: binding.owner, dependencies: [{ operationId: `proof-${id}` }], continuationNote: "Check assessments", origin: { assignmentRef: id, attemptId: id } });
-        store.recordEvidenceRead({ ...wait, owner: binding.owner, operationId: `proof-${id}`, terminalRevision: 1 });
-        store.acknowledgeResult({ ...wait, owner: binding.owner, disposition: "assignment-complete", terminalRevisions: [{ operationId: `proof-${id}`, revision: 1 }], note: "Checked all requested assessments; assigned assessment is complete." });
-    }
     mkdirSync(runDir(id), { recursive: true });
-    writeFileSync(logPathFor(id), `${JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: complete ? "Assessments completed; broader proof gaps remain." : "The unit assessments are not completed." }] })}\n`);
+    writeFileSync(logPathFor(id), `${JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: "The unit assessments are not completed." }] })}\n`);
     writeMeta({ id, assignment: binding, status: "running", pid: 4194304, spawnPid: process.pid, cwd: process.cwd(), sessionId: conversationId,
         promptPreview: "assess units", startedAt: 1, logPath: logPathFor(id), callback: true, callbackOrigin: { cwd: process.cwd(), sessionId: "parent" } });
     finalizeRun(id, 0);
     return { store, meta: readMeta(id) };
 }
 
-test("ended assignment retries admission without input, including an explicit same-conversation follow-up", async () => {
+test("ended outcomes retry admission without input for two assignments in one conversation", async () => {
     mock.timers.enable({ apis: ["setInterval"] });
     const options = { allowed: false };
     const h = host("parent", options);
@@ -108,7 +101,7 @@ test("ended assignment retries admission without input, including an explicit sa
         options.allowed = false;
         h.ctx.isIdle = () => true;
         await h.handlers.get("agent_settled")({}, h.ctx);
-        const second = endedAssignment("retry-ended-followup", first.meta.sessionId, true);
+        const second = endedAssignment("retry-ended-followup", first.meta.sessionId);
         fixtures.push(second);
         assert.equal(second.meta.sessionId, first.meta.sessionId);
         options.allowed = false;
@@ -125,9 +118,9 @@ test("ended assignment retries admission without input, including an explicit sa
         assert.match(secondDeferral, /Goal refused/);
         assert.equal(unfinished.details.assignment.state, "failed");
         assert.match(unfinished.details.assignment.reason, /continue unfinished work/);
-        assert.equal(readOutcome(second.meta).outcome, "succeeded");
+        assert.equal(readOutcome(second.meta).outcome, "failed");
         assert.notEqual(readOutcome(first.meta).eventId, readOutcome(second.meta).eventId);
-        assert.equal((await call(second.meta, {})).details.assignment.state, "completed");
+        assert.equal((await call(second.meta, {})).details.assignment.state, "failed");
         await call(second.meta, { outcome_revision: 1, disposition: "consumed", note: "Assessment evidence inspected" });
         assert.equal(readOutcome(first.meta).disposition.kind, "dismissed");
         assert.equal(readOutcome(second.meta).disposition.kind, "consumed");

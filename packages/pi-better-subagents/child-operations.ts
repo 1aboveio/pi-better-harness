@@ -509,6 +509,7 @@ export function verifyDescriptor(value: unknown, config: Pick<ChildOperationBrid
 function validateCapabilities(value: unknown): OperationBridgeCapabilities {
     if (!value || typeof value !== "object") throw new OperationBridgeError("invalid-request", "parent handshake has no capabilities");
     const record = value as Record<string, unknown>;
+    if (record.reportAssignment !== undefined && typeof record.reportAssignment !== "boolean") throw new OperationBridgeError("invalid-request", "parent reporting capability is invalid");
     const background = record.background;
     if (!background || typeof background !== "object") throw new OperationBridgeError("invalid-request", "parent handshake has no background capabilities");
     const bg = background as Record<string, unknown>;
@@ -519,6 +520,7 @@ function validateCapabilities(value: unknown): OperationBridgeCapabilities {
         if (typeof record[key] !== "boolean") throw new OperationBridgeError("invalid-request", `parent capability ${key} is invalid`);
     }
     return Object.freeze({
+        ...(typeof record.reportAssignment === "boolean" ? { reportAssignment: record.reportAssignment } : {}),
         background: Object.freeze({
             spawn: bg.spawn as boolean,
             watch: bg.watch as boolean,

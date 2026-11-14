@@ -7,6 +7,7 @@ import type { RunMeta } from "./registry.ts";
 import { processStartToken } from "./registry.ts";
 import type { PermissionSnapshot } from "./permission-policy.ts";
 import { credentialFilePaths } from "./shared-sandbox-core.ts";
+import { readAssignmentReport } from "./assignment-report.ts";
 
 export const ASSIGNMENT_OUTCOMES_VERSION = 1;
 const closedHosts = (globalThis as typeof globalThis & { __assignmentOutcomeClosedHosts?: Set<string> }).__assignmentOutcomeClosedHosts ??= new Set<string>();
@@ -62,16 +63,23 @@ export function commitAssignmentTerminal(meta: RunMeta, recoveryFailure = false)
         if (!recoveryFailure && meta.status !== "killed" && meta.operations?.resumeLaunchToken && waits.some((w) => !w.acknowledgement && ["resuming", "ready"].includes(w.phase))) return null;
         // A coherent attempt exit does not establish interpretation or completion.
         if (meta.status === "completed" && waits.some((w) => !w.acknowledgement)) return null;
-        const complete = meta.status === "completed" && waits.some((w) => w.acknowledgement?.disposition === "assignment-complete");
+        let report = null;
+        let invalidReport = "";
+        try { report = readAssignmentReport(meta); }
+        catch { if (meta.status === "completed") invalidReport = "Assignment completion is unverified: retained report evidence is unavailable or changed."; }
+        const complete = meta.status === "completed" && (report ? report.status === "complete"
+            : !invalidReport && waits.some((w) => w.acknowledgement?.disposition === "assignment-complete"));
         return store.recordAssignmentOutcome({ ...binding, revision: 1,
             outcome: complete ? "succeeded" : meta.status === "killed" ? "cancelled" : "failed",
-            reason: meta.failureReason || (complete ? "Assigned work and required interpretation are complete."
+            reason: meta.failureReason || invalidReport || (meta.status === "completed" && report ? report.reason : complete ? "Assigned work and required interpretation are complete."
                 : meta.status === "completed" ? "Assignment completion is unverified: the attempt exited without an evidence-backed completion decision. Inspect retained output and continue unfinished work or report a concrete blocker."
                 : `Assignment ended ${meta.status}; retained attempt evidence is available.`),
             processUncertain: meta.status === "lost" || typeof meta.exitCode !== "number"
                 || waits.some((w) => w.dependencies.some((d) => d.terminalRevision === 0)
                     || store.listResumeClaims({ waitId: w.waitId, generation: w.generation, state: "published" }).length > 0),
-            evidence: [{ kind: "log", ref: meta.logPath, summary: `Attempt ${meta.id}: ${meta.status}` }],
+            evidence: [{ kind: "log", ref: meta.logPath, summary: `Attempt ${meta.id}: ${meta.status}` },
+                ...(report ? [{ kind: "artifact" as const, ref: meta.assignmentReport!.path, summary: report.reason },
+                    ...report.evidence.map((e) => ({ kind: "artifact" as const, ref: e.path, summary: e.explanation }))] : [])],
             waits: waits.map((w) => ({ waitId: w.waitId, generation: w.generation, cancelEpoch: w.cancelEpoch })),
         });
     });
