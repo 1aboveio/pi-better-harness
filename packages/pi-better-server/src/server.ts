@@ -21,6 +21,7 @@ import { runtimeRoot } from "./runtime/root.ts";
 import { WorkReadModel } from "./runtime/read-model.ts";
 import { WorkQueries } from "./runtime/queries.ts";
 import { RuntimeCancellation, hasPendingCancellation } from "./runtime/cancellation.ts";
+import { RuntimeResultSupervision, hasResultSupervision } from "./runtime/result-supervision.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
   /** Defaults to `~/.pi/agent/server` (or `$PI_SERVER_DIR`). */
@@ -94,6 +95,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const nativeHost = new NativeClientHost(registry);
     let workModel: WorkReadModel | undefined;
     let cancellations: RuntimeCancellation | undefined;
+    let resultSupervision: RuntimeResultSupervision | undefined;
+    if (hasResultSupervision(getAgentDir())) resultSupervision = new RuntimeResultSupervision(realpathSync(getAgentDir()), instanceId!);
     if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
     const work = () => {
       if (!workModel) {
@@ -191,6 +194,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               nextIdleDeadline: runtimeClients.size > 0 || registry.activeCount > 0 ? null
                 : hostedUsed ? config.daemonIdleMs === 0 || zeroSince === undefined ? null : zeroSince + config.daemonIdleMs
                 : runtimeZeroSince === undefined ? null : runtimeZeroSince + config.runtimeIdleMs } });
+          }
+          if (type === "runtime_result_supervision") {
+            if (!greeted) throw new Error("not_accepted: supervision requires hello");
+            if (Object.keys(command).some(key => !["id", "type"].includes(key))) throw new Error("not_accepted: unsupported supervision field");
+            resultSupervision ??= new RuntimeResultSupervision(realpathSync(getAgentDir()), instanceId!);
+            resultSupervision.reconcile();
+            return reply({ data: { hostId: resultSupervision.hostId, epoch: resultSupervision.epoch, reason: resultSupervision.reason } });
           }
           if (type === "runtime_cancel_task" || type === "runtime_query_cancellation" || type === "runtime_cancellation_status") {
             if (!greeted) throw new Error("not_accepted: cancellation requires hello");
@@ -372,6 +382,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
     cleanupStartup = async () => {
       await cancellations?.close();
+      resultSupervision?.close();
       await workModel?.close();
       for (const socket of sockets) socket.destroy();
       server.close();
@@ -481,6 +492,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           for (const socket of sockets) socket.destroy();
           await closed;
           await cancellations?.close();
+          resultSupervision?.close();
           await workModel?.close();
           await registry.shutdown();
           await Promise.allSettled([...dispatches]);

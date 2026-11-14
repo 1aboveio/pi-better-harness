@@ -896,6 +896,7 @@ export class ObservedWaitHost {
   private continuationError?: string;
   private readonly launches = new Map<string, LaunchContext>();
   private readonly localCancels = new Set<string>();
+  private readonly resultHandoffs = new Set<string>();
   private readonly rpcRuns = new Map<string, RpcRunBinding>();
   private readonly waitOwners = new Map<string, OwnerIdentity>();
   private readonly stagedCheckpoints = new Map<string, { evidence: JsonRecord; toolCallId: string; checkpointRecorded: boolean }>();
@@ -1933,6 +1934,33 @@ export class ObservedWaitHost {
     return this.waitView(store.getWait({ waitId: result.wait.waitId }) ?? result.wait);
   }
 
+  async superviseParentWait(ctx: ExtensionContext, taskIds: readonly string[], note: string): Promise<WaitView> {
+    this.noteParentContext(ctx);
+    const operations = this.operationsForTaskIds(this.ownerFor(ctx), taskIds);
+    const root = dirname(this.storePath);
+    const registration = JSON.parse(readFileSync(join(root, "server-registration-v1.json"), "utf8"));
+    // @ts-expect-error Generated standalone lightweight socket client.
+    const { WorkClient } = await import("./shared-work-client.mjs");
+    const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-result-supervision-v1"]);
+    try {
+      await client.ready;
+      const manager = await client.request("runtime_result_supervision");
+      for (const operation of operations) {
+        if (this.requireStore().resultSupervision(operation.operationId)) continue;
+        if (this.supervisionAuthority(operation) !== "self" || this.localCancels.has(operation.taskId)) {
+          throw new Error("permission-unavailable: original supervision owner is live, unknown or draining");
+        }
+        // Stop admission before committing the durable exact-owner handoff.
+        this.resultHandoffs.add(operation.operationId);
+        this.requireStore().handoffResultSupervision({ operationId: operation.operationId,
+          expectedHostId: this.hostId, directory: this.directory, hostId: manager.hostId, epoch: manager.epoch });
+      }
+      const wait = this.waitForParent(ctx, taskIds, note);
+      await client.request("runtime_result_supervision");
+      return this.waitViewForParent(ctx, wait.waitId, wait.generation) ?? wait;
+    } finally { client.close(); }
+  }
+
   waitViewForParent(ctx: ExtensionContext, waitId: string, generation?: number): WaitView | undefined {
     const store = this.requireStore();
     const wait = store.getWait({ waitId, ...(generation ? { generation } : {}) });
@@ -2913,6 +2941,7 @@ export class ObservedWaitHost {
 
   private reconcileOperation(operation: OperationRecord): void {
     if (operation.terminalRevision > 0) return;
+    if (this.resultHandoffs.has(operation.operationId) || this.store?.resultSupervision(operation.operationId)) return;
     const authority = this.supervisionAuthority(operation);
     if (authority === "foreign") return;
     let claimed = false;
@@ -3078,6 +3107,7 @@ export class ObservedWaitHost {
   }
 
   private recordTerminal(operation: OperationRecord, inspection: SupervisorInspection): void {
+    if (this.resultHandoffs.has(operation.operationId) || this.store?.resultSupervision(operation.operationId)) return;
     const store = this.requireStore();
     const status = inspection.status;
     const outcome = terminalOutcome(status);

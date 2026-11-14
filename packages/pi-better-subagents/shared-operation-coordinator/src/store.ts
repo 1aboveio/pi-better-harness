@@ -8,6 +8,7 @@
  * and leaves no partial record.
  */
 import { StoreError } from "./errors.ts";
+import { resultSupervision, resultSupervisions, handoffResultSupervision, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.ts";
 import type { TaskCancellationIntent, TaskCancellationRequest } from "./task-cancellation.ts";
 import { repairFailedResume, type RepairResumeInput } from "./recovery.ts";
@@ -118,6 +119,11 @@ import {
 } from "./types.ts";
 
 export interface Store {
+    resultSupervision(operationId: string): ReturnType<typeof resultSupervision>;
+    resultSupervisions(): ReturnType<typeof resultSupervisions>;
+    handoffResultSupervision(input: Parameters<typeof handoffResultSupervision>[1]): ReturnType<typeof handoffResultSupervision>;
+    recoverResultSupervision(input: Parameters<typeof recoverResultSupervision>[1]): void;
+    publishSupervisedResult(input: Parameters<typeof publishSupervisedResult>[1]): ReturnType<typeof publishSupervisedResult>;
     unknownTaskCancellation(input: TaskCancellationRequest): TaskCancellationIntent;
     taskCancellationManaged(operationId: string): boolean;
     pendingTaskCancellations(): ReturnType<typeof pendingTaskCancellations>;
@@ -325,6 +331,11 @@ export function openStore(options: StoreOptions): Store {
     };
 
     const store: Store = {
+        resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
+        resultSupervisions() { alive(); return resultSupervisions(ctx); },
+        handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
+        recoverResultSupervision(input) { alive(); recoverResultSupervision(ctx, input); },
+        publishSupervisedResult(input) { alive(); return publishSupervisedResult(ctx, input); },
         unknownTaskCancellation(input) { alive(); return unknownTaskCancellation(ctx, input); },
         taskCancellationManaged(operationId) { alive(); return taskCancellationManaged(ctx, operationId); },
         pendingTaskCancellations() { alive(); return pendingTaskCancellations(ctx); },

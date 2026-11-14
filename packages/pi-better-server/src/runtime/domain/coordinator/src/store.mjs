@@ -8,6 +8,7 @@
  * and leaves no partial record.
  */
 import { StoreError } from "./errors.mjs";
+import { resultSupervision, resultSupervisions, handoffResultSupervision, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.mjs";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.mjs";
 import { repairFailedResume } from "./recovery.mjs";
 import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.mjs";
@@ -43,6 +44,11 @@ export function openStore(options) {
         }
     };
     const store = {
+        resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
+        resultSupervisions() { alive(); return resultSupervisions(ctx); },
+        handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
+        recoverResultSupervision(input) { alive(); recoverResultSupervision(ctx, input); },
+        publishSupervisedResult(input) { alive(); return publishSupervisedResult(ctx, input); },
         unknownTaskCancellation(input) { alive(); return unknownTaskCancellation(ctx, input); },
         taskCancellationManaged(operationId) { alive(); return taskCancellationManaged(ctx, operationId); },
         pendingTaskCancellations() { alive(); return pendingTaskCancellations(ctx); },
