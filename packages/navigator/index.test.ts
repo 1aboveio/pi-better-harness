@@ -252,7 +252,58 @@ describe("shared background work navigator", () => {
     assert.equal(staleReads, readsAfterDispose, "provider refresh must not consult the released stale context");
   });
 
-  it("keeps the main list timer-free and renders only material provider changes", (t) => {
+  it("keeps main-list paints free of provider reads and refreshes external changes", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+    let calls = 0;
+    let status = "running";
+    let notify: (() => void) | undefined;
+    let factory: any;
+    let paints = 0;
+    const rowProvider = provider("paint-io", "Paint", 10, 100, () => undefined);
+    const unregister = registerBackgroundWorkProvider({
+      ...rowProvider,
+      listRows(now) {
+        calls++;
+        return rowProvider.listRows(now).map(row => ({ ...row, status, primary: status }));
+      },
+      onVisibleChanged(fn) { notify = fn; return () => { notify = undefined; }; },
+    });
+    const ui = { editor: undefined as any, setStatus() {},
+      setWidget(_key: string, value: unknown) { if (typeof value === "function") factory = value; },
+      getEditorComponent() { return this.editor; }, setEditorComponent(value: any) { this.editor = value; } };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, { createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: () => false, matchKey: () => false, truncate: value => value });
+      const component = factory({ requestRender: () => { paints++; } }, {});
+      const expected = component.render(100);
+      const warmCalls = calls;
+      for (let frame = 0; frame < 60; frame++) assert.deepEqual(component.render(100), expected);
+      assert.equal(calls, warmCalls, "unrelated TUI paints must not invoke providers");
+      status = "failed";
+      t.mock.timers.tick(1000);
+      assert.ok(calls > warmCalls, "external changes must be polled without relying on paints");
+      assert.match(component.render(100).join("\n"), /failed/);
+      status = "completed";
+      notify?.();
+      assert.match(component.render(100).join("\n"), /completed/);
+      assert.ok(paints >= 2);
+      component.dispose();
+      const remounted = factory({ requestRender: () => { paints++; } }, {});
+      status = "cancelled";
+      t.mock.timers.tick(1000);
+      assert.match(remounted.render(100).join("\n"), /cancelled/, "component remounts must preserve session refreshes");
+      disposeBackgroundWorkNavigator(ctx);
+      const disposedCalls = calls;
+      t.mock.timers.tick(60_000);
+      assert.equal(calls, disposedCalls, "a disposed session must not retain a refresh loop");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("refreshes the main list without painting volatile-only provider changes", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     let notifyVisibleChanged: (() => void) | undefined;
     let elapsed = "1s";
@@ -2376,6 +2427,7 @@ describe("shared background work navigator", () => {
       assert.equal(mounted.length, 0);
 
       folded = true;
+      refreshBackgroundWorkNavigator(ctx);
       lines = widget.render(120);
       assert.doesNotMatch(lines.join("\n"), /alpha|beta/, "a folded provider's rows are not rendered");
       const yTask = lines.findIndex((line: string) => line.includes("task-one"));

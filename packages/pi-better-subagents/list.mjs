@@ -104,7 +104,7 @@ export function formatSubagentListRow(meta, p) {
     const batch = meta.batchId
         ? `  [batch: ${meta.batchName ? `${bounded(meta.batchName, 40)} ` : ""}${bounded(meta.batchId, 60)}]`
         : "";
-    const assignment = assignmentFor(meta, p.processStatus ?? meta.status);
+    const assignment = p.assignment ?? assignmentFor(meta, p.processStatus ?? meta.status);
     const diagnostic = meta.operations || meta.park || status !== assignment.processStatus || status === "failed"
         ? `\n    ${assignmentDiagnostic(assignment)}` : "";
     return `• ${name}${meta.id}  [${status}]  session_id=${meta.sessionId ?? "unavailable"}  ${bounded(meta.model ?? "?", 60)}  ${elapsed}${health}${timing}${batch}${failure}\n    ${promptPreview(meta)} · r${assignment.revision}${diagnostic}`;
@@ -133,6 +133,7 @@ export function collectSubagentList(p) {
 
     const displayed = items.slice(offset, offset + options.limit);
     const rows = displayed.map((row) => formatSubagentListRow(row.meta, {
+        assignment: p.assignmentOf?.(row.meta),
         status: row.status,
         now,
         health: healthById(row.meta.id),

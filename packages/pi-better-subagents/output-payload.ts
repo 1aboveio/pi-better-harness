@@ -862,12 +862,13 @@ export function listIncidentLabel(id: string, cwd: string, terminal: boolean): s
 export function listRevisions(
     items: Array<{ id: string; status: string; meta?: RunMeta }>,
     failureSignatures: string[],
+    assignmentOf = (meta: RunMeta) => assignmentFor(meta, effectiveStatus(meta)),
 ): { contentRevision: string; failureRevision: string } {
     return {
         contentRevision: revisionOf(items.map((item) => [
             item.id,
             item.status,
-            item.meta ? assignmentFor(item.meta, effectiveStatus(item.meta)).revision : null,
+            item.meta ? assignmentOf(item.meta).revision : null,
             item.meta?.status ?? null,
             item.meta?.exitCode ?? null,
             item.meta?.endedAt ?? null,

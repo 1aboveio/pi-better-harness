@@ -57,19 +57,7 @@ export function projectAssignment(meta, processStatus, observation = { verified:
 
 /** All consumers use the same lineage and authoritative wait read. Park caches are hints only. */
 export function assignmentFor(meta, processStatus = meta.status, options = {}) {
-    return assignmentFromSnapshot(meta, processStatus, options, () => readAttempts(options));
-}
-
-function readAttempts(options) {
-    const base = options.baseDir ?? join(tmpdir(), "pi-better-subagents");
-    const attempts = [];
-    try {
-        for (const id of readdirSync(join(base, "runs"))) {
-            const candidate = readAttempt(base, id);
-            if (candidate) attempts.push(candidate);
-        }
-    } catch { /* Registry gaps cannot establish a newer attempt. */ }
-    return attempts;
+    return createAssignmentProjector(options)(meta, processStatus);
 }
 
 function readAttempt(base, id) {

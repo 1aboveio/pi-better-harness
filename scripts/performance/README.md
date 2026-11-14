@@ -6,8 +6,15 @@ a disposable directory; the command does not use the user's Pi registry.
 
 The workload combines 200, 1,000 and 2,000 historical records with 1, 20 and 50
 displayed rows. Each consumer performs three fresh refreshes. The assertions bound
-metadata reads to one global lineage scan per refresh, plus Goal's owner-row reads.
+metadata reads to one initial identity scan, then only the relevant conversations,
+plus Goal's owner-row reads.
 The former per-row scan fails this budget even on a fast machine.
+
+Each fixture also mounts the real Navigator main-list component over the real
+Subagents projection and coordinator database. After warmup, sixty identical paints
+must make zero provider calls, metadata reads and SQLite connections. External
+refresh, component remount and session disposal are covered by Navigator tests;
+the registered list-tool test bounds filtering, formatting and cursor reads.
 
 CPU time and wall time are diagnostic metrics, not fixed pass/fail thresholds on
 shared runners. Set `PI_PERF_REPORT` to an output file to retain the JSON report.
