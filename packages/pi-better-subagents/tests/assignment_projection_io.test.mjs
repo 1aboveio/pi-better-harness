@@ -27,10 +27,16 @@ test("UI refreshes share lineage reads and a later refresh sees external changes
     fs.mkdirSync(join(runs, "null-record"));
     fs.writeFileSync(join(runs, "null-record", "meta.json"), "null");
     const read = fs.readFileSync;
+    const readdir = fs.readdirSync;
     let reads = 0;
+    let listings = 0;
     fs.readFileSync = function(path, ...args) {
         if (String(path).startsWith(runs) && String(path).endsWith("/meta.json")) reads++;
         return read.call(this, path, ...args);
+    };
+    fs.readdirSync = function(path, ...args) {
+        if (String(path) === runs) listings++;
+        return readdir.call(this, path, ...args);
     };
     syncBuiltinESMExports();
     const options = { baseDir: base, observation: { verified: true, waits: [] } };
@@ -40,6 +46,11 @@ test("UI refreshes share lineage reads and a later refresh sees external changes
         const project = createAssignmentProjector(options);
         assert.deepEqual(metas.map((meta) => project(meta)), expected);
         assert.equal(reads, metas.length + 2);
+        reads = 0;
+        listings = 0;
+        assert.deepEqual(createAssignmentProjector(options)(metas[0]), expected[0]);
+        assert.ok(reads <= 2, `a later refresh reread ${reads} unrelated run records`);
+        assert.equal(listings, 0, "a stable refresh must reuse the run identity catalog");
         options.observation.waits.push({ waitId: "live-wait", generation: 1, phase: "waiting" });
         assert.equal(project(metas[0]).state, "waiting", "the snapshot must not cache authoritative observations");
         options.observation.waits.pop();
@@ -47,14 +58,14 @@ test("UI refreshes share lineage reads and a later refresh sees external changes
         reads = 0;
         buildNavigatorRows(metas, { effectiveStatus: (m) => m.status, shortModel: () => "model",
             fmtElapsed: () => "1s", spendFor: () => "" });
-        assert.equal(reads, metas.length + 2, "navigator must scan once, not once per row");
+        assert.equal(reads, metas.length, "navigator should reread only visible conversations");
 
         // Prime Goal's parent index; the steady-state collection reads each owned
         // record once and takes one shared lineage snapshot.
         collectSubagentActivity({ baseDir: base });
         reads = 0;
         collectSubagentActivity({ baseDir: base });
-        assert.equal(reads, metas.length * 2 + 2);
+        assert.equal(reads, metas.length * 2);
 
         const continuation = { ...metas[0], id: "sa_io_resume", resumedFrom: metas[0].id,
             startedAt: 100, status: "running", operations: { ...metas[0].operations, resumeLaunchToken: "token" } };
@@ -71,6 +82,7 @@ test("UI refreshes share lineage reads and a later refresh sees external changes
         assert.equal(reads, 0, "ordinary runs do not need lineage discovery");
     } finally {
         fs.readFileSync = read;
+        fs.readdirSync = readdir;
         syncBuiltinESMExports();
         if (previousTmp === undefined) delete process.env.TMPDIR;
         else process.env.TMPDIR = previousTmp;
@@ -104,6 +116,31 @@ test("a projection batch keeps workspace, assignment and manual continuation bou
         assert.equal(project(root).attemptId, automatic.id);
         assert.equal(createAssignmentProjector(options)(root).attemptId, root.id, "the next refresh observes removals");
     } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+    }
+});
+
+test("a run directory committed after discovery becomes visible without a global rescan", () => {
+    const base = fs.mkdtempSync(join(tmpdir(), "projection-late-meta-"));
+    const runs = join(base, "runs");
+    const root = { id: "root", sessionId: "conversation", cwd: base, status: "completed",
+        startedAt: 1, exitCode: 0, operations: { conversationId: "conversation", workspace: base } };
+    const continuation = { ...root, id: "continuation", status: "failed", startedAt: 2,
+        resumedFrom: root.id, operations: { ...root.operations, resumeLaunchToken: "resume" } };
+    const originalNow = Date.now;
+    let now = originalNow();
+    Date.now = () => now;
+    try {
+        fs.mkdirSync(join(runs, root.id), { recursive: true });
+        fs.writeFileSync(join(runs, root.id, "meta.json"), JSON.stringify(root));
+        fs.mkdirSync(join(runs, continuation.id));
+        const options = { baseDir: base, observation: { verified: true, waits: [] } };
+        assert.equal(createAssignmentProjector(options)(root).attemptId, root.id);
+        fs.writeFileSync(join(runs, continuation.id, "meta.json"), JSON.stringify(continuation));
+        now += 1_001;
+        assert.equal(createAssignmentProjector(options)(root).attemptId, continuation.id);
+    } finally {
+        Date.now = originalNow;
         fs.rmSync(base, { recursive: true, force: true });
     }
 });

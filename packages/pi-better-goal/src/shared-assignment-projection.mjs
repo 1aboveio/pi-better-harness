@@ -1,6 +1,6 @@
 // Generated from packages/pi-better-subagents/assignment-projection.mjs. Do not edit directly.
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { readAssignmentWaits } from "./shared-assignment-observation.mjs";
@@ -66,31 +66,135 @@ function readAttempts(options) {
     const attempts = [];
     try {
         for (const id of readdirSync(join(base, "runs"))) {
-            try {
-                const candidate = JSON.parse(readFileSync(join(base, "runs", id, "meta.json"), "utf8"));
-                if (candidate && typeof candidate === "object") attempts.push(candidate);
-            }
-            catch { /* A partial unrelated record must not hide a continuation. */ }
+            const candidate = readAttempt(base, id);
+            if (candidate) attempts.push(candidate);
         }
     } catch { /* Registry gaps cannot establish a newer attempt. */ }
     return attempts;
 }
 
+function readAttempt(base, id) {
+    try {
+        const candidate = JSON.parse(readFileSync(join(base, "runs", id, "meta.json"), "utf8"));
+        return candidate && typeof candidate === "object" ? candidate : undefined;
+    } catch { /* A partial unrelated record must not hide a continuation. */ }
+}
+
+const attemptIndexes = new Map();
+const UNCOMMITTED_RETRY_MS = 1_000;
+const conversationKey = (sessionId, cwd) => JSON.stringify([sessionId, cwd]);
+
+function removeIdentity(index, id) {
+    const key = index.identities.get(id);
+    if (key === undefined) return;
+    index.identities.delete(id);
+    const group = index.byConversation.get(key);
+    group.delete(id);
+    if (!group.size) index.byConversation.delete(key);
+}
+
+function setIdentity(index, id, candidate) {
+    const key = conversationKey(candidate.sessionId, candidate.cwd);
+    if (index.identities.get(id) === key) return;
+    removeIdentity(index, id);
+    index.identities.set(id, key);
+    let group = index.byConversation.get(key);
+    if (!group) index.byConversation.set(key, group = new Set());
+    group.add(id);
+}
+
+function runsSignature(base) {
+    try {
+        const stat = statSync(join(base, "runs"), { bigint: true });
+        return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    } catch { return undefined; }
+}
+
+function prepareAttemptIndex(options) {
+    const base = options.baseDir ?? join(tmpdir(), "pi-better-subagents");
+    const signature = runsSignature(base);
+    if (!signature) {
+        attemptIndexes.delete(base);
+        return { index: { base, byConversation: new Map() } };
+    }
+    let index = attemptIndexes.get(base);
+    let initialAttempts;
+    if (!index) {
+        let ids;
+        try { ids = new Set(readdirSync(join(base, "runs"))); }
+        catch { return { index: { base, byConversation: new Map() } }; }
+        index = { base, signature, ids, identities: new Map(), byConversation: new Map(),
+            uncommitted: new Set(), nextRetryAt: Date.now() + UNCOMMITTED_RETRY_MS };
+        initialAttempts = new Map();
+        for (const id of ids) {
+            const candidate = readAttempt(base, id);
+            if (candidate) {
+                setIdentity(index, id, candidate);
+                initialAttempts.set(id, candidate);
+            }
+            else index.uncommitted.add(id);
+        }
+        attemptIndexes.set(base, index);
+        if (attemptIndexes.size > 8) attemptIndexes.delete(attemptIndexes.keys().next().value);
+    } else if (index.signature !== signature) {
+        let ids;
+        try { ids = new Set(readdirSync(join(base, "runs"))); }
+        catch {
+            attemptIndexes.delete(base);
+            return { index: { base, byConversation: new Map() } };
+        }
+        for (const id of index.ids) {
+            if (ids.has(id)) continue;
+            removeIdentity(index, id);
+            index.uncommitted.delete(id);
+        }
+        for (const id of ids) {
+            if (index.ids.has(id)) continue;
+            const candidate = readAttempt(base, id);
+            if (candidate) setIdentity(index, id, candidate);
+            else index.uncommitted.add(id);
+        }
+        index.ids = ids;
+        index.signature = signature;
+    }
+    if (Date.now() >= index.nextRetryAt) {
+        for (const id of index.uncommitted) {
+            const candidate = readAttempt(base, id);
+            if (!candidate) continue;
+            setIdentity(index, id, candidate);
+            index.uncommitted.delete(id);
+        }
+        index.nextRetryAt = Date.now() + UNCOMMITTED_RETRY_MS;
+    }
+    return { index, initialAttempts };
+}
+
+function readConversationAttempts(index, meta, initialAttempts) {
+    const matches = [];
+    for (const id of index.byConversation.get(conversationKey(meta.sessionId, meta.cwd)) ?? []) {
+        const fresh = initialAttempts?.get(id) ?? readAttempt(index.base, id);
+        if (!fresh) {
+            removeIdentity(index, id);
+            index.uncommitted.add(id);
+            continue;
+        }
+        setIdentity(index, id, fresh);
+        if (fresh.sessionId === meta.sessionId && fresh.cwd === meta.cwd) matches.push(fresh);
+    }
+    return matches;
+}
+
 /** One synchronous UI refresh shares a snapshot; the next refresh reads disk again. */
 export function createAssignmentProjector(options = {}) {
-    let snapshot;
+    let prepared;
+    const snapshots = new Map();
     const readSnapshot = (meta) => {
-        if (!snapshot) {
-            snapshot = new Map();
-            for (const candidate of readAttempts(options)) {
-                let workspaces = snapshot.get(candidate.sessionId);
-                if (!workspaces) snapshot.set(candidate.sessionId, workspaces = new Map());
-                let attempts = workspaces.get(candidate.cwd);
-                if (!attempts) workspaces.set(candidate.cwd, attempts = []);
-                attempts.push(candidate);
-            }
+        const key = conversationKey(meta.sessionId, meta.cwd);
+        if (!snapshots.has(key)) {
+            prepared ??= prepareAttemptIndex(options);
+            snapshots.set(key, readConversationAttempts(prepared.index, meta, prepared.initialAttempts));
         }
-        return snapshot.get(meta.sessionId)?.get(meta.cwd) ?? [];
+        return snapshots.get(key);
     };
     return (meta, processStatus = meta.status) => assignmentFromSnapshot(meta, processStatus, options,
         () => readSnapshot(meta));

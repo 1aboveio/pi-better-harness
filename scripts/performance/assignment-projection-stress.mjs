@@ -56,12 +56,11 @@ try {
             process.env.TMP = dirname(base);
             process.env.TEMP = dirname(base);
             const consumers = [
-                { name: "navigator", budget: records, run: () => buildNavigatorRows(visible, {
+                { name: "navigator", run: () => buildNavigatorRows(visible, {
                     effectiveStatus: (meta) => meta.status, shortModel: () => "model",
                     fmtElapsed: () => "1s", spendFor: () => "",
                 }) },
-                { name: "goal", budget: records + rows,
-                    run: () => collectSubagentActivity({ baseDir: base, parentPid, processExists: () => false }).items },
+                { name: "goal", run: () => collectSubagentActivity({ baseDir: base, parentPid, processExists: () => false }).items },
             ];
             for (const consumer of consumers) {
                 measuredRuns = runs;
@@ -71,14 +70,17 @@ try {
                 for (let i = 0; i < repeats; i++) assert.equal(consumer.run().length, rows);
                 const wallMs = performance.now() - start;
                 const usage = process.cpuUsage(cpu);
+                const perRefresh = consumer.name === "goal" ? rows * 2 : rows;
+                const metadataReadBudget = rows === 1 ? records + perRefresh * (repeats - 1)
+                    + (consumer.name === "goal" ? rows : 0) : perRefresh * repeats;
                 const result = { consumer: consumer.name, records, rows, refreshes: repeats,
-                    metadataReads, metadataReadBudget: consumer.budget * repeats,
+                    metadataReads, metadataReadBudget,
                     cpuMs: (usage.user + usage.system) / 1000, wallMs };
                 report.results.push(result);
                 console.log(JSON.stringify(result));
                 assert.ok(metadataReads <= result.metadataReadBudget,
                     `${consumer.name}: repeated full-registry scans (${metadataReads} reads > ${result.metadataReadBudget})`);
-                assert.ok(metadataReads >= records * repeats, "the probe must observe the real lineage reads");
+                if (rows === 1) assert.ok(metadataReads >= records, "the probe must observe the initial lineage scan");
             }
         }
     }
