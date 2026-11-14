@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.45.7] - 2026-11-14
+
+### Fixed
+
+- Bundle Goal 0.13.2 and Subagents 0.32.6 to avoid repeated full run-registry scans in assignment views and save the environment timeout shown in Subagents settings. (#739, #740)
+
+## [pi-better-subagents@0.32.6] - 2026-11-14
+
+### Fixed
+
+- Cache run identities for assignment views while refreshing the current conversation's state, reducing repeated metadata scans as the run registry grows. (#739)
+- Save the effective environment timeout displayed in settings when saving defaults without editing the timeout. (#740)
+
+## [pi-better-goal@0.13.2] - 2026-11-14
+
+### Fixed
+
+- Use the cached assignment projection in Goal activity views, avoiding a full run-registry scan on every refresh. (#739)
+
 ## [pi-better-harness@0.45.6] - 2026-11-14
 
 ### Fixed
