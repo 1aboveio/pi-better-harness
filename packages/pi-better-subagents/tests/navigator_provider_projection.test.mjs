@@ -22,7 +22,7 @@ register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 process.env.PI_CATALOG_ACCEPTANCE_PROBE = "1";
 const { default: extension } = await import("../index.ts");
 const { writeMeta, runDir } = await import("../registry.ts");
-const { refreshBackgroundWorkNavigator } = await import("../shared-navigator.ts");
+const { refreshBackgroundWorkNavigator, MAIN_LIST_WIDGET_KEY } = await import("../shared-navigator.ts");
 const { openStore } = await import("../../operation-coordinator/index.ts");
 const sqlite = createRequire(import.meta.url)("node:sqlite");
 
@@ -74,6 +74,17 @@ for (const count of [1, 50]) test(`registered provider observes ${count} attempt
         assert.equal(budget(list, "separate refresh at same time").length, count);
         budget(() => refreshBackgroundWorkNavigator(ctx), "mounted refresh");
         for (let frame = 0; frame < 60; frame++) budget(list, "unchanged frame");
+
+        // Armed confirmation is painted on every streaming frame. Exercise the
+        // real registered provider through the mounted native list component.
+        const editor=ctx.ui.factory({requestRender(){}},ctx.ui.theme,{});
+        editor.handleInput("left");editor.handleInput("down");editor.handleInput("x");
+        const widget=widgets.get(MAIN_LIST_WIDGET_KEY);
+        const component=typeof widget==='function'?widget({requestRender(){}},ctx.ui.theme):undefined;
+        assert.ok(component?.render,'actual native work-list component is mounted');
+        assert.match(component.render(120).join('\n'),/x again to stop/);
+        budget(()=>{for(let frame=0;frame<60;frame++)component.render(120);},'60 armed native paints');
+        editor.handleInput('escape');
 
         // Continuation metadata is read from disk by the assignment projection,
         // independently of this host's registry notifications.

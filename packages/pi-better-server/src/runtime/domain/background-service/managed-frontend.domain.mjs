@@ -66,6 +66,8 @@ export function createManagedBackgroundFrontend(pi) {
         return refresh;
     };
     const host = {
+        async reconcileNow() { await reconcile(); while (refresh)
+            await refresh; },
         start(context) { ctx = context; generation++; void reconcile().catch(() => undefined); },
         noteParentContext(context) { ctx = context; generation++; void reconcile().catch(() => undefined); },
         close() { ctx = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); queued.clear(); },

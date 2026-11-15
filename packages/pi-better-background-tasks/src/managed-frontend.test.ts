@@ -50,7 +50,10 @@ describe('managed native UI boundary', () => {
       });
       const frontend=createManagedBackgroundFrontend({registerTool(){}} as any);
       frontend.host.start(context());frontend.ui.prepareDetail('old');frontend.host.close();frontend.host.start(context([{id:'new-branch'}]));
+      let settled=false;const ready=frontend.host.reconcileNow().then(()=>{settled=true;});
+      await Promise.resolve();expect(settled).toBe(false);
       releaseFirst({tasks:[],legacyRows:[{id:'old'}],deliveries:[]});releaseDetail({id:'old'});
+      await ready;expect(frontend.ui.rows()[0]?.id).toBe('new');
       await vi.waitFor(()=>expect(frontend.ui.rows()[0]?.id).toBe('new'));
       expect(polls).toBe(2);expect(frontend.ui.detail('old',Date.now())).toBeNull();frontend.host.close();
     });

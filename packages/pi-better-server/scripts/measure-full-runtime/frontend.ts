@@ -1,9 +1,12 @@
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import subagents from '../../../pi-better-subagents/index.ts';
 import background from '../../../pi-better-background-tasks/src/index.ts';
+import { getObservedWaitHost } from '../../../pi-better-background-tasks/src/observed-waits.ts';
+let backgroundApi: any;
+const capturedBackground = (pi: any) => { backgroundApi = pi; return background(pi); };
 const cwd = process.env.LAUNCH_WORKSPACE!, agentDir = process.env.PI_CODING_AGENT_DIR!;
 const settingsManager = SettingsManager.inMemory({});
-const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noContextFiles: true, noThemes: true, noPromptTemplates: true, extensionFactories: process.env.BACKGROUND_ONLY ? [background] : [subagents, background] });
+const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noContextFiles: true, noThemes: true, noPromptTemplates: true, extensionFactories: process.env.BACKGROUND_ONLY ? [capturedBackground] : [subagents, capturedBackground] });
 await resourceLoader.reload();
 const { session } = await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader, sessionManager: process.env.BACKGROUND_SESSION_FILE ? SessionManager.open(process.env.BACKGROUND_SESSION_FILE) : SessionManager.inMemory(cwd), noTools: 'all' });
 await session.bindExtensions({ mode: 'print', onError: error => { throw new Error(String(error)); } });
@@ -11,6 +14,7 @@ process.send?.({ ready: true, pid: process.pid, sessionId: session.sessionId });
 process.on('message', async (request: any) => {
   try {
     if (request.stop) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); process.disconnect(); return; }
+    if(request.barrier){await getObservedWaitHost(backgroundApi)!.reconcileNow();process.send?.({id:request.id,result:{ready:true}});return;}
     if(request.entries){process.send?.({id:request.id,result:session.sessionManager.getBranch()});return;}
     const tool = session.extensionRunner.getToolDefinition(request.tool);
     if (!tool) throw new Error(`Missing real tool ${request.tool}`);

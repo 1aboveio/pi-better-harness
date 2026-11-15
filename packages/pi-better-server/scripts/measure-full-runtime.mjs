@@ -55,7 +55,18 @@ try {
   await work.request('runtime_cancellation_status');
   for (const count of [1,5,10]) {
     while(clients.length<count) { const child=start(new URL('./measure-full-runtime/frontend.ts',import.meta.url)); await message(child,m=>m.ready); clients.push(child); }
-    await work.get({cwd,active:true}); await delay(1500);
+    await work.get({cwd,active:true});
+    const warmup=[];
+    (report.warmups??=[]).push({clients:count,observations:warmup});
+    await until('all native projections completed at stable Background revision',async()=>{
+      const scope={background:true,cwd,sessionId:JSON.parse(readFileSync(sessionFile,'utf8').split('\n')[0]).id};
+      const before=await work.get(scope);
+      await Promise.all(clients.map(async child=>{const id=++seq,pending=message(child,m=>m.id===id);child.send({id,barrier:true});const reply=await pending;assert.equal(reply.error,undefined,reply.stack);}));
+      const after=await work.get(scope), management=(await work.request('runtime_get_status')).backgroundManagement;
+      warmup.push({before:before.scopeRevision,after:after.scopeRevision,management});
+      return before.status==='ready'&&after.status==='ready'&&before.scopeRevision===after.scopeRevision
+        &&after.rows.filter(row=>!row.meta.durable).length===2&&after.rows.some(row=>row.meta.id===bg.details.id);
+    });
     const observedLegacy=await work.get({background:true,cwd,sessionId:JSON.parse(readFileSync(sessionFile,'utf8').split('\n')[0]).id});
     assert.equal(observedLegacy.rows.filter(row=>!row.meta.durable).length,2);
     const managementBefore=(await work.request('runtime_get_status')).backgroundManagement;
@@ -74,12 +85,14 @@ try {
     const derivedWorker=metrics.indexConnections, coordinatorWorker=metrics.sqlite.active-derivedWorker;
     const connections={coordinator:mainConnections+coordinatorWorker,derived:derivedMain+derivedWorker};
     const managementAfter=status.backgroundManagement;
+    const backgroundAfter=await work.get({background:true,cwd,sessionId:JSON.parse(readFileSync(sessionFile,'utf8').split('\n')[0]).id});
     const managementDelta=Object.fromEntries(['scopeRefreshes','reconciles'].map(key=>[key,managementAfter[key]-managementBefore[key]]));
     const registryDelta=Object.fromEntries(Object.keys(managementAfter.registry).map(key=>[key,managementAfter.registry[key]-managementBefore.registry[key]]));
+    report.scenarios.push({warmup,backgroundBefore:observedLegacy,backgroundAfter,managementBefore,managementAfter,managementDelta,registryDelta,legacyRows:2,clients:count,elapsedMs:performance.now()-measurementStart,resources,connections,metrics,totalCpuMs:resources.reduce((s,v)=>s+v.cpuMs,0),totalRss:resources.reduce((s,v)=>s+v.rss,0),rpcMs:{p50:latencies.sort((a,b)=>a-b)[Math.floor(latencies.length*.5)],p95:latencies[Math.floor(latencies.length*.95)],p99:latencies[Math.floor(latencies.length*.99)]}});
+    writeFileSync(output,JSON.stringify(report,null,2));
+    assert.equal(backgroundAfter.scopeRevision,observedLegacy.scopeRevision,'Workload changed during unchanged-window measurement');
     assert.equal(managementDelta.reconciles,0,'Unchanged same-owner foregrounds must not multiply canonical reconciliation');
     assert.equal(registryDelta.fullDirectoryReads,0);assert.equal(registryDelta.terminalMetadataFileReads,0);
-    report.scenarios.push({managementDelta,registryDelta,legacyRows:2,clients:count,elapsedMs:performance.now()-measurementStart,resources,connections,metrics,totalCpuMs:resources.reduce((s,v)=>s+v.cpuMs,0),totalRss:resources.reduce((s,v)=>s+v.rss,0),rpcMs:{p50:latencies.sort((a,b)=>a-b)[Math.floor(latencies.length*.5)],p95:latencies[Math.floor(latencies.length*.95)],p99:latencies[Math.floor(latencies.length*.99)]}});
-    writeFileSync(output,JSON.stringify(report,null,2));
     assert.ok(connections.coordinator<=2,`Root coordinator budget exceeded: ${JSON.stringify(connections)}`); assert.ok(connections.derived<=2);
   }
 } catch(error) { report.failure=String(error); throw error; }

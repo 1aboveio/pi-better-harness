@@ -1877,7 +1877,7 @@ function ensureSubagentProvider(): void {
             saveDelegationDefault(readDelegation().mode);
             return true;
         },
-        armCloseLabel: (row) => pendingNavigatorPark(readMeta(row.id)) ? "x again to cancel resume" : row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",
+        armCloseLabel: (row) => pendingNavigatorPark(workObservation()?.rows.find((observed: any) => observed.meta.id === row.id)?.meta) ? "x again to cancel resume" : row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",
         close: (id) => {
             const outcome = navigatorCloseRun(id) as { action: string; id: string; status?: string };
             return { ...outcome, providerId: "subagents" };
