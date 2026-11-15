@@ -251,6 +251,8 @@ export class WorkReadModel {
     if (scope.id) { clauses.push("id = ?"); args.push(scope.id); }
     if (scope.sessionId) { clauses.push("origin_session = ? AND origin_cwd = ?"); args.push(scope.sessionId, scope.cwd); }
     else if (scope.cwd) { const cwd = resolve(scope.cwd); clauses.push("(cwd = ? OR substr(cwd, 1, ?) = ?)"); args.push(cwd, (cwd.endsWith(sep) ? cwd : cwd + sep).length, cwd.endsWith(sep) ? cwd : cwd + sep); }
+    // Activity describes the scope, independently of history filters and pagination.
+    const active = Number(this.db.prepare(`SELECT count(*) AS n FROM rows WHERE ${[...clauses, "active = 1"].join(" AND ")}`).get(...args).n);
     if (scope.active !== undefined) { clauses.push("active = ?"); args.push(scope.active ? 1 : 0); }
     if (scope.endedAfter !== undefined) { clauses.push("(ended IS NULL OR ended >= ?)"); args.push(scope.endedAfter); }
     if (scope.statuses?.length) { clauses.push(`state IN (${scope.statuses.map(() => "?").join(",")})`); args.push(...scope.statuses); }
@@ -291,7 +293,7 @@ export class WorkReadModel {
         return { ...row, cursor: Buffer.from(JSON.stringify([key, this.instanceId, this.revision, record.started, record.id])).toString("base64url") };
       }),
       ...(records.length > limit ? { nextCursor: Buffer.from(JSON.stringify([key, this.instanceId, this.revision, last.started, last.id])).toString("base64url") } : {}),
-      activity: { active: Number(this.db.prepare("SELECT count(*) AS n FROM rows WHERE active = 1").get().n) }, nextDeadline: null };
+      activity: { active }, nextDeadline: null };
   }
 
   async close() {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -25,8 +25,10 @@ import { appendFileSync, existsSync, readFileSync, watch } from "node:fs";
 const root = process.argv[process.argv.indexOf("--run") + 1];
 appendFileSync(root + "/launches", process.pid + "\\n");
 const watcher = watch(root, () => finish());
+let finished = false;
 function finish() {
-  if (!existsSync(root + "/release")) return;
+  if (finished || !existsSync(root + "/release")) return;
+  finished = true;
   watcher.close();
   const response = JSON.parse(readFileSync(root + "/release", "utf8"));
   process.stdout.write(JSON.stringify({ due: response.due ?? [] }));
@@ -36,7 +38,10 @@ finish();
 `);
   const entries: any[] = [{ type: "custom", customType: "pi-better-workflow-plan", data: { version: 1, kind: "set", owner: owner.name, path: planPath } }];
   const launches = () => existsSync(join(root, "launches")) ? readFileSync(join(root, "launches"), "utf8").trim().split("\n").length : 0;
-  const release = (response: object = {}) => writeFileSync(join(root, "release"), JSON.stringify(response));
+  const release = (response: object = {}) => {
+    writeFileSync(join(root, "release.tmp"), JSON.stringify(response));
+    renameSync(join(root, "release.tmp"), join(root, "release"));
+  };
   const waitForLaunches = async (count: number) => {
     const deadline = Date.now() + 10_000;
     while (launches() < count) {

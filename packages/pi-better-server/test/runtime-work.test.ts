@@ -208,6 +208,10 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     const proxyPath = join(transport, "gap.sock"); proxy.listen(proxyPath); await once(proxy, "listening");
     const gapped = new WorkClient(proxyPath, agent); clients.push(gapped);
     await gapped.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
+    let observedGap = false;
+    const stopGapObservation = gapped.onChange(snapshot => {
+      if (snapshot.resyncRequired && snapshot.resyncReason === "sequence-gap") observedGap = true;
+    });
     const waitName = (client: WorkClient, name: string) => new Promise<void>(resolve => {
       const stop = client.onChange(snapshot => {
         if (snapshot.rows.find(row => row.meta.id === "sa_shared_0")?.meta.name === name) { stop(); resolve(); }
@@ -222,8 +226,8 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     const resumed = waitName(gapped, "gap-two");
     writeFileSync(path, JSON.stringify({ ...original, name: "gap-two" })); await resumed;
     assert.equal(dropped, true);
-    assert.equal(gapped.snapshot!.resyncRequired, true);
-    assert.equal(gapped.snapshot!.resyncReason, "sequence-gap");
+    assert.equal(observedGap, true, "the first complete snapshot after the dropped event reports the gap");
+    stopGapObservation();
     const disconnected = clients.at(-1)!;
     disconnected.close();
     assert.equal(disconnected.snapshot!.status, "degraded");

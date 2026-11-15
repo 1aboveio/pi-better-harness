@@ -50,7 +50,15 @@ export class WorkQueries {
     if (Buffer.byteLength(JSON.stringify(snapshot)) > 4 * 1024 * 1024) throw new Error("state-degraded: snapshot exceeds 4 MiB; narrow the scope or limit");
     if (command.type === "runtime_subscribe") {
       this.close();
-      this.dispose = this.model.onChange(() => this.event({ type: "runtime_snapshot", snapshot: this.model.snapshot({ ...scope, cursor: undefined }) }));
+      this.dispose = this.model.onChange(() => {
+        try {
+          this.event({ type: "runtime_snapshot", snapshot: this.model.snapshot({ ...scope, cursor: undefined }) });
+        } catch (error) {
+          // A stale detail or oversized scope must not fail shared reconciliation.
+          this.close();
+          this.event({ type: "resync_required", reason: String(error).slice(0, 512), instanceId: this.model.instanceId });
+        }
+      });
       if (command.sinceSeq !== undefined && (command.instanceId !== snapshot.instanceId || command.sinceSeq !== snapshot.seq)) {
         return { ...snapshot, resyncRequired: true, resyncReason: command.instanceId !== snapshot.instanceId ? "instance-changed" : "replay-truncated" };
       }
