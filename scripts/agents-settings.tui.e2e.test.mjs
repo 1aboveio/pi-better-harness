@@ -1,18 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 
-test("agents model and effort edits persist for the session and only Ctrl+S saves catalog defaults in the real TUI", { skip: !hasTmux }, (t) => {
+test("agents model and effort edits persist for the session and only Ctrl+S saves catalog defaults in the real TUI", { skip: !hasTmux }, async (t) => {
     const fixture = mkdtempSync(join(tmpdir(), "pi-agents-settings-"));
     const agent = join(fixture, "agent");
+    let runtimeOwner;
     const rolePath = join(agent, "agents/roles/role.fixture.md");
     mkdirSync(dirname(rolePath), { recursive: true });
     writeFileSync(join(agent, "settings.json"), JSON.stringify({ tuiMode: "fullscreen" }));
@@ -57,6 +59,7 @@ export default function(pi) {
         key("Escape"); wait(/^(?![\s\S]*Agents \/ Fixture)(?![\s\S]*Search)/);
     };
     try {
+        runtimeOwner = await prepareOwnedRuntime(agent);
         tmux("new-session", "-d", "-s", "agents", "-x", "100", "-y", "40", command);
         wait(/pi-better-subagents/);
         literal("/harness-settings"); key("Tab"); key("Enter");
@@ -149,6 +152,7 @@ export default function(pi) {
         wait(/Delivery and publishing belong to the coordinator/);
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
-        rmSync(fixture, { recursive: true, force: true });
+        await stopOwnedRuntime(join(agent, "server"), runtimeOwner);
+        removeOwnedFixture(fixture);
     }
 });

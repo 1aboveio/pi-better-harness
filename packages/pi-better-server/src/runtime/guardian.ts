@@ -145,6 +145,8 @@ export async function runGuardian(serverDir: string, rebind?: DaemonOwnerIdentit
       const owner = inspectDaemonOwner(serverDir);
       if (owner.status === "live" || owner.status === "ambiguous") throw new Error("runtime-unhealthy: existing server owner was not replaced");
       let cleanToken: string | undefined;
+      let ready = false;
+      let exitCode: number | null = null;
       // The server survives guardian loss. It must not inherit a caller's pipe,
       // otherwise an exited guardian can leave that caller waiting forever for EOF.
       const inheritedLog = fstatSync(2).isFile();
@@ -158,18 +160,29 @@ export async function runGuardian(serverDir: string, rebind?: DaemonOwnerIdentit
       child.on("message", message => {
         const record = message as { type?: string; token?: string };
         if (record?.type === "runtime-clean-stop" && typeof record.token === "string") cleanToken = record.token;
+        if (record?.type === "runtime-ready" && typeof record.token === "string") {
+          const owner = inspectDaemonOwner(serverDir);
+          ready = owner.status === "live" && owner.owner.pid === child.pid && owner.owner.token === record.token;
+        }
       });
       let stopping = false;
       const stop = () => { stopping = true; child.kill("SIGTERM"); };
       process.on("SIGTERM", stop); process.on("SIGINT", stop);
       try {
-        await new Promise<void>(resolve => { child.once("error", () => resolve()); child.once("exit", () => resolve()); });
+        await new Promise<void>(resolve => { child.once("error", () => resolve()); child.once("exit", code => { exitCode = code; resolve(); }); });
       } finally { process.off("SIGTERM", stop); process.off("SIGINT", stop); }
       let checkpoint;
       try { checkpoint = JSON.parse(readFileSync(join(serverDir, "clean-stop.json"), "utf8")); } catch { /* Missing proof is a crash. */ }
-      if ((cleanToken && checkpoint?.token === cleanToken && checkpoint?.pid === child.pid && checkpoint?.reason === "clean-stop") || stopping) return;
+      if (cleanToken && checkpoint?.token === cleanToken && checkpoint?.pid === child.pid && checkpoint?.reason === "clean-stop") return;
+      if (stopping) {
+        if (!ready) throw new Error("runtime-unavailable: startup stopped before readiness; no successful start was established");
+        return;
+      }
       const dead = inspectDaemonOwner(serverDir);
       fault(dead.status === "dead" ? dead.owner : undefined);
+      if (!ready && exitCode !== null && exitCode !== 0) {
+        throw new Error(`runtime-unavailable: server failed before readiness (exit ${exitCode}); inspect ${join(serverDir, "daemon.log")}`);
+      }
       await delay(1000 * 2 ** (failures.length - 1));
     }
   } finally { release(); }

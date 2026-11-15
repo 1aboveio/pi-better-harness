@@ -35,9 +35,18 @@ export function ownerIdentityVerified(owner: DaemonOwnerIdentity): boolean {
 /** Matches the existing runner/worker start-token representation, without releasing fences. */
 export function processMatchesStart(pid: number, start: unknown): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0 || typeof start !== "string") return false;
+  if (!/^\d+$/.test(start)) {
+    // Background runner claims use ps lstart on both supported platforms;
+    // Subagent Linux records use /proc ticks. Compare in the recorded format.
+    try {
+      const observed = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+        encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000,
+      }).trim();
+      return observed.length > 0 && observed === start.trim();
+    } catch { return false; }
+  }
   const identity = linuxIdentity(pid);
-  const expected = process.platform === "darwin" ? String(Date.parse(start)) : start;
-  return identity.start !== undefined && identity.start === expected && alive({ pid, token: "observation", start: identity.start });
+  return identity.start !== undefined && identity.start === start && alive({ pid, token: "observation", start: identity.start });
 }
 
 export type OwnerInspection =

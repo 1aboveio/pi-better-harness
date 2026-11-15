@@ -19,6 +19,7 @@ import { activationArgs } from "../src/startup/commands.ts";
 import type { ActivationResult, StagedRuntime } from "../src/startup/managed-types.ts";
 import { digest, stable } from "../scripts/private-runtime/format.ts";
 import { gate, llmCalls, makeEnv, waitFor, type Env } from "./helpers.ts";
+import { stageDependencies } from "./support/staged-dependencies.ts";
 import { privateRuntimeNode } from "./private-runtime-node.ts";
 
 // Like activation-upgrade.test.ts, stage real source with this test process's SDK.
@@ -37,7 +38,7 @@ function stage(env: Env, seed: string): StagedRuntime {
   cpSync(fileURLToPath(new URL("../scripts/private-runtime/format.ts", import.meta.url)), join(root, "scripts", "private-runtime", "format.ts"));
   writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module" }));
   writeFileSync(join(root, "managed-build.json"), JSON.stringify(build));
-  symlinkSync(fileURLToPath(new URL("../../../node_modules", import.meta.url)), join(root, "node_modules"));
+  stageDependencies(root);
   mkdirSync(join(root, "node", "bin"), { recursive: true });
   symlinkSync(privateNode.node, join(root, "node", "bin", "node"));
   const runtime = { format: 1 as const, build, root, installRoot, node: join(root, "node", "bin", "node"),
