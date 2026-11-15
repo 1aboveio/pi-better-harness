@@ -122,9 +122,20 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     resultPorts.set(resultRoot, resultPort);
     if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
     const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
+    const initializeLaunch = () => {
+      if (!launchInitialization) {
+        const pending = createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog);
+        launchInitialization = pending;
+        void pending.then(host => { launches = host; }, () => {
+          // The factory releases partial resources before rejection. A later
+          // request may retry after the underlying recovery fault is repaired.
+          if (launchInitialization === pending) launchInitialization = undefined;
+        });
+      }
+      return launchInitialization;
+    };
     if (hasSubagentManagement(getAgentDir())) {
-      launchInitialization = createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog);
-      void launchInitialization.then(host => { launches = host; }, error => log(`Subagent supervision unavailable: ${String(error)}`));
+      void initializeLaunch().catch(error => log(`Subagent supervision unavailable: ${String(error)}`));
     }
     const work = () => {
       if (!workModel) {
@@ -259,8 +270,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
             runtimeInFlight++;
             try {
-              launchInitialization ??= createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog);
-              launches = await launchInitialization;
+              launches = await initializeLaunch();
               const data = await launches.handle(command);
               // The durable launch receipt must not fail because derived reads
               // are rebuilding or overloaded. Refresh independently.

@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { intersectContinuationPermissions } from "./continuation-authority.ts";
 import extension from "./index.ts";
+import { bindRuntimeOutcomeStore } from "./assignment-outcomes.ts";
 import { catalogSnapshotFromWire } from "./catalog-store.ts";
 import { openLaunchJournal, launchDigest } from "./managed-launch-journal.mjs";
 import { nextRunId, processStartToken, listMetas, writeMeta, listActiveMetasForParent, effectiveStatus, readMeta } from "./registry.ts";
+import { recoverLaunchMetadata } from "./managed-launch-recovery.ts";
 import { assertSubagentHandoff } from "./managed-launch-ownership.ts";
 import { createOwnerCapacityGates } from "./capacity.mjs";
 import { readConversationLease } from "./continuation.ts";
@@ -32,7 +34,7 @@ export class ManagedSubagentHost {
     get busy() { return this.pending > 0; }
     status() {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
-            inFlight: this.pending, continuationReady: this.workerHost?.service.continuationReady ?? false, unresolvedAttempts: this.journal.unresolvedAttempts().length };
+            inFlight: this.pending, continuationReady: this.workerHost?.service.continuationReady ?? false, unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt: any) => !readMeta(attempt.id)).length };
     }
     constructor(private root: string, private instance: string, private catalog: any, sharedStore?: unknown, private createWorkerHost?: (pi: ExtensionAPI) => NonNullable<ManagedSubagentHost["workerHost"]>, private readPermissions?: () => unknown) {
         this.current = { pid: process.pid, start: processStartToken(process.pid), owner: { workspace: root, sessionId: "runtime-recovery" } };
@@ -41,23 +43,37 @@ export class ManagedSubagentHost {
         assertSubagentHandoff(active, root);
         const opened = openLaunchJournal(this.path, sharedStore);
         this.journal = opened.journal;
-        this.closeJournal = opened.close;
-        for (const meta of active) {
-            if (meta.management?.root !== root || !processExists(meta.pid)) continue;
-            const attempt = this.journal.attempt(meta.id), lease = readConversationLease(meta.sessionId);
-            if (!attempt || attempt.sessionId !== meta.sessionId || !lease || lease.token !== attempt.lease || lease.attemptId !== meta.id) {
-                this.closeJournal(); throw new Error(`writer-authority-unknown: ${meta.id}`);
+        const unbind = sharedStore ? bindRuntimeOutcomeStore(root, sharedStore as Parameters<typeof bindRuntimeOutcomeStore>[1]) : () => {};
+        this.closeJournal = () => { try { unbind(); } finally { opened.close(); } };
+        try {
+            for (const meta of active) {
+                if (meta.management?.root !== root || !processExists(meta.pid) || processStartToken(meta.pid) !== meta.pidStartTime) continue;
+                const attempt = this.journal.attempt(meta.id), lease = readConversationLease(meta.sessionId);
+                if (!attempt || attempt.sessionId !== meta.sessionId || !lease || lease.token !== attempt.lease || lease.attemptId !== meta.id) {
+                    throw new Error(`writer-authority-unknown: ${meta.id}`);
+                }
             }
-        }
-        this.epoch = this.journal.epoch(instance);
-        for (const meta of active) {
-            if (meta.management?.root !== root || (meta.status !== "running" && meta.status !== "orphaned")) continue;
-            writeMeta({ ...meta, management: { root, instance, epoch: this.epoch },
-                supervisionInterruptedAt: meta.supervisionInterruptedAt ?? Date.now(), supervisionInterruptedReason: "runtime-recovery" });
-        }
+            this.epoch = this.journal.epoch(instance);
+            for (const attempt of this.journal.unresolvedAttempts()) {
+                if (readMeta(attempt.id)) continue;
+                const meta = recoverLaunchMetadata(attempt, { root, instance, epoch: this.epoch }, {
+                    pidExists: processExists, startToken: processStartToken, lease: readConversationLease,
+                });
+                writeMeta(meta, { ifAbsent: true });
+                active.push(meta);
+            }
+            for (const intent of this.journal.pendingIntents()) {
+                this.journal.finishRecovery(intent.owner, intent.request_key, this.epoch, this.recoveredResult(intent));
+            }
+            for (const meta of active) {
+                if (meta.management?.root !== root || (meta.status !== "running" && meta.status !== "orphaned")) continue;
+                writeMeta({ ...meta, management: { root, instance, epoch: this.epoch },
+                    supervisionInterruptedAt: meta.supervisionInterruptedAt ?? Date.now(), supervisionInterruptedReason: "runtime-recovery" });
+            }
+        } catch (error) { this.closeJournal(); throw error; }
     }
     async recover() {
-        if (listMetas({ includeArchived: false }).some(meta => meta.management?.root === this.root && ["running", "orphaned"].includes(meta.status))) await this.initialize();
+        if (listMetas({ includeArchived: false }).some(meta => meta.management?.root === this.root)) await this.initialize();
     }
     private grant(authority: any) {
         if (!authority || !/^[a-f0-9-]{36}$/.test(authority.id) || !/^[a-f0-9]{64}$/.test(authority.secret)) throw new Error("launch-authority-refused");
@@ -117,7 +133,7 @@ export class ManagedSubagentHost {
                     return { PI_MANAGED_SUBAGENT: JSON.stringify({ path: host.path, owner: host.current.ownerKey,
                         key: host.current.key, epoch: host.epoch, id: input.id, token: attempt.token }) };
                 },
-                spawned: (id, pid) => host.journal.spawned(host.current.ownerKey, host.current.key, host.epoch, id, pid),
+                spawned: (id, pid) => host.journal.spawned(host.current.ownerKey, host.current.key, host.epoch, id, pid, processStartToken(pid)),
             };
             const cwd = this.root;
             const settingsManager = SettingsManager.inMemory({});
@@ -173,6 +189,14 @@ export class ManagedSubagentHost {
         this.tail = result;
         return result;
     }
+    private recoveredResult(intent: { attempts: string }) {
+        const ids = JSON.parse(intent.attempts).map(({ id }: any) => id);
+        const runs = ids.map((id: string) => readMeta(id));
+        const status = !ids.length ? "not_launched" : runs.every(Boolean) ? "recovered" : "outcome_unknown";
+        return { details: { status, attempts: ids, runs: runs.filter(Boolean).map((meta: any) => ({
+            runId: meta.id, sessionId: meta.sessionId, status: meta.status,
+        })) }, content: [{ type: "text", text: `Original launch ${status}; no replacement attempt was dispatched.` }] };
+    }
     handle(command: Record<string, unknown>) {
         if (Object.keys(command).some(key => !["id", "type", "authority"].includes(key))) return Promise.reject(new Error("unsupported launch field"));
         this.pending++;
@@ -182,7 +206,10 @@ export class ManagedSubagentHost {
             const ownerKey = JSON.stringify([record.owner.workspace, record.owner.sessionId]);
             const digest = launchDigest({ tool: record.tool, params: record.params });
             const intent = this.journal.accept(ownerKey, record.key, digest, this.epoch);
-            if (intent.prior) return intent.result ? JSON.parse(intent.result) : { details: { status: "outcome_unknown", attempts: JSON.parse(intent.attempts).map(({ id }: any) => id) }, content: [] };
+            if (intent.prior) {
+                if (intent.result) return JSON.parse(intent.result);
+                return this.recoveredResult(intent);
+            }
             this.current = { ...record, authority: command.authority, ownerKey, grantDigest: launchDigest(record) };
             await this.initialize();
             this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...record.permissions });
