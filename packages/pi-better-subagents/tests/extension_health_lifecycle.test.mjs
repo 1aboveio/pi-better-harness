@@ -133,7 +133,7 @@ async function makeHarness(options = {}) {
     };
     betterSubagents(pi, managedDomainPort());
     await Promise.all(recipients.map(recipient => recipient.close()));
-    let recipient = await sdkRecipient({ cwd, sessionId, sent, notes, sendMessage: options.sendMessage });
+    let recipient = await sdkRecipient({ cwd, sessionId, sent, notes, sendMessage: options.sendMessage, batchWindowMs: 5000 });
     recipients.push(recipient);
     const start = handlers.get("session_start");
     handlers.set("session_start", async (event, context) => {
@@ -141,7 +141,7 @@ async function makeHarness(options = {}) {
         const activeId = context.sessionManager?.getSessionId?.();
         if (activeId && activeId !== sessionId) {
             await recipient.close();
-            recipient = await sdkRecipient({ cwd: context.cwd, sessionId: activeId, sent, notes, sendMessage: options.sendMessage });
+            recipient = await sdkRecipient({ cwd: context.cwd, sessionId: activeId, sent, notes, sendMessage: options.sendMessage, batchWindowMs: 5000 });
             recipients.push(recipient);
         }
         await recipient.start();

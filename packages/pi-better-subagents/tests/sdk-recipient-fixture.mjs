@@ -3,10 +3,10 @@ import { once } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-export async function sdkRecipient({ cwd, sessionId, sent, notes, sendMessage }) {
+export async function sdkRecipient({ cwd, sessionId, sent, notes, sendMessage, batchWindowMs }) {
     const directory = mkdtempSync(join(tmpdir(), 'sdk-recipient-'));
     const child = fork(new URL('./sdk-recipient-worker.mjs', import.meta.url), [], { execArgv: ['--import', 'tsx'],
-        env: { ...process.env, PI_BETTER_CALLBACK_BATCH_MS: process.env.PI_BETTER_CALLBACK_BATCH_MS ?? "5000", RECIPIENT_FIXTURE: JSON.stringify({ cwd, sessionId, directory, preflight: Boolean(sendMessage) }) }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+        env: { ...process.env, ...(batchWindowMs === undefined ? {} : { PI_BETTER_CALLBACK_BATCH_MS: String(batchWindowMs) }), RECIPIENT_FIXTURE: JSON.stringify({ cwd, sessionId, directory, preflight: Boolean(sendMessage) }) }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
     let errors = '';
     child.stderr.on('data', chunk => { errors += chunk; });
     child.on('message', message => {
