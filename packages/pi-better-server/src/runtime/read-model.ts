@@ -95,13 +95,16 @@ export class WorkReadModel {
     return () => { this.listeners.delete(listener); release?.(); };
   }
   get backgroundMetrics() { return { ...this.background.metrics, scopes: this.background.scopeCount, history: this.background.historyMetrics }; }
-  livenessReasons() {
+  observation(reasons = this.livenessReasons({ refresh: false })) {
+    return { status: this.state, reason: this.reason, observedAt: Date.now(), reasons };
+  }
+  livenessReasons(options: { refresh?: boolean } = {}) {
     return [
       ...[...this.projected.values()].filter(row => row.meta.status === "running"
         && processMatchesStart(row.meta.pid, row.meta.pidStartTime))
         .map(row => ({ kind: "worker", id: row.meta.id, owner: row.meta.callbackOrigin,
           lastProgressAt: row.meta.startedAt, nextDeadline: null, recovery: "observe-existing-worker" })),
-      ...this.background.livenessReasons(),
+      ...this.background.livenessReasons(options),
     ];
   }
   async ensureId(id: string) {

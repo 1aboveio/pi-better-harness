@@ -133,6 +133,7 @@ test("an active read deadline rejects readers and bounds close while native SQLi
     assert.equal(f.executor.metrics().executor.active, 0);
     assert.equal(f.executor.metrics().executor.queued, 0);
     assert.equal(f.executor.metrics().executor.status, "degraded");
+    assert.equal(f.executor.observation().status, "degraded", "cached status cannot report a failed worker as ready");
     await assert.rejects(client.get({}), /deadline exceeded/);
     assert.equal(client.snapshot!.status, "degraded", "a dead worker must never leave its cached scope authoritative");
     assert.equal((await client.request("ping")).ok, true, "the main socket remains usable after worker failure");

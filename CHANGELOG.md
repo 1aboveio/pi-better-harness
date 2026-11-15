@@ -14,6 +14,7 @@ All notable changes to this project are documented in this file. The format is b
 
 - Bundle Goal 0.14.1 so overlapping workflow admission requests share one pending scheduler check instead of launching one process per candidate. State changes invalidate admission evidence; later requests obtain a fresh check. (#785, #786)
 - Include bounded Navigator refreshes and settings writes that tolerate brief contention between independent processes.
+- Keep shared runtime status responsive while large history indexes rebuild, without forcing another inventory or terminating the read worker.
 - Bundle Background Tasks 0.16.0, Subagents 0.33.0 and Sandbox 0.14.2.
 
 ## [pi-better-goal@0.14.1] - 2026-11-16
@@ -61,6 +62,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Fixed
 
 - Isolate read queries from the main server event loop and bound queued work. (#782)
+- Read runtime status from the last worker observation, including its rebuilding or degraded state, without waiting for a full inventory. Idle shutdown still verifies current task obligations before stopping.
 
 ## [pi-better-harness@0.46.1] - 2026-11-15
 
