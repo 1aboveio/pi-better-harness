@@ -26,3 +26,9 @@ export function acquireMutationStore(root: string): { store: any; release(): voi
     }
   } };
 }
+
+/** Main-thread connections only; read-worker connections are reported separately. */
+export function mutationStoreMetrics(root: string): { active: number; leases: number } {
+  const entry = stores.get(realpathSync(root));
+  return { active: entry ? 1 : 0, leases: entry?.leases ?? 0 };
+}

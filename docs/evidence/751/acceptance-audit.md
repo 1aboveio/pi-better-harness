@@ -65,3 +65,9 @@ The Catalog and Background branches are now combined locally. Server, Background
 ## Shared mutation connection
 
 Cancellation and Background result supervision previously each opened a coordinator connection. They now acquire leases on one main-thread connection per canonical root, separate from the query worker's read connection. Closing either service releases only its lease; final release closes the store. Canonical alias sharing, root isolation and reopen behavior are covered by a new test. Server typecheck and all 19 targeted mutation/cancellation/supervision tests pass. Aggregate connection/CPU budgets still require the full resource acceptance run.
+
+## Shared-read measurement and connection metrics
+
+The macOS shared-read harness completed all six scenarios: 1/5/10 real Pi processes with 4,416 and 10,000 historical records. Unchanged metadata reads and projections stayed at zero in every measurement window. Control RPC p99 ranged from 0.72 to 6.18 ms. Raw CPU/RSS/I/O and lag observations are in `shared-read-resources-macos.json`. This harness excludes guardian and mutation workload; it is not final epic performance acceptance. Rebuild status requests took roughly 979/1562 ms, exposing a remaining status-query dependency on the busy read worker.
+
+Runtime metrics now separately expose `mutationSqlite.active` and `mutationSqlite.leases`; the existing `sqlite` metric remains the query-worker measurement. Real socket cancellation tests activate both mutation services and assert one shared connection with two leases. All seven socket tests, the lease test and Server typecheck pass. The measurement run started at fc142502, while this metrics-only change was being developed; rerun final acceptance on the final committed head.

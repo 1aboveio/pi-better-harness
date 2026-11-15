@@ -120,6 +120,8 @@ for (const stage of ["unaccepted", "accepted", "before-stop-file", "after-stop-f
       const [ready] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(errors); })]);
       const client = new WorkClient(ready.ready, root); clients.push(client); await client.ready;
       await client.request("runtime_cancellation_status");
+      await client.request("runtime_result_supervision");
+      assert.deepEqual((await client.request("runtime_get_metrics")).mutationSqlite, { active: 1, leases: 2 });
       return { child, client };
     };
     let taskId: string | undefined;

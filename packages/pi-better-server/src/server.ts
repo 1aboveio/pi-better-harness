@@ -22,6 +22,7 @@ import { runtimeRoot } from "./runtime/root.ts";
 import { RuntimeCancellation, hasPendingCancellation } from "./runtime/cancellation.ts";
 import { RuntimeResultSupervision, hasResultSupervision } from "./runtime/result-supervision.ts";
 import { SharedCatalog } from "./runtime/catalog.ts";
+import { mutationStoreMetrics } from "./runtime/mutation-store.ts";
 import { WorkQueryExecutor } from "./runtime/query-executor.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
@@ -278,6 +279,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             try {
               workQueries ??= work().connect(socket);
               const data = await workQueries.handle(command);
+              if (type === "runtime_get_metrics") {
+                return reply({ data: { ...JSON.parse(data.json), mutationSqlite: mutationStoreMetrics(getAgentDir()) } });
+              }
               if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
               // Snapshot JSON is encoded in the worker; only the small envelope runs here.
               const envelope = JSON.stringify({ id, type: "response", command: type, success: true });
