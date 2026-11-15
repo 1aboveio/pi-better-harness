@@ -543,6 +543,8 @@ function recoverCompletionCallbacks(pi) {
     }
 }
 function deliverFailureAttention(pi, meta, now) {
+    if (managementPort)
+        return;
     if (!pi || meta.callback === false || callbackSuppressionReason(meta))
         return;
     if ((meta.status === "orphaned" || meta.status === "lost") && !isHealthCallbackHandled(meta, meta.status))
@@ -737,6 +739,8 @@ let healthPi;
  * completion, with distinct ATTENTION wording from buildHealthCallbackDelivery.
  */
 function deliverHealthCallback(pi, meta, status, now) {
+    if (managementPort)
+        return;
     if (!pi)
         return;
     if (isHealthCallbackHandled(meta, status))

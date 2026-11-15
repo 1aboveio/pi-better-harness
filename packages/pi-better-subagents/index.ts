@@ -693,6 +693,7 @@ function recoverCompletionCallbacks(pi: ExtensionAPI): void {
 }
 
 function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, now: number): void {
+    if (managementPort) return;
     if (!pi || meta.callback === false || callbackSuppressionReason(meta)) return;
     if ((meta.status === "orphaned" || meta.status === "lost") && !isHealthCallbackHandled(meta, meta.status)) return;
     const state = collectRunFailures(meta.id, meta.cwd, meta.status !== "running" && meta.status !== "orphaned");
@@ -886,6 +887,7 @@ let healthPi: ExtensionAPI | undefined;
  * completion, with distinct ATTENTION wording from buildHealthCallbackDelivery.
  */
 function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, status: "orphaned" | "lost", now: number): void {
+    if (managementPort) return;
     if (!pi) return;
     if (isHealthCallbackHandled(meta, status)) return;
 
