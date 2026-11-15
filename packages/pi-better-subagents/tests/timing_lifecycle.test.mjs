@@ -76,7 +76,7 @@ async function makeHarness(options = {}) {
     const recipient = options.manager ? undefined : await sdkRecipient({ cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), sent, notes });
     if (recipient) { recipients.push({ recipient, sessionId: ctx.sessionManager.getSessionId(), failSend: options.failSend }); await recipient.failure(Boolean(options.failSend?.())); }
     const shutdown = async () => { await recipient?.close(); await handlers.get("session_shutdown")?.({}, ctx); };
-    return { pi, tools, handlers, sent, notes, ctx, shutdown };
+    return { pi, tools, handlers, sent, notes, ctx, shutdown, recipient };
 }
 
 async function spawnRun(h, { noWaitForLaunch, ...overrides } = {}) {
@@ -143,11 +143,25 @@ const MINUTE = 60_000;
 
 async function withFakeClock(fn) {
     mock.timers.enable({ apis: ["setInterval"] });
-    try { await fn(); } finally { mock.timers.reset(); }
+    const firstRun = liveRuns.length;
+    try { await fn(); } finally {
+        // An assertion failure must not leave owed alerts for the next test's
+        // same-session recipient. Reload cases intentionally share that scope.
+        try {
+            for (const run of liveRuns.slice(firstRun)) if (existsSync(runDir(run.id))) await reap(run);
+        } finally { mock.timers.reset(); }
+    }
 }
 
 const wakes = (h, kind) => h.sent.filter((entry) => entry.message.customType === `subagent-${kind}`);
 const steerPath = (id) => join(runDir(id), "steer.json");
+
+async function waitForToolWakes(h, id, count) {
+    if (await waitFor(() => wakes(h, "tool-wait").length === count)) return;
+    assert.fail(`tool-wait delivery timed out: ${JSON.stringify({ expected: count,
+        delivered: wakes(h, "tool-wait"), meta: readMeta(id), runtime: stopRuntime.diagnostics(),
+        recipient: await h.recipient.diagnostics(id) })}`);
+}
 
 function appendEvents(id, events) {
     appendFileSync(join(runDir(id), "output.log"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
@@ -684,9 +698,11 @@ describe("harness timing: stuck wake", () => {
                 assert.equal(wakes(h, "stuck").length, 1);
                 await tick();
                 assert.equal(wakes(h, "stuck").length, 1, "once per stuck spell");
+                const previousStuckAnchor = readMeta(run.id).timing.stuckAnchorAt;
                 appendEvents(run.id, editEvents("fix"));
                 await tick();
-                assert.equal(readMeta(run.id).timing.lastProgressAt > readMeta(run.id).timing.stuckAnchorAt, true);
+                assert.equal(readMeta(run.id).timing.lastProgressAt > previousStuckAnchor, true,
+                    "the edit advances progress beyond the previous stuck spell");
                 const result = (await h.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text;
                 assert.doesNotMatch(result, /Timing: stuck/, "progress clears the stuck reason");
                 await sleep(160);
@@ -716,7 +732,7 @@ describe("harness timing: tool wait", () => {
                 appendEvents(run.id, startCall("long-test"));
                 await sleep(200);
                 await tick();
-                await waitFor(() => wakes(h, "tool-wait").length === 1);
+                await waitForToolWakes(h, run.id, 1);
                 const first = wakes(h, "tool-wait");
                 assert.equal(first.length, 1, "a long normal tool call still alerts once");
                 assert.match(first[0].message.content, new RegExp(run.id));
@@ -741,7 +757,7 @@ describe("harness timing: tool wait", () => {
                 appendEvents(run.id, startCall("second-test", "npm run lint"));
                 await sleep(200);
                 await tick();
-                await waitFor(() => wakes(h, "tool-wait").length === 2);
+                await waitForToolWakes(h, run.id, 2);
                 const second = wakes(h, "tool-wait");
                 assert.equal(second.length, 2, "the next call alerts independently");
                 assert.match(second[1].message.content, /second-test/);
@@ -761,7 +777,7 @@ describe("harness timing: tool wait", () => {
                 appendEvents(run.id, [...startCall("call-a", "build"), ...startCall("call-b", "test").slice(1)]);
                 await sleep(200);
                 await tick();
-                await waitFor(() => wakes(first, "tool-wait").length === 2);
+                await waitForToolWakes(first, run.id, 2);
                 assert.equal(wakes(first, "tool-wait").length, 2, "each parallel call gets its own alert");
                 await waitFor(() => timingWakeReceipt(run.id, "tool-wait:call-a") && timingWakeReceipt(run.id, "tool-wait:call-b"));
                 await tick();
@@ -795,7 +811,7 @@ describe("harness timing: tool wait", () => {
                 assert.equal(readMeta(run.id).timing.toolWaitAlerted, undefined, "a failed handoff leaves the marker unset");
                 fail = false;
                 await tick();
-                await waitFor(() => wakes(h, "tool-wait").length === 1);
+                await waitForToolWakes(h, run.id, 1);
                 assert.equal(wakes(h, "tool-wait").length, 1, "the existing urgent callback path retries");
                 await waitFor(() => timingWakeReceipt(run.id, "tool-wait:retry-call"));
                 await tick();
