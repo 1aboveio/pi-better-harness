@@ -853,7 +853,7 @@ async function durableStatusText(pi: ExtensionAPI, id: string, ctx: ExtensionCon
       const task = host.readDurableTask(origin, id);
       if (!task) return `Background task ${id} is outside the current session scope.`;
       const meta = {
-        ...task, kind: task.kind === "watch" ? "command_watch" : "process", status: view.status === "starting" ? "running" : view.status === "lost" ? "failed" : view.status,
+        ...task, kind: task.kind === "watch" ? "command_watch" : "process", status: view.status,
         argv: task.argv ? [...task.argv] : undefined,
         logPath: task.logPaths.stdout, callbackOrigin: origin,
         lastExitCode: view.exitCode, result: task.terminal ? { exitCode: view.exitCode, signal: view.signal } : undefined,
