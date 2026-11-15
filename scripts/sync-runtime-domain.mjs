@@ -13,6 +13,7 @@ function copyLaunchDomain(source, destination) {
   mkdirSync(destination, { recursive: true });
   for (const entry of readdirSync(source, { withFileTypes: true })) {
     const from = join(source, entry.name), to = join(destination, entry.name);
+    if (destination.includes("background-service") && /\.test\./.test(entry.name)) continue;
     if (entry.isDirectory()) {
       if (["roles", "shared-operation-coordinator", "src", "supervisor"].includes(entry.name)) copyLaunchDomain(from, to);
       continue;
