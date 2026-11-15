@@ -505,11 +505,13 @@ test("watch overflow and lost notifications reconcile external writes once and r
     await model.reconcile();
     assert.equal(model.metrics.metadataReads, reads);
     assert.equal(model.metrics.projections, projections);
-    const watchers = (model as unknown as { watchers: import("node:fs").FSWatcher[] }).watchers;
-    assert.ok(watchers.length > 0);
-    watchers[0]!.emit("error", new Error("injected kernel watcher overflow"));
+    const watchers = (model as unknown as { watchers: Map<string, import("node:fs").FSWatcher> }).watchers;
+    assert.ok(watchers.size > 0);
+    watchers.values().next().value!.emit("error", new Error("injected kernel watcher overflow"));
     assert.equal(model.snapshot().status, "degraded", "the production watcher error callback exposes unknown freshness");
     await model.reconcile();
+    // Reconciliation may replace the failed watcher; close the current map,
+    // not a snapshot of the pre-overflow handles. Recovery must use the poll.
     watchers.forEach(watcher => watcher.close());
     let cancelRecovery = () => {};
     const recovered = new Promise<void>((resolve, reject) => {
