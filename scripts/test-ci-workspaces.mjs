@@ -52,8 +52,22 @@ export function selectWorkspaces(root) {
   return selected;
 }
 
-export function runWorkspaceTests(root) {
-  for (const workspace of selectWorkspaces(root)) {
+function parseShard(args) {
+  if (args.length === 0) return null;
+  if (args.length === 2 && args[0] === "--shard" && args[1].trim() === args[1] && /^[1-9]\d*\/[1-9]\d*$/.test(args[1])) {
+    const [index, total] = args[1].split("/").map(Number);
+    if (Number.isSafeInteger(index) && Number.isSafeInteger(total) && index <= total) {
+      return { index, total };
+    }
+  }
+  throw new Error("Usage: node scripts/test-ci-workspaces.mjs [--shard INDEX/TOTAL] (safe positive integers, 1 <= INDEX <= TOTAL)");
+}
+
+export function runWorkspaceTests(root, args = []) {
+  const shard = parseShard(args);
+  const workspaces = selectWorkspaces(root).filter((_, position) =>
+    !shard || position % shard.total === shard.index - 1);
+  for (const workspace of workspaces) {
     const result = spawnSync("npm", ["run", "test", "--workspace", workspace], { cwd: root, stdio: "inherit" });
     if (result.error) throw result.error;
     if (result.signal) throw new Error(`Workspace ${workspace} terminated by ${result.signal}`);
@@ -64,7 +78,7 @@ export function runWorkspaceTests(root) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    process.exitCode = runWorkspaceTests(process.cwd());
+    process.exitCode = runWorkspaceTests(process.cwd(), process.argv.slice(2));
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
