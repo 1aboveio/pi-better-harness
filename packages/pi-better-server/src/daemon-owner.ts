@@ -13,7 +13,8 @@ export interface DaemonOwnerIdentity {
 type Owner = DaemonOwnerIdentity;
 
 export function currentOwnerIdentity(token = randomUUID()): DaemonOwnerIdentity {
-  return { pid: process.pid, token, ...linuxIdentity(process.pid) };
+  const { boot, start } = linuxIdentity(process.pid);
+  return { pid: process.pid, token, ...(boot ? { boot } : {}), ...(start ? { start } : {}) };
 }
 
 export function ownerIsAlive(owner: DaemonOwnerIdentity): boolean {
@@ -88,7 +89,7 @@ function validateOwner(previous: Owner, name: string, lock: string): void {
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 
-function linuxIdentity(pid: number): Pick<Owner, "boot" | "start"> {
+function linuxIdentity(pid: number): Pick<Owner, "boot" | "start"> & { state?: string } {
   if (process.platform === "darwin") {
     try {
       const start = execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" }, timeout: 1000 }).trim();
@@ -99,7 +100,8 @@ function linuxIdentity(pid: number): Pick<Owner, "boot" | "start"> {
   if (process.platform !== "linux") return {};
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    return { boot: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(), start: stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] };
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return { boot: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(), start: fields[19], state: fields[0] };
   } catch { return {}; }
 }
 
@@ -107,6 +109,8 @@ function alive(owner: Owner): boolean {
   const identity = linuxIdentity(owner.pid);
   if (owner.boot && identity.boot && owner.boot !== identity.boot) return false;
   if (owner.start && identity.start && owner.start !== identity.start) return false;
+  // A kernel-confirmed exited process cannot own a socket even before its parent reaps it.
+  if (identity.state === "Z" || identity.state === "X") return false;
   try { process.kill(owner.pid, 0); return true; }
   catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
 }

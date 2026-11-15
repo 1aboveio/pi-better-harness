@@ -3,11 +3,18 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 const root = process.env.PI_CODING_AGENT_DIR!;
+// This process already runs under tsx. Use the SDK's real factory entry point
+// instead of compiling the same extension closure again in each jiti instance.
+const { default: background } = await import(new URL("../../../pi-better-background-tasks/src/index.ts", import.meta.url).href);
+const factories = [background];
+if (process.env.PI_TEST_PERMISSION_PUBLISHER === "1") {
+  const { default: sandbox } = await import(new URL("../../../pi-better-sandbox/index.ts", import.meta.url).href);
+  factories.push(sandbox);
+}
 // The SDK loads the production extension; no model request is needed to exercise its registered tools.
 const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
 const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager,
-  additionalExtensionPaths: [new URL("../../../pi-better-background-tasks/src/index.ts", import.meta.url).pathname,
-    ...(process.env.PI_TEST_PERMISSION_PUBLISHER === "1" ? [new URL("../../../pi-better-sandbox/index.ts", import.meta.url).pathname] : [])],
+  extensionFactories: factories,
   noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
 await resourceLoader.reload();
 if (resourceLoader.getExtensions().errors.length) throw new Error(JSON.stringify(resourceLoader.getExtensions().errors));

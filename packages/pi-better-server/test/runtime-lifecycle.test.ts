@@ -66,9 +66,18 @@ function runtime(env: ReturnType<typeof makeEnv>) {
 }
 
 async function liveServer(env: ReturnType<typeof makeEnv>) {
-  return waitFor("runtime owner", () => {
+  return waitFor("runtime owner and listener", async () => {
     const owner = inspectDaemonOwner(env.serverDir);
-    return owner.status === "live" && existsSync(join(env.serverDir, "pi-server.sock")) ? owner.owner : undefined;
+    if (owner.status !== "live") return;
+    // A replacement owner can precede removal of the killed server's socket path.
+    let probe: Client | undefined;
+    try {
+      probe = await Client.connect(join(env.serverDir, "pi-server.sock"));
+      const response = await probe.request({ type: "hello", protocolVersion: 1, runtimeRoot: env.agentDir });
+      return response.success && response.data.instanceId === owner.owner.token ? owner.owner : undefined;
+    } catch (error) {
+      if (!["ENOENT", "ECONNREFUSED", "ECONNRESET"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    } finally { probe?.close(); }
   });
 }
 
