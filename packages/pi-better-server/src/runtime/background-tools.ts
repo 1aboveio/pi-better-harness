@@ -62,7 +62,23 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     runtime = createBackgroundTaskRuntime(failures.createFailureAttention((origin:any,event:any)=>new Promise<boolean>(resolve=>notifyParent({origin,taskId:event.inspectId??event.id,status:event.status,urgent:true,event:{...event,isDelivered:undefined,getSuppressionReason:undefined,onDelivered:undefined}},
               {receiptId:event.receiptId,delivered:()=>{event.onDelivered?.(Date.now());resolve(true);},defer:()=>resolve(false)}))), (origin: any, event: any) => notifyParent({ origin, taskId: event.id, status: event.status, outcome: event.outcome, event: { ...event, isDelivered: undefined, getSuppressionReason: undefined, onDelivered: undefined, onSuppressed: undefined } }, { receiptId: event.receiptId, delivered: () => event.onDelivered?.(Date.now()), defer: () => undefined }), { assert: assertAdmission, prepared: (id: string) => journal.operation(current.ownerKey, current.record.key, { operationId: `legacy:${id}`, taskId: id, token: current.record.key }) });
                     service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, 'operation-coordinator.sqlite'), serverOwnedResults: true, pollMs: 0,
-                        notifyParent, assertAdmission, beforeParentOperation: (operation: any) => journal.operation(current.ownerKey, current.record.key, operation) });
+                        notifyParent, assertAdmission,
+                        authorizeParentCancellation: ({requester, operation, requestId}: any) => {
+                            assertAdmission();
+                            const record=current.record;
+                            const stopTool=record.tool==='bg_task_stop'||(['bg_task','bg_status'].includes(record.tool)&&record.params.action==='stop');
+                            if (!stopTool || record.params.id !== operation.taskId
+                                || (record.params.request_id ?? record.key) !== requestId
+                                || requester.kind !== 'parent-session' || requester.workspace !== record.owner.workspace
+                                || requester.sessionId !== record.owner.sessionId
+                                || requester.branchId && !record.branchIds.includes(requester.branchId))
+                                throw new Error('not_accepted: cancellation request is outside the protected native grant');
+                            const sameOwner=requester.kind===operation.owner.kind&&requester.sessionId===operation.owner.sessionId&&requester.workspace===operation.owner.workspace;
+                            if (!sameOwner && record.params.all !== true)
+                                throw new Error('not_accepted: task belongs to another execution owner; explicit all:true is required');
+                            return {requestId:`native-stop:${authority.backgroundDigest([record.owner,requestId,operation.taskId])}`,
+                                reason:`explicit native stop; requester ${authority.backgroundDigest(record.owner)}; grant ${record.id}`};
+                        }, beforeParentOperation: (operation: any) => journal.operation(current.ownerKey, current.record.key, operation) });
                     registerTools(pi, runtime, () => undefined, { resumeLocal: false });
                     sandbox.observeForegroundSandboxPolicy(pi);
                     pi.events.on(sandbox.FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, () => { if (current?.policy)

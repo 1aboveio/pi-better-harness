@@ -1018,7 +1018,13 @@ export class ObservedWaitHost {
     authorizeCancellationForParent(ctx, taskId, requestId) {
         if (this.localCancels.has(taskId))
             throw new Error("not_accepted: old cancellation admission is still draining");
-        const operation = this.ownedOperation(taskId, this.ownerFor(ctx));
+        const requester = this.ownerFor(ctx), operation = this.operationForTask(taskId);
+        if (!operation)
+            throw new Error(`Unknown task ${taskId}`);
+        const admission = this.options.authorizeParentCancellation?.({ requester, operation, requestId });
+        if (!ownerMatchesOperation(operation, requester) && !admission)
+            throw new Error(`Task ${taskId} belongs to another execution owner.`);
+        requestId = admission?.requestId ?? requestId;
         const managed = this.requireStore().resultSupervision(operation.operationId);
         if (this.supervisionAuthority(operation) === "foreign" && !(managed?.launchToken === operation.launchToken && managed.hostId === operation.supervision?.hostId))
             throw new Error("permission-unavailable: live legacy or unknown supervisor prevents cancellation handoff");
@@ -1029,12 +1035,11 @@ export class ObservedWaitHost {
         this.requireStore().admitTaskCancellation({ credentialHash: proof.hash, directory: this.directory, request: previous ?? {
                 owner: operation.owner, idempotencyKey: requestId, operationId: operation.operationId,
                 expectedLaunchToken: operation.launchToken, expectedTerminalRevision: operation.terminalRevision,
-                expectedHostId: operation.supervision?.hostId ?? "unavailable", reason: "explicit stop",
+                expectedHostId: operation.supervision?.hostId ?? "unavailable", reason: admission?.reason ?? "explicit stop",
             } });
         return proof.credential;
     }
     async stopThroughRuntime(ctx, taskId, requestId) {
-        this.ownedOperation(taskId, this.ownerFor(ctx));
         const root = realpathSync(dirname(this.storePath));
         const registrationPath = join(root, "server-registration-v1.json");
         if (!existsSync(registrationPath)) {
@@ -1060,7 +1065,13 @@ export class ObservedWaitHost {
             }
             if (receipt.state === "outcome_unknown" || !receipt.result)
                 throw new Error(`${receipt.state}: cancellation ${requestId}; query the same request before retrying`);
-            return this.statusForParent(ctx, taskId);
+            // The credential above authorizes this exact recorded owner/token. Keep
+            // the requester context intact even when its explicit all:true grant won.
+            const operation = this.requireStore().getOperation(receipt.operationId);
+            if (!operation || operation.taskId !== taskId || operation.launchToken !== receipt.expectedLaunchToken
+                || !sameOwner(operation.owner, receipt.owner))
+                throw new Error('outcome_unknown: cancellation target identity changed');
+            return this.statusForOperation(operation, this.ownerFor(ctx));
         }
         catch (error) {
             const message = String(error);
@@ -1315,8 +1326,10 @@ export class ObservedWaitHost {
         };
     }
     status(taskId, owner) {
-        const store = this.requireStore();
-        const operation = this.ownedOperation(taskId, owner);
+        return this.statusForOperation(this.ownedOperation(taskId, owner), owner);
+    }
+    statusForOperation(operation, owner) {
+        const store = this.requireStore(), taskId = operation.taskId;
         const inspection = this.inspect(taskId);
         this.reconcileInspection(operation, inspection);
         const current = store.getOperation(operation.operationId) ?? operation;
