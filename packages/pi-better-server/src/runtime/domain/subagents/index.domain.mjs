@@ -541,7 +541,7 @@ function recoverAssignmentOutcomes(pi) {
         }
         if (pending.has("timing")) {
             replayTimingWakes(pi, meta);
-            if (!meta.timing?.pendingWakes?.some(wake => !timingWakeReceipt(runDir(id), wake.key)))
+            if (!meta.timing?.pendingWakes?.some(wake => !timingWakeReceipt(id, wake.key)))
                 finishRecipientRecovery(id, "timing");
         }
         if (pending.has("health")) {
@@ -591,7 +591,7 @@ function observeRecipientNotifications(pi) {
             trackRecipientRecovery(meta.id, "health");
         if (meta.assignment && ["completed", "failed", "killed", "lost"].includes(meta.status))
             trackRecipientRecovery(meta.id, "assignment");
-        if (["running", "orphaned", "lost"].includes(meta.status))
+        if (row.failurePending || ["running", "orphaned", "lost"].includes(meta.status))
             deliverFailureAttention(pi, meta, Date.now());
     }
     for (const id of observedRecipientRows.keys())

@@ -541,3 +541,26 @@ test("pending recipient query retains old terminal obligations with scoped bound
     assert.equal(model.metrics.projections, before.projections);
   } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test("old handled terminal records re-enter pending scope for new failure journal attention", async () => {
+  const root = fixtureRoot("pending-failure");
+  const id = "sa_old_lost", directory = join(root, "runs", id); mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "meta.json"), JSON.stringify({ id, sessionId: id, cwd: root,
+    callbackOrigin: { cwd: root, sessionId: "parent" }, status: "lost", startedAt: 1, endedAt: 2,
+    lostCallbackSentAt: 3, completionCallbackSentAt: 3, callback: true }));
+  const model = new WorkReadModel(root, "failure-instance", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  const scope = { cwd: root, sessionId: "parent", pendingRecipient: true };
+  const record = { observedAt: 4, event: { id: "late-gap", operation: "child-log", kind: "incomplete", summary: "Late observation gap" } };
+  try {
+    await model.reconcile(); assert.equal(model.snapshot(scope).rows.length, 0);
+    writeFileSync(join(directory, "failures.jsonl"), JSON.stringify(record) + "\n");
+    await model.reconcile();
+    assert.equal(model.snapshot(scope).rows[0]?.meta.id, id);
+    const counters = { ...model.metrics };
+    for (let i = 0; i < 10; i++) assert.equal(model.snapshot(scope).rows.length, 1);
+    assert.equal(model.metrics.projections, counters.projections);
+    writeFileSync(join(directory, "failures.jsonl"), JSON.stringify(record) + "\n" + JSON.stringify({ observedAt: 5, event: { id: "receipt", operation: "attention-delivery", kind: "delivered", incidents: ["late-gap"] } }) + "\n");
+    await model.reconcile(); assert.equal(model.snapshot(scope).rows.length, 0);
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+});

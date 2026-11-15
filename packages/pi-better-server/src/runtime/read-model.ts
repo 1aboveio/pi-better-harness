@@ -15,6 +15,8 @@ import { fmtSpend } from "./domain/widget.mjs";
 import { effectiveStatus } from "./domain/process-status.mjs";
 import { extractChildEventFactsFromLog, healthThresholdsForConfig } from "./domain/health-observation.mjs";
 import { BackgroundObservation } from "./background.ts";
+// @ts-expect-error Generated canonical read-only failure projection.
+import { readFailureStateReadOnly, pendingFailureAttention } from "./domain/subagents/shared-failure-observations.domain.mjs";
 import { readHealthConfig } from "./health-config.ts";
 
 export interface WorkScope { processId?: number; backgroundAll?: boolean; background?: boolean; backgroundHistory?: boolean; cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; pendingRecipient?: boolean; endedAfter?: number; detail?: boolean; limit?: number; cursor?: string }
@@ -37,8 +39,9 @@ export class WorkReadModel {
   private db: any;
   private reader: ReturnType<typeof createAssignmentReader>;
   private files = new Map<string, { signature: string; meta: any }>();
-  private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string }; health?: any; recipientPending?: boolean }>();
+  private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string }; health?: any; recipientPending?: boolean; failurePending?: boolean }>();
   private logs = new Map<string, string>();
+  private failureJournals = new Map<string, string>();
   private processes = new Map<string, string>();
   private healthRevision = "";
   private details = new Map<string, { revision: string; value: any }>();
@@ -212,6 +215,7 @@ export class WorkReadModel {
       try { coordinator = this.reader.revision(); } catch { coordinator = "unknown"; }
       const coordinatorConversations = coordinator === this.coordinator ? this.coordinatorConversations : this.reader.conversationRevisions();
       const logs = new Map<string, string>();
+      const failureJournals = new Map<string, string>();
       const processes = new Map<string, string>();
       const logFamilies = new Set<string>();
       for (const [path, entry] of next) {
@@ -225,6 +229,12 @@ export class WorkReadModel {
         }
         logs.set(entry.meta.id, signature);
         if (signature !== this.logs.get(entry.meta.id)) logFamilies.add(JSON.stringify([entry.meta.sessionId, entry.meta.cwd]));
+        const failureSignature = (await Promise.all(["failures.jsonl", "failures.jsonl.observed"].map(async name => {
+          try { const info = await stat(join(this.runs, entry.meta.id, name), { bigint: true }); return `${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`; }
+          catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unverified"; }
+        }))).join(":");
+        failureJournals.set(entry.meta.id, failureSignature);
+        if (failureSignature !== this.failureJournals.get(entry.meta.id)) logFamilies.add(JSON.stringify([entry.meta.sessionId, entry.meta.cwd]));
         const status = effectiveStatus(entry.meta); processes.set(entry.meta.id, status);
         if (status !== this.processes.get(entry.meta.id)) logFamilies.add(JSON.stringify([entry.meta.sessionId, entry.meta.cwd]));
       }
@@ -262,12 +272,15 @@ export class WorkReadModel {
           const display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.toolCalls.at(-1) ?? "" };
           const health = logs.has(meta.id) ? { ...extractChildEventFactsFromLog(meta.id, { logPath: join(this.runs, meta.id, "output.log") }), thresholds: healthThresholdsForConfig(healthConfig.config) } : undefined;
           const outcome = meta.assignment ? this.reader.read({ ...meta.assignment.owner, assignmentId: meta.assignment.assignmentId }).outcome : undefined;
-          const recipientPending = Boolean(meta.timing?.pendingWakes?.length
+          const failurePending = meta.callback !== false && failureJournals.has(meta.id) && Boolean(pendingFailureAttention(
+            readFailureStateReadOnly(join(this.runs, meta.id, "failures.jsonl")), Date.now(),
+            { terminal: !["running", "orphaned"].includes(meta.status), deferObservationGaps: meta.status === "running" }));
+          const recipientPending = Boolean(failurePending || meta.timing?.pendingWakes?.length
             || (meta.status === "orphaned" && meta.orphanedCallbackSentAt === undefined && meta.orphanedCallbackSuppressedAt === undefined)
             || (meta.status === "lost" && meta.lostCallbackSentAt === undefined && meta.lostCallbackSuppressedAt === undefined)
             || (meta.callback !== false && (meta.assignment ? outcome && !outcome.deliveryReceipt && !outcome.disposition
               : meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined)));
-          row = { meta, assignment, display, health, recipientPending, sourceRevision: hash([meta, assignment.revision, display, health, recipientPending]) };
+          row = { meta, assignment, display, health, recipientPending, failurePending, sourceRevision: hash([meta, assignment.revision, display, health, recipientPending, failurePending, failureJournals.get(meta.id)]) };
         }
         rows.push(row);
         if (++batch % 256 === 0) await yieldTurn();
@@ -309,7 +322,7 @@ export class WorkReadModel {
         }
         this.db.exec("COMMIT");
       } catch (error) { this.db.exec("ROLLBACK"); throw error; }
-      this.files = next; this.logs = logs; this.processes = processes; this.healthRevision = healthConfig.revision; this.coordinator = coordinator; this.inventory++;
+      this.files = next; this.logs = logs; this.failureJournals = failureJournals; this.processes = processes; this.healthRevision = healthConfig.revision; this.coordinator = coordinator; this.inventory++;
       this.coordinatorConversations = coordinatorConversations;
       this.projected = new Map(rows.map(row => [row.meta.id, row]));
       const previousState = this.state;

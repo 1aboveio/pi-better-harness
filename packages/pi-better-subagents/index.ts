@@ -693,7 +693,7 @@ function recoverAssignmentOutcomes(pi: ExtensionAPI): void {
         if (!meta) { pendingRecipientRecovery.delete(id); continue; }
         if (pending.has("timing")) {
             replayTimingWakes(pi, meta);
-            if (!meta.timing?.pendingWakes?.some(wake => !timingWakeReceipt(runDir(id), wake.key))) finishRecipientRecovery(id, "timing");
+            if (!meta.timing?.pendingWakes?.some(wake => !timingWakeReceipt(id, wake.key))) finishRecipientRecovery(id, "timing");
         }
         if (pending.has("health")) {
             if ((meta.status !== "orphaned" && meta.status !== "lost") || isHealthCallbackHandled(meta, meta.status)) finishRecipientRecovery(id, "health");
@@ -728,7 +728,7 @@ function observeRecipientNotifications(pi: ExtensionAPI): void {
             && (meta.management || ownedByThisParent(meta) || (meta.supervisionInterruptedAt !== undefined && isAbandonedByParent(meta, realProcessProbe)))) trackRecipientRecovery(meta.id, "completion");
         if ((meta.status === "orphaned" || meta.status === "lost") && !isHealthCallbackHandled(meta, meta.status)) trackRecipientRecovery(meta.id, "health");
         if (meta.assignment && ["completed", "failed", "killed", "lost"].includes(meta.status)) trackRecipientRecovery(meta.id, "assignment");
-        if (["running", "orphaned", "lost"].includes(meta.status)) deliverFailureAttention(pi, meta, Date.now());
+        if (row.failurePending || ["running", "orphaned", "lost"].includes(meta.status)) deliverFailureAttention(pi, meta, Date.now());
     }
     for (const id of observedRecipientRows.keys()) if (!ids.has(id)) observedRecipientRows.delete(id);
     recoverAssignmentOutcomes(pi);

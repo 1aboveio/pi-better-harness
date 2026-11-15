@@ -962,6 +962,8 @@ export function readFailureState(path) {
         state = reduceFailure(state, record.event, record.observedAt);
     return remaining?.length ? storageProblem(state, "Failure evidence could not be persisted") : state;
 }
+/** Read-only projection: never retries or appends process-local pending writes. */
+export function readFailureStateReadOnly(path) { return readStoredState(path); }
 function readStoredState(path) {
     let source;
     try {
