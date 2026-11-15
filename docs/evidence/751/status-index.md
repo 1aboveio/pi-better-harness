@@ -2,7 +2,7 @@
 
 **Current status: implementation and targeted acceptance evidence are integrated; #751 is not yet complete. Final CI5 is pending.** This index supersedes the status claims in earlier checkpoint audits, while preserving their failures and raw reports as history.
 
-Reviewed source: `57f831e4` (includes final local resource evidence). CI4 passed both Linux and macOS resource lanes, including full/shared measurements, packaging, offline restart and socket backpressure qualification. CI4 as a whole still failed fixture checks; those fixes and a complete final-head CI run remain required. Passing resource lanes are not a green aggregate CI result. Issue closure and PR merge remain separate actions.
+Reviewed source: `57f831e4` (includes final local resource evidence). CI4 passed both Linux and macOS resource lanes, including full/shared measurements, packaging, offline restart and socket backpressure qualification. CI4 also exposed two Background projection regressions: scoped runner terminals could disappear before canonical publication, and ordinary scoped reads hydrated unrelated recent history. Both are corrected in `efaa87b0`, with the original visibility and read-count assertions retained. Fixture corrections and a complete final-head CI run remain required. Passing resource lanes are not a green aggregate CI result. Issue closure and PR merge remain separate actions.
 
 ## Requirement matrix
 
@@ -31,6 +31,6 @@ CI4 artifacts were downloaded to `/tmp/pi-751-ci4-artifacts/{linux,macos}/_temp/
 
 ## Remaining completion actions
 
-1. Integrate the remaining fixture/compatibility corrections and obtain complete final-head CI5 results; record its run URL, source and exact lane outcomes here.
+1. Complete lifecycle fixture verification and obtain complete final-head CI5 results; record its run URL, source and exact lane outcomes here.
 2. Confirm final CI covers the publication probe, copied-source provenance, package/offline checks and native compatibility journeys, without counting skipped tests as coverage.
 3. Reconcile the final requirement matrix with the engineering issues and PRs before declaring #751 complete. Earlier audit text saying mixed clients are unmeasured, the root has three coordinator connections, or old broad suites still have their initial failure counts is historical, not the current diagnosis.
