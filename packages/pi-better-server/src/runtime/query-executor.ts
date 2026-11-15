@@ -88,7 +88,9 @@ export class WorkQueryExecutor {
   /** Diagnostic observation only. Idle admission must await livenessReasons instead. */
   observeLiveness() {
     if (!this.livenessObservation && !this.failure) {
-      this.livenessObservation = this.livenessReasons().then(() => undefined, error => {
+      this.livenessObservation = this.request(0, { type: "runtime_observe_liveness" }).then(result => {
+        this.livenessSnapshot = { reasons: JSON.parse(result.json), observedAt: Date.now() };
+      }, error => {
         this.livenessSnapshot = { ...this.livenessSnapshot, reason: String(error) };
       }).finally(() => { this.livenessObservation = undefined; });
     }
@@ -110,11 +112,11 @@ export class WorkQueryExecutor {
     if (connection !== 0 && !this.streams.has(connection)) return Promise.reject(new Error("runtime-unavailable: client disconnected"));
     if (input.type === "runtime_get_metrics") return Promise.resolve({ json: JSON.stringify(this.metrics()) });
     if (this.failure) return Promise.reject(this.failure);
-    if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_liveness"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
+    if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_liveness", "runtime_observe_liveness"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
     if (input.sinceSeq !== undefined && !Number.isSafeInteger(input.sinceSeq)) return Promise.reject(new Error("Invalid replay sequence"));
     if (input.instanceId !== undefined && (typeof input.instanceId !== "string" || input.instanceId.length > 256)) return Promise.reject(new Error("Invalid runtime instance"));
     const command: Record<string, unknown> = { type: input.type, sinceSeq: input.sinceSeq, instanceId: input.instanceId };
-    if (command.type !== "runtime_unsubscribe" && command.type !== "runtime_get_liveness") {
+    if (command.type !== "runtime_unsubscribe" && command.type !== "runtime_get_liveness" && command.type !== "runtime_observe_liveness") {
       const scope = workScope(input.scope);
       if (scope.cwd) scope.cwd = resolve(scope.cwd);
       scope.limit ??= scope.backgroundHistory ? 10 : 50;

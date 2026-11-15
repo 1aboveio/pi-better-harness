@@ -99,8 +99,8 @@ parentPort.on("message", async message => {
   if (message.type !== "query") return;
   try {
     const command = message.command;
-    if (command.type === "runtime_get_liveness") {
-      await model.reconcile();
+    if (command.type === "runtime_get_liveness" || command.type === "runtime_observe_liveness") {
+      if (command.type === "runtime_get_liveness") await model.reconcile();
       parentPort.postMessage({ type: "reply", id: message.id, json: JSON.stringify(model.livenessReasons()), metrics: metrics() });
       return;
     }
