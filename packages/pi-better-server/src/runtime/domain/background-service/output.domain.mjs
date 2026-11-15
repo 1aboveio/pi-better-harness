@@ -531,6 +531,18 @@ function redactedVerbose(meta, options) {
  * whole document fits it is returned as plain JSON; otherwise it is paged
  * with a caller cursor like any other retained evidence.
  */
+/** Bounded raw metadata for canonical supervisor tasks. These records contain no
+ * environment values and do not invent legacy process ownership fields. */
+export function formatDurableStatusMetadata(meta, options) {
+    const json = JSON.stringify(meta, null, 2);
+    if (!options.cursor && utf8ByteLength(json) <= backgroundBudget("rawPage", options.maxBytes))
+        return json;
+    return assembleBackgroundContent({
+        surface: "rawPage", maxBytes: options.maxBytes,
+        sections: { identity: `Background task ${meta.id} metadata (environment values omitted).` },
+        verbatim: budget => pageVerbatimText(json, { cursor: options.cursor, maxBytes: budget, resource: `verbose:${scopeKey(options)}:${meta.id}` }),
+    });
+}
 function formatVerbose(meta, options) {
     const json = JSON.stringify(redactedVerbose(meta, options), null, 2);
     const resource = `verbose:${scopeKey(options)}:${meta.id}`;

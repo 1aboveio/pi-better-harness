@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { advertiseBackgroundAdapter } from "./adapter-contract.domain.mjs";
 import { formatBatchLaunch, spawnTaskBatch } from "./batch.domain.mjs";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.domain.mjs";
-import { classifyOwnership, formatLaunch, formatList, formatLog, formatMissingTask, formatMutationRefusal, formatStatus, formatStopResult, } from "./output.domain.mjs";
+import { classifyOwnership, formatLaunch, formatList, formatLog, formatMissingTask, formatMutationRefusal, formatStatus, formatDurableStatusMetadata, formatStopResult, } from "./output.domain.mjs";
 import { cursorKind, readOutputControls } from "./shared-log-utils.domain.mjs";
 import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.domain.mjs";
 import { registerDeliveryObserver } from "./delivery-observer.domain.mjs";
@@ -362,7 +362,7 @@ export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = r
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const origin = getCallbackOrigin(ctx);
             activeSession = origin;
-            const durable = await durableStatusText(pi, params.id, ctx);
+            const durable = await durableStatusText(pi, params.id, ctx, params);
             if (durable !== undefined)
                 return text(durable);
             return text(taskStatus(pi, params.id, params, statusOptions(params, origin)));
@@ -632,7 +632,7 @@ async function runAction(pi, params, ctx, callbackOrigin, getActiveSession, sign
         case "status": {
             if (!params.id)
                 return "Invalid parameters: status requires id.";
-            const durable = await durableStatusText(pi, String(params.id), ctx);
+            const durable = await durableStatusText(pi, String(params.id), ctx, params);
             if (durable !== undefined)
                 return durable;
             return taskStatus(pi, String(params.id), params, statusOptions(params, callbackOrigin));
@@ -759,12 +759,26 @@ async function durableLaunchText(pi, kind, params, ctx, onLaunch) {
         throw error;
     }
 }
-async function durableStatusText(pi, id, ctx) {
+async function durableStatusText(pi, id, ctx, params) {
     const host = getObservedWaitHost(pi);
     if (!host || !host.isDurableTask(id))
         return undefined;
     try {
-        return host.formatStatus(await host.settledStatusForParent(ctx, id));
+        const view = await host.settledStatusForParent(ctx, id);
+        if (params.verbose === true || cursorKind(typeof params.cursor === "string" ? params.cursor : undefined) === "t") {
+            const origin = { cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() };
+            const task = host.readDurableTask(origin, id);
+            if (!task)
+                return `Background task ${id} is outside the current session scope.`;
+            const meta = {
+                ...task, kind: task.kind === "watch" ? "command_watch" : "process", status: view.status === "starting" ? "running" : view.status === "lost" ? "failed" : view.status,
+                argv: task.argv ? [...task.argv] : undefined,
+                logPath: task.logPaths.stdout, callbackOrigin: origin,
+                lastExitCode: view.exitCode, result: task.terminal ? { exitCode: view.exitCode, signal: view.signal } : undefined,
+            };
+            return formatDurableStatusMetadata(meta, statusOptions(params, origin));
+        }
+        return host.formatStatus(view);
     }
     catch (error) {
         return readableError(error);
