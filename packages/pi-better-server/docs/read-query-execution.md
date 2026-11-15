@@ -89,7 +89,45 @@ and indexed pagination budgets. Queue saturation, surviving shared waiters,
 disconnect cancellation, failure, producer credit and subscription replacement
 have dedicated tests.
 
-These numbers are diagnostics, not fixed CI throughput promises. The remaining
-#782/#751 evidence includes real Pi aggregate CPU/RSS/I/O, large rebuild latency
-distributions across macOS/Linux, and guardian-enforced process exit. Socket client
-processes and test-worker CPU/RSS do not establish whole-Pi resource budgets.
+For real Pi process measurements, run from the repository root:
+
+```sh
+PI_SHARED_READ_REPORT=/tmp/shared-read-resources.json node packages/pi-better-server/scripts/measure-shared-reads.mjs
+```
+
+The script starts actual Pi RPC processes with standalone Subagents and seeded
+read-only work records. It samples control RPC at 10 Hz, counts actual worker
+database connections, and reports each Pi, the complete server process (including
+its worker thread), and the fixture work process. Setup, the measurement driver,
+and fixture writes are outside the steady-state resource window. Three-second
+windows cover each 1/5/10-client scenario; the 10-client, 10,000-record case also
+runs for 60 seconds. Short-window RSS can include startup garbage awaiting GC.
+The macOS/Linux CI matrix uploads the JSON report and gates the required CI check.
+
+Observed macOS arm64 results, Node 24.21.0, workspace Pi 0.82:
+
+| History | Pi Clients | Window | Total CPU | End RSS | RPC p50 / p95 / p99 |
+| --- | --- | --- | --- | --- | --- |
+| 4,416 | 1 | 3.03 s | 193 ms | 719 MiB | 0.234 / 0.283 / 0.302 ms |
+| 4,416 | 5 | 3.05 s | 308 ms | 1,188 MiB | 0.780 / 1.295 / 2.249 ms |
+| 4,416 | 10 | 3.09 s | 474 ms | 1,870 MiB | 2.025 / 5.765 / 6.144 ms |
+| 10,000 | 1 | 3.04 s | 444 ms | 856 MiB | 0.221 / 1.056 / 2.446 ms |
+| 10,000 | 5 | 3.04 s | 556 ms | 1,394 MiB | 0.315 / 1.450 / 1.849 ms |
+| 10,000 | 10 | 60.03 s | 12,126 ms | 1,736 MiB | 0.808 / 2.656 / 6.245 ms |
+
+Each short window performed three shared compatibility inventories; the long
+window performed 60. All windows reread zero source metadata records and performed
+zero assignment reprojections. Filesystem block-input/output deltas were zero;
+those OS counters do not count cached `stat` calls or prove zero filesystem calls.
+The 10,000-record rebuild took 1,319 ms while control RPC measured
+0.120 / 0.170 / 0.310 ms at p50 / p95 / p99. Server event-loop histogram delay in
+the 60-second case was 10.879 / 11.100 / 12.075 ms at 10 ms sampling resolution.
+
+The server used 8,790 ms CPU in that 60-second window, about 14.6% of one core.
+Periodic source-signature inventories still scale with history and account for
+much of that cost, even though they are shared across clients. This is a remaining
+optimization for the final migration/performance slice, not evidence of a completed
+whole-runtime CPU optimization. The figures are diagnostics, not fixed CI throughput
+promises. Guardian-enforced process exit and the complete migrated supervision and
+delivery matrix remain outstanding for #751; this read-only setup does not prove
+task execution authority or guardian resource budgets.

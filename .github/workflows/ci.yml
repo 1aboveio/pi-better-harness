@@ -6,6 +6,33 @@ on:
   workflow_dispatch:
 
 jobs:
+  shared-read-resources:
+    name: shared-read-resources (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+          cache: npm
+      - run: npm ci
+      - name: Measure real Pi and Server shared reads
+        env:
+          PI_SHARED_READ_REPORT: ${{ runner.temp }}/shared-read-resources.json
+        run: node packages/pi-better-server/scripts/measure-shared-reads.mjs
+      - name: Upload resource measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-read-resources-${{ matrix.os }}
+          path: ${{ runner.temp }}/shared-read-resources.json
+          if-no-files-found: warn
+
   node24-sandbox:
     name: node24-sandbox
     runs-on: ubuntu-latest
@@ -418,7 +445,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [workspace-ci, server-tests]
+    needs: [workspace-ci, server-tests, shared-read-resources]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -426,9 +453,11 @@ jobs:
         env:
           WORKSPACE_RESULT: ${{ needs.workspace-ci.result }}
           SERVER_RESULT: ${{ needs.server-tests.result }}
+          RESOURCES_RESULT: ${{ needs.shared-read-resources.result }}
         run: |
           test "$WORKSPACE_RESULT" = success
           test "$SERVER_RESULT" = success
+          test "$RESOURCES_RESULT" = success
 
   macos-sandbox:
     name: macos-sandbox
