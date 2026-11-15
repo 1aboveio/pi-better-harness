@@ -1,7 +1,6 @@
 export class WorkClient {
     constructor(socketPath: string, agentDir: string, requiredCapabilities?: string[]);
     ready: Promise<any>;
-    closed: boolean;
     request(type: string, params?: object): Promise<any>;
     snapshot?: any;
     readonly closed: boolean;

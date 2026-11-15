@@ -6,7 +6,6 @@ import { accessSync, constants, statSync } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import './child-preflight.mjs';
-import './managed-launch-bootstrap.mjs';
 
 try {
   const [binary, ...args] = process.argv.slice(2);

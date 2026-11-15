@@ -23,7 +23,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { initializeNavigatorPanels } from "./shared-navigator-panels.domain.mjs";
-import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail } from "./work-observation.domain.mjs";
+import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail, TERMINAL_NAVIGATOR_RETENTION_MS } from "./work-observation.domain.mjs";
 import { withAssignmentObservations } from "./assignment-projection.mjs";
 import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
@@ -1319,7 +1319,6 @@ let unregisterSubagentProvider;
 let acceptanceProviderRef;
 let acceptanceSpawnToolRef;
 let acceptanceStopToolRef;
-const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 let mainAgentStartedAt;
 const mainAgentTools = new Map();
 /**
@@ -1368,9 +1367,10 @@ function navigatorRunningRuns() {
     const project = createAssignmentProjector();
     return sessionVisibleNavigatorRuns(Date.now(), project).filter((m) => ["running", "waiting"].includes(project(m, effectiveStatus(m)).state));
 }
+const pendingNavigatorDismissals = new Set();
 function navigatorRunningCount() {
     const snapshot = workObservation();
-    return (snapshot?.rows.filter((row) => ["running", "waiting"].includes(row.assignment.state)).length ?? 0) +
+    return (snapshot?.rows.filter((row) => !pendingNavigatorDismissals.has(row.meta.id) && !row.meta.dismissedAt && ["running", "waiting"].includes(row.assignment.state)).length ?? 0) +
         (!snapshot || snapshot.status !== "ready" ? 1 : 0);
 }
 /**
@@ -1425,6 +1425,8 @@ function navigatorCloseRun(id) {
             if (!cancelled)
                 throw new Error("The pending wait changed; inspect it again.");
             dismissRun(id);
+            pendingNavigatorDismissals.add(id);
+            refreshBackgroundWorkNavigator(uiCtx);
             uiCtx?.ui.notify(`Cancelled the pending wait of ${id}. Writer termination may remain unproven.`, "info");
         })
             .catch((error) => uiCtx?.ui.notify(`Cancellation failed for ${id}: ${String(error)}. The wait remains available for inspection and retry.`, "warning"));
@@ -1437,6 +1439,8 @@ function navigatorCloseRun(id) {
         stopRun,
         dismissRun,
     });
+    if (outcome.action === "dismissed" || outcome.action === "stopped-and-dismissed")
+        pendingNavigatorDismissals.add(id);
     // A closed row is off the hot path: release its caches and retained events.
     spendCache.delete(id);
     healthLogCache.delete(id);
@@ -1466,7 +1470,15 @@ function statusTone(status) {
 }
 function subagentWorkRows(now) {
     const snapshot = workObservation();
-    const rows = (snapshot?.rows ?? []).filter((row) => !row.meta.dismissedAt &&
+    const sourceRows = snapshot?.rows ?? [];
+    if (snapshot?.status === "ready" && pendingNavigatorDismissals.size) {
+        // A successful local dismissal is already durable; hide its old observation until acknowledged.
+        const undismissed = new Set(sourceRows.filter((row) => !row.meta.dismissedAt).map((row) => row.meta.id));
+        for (const id of pendingNavigatorDismissals)
+            if (!undismissed.has(id))
+                pendingNavigatorDismissals.delete(id);
+    }
+    const rows = sourceRows.filter((row) => !pendingNavigatorDismissals.has(row.meta.id) && !row.meta.dismissedAt &&
         (["running", "waiting"].includes(row.assignment.state) || typeof (row.meta.endedAt ?? row.meta.lostAt) !== "number" ||
             now - (row.meta.endedAt ?? row.meta.lostAt) < TERMINAL_NAVIGATOR_RETENTION_MS)).map((row) => {
         const meta = row.meta;
@@ -4261,6 +4273,7 @@ export default function (pi, managed) {
         // switch), so the previous session's teardown no longer applies: the
         // replacing session owns this instance's supervision loops (#625).
         sessionTornDown = false;
+        pendingNavigatorDismissals.clear();
         outcomeHost = createOutcomeHost();
         setCallbackBatchContext(pi, ctx);
         agentSessionSettings.restore(ctx);
@@ -4342,6 +4355,7 @@ export default function (pi, managed) {
     pi.on("session_shutdown", async (event, ctx) => {
         closeCatalogHost();
         stopWorkObservation();
+        pendingNavigatorDismissals.clear();
         if (outcomeTicker)
             clearInterval(outcomeTicker);
         outcomeTicker = undefined;

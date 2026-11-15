@@ -169,6 +169,7 @@ export function refreshBackgroundWorkNavigator(ctx) {
         return;
     try {
         refreshMainListWidget();
+        s.overlay?.refreshDetail();
     }
     catch { /* ignore */ }
 }
@@ -899,6 +900,7 @@ function openNavigator() {
             }, selectedId);
             overlayRef = {
                 showDetail: (navigatorId) => component.showDetail(navigatorId),
+                refreshDetail: () => component.refreshDetail(),
                 focus: () => {
                     if (s.overlay !== overlayRef)
                         return;
@@ -1211,6 +1213,17 @@ function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, i
             else if (deps.matchKey(data, "escape")) {
                 backToMain();
             }
+        },
+        /** Observation arrival updates this row without resetting selection or folded sections. */
+        refreshDetail() {
+            if (closed)
+                return;
+            const wasLoading = detail?.status === "rebuilding";
+            detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+            if (wasLoading)
+                applyDefaultExpandedSections(detail, expandedSections);
+            startDetailTimer();
+            requestRender();
         },
         /** Show another row's detail in this overlay (the main list moved while it was unfocused). */
         showDetail(navigatorId) {

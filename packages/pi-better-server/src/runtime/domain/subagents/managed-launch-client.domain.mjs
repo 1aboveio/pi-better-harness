@@ -10,6 +10,7 @@ import { WorkClient } from "./shared-work-client.mjs";
 import { catalogHostAuthority } from "./catalog-host-admission.domain.mjs";
 import { openSharedCatalog } from "./shared-catalog.domain.mjs";
 import { SANDBOX_POLICY_CHANNEL } from "./permission-policy.domain.mjs";
+import { canonicalJson } from "./operation-bridge-types.domain.mjs";
 /** The fixed Pi host issues execution grants. Catalog registration grants no execution. */
 export async function submitManagedLaunch(pi, ctx, key, tool, params) {
     mkdirSync(getAgentDir(), { recursive: true });
@@ -42,10 +43,21 @@ export async function submitManagedLaunch(pi, ctx, key, tool, params) {
         const staging = `${path}.tmp`;
         writeFileSync(staging, JSON.stringify(payload), { flag: "wx", mode: 0o600 });
         renameSync(staging, path);
+        let checking = false;
         unsubscribe = pi.events.on(SANDBOX_POLICY_CHANNEL, () => {
-            // Replaying the policy channel from currentSandboxPermissions would recurse.
-            // Any host policy publication invalidates this in-flight decision instead.
-            rmSync(path, { force: true });
+            if (checking)
+                return;
+            checking = true;
+            try {
+                if (canonicalJson(currentSandboxPermissions(pi) ?? {}) !== canonicalJson(payload.permissions))
+                    rmSync(path, { force: true });
+            }
+            catch {
+                rmSync(path, { force: true });
+            }
+            finally {
+                checking = false;
+            }
         });
         return await client.request("runtime_launch_subagent", { authority: { id, secret } });
     }
