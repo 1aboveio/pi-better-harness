@@ -106,6 +106,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
     const bgLogs = await import("../../packages/pi-better-background-tasks/src/logs.ts");
     const bgFailures = await import("../../packages/pi-better-background-tasks/src/failures.ts");
     const { registerTools } = await import("../../packages/pi-better-background-tasks/src/tools.ts");
+    const { stopWorkObservation } = await import("../../packages/pi-better-subagents/work-observation.ts");
     const { createCallbackBatcher } = await import("../../packages/callback-batcher/index.ts");
 
     const origin = { cwd: fixtures.SYNTHETIC_CWD, sessionId: fixtures.SYNTHETIC_SESSION };
@@ -122,16 +123,19 @@ export async function collectBaseline({ phase = "before" } = {}) {
 
     const bgRegistered = {};
     const bgMessages = [];
-    registerTools({
-        on() {},
+    let shutdownBackground;
+    const backgroundApi = {
+        on(event, handler) { if (event === "session_shutdown") shutdownBackground = handler; },
         registerTool(tool) { bgRegistered[tool.name] = tool; },
         sendMessage(message, options) { bgMessages.push({ message, options }); },
-    });
+    };
+    registerTools(backgroundApi);
     const ctx = {
         cwd: fixtures.SYNTHETIC_CWD,
         sessionManager: { getSessionId: () => fixtures.SYNTHETIC_SESSION },
     };
 
+    try {
     const seeded = {
         success: fixtures.seedSubagentSuccess(subagentRegistry),
         failed: fixtures.seedSubagentFailed(subagentRegistry),
@@ -624,6 +628,11 @@ export async function collectBaseline({ phase = "before" } = {}) {
         cases,
         limitations: LIMITATIONS,
     };
+    } finally {
+        // Reviewed755 fixture lifetime, using this source's real SDK boundary.
+        try { await shutdownBackground?.({ type: "session_shutdown" }, ctx); }
+        finally { stopWorkObservation(); }
+    }
 }
 
 /** Where the committed BEFORE/AFTER captures live (#324 moved them out of the docs/ root). */

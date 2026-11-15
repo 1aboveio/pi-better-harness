@@ -394,13 +394,20 @@ test("watch overflow and lost notifications reconcile external writes once and r
     assert.equal(model.snapshot().status, "degraded", "the production watcher error callback exposes unknown freshness");
     await model.reconcile();
     watchers.forEach(watcher => watcher.close());
-    const recovered = new Promise<void>(resolve => {
+    let cancelRecovery = () => {};
+    const recovered = new Promise<void>((resolve, reject) => {
+      // Backported from reviewed754 f845: the observer owns its bounded wait.
+      // With every watcher closed, only the unref'ed production poll remains.
+      const deadline = setTimeout(() => { off(); reject(new Error("lost-notification observation did not recover")); }, 10000);
       const off = model.onChange(() => {
-        if (model.snapshot().rows[0]?.assignment.state === "failed") { off(); resolve(); }
+        if (model.snapshot().rows[0]?.assignment.state === "failed") { clearTimeout(deadline); off(); resolve(); }
       });
+      cancelRecovery = () => { clearTimeout(deadline); off(); };
     });
-    execFileSync(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], process.argv[2])", path, JSON.stringify({ ...meta, status: "failed" })]);
-    await recovered;
+    try {
+      execFileSync(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], process.argv[2])", path, JSON.stringify({ ...meta, status: "failed" })]);
+      await recovered;
+    } finally { cancelRecovery(); }
     assert.equal(model.snapshot().rows[0]!.assignment.state, "failed");
     assert.equal(model.metrics.metadataReads - reads, 1, "lost notifications require only one shared changed-record import");
     assert.equal(model.metrics.projections - projections, 1);
