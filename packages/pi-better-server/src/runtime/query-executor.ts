@@ -276,7 +276,8 @@ export class WorkQueryExecutor {
 
   private fail(error: Error) {
     if (this.failure) return;
-    if ([...(this.active?.waiters ?? [])].some(waiter => waiter.connection === 0)) this.internalRecoveryDemand = true;
+    if ([...this.queue, ...(this.active ? [this.active] : [])].some(query =>
+      [...query.waiters].some(waiter => waiter.connection === 0))) this.internalRecoveryDemand = true;
     this.failure = error; this.lag.disable();
     for (const query of [...this.queue, ...(this.active ? [this.active] : [])]) this.finish(query, error);
     this.queue = []; this.active = undefined;
