@@ -1886,7 +1886,8 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 // should fire ONLY the lost callback (orphaned already marked).
                 mock.timers.tick(HEALTH_TICK_MS);
                 assert.equal(readMeta(id).status, "lost");
-                await waitFor(() => healthMsgsFor(h.sent, id).length > 0);
+                if (!await waitFor(() => healthMsgsFor(h.sent, id).length > 0)) throw new Error(
+                    `lost callback recovery timed out: ${JSON.stringify({ meta: readMeta(id), recipient: await h.recipient.diagnostics(id) })}`);
                 const msgs = healthMsgsFor(h.sent, id);
                 assert.equal(msgs.length, 1, "only the new lost transition fires for this run");
                 assert.match(msgs[0].message.content, /status lost|is lost/i);
@@ -2029,7 +2030,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 await handlers.get("session_start")({}, ctx);
                 mock.timers.tick(HEALTH_TICK_MS);
 
-                await waitFor(() => !failNext);
+                if (!await waitFor(() => !failNext)) throw new Error(`first handoff was never attempted: ${JSON.stringify(await h.recipient.diagnostics(id))}`);
                 assert.equal(healthMsgsFor(sent, id).length, 0, "failed handoff must not count as delivered");
                 assert.equal(
                     readMeta(id).lostCallbackSentAt,
@@ -2042,7 +2043,8 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 await handlers.get("session_start")({}, ctx);
                 mock.timers.tick(HEALTH_TICK_MS);
 
-                await waitFor(() => healthMsgsFor(sent, id).length > 0);
+                if (!await waitFor(() => healthMsgsFor(sent, id).length > 0)) throw new Error(
+                    `retried callback recovery timed out: ${JSON.stringify({ meta: readMeta(id), recipient: await h.recipient.diagnostics(id) })}`);
                 const msgs = healthMsgsFor(sent, id);
                 assert.equal(msgs.length, 1, `exactly one successful recovery callback; got ${msgs.length}`);
                 assert.equal(msgs[0].options.deliverAs, "followUp");

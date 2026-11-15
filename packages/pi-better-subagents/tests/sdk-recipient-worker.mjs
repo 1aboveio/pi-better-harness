@@ -5,6 +5,9 @@ import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import extension from '../index.ts';
 import { renderRegisteredWorkDetail } from '../shared-navigator.ts';
 import { getCallbackBatcher } from '../shared-callback-batcher.ts';
+import { workObservation, workObservationFailure } from '../work-observation.ts';
+const deliveryTrace = [];
+function trace(stage, details = {}) { deliveryTrace.push({ at: Date.now(), stage, ...details }); if (deliveryTrace.length > 32) deliveryTrace.shift(); }
 let extensionApi;
 let deliverySequence = 0;
 const approvals = new Map();
@@ -17,14 +20,16 @@ const settingsManager = SettingsManager.inMemory({ defaultProvider: 'recipient-f
 const resourceLoader = new DefaultResourceLoader({ cwd: config.cwd, agentDir: process.env.PI_CODING_AGENT_DIR, settingsManager,
     noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
     extensionFactories: [pi => { extensionApi = { ...pi, async sendMessage(message, options) {
+        trace("handoff-start", { customType: message.customType });
         if (config.preflight) {
             const id = ++deliverySequence;
             const decision = new Promise((resolve, reject) => approvals.set(id, { resolve, reject }));
             process.send?.({ sendRequest: { id, message, options } });
-            await decision;
+            try { await decision; trace("handoff-approved"); } catch (error) { trace("handoff-refused", { error: String(error) }); throw error; }
         }
-        if (failSend) throw new Error('fixture recipient delivery unavailable');
+        if (failSend) { trace('handoff-unavailable'); throw new Error('fixture recipient delivery unavailable'); }
         const result = pi.sendMessage(message, options);
+        trace("native-send-returned");
         process.send?.({ delivery: { message, options } });
         return result;
     } }; extension(extensionApi); }, pi => pi.registerProvider('recipient-fixture', {
@@ -53,6 +58,13 @@ process.on('message', async command => {
             const pending = approvals.get(command.id); approvals.delete(command.id);
             if (command.error) pending?.reject(new Error(command.error)); else pending?.resolve();
             return;
+        }
+        if (command.type === 'diagnostics') {
+            const observation = workObservation();
+            process.send?.({ id: command.id, value: { sessionId: manager.getSessionId(), cwd: config.cwd,
+                observation: { status: observation?.status, reason: workObservationFailure(), seq: observation?.seq,
+                    row: observation?.rows?.find(row => row.meta?.id === command.value), rows: observation?.rows?.length },
+                pendingBatch: getCallbackBatcher(extensionApi).pendingCount(), trace: deliveryTrace } }); return;
         }
         if (command.type === 'rows') { process.send?.({ id: command.id, value: globalThis[Symbol.for("pi-better-harness.navigator.state")].providers.get("subagents").listRows(Date.now()) }); return; }
         if (command.type === 'detail') { process.send?.({ id: command.id, value: renderRegisteredWorkDetail('subagents', command.value, 120) }); return; }

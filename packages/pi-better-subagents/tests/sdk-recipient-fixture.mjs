@@ -28,6 +28,12 @@ export async function sdkRecipient({ cwd, sessionId, sent, notes, sendMessage, b
         child.send({ id, type, value }); return done;
     }
     return {
+        async diagnostics(id) {
+            let timer;
+            try { return await Promise.race([request('diagnostics', id), new Promise(resolve => {
+                timer = setTimeout(() => resolve({ unavailable: 'recipient diagnostics deadline', exitCode: child.exitCode, connected: child.connected, stderr: errors.slice(-2048) }), 1000);
+            })]); } finally { clearTimeout(timer); }
+        },
         rows: () => request('rows'), detail: id => request('detail', id), captureBranch: () => request('capture-branch'), branch: id => request('branch', id), busy: () => request('busy'), settle: () => request('settle'),
         async flush() {
             // Observation arrives over a real socket before this explicit batch-boundary check.
