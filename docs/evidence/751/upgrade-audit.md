@@ -8,4 +8,4 @@ Validation: 17 real activation tests pass with isolated registry roots, plus the
 
 Published releases remain immutable and retained: private-runtime/installer.ts removeOwned is used only for private candidate/work directories, never published releases. Activation waits for the preceding guardian to release ownership before launching a successor.
 
-Artifact/install/standalone matrix is being validated separately. Integration with the managed-launch branch and independent review remain required before #764 is complete.
+Artifact/install/activation/standalone matrix passed 83 tests; its one opt-in network case was then enabled separately and passed. That case installs the real private Node and locked SDK through client-download fallback. The packed standalone test passed cached offline restart with evidence under .work/standalone-DW20xi. Integration with the managed-launch branch and independent review remain required before #764 is complete.
