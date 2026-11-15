@@ -537,6 +537,18 @@ test("directory entry watchers publish repeated atomic commits without the inven
     }
     const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5 });
     assert.ok(report.ms.max <= 1000, JSON.stringify(report));
+    // The entire source root can also move while its pathname is immediately
+    // recreated. Identity checks must rebind both root and child watchers.
+    renameSync(join(f.root, "runs"), join(f.root, "old-runs-root"));
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(metaPath, JSON.stringify({ ...meta, name: "replaced-root" }));
+    const rootBy = Date.now() + 1000;
+    while (client.snapshot?.rows[0]?.meta.name !== "replaced-root") {
+      assert.ok(Date.now() < rootBy, "root replacement was not published"); await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const rootReport = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5 });
+    assert.ok(rootReport.ms.max <= 1000, JSON.stringify(rootReport));
+    assert.equal(f.executor.metrics().sourceWatchers, 2);
     rmSync(directory, { recursive: true });
     const removedBy = Date.now() + 1000;
     while (client.snapshot?.rows.length) {

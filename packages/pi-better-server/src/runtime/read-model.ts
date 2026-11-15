@@ -53,6 +53,7 @@ export class WorkReadModel {
   private healthRevision = "";
   private details = new Map<string, { revision: string; value: any }>();
   private watchers = new Map<string, FSWatcher>();
+  private rootWatchIdentities = new Map<string, string>();
   private listeners = new Set<() => void>();
   private timer?: ReturnType<typeof setInterval>;
   private pending?: Promise<void>;
@@ -208,10 +209,20 @@ export class WorkReadModel {
         try { names = await readdir(directory); }
         catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          this.unwatchDirectory(directory);
+          this.unwatchDirectory(directory); this.rootWatchIdentities.delete(directory);
           if (!archived) for (const watched of this.watchers.keys()) if (watched.startsWith(this.runs + sep)) this.unwatchDirectory(watched);
           continue;
         }
+        // Three root identities per inventory, independent of archive/client
+        // cardinality. A root can be replaced without an observed ENOENT gap.
+        const rootInfo = await stat(directory, { bigint: true });
+        const rootIdentity = `${rootInfo.dev}:${rootInfo.ino}`;
+        const previousRootIdentity = this.rootWatchIdentities.get(directory);
+        if (previousRootIdentity !== undefined && previousRootIdentity !== rootIdentity) {
+          this.unwatchDirectory(directory);
+          if (!archived) for (const watched of this.watchers.keys()) if (watched.startsWith(this.runs + sep)) this.unwatchDirectory(watched);
+        }
+        this.rootWatchIdentities.set(directory, rootIdentity);
         this.watchDirectory(directory);
         if (!archived) {
           const present = new Set(names.filter(name => safeId.test(name)).map(name => join(directory, name)));
@@ -492,7 +503,7 @@ export class WorkReadModel {
   async close() {
     this.closed = true; if (this.timer) clearInterval(this.timer);
     for (const watcher of this.watchers.values()) watcher.close();
-    this.watchers.clear();
+    this.watchers.clear(); this.rootWatchIdentities.clear();
     await this.pending; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
   }
 }
