@@ -8,9 +8,11 @@ import { registerObservedWaitClient } from "./observed-waits.domain.mjs";
 export function createManagedBackgroundFrontend(pi) {
     let ctx, generation = 0, refresh, dirty = false;
     let rows = [], legacyRows = [], details = new Map(), logs = new Map();
+    let adoptedScope;
+    const scopeOf = (context) => JSON.stringify([context.cwd, context.sessionManager.getSessionId()]);
     const ownership = new Map();
     const adoptContext = (context) => {
-        if (ctx && (ctx.cwd !== context.cwd || ctx.sessionManager.getSessionId() !== context.sessionManager.getSessionId())) {
+        if (adoptedScope !== undefined && adoptedScope !== scopeOf(context)) {
             ownership.clear();
             rows = [];
             legacyRows = [];
@@ -19,6 +21,7 @@ export function createManagedBackgroundFrontend(pi) {
             generation++;
         }
         ctx = context;
+        adoptedScope = scopeOf(context);
     };
     const rememberOwnership = (proof, context) => {
         if (!proof || typeof proof.id !== 'string' || typeof proof.operationId !== 'string'
@@ -94,12 +97,13 @@ export function createManagedBackgroundFrontend(pi) {
             await refresh; },
         start(context) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
         noteParentContext(context) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
-        close() { ctx = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); queued.clear(); ownership.clear(); },
+        close() { ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); queued.clear(); ownership.clear(); },
         isParentOriginActive: active,
         onDurableTaskChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
         listDurableTasks(origin, options = {}) { return active(origin) ? rows.filter(row => !options.retentionMs || !row.terminal || Date.now() - (row.endedAt ?? Date.now()) < options.retentionMs) : []; },
         readDurableTask(origin, id) { return active(origin) ? rows.find(row => row.id === id) : undefined; },
-        ownsDurableTask(id) { return ownership.has(id) || rows.some(row => row.id === id); },
+        ownsDurableTask(id) { if (!ctx || adoptedScope !== scopeOf(ctx))
+            return false; return ownership.has(id) || rows.some(row => row.id === id); },
         readDurableTaskLog(origin, id, lines = 40) {
             if (!active(origin))
                 return;
@@ -130,9 +134,9 @@ export function createManagedBackgroundFrontend(pi) {
                         if (!context)
                             throw new Error('Native Background context unavailable');
                         adoptContext(context);
-                        const capturedGeneration = generation;
+                        const capturedGeneration = generation, capturedScope = adoptedScope;
                         const result = await requestBackgroundTool(pi, context, id, definition.name, params, definition.parameters, signal);
-                        if (ctx === context && generation === capturedGeneration)
+                        if (ctx === context && generation === capturedGeneration && adoptedScope === capturedScope)
                             rememberOwnership(result.details?.backgroundOwnership, context);
                         await host.reconcileNow().catch(() => undefined);
                         return result;

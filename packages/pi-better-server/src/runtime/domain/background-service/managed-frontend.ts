@@ -9,12 +9,14 @@ import { registerObservedWaitClient, type ObservedWaitHost } from './observed-wa
 export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
     let ctx: ExtensionContext | undefined, generation = 0, refresh: Promise<void> | undefined, dirty=false;
     let rows: any[] = [], legacyRows: any[] = [], details = new Map<string, any>(), logs = new Map<string, any>();
+    let adoptedScope: string | undefined;
+    const scopeOf = (context: ExtensionContext) => JSON.stringify([context.cwd, context.sessionManager.getSessionId()]);
     const ownership = new Map<string, { operationId: string; owner: { kind: string; sessionId: string; workspace: string } }>();
     const adoptContext = (context: ExtensionContext) => {
-        if (ctx && (ctx.cwd !== context.cwd || ctx.sessionManager.getSessionId() !== context.sessionManager.getSessionId())) {
+        if (adoptedScope !== undefined && adoptedScope !== scopeOf(context)) {
             ownership.clear(); rows = []; legacyRows = []; details.clear(); logs.clear(); generation++;
         }
-        ctx = context;
+        ctx = context; adoptedScope = scopeOf(context);
     };
     const rememberOwnership = (proof: any, context: ExtensionContext) => {
         if (!proof || typeof proof.id !== 'string' || typeof proof.operationId !== 'string'
@@ -75,12 +77,12 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
         async reconcileNow() { await reconcile(); while (refresh) await refresh; },
         start(context: ExtensionContext) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
         noteParentContext(context: ExtensionContext) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
-        close() { ctx = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); queued.clear(); ownership.clear(); },
+        close() { ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); queued.clear(); ownership.clear(); },
         isParentOriginActive: active,
         onDurableTaskChange(listener: (change: any) => void) { listeners.add(listener); return () => listeners.delete(listener); },
         listDurableTasks(origin: any, options: any = {}) { return active(origin) ? rows.filter(row => !options.retentionMs || !row.terminal || Date.now() - (row.endedAt ?? Date.now()) < options.retentionMs) : []; },
         readDurableTask(origin: any, id: string) { return active(origin) ? rows.find(row => row.id === id) : undefined; },
-        ownsDurableTask(id: string) { return ownership.has(id) || rows.some(row => row.id === id); },
+        ownsDurableTask(id: string) { if (!ctx || adoptedScope !== scopeOf(ctx)) return false; return ownership.has(id) || rows.some(row => row.id === id); },
         readDurableTaskLog(origin: any, id: string, lines = 40) {
             if (!active(origin))
                 return;
@@ -101,9 +103,9 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
                         if (!context)
                             throw new Error('Native Background context unavailable');
                         adoptContext(context);
-                        const capturedGeneration = generation;
+                        const capturedGeneration = generation, capturedScope = adoptedScope;
                         const result = await requestBackgroundTool(pi, context, id, definition.name, params, definition.parameters, signal);
-                        if (ctx === context && generation === capturedGeneration) rememberOwnership(result.details?.backgroundOwnership, context);
+                        if (ctx === context && generation === capturedGeneration && adoptedScope === capturedScope) rememberOwnership(result.details?.backgroundOwnership, context);
                         await host.reconcileNow().catch(() => undefined);
                         return result;
                     } });

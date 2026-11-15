@@ -18,6 +18,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
     let pi: any, service: any, session: any, runtime: any, current: any;
     let tail: Promise<unknown> = Promise.resolve(), pending = 0;
     const projections = new Map<string, any>(), metrics = { scopeRefreshes: 0, exactDetailReads: 0, reconciles: 0 };
+    const recoveryVersions = new Map<string, string>();
     const scopes = new Map<string, any>(), deliveries = new Map<string, any>();
     const ownerKey = (owner: any) => JSON.stringify([owner.workspace, owner.sessionId]);
     const effectivePolicy = (record: any) => effectiveBackgroundPolicy(record.policy, permissions.readPermissionSettings({ agentDir: () => root }).background, record.owner.workspace);
@@ -119,8 +120,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
                 current = { record, authority: command.authority, ownerKey: key, digest: authority.backgroundDigest(record), policy, policyDigest: authority.backgroundDigest(policy ?? null) };
                 if (scopes.size >= 128 && !scopes.has(key)) {
                     const oldest = [...scopes.keys()].find(candidate => ![...deliveries.values()].some(item => ownerKey(item.scope.owner) === candidate));
-                    if (oldest)
-                        scopes.delete(oldest);
+                    if (oldest) {
+                        scopes.delete(oldest); recoveryVersions.delete(oldest);
+                    }
                     else
                         throw new Error('runtime-overloaded: Background scope capacity');
                 }
@@ -136,6 +138,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     if (Date.now() - item.createdAt > 30000) {
                         item.delivery.defer('Native delivery lease expired');
                         projections.delete(ownerKey(item.scope.owner));
+                        recoveryVersions.delete(ownerKey(item.scope.owner));
                         deliveries.delete(token);
                     }
                 if (record.tool === '__background_receipt') {
@@ -152,14 +155,20 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     }
                     deliveries.delete(record.params.token);
                     projections.delete(key);
+                    recoveryVersions.delete(key);
                     return { receipted: record.params.delivered === true };
                 }
                 if (record.tool === '__background_poll') {
                     if (!observe)
                         throw new Error('Shared Background observation unavailable');
                     // Recovery is indexed and bounded independently of display readiness.
-                    service.noteParentContext(ctx);
-                    await service.reconcileNow();
+                    const recoveryVersion = authority.backgroundDigest([lease.store.getChangeRevision(), record.branchIds]);
+                    if (recoveryVersions.get(key) !== recoveryVersion || service.hasPendingParentCallbackRecovery()) {
+                        metrics.reconciles++;
+                        service.noteParentContext(ctx);
+                        await service.reconcileNow();
+                        recoveryVersions.set(key, recoveryVersion);
+                    }
                     const snapshot = await observe({ background: true, cwd: record.owner.workspace, sessionId: record.owner.sessionId });
                     if (snapshot.status !== 'ready')
                         throw new Error(snapshot.reason ?? 'Shared Background observation unverified');
@@ -167,7 +176,6 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     let projection = projections.get(key);
                     if (projection?.revision !== revision) {
                         metrics.scopeRefreshes++;
-                        metrics.reconciles++;
                         const legacy = snapshot.rows.filter((row: any) => !row.meta.durable).map((row: any) => row.meta);
                         const recovery=new Map([...legacy,...registry.listPendingCallbackMetasForOrigin({cwd:record.owner.workspace,sessionId:record.owner.sessionId})].map((meta:any)=>[meta.id,meta]));
                         for (const meta of recovery.values())

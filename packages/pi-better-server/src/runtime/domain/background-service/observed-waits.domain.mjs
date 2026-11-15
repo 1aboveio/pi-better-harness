@@ -409,10 +409,29 @@ export class ObservedWaitHost {
     authorityPassCache;
     /** Running operations this follower is currently assigned to supervise. */
     followerRunningTasks = new Set();
-    lastChangeRevision = -1;
-    pendingCallbackCursor;
-    pendingClaimCursor;
-    activeBranchSignature = "";
+    unscopedCallbackRecovery = { revision: -1, branch: "", delivery: undefined, claims: undefined };
+    callbackRecoveryScopes = new Map();
+    recoveryScopeState() {
+        if (!this.activeOrigin)
+            return this.unscopedCallbackRecovery;
+        const key = JSON.stringify([this.activeOrigin?.cwd, this.activeOrigin?.sessionId]);
+        let state = this.callbackRecoveryScopes.get(key);
+        if (!state) {
+            if (this.callbackRecoveryScopes.size >= 128)
+                this.callbackRecoveryScopes.delete(this.callbackRecoveryScopes.keys().next().value);
+            state = { revision: -1, branch: "" };
+            this.callbackRecoveryScopes.set(key, state);
+        }
+        return state;
+    }
+    get lastChangeRevision() { return this.recoveryScopeState().revision; }
+    set lastChangeRevision(value) { this.recoveryScopeState().revision = value; }
+    get pendingCallbackCursor() { return this.recoveryScopeState().delivery; }
+    set pendingCallbackCursor(value) { this.recoveryScopeState().delivery = value; }
+    get pendingClaimCursor() { return this.recoveryScopeState().claims; }
+    set pendingClaimCursor(value) { this.recoveryScopeState().claims = value; }
+    get activeBranchSignature() { return this.recoveryScopeState().branch; }
+    set activeBranchSignature(value) { this.recoveryScopeState().branch = value; }
     lastOwnedTerminalAt = 0;
     constructor(pi, options = {}) {
         this.pi = pi;
@@ -545,6 +564,7 @@ export class ObservedWaitHost {
         this.activeContext = undefined;
         this.terminalRecoveryNeeded = false;
         this.pendingTerminalCallbacks.clear();
+        this.callbackRecoveryScopes.clear();
         this.watchedRunningTasks.clear();
         this.discoveredTaskSidecars.clear();
         this.durableProjectionCache = undefined;
@@ -622,7 +642,7 @@ export class ObservedWaitHost {
      * pending set is seeded once at activation and by each terminal attempt; it is
      * not a scan of the historical terminal table on every 250 ms tick.
      */
-    hasPendingParentCallbackRecovery() { return this.pendingCallbackCursor !== undefined || this.pendingClaimCursor !== undefined; }
+    hasPendingParentCallbackRecovery() { return this.lastChangeRevision < 0 || this.pendingCallbackCursor !== undefined || this.pendingClaimCursor !== undefined; }
     rememberPendingCallback(taskId) {
         if (!this.pendingTerminalCallbacks.has(taskId) && this.pendingTerminalCallbacks.size >= 256)
             this.pendingTerminalCallbacks.delete(this.pendingTerminalCallbacks.values().next().value);
@@ -3601,8 +3621,10 @@ export class ObservedWaitHost {
         // terminal callback journal once. Same-session calls keep the live context
         // current without rescanning historical terminal records.
         const branchSignature = JSON.stringify(branchIdsOf(ctx));
-        if (!previous || previousKey !== nextKey || branchSignature !== this.activeBranchSignature) {
+        const branchChanged = branchSignature !== this.activeBranchSignature;
+        if (!previous || previousKey !== nextKey || branchChanged)
             this.terminalRecoveryNeeded = true;
+        if (branchChanged) {
             this.lastChangeRevision = -1;
             this.pendingCallbackCursor = undefined;
             this.pendingClaimCursor = undefined;

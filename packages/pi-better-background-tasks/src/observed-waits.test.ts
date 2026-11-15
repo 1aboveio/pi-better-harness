@@ -614,11 +614,20 @@ describe("supervision authority", () => {
       notifyParent(notification, delivery) { delivered.push(notification.taskId); delivery.delivered(); } });
     cleanups.push(() => host.close());
     const ctx = createCtx(root, "paged-owner", "current"); host.start(ctx);
-    for (let page = 0; page < 10; page++) { host.noteParentContext(ctx); await host.reconcileNow(); }
+    for (let page = 0; page < 10; page++) {
+      host.noteParentContext(createCtx(root, "interleaved-owner")); await host.reconcileNow();
+      host.noteParentContext(ctx); await host.reconcileNow();
+    }
     expect(delivered).toHaveLength(10);
     expect(new Set(delivered).size).toBe(10);
     expect((host as unknown as { pendingTerminalCallbacks: Set<string> }).pendingTerminalCallbacks.size).toBeLessThanOrEqual(256);
     expect(store.listPendingParentCallbacks({ sessionId: "paged-owner", workspace: root }, { limit: 256 })).toHaveLength(256);
+    for (let index = 0; index < 129; index++) {
+      host.noteParentContext(createCtx(root, `scope-${index}`), { recover: false }); await host.reconcileNow();
+    }
+    host.noteParentContext(ctx, { recover: false });
+    expect(host.hasPendingParentCallbackRecovery()).toBe(true);
+    expect((host as unknown as { callbackRecoveryScopes: Map<string, unknown> }).callbackRecoveryScopes.size).toBeLessThanOrEqual(128);
   });
 
   it("does not rewrite supervision while overlapping live hosts reconcile unchanged operations", async () => {

@@ -55,6 +55,22 @@ describe('managed native UI boundary', () => {
       expect(frontend.host.ownsDurableTask('owned-256')).toBe(false);
       frontend.host.close();
     });
+    it('fences a reused native session manager whose session ID changes in place', async () => {
+      let sessionId = 'native', registered: any;
+      const ctx = { cwd: '/workspace', sessionManager: { getSessionId: () => sessionId, getBranch: () => [] } } as any;
+      fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => tool === '__background_poll' ? { tasks: [], deliveries: [] }
+        : { details: { backgroundOwnership: { id: 'old', operationId: 'op-old', owner: { kind: 'parent-session', workspace: '/workspace', sessionId: 'native' } } } });
+      const frontend = createManagedBackgroundFrontend({ registerTool(tool: any) { registered = tool; } } as any);
+      frontend.host.start(ctx); frontend.proxy.registerTool({ name: 'bg_task_status', parameters: {}, execute() {} } as any);
+      await registered.execute('old', {}, undefined, undefined, ctx);
+      expect(frontend.host.ownsDurableTask('old')).toBe(true);
+      sessionId = 'replacement';
+      expect(frontend.host.ownsDurableTask('old')).toBe(false);
+      frontend.host.noteParentContext(ctx);
+      sessionId = 'native'; frontend.host.noteParentContext(ctx);
+      expect(frontend.host.ownsDurableTask('old')).toBe(false);
+      frontend.host.close();
+    });
     it.each(['close', 'switch'])('does not restore old ownership from a late tool result after %s', async (change) => {
       let release!: (value: any) => void, registered: any;
       fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => tool === '__background_poll'
