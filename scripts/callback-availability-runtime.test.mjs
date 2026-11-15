@@ -6,7 +6,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { after } from "node:test";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 import { Type } from "typebox";
 import backgroundTasksExtension from "../packages/pi-better-background-tasks/src/index.ts";
 import subagentsExtension from "../packages/pi-better-subagents/index.ts";
@@ -20,6 +21,19 @@ const sdk = await import(sdkUrl);
 const ai = await import(process.env.PI_CODEMODE_TEST_SDK_DIR
   ? new URL("../../pi-ai/dist/index.js", sdkUrl).href
   : import.meta.resolve("@earendil-works/pi-ai"));
+
+const runtimeAgentDir = mkdtempSync(join(tmpdir(), "pi-callback-runtime-"));
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+let runtimeOwner;
+process.env.PI_CODING_AGENT_DIR = runtimeAgentDir;
+after(async () => {
+  await stopOwnedRuntime(join(runtimeAgentDir, "server"), runtimeOwner);
+  removeOwnedFixture(runtimeAgentDir);
+  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+});
+// Installation is fixture setup, not part of either ten-second model journey.
+runtimeOwner = await prepareOwnedRuntime(runtimeAgentDir);
 
 test("#425 real Pi sees one mixed completion steer after a held tool without settling", { timeout: 10_000 }, async (t) => {
   const keepAlive = setInterval(() => {}, 10_000);

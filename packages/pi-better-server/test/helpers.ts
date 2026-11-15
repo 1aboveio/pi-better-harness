@@ -129,7 +129,7 @@ export function gate(env: Env, name: string) {
 
 /** Spawn the daemon as a real child process (so tests can kill -9 it). Node strips the .ts types itself. */
 export async function spawnDaemon(env: Env): Promise<{ child: ChildProcess; socketPath: string }> {
-  const child = spawn(process.execPath, [join(here, "..", "src", "cli.ts")], {
+  const child = spawn(process.execPath, [join(here, "support", "owned-daemon.ts")], {
     env: { ...process.env, ...env.vars },
     stdio: ["ignore", "ignore", "pipe"],
   });

@@ -177,6 +177,7 @@ test("SDK standalone Subagents cannot acquire Background capability from carried
       finally { db.close(); }
     }
   } finally {
+    await session?._extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });
     session?.dispose();
     await daemon?.stop();
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;

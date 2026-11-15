@@ -3,11 +3,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { after } from "node:test";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 import { Type } from "typebox";
 
 const sdkUrl = process.env.PI_CODEMODE_TEST_SDK_DIR
@@ -18,6 +19,21 @@ const ai = await import(process.env.PI_CODEMODE_TEST_SDK_DIR
   ? new URL("../../pi-ai/dist/index.js", sdkUrl).href
   : import.meta.resolve("@earendil-works/pi-ai"));
 const settingsType = "pi-better-subagents-settings";
+const root = mkdtempSync(join(tmpdir(), "pi-subagent-settings-runtime-"));
+const agentDir = join(root, "agent");
+const previousEnv = Object.fromEntries(["PI_CODING_AGENT_DIR", "TMPDIR", "TMP", "TEMP"]
+  .map((key) => [key, process.env[key]]));
+let runtimeOwner;
+process.env.PI_CODING_AGENT_DIR = agentDir;
+for (const key of ["TMPDIR", "TMP", "TEMP"]) process.env[key] = root;
+after(async () => {
+  await stopOwnedRuntime(join(agentDir, "server"), runtimeOwner);
+  removeOwnedFixture(root);
+  for (const [key, value] of Object.entries(previousEnv)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+});
+runtimeOwner = await prepareOwnedRuntime(agentDir);
 
 function textContent(message) {
   return typeof message.content === "string" ? message.content
@@ -37,11 +53,7 @@ function snapshotFromResult(result, expected) {
 }
 
 test("real Pi refreshes live parent occupancy and source revisions during one foreground run", { timeout: 10_000 }, async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "pi-subagent-settings-runtime-"));
-  const agentDir = join(root, "agent");
   const configPath = join(agentDir, "settings.json");
-  const previousEnv = Object.fromEntries(["PI_CODING_AGENT_DIR", "TMPDIR", "TMP", "TEMP"]
-    .map((key) => [key, process.env[key]]));
   process.env.PI_CODING_AGENT_DIR = agentDir;
   // Registry reconciliation and shutdown must never see the user's real children.
   for (const key of ["TMPDIR", "TMP", "TEMP"]) process.env[key] = root;
@@ -89,7 +101,6 @@ test("real Pi refreshes live parent occupancy and source revisions during one fo
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
-      rmSync(root, { recursive: true, force: true });
     }
   });
   const { default: subagentsExtension } = await import("../packages/pi-better-subagents/index.ts");
