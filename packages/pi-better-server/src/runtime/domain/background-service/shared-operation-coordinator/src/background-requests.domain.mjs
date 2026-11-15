@@ -2,6 +2,10 @@
 // Generated from packages/operation-coordinator/src/background-requests.ts. Do not edit directly.
 import { createHash } from 'node:crypto';
 const prefix = 'background-request-v1:';
+// A partial index excludes returned history. CASE protects other coordinator
+// records and makes corrupt request rows visible to recovery rather than hiding them.
+const pendingPredicate = "key GLOB 'background-request-v1:*' AND CASE WHEN json_valid(value) THEN COALESCE(json_extract(value, '$.state'), '') != 'returned' ELSE 1 END";
+export const BACKGROUND_PENDING_QUERY = `SELECT value FROM coordinator_state INDEXED BY background_requests_pending WHERE ${pendingPredicate} ORDER BY key LIMIT ?`;
 function storageKey(owner, key) { return prefix + createHash('sha256').update(JSON.stringify([owner, key])).digest('hex'); }
 export class BackgroundRequests {
     context;
@@ -9,6 +13,8 @@ export class BackgroundRequests {
     constructor(context, alive) {
         this.context = context;
         this.alive = alive;
+        alive();
+        context.db.exec(`CREATE INDEX IF NOT EXISTS background_requests_pending ON coordinator_state(key) WHERE ${pendingPredicate}`);
     }
     read(owner, key) {
         this.alive();
@@ -59,5 +65,14 @@ export class BackgroundRequests {
             this.write(value);
         });
     }
-    pending() { this.alive(); return this.context.db.prepare("SELECT value FROM coordinator_state WHERE key LIKE 'background-request-v1:%'").all().map(row => JSON.parse(String(row.value))).filter(value => value.state !== 'returned'); }
+    hasPending() {
+        this.alive();
+        return Boolean(this.context.db.prepare(`SELECT 1 FROM coordinator_state INDEXED BY background_requests_pending WHERE ${pendingPredicate} LIMIT 1`).get());
+    }
+    pending(limit = 128) {
+        this.alive();
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128)
+            throw new Error('Background recovery batch limit must be 1..128');
+        return this.context.db.prepare(BACKGROUND_PENDING_QUERY).all(limit).map(row => JSON.parse(String(row.value)));
+    }
 }

@@ -56,6 +56,7 @@ export class WorkReadModel {
   private coordinator = "unknown";
   private coordinatorConversations?: Map<string, string>;
   private revision = 0;
+  private foldQueueSequence = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
   private reason: string | undefined = "Initial source inventory is rebuilding.";
   private counters = { inventories: 0, metadataReads: 0, projections: 0 };
@@ -83,8 +84,8 @@ export class WorkReadModel {
       CREATE INDEX work_terminal ON rows(active, ended, started DESC, id DESC);
       CREATE INDEX work_recipient_pending ON rows(origin_cwd, origin_session, recipient_pending, started DESC, id DESC);
       CREATE INDEX work_state ON rows(state, started DESC, id DESC);
-      CREATE TABLE terminal_log_folds (id TEXT PRIMARY KEY, revision TEXT NOT NULL, pending INTEGER NOT NULL);
-      CREATE INDEX pending_terminal_log_folds ON terminal_log_folds(pending, id);`);
+      CREATE TABLE terminal_log_folds (id TEXT PRIMARY KEY, revision TEXT NOT NULL, pending INTEGER NOT NULL, queue_position INTEGER NOT NULL);
+      CREATE INDEX pending_terminal_log_folds ON terminal_log_folds(pending, queue_position, id);`);
     this.runs = join(options.baseDir ?? join(realpathSync(tmpdir()), "pi-better-subagents"), "runs");
     this.archives = join(options.durableDir ?? process.env.PI_SUBAGENT_DURABLE_DIR ?? join(agentDir, "subagents"), "attempts");
     this.markers = join(this.archives, "../session-state");
@@ -319,7 +320,7 @@ export class WorkReadModel {
       let semanticChange = false;
       try {
         for (const id of this.projected.keys()) if (!metas.has(id)) { remove.run(id); this.db.prepare("DELETE FROM terminal_log_folds WHERE id=?").run(id); semanticChange = true; }
-        for (const id of terminalLogChanges) this.db.prepare("INSERT INTO terminal_log_folds VALUES (?, ?, 1) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, pending=1").run(id, hash([logs.get(id), metas.get(id)?.status]));
+        for (const id of terminalLogChanges) this.db.prepare("INSERT INTO terminal_log_folds VALUES (?, ?, 1, ?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, pending=1, queue_position=CASE WHEN terminal_log_folds.pending=0 THEN excluded.queue_position ELSE terminal_log_folds.queue_position END").run(id, hash([logs.get(id), metas.get(id)?.status]), ++this.foldQueueSequence);
         for (const row of rows) {
           if (this.projected.get(row.meta.id)?.sourceRevision === row.sourceRevision) continue;
           semanticChange = true;
@@ -347,11 +348,13 @@ export class WorkReadModel {
 
   /** Derived pending index: no unbounded JavaScript backlog and no dropped IDs. */
   terminalLogChanges(): Array<{id: string; revision: string}> {
-    return this.db.prepare("SELECT id, revision FROM terminal_log_folds WHERE pending=1 ORDER BY id LIMIT 128").all();
+    return this.db.prepare("SELECT id, revision FROM terminal_log_folds WHERE pending=1 ORDER BY queue_position, id LIMIT 128").all();
   }
   acknowledgeTerminalLogs(batch: Array<{id: string; revision: string}>) {
-    const acknowledge = this.db.prepare("UPDATE terminal_log_folds SET pending=0 WHERE id=? AND revision=?");
-    for (const entry of batch) acknowledge.run(entry.id, entry.revision);
+    const acknowledge = this.db.prepare("UPDATE terminal_log_folds SET pending=CASE WHEN revision=? THEN 0 ELSE 1 END, queue_position=? WHERE id=?");
+    // A newer revision remains owed, but rejoins behind existing obligations.
+    // Continuously changing low IDs cannot monopolize every subsequent batch.
+    for (const entry of batch) acknowledge.run(entry.revision, ++this.foldQueueSequence, entry.id);
   }
 
   snapshot(scope: WorkScope = {}): WorkSnapshot {

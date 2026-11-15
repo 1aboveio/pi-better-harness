@@ -37,6 +37,29 @@ test("derived fold index bounds batches and preserves overflow and in-flight rev
   } finally { model.close(); }
 });
 
+test("continuously changing first batch cannot starve later failure obligations", async () => {
+  const root = process.env.PI_CODING_AGENT_DIR!, base = join(root, "fair-index-runs"); mkdirSync(root, { recursive: true });
+  for (let i = 0; i < 260; i++) {
+    const id = `fair_${String(i).padStart(3,"0")}`, dir = join(base, "runs", id); mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "meta.json"), JSON.stringify({ id, sessionId: id, cwd: root, status: "orphaned", startedAt: 1, management: { root } }));
+    writeFileSync(join(dir, "output.log"), "{}\n");
+  }
+  const model = new WorkReadModel(root, "fair-index", { baseDir: base, intervalMs: 0 });
+  try {
+    await model.reconcile(); const first = model.terminalLogChanges(); assert.equal(first.length,128);
+    const visited = new Set<string>();
+    for (let pass = 0; pass < 3; pass++) {
+      const batch = model.terminalLogChanges();
+      for (const entry of batch) visited.add(entry.id);
+      // The same first 128 live orphan logs advance during every acknowledgement.
+      for (const entry of first) appendFileSync(join(base,"runs",entry.id,"output.log"), "{}\n");
+      await model.reconcile(); model.acknowledgeTerminalLogs(batch);
+    }
+    assert.equal(visited.size,260,"every existing obligation gets a turn despite continuous low-ID updates");
+    assert.ok(model.terminalLogChanges().length,"newer content remains owed after fair scheduling");
+  } finally { model.close(); }
+});
+
 test("large cold log folding stays off the socket thread and drains overflow without losing failures", { timeout: 60000 }, async (t) => {
   const root = process.env.PI_CODING_AGENT_DIR!, cwd = process.cwd(); mkdirSync(root, { recursive: true });
   const lease = acquireMutationStore(root); lease.store.subagentLaunchJournal().epoch("prior"); lease.release();

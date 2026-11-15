@@ -1,3 +1,4 @@
+import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { effectiveBackgroundPolicy } from './background-policy.ts';
 import { Check } from 'typebox/value';
 import { randomUUID } from 'node:crypto';
@@ -12,14 +13,8 @@ export async function createBackgroundTools(root: string, instance: string, drai
         load('observed-waits'), load('tools'), load('runtime'), load('sandbox'), load('managed-authority'),
         import(String('./domain/sandbox-policy/permission-settings.domain.mjs')), load('registry'), load('navigator-provider'), load('failures'),
     ]);
-    const lease = acquireMutationStore(root), journal = lease.store.backgroundRequests();
-    // A prior process may have dispatched external work before losing its RPC reply.
-    // Return durable exact identities; never dispatch the same request again.
-    for (const previous of journal.pending())
-        journal.finish(previous.owner, previous.key, {
-            content: [{ type: 'text', text: previous.state === 'accepted' ? 'Background request was recovered before dispatch.' : 'Background request recovered after interrupted dispatch; inspect the recorded operations before issuing new work.' }],
-            details: { status: previous.state === 'accepted' ? 'not_launched' : 'outcome_unknown', recovered: true, operations: previous.operations }
-        });
+    const lease = acquireMutationStore(root);
+    let journal: ReturnType<typeof lease.store.backgroundRequests>;
     let pi: any, service: any, session: any, runtime: any, current: any;
     let tail: Promise<unknown> = Promise.resolve(), pending = 0;
     const projections = new Map<string, any>(), metrics = { scopeRefreshes: 0, exactDetailReads: 0, reconciles: 0 };
@@ -47,6 +42,18 @@ export async function createBackgroundTools(root: string, instance: string, drai
         deliveries.set(token, { token, notification, receiptId: delivery.receiptId ?? `background-terminal:${notification.operationId}`, delivery, scope, createdAt: Date.now() });
     };
     try {
+        journal = lease.store.backgroundRequests();
+        // Durable exact identities survive an interrupted RPC. Recover only
+        // pending indexed batches and yield between them; never redispatch.
+        for (;;) {
+            const batch = journal.pending();
+            if (!batch.length) break;
+            for (const previous of batch) journal.finish(previous.owner, previous.key, {
+                content: [{ type: 'text', text: previous.state === 'accepted' ? 'Background request was recovered before dispatch.' : 'Background request recovered after interrupted dispatch; inspect the recorded operations before issuing new work.' }],
+                details: { status: previous.state === 'accepted' ? 'not_launched' : 'outcome_unknown', recovered: true, operations: previous.operations },
+            });
+            await yieldTurn();
+        }
         const settingsManager = SettingsManager.inMemory({});
         const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager, noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
             extensionFactories: [(api: any) => {
@@ -229,7 +236,7 @@ export function hasBackgroundRequests(root: string): boolean {
         return false;
     const lease = acquireMutationStore(root);
     try {
-        return lease.store.backgroundRequests().pending().length > 0;
+        return lease.store.backgroundRequests().hasPending();
     }
     finally {
         lease.release();

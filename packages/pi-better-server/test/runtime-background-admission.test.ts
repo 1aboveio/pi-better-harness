@@ -68,3 +68,37 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
             process.env.PI_CODING_AGENT_DIR = previous;
     }
 });
+
+test('Background recovery yields between bounded pending batches and preserves exact operation receipts', { timeout: 30000 }, async () => {
+    const root = realpathSync(mkdtempSync('/tmp/bg-recover-')), previous = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = root;
+    const lease = acquireMutationStore(root), journal = lease.store.backgroundRequests();
+    const keys = Array.from({ length: 260 }, (_, i) => `interrupted-${i}`);
+    for (const key of keys) {
+        journal.accept('owner', key, 'digest'); journal.dispatch('owner', key);
+        journal.operation('owner', key, { operationId: `operation-${key}`, taskId: `task-${key}`, token: `token-${key}` });
+    }
+    let service: Awaited<ReturnType<typeof createBackgroundTools>> | undefined, complete = false, observedPartial = false;
+    const observeYield = () => {
+        if (complete) return;
+        const returned = keys.filter(key => journal.read('owner', key)?.state === 'returned').length;
+        if (returned > 0 && returned < keys.length) observedPartial = true;
+        else if (!complete) setImmediate(observeYield);
+    };
+    setImmediate(observeYield);
+    try {
+        service = await createBackgroundTools(root, 'recovery-batches'); complete = true;
+        assert.equal(observedPartial, true, 'other event-loop work runs between recovery batches');
+        assert.equal(journal.hasPending(), false);
+        for (const key of keys) {
+            const result: any = journal.read('owner', key)?.result;
+            assert.equal(result.details.status, 'outcome_unknown');
+            assert.deepEqual(result.details.operations, [{ operationId: `operation-${key}`, taskId: `task-${key}`, token: `token-${key}` }]);
+        }
+    } finally {
+        complete = true; await service?.close(); lease.release();
+        if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previous;
+        rmSync(root, { recursive: true, force: true });
+    }
+});
