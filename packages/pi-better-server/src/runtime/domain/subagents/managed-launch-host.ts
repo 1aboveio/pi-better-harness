@@ -13,7 +13,7 @@ import { nextRunId, processStartToken, listMetas, writeMeta, listActiveMetasForP
 import { recoverLaunchMetadata } from "./managed-launch-recovery.ts";
 import { assertSubagentHandoff } from "./managed-launch-ownership.ts";
 import { createOwnerCapacityGates } from "./capacity.mjs";
-import { readConversationLease } from "./continuation.ts";
+import { readConversationLease, releaseUnspawnedConversationLease } from "./continuation.ts";
 import { processExists } from "./spawn.ts";
 import type { ManagedLaunchPort } from "./managed-launch-port.ts";
 
@@ -74,7 +74,10 @@ export class ManagedSubagentHost {
                     const prior = wait?.park?.attemptId ? readMeta(wait.park.attemptId) : undefined;
                     const park = prior ? readParkRecord(prior.id) : undefined;
                     if (!prior || prior.management?.root !== root || claim.lease.ownerId !== `managed-subagents:${prior.management.instance}` || !park?.checkpoint) continue;
-                    if (readConversationLease(prior.sessionId)) continue;
+                    if (readConversationLease(prior.sessionId) && (!claim.lease.processStartToken || !releaseUnspawnedConversationLease({
+                        sessionId: prior.sessionId, attemptId: claim.attemptId, managerPid: pid, managerStart: claim.lease.processStartToken,
+                        canProveUnspawned: () => { this.journal.current(this.epoch); return !this.journal.attempt(claim.attemptId) && !readMeta(claim.attemptId); },
+                    }))) continue;
                     verifyParkCheckpoint({ ...park.checkpoint, version: 1, waitId: claim.waitId, generation: claim.generation });
                     const result = (sharedStore as any).repairFailedResume({ waitId: claim.waitId, generation: claim.generation,
                         claimId: claim.claimId, claimToken: claim.claimToken, attemptId: claim.attemptId, launchToken: claim.launchToken,

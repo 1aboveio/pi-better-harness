@@ -4,7 +4,7 @@ import extension, { isHealthTickerActive } from "../../../pi-better-subagents/in
 import { workObservation } from "../../../pi-better-subagents/work-observation.ts";
 const cwd = process.env.LAUNCH_WORKSPACE, agentDir = process.env.PI_CODING_AGENT_DIR;
 const fixture = process.env.CONTINUATION_CONTEXT ? JSON.parse(process.env.CONTINUATION_CONTEXT) : undefined;
-let policy = fixture?.policy;
+let policy = fixture?.policy ?? (process.env.LAUNCH_POLICY ? JSON.parse(process.env.LAUNCH_POLICY) : undefined);
 const deliveries = [];
 const notes = [];
 let uiFailures = 0;

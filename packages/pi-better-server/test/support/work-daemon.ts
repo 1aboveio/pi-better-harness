@@ -1,6 +1,24 @@
 import { existsSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 
+if (process.env.CONTINUATION_CRASH_POINT === "lease") {
+  const fs = createRequire(import.meta.url)("node:fs");
+  const link = fs.linkSync;
+  fs.linkSync = (...args: any[]) => {
+    const result = link(...args);
+    const marker = process.env.CONTINUATION_CRASH_MARKER;
+    if (marker && !existsSync(marker)) {
+      try {
+        const lease = JSON.parse(fs.readFileSync(args[1], "utf8"));
+        if (lease.sessionId && lease.attemptId && lease.attemptId !== lease.sessionId) {
+          writeFileSync(marker, JSON.stringify({ attemptId: lease.attemptId, sessionId: lease.sessionId })); process.kill(process.pid, "SIGKILL");
+        }
+      } catch { /* unrelated atomic file */ }
+    }
+    return result;
+  };
+  syncBuiltinESMExports();
+}
 const sqlite = createRequire(import.meta.url)("node:sqlite");
 const OriginalDatabase = sqlite.DatabaseSync;
 const metrics = { opens: 0, active: 0, maximum: 0 };

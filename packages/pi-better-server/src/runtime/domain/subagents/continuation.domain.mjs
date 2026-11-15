@@ -920,3 +920,23 @@ export function readConversationLease(sessionId) {
         return undefined;
     }
 }
+/** Release exact undispatched server ownership under the ordinary conversation lock. */
+export function releaseUnspawnedConversationLease(input) {
+    return withConversationMutation(input.sessionId, () => {
+        const lease = readConversationLease(input.sessionId);
+        if (!lease)
+            return true;
+        if (lease.attemptId !== input.attemptId || lease.pid !== input.managerPid || !lease.start
+            || Buffer.from(lease.start).toString("base64url") !== input.managerStart)
+            return false;
+        if (processExists(lease.pid)) {
+            const start = processStartToken(lease.pid);
+            if (!start || start === lease.start)
+                return false;
+        }
+        if (!input.canProveUnspawned())
+            return false;
+        releaseLeaseUnlocked(leasePathFor(input.sessionId), lease.raw);
+        return readConversationLease(input.sessionId) === undefined;
+    }, { waitMs: RELEASE_LOCK_WAIT_MS });
+}
