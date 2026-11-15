@@ -93,7 +93,6 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     admitDaemonStartup({ canonicalServerDir: serverDir, agentDir: getAgentDir(), build, intent: startupIntentFromEnv(process.env) });
     let cancellations: RuntimeCancellation | undefined;
     let resultSupervision: RuntimeResultSupervision | undefined;
-    if (hasResultSupervision(getAgentDir())) resultSupervision = new RuntimeResultSupervision(realpathSync(getAgentDir()), instanceId!);
     const resultPortKey = Symbol.for("pi-better-server:result-supervision-ports-v1");
     const resultPorts: Map<string, any> = (globalThis as any)[resultPortKey] ??= new Map();
     const resultRoot = realpathSync(getAgentDir());
@@ -102,24 +101,30 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       resultSupervision.reconcile();
       return { hostId: resultSupervision.hostId, epoch: resultSupervision.epoch, reason: resultSupervision.reason };
     } };
+    let workModel: WorkQueryExecutor | undefined;
+    let registry!: SessionRegistry;
+    cleanupStartup = async () => {
+      try { await registry?.shutdown(); }
+      finally {
+        try { await cancellations?.close(); }
+        finally {
+          resultSupervision?.close();
+          if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
+          await workModel?.close();
+        }
+      }
+    };
+    if (hasResultSupervision(getAgentDir())) resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!);
     resultPorts.set(resultRoot, resultPort);
     if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
     const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
-    let workModel: WorkQueryExecutor | undefined;
     const work = () => {
       if (!workModel) {
         workModel = new WorkQueryExecutor(realpathSync(getAgentDir()), instanceId!);
       }
       return workModel;
     };
-    const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log, sessionIdleMs: config.sessionIdleMs, now, workClient: () => createLocalWorkClient(work(), realpathSync(getAgentDir())) });
-    cleanupStartup = async () => {
-      await registry.shutdown();
-      await cancellations?.close();
-      resultSupervision?.close();
-      if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
-      await workModel?.close();
-    };
+    registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log, sessionIdleMs: config.sessionIdleMs, now, workClient: () => createLocalWorkClient(work(), realpathSync(getAgentDir())) });
     await registry.resumeAll();
     const nativeHost = new NativeClientHost(registry);
     // Structural port permits independent integration with the shared maintenance owner.
@@ -570,8 +575,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     }
     return daemon;
   } catch (error) {
-    await cleanupStartup();
-    releaseOwner();
+    try { await cleanupStartup(); } finally { releaseOwner(); }
     throw error;
   }
 }

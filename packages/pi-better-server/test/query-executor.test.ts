@@ -216,6 +216,7 @@ test("diagnostic refresh reads the current index without initiating another inve
     await ready(client);
     await f.executor.livenessReasons();
     const before = f.executor.metrics();
+    assert.equal(typeof before.inventories, "number");
     f.executor.observeLiveness();
     const deadline = Date.now() + 2000;
     while (f.executor.metrics().executor.completed === before.executor.completed) {
