@@ -357,3 +357,16 @@ test("a failed read worker cannot retain a detached daemon indefinitely", { time
   const checkpoint = JSON.parse(readFileSync(join(env.serverDir, "clean-stop.json"), "utf8"));
   assert.equal(checkpoint.observation, "unavailable", "shutdown must disclose that obligations could not be verified");
 });
+
+test("upgrade observation refuses unknown writer metadata instead of treating it as idle", async t => {
+  const root = mkdtempSync(join('/tmp', 'upgrade-writer-'));
+  const baseDir = join(root, 'subagents');
+  const run = join(baseDir, 'runs', 'sa_unknown_1'); mkdirSync(run, { recursive: true });
+  writeFileSync(join(run, 'meta.json'), JSON.stringify({ id: 'sa_unknown_1', sessionId: 'sa_unknown_1',
+    status: 'running', pid: process.pid, spawnPid: process.pid, cwd: root, startedAt: Date.now(),
+    promptPreview: 'unknown writer', logPath: join(run, 'log.jsonl') }));
+  const model = new WorkReadModel(root, 'upgrade-test', { baseDir, durableDir: join(root, 'archives') });
+  t.after(async () => { await model.close(); rmSync(root, { recursive: true, force: true }); });
+  await model.reconcile();
+  assert.ok(model.upgradeObligations().some(reason => reason.kind === 'unresolved-writer' && reason.id === 'sa_unknown_1'));
+});

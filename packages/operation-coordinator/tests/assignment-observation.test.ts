@@ -72,3 +72,19 @@ test("v4 missing required fields remains unverified and missing storage is never
     assert.deepEqual(readFileSync(h.path), before);
     assert.equal(existsSync(`${h.path}.missing`), false);
 });
+
+test("upgrade obligations retain accepted intents until durable resolution", async () => {
+    const h = createHarness();
+    const { createAssignmentReader } = await import('../assignment-observation.mjs');
+    const db = new DatabaseSync(h.path);
+    db.exec(`CREATE TABLE subagent_launch_intents (owner TEXT, request_key TEXT, attempts TEXT, state TEXT);
+      INSERT INTO subagent_launch_intents VALUES ('parent', 'request', '[{"id":"attempt"}]', 'accepted');`);
+    const reader = createAssignmentReader(h.path);
+    try {
+        assert.deepEqual(reader.upgradeObligations(), [{ kind: 'launch-intent', id: 'request', owner: 'parent', attempts: ['attempt'] }]);
+        db.exec("UPDATE subagent_launch_intents SET state='returned'");
+        assert.deepEqual(reader.upgradeObligations(), []);
+        db.exec("UPDATE schema_meta SET value='999' WHERE key='schema_version'");
+        assert.throws(() => reader.upgradeObligations(), /Unsupported coordinator schema/);
+    } finally { reader.close(); db.close(); h.closeStore(); }
+});
