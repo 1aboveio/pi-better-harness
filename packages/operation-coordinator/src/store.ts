@@ -7,6 +7,7 @@
  * and leaves no partial record.
  */
 import { setUpgradeFence } from "./upgrade.ts";
+import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgroundTerminals, seedPendingParentCallbacks, type ParentCallbackScope, type ParentCallbackPage, type RecentBackgroundTerminalPage } from './background-parent-callbacks.ts';
 import { BackgroundRequests } from "./background-requests.ts";
 import { StoreError } from "./errors.ts";
 import { SubagentLaunchJournal } from "./subagent-launch.ts";
@@ -165,6 +166,10 @@ export interface Store {
      * `operation-conflict` or `task-ownership`.
      */
     backgroundRequests(): BackgroundRequests;
+    setParentCallbackPending(taskId: string, pending: boolean): boolean;
+    listPendingParentCallbacks(scope: ParentCallbackScope, options?: ParentCallbackPage): OperationRecord[];
+    listRecentBackgroundTerminals(options: RecentBackgroundTerminalPage): OperationRecord[];
+    seedPendingParentCallbacks(options?: { limit?: number }): { done: boolean; seeded: number };
     setUpgradeFence(epoch: string | null): void;
     registerOperation(input: RegisterOperationInput): RegisterOperationResult;
     /**
@@ -372,6 +377,10 @@ export function openStore(options: StoreOptions): Store {
             closed = true;
             db.close();
         },
+        setParentCallbackPending(taskId, pending) { alive(); return setParentCallbackPending(ctx, taskId, pending); },
+        listPendingParentCallbacks(scope, options) { alive(); return listPendingParentCallbacks(ctx, scope, options); },
+        listRecentBackgroundTerminals(options) { alive(); return listRecentBackgroundTerminals(ctx, options); },
+        seedPendingParentCallbacks(options) { alive(); return seedPendingParentCallbacks(ctx, options); },
         backgroundRequests() { alive(); return new BackgroundRequests(ctx, alive); },
         setUpgradeFence(epoch) { alive(); setUpgradeFence(ctx, epoch); },
         registerOperation(input) {

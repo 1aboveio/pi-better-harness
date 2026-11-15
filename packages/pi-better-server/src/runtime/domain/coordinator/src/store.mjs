@@ -8,6 +8,7 @@
  * and leaves no partial record.
  */
 import { setUpgradeFence } from "./upgrade.mjs";
+import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgroundTerminals, seedPendingParentCallbacks } from './background-parent-callbacks.mjs';
 import { BackgroundRequests } from "./background-requests.mjs";
 import { StoreError } from "./errors.mjs";
 import { SubagentLaunchJournal } from "./subagent-launch.mjs";
@@ -79,6 +80,10 @@ export function openStore(options) {
             closed = true;
             db.close();
         },
+        setParentCallbackPending(taskId, pending) { alive(); return setParentCallbackPending(ctx, taskId, pending); },
+        listPendingParentCallbacks(scope, options) { alive(); return listPendingParentCallbacks(ctx, scope, options); },
+        listRecentBackgroundTerminals(options) { alive(); return listRecentBackgroundTerminals(ctx, options); },
+        seedPendingParentCallbacks(options) { alive(); return seedPendingParentCallbacks(ctx, options); },
         backgroundRequests() { alive(); return new BackgroundRequests(ctx, alive); },
         setUpgradeFence(epoch) { alive(); setUpgradeFence(ctx, epoch); },
         registerOperation(input) {

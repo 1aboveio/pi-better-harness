@@ -28,6 +28,27 @@ const RESULT_ADMISSION_FENCE = `CREATE TRIGGER IF NOT EXISTS result_scope_admiss
             AND (json_extract(NEW.supervision_json, '$.resultScope') IS NULL
               OR key = 'result-scope-v1:' || json_extract(NEW.supervision_json, '$.resultScope')))
     BEGIN SELECT RAISE(ABORT, 'permission-unavailable: legacy launch into managed result scope'); END`;
+const BACKGROUND_CALLBACK_DDL = [
+    `CREATE TABLE IF NOT EXISTS background_parent_callbacks (
+        operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id),
+        owner_kind TEXT NOT NULL CHECK(owner_kind='parent-session'),
+        owner_workspace TEXT NOT NULL,
+        owner_session_id TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS background_parent_callbacks_owner ON background_parent_callbacks(owner_kind,owner_workspace,owner_session_id,operation_id)`,
+    `CREATE INDEX IF NOT EXISTS operations_background_recent ON operations(terminal_at,operation_id) WHERE observer_kind='local-supervisor' AND terminal_revision>0`,
+    `CREATE INDEX IF NOT EXISTS operations_background_owner_recent ON operations(owner_kind,owner_workspace,owner_session_id,terminal_at,operation_id) WHERE observer_kind='local-supervisor' AND terminal_revision>0`,
+    `CREATE INDEX IF NOT EXISTS operations_background_parent_seed ON operations(operation_id) WHERE owner_kind='parent-session' AND observer_kind='local-supervisor'`,
+    `CREATE TABLE IF NOT EXISTS background_parent_callback_migration (
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+        after_operation_id TEXT NOT NULL,
+        through_operation_id TEXT NOT NULL,
+        done INTEGER NOT NULL CHECK(done IN (0,1))
+    )`,
+    `INSERT OR IGNORE INTO background_parent_callback_migration(singleton,after_operation_id,through_operation_id,done)
+        SELECT 1,'',COALESCE(MAX(operation_id),''),CASE WHEN MAX(operation_id) IS NULL THEN 1 ELSE 0 END
+        FROM operations WHERE owner_kind='parent-session' AND observer_kind='local-supervisor'`,
+];
 const DDL = [
     `CREATE TABLE task_cancellation_authorities (
         credential_hash TEXT PRIMARY KEY,
@@ -82,6 +103,7 @@ const DDL = [
         updated_at INTEGER NOT NULL,
         terminal_at INTEGER
     )`,
+    ...BACKGROUND_CALLBACK_DDL,
     `CREATE INDEX operations_owner ON operations (owner_kind, owner_session_id)`,
     `CREATE INDEX operations_phase ON operations (phase)`,
     `CREATE INDEX operations_running_supervisor ON operations (phase, supervision_host_id)`,
@@ -319,6 +341,10 @@ export function ensureSchema(ctx) {
  * records during a rolling upgrade. Missing additions are created once on open.
  */
 function ensureAdditiveSchema(ctx) {
+    // Schema/index creation is atomic; legacy obligation seeding is performed
+    // separately in bounded batches by the canonical manager.
+    ctx.transaction(() => { for (const statement of BACKGROUND_CALLBACK_DDL)
+        ctx.db.exec(statement); });
     const hasColumn = () => getRows(ctx, "PRAGMA table_info(operations)").some((row) => columnText(row, "name") === "supervision_host_id");
     const hasIndex = () => getRows(ctx, "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", "operations_running_supervisor").length > 0;
     const hasTable = (name) => existingTables(ctx).includes(name);

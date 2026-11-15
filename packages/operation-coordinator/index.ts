@@ -117,3 +117,5 @@ export { StoreError, isStoreError } from "./src/errors.ts";
 export type { StoreErrorCode } from "./src/errors.ts";
 export { openStore, ownerDiff } from "./src/store.ts";
 export type { Store } from "./src/store.ts";
+
+export type { ParentCallbackScope, ParentCallbackPage, RecentBackgroundTerminalPage } from './src/background-parent-callbacks.ts';
