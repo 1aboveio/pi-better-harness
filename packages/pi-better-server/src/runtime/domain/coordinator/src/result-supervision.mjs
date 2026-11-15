@@ -1,4 +1,5 @@
 // Generated canonical coordinator. Do not edit directly.
+import { isDeepStrictEqual } from "node:util";
 import { getRow, run } from "./sqlite.mjs";
 import { getOperation, recordSupervision, recordTerminalOutcome } from "./operations.mjs";
 import { requireId, requirePath } from "./validate.mjs";
@@ -22,8 +23,13 @@ export function handoffResultSupervision(ctx, input) {
     const directory = requirePath("directory", input.directory);
     return ctx.transaction(() => {
         const previous = resultSupervision(ctx, operationId);
-        if (previous)
+        if (previous) {
+            if (previous.directory !== directory || previous.hostId !== hostId || previous.epoch !== epoch
+                || !isDeepStrictEqual(previous.capability, input.capability)) {
+                throw new Error("supervision-conflict: repeated handoff changed destination or captured authority");
+            }
             return previous;
+        }
         const operation = getOperation(ctx, operationId);
         if (!operation || operation.supervision?.hostId !== input.expectedHostId)
             throw new Error("permission-unavailable: exact supervision owner changed");

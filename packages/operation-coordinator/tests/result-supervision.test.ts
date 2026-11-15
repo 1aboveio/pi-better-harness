@@ -60,3 +60,18 @@ test("scope handoff fences discovery transactionally without stealing a changed 
     assert.equal(store.tryClaimDiscovery({ scope: claim.scope, expected: null, hostId: "old-host", token: "discovery-2" }), null);
     assert.equal(store.getOperation("op-build-1")?.supervision?.hostId, "server:epoch-1");
 });
+
+
+test("repeated handoff cannot silently accept a different destination or authority", () => {
+    const { store } = createHarness();
+    registerOperation(store);
+    const input = { ...transfer("op-build-1"), capability: { adapter: "background-results-v1", captured: { allowed: true }, current: { allowed: true } } };
+    const grant = store.handoffResultSupervision(input);
+    assert.deepEqual(store.handoffResultSupervision(input), grant);
+    for (const patch of [{ directory: "/foreign" }, { hostId: "server:other" }, { epoch: "other" },
+        { capability: undefined }, { capability: { ...input.capability, current: { allowed: false } } }]) {
+        assert.throws(() => store.handoffResultSupervision({ ...input, ...patch }), /supervision-conflict/);
+        assert.deepEqual(store.resultSupervision(input.operationId), grant);
+        assert.equal(store.getOperation(input.operationId)?.supervision?.hostId, grant.hostId);
+    }
+});

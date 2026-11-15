@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { getRow, run, type StoreContext } from "./sqlite.ts";
 import { getOperation, recordSupervision, recordTerminalOutcome } from "./operations.ts";
 import { requireId, requirePath } from "./validate.ts";
@@ -40,7 +41,13 @@ export function handoffResultSupervision(ctx: StoreContext, input: {
     const directory = requirePath("directory", input.directory);
     return ctx.transaction(() => {
         const previous = resultSupervision(ctx, operationId);
-        if (previous) return previous;
+        if (previous) {
+            if (previous.directory !== directory || previous.hostId !== hostId || previous.epoch !== epoch
+                || !isDeepStrictEqual(previous.capability, input.capability)) {
+                throw new Error("supervision-conflict: repeated handoff changed destination or captured authority");
+            }
+            return previous;
+        }
         const operation = getOperation(ctx, operationId);
         if (!operation || operation.supervision?.hostId !== input.expectedHostId) throw new Error("permission-unavailable: exact supervision owner changed");
         const grant = { operationId, directory, hostId, epoch, launchToken: operation.launchToken,
