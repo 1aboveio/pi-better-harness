@@ -3,7 +3,7 @@ import { fork } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, cpus, release, totalmem } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -30,6 +30,14 @@ async function sample(child) {
   child.send({ type: 'resource-sample', id });
   return result;
 }
+async function refreshProvider(child) {
+  const id = ++requestId;
+  const result = waitMessage(child, message => message.type === 'provider-refreshed' && message.id === id);
+  child.send({ type: 'provider-refresh', id });
+  const response = await result;
+  assert.equal(response.error, undefined, response.error);
+  return response.rows;
+}
 function track(child) { children.add(child); child.once('exit', () => children.delete(child)); return child; }
 async function stop(child, graceful = false) {
   if (child.exitCode !== null || child.signalCode !== null) return;
@@ -43,7 +51,7 @@ function distribution(values) {
   const percentile = p => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
   return { samples: sorted.length, p50: percentile(.5), p95: percentile(.95), p99: percentile(.99), max: sorted.at(-1) };
 }
-const report = { platform: process.platform, arch: process.arch, node: process.version,
+const report = { machine: { cpu: cpus()[0]?.model, logicalCpus: cpus().length, memoryBytes: totalmem(), osRelease: release() }, platform: process.platform, arch: process.arch, node: process.version,
   sdk: sdkVersion, scope: 'Real Pi RPC processes with standalone Subagents, control RPC at 10 Hz, seeded read-only work records; no guardian in slice #753.', scenarios: [] };
 const output = process.env.PI_SHARED_READ_REPORT ?? join(tmpdir(), 'pi-shared-read-resources.json');
 const phase = (step, history, clients = 0) => { report.phase = { step, history, clients }; };
@@ -53,6 +61,9 @@ try {
     const root = realpathSync(mkdtempSync('/tmp/p751-res-'));
     const agent = join(root, 'agent'), transport = join(root, 's'), runs = join(root, 'pi-better-subagents/runs');
     const durable = join(agent, 'subagents'), archives = join(durable, 'attempts');
+    const sessionId = 'b005eb3d-66af-4b8b-88b7-0dd4971de123';
+    const sessionPath = join(root, 'shared-observer.jsonl');
+    writeFileSync(sessionPath, JSON.stringify({ type: 'session', version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: root }) + '\n');
     mkdirSync(runs, { recursive: true }); mkdirSync(archives, { recursive: true });
     for (let i = 0; i < history; i++) {
       const id = `sa_resource_history_${i}`;
@@ -62,12 +73,12 @@ try {
     }
     const env = { ...process.env, PI_CODING_AGENT_DIR: agent,
       PI_SERVER_DIR: transport, PI_SUBAGENT_DURABLE_DIR: durable, TMPDIR: root, TMP: root, TEMP: root,
-      PI_OFFLINE: '1', PI_SANDBOX_RECOVERY_SNAPSHOT: 'off' };
+      PI_OFFLINE: '1', PI_CATALOG_ACCEPTANCE_PROBE: '1', PI_SANDBOX_RECOVERY_SNAPSHOT: 'off' };
     const work = track(fork(new URL('./measure-shared-reads/probe.mjs', import.meta.url), [], { env, execArgv: [], stdio: ['ignore','ignore','inherit','ipc'] }));
     for (let i = 0; i < 2; i++) {
       const id = `sa_resource_active_${i}`; mkdirSync(join(runs, id));
       writeFileSync(join(runs, id, 'meta.json'), JSON.stringify({ id, cwd: root, status: 'running',
-        pid: work.pid, spawnPid: process.pid, startedAt: Date.now(), sessionId: id, callback: false, name: `resource-work-${i}` }));
+        pid: work.pid, spawnPid: process.pid, startedAt: Date.now(), sessionId: id, callback: false, callbackOrigin: { cwd: root, sessionId }, name: `resource-work-${i}` }));
     }
     const server = track(fork(new URL('./measure-shared-reads/daemon.mjs', import.meta.url), [], { env, execArgv: [], stdio: ['ignore','ignore','inherit','ipc'] }));
     phase('start-server', history);
@@ -93,7 +104,7 @@ try {
     for (const count of [1, 5, 10]) {
       phase('start-pi-clients', history, count);
       while (pis.length < count) {
-        const pi = track(fork(sdkCli, ['--mode','rpc','--offline','--no-session','--no-extensions',
+        const pi = track(fork(sdkCli, ['--mode','rpc','--offline','--session',sessionPath,'--no-extensions',
           '--extension',join(workspace,'packages/pi-better-subagents/index.ts'),
           '--no-skills','--no-prompt-templates','--no-themes'], {
           cwd: root, env, execArgv: ['--import', new URL('./measure-shared-reads/probe.mjs', import.meta.url).href], stdio: ['pipe','pipe','pipe','ipc'] }));
@@ -114,6 +125,14 @@ try {
       }
       phase('warmup', history, count);
       await delay(1200);
+      const providerDeadline = performance.now() + 15000;
+      let providerRows;
+      do {
+        providerRows = await Promise.all(pis.map(refreshProvider));
+        if (providerRows.every(rows => rows >= 2)) break;
+        assert.ok(performance.now() < providerDeadline, `Actual provider did not observe active work: ${providerRows}`);
+        await delay(100);
+      } while (true);
       await control.get({ cwd: root, active: true });
       const before = await control.request('runtime_get_metrics');
       report.lastMetrics = before;
@@ -123,11 +142,15 @@ try {
       const began = performance.now(), latencies = [];
       const windowMs = count === 10 && history === 10000 ? 60000 : 3000;
       while (performance.now() - began < windowMs) {
-        const sent = performance.now(); await Promise.all(pis.map(pi => pi.rpc())); latencies.push(performance.now() - sent);
+        const sent = performance.now(); await Promise.all(pis.map(async pi => { await pi.rpc(); assert.ok(await refreshProvider(pi) >= 2); })); latencies.push(performance.now() - sent);
         await delay(100);
       }
       const elapsedMs = performance.now() - began;
       const end = await Promise.all(subjects.map(sample));
+      for (let i = 0; i < pis.length; i++) {
+        assert.equal(end[i].fileCalls.archiveReads, start[i].fileCalls.archiveReads, 'unchanged actual provider must not reread archives');
+        assert.equal(end[i].fileCalls.markerStats, start[i].fileCalls.markerStats, 'unchanged actual provider must not stat per-archive markers');
+      }
       phase('post-window-snapshot', history, count);
       await control.get({ cwd: root, active: true });
       const after = await control.request('runtime_get_metrics');
@@ -139,11 +162,13 @@ try {
       assert.ok(after.sqlite.active <= 2, 'read worker must retain the root database budget');
       assert.equal((await control.request('runtime_get_status')).hostedSessions, 0,
         'ordinary local Pi clients must not create hosted sessions');
-      const resources = end.map((value, i) => ({ pid: value.pid, role: i < pis.length ? 'pi' : i === pis.length ? 'server' : 'work',
+      const resources = end.map((value, i) => ({ pid: value.pid, identity: value.identity, role: i < pis.length ? 'pi' : i === pis.length ? 'server' : 'work',
+        archiveReadDelta: value.fileCalls.archiveReads - start[i].fileCalls.archiveReads, markerStatDelta: value.fileCalls.markerStats - start[i].fileCalls.markerStats,
         cpuMs: ((value.cpu.user - start[i].cpu.user) + (value.cpu.system - start[i].cpu.system))/1000,
         rss: value.rss, fsRead: value.usage.fsRead - start[i].usage.fsRead, fsWrite: value.usage.fsWrite - start[i].usage.fsWrite,
         lagMs: value.lag }));
-      const entry = { history, clients: count, elapsedMs, resources,
+      const entry = { history, clients: count, elapsedMs, resources, actualProviderRefresh: true, providerRows,
+        totalFsRead: resources.reduce((sum,r) => sum+r.fsRead, 0), totalFsWrite: resources.reduce((sum,r) => sum+r.fsWrite, 0),
         totalCpuMs: resources.reduce((sum,r) => sum+r.cpuMs, 0), totalRss: resources.reduce((sum,r) => sum+r.rss, 0),
         rpcMs: distribution(latencies), inventoryDelta: after.inventories-before.inventories,
         metadataReadDelta: after.metadataReads-before.metadataReads, projectionDelta: after.projections-before.projections,
