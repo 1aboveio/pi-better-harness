@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { processStartToken } from "./registry.ts";
 import { launchDigest } from "./managed-launch-journal.mjs";
 
 /** Runs before the Pi CLI or any worker extension can execute task code. */
@@ -23,6 +24,8 @@ export function verifyManagedBootstrap(env = process.env) {
         if (attempt.bootstrapped || (attempt.pid && attempt.pid !== process.pid)) throw new Error("Managed launch token already has a writer");
         attempt.bootstrapped = true;
         attempt.writerPid = process.pid;
+        attempt.writerStartTime = processStartToken(process.pid);
+        if (!attempt.writerStartTime) throw new Error("Managed launch cannot prove writer process identity");
         const attempts = JSON.parse(row.attempts).map(value => value.id === attempt.id ? attempt : value);
         db.prepare("UPDATE subagent_launch_intents SET attempts=? WHERE owner=? AND request_key=?").run(JSON.stringify(attempts), proof.owner, proof.key);
         db.exec("COMMIT");

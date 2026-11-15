@@ -13,6 +13,6 @@ export interface ManagedLaunchPort {
     snapshot(host: CatalogHost): Promise<CatalogSnapshot>;
     attempt(): string;
     workerCommand(args: string[]): { file: string; fileArgs: string[] };
-    beforeSpawn(input: { id: string; sessionId: string; lease: string; leasePath: string; preflightPath: string; policyPath?: string; permissions: unknown; recipe: NonNullable<RunMeta["recipe"]> }): Record<string, string>;
+    beforeSpawn(input: { id: string; sessionId: string; lease: string; leasePath: string; preflightPath: string; policyPath?: string; permissions: unknown; recoveryMeta: RunMeta; recipe: NonNullable<RunMeta["recipe"]> }): Record<string, string>;
     spawned(id: string, pid: number): void;
 }

@@ -37,6 +37,16 @@ export class SubagentLaunchJournal {
     unresolvedAttempts() {
         return this.db.prepare("SELECT j.value AS attempt FROM subagent_launch_intents, json_each(subagent_launch_intents.attempts) j WHERE subagent_launch_intents.state='accepted'").all().map(row => JSON.parse(String(row.attempt)));
     }
+    pendingIntents() {
+        return this.db.prepare("SELECT * FROM subagent_launch_intents WHERE state='accepted'").all();
+    }
+    finishRecovery(owner, key, epoch, result) {
+        this.transaction(() => {
+            this.current(epoch);
+            this.db.prepare("UPDATE subagent_launch_intents SET state='returned', result=? WHERE owner=? AND request_key=? AND state='accepted' AND epoch<?")
+                .run(JSON.stringify(result), owner, key, epoch);
+        });
+    }
     accept(owner, key, digest, epoch) {
         return this.transaction(() => {
             this.current(epoch);
@@ -65,7 +75,7 @@ export class SubagentLaunchJournal {
             return attempt;
         });
     }
-    spawned(owner, key, epoch, id, pid) {
+    spawned(owner, key, epoch, id, pid, pidStartTime) {
         this.transaction(() => {
             this.current(epoch);
             const attempts = JSON.parse(this.read(owner, key).attempts);
@@ -74,7 +84,7 @@ export class SubagentLaunchJournal {
                 throw new Error("Launch publication is ambiguous");
             if (attempt.writerPid && attempt.writerPid !== pid)
                 throw new Error("Launch writer does not match spawned process");
-            Object.assign(attempt, { state: "spawned", pid });
+            Object.assign(attempt, { state: "spawned", pid, pidStartTime });
             this.db.prepare("UPDATE subagent_launch_intents SET attempts=? WHERE owner=? AND request_key=?").run(JSON.stringify(attempts), owner, key);
         });
     }
