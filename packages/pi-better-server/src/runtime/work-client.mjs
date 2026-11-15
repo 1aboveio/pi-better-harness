@@ -12,7 +12,7 @@ export class WorkClient {
     closed = false;
 
     constructor(socketPath, agentDir, requiredCapabilities = []) {
-        this.socket = connect(socketPath);
+        this.socket = typeof socketPath === "string" ? connect(socketPath) : socketPath;
         this.socket.setEncoding("utf8");
         this.socket.on("data", chunk => {
             this.buffer += chunk;

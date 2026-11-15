@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 
+const hostedClients = new WeakSet<object>();
 const clients = new WeakMap<object, Promise<any>>();
 const generations = new WeakMap<object, number>();
 const listeners = new WeakMap<object, Set<() => void>>();
@@ -32,7 +33,7 @@ export function backgroundObservation(pi: ExtensionAPI, ctx: ExtensionContext, h
       }
     }
     catch (error) {
-      if (!retry || !client.closed || (generations.get(pi) ?? 0) !== generation) throw error;
+      if (!retry || hostedClients.has(client) || !client.closed || (generations.get(pi) ?? 0) !== generation) throw error;
       if (clients.get(pi) === connection) clients.delete(pi);
       return read(false);
     }
@@ -49,6 +50,18 @@ function observationClient(pi: ExtensionAPI, scope: { background: boolean; cwd: 
   let pending = clients.get(pi);
   if (!pending) {
     pending = (async () => {
+      let hosted: any;
+      let rejected: unknown;
+      pi.events?.emit("pi-better-runtime:connect", {
+        accept: (client: any) => { hosted = client; }, reject: (error: unknown) => { rejected = error; },
+      });
+      if (rejected) throw rejected;
+      if (hosted) {
+        hostedClients.add(hosted);
+        hosted.onChange(() => { for (const notify of listeners.get(pi) ?? []) notify(); });
+        try { await hosted.subscribe(scope); checkOpen(); return hosted; }
+        catch (error) { hosted.close(); throw error; }
+      }
       const requestedRoot = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
       mkdirSync(requestedRoot, { recursive: true, mode: 0o700 });
       const root = realpathSync(requestedRoot);

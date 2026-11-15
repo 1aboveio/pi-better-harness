@@ -78,13 +78,8 @@ export class BackgroundObservation {
       return changed;
     }
   }
-  private project(operations: any[], history = false) {
+  private project(operations: any[]) {
       return operations.map((op: any) => {
-        if (history) {
-          const observed = this.rows.find(row => row.operationId === op.operation_id);
-          if (observed) return observed;
-          if (op.phase === "running") return undefined;
-        }
         this.metrics.runnerSnapshots++;
         const inspection = snapshot(this.directory, op.task_id);
         let context: any = {};

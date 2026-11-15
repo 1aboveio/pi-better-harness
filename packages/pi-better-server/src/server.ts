@@ -1,3 +1,4 @@
+import { createLocalWorkClient } from "./runtime/local-client.ts";
 import { chmodSync, existsSync, realpathSync, unlinkSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { getAgentDir, type RpcCommand } from "@earendil-works/pi-coding-agent";
@@ -81,10 +82,6 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const owner = inspectDaemonOwner(serverDir);
     const instanceId = owner.status === "live" ? owner.owner.token : undefined;
     admitDaemonStartup({ canonicalServerDir: serverDir, agentDir: getAgentDir(), build, intent: startupIntentFromEnv(process.env) });
-    const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log, sessionIdleMs: config.sessionIdleMs, now });
-    cleanupStartup = () => registry.shutdown();
-    await registry.resumeAll();
-    const nativeHost = new NativeClientHost(registry);
     let workModel: WorkQueryExecutor | undefined;
     const work = () => {
       if (!workModel) {
@@ -92,6 +89,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       }
       return workModel;
     };
+    const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log, sessionIdleMs: config.sessionIdleMs, now, workClient: () => createLocalWorkClient(work(), realpathSync(getAgentDir())) });
+    cleanupStartup = async () => { await registry.shutdown(); await workModel?.close(); };
+    await registry.resumeAll();
+    const nativeHost = new NativeClientHost(registry);
     // Structural port permits independent integration with the shared maintenance owner.
     const sessionMaintenance = (registry as SessionRegistry & { maintenance?: {
       readonly busy: boolean;

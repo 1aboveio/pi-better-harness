@@ -1,7 +1,7 @@
 import { Worker } from "node:worker_threads";
 import { performance, monitorEventLoopDelay } from "node:perf_hooks";
 import { resolve } from "node:path";
-import type { Socket } from "node:net";
+import type { Duplex } from "node:stream";
 import { workScope } from "./queries.ts";
 
 export interface EncodedRead { json: string }
@@ -10,7 +10,8 @@ interface Query {
   id: number; key?: string; command: Record<string, unknown>; connection: number;
   enqueued: number; deadline: ReturnType<typeof setTimeout>; waiters: Set<Waiter>;
 }
-interface Stream { socket: Socket; paused: boolean; generation: number; drain: () => void; close: () => void }
+export type ReadStream = Pick<Duplex, "destroyed" | "writableLength" | "write" | "on" | "once" | "off">;
+interface Stream { socket: ReadStream; paused: boolean; generation: number; drain: () => void; close: () => void }
 interface WorkerMetrics { sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
 export interface QueryExecutorOptions {
   capacity?: number; timeoutMs?: number; maxConnections?: number;
@@ -60,7 +61,7 @@ export class WorkQueryExecutor {
     });
   }
 
-  connect(socket: Socket) {
+  connect(socket: ReadStream) {
     if (this.streams.size >= (this.options.maxConnections ?? 64)) throw new Error("runtime-overloaded: too many read clients; retry later");
     const connection = ++this.connectionCounter;
     const drain = () => {
