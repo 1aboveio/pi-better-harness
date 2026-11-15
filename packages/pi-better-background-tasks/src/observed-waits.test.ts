@@ -1156,8 +1156,11 @@ describe("parent tool integration", () => {
     }, undefined, undefined, ctx);
     const launchText = textOf(launched);
     expect(launchText).toContain("Started durable background process");
-    const taskId = /Started durable background process (bgs_[0-9a-f]{20})/.exec(launchText)?.[1];
+    const receipt = launched.details as { id: string; operationId: string; owner: { sessionId: string; workspace: string } };
+    const taskId = receipt.id;
     expect(taskId).toBeTruthy();
+    expect(receipt.owner).toMatchObject({ sessionId: "session-1", workspace: root });
+    expect(host.statusForParent(ctx, taskId).operationId).toBe(receipt.operationId);
 
     await until(host, () => host.statusForParent(ctx, taskId!).phase === "terminal");
     const status = await harness.tools.get("bg_task_status")!.execute("call-2", { id: taskId }, undefined, undefined, ctx);
@@ -1199,14 +1202,14 @@ describe("parent tool integration", () => {
       callback: false,
     }, undefined, undefined, ctx);
     const text = textOf(spawned);
-    const taskId = /Started durable background process (bgs_[0-9a-f]{20})/.exec(text)?.[1];
+    const taskId = (spawned.details as { id: string }).id;
     expect(taskId).toBeTruthy();
     await until(host, () => host.statusForParent(ctx, taskId!).phase === "terminal");
     const status = await harness.tools.get("bg_task")!.execute("call-2", { action: "status", id: taskId }, undefined, undefined, ctx);
     expect(textOf(status)).toContain("succeeded");
   });
 
-  it("keeps the legacy route when the durable host could not open", async () => {
+  it("refuses launch instead of falling back to legacy execution when the installed durable host cannot open", async () => {
     const root = workspace("unavailable");
     const harness = createHarness();
     const host = createObservedWaitHost(harness.pi, {
@@ -1219,6 +1222,11 @@ describe("parent tool integration", () => {
     expect(host.available).toBe(false);
     expect(host.reason).toBeTruthy();
     registerTools(harness.pi);
+    const marker = join(root, "must-not-run");
+    await expect(harness.tools.get("bg_task_spawn")!.execute("refused-launch", {
+      shell: false, argv: nodeCommand(`require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unauthorized fallback')`),
+    }, undefined, undefined, createCtx(root))).rejects.toThrow();
+    expect(existsSync(marker)).toBe(false);
 
     const wait = await harness.tools.get("wait_for_operations")!.execute("call-1", {
       task_ids: ["bgs_aaaaaaaaaaaaaaaaaaaa"],

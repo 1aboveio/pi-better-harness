@@ -11,7 +11,7 @@ import { WorkClient } from "../src/runtime/work-client.mjs";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 const { createLocalSupervisor, supervisorPaths } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
 
-for (const crash of ["none", "concurrent-frontends", "before-terminal", "after-terminal", "missing-current-authority", "missing-captured-authority", "missing-launch-evidence"]) {
+for (const crash of ["none", "concurrent-frontends", "published-permissions", "before-terminal", "after-terminal", "missing-current-authority", "missing-captured-authority", "missing-launch-evidence"]) {
 test(`SDK frontend exits; server imports independent evidence with ${crash} server crash and retains exact delivery`, { timeout: 30000 }, async () => {
   mkdirSync(resolve(".work/760"), { recursive: true });
   const root = mkdtempSync(resolve(".work/760/flow-"));
@@ -25,7 +25,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
   const taskIds: string[] = [];
   const start = async (file: string) => {
     const child = fork(new URL(file, import.meta.url), [], { execArgv: ["--import", "tsx"],
-      env: { ...process.env, TMPDIR: file.includes("result-frontend") ? runnerRoot : root, PI_CODING_AGENT_DIR: root, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+      env: { ...process.env, PI_TEST_PERMISSION_PUBLISHER: crash === "published-permissions" ? "1" : "0", TMPDIR: file.includes("result-frontend") ? runnerRoot : root, PI_CODING_AGENT_DIR: root, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
     children.push(child);
     let errors = ""; child.stderr!.on("data", chunk => { errors += chunk; });
     const [ready] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(errors); })]);
@@ -205,7 +205,7 @@ test("two actual HostedSessions share server supervision without a discovery hos
       };
       const launch = await tool("bg_task_spawn").execute(`hosted-launch-${i}`, { shell: false, callback: false,
         argv: [process.execPath, "-e", "console.log('hosted independent result')"] });
-      const taskId = launch.content.map((part: any) => part.text ?? "").join("\n").match(/bgs_[0-9a-f]{20}/)?.[0];
+      const taskId = (launch.details as { id?: string })?.id;
       assert.ok(taskId, JSON.stringify(launch));
       const waited = await tool("wait_for_operations").execute(`hosted-wait-${i}`, { task_ids: [taskId], continuation_note: "Interpret hosted evidence" });
       assert.ok((waited.details as any)?.waitId, JSON.stringify(waited));
