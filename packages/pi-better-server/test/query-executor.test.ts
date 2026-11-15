@@ -133,6 +133,7 @@ test("an active read deadline rejects readers and bounds close while native SQLi
     assert.equal(f.executor.metrics().executor.active, 0);
     assert.equal(f.executor.metrics().executor.queued, 0);
     assert.equal(f.executor.metrics().executor.status, "degraded");
+    assert.equal(f.executor.observation().status, "degraded", "cached status cannot report a failed worker as ready");
     await assert.rejects(client.get({}), /deadline exceeded/);
     assert.equal(client.snapshot!.status, "degraded", "a dead worker must never leave its cached scope authoritative");
     assert.equal((await client.request("ping")).ok, true, "the main socket remains usable after worker failure");
@@ -194,13 +195,13 @@ test("diagnostic liveness does not wait behind SQLite while fresh idle checks st
     await f.executor.livenessReasons();
     const { finished } = await f.stall();
     const began = performance.now();
-    const observation = f.executor.observeLiveness();
+    const observation = f.executor.observation();
     assert.ok(performance.now() - began < 100, "diagnostics must not block on the read worker");
-    assert.equal(observation.status, "refreshing");
+    assert.equal(observation.status, "ready");
     assert.ok(observation.observedAt);
     const queued = f.executor.metrics().executor.queued;
-    for (let i = 0; i < 100; i++) f.executor.observeLiveness();
-    assert.equal(f.executor.metrics().executor.queued, queued, "status probes share one refresh");
+    for (let i = 0; i < 100; i++) f.executor.observation();
+    assert.equal(f.executor.metrics().executor.queued, queued, "status probes enqueue no worker work");
     let checked = false;
     const fresh = f.executor.livenessReasons().then(() => { checked = true; });
     assert.equal(checked, false, "fresh shutdown checks cannot use the diagnostic cache");
@@ -209,7 +210,7 @@ test("diagnostic liveness does not wait behind SQLite while fresh idle checks st
   } finally { await f.close(); }
 });
 
-test("diagnostic refresh reads the current index without initiating another inventory", { timeout: 10000 }, async () => {
+test("diagnostic observation uses pushed state without initiating another inventory", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
     const client = await f.client();
@@ -217,12 +218,9 @@ test("diagnostic refresh reads the current index without initiating another inve
     await f.executor.livenessReasons();
     const before = f.executor.metrics();
     assert.equal(typeof before.inventories, "number");
-    f.executor.observeLiveness();
-    const deadline = Date.now() + 2000;
-    while (f.executor.metrics().executor.completed === before.executor.completed) {
-      assert.ok(Date.now() < deadline, "diagnostic observation should finish");
-      await new Promise(resolve => setTimeout(resolve, 5));
-    }
+    f.executor.observation();
+    assert.equal(f.executor.metrics().executor.completed, before.executor.completed,
+      "diagnostic polling uses the pushed observation without a worker request");
     assert.equal(f.executor.metrics().inventories, before.inventories,
       "diagnostic polling must not initiate expensive fresh inventories");
   } finally { await f.close(); }

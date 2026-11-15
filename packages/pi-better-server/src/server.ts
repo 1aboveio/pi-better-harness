@@ -210,10 +210,12 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           }
           if (type === "runtime_get_status") {
             if (!greeted) throw new Error("runtime_get_status requires hello");
-            const observation = workModel?.observeLiveness();
+            // Status observes the last inventory; only idle shutdown requests a fresh liveness check.
+            const observation = workModel?.observation();
             return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
               capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, lifecycle: config,
               guardianBinding: guardianBinding?.identity ?? null,
+              workObservation: observation ? { status: observation.status, reason: observation.reason, observedAt: observation.observedAt } : null,
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
                 ...registry.list().filter(session => session.live).map(session => ({ kind: "hosted-session", id: session.sessionId })),
                 ...(observation?.reasons ?? [])],

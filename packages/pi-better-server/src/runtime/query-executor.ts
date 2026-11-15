@@ -2,6 +2,7 @@ import { Worker } from "node:worker_threads";
 import { performance, monitorEventLoopDelay } from "node:perf_hooks";
 import { resolve } from "node:path";
 import type { Duplex } from "node:stream";
+import type { WorkReadModel } from "./read-model.ts";
 import { workScope } from "./queries.ts";
 
 export interface EncodedRead { json: string }
@@ -34,6 +35,9 @@ export class WorkQueryExecutor {
   private termination?: Promise<number>;
   private exited = false;
   private workerMetrics: WorkerMetrics = {};
+  private lastObservation: Omit<ReturnType<WorkReadModel["observation"]>, "observedAt"> & { observedAt: number | null } = {
+    status: "rebuilding", reason: "Initial source inventory is rebuilding.", observedAt: null, reasons: [],
+  };
   private lag = monitorEventLoopDelay({ resolution: 10 });
   private waits: number[] = [];
   private completed = 0;
@@ -43,8 +47,6 @@ export class WorkQueryExecutor {
   private timeouts = 0;
   private durations: number[] = [];
   private options: QueryExecutorOptions;
-  private livenessSnapshot: { reasons: any[]; observedAt: number | null; reason?: string } = { reasons: [], observedAt: null };
-  private livenessObservation?: Promise<void>;
   readonly instanceId: string;
 
   constructor(agentDir: string, instanceId: string, options: QueryExecutorOptions = {}) {
@@ -80,22 +82,11 @@ export class WorkQueryExecutor {
 
   async livenessReasons(): Promise<any[]> {
     const result = await this.request(0, { type: "runtime_get_liveness" });
-    const reasons = JSON.parse(result.json);
-    this.livenessSnapshot = { reasons, observedAt: Date.now() };
-    return reasons;
+    return JSON.parse(result.json);
   }
 
-  /** Diagnostic observation only. Idle admission must await livenessReasons instead. */
-  observeLiveness() {
-    if (!this.livenessObservation && !this.failure) {
-      this.livenessObservation = this.request(0, { type: "runtime_observe_liveness" }).then(result => {
-        this.livenessSnapshot = { reasons: JSON.parse(result.json), observedAt: Date.now() };
-      }, error => {
-        this.livenessSnapshot = { ...this.livenessSnapshot, reason: String(error) };
-      }).finally(() => { this.livenessObservation = undefined; });
-    }
-    return { ...this.livenessSnapshot, status: this.failure || this.livenessSnapshot.reason ? "degraded" : "refreshing",
-      ...(this.failure ? { reason: this.failure.message } : {}) };
+  observation() {
+    return this.failure ? { ...this.lastObservation, status: "degraded" as const, reason: this.failure.message } : this.lastObservation;
   }
 
   metrics() {
@@ -112,11 +103,11 @@ export class WorkQueryExecutor {
     if (connection !== 0 && !this.streams.has(connection)) return Promise.reject(new Error("runtime-unavailable: client disconnected"));
     if (input.type === "runtime_get_metrics") return Promise.resolve({ json: JSON.stringify(this.metrics()) });
     if (this.failure) return Promise.reject(this.failure);
-    if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_liveness", "runtime_observe_liveness"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
+    if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_liveness"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
     if (input.sinceSeq !== undefined && !Number.isSafeInteger(input.sinceSeq)) return Promise.reject(new Error("Invalid replay sequence"));
     if (input.instanceId !== undefined && (typeof input.instanceId !== "string" || input.instanceId.length > 256)) return Promise.reject(new Error("Invalid runtime instance"));
     const command: Record<string, unknown> = { type: input.type, sinceSeq: input.sinceSeq, instanceId: input.instanceId };
-    if (command.type !== "runtime_unsubscribe" && command.type !== "runtime_get_liveness" && command.type !== "runtime_observe_liveness") {
+    if (command.type !== "runtime_unsubscribe" && command.type !== "runtime_get_liveness") {
       const scope = workScope(input.scope);
       if (scope.cwd) scope.cwd = resolve(scope.cwd);
       scope.limit ??= scope.backgroundHistory ? 10 : 50;
@@ -158,6 +149,7 @@ export class WorkQueryExecutor {
   private receive(message: any) {
     if (this.failure) return;
     if (message.metrics) this.workerMetrics = message.metrics;
+    if (message.observation) this.lastObservation = message.observation;
     if (message.type === "revision") { this.revision++; this.worker.postMessage({ type: "revision-consumed" }); return; }
     if (message.type === "event") {
       if (this.streams.get(message.connection)?.generation === message.generation) this.event(message.connection, message.line);

@@ -6,7 +6,7 @@ Implements the read-executor portion of #782 within the #751 single-server desig
 
 The main thread handles bounded protocol parsing, connection admission, cached executor metrics, small response envelopes and diagnostic status. Snapshot queries, pagination, projection, SQLite reads, index reconciliation and snapshot JSON encoding execute in the dedicated read worker. Even a cache miss uses that worker; there is no synchronous fallback on the socket thread.
 
-Diagnostic status returns the last observed liveness reasons with `observedAt` and an explicit observation state. It schedules at most one refresh and does not await a busy worker. These reasons may be stale. Idle admission separately awaits a fresh liveness query before deciding whether to drain. Neither a snapshot nor diagnostic status grants mutation authority.
+Diagnostic status returns the last observed liveness reasons with `observedAt` and an explicit observation state. The worker pushes observations with revision and fresh-liveness replies; status reads the cached observation without scheduling or awaiting worker work. These reasons may be stale. Idle admission separately awaits a fresh liveness query before deciding whether to drain. Neither a snapshot nor diagnostic status grants mutation authority.
 
 The main-thread work target is at most 10 ms per ordinary dispatch. This is a review threshold, not a measured maximum across every operation. The real-process harness enforces a 250 ms control-status response budget while rebuilding history. Catalog file operations and canonical mutation transactions still execute on the main thread; their worst-case latency and supervision deadlines require further measurement. They are not covered by the read-worker isolation claim.
 

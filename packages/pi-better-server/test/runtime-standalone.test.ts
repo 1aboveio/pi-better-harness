@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
@@ -59,8 +59,16 @@ test("packed standalone packages use one pinned socket runtime, including cached
     for (const fixture of socketFixtures) rmSync(fixture, { recursive: true, force: true });
   });
   const clients: string[] = [], archives: string[] = [], sizes: Record<string, number> = {};
+  // npm prepack regenerates modules. Build in a private source copy so parallel
+  // daemon tests cannot import a truncated or temporarily removed output file.
+  const packWorkspace = join(evidence, "pack-workspace");
+  mkdirSync(packWorkspace);
+  const include = (path: string) => !["node_modules", ".work", "runtime-client"].includes(basename(path));
+  for (const name of ["packages", "scripts"]) cpSync(join(workspace, name), join(packWorkspace, name), { recursive: true, filter: include });
+  for (const name of ["package.json", "package-lock.json"]) cpSync(join(workspace, name), join(packWorkspace, name));
+  symlinkSync(join(workspace, "node_modules"), join(packWorkspace, "node_modules"), "dir");
   for (const name of ["pi-better-subagents", "pi-better-background-tasks"]) {
-    const packed = await execute("npm", ["pack", "--json", "--pack-destination", evidence], join(workspace, "packages", name), env);
+    const packed = await execute("npm", ["pack", "--json", "--pack-destination", evidence], join(packWorkspace, "packages", name), env);
     writeFileSync(join(evidence, `${name}-pack.log`), packed.stderr);
     assert.equal(packed.code, 0, packed.stderr);
     const record = JSON.parse(packed.stdout.slice(packed.stdout.indexOf("[")))[0]; sizes[name] = record.size;

@@ -107,3 +107,11 @@ Spec review found a concrete #760 partial-handoff defect: marking an entire scop
 Review also found the schema-v3 migration skipped that trigger. The first migration open now installs it; a dedicated regression proves enforcement without a second open. Two SQLite connections exercise registration between snapshot and handoff, and registration after handoff. A real frontend is SIGKILLed while its runner stays alive: unrelated launch is refused without fencing discovery, explicit adoption retains the original task authority, and terminal import advances its wait exactly once.
 
 Validation after these fixes: coordinator 121 passed; Background 564 passed/four skipped; 13 real Catalog/supervision tests passed; Server, Background, Subagents and coordinator typechecks passed. The scope fence persists for older clients as intended. Cross-platform raw reports from successful CI b0e05b41 are retained separately; they predate this admission-fence change.
+
+## Main integration and concurrent packaging isolation
+
+Merged main through 3fb5abb8, including the 0.47.0 release and independent status fix. Diagnostic status now consumes the worker-pushed observation; the redundant pull-refresh state and command are removed. Both status observation fields use the same cached evidence, while shutdown still performs a fresh liveness request. Six status/executor tests pass, including blocked initial inventory and stalled SQLite.
+
+CI run 43739843816 exposed concurrent npm prepack rewriting generated source while a daemon imported it (`process.mjs` temporarily lacked its export). The standalone package test now copies source to a private packaging workspace before running prepack. It no longer modifies source consumed by parallel daemon tests. Running standalone packaging and all real result-supervision cases concurrently passes all 13 tests, including pinned Node installation, package integrity, offline restart and mixed-client refusal.
+
+Full Subagents rerun after the scope fence and canonical digest change: 1,407 passed, seven skipped. This run predates the main merge; the post-merge status and packaging runs above exercise the changed paths.
