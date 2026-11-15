@@ -1,4 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-subagents/index.ts. Do not edit directly.
+import { appendTimingWake, removeTimingReceipt, receiptTimingWake, timingWakeReceipt } from "./timing-notifications.domain.mjs";
 /**
  * pi-better-subagents — Claude Code-style async subagents for pi.
  *
@@ -907,18 +908,36 @@ function sameOpenCalls(a, b) {
  * intentional suppression), so reloads and later ticks never repeat it.
  */
 function deliverTimingWake(pi, meta, kind, key, content, isHandled, markHandled) {
-    if (!callbackSuppressionReason(meta)) {
-        try {
-            uiCtx?.ui.notify(content, "warning");
+    if (managementPort) {
+        foldTimingWakeReceipts(readMeta(meta.id) ?? meta);
+        if (isHandled(readMeta(meta.id) ?? meta))
+            return;
+        const receipt = timingWakeReceipt(meta.id, key);
+        if (receipt !== undefined) {
+            markHandled(receipt);
+            return;
         }
-        catch { /* ignore */ }
+        const current = readMeta(meta.id);
+        const pending = (current?.timing?.pendingWakes ?? []).filter(wake => timingWakeReceipt(meta.id, wake.key) === undefined);
+        const next = appendTimingWake(pending, { kind, key, content });
+        if (next !== pending)
+            patchTiming(meta.id, { pendingWakes: next });
+        return;
     }
+    // Foreign/inactive foregrounds must leave the durable notification pending.
+    if (callbackSuppressionReason(meta))
+        return;
+    try {
+        uiCtx?.ui.notify(content, "warning");
+    }
+    catch { /* ignore */ }
     if (!pi || meta.callback === false) {
         markHandled(Date.now());
         return;
     }
     void getCallbackBatcher(pi).deliverUrgent({
         source: "subagent",
+        receiptId: `timing:${meta.id}:${key}`,
         id: meta.id,
         label: timingLabel(meta),
         status: key,
@@ -938,8 +957,60 @@ function deliverTimingWake(pi, meta, kind, key, content, isHandled, markHandled)
             return callbackSuppressionReason(current);
         },
         onDelivered: (at) => markHandled(at),
-        onSuppressed: (_reason, at) => markHandled(at),
+        onSuppressed: () => { },
     });
+}
+function replayTimingWakes(pi, meta) {
+    if (managementPort || callbackSuppressionReason(meta))
+        return;
+    meta = readMeta(meta.id) ?? meta;
+    for (const wake of meta.timing?.pendingWakes ?? []) {
+        if (timingWakeHandled(meta, wake.key))
+            continue;
+        const eventId = `timing:${meta.id}:${wake.key}`;
+        const entries = uiCtx?.sessionManager?.getBranch?.() ?? [];
+        const receipt = entries.some((entry) => {
+            const message = entry.type === "custom_message" ? entry : entry.type === "message" && entry.message?.role === "custom" ? entry.message : undefined;
+            return message?.customType === `subagent-${wake.kind}` && message.details?.urgentEventId === eventId;
+        });
+        if (receipt) {
+            receiptTimingWake(meta.id, wake.key, Date.now());
+            continue;
+        }
+        deliverTimingWake(pi, meta, wake.kind, wake.key, wake.content, () => timingWakeHandled(readMeta(meta.id) ?? meta, wake.key), at => receiptTimingWake(meta.id, wake.key, at));
+    }
+}
+function timingWakeHandled(meta, key) {
+    if (timingWakeReceipt(meta.id, key) !== undefined)
+        return true;
+    if (key === "deadline")
+        return meta.timing?.deadlineWakeSentAt !== undefined;
+    if (key.startsWith("tool-wait:"))
+        return (meta.timing?.toolWaitAlerted ?? []).includes(key.slice(10));
+    if (key.startsWith("stuck:"))
+        return meta.timing?.stuckWakeSentAt !== undefined && (meta.timing.stuckAnchorAt ?? 0) >= Number(key.slice(6));
+    return false;
+}
+function foldTimingWakeReceipts(meta) {
+    const pending = meta.timing?.pendingWakes ?? [];
+    const acknowledged = pending.filter(wake => wake.key !== "timing-overflow" && timingWakeReceipt(meta.id, wake.key) !== undefined);
+    if (!acknowledged.length || !meta.timing)
+        return;
+    const patch = { ...meta.timing, pendingWakes: pending.filter(wake => !acknowledged.includes(wake)) };
+    for (const wake of acknowledged) {
+        const at = timingWakeReceipt(meta.id, wake.key);
+        if (wake.kind === "deadline")
+            patch.deadlineWakeSentAt = at;
+        if (wake.kind === "stuck") {
+            patch.stuckWakeSentAt = at;
+            patch.stuckAnchorAt = Math.max(patch.stuckAnchorAt ?? 0, Number(wake.key.slice(6)));
+        }
+        if (wake.kind === "tool-wait")
+            patch.toolWaitAlerted = [...new Set([...(patch.toolWaitAlerted ?? []), wake.key.slice(10)])];
+    }
+    patchTiming(meta.id, patch);
+    for (const wake of acknowledged)
+        removeTimingReceipt(meta.id, wake.key);
 }
 /** Stop a run for a timing reason and report it through the ordinary completion callback. */
 function stopForTiming(pi, id, reason, now) {
@@ -4277,14 +4348,18 @@ export default function (pi, managed) {
                 if (sessionTornDown || observation?.status !== "ready")
                     return;
                 for (const row of observation.rows) {
+                    replayTimingWakes(pi, row.meta);
                     if (row.meta.status === "orphaned" || row.meta.status === "lost")
                         deliverHealthCallback(pi, row.meta, row.meta.status, Date.now());
                     if (["running", "orphaned", "lost"].includes(row.meta.status))
                         deliverFailureAttention(pi, row.meta, Date.now());
                 }
             });
-        if (!managed)
+        if (!managed) {
             recoverCompletionCallbacks(pi);
+            for (const meta of activeCallbackOrigin ? listMetasForOrigin(activeCallbackOrigin) : [])
+                replayTimingWakes(pi, meta);
+        }
         // Admission can defer before batcher enqueue, even after the last child
         // exits. Keep reconciliation independent of the live-run health ticker.
         if (outcomeTicker)
