@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sourceProvenance } from '../scripts/source-provenance.mjs';
+const { sourceProvenance } = await import(new URL('../scripts/source-provenance.mjs', import.meta.url).href);
 
 test('copied source reports unknown Git identity and a reproducible content manifest', () => {
   const root = mkdtempSync(join(tmpdir(), 'source-copy-'));
