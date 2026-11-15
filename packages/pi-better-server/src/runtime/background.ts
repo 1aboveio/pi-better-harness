@@ -27,6 +27,7 @@ export class BackgroundObservation {
   private root: string;
   private directory: string;
   private enabled = false;
+  private allRequested = false;
   private history?: BackgroundHistory;
   private legacy = new Map<string, BackgroundScope>();
   private recentRevision?: number;
@@ -98,7 +99,7 @@ export class BackgroundObservation {
       const operations = this.db ? this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor'").all() : [];
       // Active snapshots retain a bounded recent window. Complete history is
       // available through the separately paginated history index.
-      if (this.db && this.recentRevision !== revision) {
+      if (this.allRequested && this.db && this.recentRevision !== revision) {
         this.recent = this.db.prepare(`SELECT * FROM operations WHERE observer_kind='local-supervisor'
           AND terminal_at >= ? AND terminal_revision > 0
           ORDER BY terminal_at DESC, operation_id DESC LIMIT ?`).all(Date.now() - 30000, DISCOVERY_PAGE_SIZE);
@@ -107,6 +108,12 @@ export class BackgroundObservation {
       this.recent = this.recent.filter(op => Date.now() - op.terminal_at < 30000);
       operations.push(...this.recent);
       const rows = this.project(operations);
+      // A passive runner may finish before its manager publishes the outcome.
+      // Invalidate history on that exact state transition, not on scope/projection
+      // churn (which would continually restart a yielding history build).
+      const previousRows = new Map(this.rows.map(row => [row.id, row]));
+      if (rows.some(row => { const previous = previousRows.get(row.id); return previous
+        && (previous.status !== row.status || previous.active !== row.active); })) this.history?.invalidate();
       for (const entry of this.legacy.values()) {
         if (hasPendingIndex) this.refreshPending(entry, revision);
         this.refreshRecent(entry, revision);
@@ -227,11 +234,13 @@ export class BackgroundObservation {
     return () => { if (!released) { released = true; entry.references--; } };
   }
   read(scope: WorkScope, index?: any): any[] {
-    if (!this.enabled) { this.enabled = true; this.refresh(); }
+    const newlyGlobal = scope.backgroundAll && !this.allRequested;
+    if (scope.backgroundAll) this.allRequested = true;
+    if (!this.enabled || newlyGlobal) { this.enabled = true; this.refresh(); }
     const legacy = this.legacyScope(scope);
     if (scope.backgroundHistory) { this.metrics.historyQueries++; return index.records.map((record: any) => record.meta); }
     const legacyRows = legacy.rows;
-    const rows = [...new Map([...this.pendingRows(legacy), ...(scope.backgroundAll ? this.rows : [...this.rows.filter(row => row.active), ...legacy.recent])].map(row => [row.id, row])).values()];
+    const rows = [...new Map([...this.pendingRows(legacy), ...(scope.backgroundAll ? this.rows : [...this.rows, ...legacy.recent])].map(row => [row.id, row])).values()];
     return [...rows.filter(row => row.owner.kind === "parent-session" && row.dismissedAt === undefined
       && (scope.backgroundAll || row.owner.workspace === scope.cwd && row.owner.sessionId === scope.sessionId) && (!scope.active || row.active)),
       ...legacyRows.filter((row: any) => (scope.backgroundAll || row.callbackOrigin && belongsToOrigin(row, legacy.origin)
