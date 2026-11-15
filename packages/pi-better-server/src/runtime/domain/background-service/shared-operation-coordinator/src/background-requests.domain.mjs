@@ -32,8 +32,13 @@ export class BackgroundRequests {
             return { prior: false, record };
         });
     }
-    dispatch(owner, key) { this.update(owner, key, value => { if (value.state !== 'accepted')
-        throw new Error('Background request already dispatched'); value.state = 'dispatching'; }); }
+    dispatch(owner, key) {
+        this.update(owner, key, value => {
+            if (value.state !== 'accepted')
+                throw new Error('Background request already dispatched');
+            value.state = 'dispatching';
+        });
+    }
     operation(owner, key, operation) {
         this.update(owner, key, value => {
             if (value.state !== 'dispatching')
@@ -46,8 +51,13 @@ export class BackgroundRequests {
     finish(owner, key, result) { this.update(owner, key, value => { value.result = result; value.state = 'returned'; }); }
     update(owner, key, change) {
         this.alive();
-        this.context.transaction(() => { const value = this.read(owner, key); if (!value)
-            throw new Error('Background request not admitted'); change(value); this.write(value); });
+        this.context.transaction(() => {
+            const value = this.read(owner, key);
+            if (!value)
+                throw new Error('Background request not admitted');
+            change(value);
+            this.write(value);
+        });
     }
     pending() { this.alive(); return this.context.db.prepare("SELECT value FROM coordinator_state WHERE key LIKE 'background-request-v1:%'").all().map(row => JSON.parse(String(row.value))).filter(value => value.state !== 'returned'); }
 }
