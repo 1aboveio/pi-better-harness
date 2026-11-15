@@ -124,8 +124,9 @@ export async function collectBaseline({ phase = "before" } = {}) {
 
     const bgRegistered = {};
     const bgMessages = [];
+    let shutdownBackground;
     const backgroundApi = {
-        on() {},
+        on(event, handler) { if (event === "session_shutdown") shutdownBackground = handler; },
         registerTool(tool) { bgRegistered[tool.name] = tool; },
         sendMessage(message, options) { bgMessages.push({ message, options }); },
     };
@@ -629,8 +630,12 @@ export async function collectBaseline({ phase = "before" } = {}) {
         limitations: LIMITATIONS,
     };
     } finally {
-        closeBackgroundObservation(backgroundApi);
-        stopWorkObservation();
+        // Reviewed755 fixture lifetime, using this source's real SDK boundary.
+        try { await shutdownBackground?.({ type: "session_shutdown" }, ctx); }
+        finally {
+            try { closeBackgroundObservation(backgroundApi); }
+            finally { stopWorkObservation(); }
+        }
     }
 }
 

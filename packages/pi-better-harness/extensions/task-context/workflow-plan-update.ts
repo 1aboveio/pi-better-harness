@@ -21,6 +21,8 @@ export interface RushDecisionInput {
   humanWords: string;
   changes: string;
   supersedes?: string | undefined;
+  answers?: string[] | undefined;
+  source?: string | undefined;
 }
 
 export interface RushPlanUpdate {
@@ -378,6 +380,13 @@ function appendDecision(plan: Record<string, unknown>, decision: RushDecisionInp
   for (const field of ["humanWords", "changes"] as const) {
     if (typeof decision[field] !== "string" || !decision[field].trim()) throw new Error(`workflow.decision.${field} is required.`);
   }
+  if (decision.answers !== undefined && (!Array.isArray(decision.answers) ||
+      !decision.answers.every((answer) => typeof answer === "string" && answer.trim().length > 0))) {
+    throw new Error("workflow.decision.answers must be a list of non-empty answer-file keys.");
+  }
+  if (decision.source !== undefined && (typeof decision.source !== "string" || !decision.source.trim())) {
+    throw new Error("workflow.decision.source must be non-empty text.");
+  }
   const decisions = plan.decisions === undefined || plan.decisions === null ? [] : plan.decisions;
   if (!Array.isArray(decisions)) throw new Error("The saved plan's decisions field is not a list.");
   const known = new Set(decisions.flatMap((entry) => isRecord(entry) && typeof entry.id === "string" ? [entry.id] : []));
@@ -388,6 +397,8 @@ function appendDecision(plan: Record<string, unknown>, decision: RushDecisionInp
   decisions.push({
     id, timestamp: ts, humanWords: decision.humanWords, changes: decision.changes,
     supersedes: decision.supersedes ?? null,
+    ...(decision.answers === undefined ? {} : { answers: [...decision.answers] }),
+    ...(decision.source === undefined ? {} : { source: decision.source }),
   });
   plan.decisions = decisions;
   return id;
