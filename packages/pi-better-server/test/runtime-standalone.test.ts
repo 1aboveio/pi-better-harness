@@ -6,12 +6,16 @@ import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 import { claimDaemonOwner, inspectDaemonOwner } from "../src/daemon-owner.ts";
 import { runtimeRoot } from "../src/runtime/root.ts";
 import { createServerArtifact, ownPackageDir } from "../src/startup/artifact.ts";
 import type { RuntimePlatform } from "../src/startup/managed-types.ts";
 
 const workspace = process.env.PI_RUNTIME_PACK_WORKSPACE ?? resolve(import.meta.dirname, "../../..");
+// jiti belongs to the selected host SDK, not the eval child's working directory.
+const hostRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
+const hostJiti = pathToFileURL(hostRequire.resolve("jiti")).href;
 mkdirSync(join(workspace, ".work"), { recursive: true });
 const execute = (command: string, args: string[], cwd: string, env = process.env) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
   const child = spawn(command, args, { cwd, env, stdio: "pipe" });
@@ -75,7 +79,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
   const backgroundSource = join(evidence, "pi-better-background-tasks/node_modules/pi-better-background-tasks/src");
   const entryScript = `
     import assert from 'node:assert/strict';
-    import {createJiti} from 'jiti';
+    import {createJiti} from ${JSON.stringify(hostJiti)};
     import {pathToFileURL} from 'node:url';
     const jiti=createJiti(import.meta.url);
     const tools=new Map(); let provider;
