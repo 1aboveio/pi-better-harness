@@ -16,7 +16,7 @@ interface WorkerMetrics { sqlite?: { opens: number; active: number; maximum: num
 export interface QueryExecutorOptions {
   capacity?: number; timeoutMs?: number; maxConnections?: number;
   workerUrl?: URL;
-  modelOptions?: { baseDir?: string; durableDir?: string; intervalMs?: number };
+  modelOptions?: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number };
 }
 
 /** One root, one read worker, one admitted operation at a time. No mutation RPC. */
@@ -76,6 +76,11 @@ export class WorkQueryExecutor {
     return { handle: (command: Record<string, unknown>) => this.request(connection, command), close };
   }
 
+  async livenessReasons(): Promise<any[]> {
+    const result = await this.request(0, { type: "runtime_get_liveness" });
+    return JSON.parse(result.json);
+  }
+
   metrics() {
     return { ...this.workerMetrics, executor: { active: this.active ? 1 : 0, queued: this.queue.length,
       clients: this.streams.size, completed: this.completed, singleflightHits: this.coalesced, rejected: this.rejected,
@@ -87,14 +92,14 @@ export class WorkQueryExecutor {
   }
 
   private request(connection: number, input: Record<string, unknown>): Promise<EncodedRead> {
-    if (!this.streams.has(connection)) return Promise.reject(new Error("runtime-unavailable: client disconnected"));
+    if (connection !== 0 && !this.streams.has(connection)) return Promise.reject(new Error("runtime-unavailable: client disconnected"));
     if (input.type === "runtime_get_metrics") return Promise.resolve({ json: JSON.stringify(this.metrics()) });
     if (this.failure) return Promise.reject(this.failure);
-    if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
+    if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_liveness"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
     if (input.sinceSeq !== undefined && !Number.isSafeInteger(input.sinceSeq)) return Promise.reject(new Error("Invalid replay sequence"));
     if (input.instanceId !== undefined && (typeof input.instanceId !== "string" || input.instanceId.length > 256)) return Promise.reject(new Error("Invalid runtime instance"));
     const command: Record<string, unknown> = { type: input.type, sinceSeq: input.sinceSeq, instanceId: input.instanceId };
-    if (command.type !== "runtime_unsubscribe") {
+    if (command.type !== "runtime_unsubscribe" && command.type !== "runtime_get_liveness") {
       const scope = workScope(input.scope);
       if (scope.cwd) scope.cwd = resolve(scope.cwd);
       scope.limit ??= scope.backgroundHistory ? 10 : 50;

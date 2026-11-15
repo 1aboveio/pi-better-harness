@@ -1,5 +1,6 @@
 import { createLocalWorkClient } from "./runtime/local-client.ts";
-import { chmodSync, existsSync, realpathSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, realpathSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
+import { join } from "node:path";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { getAgentDir, type RpcCommand } from "@earendil-works/pi-coding-agent";
 import { CompanionManager, type CompanionManagerOptions } from "./companion.ts";
@@ -10,7 +11,7 @@ import { MoveService } from "./move/service.ts";
 import { CONTROL_COMMANDS, DAEMON_COMMANDS, encodeLine, failure, LineDecoder, MOVE_COMMANDS, type MoveCommand, type ServerMessage } from "./protocol.ts";
 import { SessionRegistry, type SessionRegistryOptions } from "./registry.ts";
 import { NativeClientHost, NATIVE_HOST_COMMANDS } from "./remote-client/host.ts";
-import { claimDaemonOwner, inspectDaemonOwner } from "./daemon-owner.ts";
+import { claimDaemonOwner, inspectDaemonOwner, ownerIdentityVerified, sameOwner, validateDaemonOwnerIdentity } from "./daemon-owner.ts";
 import { readOwnBuild, readStagedRuntime } from "./startup/artifact.ts";
 import { canonicalStateDir, commitActivationStop, compatibleUpgrade, hasActivationReservations, readActivationJournal } from "./startup/activation.ts";
 import { admitDaemonStartup, startupIntentFromEnv } from "./startup/admission.ts";
@@ -33,6 +34,8 @@ export interface DaemonOptions extends Partial<LifecycleConfig> {
   now?: () => number;
   /** Brief protection between hello/readiness and creation of a session. */
   startupGraceMs?: number;
+  /** CLI-owned process shutdown budget; never used to reclaim a different owner. */
+  onDraining?: () => void;
 }
 
 export interface Daemon {
@@ -118,6 +121,12 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const dispatches = new Set<Promise<void>>();
     let inFlight = 0;
     let draining = false;
+    let idleStopping = false;
+    const runtimeClients = new Map<Socket, string>();
+    let guardianBinding: { socket: Socket; identity: import("./daemon-owner.ts").DaemonOwnerIdentity } | undefined;
+    let observationUnavailable = false;
+    let runtimeZeroSince: number | undefined = now();
+    let hostedUsed = registry.activeCount > 0;
     let zeroSince: number | undefined = registry.activeCount === 0 ? now() : undefined;
     let startupUntil = 0;
     const server: Server = createServer((socket) => {
@@ -155,10 +164,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return;
           }
           if (type === "hello") {
-            const verdict = checkHello(command, { build, instanceId, safeUpgrade, agentDir: realpathSync(getAgentDir()) });
+            const verdict = checkHello(command, { build, instanceId, safeUpgrade, runtimeLifecycle: true, agentDir: realpathSync(getAgentDir()) });
             if (verdict.ok) {
               reconnectControllers.set(control, Array.isArray(command.capabilities) && command.capabilities.includes("runtime-reconnect-v1"));
-              if (!greeted) startupUntil = Math.max(startupUntil, now() + startupGraceMs);
+              if (!greeted && command.runtimeRoot === undefined) startupUntil = Math.max(startupUntil, now() + startupGraceMs);
               greeted = true;
               return reply({ data: verdict.data });
             }
@@ -169,7 +178,34 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (type === "runtime_get_status") {
             if (!greeted) throw new Error("runtime_get_status requires hello");
             return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
-              capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, ...(workModel ? { readModel: workModel.metrics() } : {}) } });
+              capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, lifecycle: config,
+              guardianBinding: guardianBinding?.identity ?? null,
+              livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
+                ...registry.list().filter(session => session.live).map(session => ({ kind: "hosted-session", id: session.sessionId })),
+                ...(await workModel?.livenessReasons() ?? [])],
+              nextIdleDeadline: runtimeClients.size > 0 || registry.activeCount > 0 ? null
+                : hostedUsed ? config.daemonIdleMs === 0 || zeroSince === undefined ? null : zeroSince + config.daemonIdleMs
+                : runtimeZeroSince === undefined ? null : runtimeZeroSince + config.runtimeIdleMs } });
+          }
+          if (type === "runtime_register_client") {
+            if (!greeted) throw new Error("runtime_register_client requires hello");
+            if (typeof command.clientId !== "string" || !command.clientId || command.clientId.length > 256) throw new Error("Invalid runtime client identity");
+            runtimeClients.set(socket, command.clientId);
+            runtimeZeroSince = undefined;
+            return reply({ data: { clientId: command.clientId } });
+          }
+          if (type === "runtime_guardian_bind") {
+            if (!greeted) throw new Error("runtime_guardian_bind requires hello");
+            validateDaemonOwnerIdentity(command.server);
+            validateDaemonOwnerIdentity(command.guardian);
+            const current = inspectDaemonOwner(serverDir);
+            const guardian = inspectDaemonOwner(serverDir, "guardian-owner");
+            if (current.status !== "live" || guardian.status !== "live"
+              || !ownerIdentityVerified(current.owner) || !ownerIdentityVerified(guardian.owner)
+              || !sameOwner(current.owner, command.server) || !sameOwner(guardian.owner, command.guardian)
+              || current.owner.token !== instanceId) throw new Error("runtime-unhealthy: exact guardian/server identity could not be verified");
+            guardianBinding = { socket, identity: guardian.owner };
+            return reply({ data: { server: current.owner, guardian: guardian.owner } });
           }
           if (type === "runtime_upgrade_status") return reply({ data: readActivationJournal(serverDir) ?? null });
           if (["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_metrics"].includes(type)) {
@@ -289,7 +325,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         } finally {
           releaseSessionOperation?.();
           inFlight--;
-          if (registry.activeCount > 0) zeroSince = undefined;
+          if (registry.activeCount > 0) { zeroSince = undefined; hostedUsed = true; }
           else zeroSince ??= now();
         }
       };
@@ -314,6 +350,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       socket.on("close", () => {
         workQueries?.close();
         sockets.delete(socket);
+        runtimeClients.delete(socket);
+        if (guardianBinding?.socket === socket) guardianBinding = undefined;
+        if (runtimeClients.size === 0) runtimeZeroSince ??= now();
         reconnectControllers.delete(control);
         control.dispose();
       });
@@ -387,10 +426,28 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return;
           }
           zeroSince ??= now();
-          if (config.daemonIdleMs === 0 || now() - zeroSince < config.daemonIdleMs || now() < startupUntil) return;
+          if (runtimeClients.size > 0) return;
+          runtimeZeroSince ??= now();
+          if (hostedUsed ? (config.daemonIdleMs === 0 || now() - zeroSince < config.daemonIdleMs || now() < startupUntil)
+            : (now() - runtimeZeroSince < config.runtimeIdleMs || now() < startupUntil)) return;
+          // Recheck durable activity before fencing admission; observation never adopts a writer.
+          if (draining) return;
+          try {
+            if ((await work().livenessReasons()).length > 0) {
+              runtimeZeroSince = undefined;
+              return;
+            }
+          } catch (error) {
+            // The executor already bounds query deadlines and terminates failed workers.
+            // Unknown obligations cannot keep an otherwise detached runtime alive forever.
+            // Stop only the management layer; leave runner evidence and writer leases intact.
+            observationUnavailable = true;
+            log(`runtime observation unavailable at idle shutdown: ${String(error)}`);
+          }
           // No create/open can slip between this check and the synchronous admission fence.
-          if (inFlight > 0 || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
+          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
           draining = true;
+          idleStopping = true;
           log("idle timeout with no active sessions; shutting down");
         })().finally(() => { maintenance = undefined; });
         return maintenance.then(() => draining ? daemon.stop() : undefined);
@@ -399,6 +456,12 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         const pendingMaintenance = maintenance;
         stopped ??= (async () => {
           draining = true;
+          options.onDraining?.();
+          if (idleStopping) {
+            const temporary = join(serverDir, `idle-stop-${instanceId}.tmp`);
+            writeFileSync(temporary, JSON.stringify({ token: instanceId, pid: process.pid }), { mode: 0o600 });
+            renameSync(temporary, join(serverDir, "idle-stop-intent.json"));
+          }
           if (timer) clearInterval(timer);
           await pendingMaintenance?.catch(error => log(`maintenance interrupted during shutdown: ${String(error)}`));
           if (upgradeCommitted) {
@@ -415,16 +478,19 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           await registry.shutdown();
           await Promise.allSettled([...dispatches]);
           if (existsSync(socketPath)) unlinkSync(socketPath);
+          const checkpoint = join(serverDir, `clean-stop-${instanceId}.tmp`);
+          writeFileSync(checkpoint, JSON.stringify({ pid: process.pid, token: instanceId, reason: "clean-stop", observation: observationUnavailable ? "unavailable" : "verified" }), { mode: 0o600 });
+          renameSync(checkpoint, join(serverDir, "clean-stop.json"));
           releaseOwner();
           finishClosed();
         })();
         return stopped;
       },
     };
-    const durations = [config.sessionIdleMs, config.daemonIdleMs].filter(value => value > 0);
+    const durations = [config.sessionIdleMs, config.daemonIdleMs, config.runtimeIdleMs].filter(value => value > 0);
     if (safeUpgrade) durations.push(1_000);
     if (durations.length) {
-      timer = setInterval(() => { void daemon.sweepIdle().catch(error => log(`lifecycle maintenance failed: ${String(error)}`)); }, Math.max(5, Math.min(30_000, ...durations)));
+      timer = setInterval(() => { void daemon.sweepIdle().catch(error => log(`lifecycle maintenance failed: ${String(error)}`)); }, Math.max(5, Math.min(1_000, ...durations)));
       timer.unref();
     }
     return daemon;

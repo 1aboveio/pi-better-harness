@@ -99,6 +99,11 @@ parentPort.on("message", async message => {
   if (message.type !== "query") return;
   try {
     const command = message.command;
+    if (command.type === "runtime_get_liveness") {
+      await model.reconcile();
+      parentPort.postMessage({ type: "reply", id: message.id, json: JSON.stringify(model.livenessReasons()), metrics: metrics() });
+      return;
+    }
     if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe"].includes(command.type)) throw new Error("Unsupported read operation");
     if (command.type === "runtime_get_snapshot" && command.scope?.id) await model.ensureId(command.scope.id);
     const state = session(message.connection);

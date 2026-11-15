@@ -11,10 +11,11 @@ import { Client, makeEnv } from "./helpers.ts";
 test("lifetime settings validate durations and resolve options, environment, saved settings and defaults", () => {
   const env = makeEnv();
   mkdirSync(env.serverDir);
-  assert.deepEqual(readLifecycleConfig(env.serverDir, {}, {}), { sessionIdleMs: 86_400_000, daemonIdleMs: 1_800_000 });
+  assert.deepEqual(readLifecycleConfig(env.serverDir, {}, {}), { sessionIdleMs: 86_400_000, daemonIdleMs: 1_800_000, runtimeIdleMs: 30_000 });
   writeFileSync(join(env.serverDir, "lifecycle.json"), JSON.stringify({ sessionIdleMs: 24, daemonIdleMs: 30 }));
-  assert.deepEqual(readLifecycleConfig(env.serverDir, { sessionIdleMs: 0 }, { PI_SERVER_DAEMON_IDLE_MS: "90" }), { sessionIdleMs: 0, daemonIdleMs: 90 });
-  assert.deepEqual(readLifecycleConfig(env.serverDir, {}, {}), { sessionIdleMs: 24, daemonIdleMs: 30 });
+  assert.deepEqual(readLifecycleConfig(env.serverDir, { sessionIdleMs: 0 }, { PI_SERVER_DAEMON_IDLE_MS: "90" }), { sessionIdleMs: 0, daemonIdleMs: 90, runtimeIdleMs: 30_000 });
+  assert.deepEqual(readLifecycleConfig(env.serverDir, {}, {}), { sessionIdleMs: 24, daemonIdleMs: 30, runtimeIdleMs: 30_000 });
+  assert.throws(() => readLifecycleConfig(env.serverDir, { runtimeIdleMs: 0 }, {}), /positive/);
   for (const value of ["", "-1", "NaN", "1.5", "true"]) assert.throws(() => readLifecycleConfig(env.serverDir, {}, { PI_SERVER_SESSION_IDLE_MS: value }), /non-negative integer/);
   writeFileSync(join(env.serverDir, "lifecycle.json"), JSON.stringify({ daemonIdleMs: null }));
   assert.throws(() => readLifecycleConfig(env.serverDir, {}, {}), /non-negative integer/);
@@ -24,7 +25,7 @@ test("empty daemon expires despite a polling client and releases ownership for r
   const env = makeEnv();
   Object.assign(process.env, env.vars);
   let now = 1_000;
-  const daemon = await startDaemon({ serverDir: env.serverDir, sessionIdleMs: 0, daemonIdleMs: 100, startupGraceMs: 0, now: () => now });
+  const daemon = await startDaemon({ serverDir: env.serverDir, sessionIdleMs: 0, daemonIdleMs: 100, runtimeIdleMs: 100, startupGraceMs: 0, now: () => now });
   t.after(() => daemon.stop());
   const client = await Client.connect(daemon.socketPath);
   t.after(() => client.close());
@@ -104,7 +105,7 @@ test("hello provides a bounded connection-start lease without polling renewing i
   const env = makeEnv();
   Object.assign(process.env, env.vars);
   let now = 1_000;
-  const daemon = await startDaemon({ serverDir: env.serverDir, sessionIdleMs: 0, daemonIdleMs: 100, startupGraceMs: 50, now: () => now });
+  const daemon = await startDaemon({ serverDir: env.serverDir, sessionIdleMs: 0, daemonIdleMs: 100, runtimeIdleMs: 100, startupGraceMs: 50, now: () => now });
   t.after(() => daemon.stop());
   now += 99;
   const client = await DaemonClient.connect(daemon.socketPath);

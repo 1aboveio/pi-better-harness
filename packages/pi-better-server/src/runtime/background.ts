@@ -1,3 +1,4 @@
+import { processMatchesStart } from "../daemon-owner.ts";
 import { createRequire } from "node:module";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -25,6 +26,27 @@ export class BackgroundObservation {
   reason?: string;
   get connectionCount() { return this.db ? 1 : 0; }
   get scopeCount() { return this.legacy.size; }
+  livenessReasons() {
+    this.enabled = true;
+    this.refresh();
+    if (!this.db) return [];
+    const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
+    if (!["1", "2", "3", "4"].includes(version)) return [];
+    let operations: any[] = [];
+    try { operations = this.db ? this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor' AND terminal_revision = 0").all() : []; }
+    catch (error) { this.status = "degraded"; this.reason = String(error); return []; }
+    return operations.flatMap((op: any) => {
+      try {
+        const inspection = snapshot(this.directory, op.task_id);
+        const claim = inspection?.claim;
+        return claim && !inspection.terminal && inspection.token === op.launch_token && processMatchesStart(claim.pid, claim.pidStartTime)
+          ? [{ kind: "runner", id: op.task_id, owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace }, operationId: op.operation_id,
+            lastProgressAt: inspection.command?.startedAt ?? claim.claimedAt,
+            nextDeadline: inspection.launch.timeoutSeconds ? inspection.launch.createdAt + inspection.launch.timeoutSeconds * 1000 : null,
+            recovery: "observe-existing-runner" }] : [];
+      } catch (error) { this.status = "degraded"; this.reason = String(error); return []; }
+    });
+  }
   readonly metrics = { runnerSnapshots: 0, activeQueries: 0, historyQueries: 0 };
   constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor"), indexDb?: any, changed = () => {}) {
     this.root = root; this.directory = directory;

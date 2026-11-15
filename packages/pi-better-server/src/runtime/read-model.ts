@@ -1,3 +1,4 @@
+import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
@@ -94,6 +95,15 @@ export class WorkReadModel {
     return () => { this.listeners.delete(listener); release?.(); };
   }
   get backgroundMetrics() { return { ...this.background.metrics, scopes: this.background.scopeCount, history: this.background.historyMetrics }; }
+  livenessReasons() {
+    return [
+      ...[...this.projected.values()].filter(row => row.meta.status === "running"
+        && processMatchesStart(row.meta.pid, row.meta.pidStartTime))
+        .map(row => ({ kind: "worker", id: row.meta.id, owner: row.meta.callbackOrigin,
+          lastProgressAt: row.meta.startedAt, nextDeadline: null, recovery: "observe-existing-worker" })),
+      ...this.background.livenessReasons(),
+    ];
+  }
   async ensureId(id: string) {
     if (!safeId.test(id)) throw new Error("Invalid run ID");
     if (this.state === "rebuilding") await this.reconcile();
@@ -191,7 +201,7 @@ export class WorkReadModel {
         const status = effectiveStatus(entry.meta); processes.set(entry.meta.id, status);
         if (status !== this.processes.get(entry.meta.id)) logFamilies.add(JSON.stringify([entry.meta.sessionId, entry.meta.cwd]));
       }
-      const healthConfig = readHealthConfig(this.agentDir);
+      const healthConfig = await readHealthConfig(this.agentDir, next.size > 0);
       const changed = next.size !== this.files.size || [...next].some(([path, entry]) => this.files.get(path)?.signature !== entry.signature);
       if (!changed && !logFamilies.size && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && this.state === "ready") return;
       const metas = new Map<string, any>();

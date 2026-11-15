@@ -11,6 +11,7 @@ import { readActiveRuntime, activateStagedRuntime, type ActivateOptions } from "
 import { readOwnBuild, readStagedRuntime } from "./artifact.ts";
 import { checkStartupAdmission } from "./admission.ts";
 import { PROTOCOL_VERSION, type HelloData } from "../protocol.ts";
+import { runtimeRoot } from "../runtime/root.ts";
 
 export interface Readiness {
   version: 1;
@@ -67,7 +68,16 @@ export async function ensureDaemon(options: EnsureOptions): Promise<Readiness> {
   abortCheck(options.signal);
   const timeoutMs = options.timeoutMs ?? 15_000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new Error("Ensure timeout must be an integer from 1 to 120000 ms");
-  const serverDir = existsSync(options.serverDir) ? realpathSync(options.serverDir) : resolve(options.serverDir);
+  const requested = existsSync(options.serverDir) ? realpathSync(options.serverDir) : resolve(options.serverDir);
+  const serverDir = existsSync(join(options.agentDir, "server-registration-v1.json")) ? runtimeRoot(options.agentDir, options.serverDir).serverDir : requested;
+  if (requested !== serverDir) {
+    try {
+      await health(socketPathFor(requested), Math.min(2000, timeoutMs), options);
+      throw new Error(`runtime-unhealthy: explicit endpoint ${requested} conflicts with registered runtime ${serverDir}`);
+    } catch (error) {
+      if (!absent(error)) throw new Error(`Server health at explicit endpoint ${requested}: ${String(error)}. Existing listener was not replaced.`);
+    }
+  }
   const socketPath = socketPathFor(serverDir);
   const deadline = Date.now() + timeoutMs;
   const ready = (hello: HelloData): Readiness => ({ version: 1, agent: "pi", serverDir, socketPath, hello });
@@ -84,6 +94,8 @@ export async function ensureDaemon(options: EnsureOptions): Promise<Readiness> {
     throw new Error(`Server runtime at ${serverDir} is incompatible: ${error instanceof Error ? error.message : String(error)}. Update/register a compatible installed runtime; no daemon was launched.`);
   }
   checkStartupAdmission({ canonicalServerDir: serverDir, agentDir: options.agentDir, build: selected?.build ?? readOwnBuild(), intent: { kind: "ordinary" } });
+  const registered = runtimeRoot(options.agentDir, options.serverDir).serverDir;
+  if (registered !== serverDir) return ensureDaemon({ ...options, serverDir: registered });
   if (Date.now() >= deadline) throw new Error(`Server readiness timed out at ${socketPath} before launch`);
   const logPath = join(serverDir, "daemon.log");
   let exitDetail = "";

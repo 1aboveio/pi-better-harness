@@ -208,7 +208,12 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
         while (buffer.includes("\n")) {
           const index = buffer.indexOf("\n"), line = buffer.slice(0, index); buffer = buffer.slice(index + 1);
           const frame = JSON.parse(line);
-          if (dropNext && frame.event?.type === "runtime_snapshot") { dropNext = false; dropped = true; continue; }
+          // A non-atomic fixture write may publish a transient degraded snapshot first.
+          if (dropNext && frame.event?.type === "runtime_snapshot"
+            && frame.event.snapshot.rows.find((row: any) => row.meta.id === "sa_shared_0")?.meta.name === "gap-one") {
+            dropped = true; continue;
+          }
+          if (frame.event?.snapshot?.rows.find((row: any) => row.meta.id === "sa_shared_0")?.meta.name === "gap-two") dropNext = false;
           downstream.write(line + "\n");
         }
       });
