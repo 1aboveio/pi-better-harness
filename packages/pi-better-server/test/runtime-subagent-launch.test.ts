@@ -74,6 +74,7 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
     assert.notEqual(metaFor(first.details.runId).spawnPid, metaFor(independent.details.runId).spawnPid);
     assert.equal(metaFor(first.details.runId).cwd, cwd);
     await waitFile(entered);
+    for (const id of attempts) await waitFile(`${entered}.${metaFor(id).pid}`);
     const duplicateBootstrap = () => spawnSync(execPath, [new URL("../src/runtime/domain/subagents/managed-worker.mjs", import.meta.url).pathname], {
       env: { ...env, PI_MANAGED_SUBAGENT: JSON.stringify(bootstrapProof) }, encoding: "utf8",
     });

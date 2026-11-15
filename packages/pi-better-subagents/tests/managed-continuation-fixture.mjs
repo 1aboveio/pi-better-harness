@@ -1,6 +1,6 @@
 import { fork } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
@@ -12,6 +12,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
     process.env.PI_CODING_AGENT_DIR = agent;
     process.env.PI_SUBAGENT_DURABLE_DIR = join(agent, "subagents");
     const model = await startContinuationModel(artifacts);
+    writeFileSync(join(agent, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: { defaultTools: "read,bash" } } }));
     writeFileSync(join(agent, "models.json"), JSON.stringify(continuationModels(model.baseUrl)));
     const observer = new URL("./fixtures/continuation-worker-observer.mjs", import.meta.url).href;
     const env = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${observer}`.trim(),
@@ -83,5 +84,9 @@ export async function continuationFixture({ root, artifacts, workspace }) {
     return { makeHarness, async close() {
         for (const child of actors) { const exited = once(child, "exit"); child.send({ stop: true }); await exited; }
         await stopDaemon(); await model.close();
+        if (process.env.PI_CONTINUATION_EVIDENCE_DIR) {
+            mkdirSync(process.env.PI_CONTINUATION_EVIDENCE_DIR, { recursive: true });
+            cpSync(root, mkdtempSync(join(process.env.PI_CONTINUATION_EVIDENCE_DIR, "continuation-")), { recursive: true });
+        }
     } };
 }

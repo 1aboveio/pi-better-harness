@@ -60,7 +60,11 @@ export default function offline(pi: ExtensionAPI) {
       turn++;
       const stream = createAssistantMessageEventStream();
       const gate = process.env.LAUNCH_RELEASE!, entered = process.env.LAUNCH_ENTERED!;
-      if (turn === 1) writeFileSync(entered, JSON.stringify({ pid: process.pid, model: model.id }));
+      if (turn === 1) {
+        const proof = JSON.stringify({ pid: process.pid, model: model.id });
+        writeFileSync(entered, proof);
+        writeFileSync(`${entered}.${process.pid}`, proof);
+      }
       const finish = () => {
         const content = turn === 1 ? [{ type: "toolCall", id: "launch-report", name: "report_assignment_result", arguments: {
           status: "complete", reason: "Offline provider observed real worker bootstrap and release", evidence: [{ path: entered, explanation: "Actual worker PID and model after production bootstrap" }] } }]
