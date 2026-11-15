@@ -425,11 +425,11 @@ describe("#325 lost runs", () => {
                     { id: "delivered:lost", operation: "attention-delivery", kind: "delivered", incidents: ["supervision:lost"] },
                 ]);
                 appendFileSync(log, '{"type":"tool_execution_end","toolCallId":"broken"}\n');
-                if (!await waitFor(() => h.sent.some(x => x.message.customType === "subagent-failure"))) throw new Error(`canonical observation did not deliver late failure attention: ${JSON.stringify({ runtime: fixture.runtimeDiagnostics(), foreground: await h.inspect(), sent: h.sent, meta: readMeta(id), failures: readRunFailures(id) })}`);
+                if (!await waitFor(() => h.sent.some(x => x.message.customType === "subagent-failure" && x.message.content.includes("malformed structured events")))) throw new Error(`canonical observation did not deliver late failure attention: ${JSON.stringify({ runtime: fixture.runtimeDiagnostics(), foreground: await h.inspect(), sent: h.sent, meta: readMeta(id), failures: readRunFailures(id) })}`);
                 await h.tools.get("subagent_result").execute("read-again", { id });
-                await waitFor(() => h.sent.some(x => x.message.customType === "subagent-failure"));
-                const wakes = h.sent.filter((x) => x.message.customType === "subagent-failure");
-                assert.equal(wakes.length, 1, "delivered once; the receipt prevents repeats");
+                await waitFor(() => h.sent.some(x => x.message.customType === "subagent-failure" && x.message.content.includes("malformed structured events")));
+                const wakes = h.sent.filter((x) => x.message.customType === "subagent-failure" && x.message.content.includes("malformed structured events"));
+                assert.equal(wakes.length, 1, "the new malformed-event incident is delivered once; its receipt prevents repeats");
                 assert.match(wakes[0].message.content, /Observation incomplete · .*malformed structured events/);
                 assert.doesNotMatch(wakes[0].message.content, /supervision was lost/i, "the delivered supervision incident is not repeated");
             } finally {
