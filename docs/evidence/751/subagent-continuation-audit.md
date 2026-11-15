@@ -1,5 +1,7 @@
 # Managed continuation acceptance evidence
 
+> **Status authority:** [Current acceptance matrix](status-index.md). This is a historical checkpoint; its open gaps and test counts are not the current completion status. Original evidence is retained below.
+
 Issue: #762, parent #751. This branch integrates #761 recovery at 8c7ec00f. External model responses are fixture-controlled; SDK, bootstrap, workers, local runners, Unix transport, coordinator SQLite, saved native conversations, and result publication are production paths.
 
 ## Verified behavior

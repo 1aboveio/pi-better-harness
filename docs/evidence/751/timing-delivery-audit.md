@@ -1,5 +1,7 @@
 # Managed timing notification ownership
 
+> **Status authority:** [Current acceptance matrix](status-index.md). This is a historical checkpoint; its open gaps and test counts are not the current completion status. Original evidence is retained below.
+
 The runtime enforces deadlines and publishes bounded pending timing notices. It does not send a recipient message or mark a notification handled because its own SDK context differs from the parent. Foreground snapshot observation and session reconnect replay retained notices under the existing exact session/workspace/branch gate.
 
 The recipient writes a timing receipt after handoff. Urgent messages carry a structured native receipt identity, allowing reconnect to repair a missing receipt without another model turn. The runtime folds receipts into existing timing markers and removes folded files; frontend receipt writes do not race the runtime's timing metadata writes.

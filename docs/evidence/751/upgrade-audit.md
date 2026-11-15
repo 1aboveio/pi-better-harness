@@ -1,5 +1,7 @@
 # Upgrade obligation and admission audit
 
+> **Status authority:** [Current acceptance matrix](status-index.md). This is a historical checkpoint; its open gaps and test counts are not the current completion status. Original evidence is retained below.
+
 The activation gate now checks durable runtime obligations in addition to HostedSession idleness. It refuses degraded observations, accepted launch intents, active resume claims, unsettled operations (including watches), and unresolved worker metadata. Upgrade status exposes blockers instead of presenting a silent wait.
 
 A persistent SQLite trigger fences new operation registration while an activation is pending, including older bundled foreground writers. Existing operation retries remain idempotent. An exact worker-conversation assignment binding with an accepted attempt and no terminal assignment outcome can create dependencies; unrelated workspaces and completed assignments cannot use this exception. Both Background launch paths register the operation before starting the supervisor, so this fence runs before execution. New managed Subagent launch requests receive runtime-draining while pending. Revoked reservations clear the fence; proven successor startup clears the preceding manager's fence.

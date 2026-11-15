@@ -1,5 +1,7 @@
 # Final resource validation
 
+> **Status authority:** [Current acceptance matrix](status-index.md). This document records the final local resource runs; overall completion still requires final CI.
+
 Both measurements ran sequentially from an isolated checkout with fresh `npm ci --registry=https://registry.npmjs.org` dependencies on macOS (Apple M3 Max). Each report records a clean source tree. The driver used Node 24.21.0; the full managed-runtime run used pinned Node 24.14.1 for managed processes.
 
 ## Full mixed runtime

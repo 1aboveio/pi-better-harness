@@ -1,5 +1,7 @@
 # Background ownership migration
 
+> **Status authority:** [Current acceptance matrix](status-index.md). This is a historical checkpoint; its open gaps and test counts are not the current completion status. Original evidence is retained below.
+
 The native Background extension registers the existing tools and UI, but execution goes through the fixed server adapter. The frontend holds no coordinator connection or mechanical reconciliation timer. The server adapter borrows the root mutation store and uses the shared query-worker snapshot; unchanged recipients do not each enumerate legacy metadata or reconcile operations. Navigator rendering reads cached data. Explicit selection and observation refresh load evidence.
 
 Protected request grants capture native session/workspace/branch identity, PID/start identity, tool schema, arguments and current Background permissions. The server validates the grant and schema, intersects captured restrictions with the fresh mandatory profile, and checks authority again immediately before external dispatch. A durable request journal returns prior results or exact prepared identities after an interrupted dispatch; it never silently retries an uncertain external launch. New parent admissions are refused during upgrade drain. Worker launches retain their captured Background profile and re-read mandatory settings before preparation and dispatch.

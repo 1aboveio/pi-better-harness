@@ -1,5 +1,7 @@
 # Managed runtime integration checkpoint
 
+> **Status authority:** [Current acceptance matrix](status-index.md). This is a historical checkpoint; its open gaps and test counts are not the current completion status. Original evidence is retained below.
+
 Integration branch: `fix/751-managed-integration`. This is not final epic acceptance.
 
 The branch combines managed launch recovery, server-owned continuation, recipient delivery, durable timing notices, upgrade obligations and admission fencing. Merge resolution preserves both the shared execution context and durable no-attempt refusal receipts. Generated domain sources are regenerated from canonical packages; the Server compiler excludes those source mirrors, while canonical packages retain their own checks.

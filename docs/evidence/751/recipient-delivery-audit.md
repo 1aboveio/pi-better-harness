@@ -1,5 +1,7 @@
 # Recipient delivery audit (#763)
 
+> **Status authority:** [Current acceptance matrix](status-index.md). This is a historical checkpoint; its open gaps and test counts are not the current completion status. Original evidence is retained below.
+
 The registered Subagents extension supplies local and HostedSession outcome inspection and explicit consumption. HostedSession binds the real SDK extension runner. No separate socket consume API is required; permission checks remain in assignment-outcomes.ts.
 
 ## Real entrypoint evidence

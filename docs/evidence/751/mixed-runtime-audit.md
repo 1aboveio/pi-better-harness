@@ -1,5 +1,7 @@
 # Mixed native and remote runtime evidence
 
+> **Status authority:** [Current acceptance matrix](status-index.md). This is a historical checkpoint; its open gaps and test counts are not the current completion status. Original evidence is retained below.
+
 The full resource matrix now uses two real `RemoteClientSession` presentation adapters over Unix transport attached to two real HostedSessions, concurrently with ordinary local SDK clients. This exercises the logical remote adapter boundary; it does not claim cross-machine SSH/network coverage.
 
 The originating remote session launches a real canonical Background tool through its hosted extension. That runner and command remain active alongside the local managed Subagent, local Background runner/command, and legacy commands throughout the 1/5/10-local-client measurements. The server owns mechanical execution. Remote adapters have no local extension handlers; ordinary local clients open no coordinator connection. The measurement process that hosts both remote adapters is included in aggregate CPU/RSS, as are the actual remote runner and command.

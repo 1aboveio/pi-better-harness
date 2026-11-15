@@ -1,5 +1,7 @@
 # Final acceptance gates for #765 and #782
 
+> **Status authority:** [Current acceptance matrix](status-index.md). This is a historical checkpoint; its open gaps and test counts are not the current completion status. Original evidence is retained below.
+
 This checklist preserves the accepted design's budgets. Existing resource JSON is partial evidence, not proof of full epic completion.
 
 | Gate | Runnable evidence | Remaining scope |

@@ -1,5 +1,7 @@
 # Managed Subagent launch audit
 
+> **Status authority:** [Current acceptance matrix](status-index.md). This is a historical checkpoint; its open gaps and test counts are not the current completion status. Original evidence is retained below.
+
 Integration base: main d2bfeea0 (Catalog/Background PR #789 merged after CI 43741123570 passed).
 
 The existing #761 branch contains a fixed managed launch host, durable intent journal, bootstrap writer fence, per-original-owner capacity, client admission and managed supervision hooks. The old PR description incorrectly described it as an integration-only baseline. This work is not yet acceptance-complete.

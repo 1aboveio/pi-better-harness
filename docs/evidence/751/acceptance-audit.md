@@ -1,5 +1,7 @@
 # Unified runtime acceptance audit
 
+> **Status authority:** [Current acceptance matrix](status-index.md). This is a historical checkpoint; its open gaps and test counts are not the current completion status. Original evidence is retained below.
+
 Audit baseline: `7e70fdf5` (origin/main), 2026-11-16.
 
 Issue #751 remains incomplete. Merged implementation and open issue state are separate evidence: #755 and #759 have merged PRs, while their issues remain open.
