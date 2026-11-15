@@ -5,6 +5,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   shared-read-resources:
     name: shared-read-resources (${{ matrix.os }})
@@ -121,9 +128,13 @@ jobs:
 
   # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
   pi-1x-compat:
-    name: pi-1x-compat
+    name: pi-1x-compat (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
 
@@ -150,6 +161,8 @@ jobs:
           test "$(codex --version)" = "codex-cli 0.159.2"
 
       - name: pi-better-server suite on supported native Pi 1.2
+        env:
+          TEST_SHARD: ${{ matrix.shard }}/2
         run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.2.0 "$RUNNER_TEMP/pi-compat"
 
   # Exercise the affected extensions against the minimum and current Pi 1.x
@@ -229,12 +242,16 @@ jobs:
         run: npm test -w pi-better-background-tasks -w navigator -w ssh-core -w pi-better-ssh
 
   workspace-ci:
-    name: workspace-ci
+    name: workspace-ci (${{ matrix.lane }})
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [scripts-1, scripts-2, workspaces-1, workspaces-2]
     steps:
       - uses: actions/checkout@v4
 
@@ -268,6 +285,7 @@ jobs:
           test "$(codex --version)" = "codex-cli 0.159.2"
 
       - name: Select assignment projection performance checks
+        if: matrix.lane == 'scripts-1'
         id: performance-scope
         timeout-minutes: 2
         env:
@@ -291,28 +309,40 @@ jobs:
           if-no-files-found: warn
 
       - name: Typecheck
+        if: matrix.lane == 'scripts-1'
         run: npm run typecheck
 
       - name: Root script tests
+        if: startsWith(matrix.lane, 'scripts-')
         env:
           PI_NAVIGATOR_EVIDENCE_DIR: ${{ runner.temp }}/navigator-golden
-        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 scripts/*.test.mjs
+          TEST_LANE: ${{ matrix.lane }}
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 --test-shard="${TEST_LANE#scripts-}/2" scripts/*.test.mjs
+
+      - name: Stage bundled components for isolated workspace tests
+        if: startsWith(matrix.lane, 'workspaces-')
+        run: node scripts/stage-harness-dependencies.mjs
 
       - name: Workspace tests (Server runs in isolated shards)
-        run: node scripts/test-ci-workspaces.mjs
+        if: startsWith(matrix.lane, 'workspaces-')
+        env:
+          TEST_LANE: ${{ matrix.lane }}
+        run: node scripts/test-ci-workspaces.mjs --shard "${TEST_LANE#workspaces-}/2"
 
       - name: Upload navigator golden-path evidence
-        if: always()
+        if: ${{ always() && startsWith(matrix.lane, 'scripts-') }}
         uses: actions/upload-artifact@v4
         with:
-          name: navigator-golden
+          name: navigator-golden-${{ matrix.lane }}
           path: ${{ runner.temp }}/navigator-golden
           if-no-files-found: warn
 
       - name: Cross-session leakage regressions
+        if: matrix.lane == 'scripts-2'
         run: npm run test:cross-session
 
       - name: Package dry run
+        if: matrix.lane == 'scripts-1'
         run: |
           npm pack --dry-run --workspaces
           npm pack --dry-run -w packages/pi-better-harness --json > /tmp/pi-harness-pack.json
@@ -376,14 +406,17 @@ jobs:
             extensions/project-context/index.ts \
             extensions/worktree-context.ts
           do
+            # shellcheck disable=SC2016
             node -e 'const d = require(process.argv[1]); const pack = Array.isArray(d) ? d[0] : Object.values(d)[0]; if (!pack.files.some((file) => file.path === process.argv[2])) throw new Error(`missing bundled extension: ${process.argv[2]}`);' /tmp/pi-harness-pack.json "$path"
           done
 
           # The sandbox ships no launcher: users keep running ordinary `pi`.
+          # shellcheck disable=SC2016
           node -e 'const d = require("/tmp/pi-harness-pack.json"); const pack = Array.isArray(d) ? d[0] : Object.values(d)[0]; const launcher = pack.files.find((file) => file.path.startsWith("node_modules/pi-better-sandbox/bin/")); if (launcher) throw new Error(`pi-better-sandbox must ship no launcher, found ${launcher.path}`);'
 
       # Run last: replace installed peers only, preserving baseline checks and the lockfile.
       - name: Native codemode batch compatibility (Pi 0.99.1)
+        if: matrix.lane == 'scripts-2'
         timeout-minutes: 5
         env:
           PI_CODEMODE_TEST_REQUIRED: "1"
@@ -393,13 +426,13 @@ jobs:
           node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/goal-retry-runtime.test.mjs
 
   server-tests:
-    name: server-tests (${{ matrix.shard }}/2)
+    name: server-tests (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
@@ -439,7 +472,7 @@ jobs:
         working-directory: packages/pi-better-server
         env:
           TEST_SHARD: ${{ matrix.shard }}
-        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$TEST_SHARD/2" test/*.test.ts
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$TEST_SHARD/3" test/*.test.ts
 
   # Keep the existing required check name, and fail on failed, cancelled, or skipped lanes.
   ci:
@@ -462,6 +495,7 @@ jobs:
   macos-sandbox:
     name: macos-sandbox
     runs-on: macos-latest
+    timeout-minutes: 10
     env:
       # Turns "no backend, so skip" into a hard failure on the lane whose whole
       # job is that backend. A silently skipped confinement suite is a green run
@@ -520,6 +554,7 @@ jobs:
   linux-sandbox:
     name: linux-sandbox
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       # Same contract as the macOS lane: a runner that has lost bubblewrap must
       # fail here rather than report a skipped suite.
