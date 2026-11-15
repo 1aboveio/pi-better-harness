@@ -1289,6 +1289,11 @@ function reconcileHealth() {
                 }
             }
         }
+        // Canonical loss is an assignment terminal fact even when no recipient
+        // is attached. This manager already proved current epoch, ownership and
+        // process identity above; native foregrounds never enter this pass.
+        if (meta.status === "lost" && meta.assignment && pi)
+            enqueueCompletionCallback(pi, meta.id);
         // Durable recovery independent of a fresh transition: any current
         // orphaned/lost without a successful handoff marker must eventually
         // deliver exactly one coordinator follow-up (or mark callback:false).

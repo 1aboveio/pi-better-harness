@@ -162,6 +162,23 @@ async function spawnRun({ tools, ctx }, overrides = {}) {
     return { id, pid, out };
 }
 
+/** Lose the original worker only while its manager is absent, so recovery
+ * establishes lost truth instead of rewriting an already terminal assignment. */
+async function loseManagedWorker(fixture, run, artifacts) {
+    const requestPath = join(artifacts, `request-${createHash("sha256").update("lifecycle test task").digest("hex")}.json`);
+    assert.ok(await waitFor(() => existsSync(requestPath), { timeoutMs: 10000 }), "real managed worker entered its provider");
+    await fixture.pauseRuntime();
+    killProcessTree(run.pid, "SIGKILL");
+    await fixture.resumeRuntime();
+    const { readOutcome } = await import("../assignment-outcomes.ts");
+    assert.ok(await waitFor(() => readMeta(run.id)?.status === "lost" && readOutcome(readMeta(run.id)), { timeoutMs: 20000 }),
+        `canonical restart did not publish lost assignment: ${JSON.stringify({ meta: readMeta(run.id), runtime: fixture.runtimeDiagnostics() })}`);
+    const outcome = readOutcome(readMeta(run.id));
+    assert.equal(outcome.outcome, "failed");
+    assert.equal(outcome.processUncertain, true);
+    return outcome;
+}
+
 /** Poll (real timers) until fn() returns truthy; undefined on timeout. */
 async function waitFor(fn, { timeoutMs = 5000, intervalMs = 20 } = {}) {
     const deadline = Date.now() + timeoutMs;
@@ -412,18 +429,15 @@ describe("#325 lost runs", () => {
             process.env.PI_CONTINUATION_SLEEP_MS = "30000";
             const fixture = await continuationFixture({ root, artifacts, workspace: root });
             const h = fixture.makeHarness(); await h.ready;
-            let id;
+            let id, pid;
             try {
-                ({ id } = await spawnRun(h, { cwd: root }));
-                await h.tools.get("subagent_stop").execute("stop", { id });
-                if (!await waitFor(() => readMeta(id)?.completionCallbackSentAt)) throw new Error("real terminal callback did not settle");
+                ({ id, pid } = await spawnRun(h, { cwd: root }));
+                await loseManagedWorker(fixture, { id, pid }, artifacts);
+                assert.ok(await waitFor(() => readMeta(id)?.lostCallbackSentAt && h.sent.some(item => item.message?.customType === "subagent-health" && item.message.content.includes(id))), "actual lost-health handoff settled");
                 const meta = readMeta(id), log = meta.logPath;
-                // Replay a retained lost-health record with the real captured owner and execution identity.
-                writeMeta({ ...meta, status: "lost", lostAt: Date.now(), lostCallbackSentAt: Date.now() });
-                observeFailures(failurePath(id), [
-                    { id: "supervision:lost", operation: "supervision:lost", kind: "incomplete", summary: "Child supervision was lost; outcome is unknown" },
-                    { id: "delivered:lost", operation: "attention-delivery", kind: "delivered", incidents: ["supervision:lost"] },
-                ]);
+                const { readOutcome } = await import("../assignment-outcomes.ts");
+                const originalOutcome = readOutcome(meta);
+                assert.ok(originalOutcome, "canonical recovery published an assignment outcome");
                 appendFileSync(log, '{"type":"tool_execution_end","toolCallId":"broken"}\n');
                 if (!await waitFor(() => h.sent.some(x => x.message.customType === "subagent-failure" && x.message.content.includes("malformed structured events")))) throw new Error(`canonical observation did not deliver late failure attention: ${JSON.stringify({ runtime: fixture.runtimeDiagnostics(), foreground: await h.inspect(), sent: h.sent, meta: readMeta(id), failures: readRunFailures(id) })}`);
                 await h.tools.get("subagent_result").execute("read-again", { id });
@@ -432,7 +446,10 @@ describe("#325 lost runs", () => {
                 assert.equal(wakes.length, 1, "the new malformed-event incident is delivered once; its receipt prevents repeats");
                 assert.match(wakes[0].message.content, /Observation incomplete · .*malformed structured events/);
                 assert.doesNotMatch(wakes[0].message.content, /supervision was lost/i, "the delivered supervision incident is not repeated");
+                assert.deepEqual(readOutcome(readMeta(id))?.outcome, originalOutcome.outcome, "late failure attention preserves the immutable assignment outcome");
+                assert.equal(fixture.runtimeDiagnostics().exitCode, null, "late failure folding keeps the manager alive");
             } finally {
+                if (pid && realProcessProbe.pidExists(pid)) killProcessTree(pid, "SIGKILL");
                 await h.shutdown(); await fixture.close(); rmSync(root, { recursive: true, force: true });
                 for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
             }
@@ -1956,17 +1973,17 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
             const prior = Object.fromEntries(["PI_CODING_AGENT_DIR", "PI_SUBAGENT_DURABLE_DIR", "PI_CONTINUATION_SLEEP_MS"].map(key => [key, process.env[key]]));
             process.env.PI_CONTINUATION_SLEEP_MS = "30000";
             const fixture = await continuationFixture({ root, artifacts, workspace: root });
-            let h = fixture.makeHarness(); await h.ready;
+            let h = fixture.makeHarness({ ui: true }); await h.ready;
+            let pid;
             try {
-                const { id } = await spawnRun(h, { cwd: root });
-                await h.tools.get("subagent_stop").execute("stop", { id });
-                if (!await waitFor(() => readMeta(id)?.completionCallbackSentAt)) throw new Error("real terminal callback did not settle");
-                const meta = readMeta(id);
+                const run = await spawnRun(h, { cwd: root }); const id = run.id; pid = run.pid;
                 const sessionFile = h.sessionFile;
                 if (!sessionFile || !existsSync(sessionFile)) throw new Error("real recipient session was not saved before reconnect");
                 await h.shutdown();
-                // Retained lost state uses the real attempt, captured process identity and recipient.
-                writeMeta({ ...meta, status: "lost", lostAt: Date.now() });
+                const originalOutcome = await loseManagedWorker(fixture, run, artifacts);
+                // Canonical loss is durable before any recipient reconnects.
+                assert.equal(originalOutcome.revision, 1);
+                assert.equal(fixture.runtimeDiagnostics().exitCode, null);
                 assert.equal(readMeta(id).lostCallbackSentAt, undefined);
                 const foreign = fixture.makeHarness({ sessionId: "foreign-health-recipient" }); await foreign.ready;
                 assert.equal(healthMsgsFor(foreign.delivered, id).length, 0, "another real SDK session cannot receive this health callback");
@@ -1990,7 +2007,13 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 await h.shutdown(); h = fixture.makeHarness({ sessionFile }); await h.ready;
                 await h.tools.get("subagent_result").execute("reconnect", { id });
                 assert.equal(healthMsgsFor(h.delivered, id).length, 0, "a subsequent real SDK reconnect does not repeat the delivered health callback");
+                const { readOutcome } = await import("../assignment-outcomes.ts");
+                const retainedOutcome = readOutcome(readMeta(id));
+                assert.equal(retainedOutcome.eventId, originalOutcome.eventId);
+                assert.equal(retainedOutcome.revision, originalOutcome.revision);
+                assert.equal(retainedOutcome.outcome, originalOutcome.outcome);
             } finally {
+                if (pid && realProcessProbe.pidExists(pid)) killProcessTree(pid, "SIGKILL");
                 await h.shutdown(); await fixture.close(); rmSync(root, { recursive: true, force: true });
                 for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
             }
