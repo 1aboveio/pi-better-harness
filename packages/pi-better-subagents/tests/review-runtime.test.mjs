@@ -5,10 +5,13 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { describe, it, after } from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { continuationFixture } from "./managed-continuation-fixture.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "review-runtime-"));
 const runtimeTmp = join(root, "tmp");
@@ -16,6 +19,7 @@ mkdirSync(runtimeTmp, { recursive: true });
 process.env.TMPDIR = runtimeTmp;
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
+const stopRuntime = await startWorkRuntimeFixture();
 
 const { setConfigForTests } = await import("../config.ts");
 const { clarifyCatalogRequest } = await import("../catalog-runtime.ts");
@@ -23,8 +27,6 @@ const { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } = await import(
 const { resolveRoleAssignment } = await import("../role-assignment.ts");
 const { mergeJobOptions } = await import("../batch.mjs");
 const { default: extension } = await import("../index.ts");
-// Pi does not export this subpath. Import the installed file, the same boundary command-repros used.
-const { validateToolArguments } = await import("../../../node_modules/@earendil-works/pi-ai/dist/utils/validation.js");
 
 const tools = {};
 setConfigForTests({ defaultTools: "read", maxConcurrent: 4, defaultModel: null, tierPolicy: null });
@@ -52,7 +54,8 @@ function runNames() {
 }
 
 describe("review runtime P1", () => {
-    after(() => {
+    after(async () => {
+        await stopRuntime();
         setConfigForTests(undefined);
         rmSync(root, { recursive: true, force: true });
     });
@@ -149,7 +152,12 @@ describe("review runtime P1", () => {
         assert.equal(entry.capabilities.grantedByCatalog, false);
     });
 
-    it("admits an ambiguous role array through Pi validation and does not launch", async () => {
+    it("admits an ambiguous role array through Pi validation and does not launch", async (t) => {
+        const sdkRoot = join(runtimeTmp, "actual-sdk"), artifacts = join(sdkRoot, "children"); mkdirSync(artifacts, { recursive: true });
+        const prior = Object.fromEntries(["PI_CODING_AGENT_DIR", "PI_SUBAGENT_DURABLE_DIR"].map(key => [key, process.env[key]]));
+        const fixture = await continuationFixture({ root: sdkRoot, artifacts, workspace: root });
+        const host = fixture.makeHarness(); await host.ready;
+        t.after(async () => { await host.shutdown(); await fixture.close(); for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
         const ambiguous = ["role.developer", "role.reviewer"];
         const spawnArgs = validateToolArguments(tools.subagent_spawn, {
             id: "t",
@@ -179,16 +187,12 @@ describe("review runtime P1", () => {
         assert.equal(plain.role, "role.developer");
 
         const before = runNames();
-        const single = await tools.subagent_spawn.execute("call", spawnArgs, undefined, undefined, ctxWith({
-            getAvailable: () => [{ provider: "openai", id: "gpt-6.1-sol", reasoning: true }],
-        }));
+        const single = await host.tools.get("subagent_spawn").execute("call", spawnArgs);
         assert.equal(single.details.status, "clarification-needed");
         assert.equal(single.details.launched, false);
         assert.equal(single.details.wrote, false);
         assert.match(single.content[0].text, /Nothing was launched/);
-        const batch = await tools.subagent_spawn_batch.execute("call", batchArgs, undefined, undefined, ctxWith({
-            getAvailable: () => [{ provider: "openai", id: "gpt-6.1-sol", reasoning: true }],
-        }));
+        const batch = await host.tools.get("subagent_spawn_batch").execute("call", batchArgs);
         assert.equal(batch.details.status, "clarification-needed");
         assert.equal(batch.details.launched, false);
         assert.equal(batch.details.wrote, false);

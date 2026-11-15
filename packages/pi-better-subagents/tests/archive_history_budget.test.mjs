@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fork, execFileSync } from "node:child_process";
+import { once } from "node:events";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,11 +10,9 @@ import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 
 test("large archive history stays bounded across independent readers and publications", { timeout: 120_000 }, async (t) => {
     const root = mkdtempSync(join(tmpdir(), "archive-budget-"));
-    t.after(() => rmSync(root, { recursive: true, force: true }));
     mkdirSync(join(root, "attempts"));
     mkdirSync(join(root, "pi-better-subagents", "runs"), { recursive: true });
     const stopRuntime = await startWorkRuntimeFixture({ ...process.env, TMPDIR: root, TMP: root, TEMP: root, PI_SUBAGENT_DURABLE_DIR: root });
-    t.after(stopRuntime);
     for (let i = 0; i < 4416; i++) {
         const meta = { id: `sa_archive_${i}`, sessionId: `conversation-${i}`, status: "completed",
             startedAt: i, endedAt: i + 1, cwd: root,
@@ -25,14 +24,17 @@ test("large archive history stays bounded across independent readers and publica
             env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root, PI_SUBAGENT_DURABLE_DIR: root },
             execArgv: ["--import", "tsx"], stdio: ["ignore", "inherit", "inherit", "ipc"],
         });
-        t.after(() => new Promise((resolve) => { child.once("exit", resolve); child.kill(); }));
-        return (command) => new Promise((resolve, reject) => {
+        const ready = Promise.race([once(child, "message"), once(child, "exit").then(([code]) => { throw new Error(`archive SDK reader exited before ready: ${code}`); })]);
+        t.after(async () => { if (child.exitCode === null) { const exited = once(child, "exit"); child.send("stop"); await exited; } });
+        return async (command) => { await ready; return new Promise((resolve, reject) => {
             const onError = (error) => reject(error);
             child.once("message", (result) => { child.removeListener("error", onError); resolve(result); });
             child.once("error", onError);
             child.send(command);
-        });
+        }); };
     });
+    t.after(stopRuntime);
+    t.after(() => rmSync(root, { recursive: true, force: true }));
     const writer = (action, value = "") => execFileSync(process.execPath, ["--input-type=module", "-e", `
         import { readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync } from 'node:fs';
         import { join } from 'node:path';
@@ -44,7 +46,7 @@ test("large archive history stays bounded across independent readers and publica
         ${action === "marker" ? `mkdirSync(join(root, 'session-state'), {recursive:true}); const path2 = join(root, 'session-state', 'conversation-4415.json'); writeFileSync(path2 + '.tmp', JSON.stringify({version:1, sessionId:'conversation-4415', attemptId:'sa_later', status:${JSON.stringify(value)}, startedAt:5000})); renameSync(path2 + '.tmp', path2);` : ""}
         ${action === "clear" ? "unlinkSync(join(root, 'session-state', 'conversation-4415.json'));" : ""}
     `]);
-    for (const reader of readers) assert.equal((await reader("warm")).healthIntervals, 1);
+    for (const reader of readers) assert.equal((await reader("warm")).frontendHealthActive, false, "SDK readers never acquire the server's health loop");
     const failures = [];
     let mutationReads = 0;
     let maxMutationReads = 0;

@@ -1,5 +1,8 @@
 /**
  * Extension-level lifecycle tests for the issue #63 production wiring.
+ * The real-identity and late-lost-attention cases use actual SDK foregrounds,
+ * the canonical daemon and managed workers. Remaining legacy cases below still
+ * exercise the old factory fixture and are not server-ownership qualification.
  *
  * The pure seams (reconcileRun / needsMonitoring / registry identity) are
  * covered by tests/health_reconcile.test.mjs and tests/registry_identity.test.mjs
@@ -44,6 +47,7 @@
  */
 import { describe, it, after, mock } from "node:test";
 import assert from "node:assert/strict";
+import { continuationFixture } from "./managed-continuation-fixture.mjs";
 import { register } from "node:module";
 import { mkdtempSync, writeFileSync, appendFileSync, chmodSync, rmSync, readFileSync, readdirSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -367,40 +371,34 @@ describe("#315 child tool failures and parent wakes", () => {
 
 describe("#325 lost runs", () => {
     it("observation gaps found after the lost health callback are not deferred, and are delivered once", async () => {
-        await withFakeClock(async () => {
-            const h = makeHarness();
-            const id = nextRunId();
-            const keeper = nextRunId();
-            dirOnly.push(id, keeper);
-            const log = join(runDir(id), "output.log");
+            const root = mkdtempSync(join(tmpdir(), "managed-late-health-")), artifacts = join(root, "children"); mkdirSync(artifacts);
+            const prior = Object.fromEntries(["PI_CODING_AGENT_DIR", "PI_SUBAGENT_DURABLE_DIR", "PI_CONTINUATION_SLEEP_MS"].map(key => [key, process.env[key]]));
+            process.env.PI_CONTINUATION_SLEEP_MS = "30000";
+            const fixture = await continuationFixture({ root, artifacts, workspace: root });
+            const h = fixture.makeHarness(); await h.ready;
+            let id;
             try {
-                writeMeta({ id, status: "lost", pid: DEAD_PID, spawnPid: process.pid, cwd: h.ctx.cwd,
-                    callbackOrigin: { cwd: h.ctx.cwd, sessionId: "test-session" }, promptPreview: "lost gaps",
-                    startedAt: Date.now() - 60_000, lostAt: Date.now() - 30_000, endedAt: Date.now() - 30_000, lostCallbackSentAt: Date.now() - 30_000,
-                    logPath: log, sessionId: id, callback: true });
-                writeFileSync(log, "");
+                ({ id } = await spawnRun(h, { cwd: root }));
+                await h.tools.get("subagent_stop").execute("stop", { id });
+                if (!await waitFor(() => readMeta(id)?.completionCallbackSentAt)) throw new Error("real terminal callback did not settle");
+                const meta = readMeta(id), log = meta.logPath;
+                // Replay a retained lost-health record with the real captured owner and execution identity.
+                writeMeta({ ...meta, status: "lost", lostAt: Date.now(), lostCallbackSentAt: Date.now() });
                 observeFailures(failurePath(id), [
                     { id: "supervision:lost", operation: "supervision:lost", kind: "incomplete", summary: "Child supervision was lost; outcome is unknown" },
                     { id: "delivered:lost", operation: "attention-delivery", kind: "delivered", incidents: ["supervision:lost"] },
                 ]);
-                // Another monitored run keeps the health ticker alive (callback:false keeps it silent).
-                writeMeta({ id: keeper, status: "orphaned", pid: process.pid, spawnPid: process.pid, cwd: h.ctx.cwd, promptPreview: "keeper",
-                    startedAt: Date.now(), orphanedCallbackSentAt: Date.now(), logPath: join(runDir(keeper), "output.log"), sessionId: keeper, callback: false });
-                await h.handlers.get("session_start")({}, h.ctx);
                 appendFileSync(log, '{"type":"tool_execution_end","toolCallId":"broken"}\n');
-                for (let i = 0; i < 3; i++) {
-                    mock.timers.tick(HEALTH_TICK_MS);
-                    await new Promise((resolve) => setImmediate(resolve));
-                }
+                if (!await waitFor(() => h.sent.some(x => x.message.customType === "subagent-failure"))) throw new Error(`canonical observation did not deliver late failure attention: ${JSON.stringify({ runtime: fixture.runtimeDiagnostics(), foreground: await h.inspect(), sent: h.sent, meta: readMeta(id), failures: readRunFailures(id) })}`);
+                await h.tools.get("subagent_result").execute("read-again", { id });
                 const wakes = h.sent.filter((x) => x.message.customType === "subagent-failure");
                 assert.equal(wakes.length, 1, "delivered once; the receipt prevents repeats");
                 assert.match(wakes[0].message.content, /Observation incomplete · .*malformed structured events/);
                 assert.doesNotMatch(wakes[0].message.content, /supervision was lost/i, "the delivered supervision incident is not repeated");
             } finally {
-                writeMeta({ ...readMeta(keeper), status: "lost", endedAt: Date.now(), lostCallbackSentAt: Date.now() });
-                h.shutdown();
+                await h.shutdown(); await fixture.close(); rmSync(root, { recursive: true, force: true });
+                for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
             }
-        });
     });
 });
 
@@ -554,13 +552,17 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
     });
 
     it("records the real OS identity where the environment exposes it", async () => {
-        const h = makeHarness();
+        const root = mkdtempSync(join(tmpdir(), "managed-health-")), artifacts = join(root, "children"); mkdirSync(artifacts);
+        const prior = Object.fromEntries(["PI_CODING_AGENT_DIR", "PI_SUBAGENT_DURABLE_DIR", "PI_CONTINUATION_SLEEP_MS"].map(key => [key, process.env[key]]));
+        process.env.PI_CONTINUATION_SLEEP_MS = "30000";
+        const fixture = await continuationFixture({ root, artifacts, workspace: root });
+        const h = fixture.makeHarness(); await h.ready;
         try {
-            const { id, pid } = await spawnRun(h);
+            const { id, pid } = await spawnRun(h, { cwd: root });
             const meta = readMeta(id);
             assert.equal(meta.pid, pid);
-            assert.equal(meta.spawnPid, process.pid);
-            const parentToken = realProcessProbe.startToken(process.pid);
+            assert.equal(meta.spawnPid, h.pid);
+            const parentToken = realProcessProbe.startToken(h.pid);
             if (parentToken !== undefined) assert.equal(meta.spawnPidStartTime, parentToken);
             assert.equal(realProcessProbe.pidExists(pid), true, "spawned child stays alive for probing");
             // Best-effort capabilities: assert parity only where the OS probe
@@ -569,9 +571,15 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
             if (pgid !== undefined) assert.equal(meta.pgid, pgid, "persisted pgid must match the live probe");
             const token = realProcessProbe.startToken(pid);
             if (token !== undefined) assert.equal(meta.pidStartTime, token, "persisted start token must match the live probe");
+            assert.equal((await fixture.healthOwner()).subagentHealthActive, true, "real daemon owns health reconciliation while work is live");
+            assert.equal((await h.inspect()).healthActive, false, "real SDK foreground never competes for the health loop");
+            await h.shutdown();
+            assert.equal(realProcessProbe.pidExists(pid), true, "foreground exit retains the captured worker");
+            assert.equal((await fixture.healthOwner()).subagentHealthActive, true, "daemon retains health ownership after foreground exit");
             await reapRun({ id, pid });
         } finally {
-            h.shutdown();
+            await h.shutdown(); await fixture.close(); rmSync(root, { recursive: true, force: true });
+            for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
         }
     });
 });
@@ -1848,56 +1856,48 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
     });
 
     it("persisted unmarked lost recovers one callback after reload", async () => {
-        await withFakeClock(async () => {
-            const h = makeHarness();
+            const root = mkdtempSync(join(tmpdir(), "managed-recover-health-")), artifacts = join(root, "children"); mkdirSync(artifacts);
+            const prior = Object.fromEntries(["PI_CODING_AGENT_DIR", "PI_SUBAGENT_DURABLE_DIR", "PI_CONTINUATION_SLEEP_MS"].map(key => [key, process.env[key]]));
+            process.env.PI_CONTINUATION_SLEEP_MS = "30000";
+            const fixture = await continuationFixture({ root, artifacts, workspace: root });
+            let h = fixture.makeHarness(); await h.ready;
             try {
-                const id = nextRunId();
-                dirOnly.push(id);
-                // Already terminal-lost from a prior session, marker missing.
-                // Lost is excluded from process monitoring, so recovery must
-                // scan unmarked lost independently of reconcile transitions.
-                writeMeta({
-                    id,
-                    status: "lost",
-                    pid: DEAD_PID,
-                    pgid: DEAD_PID,
-                    pidStartTime: "gone-token",
-                    spawnPid: process.pid,
-                    cwd: tmpdir(),
-                    promptPreview: "p",
-                    startedAt: Date.now() - 120_000,
-                    orphanedAt: Date.now() - 90_000,
-                    lostAt: Date.now() - 60_000,
-                    endedAt: Date.now() - 60_000,
-                    logPath: join(runDir(id), "output.log"),
-                    sessionId: id,
-                    callback: true,
-                });
-                writeFileSync(join(runDir(id), "output.log"), "lost-unmarked\n");
+                const { id } = await spawnRun(h, { cwd: root });
+                await h.tools.get("subagent_stop").execute("stop", { id });
+                if (!await waitFor(() => readMeta(id)?.completionCallbackSentAt)) throw new Error("real terminal callback did not settle");
+                const meta = readMeta(id);
+                const sessionFile = h.sessionFile;
+                if (!sessionFile || !existsSync(sessionFile)) throw new Error("real recipient session was not saved before reconnect");
+                await h.shutdown();
+                // Retained lost state uses the real attempt, captured process identity and recipient.
+                writeMeta({ ...meta, status: "lost", lostAt: Date.now() });
                 assert.equal(readMeta(id).lostCallbackSentAt, undefined);
-
-                await h.handlers.get("session_start")({}, h.ctx);
-                assert.equal(isHealthTickerActive(), true, "unmarked lost keeps the health ticker alive");
-                mock.timers.tick(HEALTH_TICK_MS);
+                const foreign = fixture.makeHarness({ sessionId: "foreign-health-recipient" }); await foreign.ready;
+                assert.equal(healthMsgsFor(foreign.delivered, id).length, 0, "another real SDK session cannot receive this health callback");
+                assert.equal(readMeta(id).lostCallbackSentAt, undefined, "foreign observation does not consume the recipient's pending health callback");
+                await foreign.shutdown();
+                h = fixture.makeHarness({ sessionFile }); await h.ready;
+                assert.equal((await h.inspect()).healthActive, false, "reconnecting SDK frontend never acquires the server's health loop");
+                if (!await waitFor(() => readMeta(id)?.lostCallbackSentAt && healthMsgsFor(h.delivered, id).length)) throw new Error("scoped SDK reconnect did not recover retained health callback");
 
                 assert.equal(readMeta(id).status, "lost");
-                const msgs = healthMsgsFor(h.sent, id);
+                const msgs = healthMsgsFor(h.delivered, id);
                 assert.equal(msgs.length, 1, `exactly one recovered lost callback; got ${msgs.length}`);
                 assert.equal(msgs[0].options.deliverAs, "followUp");
                 assert.equal(msgs[0].options.triggerTurn, true);
                 assert.match(msgs[0].message.content, /ATTENTION/i);
                 assert.match(msgs[0].message.content, /no related process remains/i);
                 assert.ok(readMeta(id).lostCallbackSentAt > 0, "marker written after successful handoff");
-                assert.equal(isHealthTickerActive(), false, "ticker stops after marked lost has nothing left to monitor");
+                assert.equal((await h.inspect()).healthActive, false, "delivery does not start a competing frontend health loop");
 
                 // Reload after successful handoff must not re-fire.
-                await h.handlers.get("session_start")({}, h.ctx);
-                mock.timers.tick(HEALTH_TICK_MS);
-                assert.equal(healthMsgsFor(h.sent, id).length, 1, "dedupe after recovered lost handoff");
+                await h.shutdown(); h = fixture.makeHarness({ sessionFile }); await h.ready;
+                await h.tools.get("subagent_result").execute("reconnect", { id });
+                assert.equal(healthMsgsFor(h.delivered, id).length, 0, "a subsequent real SDK reconnect does not repeat the delivered health callback");
             } finally {
-                h.shutdown();
+                await h.shutdown(); await fixture.close(); rmSync(root, { recursive: true, force: true });
+                for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
             }
-        });
     });
 
     it("failed callback handoff is not permanently suppressed; reload delivers one later success", async () => {

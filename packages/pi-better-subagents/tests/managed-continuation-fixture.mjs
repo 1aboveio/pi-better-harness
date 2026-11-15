@@ -24,19 +24,21 @@ export async function continuationFixture({ root, artifacts, workspace }) {
     let nextActor = 0;
     function makeHarness(options = {}) {
         const actorId = ++nextActor, requests = new Map();
-        let sequence = 0, entries = [], actualSessionId, stopped, errors = "", policy = options.policy;
+        let sequence = 0, entries = [], actualSessionId, actualSessionFile, stopped, errors = "", policy = options.policy;
         const cwd = options.cwd ?? workspace, sessionId = options.sessionId ?? "owner-session";
         const child = fork(new URL("../../pi-better-server/test/support/subagent-launch-sdk.mjs", import.meta.url), [], {
             execPath: env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath, execArgv: ["--import", "tsx"],
-            env: { ...env, LAUNCH_WORKSPACE: cwd, CONTINUATION_CONTEXT: JSON.stringify({ sessionId, sessionDir: join(root, "parents"), policy }) },
+            env: { ...env, LAUNCH_WORKSPACE: cwd, CONTINUATION_CONTEXT: JSON.stringify({ sessionId, sessionDir: join(root, "parents"), sessionFile: options.sessionFile, policy }) },
             stdio: ["ignore", "ignore", "pipe", "ipc"],
         });
         actors.add(child); child.stderr.on("data", bytes => { errors += bytes; });
-        const tools = new Map(), sent = [];
+        const tools = new Map(), sent = [], delivered = [];
         const update = state => {
             if (!state) return;
             entries = state.entries;
             actualSessionId = state.sessionId;
+            actualSessionFile = state.sessionFile;
+            delivered.splice(0, delivered.length, ...(state.deliveries ?? []));
             sent.splice(0, sent.length, ...entries.filter(entry => entry.type === "custom_message").map(entry => ({ message: entry })));
         };
         const ready = new Promise((resolve, reject) => {
@@ -78,12 +80,15 @@ export async function continuationFixture({ root, artifacts, workspace }) {
             tools.set(tool, { execute: (key, params) => execute(tool, key, params) });
         }
         // Read-only SDK snapshots support the existing assertions, never tool execution.
-        return { tools, sent, ready, ctx: { cwd, sessionManager: { getSessionId: () => actualSessionId, getBranch: () => entries } },
+        return { tools, sent, delivered, ready, ctx: { cwd, sessionManager: { getSessionId: () => actualSessionId, getBranch: () => entries } },
+            pid: child.pid,
+            get sessionFile() { return actualSessionFile; },
+            async inspect() { await ready; const id = ++sequence; return new Promise((resolve, reject) => { requests.set(id, { resolve, reject }); child.send({ id, inspect: true }); }); },
             publishPolicy(next) { policy = next; },
             shutdown() { return stopped ??= (async () => { await ready; if (child.exitCode === null) { const exited = once(child, "exit"); child.send({ stop: true }); await exited; } })(); },
         };
     }
-    return { makeHarness, async observedTerminal(id) {
+    return { makeHarness, healthOwner: () => stopDaemon.metrics(), runtimeDiagnostics: () => stopDaemon.diagnostics(), async observedTerminal(id) {
         const value = await observation.get({ id, limit: 1 });
         const row = value.rows[0];
         return row && !["running", "orphaned"].includes(row.meta.status);

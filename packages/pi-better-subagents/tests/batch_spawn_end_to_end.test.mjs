@@ -383,9 +383,19 @@ describe("subagent_spawn_batch end-to-end", () => {
         assert.ok(tools.subagent_spawn.promptGuidelines.some((line) => line.includes("after a completion or attention callback")));
     });
 
-    it("launches multiple jobs and records batchId/batchName in each meta", async () => {
-        const { tools } = loadExtension(mod);
-        const ctx = makeCtx();
+    it("launches multiple jobs and records batchId/batchName in each meta", async (t) => {
+        const root = join(RUNTIME, "managed-batch"); mkdirSync(root, { recursive: true });
+        const artifacts = join(root, "children"); mkdirSync(artifacts);
+        const prior = Object.fromEntries(["PI_CODING_AGENT_DIR", "PI_SUBAGENT_DURABLE_DIR", "PI_CONTINUATION_SLEEP_MS"].map(key => [key, process.env[key]]));
+        process.env.PI_CONTINUATION_SLEEP_MS = "30000";
+        const fixture = await continuationFixture({ root, artifacts, workspace: RUNTIME });
+        const h = fixture.makeHarness(); await h.ready;
+        const tools = Object.fromEntries(h.tools), ctx = h.ctx;
+        t.after(async () => {
+            for (const meta of registry.listMetas().filter(meta => meta.callbackOrigin?.sessionId === ctx.sessionManager.getSessionId() && ["running", "orphaned"].includes(meta.status))) await tools.subagent_stop.execute("cleanup", { id: meta.id });
+            await h.shutdown(); await fixture.close();
+            for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+        });
 
         const res = await tools.subagent_spawn_batch.execute(
             "tc1",

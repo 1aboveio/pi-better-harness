@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { join, relative, isAbsolute } from "node:path";
 import { openSync, closeSync, fstatSync, readSync, realpathSync, constants } from "node:fs";
-import { openStore, type OwnerIdentity, type AssignmentOutcomeRecord } from "./shared-operation-coordinator/index.ts";
+import { openStore, ownerDiff, StoreError, type OwnerIdentity, type AssignmentOutcomeRecord } from "./shared-operation-coordinator/index.ts";
 import type { RunMeta } from "./registry.ts";
 import { processStartToken } from "./registry.ts";
 import type { PermissionSnapshot } from "./permission-policy.ts";
@@ -69,7 +69,7 @@ export function commitAssignmentTerminal(meta: RunMeta, recoveryFailure = false)
         catch { if (meta.status === "completed") invalidReport = "Assignment completion is unverified: retained report evidence is unavailable or changed."; }
         const complete = meta.status === "completed" && (report ? report.status === "complete"
             : !invalidReport && waits.some((w) => w.acknowledgement?.disposition === "assignment-complete"));
-        return store.recordAssignmentOutcome({ ...binding, revision: 1,
+        try { return store.recordAssignmentOutcome({ ...binding, revision: 1,
             outcome: complete ? "succeeded" : meta.status === "killed" ? "cancelled" : "failed",
             reason: meta.failureReason || invalidReport || (meta.status === "completed" && report ? report.reason : complete ? "Assigned work and required interpretation are complete."
                 : meta.status === "completed" ? "Assignment completion is unverified: the attempt exited without an evidence-backed completion decision. Inspect retained output and continue unfinished work or report a concrete blocker."
@@ -81,7 +81,17 @@ export function commitAssignmentTerminal(meta: RunMeta, recoveryFailure = false)
                 ...(report ? [{ kind: "artifact" as const, ref: meta.assignmentReport!.path, summary: report.reason },
                     ...report.evidence.map((e) => ({ kind: "artifact" as const, ref: e.path, summary: e.explanation }))] : [])],
             waits: waits.map((w) => ({ waitId: w.waitId, generation: w.generation, cancelEpoch: w.cancelEpoch })),
-        });
+        }); } catch (error) {
+            // A competing finalizer may commit after our initial read. The store
+            // still refuses rewrites; return only the same captured binding's winner.
+            if (error instanceof StoreError && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
+                const winner = store.getAssignmentOutcome(binding.assignmentId);
+                if (winner && winner.assignmentId === binding.assignmentId && ownerDiff(winner.owner, binding.owner) === "none"
+                    && ownerDiff(winner.recipient, binding.recipient) === "none"
+                    && winner.evidence.some(evidence => evidence.kind === "log" && evidence.ref === meta.logPath)) return winner;
+            }
+            throw error;
+        }
     });
 }
 export function readOutcome(meta: RunMeta): AssignmentOutcomeRecord | null {

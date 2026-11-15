@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { join, relative, isAbsolute } from "node:path";
 import { openSync, closeSync, fstatSync, readSync, realpathSync, constants } from "node:fs";
-import { openStore } from "./shared-operation-coordinator/index.domain.mjs";
+import { openStore, ownerDiff, StoreError } from "./shared-operation-coordinator/index.domain.mjs";
 import { processStartToken } from "./registry.domain.mjs";
 import { credentialFilePaths } from "./shared-sandbox-core.domain.mjs";
 import { readAssignmentReport } from "./assignment-report.domain.mjs";
@@ -92,18 +92,32 @@ export function commitAssignmentTerminal(meta, recoveryFailure = false) {
         }
         const complete = meta.status === "completed" && (report ? report.status === "complete"
             : !invalidReport && waits.some((w) => w.acknowledgement?.disposition === "assignment-complete"));
-        return store.recordAssignmentOutcome({ ...binding, revision: 1,
-            outcome: complete ? "succeeded" : meta.status === "killed" ? "cancelled" : "failed",
-            reason: meta.failureReason || invalidReport || (meta.status === "completed" && report ? report.reason : complete ? "Assigned work and required interpretation are complete."
-                : meta.status === "completed" ? "Assignment completion is unverified: the attempt exited without an evidence-backed completion decision. Inspect retained output and continue unfinished work or report a concrete blocker."
-                    : `Assignment ended ${meta.status}; retained attempt evidence is available.`),
-            processUncertain: meta.status === "lost" || typeof meta.exitCode !== "number"
-                || waits.some((w) => w.dependencies.some((d) => d.terminalRevision === 0)
-                    || store.listResumeClaims({ waitId: w.waitId, generation: w.generation, state: "published" }).length > 0),
-            evidence: [{ kind: "log", ref: meta.logPath, summary: `Attempt ${meta.id}: ${meta.status}` },
-                ...(report ? [{ kind: "artifact", ref: meta.assignmentReport.path, summary: report.reason },
-                    ...report.evidence.map((e) => ({ kind: "artifact", ref: e.path, summary: e.explanation }))] : [])],
-            waits: waits.map((w) => ({ waitId: w.waitId, generation: w.generation, cancelEpoch: w.cancelEpoch })), });
+        try {
+            return store.recordAssignmentOutcome({ ...binding, revision: 1,
+                outcome: complete ? "succeeded" : meta.status === "killed" ? "cancelled" : "failed",
+                reason: meta.failureReason || invalidReport || (meta.status === "completed" && report ? report.reason : complete ? "Assigned work and required interpretation are complete."
+                    : meta.status === "completed" ? "Assignment completion is unverified: the attempt exited without an evidence-backed completion decision. Inspect retained output and continue unfinished work or report a concrete blocker."
+                        : `Assignment ended ${meta.status}; retained attempt evidence is available.`),
+                processUncertain: meta.status === "lost" || typeof meta.exitCode !== "number"
+                    || waits.some((w) => w.dependencies.some((d) => d.terminalRevision === 0)
+                        || store.listResumeClaims({ waitId: w.waitId, generation: w.generation, state: "published" }).length > 0),
+                evidence: [{ kind: "log", ref: meta.logPath, summary: `Attempt ${meta.id}: ${meta.status}` },
+                    ...(report ? [{ kind: "artifact", ref: meta.assignmentReport.path, summary: report.reason },
+                        ...report.evidence.map((e) => ({ kind: "artifact", ref: e.path, summary: e.explanation }))] : [])],
+                waits: waits.map((w) => ({ waitId: w.waitId, generation: w.generation, cancelEpoch: w.cancelEpoch })), });
+        }
+        catch (error) {
+            // A competing finalizer may commit after our initial read. The store
+            // still refuses rewrites; return only the same captured binding's winner.
+            if (error instanceof StoreError && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
+                const winner = store.getAssignmentOutcome(binding.assignmentId);
+                if (winner && winner.assignmentId === binding.assignmentId && ownerDiff(winner.owner, binding.owner) === "none"
+                    && ownerDiff(winner.recipient, binding.recipient) === "none"
+                    && winner.evidence.some(evidence => evidence.kind === "log" && evidence.ref === meta.logPath))
+                    return winner;
+            }
+            throw error;
+        }
     });
 }
 export function readOutcome(meta) {

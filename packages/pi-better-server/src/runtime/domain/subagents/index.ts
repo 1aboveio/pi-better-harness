@@ -702,7 +702,8 @@ function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, no
     // orphaned run's health callback is handled there is no later callback that is sure to come
     // (the run may stay orphaned), so gaps found after it are delivered now (#325).
     const pending = pendingFailureAttention(state, now, { deferObservationGaps: meta.status === "running" });
-    if (!pending || (meta.status !== "running" && meta.status !== "orphaned" && meta.completionCallbackPendingAt !== undefined)) return;
+    if (!pending || (meta.status !== "running" && meta.status !== "orphaned" && meta.completionCallbackPendingAt !== undefined
+        && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined)) return;
     // Only the pending incidents are rendered; earlier deliveries are counted, not repeated (#315).
     void getCallbackBatcher(pi).deliverUrgent({
         ...failureAttentionFields(meta, state, pending),
@@ -4418,7 +4419,15 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         catch { mainAgentStartedAt = undefined; }
         mainAgentTools.clear();
         activeCallbackOrigin = callbackOriginFromContext(ctx);
-        if (!managed && activeCallbackOrigin) await startWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => refreshBackgroundWorkNavigator(ctx));
+        if (!managed && activeCallbackOrigin) await startWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => {
+            refreshBackgroundWorkNavigator(ctx);
+            const observation = workObservation();
+            if (sessionTornDown || observation?.status !== "ready") return;
+            for (const row of observation.rows) {
+                if (row.meta.status === "orphaned" || row.meta.status === "lost") deliverHealthCallback(pi, row.meta, row.meta.status, Date.now());
+                if (["running", "orphaned", "lost"].includes(row.meta.status)) deliverFailureAttention(pi, row.meta, Date.now());
+            }
+        });
         if (!managed) recoverCompletionCallbacks(pi);
         // Admission can defer before batcher enqueue, even after the last child
         // exits. Keep reconciliation independent of the live-run health ticker.

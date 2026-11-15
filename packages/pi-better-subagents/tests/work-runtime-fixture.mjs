@@ -18,5 +18,7 @@ export async function startWorkRuntimeFixture(env = process.env) {
         rmSync(transport, { recursive: true, force: true });
     };
     stop.socketPath = ready.ready;
+    stop.metrics = async () => { const reply = once(child, "message"); child.send("metrics"); return (await reply)[0]; };
+    stop.diagnostics = () => ({ exitCode: child.exitCode, stderr: error });
     return stop;
 }
