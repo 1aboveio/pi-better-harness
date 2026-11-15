@@ -431,3 +431,13 @@ test("production schemas gate bridge tools and sandboxed workers are not withhel
     });
     assert.equal(sandboxedPlan.tools.length, 6);
 });
+
+
+test("managed continuation accepts a narrower scope but never widens captured authority", () => {
+    const permissions = { projectFiles: "read-write", outsideProject: "read", storedCredentials: "off", commands: true, network: true, shell: true, commandTimeoutSeconds: 30 };
+    const captured = { mandatoryPermissions: true, sandbox: { root: "/assignment", permissions, denyWrite: ["/assignment/private"] } };
+    const current = { mandatoryPermissions: true, sandbox: { ...captured.sandbox, permissions: { ...permissions, projectFiles: "read", network: false, shell: false, commandTimeoutSeconds: 10 } } };
+    assert.doesNotThrow(() => assertAssignmentPermissionScope(captured, current, true));
+    assert.throws(() => assertAssignmentPermissionScope(captured, { ...current, sandbox: { ...current.sandbox, permissions: { ...current.sandbox.permissions, storedCredentials: "read" } } }, true), /captured assignment scope/);
+    assert.throws(() => assertAssignmentPermissionScope(captured, { ...current, mandatoryPermissions: false }, true), /unavailable/);
+});

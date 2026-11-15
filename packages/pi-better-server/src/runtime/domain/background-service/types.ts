@@ -1,0 +1,234 @@
+import type { ResolvedSshIdentity, SshConnectionParams } from "./shared-ssh-core/index.js";
+
+export type { ResolvedSshIdentity, SshConnectionParams };
+
+export type BackgroundTaskStatus =
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "timed_out";
+
+export type BackgroundTaskKind = "process" | "command_watch";
+
+export type Condition =
+  | { type: "exit_code"; equals: number }
+  | { type: "stdout_contains"; value: string }
+  | { type: "stderr_contains"; value: string }
+  | { type: "json_path_equals"; path: string; value: unknown }
+  | { type: "json_path_exists"; path: string };
+
+export interface CommandSpec {
+  command?: string;
+  argv?: string[];
+  shell?: boolean;
+  /** Run the shell as a login shell (`bash -lc`, the default). False runs `bash -c`, skipping profile sourcing. */
+  loginShell?: boolean;
+  cwd?: string;
+  env?: Record<string, string>;
+}
+
+/**
+ * Evidence from an opt-in step gate (#619): bash reported a failing step inside a
+ * chained shell command, so a later command's exit 0 could not mask it.
+ */
+export interface StepGateFailure {
+  /** Exit code of the first failing step bash reported. */
+  stepExitCode: number;
+  /** The shell's own final status, before the gate turned a masked 0 into a failure. */
+  shellExitCode: number | null;
+  /** The failing step as bash named it, bounded so task metadata stays small. */
+  command: string;
+}
+
+export interface CommandResult {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  startedAt: number;
+  endedAt: number;
+  timedOut?: boolean;
+  /** Bytes of stdout never stored because the capture cap was reached. */
+  stdoutDiscardedBytes?: number;
+  /** Bytes of stderr never stored because the capture cap was reached. */
+  stderrDiscardedBytes?: number;
+  /** True when stdout or stderr capture overflowed. Distinct from log retention. */
+  captureTruncated?: boolean;
+}
+
+/** A watch's first check, as reported in the launch tool result (#359). */
+export interface FirstWatchCheck {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  durationMs: number;
+  timedOut?: boolean;
+  stdout: string;
+  stderr: string;
+  /** Set when the check itself could not run (e.g. an SSH runner error). */
+  error?: string;
+}
+
+export interface RemoteTaskParams {
+  session?: "tmux" | "direct";
+  install_tmux?: boolean;
+  workdir?: string;
+}
+
+export interface ResolvedRemoteTaskMetadata {
+  command: string;
+  session?: "tmux" | "direct";
+  installTmux?: boolean;
+  workdir?: string;
+  sessionName?: string;
+  bootstrapStatus?: "pending" | "present" | "installed" | "needs_user" | "unknown_package_manager" | "install_failed" | "timed_out";
+  bootstrapMessage?: string;
+  tmuxInstalled?: boolean;
+  sessionStarted?: boolean;
+  logOffset?: number;
+  warning?: string;
+  stopMessage?: string;
+}
+
+export interface BackgroundTaskCallbackOrigin {
+  cwd: string;
+  sessionId?: string;
+}
+
+export interface TaskSandboxProvenance {
+  confinement: "confined" | "unconfined" | "unknown";
+  backend?: string;
+  policySource: "background" | "main-legacy" | "no-publisher" | "remote";
+  policySummary: string;
+  changesAffectTask: false;
+}
+
+export interface BackgroundTaskMeta {
+  id: string;
+  name?: string;
+  /**
+   * Launcher-assigned batch identity, e.g. `bg_batch_<uuid>`, set when this task
+   * was started by a batch launch. Absent for a single spawn. Persisted with the
+   * rest of the metadata, so a reloaded task still says which launch it belonged to.
+   */
+  batchId?: string;
+  /** Operator-facing batch label from the same launch, when one was given. */
+  batchName?: string;
+  kind: BackgroundTaskKind;
+  status: BackgroundTaskStatus;
+  startedAt: number;
+  endedAt?: number;
+  deadlineAt?: number;
+  intervalMs?: number;
+  lastCheckedAt?: number;
+  /**
+   * Latest meaningful progress. A process advances it on output; a watch only
+   * when its observed outcome changes state (never on the poll itself).
+   */
+  lastProgressAt?: number;
+  /**
+   * Watch only: canonical fingerprint of the last observed poll outcome
+   * (stdout content, stderr content, exit code, signal, error). A poll that
+   * reports the same outcome is activity, not progress. Versioned; a value from
+   * another version, or a record without one, is adopted without moving the
+   * state clock so an upgrade or reload can never keep resetting silence.
+   */
+  watchFingerprint?: string;
+  lastExitCode?: number | null;
+  lastSignal?: NodeJS.Signals | null;
+  lastState?: unknown;
+  result?: unknown;
+  logPath: string;
+  callback?: boolean;
+  callbackSentAt?: number;
+  callbackOrigin?: BackgroundTaskCallbackOrigin;
+  callbackSuppressedAt?: number;
+  callbackSuppressedReason?: string;
+  dismissedAt?: number;
+  command?: string;
+  argv?: string[];
+  shell?: boolean;
+  /**
+   * Per-command cap captured from the Background tasks profile at launch, in
+   * seconds. Absent means the launch had no cap. Persisted so a resumed task
+   * keeps the cap it started under; it bounds one command (each check for a
+   * watch), never a watch's whole lifetime.
+   */
+  commandTimeoutSeconds?: number;
+  cwd: string;
+  env?: Record<string, string>;
+  /**
+   * The executable and argv this task was actually launched with, when that
+   * differs from `command`/`argv` above — today, an OS write-sandbox wrapper
+   * captured from the foreground policy at launch. Re-running a watch poll uses
+   * it verbatim, which is how a running task keeps the policy it started under
+   * even after the foreground policy changes. `command`/`argv` stay the operator's
+   * own request, so status, navigator, and goal surfaces read unchanged.
+   */
+  launchArgv?: string[];
+  /** Launch-time evidence, never inferred from current settings or missing profile files. */
+  sandbox?: TaskSandboxProvenance;
+  maxLogBytes?: number;
+  logDiscardedBytes?: number;
+  logRetentionEvents?: number;
+  /** Own retention writes are not task output. Both fields must still match to ignore them. */
+  logMaintenance?: { mtimeMs: number; size: number };
+  /** Incremented on every same-inode compaction so log-page cursors can detect it. */
+  logGeneration?: number;
+  /** Bytes never captured into watch/command buffers. Distinct from logDiscardedBytes. */
+  captureDiscardedBytes?: number;
+  captureOverflowEvents?: number;
+  stdoutDiscardedBytes?: number;
+  stderrDiscardedBytes?: number;
+  pid?: number;
+  /** Opaque process-start token used to reject recycled child PIDs. */
+  pidStartTime?: string;
+  pgid?: number;
+  spawnPid: number;
+  /** Opaque process-start token used to reject recycled supervisor PIDs. */
+  spawnPidStartTime?: string;
+  /**
+   * Launch intent (#619): this shell command runs with the step gate. A failure bash
+   * reports for one step is surfaced even when a later command exits 0. Absent means
+   * ordinary shell semantics: only the command's own exit status is reported.
+   */
+  requireSuccessfulSteps?: boolean;
+  /** Observed step-gate evidence; absent when the gate is off or no step failed. */
+  stepGateFailure?: StepGateFailure;
+  successWhen?: Condition;
+  failureWhen?: Condition;
+  /**
+   * Watch only (#359): consecutive exit-0 checks that write stderr and match neither
+   * condition before the watch is flagged as possibly blind. 0 turns the rule off;
+   * undefined means DEFAULT_BLIND_CHECKS.
+   */
+  blindChecks?: number;
+  /** Current run of such checks; reset by any other check. */
+  blindCheckStreak?: number;
+  /**
+   * Caller-declared structured intent (#325), validated before launch. A later task of the same
+   * kind, cwd, SSH target, and session with the same operationId that succeeds recovers this
+   * task's earlier failures; exit codes in expectedExitCodes are recorded as expected failures.
+   */
+  operationId?: string;
+  expectedExitCodes?: number[];
+  notifyOn?: "terminal";
+  stopRequestedAt?: number;
+  error?: string;
+  /** Set when stop failed while the task is still running. Distinct from poll errors. */
+  stopError?: string;
+  ssh?: ResolvedSshIdentity;
+  remote?: ResolvedRemoteTaskMetadata;
+}
+
+export interface TerminalResult {
+  status: Exclude<BackgroundTaskStatus, "running">;
+  reason: string;
+  matchedCondition?: Condition;
+  matchedValue?: unknown;
+  commandResult?: CommandResult;
+}
+
+export function isTerminalStatus(status: BackgroundTaskStatus): boolean {
+  return status !== "running";
+}

@@ -20,7 +20,22 @@ export async function createSubagentLaunch(root: string, instance: string, catal
   const lease = acquireMutationStore(root);
   let host: any;
   try {
-    host = new ManagedSubagentHost(root, instance, catalog, lease.store);
+    const servicePath = "./domain/background-service/observed-waits.domain.mjs";
+    const { createObservedWaitHost } = await import(servicePath);
+    const permissionPath = "./domain/sandbox-policy/permission-settings.domain.mjs";
+    const { readPermissionSettings } = await import(permissionPath);
+    const toolsPath = "./domain/background-service/tools.domain.mjs";
+    const runtimePath = "./domain/background-service/runtime.domain.mjs";
+    const { registerTools } = await import(toolsPath);
+    const { createBackgroundTaskRuntime } = await import(runtimePath);
+    host = new ManagedSubagentHost(root, instance, catalog, lease.store, (pi: any) => {
+      const service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, "operation-coordinator.sqlite"), serverOwnedResults: true });
+      const runtime = createBackgroundTaskRuntime();
+      registerTools(pi, runtime, () => undefined);
+      const close = service.close.bind(service);
+      service.close = () => { try { close(); } finally { runtime.suspendScheduledWork(); } };
+      return service;
+    }, () => readPermissionSettings({ agentDir: () => root }));
     await host.recover();
     const close = host.close.bind(host);
     host.close = async () => {

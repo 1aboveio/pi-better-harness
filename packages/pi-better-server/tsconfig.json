@@ -14,5 +14,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
-  "exclude": ["src/runtime/domain/subagents"]
+  "exclude": ["src/runtime/domain"]
 }

@@ -1,0 +1,1027 @@
+// Generated fixed launch domain from packages/pi-better-background-tasks/src/tools.ts. Do not edit directly.
+import { Type } from "typebox";
+import { advertiseBackgroundAdapter } from "./adapter-contract.domain.mjs";
+import { formatBatchLaunch, spawnTaskBatch } from "./batch.domain.mjs";
+import { refreshBackgroundTasksNavigator } from "./navigator-provider.domain.mjs";
+import { classifyOwnership, formatLaunch, formatList, formatLog, formatMissingTask, formatMutationRefusal, formatStatus, formatStopResult, } from "./output.domain.mjs";
+import { cursorKind, readOutputControls } from "./shared-log-utils.domain.mjs";
+import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.domain.mjs";
+import { registerDeliveryObserver } from "./delivery-observer.domain.mjs";
+import { formatWaitView, getObservedWaitHost, observedWaitServiceUnavailableReason, } from "./observed-waits.domain.mjs";
+import { backgroundObservation } from "./work-observation.domain.mjs";
+import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.domain.mjs";
+import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.domain.mjs";
+import { runTaskMaintenance } from "./maintenance.domain.mjs";
+import { backgroundProcessDiagnosticsAccess, ForegroundSandboxBlockedError } from "./sandbox.domain.mjs";
+import { inspectTaskProcess } from "./task-diagnostics.domain.mjs";
+import { isTerminalStatus } from "./types.domain.mjs";
+export { formatLaunch } from "./output.domain.mjs";
+const defaultRuntime = { awaitFirstWatchCheck, resumeRunningTask, spawnTask, startWatchTask, stopTask };
+const JsonPathSchema = Type.String({
+    pattern: "^\\$",
+    description: "Root-prefixed JSON path, e.g. $.status, $.terminalFailure, or $.steps[0].status. Bare keys and wildcards are unsupported.",
+});
+const ConditionSchema = Type.Union([
+    Type.Object({ type: Type.Literal("exit_code"), equals: Type.Number() }),
+    Type.Object({ type: Type.Literal("stdout_contains"), value: Type.String() }),
+    Type.Object({ type: Type.Literal("stderr_contains"), value: Type.String() }),
+    Type.Object({ type: Type.Literal("json_path_equals"), path: JsonPathSchema, value: Type.Any() }),
+    Type.Object({ type: Type.Literal("json_path_exists"), path: JsonPathSchema }),
+]);
+/**
+ * String-to-string map declared with additionalProperties. Equivalent to
+ * Type.Record(Type.String(), Type.String()) for accepted values; kept as the
+ * plainer JSON Schema form.
+ */
+function StringMap(description) {
+    return Type.Unsafe({ type: "object", additionalProperties: { type: "string" }, description });
+}
+const SshSchema = Type.Object({
+    host: Type.String({ description: "SSH host. Required when ssh is set." }),
+    user: Type.Optional(Type.String({ description: "SSH user." })),
+    port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65_535, description: "SSH port." })),
+    identity_file: Type.Optional(Type.String({ description: "SSH identity file path." })),
+    jump: Type.Optional(Type.String({ description: "SSH jump host passed with -J." })),
+    options: Type.Optional(StringMap("Additional SSH -o key/value options. Agent-safe defaults remain enforced.")),
+}, {
+    description: "Structured SSH connection for remote background tasks. Set ssh instead of wrapping command in a hand-written ssh command; command is the remote command, and Pi keeps durable local logs, status, callbacks, and remote stop semantics.",
+});
+const RemoteSchema = Type.Object({
+    session: Type.Optional(Type.Union([Type.Literal("tmux"), Type.Literal("direct")], { description: "Remote session mode. SSH spawn defaults to durable tmux. Watch always uses direct one-shot polls. Explicit direct spawn has weaker stop semantics." })),
+    install_tmux: Type.Optional(Type.Boolean({ description: "Allow SSH spawn to install tmux non-interactively when missing. Defaults true in tmux mode and is ignored for watch and direct spawn." })),
+    workdir: Type.Optional(Type.String({ description: "Remote working directory for the spawned command." })),
+}, {
+    description: "Remote execution controls used with ssh. Omit session for SSH spawn to get the durable tmux default; SSH watch runs direct one-shot polls regardless of session and does not install tmux.",
+});
+// Structured intent (#325). Validated in code before launch (no uniqueItems/pattern: some providers reject them).
+// Each field also admits null, which means "not declared": models send optional fields as explicit
+// null, and readTaskIntent treats null exactly like an omitted field on every Pi version. Plain
+// JSON Schema `anyOf` (Type.Unsafe), not Type.Union: Pi 0.82 converts a null to "" or [] through a
+// TypeBox union, and a Null-first union reports a malformed array as "must be null".
+const IntentFields = {
+    operation_id: Type.Optional(Type.Unsafe({ anyOf: [{ type: "null" }, { type: "string" }], description: "Optional stable id (letters, digits, . _ : / -; up to 64) for one logical operation. Reuse it when you retry with a changed command, scope, or timeout: when a later task with the same operation_id succeeds, earlier failures of that operation in this session are recovered." })),
+    expected_exit_codes: Type.Optional(Type.Unsafe({ anyOf: [{ type: "array", items: { type: "integer", minimum: 0, maximum: 255 }, minItems: 1, maxItems: 16 }, { type: "null" }], description: "Optional distinct non-zero exit codes that are intentional for this command (e.g. [1] for a no-match probe). 0 is allowed and ignored: exit 0 is already success. Declared before launch; recorded as expected failures, not incidents needing action. Signals and timeouts are never expected." })),
+};
+const CommandFields = {
+    name: Type.Optional(Type.String({ description: "Human-readable task label." })),
+    command: Type.Optional(Type.String({ description: "Shell command to run, or the remote command when ssh is set. Required unless shell:false with argv is used." })),
+    argv: Type.Optional(Type.Array(Type.String(), { description: "Argument vector. Use with shell:false to avoid shell parsing." })),
+    shell: Type.Optional(Type.Boolean({ description: "Run command through the package's bash-compatible shell. Default true. When the Background tasks sandbox profile turns Shell scripts off, a shell command and a direct shell executable are refused; pass argv with shell:false for a direct executable." })),
+    cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current pi cwd." })),
+    env: Type.Optional(StringMap("Extra environment variables.")),
+    max_log_bytes: Type.Optional(Type.Number({ description: "Maximum retained raw-log bytes. Default 4194304 (4 MiB). Older output is compacted while the task runs." })),
+    callback: Type.Optional(Type.Boolean({ description: "Queue a follow-up when the task reaches a terminal state. Default true." })),
+    timeout_seconds: Type.Optional(Type.Number({ description: "Optional whole-task timeout in seconds. Command watchers default to 900 seconds when omitted; pass 0 to disable. Spawned processes have no default timeout. When the Background tasks sandbox profile sets a command time limit, that cap applies to each actual command (and each watch check) independently: a smaller timeout_seconds still wins, and 0 does not disable the policy cap." })),
+    ssh: Type.Optional(SshSchema),
+    remote: Type.Optional(RemoteSchema),
+    ...IntentFields,
+};
+/**
+ * Opt-in step gate (#619). Chained shell commands report only the last command's
+ * status, so a failing test run followed by summary commands reads as success at
+ * the status surface. The gate runs the command under bash errexit so its first
+ * unhandled failing step decides the task's exit code.
+ */
+const StepGateField = Type.Optional(Type.Boolean({
+    description: "Spawn only: opt in to a step gate for a shell command. The command runs under bash errexit, so its first unhandled failing step ends the task with that step's exit code and a later command cannot mask it; status reports that exit with `(step gate)` and names the failing step. Handled failures (`|| true`, `if`/`while`/`until` conditions, `!`) are not gate failures. Not supported with shell:false or ssh. Default false (ordinary shell semantics).",
+}));
+const SpawnParams = Type.Object({ ...CommandFields, require_successful_steps: StepGateField });
+/**
+ * Batch launch. A job is exactly a spawn, so the job schema is the spawn schema;
+ * `shared` is that schema minus per-job identity, and a shared `name`/`command`/
+ * `argv` is refused here rather than silently applied to every job that omits it.
+ */
+const BatchJobParams = Type.Object({
+    ...CommandFields,
+    require_successful_steps: StepGateField,
+}, { description: "One independent background task. Supply its own command, or shell:false with argv; one invalid job refuses the whole batch before anything starts." });
+const BatchSharedParams = Type.Omit(Type.Object({ ...CommandFields, require_successful_steps: StepGateField }), ["name", "command", "argv"], {
+    additionalProperties: false,
+    description: "Launch options applied to every job. A job's own value wins, and an explicit false, 0, or null overrides the shared value instead of inheriting it. name, command, and argv are per job: set them on each job, not here.",
+});
+const BatchParams = Type.Object({
+    batchName: Type.Optional(Type.String({ description: "Optional label for the whole batch. Recorded on every launched task and shown in the launch result." })),
+    shared: Type.Optional(BatchSharedParams),
+    jobs: Type.Array(BatchJobParams, {
+        minItems: 1,
+        maxItems: 100,
+        description: "One to 100 independent jobs. The whole batch is refused before launch if any job is invalid.",
+    }),
+});
+const BlindChecksField = Type.Optional(Type.Integer({ minimum: 0, description: "Flag the watch as possibly blind after this many checks in a row exit 0, write stderr, and match neither success_when nor failure_when: one incident that needs action, with the latest stderr line. The watch keeps running; a check with no stderr or a matched condition recovers it. Default 3; 0 turns it off." }));
+/**
+ * How to write a watch check (#359): a check that swallows its own errors reports "pending"
+ * forever. Shared by bg_task_watch and the bg_task wrapper.
+ */
+const WATCH_CHECK_GUIDANCE = "Waits up to 15s for the first check and returns its exit code with stdout and stderr tails; if it is still running, says so. "
+    + "Write the check so a broken check is visible: do not end it with `exit 0` or `|| true`, because a check that exits non-zero is recorded and escalates. "
+    + "Map an unknown or unparseable state to failure (exit non-zero), not to pending. Prefer structured output, e.g. `--format=json | jq -er '.status'`, over fragile format strings. "
+    + "A check that exits 0 but writes stderr without matching a condition for blind_checks (default 3) checks in a row is flagged as needing action; if that stderr is expected, redirect it (2>/dev/null) or set blind_checks:0.";
+const WatchParams = Type.Object({
+    ...CommandFields,
+    interval_seconds: Type.Optional(Type.Number({ description: "Polling interval in seconds. Default 30." })),
+    success_when: ConditionSchema,
+    failure_when: Type.Optional(ConditionSchema),
+    blind_checks: BlindChecksField,
+});
+const CursorFields = {
+    cursor: Type.Optional(Type.String({ description: "Caller-owned continuation cursor from a previous page. Replay returns the same page or a no-change/failure-only notice; nextCursor continues. Independent callers do not consume each other. Cursors are bound to the selected session scope." })),
+    max_bytes: Type.Optional(Type.Number({ description: "Optional UTF-8 byte budget. Defaults: status/log/list 1 KiB, raw evidence 16 KiB. Larger explicit pages are allowed up to the shared hard cap (status 2 KiB, log/list 4 KiB, raw 64 KiB). Hard caps are OUTPUT_BUDGET_MAX_BYTES." })),
+    maxBytes: Type.Optional(Type.Number({ description: "Deprecated alias for max_bytes. max_bytes wins when both are given." })),
+    all: Type.Optional(Type.Boolean({ description: "Inspect, list, stop, or clear-by-id tasks across every session. Default false is current-session only. Unknown ownership is reported as a gap, never as missing or healthy; stop and clear refuse tasks outside the current session." })),
+};
+const IdParams = Type.Object({
+    id: Type.String({ description: "Background task id." }),
+    verbose: Type.Optional(Type.Boolean({ description: "Return raw metadata JSON with environment values omitted, bounded like raw evidence (16 KiB default, max_bytes up to 64 KiB, paged with cursor when larger). Default false returns the compact model-facing summary. Use true only for debugging or explicit recovery." })),
+    ...CursorFields,
+});
+const HistoryField = {
+    diagnostics: Type.Optional(Type.Boolean({ description: "For status: sample registered task process identity, CPU time, state and wait evidence. Requires current Process access Read in both Main and Background tasks. No arguments, environment or remote probes; a snapshot cannot prove useful work or a hang." })),
+    history: Type.Optional(Type.Boolean({ description: "If true, return an incident page that also lists failure history: expected failures and recovered or superseded incidents. Default output lists only failures that need action and counts the rest." })),
+};
+const StatusParams = Type.Object({
+    id: Type.String({ description: "Background task id." }),
+    verbose: Type.Optional(Type.Boolean({ description: "Return raw metadata JSON with environment values omitted, bounded like raw evidence (16 KiB default, max_bytes up to 64 KiB, paged with cursor when larger). Default false returns the compact model-facing summary. Use true only for debugging or explicit recovery." })),
+    ...HistoryField,
+    ...CursorFields,
+});
+const ListParams = Type.Object({
+    status: Type.Optional(Type.Array(Type.String({ description: "Statuses to include." }))),
+    limit: Type.Optional(Type.Number({ description: "Maximum tasks to show. Default 10, max 100." })),
+    ...CursorFields,
+});
+const LogParams = Type.Object({
+    id: Type.String({ description: "Background task id." }),
+    lines: Type.Optional(Type.Number({ description: "Number of trailing display rows. Default 10 for compact model ingestion. Set 0 to page retained raw bytes from the oldest retained offset." })),
+    tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines. lines wins when both are given." })),
+    raw: Type.Optional(Type.Boolean({ description: "Page retained raw log bytes (16 KiB default, 64 KiB hard cap) instead of the compact excerpt. Capture and retention loss are disclosed; this is not a full-history archive." })),
+    ...CursorFields,
+});
+const ActionParams = Type.Object({
+    request_id: Type.Optional(Type.String({ description: "Stable cancellation request identity for action:stop. Reuse after disconnect." })),
+    action: Type.Union([
+        Type.Literal("spawn"),
+        Type.Literal("watch"),
+        Type.Literal("list"),
+        Type.Literal("status"),
+        Type.Literal("log"),
+        Type.Literal("stop"),
+        Type.Literal("clear"),
+    ]),
+    id: Type.Optional(Type.String()),
+    status: Type.Optional(Type.Array(Type.String())),
+    limit: Type.Optional(Type.Number()),
+    lines: Type.Optional(Type.Number({ description: "action:log trailing display rows (default 10; 0 pages raw bytes)." })),
+    tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines." })),
+    verbose: Type.Optional(Type.Boolean()),
+    ...CommandFields,
+    require_successful_steps: StepGateField,
+    interval_seconds: Type.Optional(Type.Number()),
+    success_when: Type.Optional(ConditionSchema),
+    failure_when: Type.Optional(ConditionSchema),
+    blind_checks: BlindChecksField,
+    raw: Type.Optional(Type.Boolean()),
+    ...HistoryField,
+    ...CursorFields,
+});
+const StatusActionParams = Type.Object({
+    request_id: Type.Optional(Type.String({ description: "Stable cancellation request identity for action:stop. Reuse after disconnect." })),
+    action: Type.Union([Type.Literal("list"), Type.Literal("status"), Type.Literal("log"), Type.Literal("stop"), Type.Literal("clear")]),
+    id: Type.Optional(Type.String()),
+    status: Type.Optional(Type.Array(Type.String())),
+    limit: Type.Optional(Type.Number()),
+    lines: Type.Optional(Type.Number({ description: "action:log trailing display rows (default 10; 0 pages raw bytes)." })),
+    tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines." })),
+    verbose: Type.Optional(Type.Boolean()),
+    raw: Type.Optional(Type.Boolean()),
+    ...HistoryField,
+    ...CursorFields,
+});
+const WaitForOperationsParams = Type.Object({
+    task_ids: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
+        minItems: 1,
+        maxItems: 100,
+        description: "Durable local task ids owned by this session. Every listed operation must reach a terminal outcome.",
+    }),
+    continuation_note: Type.String({
+        minLength: 1,
+        maxLength: 2_000,
+        description: "The next reasoning step after the result. This cannot change tools, model, role, permissions or authorization.",
+    }),
+}, {
+    additionalProperties: false,
+    description: "Register an all-settled durable wait on owned background operations. Returns immediately; the parent stays responsive and is notified when every dependency is terminal. A final answer that says you are waiting is not a registration.",
+});
+const TerminalRevisionSchema = Type.Object({
+    operation_id: Type.String({ minLength: 1, maxLength: 200 }),
+    task_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    revision: Type.Integer({ minimum: 1 }),
+}, { additionalProperties: false });
+const AcknowledgeParams = Type.Object({
+    wait_id: Type.String({ minLength: 1, maxLength: 200 }),
+    generation: Type.Integer({ minimum: 1 }),
+    terminal_revisions: Type.Union([
+        Type.Array(TerminalRevisionSchema, { minItems: 1, maxItems: 100 }),
+        Type.Record(Type.String(), Type.Integer({ minimum: 1 })),
+    ], { description: "The exact terminal revisions that were read. An object maps operation_id (or task_id) to revision." }),
+    disposition: Type.Union([Type.Literal("continue"), Type.Literal("blocked"), Type.Literal("assignment-complete")]),
+    note: Type.String({ maxLength: 4_000, description: "What the evidence means for the next step. This does not complete a Goal or assignment by itself." }),
+}, {
+    additionalProperties: false,
+    description: "Interpret the exact terminal evidence of a wait and consume that generation. Requires a prior status/log read of each revision. Acknowledging does not complete the assignment.",
+});
+const WaitCancelParams = Type.Object({
+    wait_id: Type.String({ minLength: 1, maxLength: 200 }),
+    generation: Type.Integer({ minimum: 1 }),
+    reason: Type.String({ minLength: 1, maxLength: 1_024 }),
+}, {
+    additionalProperties: false,
+    description: "Cancel one durable wait generation. This detaches observation ownership; it does not stop the background task. Stopping the task is a separate explicit action.",
+});
+const WaitListParams = Type.Object({
+    pending_only: Type.Optional(Type.Boolean({ description: "Only generations that can still accept a result. Default false lists consumed and cancelled history too." })),
+}, { additionalProperties: false, description: "List durable operation waits owned by the current session and workspace." });
+const BACKGROUND_ORCHESTRATION_GUIDELINES = [
+    "Follow the Harness execution policy when scheduling independent background operations; subagent delegation mode does not require background commands to run serially.",
+    "Use background tasks for genuinely long-running processes or repeated checks. Run short commands in the foreground.",
+    "When a structured plan is active, keep it as the coordinator ledger: launch relevant background work early, continue unblocked foreground work without polling, and update the plan after inspecting each terminal result or failure.",
+    "Do not treat launch as completion of the parent milestone; relevant background work must be terminal, inspected, and integrated before verification or completion.",
+];
+export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = refreshBackgroundTasksNavigator) {
+    const { resumeRunningTask, spawnTask } = runtime;
+    let activeSession;
+    const getActiveSession = () => activeSession;
+    const schemas = new Map();
+    const register = (definition) => {
+        // A reload must not share schema identity with the previous registration.
+        const parameters = { ...definition.parameters };
+        schemas.set(definition.name, parameters);
+        pi.registerTool({ ...definition, parameters });
+    };
+    advertiseBackgroundAdapter(pi, schemas);
+    pi.on("session_start", async (_event, ctx) => {
+        setCallbackBatchContext(pi, ctx);
+        activeSession = getCallbackOrigin(ctx);
+        for (const meta of listMetasForOrigin(activeSession)) {
+            if (meta.status === "running" || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)) {
+                resumeRunningTask(pi, meta, getActiveSession);
+            }
+        }
+        runTaskMaintenance({ activeOrigin: activeSession });
+    });
+    pi.on("agent_start", (_event, ctx) => {
+        setCallbackBatchContext(pi, ctx);
+        getCallbackBatcher(pi).setForegroundRunning(true);
+    });
+    pi.on("session_tree", (_event, ctx) => { setCallbackBatchContext(pi, ctx); });
+    pi.on("agent_end", () => { getCallbackBatcher(pi).setForegroundRunning(false); });
+    pi.on("agent_settled", (_event, ctx) => {
+        getCallbackBatcher(pi).setForegroundRunning(false);
+        setCallbackBatchContext(pi, ctx);
+    });
+    pi.on("tool_execution_start", (event) => { getCallbackBatcher(pi).toolStarted(event.toolCallId); });
+    pi.on("tool_execution_end", async (event) => { await getCallbackBatcher(pi).toolEnded(event.toolCallId); });
+    pi.on("session_before_switch", () => {
+        activeSession = undefined;
+        cancelCallbackBatch(pi);
+    });
+    pi.on("session_shutdown", () => {
+        activeSession = undefined;
+        cancelCallbackBatch(pi);
+    });
+    register({
+        name: "bg_task_spawn",
+        label: "BG Spawn",
+        description: "Start a long-running background process and return immediately with its task id. For remote work, prefer structured ssh: pass ssh:{host,user} and put the remote command in command; spawn defaults to a remote tmux session with durable local logs and real remote stop. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. If tmux is missing, the preset attempts to install tmux non-interactively and fails closed with operator guidance when setup cannot proceed. Explicit remote.session=direct skips tmux, but direct mode has weaker stop semantics and may leave the remote process running. Pass require_successful_steps:true for a chained shell command whose earlier failing steps must not be masked by a later command's exit 0: it runs under bash errexit and ends at the first unhandled failing step. Never wait or poll in the foreground.",
+        promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
+        parameters: SpawnParams,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const origin = getCallbackOrigin(ctx);
+            activeSession = origin;
+            let receipt;
+            const durable = await durableLaunchText(pi, "process", params, ctx, launch => { receipt = launch; });
+            if (durable !== undefined) {
+                refreshNavigator(ctx);
+                return text(durable, launchReceipt(receipt));
+            }
+            const launched = reportLaunch(() => spawnTask(pi, params, ctx.cwd, origin, getActiveSession));
+            refreshNavigator(ctx);
+            return text(launched);
+        },
+    });
+    register({
+        name: "bg_task_spawn_batch",
+        label: "BG Spawn Batch",
+        description: "Start up to 100 independent background processes at once and return immediately with a batch id, one task id per launched job, and any job that was refused. Each job is a normal background task with its own process, log, and metadata, and records the batch id and batch name. Every job is preflighted first, so one invalid job refuses the batch before any process starts. Never wait or poll in the foreground; inspect, log, or stop each task by its id.",
+        promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
+        parameters: BatchParams,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            activeSession = getCallbackOrigin(ctx);
+            const launched = spawnTaskBatch(pi, params, ctx.cwd, activeSession, getActiveSession, {}, runtime);
+            refreshNavigator(ctx);
+            return text(formatBatchLaunch(launched), launched);
+        },
+    });
+    register({
+        name: "bg_task_watch",
+        label: "BG Watch",
+        description: `Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command; each interval opens a direct one-shot SSH poll without tmux installation. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. Returns its task id once the first check finishes. ${WATCH_CHECK_GUIDANCE} Default timeout 900 seconds; pass timeout_seconds:0 to disable.`,
+        promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
+        parameters: WatchParams,
+        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+            const origin = getCallbackOrigin(ctx);
+            activeSession = origin;
+            let receipt;
+            const durable = await durableLaunchText(pi, "watch", params, ctx, launch => { receipt = launch; });
+            if (durable !== undefined) {
+                refreshNavigator(ctx);
+                return text(durable, launchReceipt(receipt));
+            }
+            const launched = await launchWatch(pi, params, ctx.cwd, origin, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal, runtime);
+            refreshNavigator(ctx);
+            return text(launched);
+        },
+    });
+    register({
+        name: "bg_task_list",
+        label: "BG List",
+        description: "List durable background tasks as compact rows under a 1 KiB UTF-8 budget (10 entries default), newest first. Current-session only unless all:true. Nonblocking. Pass the returned nextCursor as cursor to page further (every task is reachable), or statusCursor to get a small no-change response or failure-only updates; a higher limit/max_bytes gives a larger explicit page.",
+        parameters: ListParams,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            activeSession = getCallbackOrigin(ctx);
+            return text(await durableAwareList(pi, params, activeSession, ctx));
+        },
+    });
+    register({
+        name: "bg_task_status",
+        label: "BG Status",
+        description: "Inspect one background task. Default output is a compact model-facing summary (1 KiB UTF-8) with matched condition, exit/signal, stop error, and failure counts before progress. Current-session only unless all:true; unknown ownership is a gap, not missing or healthy. Pass verbose:true only when full raw metadata is explicitly needed. Environment values are omitted. A raw log nextCursor passed as cursor continues the raw log page; an incidentCursor pages incidents that need action; history:true lists failure history too. After a terminal callback, call this first and call bg_task_log only if the summary is insufficient.",
+        parameters: StatusParams,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const origin = getCallbackOrigin(ctx);
+            activeSession = origin;
+            const durable = await durableStatusText(pi, params.id, ctx);
+            if (durable !== undefined)
+                return text(durable);
+            return text(taskStatus(pi, params.id, params, statusOptions(params, origin)));
+        },
+    });
+    register({
+        name: "bg_task_log",
+        label: "BG Log",
+        description: "Read a background task log. Default output is a compact 10-line terminal-aware tail for model ingestion (1 KiB UTF-8). Current-session only unless all:true. Pass lines for a bounded tail (tail_lines is a deprecated alias); lines:0 pages the retained raw log from the oldest retained offset (16 KiB pages, 64 KiB hard cap) with a caller-owned cursor. Capture and retention loss are disclosed; this is not a full-history archive. Nonblocking.",
+        parameters: LogParams,
+        renderResult(result, options, theme) {
+            return renderBackgroundTaskLogDisplay(result, options, theme);
+        },
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const origin = getCallbackOrigin(ctx);
+            activeSession = origin;
+            const durable = await durableLogText(pi, params.id, params, ctx);
+            if (durable !== undefined)
+                return text(durable);
+            return logText(params.id, logOptions(params, origin));
+        },
+    });
+    register({
+        name: "bg_task_stop",
+        label: "BG Stop",
+        description: "Cancel a watcher or terminate a background task. Only a task owned by the current session stops; a foreign-session or unverifiable task is refused unless all:true. For a tmux-backed SSH task, stop kills its remote tmux session before marking it cancelled. Direct SSH stop only tears down the local client and may leave the remote process running.",
+        parameters: Type.Object({ ...IdParams.properties, request_id: Type.Optional(Type.String({ description: "Stable cancellation request identity. Reuse this value after a disconnect." })) }),
+        async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+            const origin = getCallbackOrigin(ctx);
+            activeSession = origin;
+            const durable = await durableStopText(pi, params.id, ctx, params.request_id ?? toolCallId);
+            if (durable !== undefined) {
+                refreshNavigator(ctx);
+                return text(durable);
+            }
+            const result = await formatStop(pi, params.id, ctx, getActiveSession, statusOptions(params, origin), runtime);
+            refreshNavigator(ctx);
+            return text(result);
+        },
+    });
+    register({
+        name: "bg_task",
+        label: "BG Task",
+        description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command. For action:spawn, require_successful_steps:true runs a chained shell command under bash errexit so it ends at its first unhandled failing step instead of only reporting its last command's exit. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn returns immediately; do not poll in foreground. For action:watch: " + WATCH_CHECK_GUIDANCE + " For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use lines:0 to page retained raw bytes. Standalone tools and these wrappers share the same output assembler. List/status/log default to the current session; pass all:true to override. Stop and clear change only current-session tasks: clear dismisses every owned terminal task, or one task with id (all:true allows another session's task by id).",
+        promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
+        parameters: ActionParams,
+        renderResult(result, options, theme) {
+            return renderBackgroundTaskLogDisplay(result, options, theme);
+        },
+        async execute(toolCallId, params, signal, _onUpdate, ctx) {
+            activeSession = getCallbackOrigin(ctx);
+            return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, signal, runtime, refreshNavigator);
+        },
+    });
+    register({
+        name: "bg_status",
+        label: "BG Status",
+        description: "Action wrapper for inspecting background tasks: list, status, log, stop, or clear. Nonblocking. Status is compact by default; log returns a compact tail by default. Use verbose:true or lines:0 only for explicit full-data recovery. Shares the same output assembler as the standalone tools. Current-session default; pass all:true to override. Stop and clear change only current-session tasks (clear with id and all:true for another session's task).",
+        parameters: StatusActionParams,
+        renderResult(result, options, theme) {
+            return renderBackgroundTaskLogDisplay(result, options, theme);
+        },
+        async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+            activeSession = getCallbackOrigin(ctx);
+            return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, undefined, runtime, refreshNavigator);
+        },
+    });
+    register({
+        name: "wait_for_operations",
+        label: "Wait for Operations",
+        description: "Register an all-settled durable wait on background operations owned by this session and return immediately. The parent stays responsive; a completion notification arrives when every listed operation is terminal. Reading the status/log and acknowledging the exact revisions is required before the wait is consumed. This never enqueues, merges, pushes, or resumes a model by itself.",
+        promptGuidelines: [
+            "Call wait_for_operations when no independent work remains; a final answer that says you are waiting is not a registration.",
+            "After a settled wait, inspect bg_task_status and bg_task_log, then acknowledge_operation_result with the exact revisions.",
+        ],
+        parameters: WaitForOperationsParams,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const host = getObservedWaitHost(pi);
+            if (!host?.available) {
+                return text(observedWaitServiceUnavailableReason(pi)
+                    ?? "Observed waits are unavailable in this session; inspect tasks directly and continue without a durable wait.");
+            }
+            try {
+                const wait = host.usesServerResults
+                    ? await host.superviseParentWait(ctx, params.task_ids, params.continuation_note)
+                    : host.waitForParent(ctx, params.task_ids, params.continuation_note);
+                return text(formatWaitView(wait), wait);
+            }
+            catch (error) {
+                return text(`Wait was not registered: ${readableError(error)}`);
+            }
+        },
+    });
+    register({
+        name: "acknowledge_operation_result",
+        label: "Acknowledge Operation Result",
+        description: "Consume one ready wait generation after interpreting its exact terminal evidence. Requires a prior bg_task_status or bg_task_log read of every listed revision. The disposition (continue, blocked, assignment-complete) is recorded against the evidence; it does not complete a Goal or assignment by itself.",
+        parameters: AcknowledgeParams,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const host = getObservedWaitHost(pi);
+            if (!host?.available) {
+                return text(observedWaitServiceUnavailableReason(pi)
+                    ?? "Observed waits are unavailable in this session; no wait was consumed.");
+            }
+            try {
+                const ack = host.acknowledgeForParent(ctx, {
+                    waitId: params.wait_id,
+                    generation: params.generation,
+                    terminalRevisions: params.terminal_revisions,
+                    disposition: params.disposition,
+                    note: params.note,
+                });
+                return text(`Acknowledged ${ack.waitId} generation ${ack.generation} as ${ack.disposition}; phase ${ack.phase}. Released ${ack.releasedPinIds.length} evidence pin(s).`, ack);
+            }
+            catch (error) {
+                return text(`Wait was not acknowledged: ${readableError(error)}`);
+            }
+        },
+    });
+    register({
+        name: "bg_task_wait_cancel",
+        label: "BG Wait Cancel",
+        description: "Cancel one durable wait generation owned by this session. This detaches observation ownership and voids unconsumed deliveries; it does not stop the background task. Stop the task separately with bg_task_stop when that is the intent.",
+        parameters: WaitCancelParams,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const host = getObservedWaitHost(pi);
+            if (!host?.available)
+                return text("Observed waits are unavailable; no wait was cancelled.");
+            try {
+                const wait = host.cancelWaitForParent(ctx, params.wait_id, params.generation, params.reason);
+                return text(`Cancelled ${wait.waitId} generation ${wait.generation}. The operation itself was not stopped.`, wait);
+            }
+            catch (error) {
+                return text(`Wait was not cancelled: ${readableError(error)}`);
+            }
+        },
+    });
+    register({
+        name: "bg_task_wait_list",
+        label: "BG Wait List",
+        description: "List durable waits owned by the current session and workspace. Compact rows; consumed and cancelled generations are included unless pending_only is true.",
+        parameters: WaitListParams,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const host = getObservedWaitHost(pi);
+            if (!host?.available)
+                return text("Observed waits are unavailable in this session.");
+            try {
+                const waits = host.listWaitsForParent(ctx, { pendingOnly: params.pending_only === true });
+                if (waits.length === 0)
+                    return text("No durable waits for this session.");
+                return text(waits.map((wait) => formatWaitView(wait)).join("\n\n"), waits);
+            }
+            catch (error) {
+                return text(`Waits could not be listed: ${readableError(error)}`);
+            }
+        },
+    });
+    registerDeliveryObserver(pi, {
+        launch: async (params, ctx) => {
+            const host = getObservedWaitHost(pi);
+            if (!host?.available) {
+                throw new Error("Durable observed waits are unavailable; refusing to launch an unsupervised delivery watcher.");
+            }
+            const launched = await host.launchParent({
+                kind: "process",
+                params: params,
+                ctx,
+            });
+            return { id: launched.id };
+        },
+        wait: (taskIds, note, ctx) => {
+            const host = getObservedWaitHost(pi);
+            if (!host?.available) {
+                throw new Error("Durable observed waits are unavailable; the delivery wait was not registered.");
+            }
+            return host.waitForParent(ctx, taskIds, note);
+        },
+    });
+}
+export function text(textValue, details) {
+    return { content: [{ type: "text", text: textValue }], details };
+}
+function launchReceipt(launch) {
+    return launch ? { id: launch.id, operationId: launch.operationId, kind: launch.kind,
+        owner: launch.owner, started: launch.started, claimed: launch.claimed } : undefined;
+}
+/** Requested byte budget: canonical `max_bytes`, else the deprecated `maxBytes` alias (#321). */
+function requestedMaxBytes(params) {
+    const value = readOutputControls(params).maxBytes;
+    return typeof value === "number" ? value : undefined;
+}
+function statusOptions(params, origin) {
+    return {
+        verbose: params.verbose === true,
+        history: params.history === true,
+        cursor: typeof params.cursor === "string" ? params.cursor : undefined,
+        maxBytes: requestedMaxBytes(params),
+        all: params.all === true,
+        ...scopeOptions(origin),
+    };
+}
+function taskStatus(pi, id, params, options) {
+    const inspection = inspectMeta(id);
+    const enriched = { ...options };
+    const kind = cursorKind(options.cursor);
+    if (params.diagnostics === true && !options.history && (!kind || kind === "s" || kind === "t") &&
+        inspection.meta && classifyOwnership(inspection.meta, options) === "allow") {
+        enriched.processDiagnostics = inspectTaskProcess(inspection.meta, backgroundProcessDiagnosticsAccess(pi));
+        // Fresh samples bypass status suppression, not raw or incident pagination.
+        if (kind === "s")
+            enriched.cursor = undefined;
+    }
+    return formatStatus(inspection, enriched);
+}
+function logOptions(params, origin) {
+    // Canonical `lines`, else the deprecated `tail_lines` alias (#321).
+    const lines = readOutputControls(params).lines;
+    return {
+        tailLines: typeof lines === "number" ? lines : undefined,
+        raw: params.raw === true,
+        cursor: typeof params.cursor === "string" ? params.cursor : undefined,
+        maxBytes: requestedMaxBytes(params),
+        all: params.all === true,
+        ...scopeOptions(origin),
+    };
+}
+function listOptions(params, origin) {
+    return {
+        statuses: params.status,
+        limit: typeof params.limit === "number" ? params.limit : undefined,
+        cursor: typeof params.cursor === "string" ? params.cursor : undefined,
+        maxBytes: requestedMaxBytes(params),
+        all: params.all === true,
+        ...scopeOptions(origin),
+    };
+}
+async function actionText(pi, params, ctx, callbackOrigin, getActiveSession, signal, runtime, refreshNavigator) {
+    if (params.action === "log" && params.id) {
+        const durable = await durableLogText(pi, String(params.id), params, ctx);
+        if (durable !== undefined)
+            return text(durable);
+        return logText(String(params.id), logOptions(params, callbackOrigin));
+    }
+    let receipt;
+    return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession, signal, runtime, refreshNavigator, launch => { receipt = launch; }), launchReceipt(receipt));
+}
+async function runAction(pi, params, ctx, callbackOrigin, getActiveSession, signal, runtime, refreshNavigator, onLaunch) {
+    const { spawnTask } = runtime;
+    const withNavigatorRefresh = (ctx, result) => { refreshNavigator(ctx); return result; };
+    switch (params.action) {
+        case "spawn": {
+            const durable = await durableLaunchText(pi, "process", params, ctx, onLaunch);
+            if (durable !== undefined)
+                return withNavigatorRefresh(ctx, durable);
+            return withNavigatorRefresh(ctx, reportLaunch(() => spawnTask(pi, params, ctx.cwd, callbackOrigin, getActiveSession)));
+        }
+        case "watch": {
+            if (!params.success_when)
+                return "Invalid parameters: watch requires success_when.";
+            const durable = await durableLaunchText(pi, "watch", params, ctx, onLaunch);
+            if (durable !== undefined)
+                return withNavigatorRefresh(ctx, durable);
+            return withNavigatorRefresh(ctx, await launchWatch(pi, params, ctx.cwd, callbackOrigin, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal, runtime));
+        }
+        case "list":
+            return durableAwareList(pi, params, callbackOrigin, ctx);
+        case "status": {
+            if (!params.id)
+                return "Invalid parameters: status requires id.";
+            const durable = await durableStatusText(pi, String(params.id), ctx);
+            if (durable !== undefined)
+                return durable;
+            return taskStatus(pi, String(params.id), params, statusOptions(params, callbackOrigin));
+        }
+        case "log": {
+            if (!params.id)
+                return "Invalid parameters: log requires id.";
+            const durable = await durableLogText(pi, String(params.id), params, ctx);
+            if (durable !== undefined)
+                return durable;
+            return formatLog(String(params.id), logOptions(params, callbackOrigin));
+        }
+        case "stop": {
+            if (!params.id)
+                return "Invalid parameters: stop requires id.";
+            const durable = await durableStopText(pi, String(params.id), ctx, typeof params.request_id === "string" ? params.request_id : undefined);
+            if (durable !== undefined)
+                return withNavigatorRefresh(ctx, durable);
+            return withNavigatorRefresh(ctx, await formatStop(pi, String(params.id), ctx, getActiveSession, statusOptions(params, callbackOrigin), runtime));
+        }
+        case "clear": {
+            const host = getObservedWaitHost(pi);
+            await host?.refreshManagedResults();
+            const durableId = typeof params.id === "string" && params.id && host?.isDurableTask(params.id) === true;
+            if (durableId) {
+                return withNavigatorRefresh(ctx, dismissDurableForClear(pi, params, callbackOrigin)
+                    ?? `Durable operation ${String(params.id)} was not dismissed.`);
+            }
+            const legacy = formatClear(params, statusOptions(params, callbackOrigin));
+            const durable = dismissDurableForClear(pi, params, callbackOrigin);
+            return withNavigatorRefresh(ctx, durable === undefined ? legacy : `${legacy}\n${durable}`);
+        }
+        default:
+            return `Unknown action: ${String(params.action)}`;
+    }
+}
+/** Shared history applies ownership, filters and paging before metadata crosses the socket. */
+async function durableAwareList(pi, params, origin, ctx) {
+    const options = listOptions(params, origin);
+    const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, true, params.all === true, { limit: options.limit, statuses: options.statuses, cursor: options.cursor }) : undefined;
+    if (snapshot && snapshot.status !== "ready")
+        throw new Error(snapshot.reason ?? "Background activity is unverified");
+    const legacy = formatList(options, snapshot?.backgroundIndex);
+    if (snapshot)
+        return legacy;
+    const host = getObservedWaitHost(pi);
+    if ((!snapshot && !host?.available) || !origin || typeof params.cursor === "string")
+        return legacy;
+    const wanted = Array.isArray(params.status) && params.status.length > 0
+        ? new Set(params.status.filter((status) => typeof status === "string"))
+        : undefined;
+    const limit = Math.max(1, Math.min(Math.floor(typeof params.limit === "number" ? params.limit : 10), 100));
+    const durable = (snapshot ? snapshot.rows.filter((row) => row.meta.durable).map((row) => row.meta) : host?.listDurableTasks(origin) ?? [])
+        .filter((task) => !wanted || (task.active ? wanted.has("running") : wanted.has(task.status)))
+        .slice(0, limit);
+    if (durable.length === 0)
+        return legacy;
+    const rows = durable.map((task) => {
+        const elapsed = Math.max(0, Math.round(((task.endedAt ?? Date.now()) - task.startedAt) / 1000));
+        const label = task.name ? `${task.name} · ` : "";
+        const command = (task.command ?? task.argv?.join(" ") ?? "").replace(/\s+/g, " ").trim();
+        const exit = task.exitCode !== null ? ` exit=${task.exitCode}` : "";
+        const waits = task.waits.length ? ` waits=${task.waits.length}` : "";
+        return `  ${task.id}  ${task.status}  ${task.kind}  ${elapsed}s  ${label}${command}${exit}${waits}`.slice(0, 500);
+    });
+    return [
+        `durable background operations (supervised, current session): ${durable.length}`,
+        ...rows,
+        "Inspect with bg_task_status/bg_task_log; stop with bg_task_stop; dismiss a terminal operation with clear.",
+        legacy,
+    ].join("\n");
+}
+/** Dismiss matching terminal durable operations without touching the legacy registry. */
+function dismissDurableForClear(pi, params, origin) {
+    const host = getObservedWaitHost(pi);
+    if (!host?.available || !origin)
+        return undefined;
+    const id = typeof params.id === "string" && params.id ? params.id : undefined;
+    if (id) {
+        if (!host.isDurableTask(id))
+            return undefined;
+        const task = host.readDurableTask(origin, id);
+        if (!task)
+            return `Durable operation ${id} belongs to another session; it was not dismissed.`;
+        const dismissed = host.dismissDurableTask(origin, id);
+        if (!dismissed && !task.terminal)
+            return `Durable operation ${id} is ${task.status}; stop it before dismissing it.`;
+        return dismissed
+            ? `Dismissed durable operation ${id}. Its terminal evidence remains available through bg_task_status and bg_task_log.`
+            : `Durable operation ${id} was not dismissed.`;
+    }
+    const terminal = host.listDurableTasks(origin, { fresh: true }).filter((task) => task.terminal);
+    let dismissed = 0;
+    for (const task of terminal)
+        if (host.dismissDurableTask(origin, task.id))
+            dismissed += 1;
+    return dismissed > 0
+        ? `Dismissed ${dismissed} terminal durable operation${dismissed === 1 ? "" : "s"}.`
+        : undefined;
+}
+function readableError(error) {
+    return error instanceof Error ? error.message : String(error);
+}
+/**
+ * Route a local launch through the durable supervisor when the observed-waits
+ * host is installed. `undefined` means "use the legacy task route": remote/SSH
+ * work, an extension without the durable host, or a session not yet activated.
+ * A failed activation is never permission to start a second legacy command.
+ * Admission and sandboxing happen inside the host, through the
+ * same `resolve*SandboxPlan` helpers the legacy route uses.
+ */
+async function durableLaunchText(pi, kind, params, ctx, onLaunch) {
+    const host = getObservedWaitHost(pi);
+    if (!host || params.ssh || !host.available && !host.hasActivated)
+        return undefined;
+    try {
+        const launched = await host.launchParent({ kind, params, ctx });
+        onLaunch?.(launched);
+        return host.formatLaunch(launched);
+    }
+    catch (error) {
+        if (error instanceof ForegroundSandboxBlockedError)
+            return error.message;
+        throw error;
+    }
+}
+async function durableStatusText(pi, id, ctx) {
+    const host = getObservedWaitHost(pi);
+    if (!host || !host.isDurableTask(id))
+        return undefined;
+    try {
+        return host.formatStatus(await host.settledStatusForParent(ctx, id));
+    }
+    catch (error) {
+        return readableError(error);
+    }
+}
+async function durableLogText(pi, id, params, ctx) {
+    const host = getObservedWaitHost(pi);
+    if (!host || !host.isDurableTask(id))
+        return undefined;
+    try {
+        await host.settledStatusForParent(ctx, id);
+        const requested = typeof params.lines === "number" ? params.lines
+            : typeof params.tail_lines === "number" ? params.tail_lines : 40;
+        // `lines: 0` means the retained raw log on the legacy route; the durable
+        // store keeps the bounded tails, so show a wider tail instead of an empty page.
+        const lines = requested === 0 ? 200 : Math.max(1, Math.floor(requested));
+        return host.formatLog(host.logForParent(ctx, id, { lines }));
+    }
+    catch (error) {
+        return readableError(error);
+    }
+}
+async function durableStopText(pi, id, ctx, requestId) {
+    const host = getObservedWaitHost(pi);
+    if (!host || !host.isDurableTask(id))
+        return undefined;
+    try {
+        const status = host.formatStatus(await host.stopForParent(ctx, id, requestId));
+        return requestId ? `Cancellation request: ${requestId}\n${status}` : status;
+    }
+    catch (error) {
+        return readableError(error);
+    }
+}
+/**
+ * Report a launch, or why the foreground sandbox refused it.
+ *
+ * A blocked launch is an operator-facing answer, not a tool crash: the task was
+ * never started, and nothing about it is retried unconfined.
+ */
+function reportLaunch(launch) {
+    try {
+        return formatLaunch(launch());
+    }
+    catch (error) {
+        if (error instanceof ForegroundSandboxBlockedError)
+            return error.message;
+        throw error;
+    }
+}
+/**
+ * Start a watch and wait, bounded by `waitMs`, for its first check, so the launch result
+ * shows what the check really prints (#359). Local and SSH watches share this path.
+ */
+export async function launchWatch(pi, params, cwd, callbackOrigin, getActiveSession, waitMs = FIRST_WATCH_CHECK_WAIT_MS, signal, runtime = defaultRuntime) {
+    const { startWatchTask, awaitFirstWatchCheck } = runtime;
+    let meta;
+    try {
+        meta = startWatchTask(pi, params, cwd, callbackOrigin, getActiveSession);
+    }
+    catch (error) {
+        if (error instanceof ForegroundSandboxBlockedError)
+            return error.message;
+        throw error;
+    }
+    // Esc (the tool's abort signal) ends the wait at once; the watch itself keeps running.
+    const outcome = await awaitFirstWatchCheck(meta.id, waitMs, signal);
+    const latest = readMeta(meta.id) ?? meta;
+    if (outcome && !("pending" in outcome && isTerminalStatus(latest.status)))
+        return formatLaunch(latest, outcome);
+    return formatLaunch(latest);
+}
+/** Origins whose session identity could not be read (the host threw). */
+const unavailableSessionOrigins = new WeakSet();
+function getCallbackOrigin(ctx) {
+    let sessionId;
+    let unavailable = false;
+    try {
+        sessionId = ctx?.sessionManager?.getSessionId();
+    }
+    catch {
+        sessionId = undefined;
+        unavailable = true;
+    }
+    const origin = { cwd: ctx?.cwd ?? "", sessionId };
+    if (unavailable)
+        unavailableSessionOrigins.add(origin);
+    return origin;
+}
+function scopeOptions(origin) {
+    return {
+        origin,
+        ...(origin && unavailableSessionOrigins.has(origin) ? { sessionUnavailable: true } : {}),
+    };
+}
+function logText(id, options) {
+    const body = formatLog(id, options);
+    if (!inspectMeta(id).meta)
+        return text(body);
+    return text(body, buildBackgroundTaskLogDisplayDetails(body));
+}
+export function buildBackgroundTaskLogDisplayDetails(body) {
+    const fullLines = String(body ?? "").split(/\r?\n/);
+    const head = fullLines[0] || "bg_task_log";
+    const rest = fullLines.slice(1);
+    const compactLines = nonEmptyPreviewLines(rest);
+    return {
+        kind: "background-task-log-display",
+        head,
+        fullLineCount: fullLines.length,
+        compactLines,
+        foldedLineCount: Math.max(0, rest.length - compactLines.length),
+    };
+}
+export function renderBackgroundTaskLogDisplay(result, options = {}, theme = {}) {
+    const fullText = resultTextContent(result);
+    const details = result?.details;
+    if (!details || details.kind !== "background-task-log-display")
+        return renderLines(fullText.split(/\r?\n/));
+    const expanded = options?.expanded === true;
+    const meta = `${details.fullLineCount} lines`;
+    if (expanded) {
+        return renderLines([
+            `${themed(theme, "accent", "bg_task_log")} ${themed(theme, "dim", `· ${meta}`)}`,
+            themed(theme, "dim", "Full displayed log. Click or collapse to fold."),
+            "",
+            ...fullText.split(/\r?\n/),
+        ], "wrap");
+    }
+    const folded = details.foldedLineCount > 0
+        ? themed(theme, "dim", `Folded ${details.foldedLineCount} display lines. Click or expand for the requested log payload.`)
+        : themed(theme, "dim", "Compact log. Expand for full display if needed.");
+    return renderLines([
+        `${themed(theme, "accent", "bg_task_log")} ${themed(theme, "dim", `· ${meta}`)}`,
+        details.head,
+        "",
+        themed(theme, "dim", "preview"),
+        ...details.compactLines,
+        folded,
+    ]);
+}
+function resultTextContent(result) {
+    const content = result?.content;
+    if (Array.isArray(content))
+        return content.map((part) => part.text ?? "").join("\n");
+    return String(result ?? "");
+}
+function nonEmptyPreviewLines(lines) {
+    const nonEmpty = lines.filter((line) => line.trim().length > 0).slice(0, 8);
+    return nonEmpty.length ? nonEmpty : lines.slice(0, 3);
+}
+function themed(theme, color, value) {
+    const fg = theme?.fg;
+    return typeof fg === "function" ? fg(color, value) : value;
+}
+function renderLines(lines, mode = "truncate") {
+    return {
+        render(width = 80) {
+            return mode === "wrap"
+                ? lines.flatMap((line) => wrapLineToVisibleWidth(line, width))
+                : lines.map((line) => truncateToVisibleWidth(line, width));
+        },
+        invalidate() { },
+    };
+}
+function wrapLineToVisibleWidth(line, width) {
+    const str = String(line ?? "");
+    const max = Math.max(1, Number(width) || 80);
+    if (truncateToVisibleWidth(str, max) === str)
+        return [str];
+    const out = [];
+    let current = "";
+    let visible = 0;
+    for (const char of str) {
+        if (visible >= max) {
+            out.push(current);
+            current = "";
+            visible = 0;
+        }
+        current += char;
+        visible += 1;
+    }
+    out.push(current);
+    return out;
+}
+function truncateToVisibleWidth(value, width) {
+    const max = Math.max(0, Math.floor(width || 0));
+    return String(value ?? "").slice(0, max);
+}
+async function formatStop(pi, id, _ctx, getActiveSession, options = {}, runtime = defaultRuntime) {
+    const { stopTask } = runtime;
+    const existing = inspectMeta(id);
+    if (!existing.meta && !existing.found)
+        return formatStopResult(existing, options);
+    if (!existing.meta)
+        return formatMissingTask(existing, options);
+    // Same ownership rule as reads (#322): only a task owned by the current
+    // session stops unless the caller passes all:true.
+    const ownership = classifyOwnership(existing.meta, options);
+    if (ownership !== "allow")
+        return formatMutationRefusal(id, ownership, "stop", options);
+    const meta = await stopTask(pi, id, getActiveSession);
+    if (!meta)
+        return formatStopResult({ id, found: existing.found, readable: false, error: existing.error }, options);
+    return formatStopResult({ id: meta.id, meta, found: true, readable: true }, options);
+}
+/**
+ * Dismiss terminal tasks with the same ownership rule as reads (#322). Bulk
+ * clear never crosses the current session scope (stricter than reads, which
+ * accept all:true for a list); clear with an id honours all:true like a read
+ * by id. Tasks whose ownership cannot be verified are counted, not dismissed.
+ */
+function formatClear(params, options) {
+    if (typeof params.id === "string" && params.id)
+        return formatClearById(params.id, options);
+    const statuses = params.status;
+    const wanted = statuses && statuses.length > 0 ? new Set(statuses) : undefined;
+    const statusLabel = wanted ? ` matching ${Array.from(wanted).join(",")}` : "";
+    const origin = options.origin;
+    if (!origin || options.sessionUnavailable) {
+        return "Dismissed 0 terminal background tasks: the current session identity is unavailable, so no task's ownership can be verified. Clear one task with id and all:true.";
+    }
+    const scoped = { ...options, all: false };
+    const now = Date.now();
+    let cleared = 0;
+    let unverified = 0;
+    for (const meta of listMetasForOrigin(origin)) {
+        if (meta.dismissedAt !== undefined)
+            continue;
+        if (!isTerminalStatus(meta.status))
+            continue;
+        if (wanted && !wanted.has(meta.status))
+            continue;
+        if (classifyOwnership(meta, scoped) !== "allow") {
+            unverified += 1;
+            continue;
+        }
+        meta.dismissedAt = now;
+        writeMeta(meta);
+        cleared += 1;
+    }
+    const skipped = unverified
+        ? ` ${unverified} terminal task${unverified === 1 ? "" : "s"} with unverifiable ownership ${unverified === 1 ? "was" : "were"} not dismissed; clear one with id and all:true.`
+        : "";
+    return `Dismissed ${cleared} terminal background task${cleared === 1 ? "" : "s"}${statusLabel}.${skipped}`;
+}
+function formatClearById(id, options) {
+    const inspection = inspectMeta(id);
+    if (!inspection.meta)
+        return formatMissingTask(inspection, options);
+    const meta = inspection.meta;
+    const ownership = classifyOwnership(meta, options);
+    if (ownership !== "allow")
+        return formatMutationRefusal(id, ownership, "clear", options);
+    if (!isTerminalStatus(meta.status))
+        return `Background task ${id} is ${meta.status}; only terminal tasks can be dismissed. Stop it first.`;
+    if (meta.dismissedAt !== undefined)
+        return `Background task ${id} was already dismissed.`;
+    meta.dismissedAt = Date.now();
+    writeMeta(meta);
+    return `Dismissed terminal background task ${id} (${meta.status}).`;
+}

@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { intersectContinuationPermissions } from "./continuation-authority.ts";
 import extension from "./index.ts";
 import { bindRuntimeOutcomeStore } from "./assignment-outcomes.ts";
 import { catalogSnapshotFromWire } from "./catalog-store.ts";
@@ -25,6 +26,8 @@ export class ManagedSubagentHost {
     private closeJournal: () => void;
     private epoch: number;
     private pending = 0;
+    private continuationFailures = new Map<string, { failures: number; retryAt: number; reason: string }>();
+    private workerHost?: { start(ctx?: unknown): void; close(): void; service: { continuationReady: boolean } };
     private path: string;
     private capacityFor = createOwnerCapacityGates(({ pid, start }: { pid: number; start: string }) =>
         listActiveMetasForParent(pid).filter(meta => meta.spawnPidStartTime === start && effectiveStatus(meta) === "running").length
@@ -32,9 +35,9 @@ export class ManagedSubagentHost {
     get busy() { return this.pending > 0; }
     status() {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
-            inFlight: this.pending, unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt: any) => !readMeta(attempt.id)).length };
+            inFlight: this.pending, continuationReady: this.workerHost?.service.continuationReady ?? false, continuationUnavailable: [...this.continuationFailures].map(([key, value]) => ({ key, ...value })), unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt: any) => !readMeta(attempt.id)).length };
     }
-    constructor(private root: string, private instance: string, private catalog: any, sharedStore?: unknown) {
+    constructor(private root: string, private instance: string, private catalog: any, sharedStore?: unknown, private createWorkerHost?: (pi: ExtensionAPI) => NonNullable<ManagedSubagentHost["workerHost"]>, private readPermissions?: () => unknown) {
         this.current = { pid: process.pid, start: processStartToken(process.pid), owner: { workspace: root, sessionId: "runtime-recovery" } };
         this.path = join(root, "operation-coordinator.sqlite");
         const active = listMetas({ includeArchived: false });
@@ -100,6 +103,8 @@ export class ManagedSubagentHost {
             const port: ManagedLaunchPort = {
                 get owner() { return { pid: host.current.pid, start: host.current.start }; },
                 get identity() { return { root: host.root, instance: host.instance, epoch: host.epoch }; },
+                continuationContext: () => host.executionContext(host.current),
+                dispatchContinuation: (park, run) => host.dispatchContinuation(park, run),
                 supervised: () => listMetas({ includeArchived: false }).filter(meta => port.owns(meta)),
                 owns: meta => meta.management?.root === host.root && meta.management?.instance === host.instance && meta.management?.epoch === host.epoch,
                 assertCurrent: () => host.journal.current(host.epoch),
@@ -113,12 +118,19 @@ export class ManagedSubagentHost {
                 },
                 beforeSpawn: input => {
                     assertSubagentHandoff(listMetas({ includeArchived: false }), host.root);
-                    const fresh = host.grant(host.current.authority);
-                    if (launchDigest(fresh) !== host.current.grantDigest) throw new Error("launch-authority-changed");
+                    if (host.current.continuation) {
+                        const permissions = intersectContinuationPermissions(host.current.capturedPermissions, host.readPermissions?.());
+                        if (launchDigest(permissions) !== launchDigest(host.current.permissions)) throw new Error("continuation-permissions-changed");
+                        host.journal.accept(host.current.ownerKey, host.current.key, host.current.digest, host.epoch);
+                    } else {
+                        const fresh = host.grant(host.current.authority);
+                        if (launchDigest(fresh) !== host.current.grantDigest) throw new Error("launch-authority-changed");
+                    }
                     const preflightDigest = launchDigest(JSON.parse(readFileSync(input.preflightPath, "utf8")));
                     const policyDigest = input.policyPath ? launchDigest(JSON.parse(readFileSync(input.policyPath, "utf8"))) : undefined;
                     const attempt = host.journal.prepare(host.current.ownerKey, host.current.key, host.epoch, { ...input, preflightDigest, policyDigest,
-                        capacityOwner: { pid: host.current.pid, start: host.current.start } });
+                        capacityOwner: { pid: host.current.pid, start: host.current.start },
+                        launchAuthority: host.current.launchAuthority ?? { owner: host.current.owner, pid: host.current.pid, start: host.current.start, settings: host.current.settings, model: host.current.model, projectTrusted: host.current.projectTrusted, permissions: host.current.permissions } });
                     return { PI_MANAGED_SUBAGENT: JSON.stringify({ path: host.path, owner: host.current.ownerKey,
                         key: host.current.key, epoch: host.epoch, id: input.id, token: attempt.token }) };
                 },
@@ -128,7 +140,17 @@ export class ManagedSubagentHost {
             const settingsManager = SettingsManager.inMemory({});
             const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: this.root, settingsManager,
                 noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
-                extensionFactories: [(pi: ExtensionAPI) => { this.api = pi; extension(pi, port); }] });
+                extensionFactories: [(pi: ExtensionAPI) => {
+                    const registered: any[] = [];
+                    const adapterPi = { ...pi,
+                        registerTool: (tool: any) => { registered.push(tool); pi.registerTool(tool); },
+                        getAllTools: () => [...registered, ...pi.getAllTools()],
+                    } as ExtensionAPI;
+                    this.api = adapterPi;
+                    this.workerHost = this.createWorkerHost?.(adapterPi);
+                    if (this.workerHost) pi.on("session_start", (_event, ctx) => this.workerHost!.start(ctx));
+                    extension(adapterPi, port);
+                }] });
             await resourceLoader.reload();
             const created = await createAgentSession({ cwd, agentDir: this.root, settingsManager, resourceLoader,
                 sessionManager: SessionManager.inMemory(cwd), noTools: "all" });
@@ -139,6 +161,43 @@ export class ManagedSubagentHost {
             } });
             if (initializationErrors.length) throw new Error(`Managed launch initialization failed: ${initializationErrors.join("; ")}`);
         })();
+    }
+    private executionContext(record: any) {
+            const ctx = this.session.extensionRunner.createContext();
+            const branch = [...record.settings, ...(record.owner.goalId ? [{ type: "custom", customType: "pi-better-goal", data: { kind: "set", goal: { goalId: record.owner.goalId } } }] : []), { id: record.owner.branchId }];
+            const model = record.model?.split("/");
+            return { ...ctx, cwd: record.owner.workspace, hasUI: false, isProjectTrusted: () => record.projectTrusted,
+                model: model ? ctx.modelRegistry.find(model[0], model.slice(1).join("/")) : undefined,
+                sessionManager: { getSessionId: () => record.owner.sessionId, getBranch: () => branch, getLeafId: () => record.owner.branchId,
+                    getSessionFile: () => undefined, getEntries: () => branch } };
+    }
+    private dispatchContinuation(park: any, run: () => Promise<"resumed" | "held" | "skipped">) {
+        const retryKey = `${park.waitId}:${park.generation}`;
+        const failure = this.continuationFailures.get(retryKey);
+        if (failure && Date.now() < failure.retryAt) return Promise.resolve("skipped" as const);
+        this.pending++;
+        const result = this.tail.catch(() => undefined).then(async () => {
+            const saved = this.journal.attempt(park.runId)?.launchAuthority;
+            if (!saved) throw new Error("Captured continuation launch authority unavailable");
+            const permissions = intersectContinuationPermissions(saved.permissions, this.readPermissions?.());
+            const key = `continuation:${park.waitId}:${park.generation}`;
+            this.current = { ...saved, key, continuation: true, launchAuthority: saved,
+                capturedPermissions: saved.permissions, permissions,
+                ownerKey: JSON.stringify([saved.owner.workspace, saved.owner.sessionId]),
+                digest: launchDigest({ key, runId: park.runId }) };
+            this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...permissions });
+            const outcome = await run();
+            if (outcome === "resumed") this.journal.finish(this.current.ownerKey, key, this.epoch, { status: outcome });
+            this.continuationFailures.delete(retryKey);
+            return outcome;
+        }).catch(error => {
+            const failures = Math.min(6, (this.continuationFailures.get(retryKey)?.failures ?? 0) + 1);
+            if (this.continuationFailures.size >= 128 && !this.continuationFailures.has(retryKey)) this.continuationFailures.delete(this.continuationFailures.keys().next().value!);
+            this.continuationFailures.set(retryKey, { failures, retryAt: Date.now() + Math.min(30000, 1000 * 2 ** (failures - 1)), reason: String(error).slice(0, 500) });
+            return "skipped" as const;
+        }).finally(() => { this.pending--; });
+        this.tail = result;
+        return result;
     }
     private recoveredResult(intent: { attempts: string }) {
         const ids = JSON.parse(intent.attempts).map(({ id }: any) => id);
@@ -165,13 +224,7 @@ export class ManagedSubagentHost {
                 this.current = { ...record, authority: command.authority, ownerKey, grantDigest: launchDigest(record) };
                 await this.initialize();
                 this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...record.permissions });
-                const ctx = this.session.extensionRunner.createContext();
-                const branch = [...record.settings, ...(record.owner.goalId ? [{ type: "custom", customType: "pi-better-goal", data: { kind: "set", goal: { goalId: record.owner.goalId } } }] : []), { id: record.owner.branchId }];
-                const model = record.model?.split("/");
-                const context = { ...ctx, cwd: record.owner.workspace, hasUI: false, isProjectTrusted: () => record.projectTrusted,
-                    model: model ? ctx.modelRegistry.find(model[0], model.slice(1).join("/")) : undefined,
-                    sessionManager: { getSessionId: () => record.owner.sessionId, getBranch: () => branch, getLeafId: () => record.owner.branchId,
-                        getSessionFile: () => undefined, getEntries: () => branch } };
+                const context = this.executionContext(record);
                 const tool = this.session.extensionRunner.getToolDefinition(record.tool);
                 if (!tool) throw new Error("Fixed subagent adapter unavailable");
                 const response = await tool.execute(record.key, record.params, undefined, undefined, context);
@@ -195,7 +248,9 @@ export class ManagedSubagentHost {
         try {
             if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
         } finally {
-            try { session?.dispose(); } finally { this.closeJournal(); }
+            try { session?.dispose(); } finally {
+                try { this.workerHost?.close(); } finally { this.closeJournal(); }
+            }
         }
     }
 }

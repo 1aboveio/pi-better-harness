@@ -557,6 +557,8 @@ function rpcCode(error: unknown): string {
 }
 
 export interface ObservedWaitHostOptions {
+  /** Runtime-owned coordinator handle. The caller retains its lifetime lease. */
+  sharedStore?: Store;
   /** Production adapters leave global discovery and terminal import to the server. */
   serverOwnedResults?: boolean;
   /** SQLite path. Defaults under the Pi agent directory. */
@@ -1003,7 +1005,7 @@ export class ObservedWaitHost {
     this.closed = false;
     this.unavailableReason = undefined;
     try {
-      this.store = openStore({
+      this.store = this.options.sharedStore ?? openStore({
         path: this.storePath,
         ...(this.options.now ? { now: this.options.now } : {}),
       });
@@ -1037,7 +1039,7 @@ export class ObservedWaitHost {
     this.timer = undefined;
     this.releaseDiscoveryAuthority();
     this.releaseSupervisionAuthority();
-    try { this.store?.close(); } catch { /* already closed */ }
+    try { if (!this.options.sharedStore) this.store?.close(); } catch { /* already closed */ }
     this.store = undefined;
     this.launches.clear();
     this.rpcRuns.clear();

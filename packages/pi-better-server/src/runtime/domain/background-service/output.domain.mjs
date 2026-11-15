@@ -1,0 +1,855 @@
+// Generated fixed launch domain from packages/pi-better-background-tasks/src/output.ts. Do not edit directly.
+import { actionableFailures, failureRevision, formatFailureLines, formatFailureSummary, formatIncidentSummary, historyTailLine, incidentCursorScope, incidentPageHeading, incidentResource, incidentVerbatimPage, isIncidentCursor, pendingAttentionNote, pendingFailureAttention, quietFailureLine, readFailureState, terminalFailureParts, scopedFailures, } from "./shared-failure-observations.domain.mjs";
+import { assemblePriorityEnvelope, clampBudgetBytes, cursorKind, formatUnchangedEvidence, inspectStatusRevision, lifecycleContentRevision, pageRows, pageVerbatimText, revisionOf, sessionScopeKey, sliceUtf8Bytes, utf8ByteLength, OUTPUT_BUDGET_BYTES, OUTPUT_BUDGET_MAX_BYTES, OUTPUT_PAGE_DEFAULTS, } from "./shared-log-utils.domain.mjs";
+import { failurePath } from "./failures.domain.mjs";
+import { captureGapsFor, pageTaskLog, readLog } from "./logs.domain.mjs";
+import { belongsToOrigin, inspectMeta, listTaskRecords, originOf } from "./registry.domain.mjs";
+import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.domain.mjs";
+/**
+ * Issue #312 consumer budgets. Defaults follow OUTPUT-POLICY / shared
+ * `OUTPUT_BUDGET_BYTES`. Explicit larger pages clamp to `OUTPUT_BUDGET_MAX_BYTES`
+ * (hard caps). Totals are UTF-8 bytes of the whole model-facing `content`,
+ * including headers, failures, gaps, and continuation.
+ */
+export const BACKGROUND_OUTPUT_BUDGET_BYTES = {
+    status: OUTPUT_BUDGET_BYTES.status,
+    log: OUTPUT_BUDGET_BYTES.log,
+    list: OUTPUT_BUDGET_BYTES.list,
+    rawPage: OUTPUT_BUDGET_BYTES.rawPage,
+};
+export const BACKGROUND_OUTPUT_HARD_CAP_BYTES = {
+    status: OUTPUT_BUDGET_MAX_BYTES.status,
+    log: OUTPUT_BUDGET_MAX_BYTES.log,
+    list: OUTPUT_BUDGET_MAX_BYTES.list,
+    rawPage: OUTPUT_BUDGET_MAX_BYTES.rawPage,
+};
+export const DEFAULT_LOG_TAIL_ROWS = OUTPUT_PAGE_DEFAULTS.logLines;
+export const DEFAULT_LIST_ENTRIES = OUTPUT_PAGE_DEFAULTS.listEntries;
+const MAX_LIST_ENTRIES = 100;
+const STATUS_EXCERPT_ROWS = 3;
+/** Longest incident preview a list lead-in may show; the rest is on bg_task_status. */
+const LIST_LEAD_PREVIEW_BYTES = 200;
+export function backgroundBudget(surface, requested) {
+    const fallback = BACKGROUND_OUTPUT_BUDGET_BYTES[surface];
+    const hard = BACKGROUND_OUTPUT_HARD_CAP_BYTES[surface];
+    return Math.min(clampBudgetBytes(requested, fallback), hard);
+}
+function oneLine(value, maxLength) {
+    const raw = typeof value === "string" ? value : JSON.stringify(value);
+    const single = String(raw ?? "").replace(/\s+/g, " ").trim();
+    return single.length <= maxLength ? single : `${single.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+function formatDuration(ms) {
+    const seconds = Math.max(0, Math.round(ms / 1000));
+    if (seconds < 60)
+        return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds % 60;
+    return `${minutes}m${rest.toString().padStart(2, "0")}s`;
+}
+function stringifyObserved(value) {
+    if (value === undefined)
+        return "undefined";
+    if (typeof value === "string")
+        return oneLine(value, 200);
+    try {
+        return oneLine(JSON.stringify(value), 200);
+    }
+    catch {
+        return oneLine(String(value), 200);
+    }
+}
+/** Cursor scope: pagination and revision cursors never cross session scopes. */
+function scopeKey(options) {
+    return sessionScopeKey({ all: options.all, unavailable: options.sessionUnavailable, origin: options.origin, processId: process.pid });
+}
+function taskGaps(meta) {
+    const gaps = [];
+    if (meta.logDiscardedBytes) {
+        gaps.push({
+            kind: "retention",
+            bytes: meta.logDiscardedBytes,
+            detail: `${meta.logRetentionEvents ?? 1} compaction(s); discarded bytes are not recoverable`,
+        });
+    }
+    for (const gap of captureGapsFor(meta)) {
+        gaps.push({ kind: "capture", bytes: gap.bytes, detail: gap.detail });
+    }
+    return gaps;
+}
+function failureStateFor(id) {
+    return readFailureState(failurePath(id));
+}
+/**
+ * Failure section computed for the exact bytes the envelope grants it: whole
+ * incident rows when they fit, otherwise a count line (total / shown /
+ * omitted) with an incident cursor that resumes at the first byte not shown.
+ */
+function incidentSection(id, options, state = failureStateFor(id), detail = "compact") {
+    // Only what needs action is listed; history (expected, closed) is one count line without a cursor.
+    if (!formatIncidentSummary(state, { maxBytes: Number.MAX_SAFE_INTEGER }).text)
+        return undefined;
+    const resource = incidentResource(scopeKey(options), id);
+    return (budget) => formatIncidentSummary(state, {
+        maxBytes: budget,
+        resource,
+        retrieval: `pass as cursor to bg_task_status id=${id}`,
+        detail,
+    }).text || undefined;
+}
+function assembleIncidentPage(meta, options) {
+    const state = failureStateFor(meta.id);
+    const resource = incidentResource(scopeKey(options), meta.id);
+    const cursor = isIncidentCursor(options.cursor) ? options.cursor : undefined;
+    const scope = options.history ? "all" : incidentCursorScope(cursor) ?? "actionable";
+    return assembleBackgroundContent({
+        surface: "status",
+        maxBytes: options.maxBytes,
+        sections: {
+            identity: `${identityLine(meta)} ${incidentPageHeading(scopedFailures(state, scope).length, scope)}`,
+            decision: formatDecision(meta),
+        },
+        verbatim: (budget) => incidentVerbatimPage(state, { cursor, scope, maxBytes: budget, resource }),
+    });
+}
+function formatCondition(condition, observed) {
+    switch (condition.type) {
+        case "exit_code":
+            return `Condition matched: exit_code = ${condition.equals}\nobserved: ${stringifyObserved(observed ?? condition.equals)}`;
+        case "json_path_equals":
+            return `Condition matched: ${condition.path} = ${stringifyObserved(condition.value)}\nobserved: ${stringifyObserved(observed)}`;
+        case "json_path_exists":
+            return `Condition matched: ${condition.path} exists\nobserved: ${stringifyObserved(observed)}`;
+        case "stdout_contains":
+            return `Condition matched: stdout_contains ${JSON.stringify(condition.value)}`;
+        case "stderr_contains":
+            return `Condition matched: stderr_contains ${JSON.stringify(condition.value)}`;
+    }
+}
+function resultFields(meta) {
+    if (!meta.result || typeof meta.result !== "object")
+        return {};
+    return meta.result;
+}
+/** Decision facts: stop error, matched condition and observed value, exit/signal, recorded error. */
+function formatDecision(meta) {
+    const lines = [];
+    if (meta.status === "running" && meta.stopError) {
+        lines.push(`stop failed: ${oneLine(meta.stopError, 300)}`);
+        lines.push("The task may still be executing.");
+    }
+    const result = resultFields(meta);
+    if (result.matchedCondition) {
+        lines.push(formatCondition(result.matchedCondition, result.matchedValue));
+    }
+    if (meta.lastExitCode !== undefined || meta.lastSignal) {
+        // A gated task's exit can be a failing step's code rather than the last command's (#619).
+        const gate = meta.stepGateFailure ? " (step gate)" : "";
+        lines.push(`exit=${meta.lastExitCode ?? "null"}${meta.lastSignal ? ` signal=${meta.lastSignal}` : ""}${gate}`);
+    }
+    if (meta.stepGateFailure) {
+        // "stopped at that step" is the usual errexit case; a differing shell exit means the
+        // command disabled errexit and the gate's EXIT override or the command decided the exit.
+        const gate = meta.stepGateFailure;
+        const ending = gate.shellExitCode === null
+            ? "the shell exit is unknown"
+            : gate.shellExitCode === gate.stepExitCode
+                ? "the shell stopped at that step"
+                : `the shell's own exit was ${gate.shellExitCode}`;
+        lines.push(`step gate: ${oneLine(gate.command || "a chained step", 120)} exited ${gate.stepExitCode}; ${ending}`);
+    }
+    if (result.reason && !result.matchedCondition)
+        lines.push(oneLine(result.reason, 240));
+    if (meta.error && meta.error !== meta.stopError && meta.error !== result.reason) {
+        lines.push(`error: ${oneLine(meta.error, 300)}`);
+    }
+    return lines.length ? lines.join("\n") : undefined;
+}
+/**
+ * Completion-callback facts (no env/command dump). Incident rows are passed
+ * whole so the batch can count exactly which it shows.
+ */
+export function formatCallbackFacts(meta) {
+    const state = failureStateFor(meta.id);
+    const pending = pendingFailureAttention(state, Date.now(), { terminal: true });
+    const incidents = pending?.incidents ?? [];
+    const rows = terminalFailureParts(state, incidents).rows;
+    const gapLines = [
+        meta.logDiscardedBytes ? `retention discarded ${meta.logDiscardedBytes} bytes; not recoverable` : undefined,
+        meta.captureDiscardedBytes ? `capture overflow discarded ${meta.captureDiscardedBytes} bytes; not full history` : undefined,
+    ].filter((line) => Boolean(line));
+    // History (expected and closed incidents) is not a row, but the callback still says it exists, so a
+    // declared expected exit is not read as a plain failure. It leads the decision: a tight callback
+    // budget keeps a prefix of the decision, and this short line must survive it (#332).
+    const history = actionableFailures(state).length ? historyTailLine(state) : quietFailureLine(state);
+    const decision = [history, pendingAttentionNote(state, incidents), formatDecision(meta), ...gapLines].filter(Boolean).join("\n") || undefined;
+    return {
+        outcome: meta.status,
+        ...(rows.length ? { failureRows: rows, incidentCount: rows.length } : {}),
+        decision,
+    };
+}
+function formatDiagnostics(meta, extra = []) {
+    const lines = [...extra];
+    if (meta.ssh)
+        lines.push(`remote: ${meta.ssh.target}`);
+    if (meta.remote?.session)
+        lines.push(`remote mode: ${meta.remote.session}`);
+    if (meta.remote?.sessionName)
+        lines.push(`remote session: ${meta.remote.sessionName}`);
+    if (meta.remote?.bootstrapMessage)
+        lines.push(`remote setup: ${oneLine(meta.remote.bootstrapMessage, 180)}`);
+    if (meta.remote?.warning)
+        lines.push(`warning: ${oneLine(meta.remote.warning, 180)}`);
+    if (meta.remote?.stopMessage)
+        lines.push(`remote stop: ${oneLine(meta.remote.stopMessage, 180)}`);
+    if (meta.logDiscardedBytes) {
+        lines.push(`retention discarded ${meta.logDiscardedBytes} bytes in ${meta.logRetentionEvents ?? 1} compaction(s); not recoverable`);
+    }
+    if (meta.captureDiscardedBytes) {
+        lines.push(`capture overflow discarded ${meta.captureDiscardedBytes} bytes in ${meta.captureOverflowEvents ?? 1} event(s); not full history`);
+    }
+    return lines.length ? lines.join("\n") : undefined;
+}
+function formatProcessDiagnostics(diagnostics) {
+    if (!diagnostics)
+        return undefined;
+    const facts = diagnostics.availability === "available" && diagnostics.identity === "matches"
+        ? `identity matches; state=${diagnostics.state}; CPU=${diagnostics.cpuTime}; wait=${diagnostics.waitChannel}`
+        : diagnostics.reason ?? diagnostics.availability;
+    return `process diagnostics: ${facts}\nA snapshot cannot prove useful work or a hang.`;
+}
+function formatStepGate(meta) {
+    if (!meta.requireSuccessfulSteps)
+        return undefined;
+    return "step gate: on; the command runs under bash errexit, so its first unhandled failing step ends the task.";
+}
+function formatLaunchSandbox(meta) {
+    const sandbox = meta.sandbox;
+    if (!sandbox)
+        return "sandbox: unknown; launch-time policy was not recorded.";
+    const backend = sandbox.backend ? `; ${oneLine(sandbox.backend, 40)}` : "";
+    return `sandbox: ${sandbox.confinement}${backend}; source: ${oneLine(sandbox.policySource, 80)}; later changes do not affect this task.`;
+}
+function formatStaleProgress(stall) {
+    if (!stall)
+        return undefined;
+    const summary = formatBackgroundTaskStall(stall);
+    if (!summary)
+        return undefined;
+    return `progress: ${summary}; last observed: ${new Date(stall.observedAt).toISOString()}.\nSilence alone does not prove the task is hung.`;
+}
+function formatProgress(meta) {
+    const lines = [`kind: ${meta.kind}`];
+    if (meta.name)
+        lines.push(`name: ${oneLine(meta.name, 80)}`);
+    lines.push(`elapsed: ${formatDuration((meta.endedAt ?? Date.now()) - meta.startedAt)}`);
+    if (meta.deadlineAt && meta.status === "running") {
+        lines.push(`deadline: ${formatDuration(meta.deadlineAt - Date.now())} left`);
+    }
+    if (meta.lastCheckedAt)
+        lines.push(`last check: ${formatDuration(Date.now() - meta.lastCheckedAt)} ago`);
+    if (meta.lastState !== undefined)
+        lines.push(`last state: ${oneLine(meta.lastState, 120)}`);
+    return lines.join("\n");
+}
+function identityLine(meta) {
+    const stop = meta.status === "running" && meta.stopError ? " · stop failed" : "";
+    return `Background task ${meta.id} is ${meta.status}${stop}.`;
+}
+/** Lifecycle, result, and retained-log facts. A deleted or rewritten log is a change. */
+function contentRevision(meta, stall) {
+    return lifecycleContentRevision([
+        stall ? [stall.state, stall.observedAt ?? null] : null,
+        meta.sandbox ?? null,
+        meta.status,
+        meta.endedAt ?? null,
+        meta.lastCheckedAt ?? null,
+        meta.lastProgressAt ?? null,
+        meta.lastExitCode ?? null,
+        meta.lastSignal ?? null,
+        meta.requireSuccessfulSteps ?? null,
+        meta.stepGateFailure ?? null,
+        meta.error ?? null,
+        meta.stopError ?? null,
+        meta.logGeneration ?? 0,
+        meta.logDiscardedBytes ?? 0,
+        meta.captureDiscardedBytes ?? 0,
+        meta.result ?? null,
+        meta.lastState ?? null,
+        meta.remote?.bootstrapStatus ?? null,
+        meta.remote?.stopMessage ?? null,
+    ], meta.logPath);
+}
+export function assembleBackgroundContent(input) {
+    const maxBytes = backgroundBudget(input.surface, input.maxBytes);
+    return assemblePriorityEnvelope({
+        maxBytes,
+        sections: input.sections,
+        verbatim: input.verbatim,
+        // Explicit evidence pages always advance: half the page is held for bytes.
+        // Explicit evidence pages and list rows always get room: half the page
+        // is held back from failure/diagnostic sections.
+        verbatimReserve: input.surface === "rawPage" || input.surface === "list" ? Math.floor(maxBytes / 2) : undefined,
+        gaps: input.gaps,
+        statusCursor: input.statusCursor,
+        // ADR 0006 surface contract: background summaries lead with failures.
+        failureFirst: true,
+    }).text;
+}
+export function formatMissingTask(inspection, options = {}) {
+    if (inspection.found || inspection.error) {
+        return assembleBackgroundContent({
+            surface: "status",
+            maxBytes: options.maxBytes,
+            sections: {
+                identity: `Background task ${inspection.id} metadata is unreadable.`,
+                diagnostics: [
+                    inspection.error ?? "metadata could not be read",
+                    "Cannot treat this as an empty or nonexistent task.",
+                ].join("\n"),
+            },
+            gaps: [{ kind: "read", detail: inspection.error ?? "unreadable metadata" }],
+        });
+    }
+    return assembleBackgroundContent({
+        surface: "status",
+        maxBytes: options.maxBytes,
+        sections: {
+            identity: `No background task found for id ${inspection.id}.`,
+        },
+    });
+}
+function formatOwnershipGap(id, kind, options) {
+    const detail = kind === "foreign"
+        ? "This task belongs to another session. Pass all:true to inspect it."
+        : options.sessionUnavailable
+            ? "The current session identity is unavailable, so ownership cannot be verified. Cannot treat this as nonexistent or healthy. Pass all:true to inspect."
+            : "Task ownership is unavailable or unreadable. Cannot treat this as nonexistent or healthy. Pass all:true to inspect.";
+    return assembleBackgroundContent({
+        surface: "status",
+        maxBytes: options.maxBytes,
+        sections: {
+            identity: `Background task ${id} is outside the current session scope.`,
+            diagnostics: detail,
+        },
+        gaps: [{ kind: "read", detail: kind === "foreign" ? "foreign-session" : "ownership-unavailable" }],
+    });
+}
+/**
+ * Refusal for a mutation (stop, clear) of a task outside the current session
+ * scope. Mutations use the same ownership rule as reads (#322): only an owned
+ * task changes; nothing about a foreign or unverifiable task is disclosed.
+ */
+export function formatMutationRefusal(id, kind, action, options) {
+    const verb = action === "stop" ? "stopped" : "dismissed";
+    const detail = kind === "foreign"
+        ? `This task belongs to another session, so it was not ${verb}. Pass all:true to ${action} it explicitly.`
+        : options.sessionUnavailable
+            ? `The current session identity is unavailable, so ownership cannot be verified and the task was not ${verb}. Pass all:true to ${action} it explicitly.`
+            : `Task ownership is unavailable or unreadable, so the task was not ${verb}. Pass all:true to ${action} it explicitly.`;
+    return assembleBackgroundContent({
+        surface: "status",
+        maxBytes: options.maxBytes,
+        sections: {
+            identity: `Background task ${id} is outside the current session scope; not ${verb}.`,
+            diagnostics: detail,
+        },
+        gaps: [{ kind: "read", detail: kind === "foreign" ? "foreign-session" : "ownership-unavailable" }],
+    });
+}
+/**
+ * Current-session ownership, shared by reads and mutations. Without a current
+ * session id, ownership is only verified for a task this process launched with
+ * the same sessionless origin; a legacy task with no recorded origin is never
+ * assumed to be ours.
+ */
+export function classifyOwnership(meta, options) {
+    if (options.all === true)
+        return "allow";
+    if (options.sessionUnavailable)
+        return "unknown";
+    const origin = options.origin;
+    if (!origin)
+        return "allow";
+    if (!origin.sessionId) {
+        const recorded = meta.callbackOrigin;
+        if (!recorded)
+            return "unknown";
+        if (recorded.cwd === origin.cwd && !recorded.sessionId && meta.spawnPid === process.pid)
+            return "allow";
+        return recorded.sessionId ? "foreign" : "unknown";
+    }
+    if (belongsToOrigin(meta, origin))
+        return "allow";
+    const taskOrigin = originOf(meta);
+    if (!meta.callbackOrigin || (!taskOrigin.sessionId && origin.sessionId))
+        return "unknown";
+    return "foreign";
+}
+function asInspection(inspection, idOrOptions) {
+    if (!inspection) {
+        return { id: typeof idOrOptions === "string" ? idOrOptions : "", found: false, readable: false };
+    }
+    if (typeof inspection === "object" && ("found" in inspection || "readable" in inspection)) {
+        return inspection;
+    }
+    const meta = inspection;
+    return { id: meta.id, meta, found: true, readable: true };
+}
+/**
+ * Launch result. For a watch, `firstCheck` reports its first check (#359): the check's result,
+ * or why the launch stopped waiting while it was still running.
+ *
+ * The first check gets whatever the status budget leaves after the rest of the launch text, so
+ * nothing else is clipped for it. The log path is kept whole or dropped whole: a clipped path
+ * looks valid but points nowhere.
+ */
+export function formatLaunch(meta, firstCheck) {
+    const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
+    const remoteLines = [
+        ...(meta.ssh ? [`Remote: ${meta.ssh.target}${meta.remote?.session ? ` mode=${meta.remote.session}` : ""}${meta.remote?.sessionName ? ` session=${meta.remote.sessionName}` : ""}.`] : []),
+        ...(meta.remote?.bootstrapMessage ? [`Remote setup: ${meta.remote.bootstrapMessage}`] : []),
+        ...(meta.remote?.warning ? [`Warning: ${meta.remote.warning}`] : []),
+    ];
+    const logLine = `Log: ${meta.logPath}`;
+    const build = (checkText, withLog) => assembleBackgroundContent({
+        surface: "status",
+        sections: {
+            identity: `Started background ${meta.kind} ${label}. Status: ${meta.status}.`,
+            failure: incidentSection(meta.id, {}),
+            decision: formatDecision(meta),
+            diagnostics: [formatLaunchSandbox(meta), formatStepGate(meta), ...remoteLines, ...(checkText ? [checkText] : [])].filter(Boolean).join("\n") || undefined,
+            progress: withLog ? logLine : undefined,
+        },
+        gaps: taskGaps(meta),
+    });
+    let checkText;
+    if (firstCheck) {
+        const room = backgroundBudget("status") - utf8ByteLength(build(undefined, true)) - 1;
+        checkText = formatFirstWatchCheck(meta, firstCheck, room);
+    }
+    const text = build(checkText, true);
+    return text.includes(logLine) ? text : build(checkText, false);
+}
+const FIRST_CHECK_TAIL_LINES = 3;
+const FIRST_CHECK_LINE_CHARS = 200;
+function tailLines(text) {
+    return text.split(/\r?\n/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean)
+        .slice(-FIRST_CHECK_TAIL_LINES)
+        .map((line) => line.length > FIRST_CHECK_LINE_CHARS ? `${line.slice(0, FIRST_CHECK_LINE_CHARS - 1)}…` : line);
+}
+function pendingFirstCheckText(check) {
+    switch (check.pending) {
+        case "aborted":
+            return "First check still running; stopped waiting because the tool call was cancelled. The watch continues in the background; check it later with bg_task_status.";
+        case "suspended":
+            return "First check still running when the session shut down. The watch continues when its session resumes; check it later with bg_task_status.";
+        default:
+            return `First check still running after ${formatDuration(check.waitedMs)}; the watch continues in the background. Check it later with bg_task_status.`;
+    }
+}
+/**
+ * The first check of a watch in at most `maxBytes` (#359). What matters most is kept first: the
+ * outcome, the exit-0-with-stderr warning, the newest stderr lines, then the newest stdout lines,
+ * so stdout is cut first. Lines are shown oldest to newest.
+ */
+export function formatFirstWatchCheck(meta, check, maxBytes = Number.MAX_SAFE_INTEGER) {
+    if ("pending" in check)
+        return pendingFirstCheckText(check);
+    if (check.error)
+        return `First check could not run: ${oneLine(check.error, 300)}`;
+    const outcome = check.timedOut ? "timed out" : check.signal ? `signal ${check.signal}` : `exit ${check.exitCode ?? "unknown"}`;
+    const took = check.durationMs < 1000 ? `${check.durationMs}ms` : formatDuration(check.durationMs);
+    const header = `First check: ${outcome} in ${took}.`;
+    const stdout = tailLines(check.stdout);
+    const stderr = tailLines(check.stderr);
+    const warning = check.exitCode === 0 && stderr.length && meta.status === "running"
+        ? "The check exited 0 but wrote stderr: if it is broken, the watch cannot tell. Let errors exit non-zero."
+        : undefined;
+    const keptErr = [];
+    const keptOut = [];
+    let keptEmptyStdout = false;
+    const render = () => [
+        header,
+        ...(warning ? [warning] : []),
+        ...(keptErr.length ? [`stderr tail:\n${keptErr.map((line) => `  ${line}`).join("\n")}`] : []),
+        ...(keptOut.length ? [`stdout tail:\n${keptOut.map((line) => `  ${line}`).join("\n")}`] : []),
+        ...(keptEmptyStdout ? ["stdout: (empty)"] : []),
+    ].join("\n");
+    const omissionNote = () => {
+        const omitted = (stderr.length - keptErr.length) + (stdout.length - keptOut.length);
+        return omitted > 0 ? `(${omitted} output line${omitted === 1 ? "" : "s"} omitted; see bg_task_log)` : undefined;
+    };
+    const fits = () => utf8ByteLength([render(), omissionNote()].filter(Boolean).join("\n")) <= maxBytes;
+    // Newest first within each stream; each kept line goes in front to stay in order.
+    for (const line of [...stderr].reverse()) {
+        keptErr.unshift(line);
+        if (!fits()) {
+            keptErr.shift();
+            break;
+        }
+    }
+    for (const line of [...stdout].reverse()) {
+        keptOut.unshift(line);
+        if (!fits()) {
+            keptOut.shift();
+            break;
+        }
+    }
+    if (!stdout.length) {
+        keptEmptyStdout = true;
+        if (!fits())
+            keptEmptyStdout = false;
+    }
+    return [render(), omissionNote()].filter(Boolean).join("\n");
+}
+function redactedVerbose(meta, options) {
+    const { env, ...rest } = meta;
+    const state = failureStateFor(meta.id);
+    const observations = Object.values(state.observations);
+    const body = {
+        ...rest,
+        sandbox: meta.sandbox ?? { confinement: "unknown", policySummary: "Launch-time policy was not recorded." },
+        ...(options.processDiagnostics ? { processDiagnostics: options.processDiagnostics } : {}),
+        ...(env ? { env: { omitted: true, keyCount: Object.keys(env).length } } : {}),
+    };
+    if (!observations.length)
+        return body;
+    return {
+        failureSummary: formatFailureSummary(state),
+        failureJournal: failurePath(meta.id),
+        failureObservations: observations.map((observation) => ({
+            ...observation,
+            attentionDeliveredAt: state.delivered[observation.id],
+        })),
+        ...body,
+    };
+}
+/**
+ * Verbose metadata is explicit evidence under the raw-page budget. When the
+ * whole document fits it is returned as plain JSON; otherwise it is paged
+ * with a caller cursor like any other retained evidence.
+ */
+function formatVerbose(meta, options) {
+    const json = JSON.stringify(redactedVerbose(meta, options), null, 2);
+    const resource = `verbose:${scopeKey(options)}:${meta.id}`;
+    if (!options.cursor && utf8ByteLength(json) <= backgroundBudget("rawPage", options.maxBytes))
+        return json;
+    // Live process samples are not part of the paged document: CPU/state changes
+    // must not invalidate continuation, even when diagnostics is omitted next time.
+    const stableJson = JSON.stringify(redactedVerbose(meta, { ...options, processDiagnostics: undefined }), null, 2);
+    return assembleBackgroundContent({
+        surface: "rawPage",
+        maxBytes: options.maxBytes,
+        sections: {
+            identity: `Background task ${meta.id} metadata (environment values omitted).`,
+            diagnostics: formatProcessDiagnostics(options.processDiagnostics),
+        },
+        verbatim: (budget) => pageVerbatimText(stableJson, { cursor: options.cursor, maxBytes: budget, resource }),
+    });
+}
+/** Retained raw log pages for this task in this scope. */
+function rawLogPage(meta, options, cursor, budget) {
+    return pageTaskLog(meta, { cursor, maxBytes: budget, resource: `log:${scopeKey(options)}:${meta.id}` });
+}
+/**
+ * A compact newest-rows excerpt. When earlier rows, older bytes, or a long
+ * line's prefix are not shown, the page says so and its cursor starts a raw
+ * page at the oldest retained byte (bg_task_log), so nothing is hidden.
+ */
+function excerptPage(meta, options, log, budget) {
+    const text = log.text || "(log is empty)";
+    const encoded = utf8ByteLength(text);
+    let body = text;
+    if (encoded > budget) {
+        const slice = sliceUtf8Bytes(text, encoded - budget, budget, false);
+        body = slice.bytes <= budget ? slice.text : "";
+        if (slice.startByte > 0) {
+            const newline = body.indexOf("\n");
+            if (newline >= 0 && newline < body.length - 1)
+                body = body.slice(newline + 1);
+        }
+    }
+    const shownBytes = log.text ? utf8ByteLength(body) : 0;
+    const omittedSomething = Boolean(log.truncated) || shownBytes < utf8ByteLength(log.text);
+    if (!omittedSomething)
+        return { text: body, hasMore: false, omittedBytes: 0 };
+    const start = rawLogPage(meta, options, undefined, 0);
+    const rows = log.omittedRows ? `; ${log.omittedRows} earlier display row(s)` : "";
+    return {
+        text: body,
+        hasMore: true,
+        omittedBytes: Math.max(0, (log.totalBytes ?? 0) - shownBytes),
+        nextCursor: start.nextCursor,
+        via: `pass to bg_task_log id=${meta.id}: raw pages from the oldest retained byte${rows}`,
+    };
+}
+export function formatStatus(inspection, idOrOptions, maybeOptions) {
+    const inspectionValue = asInspection(inspection, idOrOptions);
+    const options = (typeof idOrOptions === "string" ? maybeOptions : idOrOptions) ?? {};
+    if (!inspectionValue.meta)
+        return formatMissingTask(inspectionValue, options);
+    const meta = inspectionValue.meta;
+    const ownership = classifyOwnership(meta, options);
+    if (ownership !== "allow")
+        return formatOwnershipGap(meta.id, ownership, options);
+    if (isIncidentCursor(options.cursor) || options.history)
+        return assembleIncidentPage(meta, options);
+    // A page cursor from another view of this task continues that view instead
+    // of resetting a status revision (#323): a raw/file cursor pages the log,
+    // a text cursor pages verbose metadata.
+    const pageKind = cursorKind(options.cursor);
+    if (pageKind === "f")
+        return formatLog(meta.id, { ...options, raw: true });
+    if (pageKind === "t")
+        return formatVerbose(meta, options);
+    if (options.verbose)
+        return formatVerbose(meta, options);
+    // A bg_task_list page cursor pages the list, not this task: say so rather than report it as a
+    // stale status cursor (#332).
+    const listCursor = pageKind === "l";
+    const state = failureStateFor(meta.id);
+    const stall = meta.status === "running" ? observeBackgroundTaskStall(meta) : undefined;
+    const staleProgress = formatStaleProgress(stall);
+    const sandbox = formatLaunchSandbox(meta);
+    const resource = `status:${scopeKey(options)}:${meta.id}`;
+    const revision = inspectStatusRevision({
+        resource,
+        contentRevision: contentRevision(meta, stall),
+        failureRevision: failureRevision(state),
+        cursor: listCursor ? undefined : options.cursor,
+    });
+    if (options.cursor && revision.change === "none") {
+        return assembleBackgroundContent({
+            surface: "status",
+            maxBytes: options.maxBytes,
+            sections: {
+                identity: `${identityLine(meta)} · unchanged`,
+                failure: actionableFailures(state).length
+                    ? `${actionableFailures(state).length} active failure observation(s), unchanged.`
+                    : undefined,
+                decision: [staleProgress, formatUnchangedEvidence(options.cursor)].filter(Boolean).join("\n"),
+                diagnostics: sandbox,
+            },
+            statusCursor: revision.nextCursor,
+        });
+    }
+    const log = readLog(meta.logPath, STATUS_EXCERPT_ROWS);
+    // Change/reset and read-gap facts are short and decision-relevant: they are
+    // budgeted with the decision section, ahead of long incident rows.
+    const changeFacts = [
+        ...(listCursor ? ["cursor ignored: it is a bg_task_list page cursor; pass it to bg_task_list, or pass this status's statusCursor here."] : []),
+        ...(revision.change === "failure" ? ["change=failure"] : []),
+        ...(revision.reset ? [`reset=${revision.reset}`] : []),
+        ...(log.error ? [`log unreadable: ${oneLine(log.error, 200)}; cannot treat this as an empty healthy log.`] : []),
+    ];
+    return assembleBackgroundContent({
+        surface: "status",
+        maxBytes: options.maxBytes,
+        sections: {
+            identity: identityLine(meta),
+            failure: incidentSection(meta.id, options, state),
+            decision: [...changeFacts, formatDecision(meta), staleProgress].filter(Boolean).join("\n") || undefined,
+            diagnostics: formatDiagnostics(meta, [formatProcessDiagnostics(options.processDiagnostics), sandbox].filter((line) => !!line)),
+            progress: formatProgress(meta),
+        },
+        verbatim: log.error ? undefined : (budget) => excerptPage(meta, options, log, budget),
+        gaps: [
+            ...taskGaps(meta),
+            ...(log.error ? [{ kind: "read", detail: log.error }] : []),
+        ],
+        statusCursor: revision.nextCursor,
+    });
+}
+export function formatLog(id, options = {}) {
+    const inspection = inspectMeta(id);
+    if (!inspection.meta)
+        return formatMissingTask(inspection, options);
+    const meta = inspection.meta;
+    const ownership = classifyOwnership(meta, options);
+    if (ownership !== "allow")
+        return formatOwnershipGap(meta.id, ownership, options);
+    const fileCursor = cursorKind(options.cursor) === "f";
+    const raw = options.raw === true || options.tailLines === 0 || fileCursor;
+    // Raw evidence keeps whole excerpts and evidence paths.
+    const failure = incidentSection(id, options, undefined, raw ? "full" : "compact");
+    if (raw) {
+        return assembleBackgroundContent({
+            surface: "rawPage",
+            maxBytes: options.maxBytes,
+            sections: {
+                identity: `${meta.id} raw log (${meta.status})`,
+                failure,
+                decision: formatDecision(meta),
+                diagnostics: formatDiagnostics(meta, [
+                    "Raw retained bytes; capture/retention loss is not recoverable as full history.",
+                ]),
+            },
+            verbatim: (budget) => rawLogPage(meta, options, options.cursor, budget),
+        });
+    }
+    const tailLines = options.tailLines && options.tailLines > 0 ? Math.floor(options.tailLines) : DEFAULT_LOG_TAIL_ROWS;
+    const log = readLog(meta.logPath, tailLines);
+    const staleCursor = options.cursor ? ["reset=stale-cursor (compact tails have no cursor; pass a raw nextCursor or lines:0)"] : [];
+    if (log.error) {
+        return assembleBackgroundContent({
+            surface: "log",
+            maxBytes: options.maxBytes,
+            sections: {
+                identity: `${meta.id} log (${meta.status})`,
+                failure,
+                diagnostics: [...staleCursor, `log unreadable: ${log.error}`, "Cannot treat this as an empty healthy log."].join("\n"),
+            },
+            gaps: [{ kind: "read", detail: log.error }, ...taskGaps(meta)],
+        });
+    }
+    return assembleBackgroundContent({
+        surface: "log",
+        maxBytes: options.maxBytes,
+        sections: {
+            identity: `${meta.id} log (${meta.status}) · newest ${tailLines} display row${tailLines === 1 ? "" : "s"}`,
+            failure,
+            decision: formatDecision(meta),
+            diagnostics: formatDiagnostics(meta, staleCursor),
+        },
+        verbatim: (budget) => excerptPage(meta, options, log, budget),
+        gaps: taskGaps(meta),
+    });
+}
+function compactRow(meta, incidents) {
+    const age = formatDuration((meta.endedAt ?? Date.now()) - meta.startedAt);
+    const remote = meta.ssh ? ` ${oneLine(meta.ssh.target, 60)}${meta.remote?.session ? ` ${meta.remote.session}` : ""}` : "";
+    const incident = incidents > 0 ? ` · ${incidents} incident${incidents === 1 ? "" : "s"}` : "";
+    const label = meta.name ? ` ${oneLine(meta.name, 60)}` : "";
+    const waits = meta.waits?.length;
+    return `${meta.id} ${meta.status} ${meta.kind} ${age}${incident}${remote}${label}${waits ? ` waits=${waits}` : ""}`;
+}
+export function formatList(options = {}, index = listTaskRecords()) {
+    if (index.indexError) {
+        return assembleBackgroundContent({
+            surface: "list",
+            maxBytes: options.maxBytes,
+            sections: {
+                identity: "Cannot list background tasks.",
+                diagnostics: `Task index is unreadable: ${index.indexError}. Cannot treat the registry as empty.`,
+            },
+            gaps: [{ kind: "read", detail: index.indexError }],
+        });
+    }
+    if (!options.all && !options.origin) {
+        return assembleBackgroundContent({
+            surface: "list",
+            maxBytes: options.maxBytes,
+            sections: {
+                identity: "Current session is unavailable.",
+                diagnostics: "Pass all:true to list tasks across sessions. Cannot treat the registry as empty.",
+            },
+            gaps: [{ kind: "read", detail: "session scope unavailable" }],
+        });
+    }
+    const wanted = options.statuses && options.statuses.length > 0 ? new Set(options.statuses) : undefined;
+    let unreadable = index.page?.unreadable ?? 0;
+    let unknown = index.page?.unknown ?? 0;
+    const allowed = [];
+    for (const record of index.records) {
+        if (!record.meta) {
+            if (record.found)
+                unreadable += 1;
+            continue;
+        }
+        const ownership = classifyOwnership(record.meta, options);
+        if (ownership === "allow") {
+            if (!wanted || wanted.has(record.meta.status) || wanted.has("running") && record.meta.durable
+                && record.meta.active)
+                allowed.push(record.meta);
+        }
+        else if (ownership === "unknown") {
+            unknown += 1;
+        }
+    }
+    const scope = scopeKey(options);
+    const statusesKey = [...(options.statuses ?? [])].sort().join(",");
+    const resource = `list:${scope}:${statusesKey}`;
+    const limit = Math.max(1, Math.min(Math.floor(options.limit ?? DEFAULT_LIST_ENTRIES), MAX_LIST_ENTRIES));
+    const total = index.page?.total ?? allowed.length;
+    const states = new Map(allowed.map((meta) => [meta.id, failureStateFor(meta.id)]));
+    const incidentsOf = (id) => actionableFailures(states.get(id)).length;
+    const revision = inspectStatusRevision({
+        resource,
+        contentRevision: index.page?.contentRevision ?? revisionOf(allowed.map((meta) => [meta.id, meta.status, meta.endedAt ?? null])),
+        failureRevision: revisionOf([index.page?.failureRevision, allowed.map((meta) => [meta.id, failureRevision(states.get(meta.id))])]),
+        cursor: cursorKind(options.cursor) === "s" ? options.cursor : undefined,
+    });
+    const scopeLabel = options.all ? "all sessions" : "current session";
+    if (options.cursor && cursorKind(options.cursor) === "s" && revision.change === "none") {
+        return assembleBackgroundContent({
+            surface: "list",
+            maxBytes: options.maxBytes,
+            sections: {
+                identity: `${total} background task${total === 1 ? "" : "s"} (${scopeLabel}) · unchanged`,
+                decision: formatUnchangedEvidence(options.cursor),
+            },
+            statusCursor: revision.nextCursor,
+        });
+    }
+    const failing = allowed.filter((meta) => incidentsOf(meta.id) > 0);
+    const withIncidents = failing.length;
+    // One leading incident (the newest failing task's top row), then a count:
+    // failures lead the surface without repeating a paragraph per task.
+    const listFailure = (budget) => {
+        const newest = failing[0];
+        if (!newest)
+            return undefined;
+        const count = `${withIncidents} task${withIncidents === 1 ? "" : "s"}${index.page ? " on this page" : ""} with unresolved incidents; newest ${newest.id} has ${incidentsOf(newest.id)}. Full incidents: bg_task_status id=${newest.id}.`;
+        const top = formatFailureLines(states.get(newest.id))[0] ?? "";
+        // The lead-in is a pointer, not the incident page: at most a short preview.
+        const room = Math.min(LIST_LEAD_PREVIEW_BYTES, budget - utf8ByteLength(count) - 1);
+        if (room < 48 || !top)
+            return count;
+        const shown = utf8ByteLength(top) <= room ? top : `${sliceUtf8Bytes(top, 0, room - 12, false).text} (clipped)`;
+        return `${shown}\n${count}`;
+    };
+    const notes = [
+        ...(unreadable ? [`${unreadable} task record(s) with unreadable metadata; cannot treat as empty or healthy`] : []),
+        ...(unknown ? [`${unknown} task(s) with unavailable ownership hidden; pass all:true to inspect`] : []),
+        ...(revision.change === "failure" ? ["change=failure"] : []),
+    ];
+    const gaps = [
+        ...(unreadable ? [{ kind: "read", detail: `${unreadable} unreadable metadata file(s)` }] : []),
+        ...(unknown ? [{ kind: "read", detail: `${unknown} task(s) with unverifiable ownership` }] : []),
+    ];
+    const pageCursor = options.cursor && cursorKind(options.cursor) !== "s" ? options.cursor : undefined;
+    return assembleBackgroundContent({
+        surface: "list",
+        maxBytes: options.maxBytes,
+        sections: {
+            identity: options.sessionUnavailable && !options.all
+                ? "Current session identity is unavailable; task ownership cannot be verified."
+                : total === 0
+                    ? `No background tasks found (${scopeLabel}).`
+                    : `${total} background task${total === 1 ? "" : "s"} (${scopeLabel}), newest first${allowed.some(meta => meta.durable) ? "; durable background operations included" : ""}`,
+            failure: withIncidents ? listFailure : undefined,
+            diagnostics: notes.join("\n") || undefined,
+        },
+        verbatim: allowed.length === 0 && !pageCursor
+            ? undefined
+            : (budget) => pageRows(allowed, {
+                cursor: pageCursor,
+                resource,
+                limit,
+                maxBytes: budget,
+                ...(index.page ? { indexed: { total, before: index.page.before } } : {}),
+                keyOf: (meta) => ({ time: meta.startedAt, id: meta.id }),
+                render: (meta) => compactRow(meta, incidentsOf(meta.id)),
+            }),
+        gaps,
+        statusCursor: revision.nextCursor,
+    });
+}
+export function formatStopResult(inspection, options = {}) {
+    if (!inspection.meta)
+        return formatMissingTask(inspection, options);
+    return formatStatus(inspection, options);
+}
+export { inspectMeta, utf8ByteLength };

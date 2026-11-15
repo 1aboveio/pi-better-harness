@@ -12,6 +12,7 @@ export interface LaunchAttempt {
     policyPath?: string;
     policyDigest?: string;
     capacityOwner: { pid: number; start: string };
+    launchAuthority?: unknown;
     recipe: unknown;
     permissions: unknown;
     token: string;

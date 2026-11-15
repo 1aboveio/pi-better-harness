@@ -14,6 +14,9 @@ test("managed launch shares the mutation connection and releases only its lease"
   try {
     host = await createSubagentLaunch(env.agentDir, "shared-launch", {});
     assert.deepEqual(mutationStoreMetrics(env.agentDir), { active: 1, leases: 2 });
+    await host.initialize();
+    assert.equal(host.status().continuationReady, true, "managed SDK registers the fixed continuation adapter");
+    assert.deepEqual(mutationStoreMetrics(env.agentDir), { active: 1, leases: 2 });
     const journal = first.store.subagentLaunchJournal();
     assert.equal(host.status().runtimeEpoch, journal.epoch("shared-launch"));
     await host.close();
@@ -65,4 +68,24 @@ test("failed launch construction releases its mutation lease and permits a clean
     await host.close();
     assert.deepEqual(mutationStoreMetrics(env.agentDir), { active: 0, leases: 0 });
   } finally { db.close(); }
+});
+
+test("unavailable continuation authority backs off without retaining active work", async () => {
+  const env = makeEnv();
+  const { createSubagentLaunch } = await import("../src/runtime/subagent-launch.ts");
+  const host = await createSubagentLaunch(env.agentDir, "retry-owner", {});
+  try {
+    const park = { runId: "missing-authority", waitId: "wait", generation: 1 };
+    const run = async () => { throw new Error("unavailable authority must not dispatch"); };
+    assert.equal(await host.dispatchContinuation(park, run), "skipped");
+    const first = host.status().continuationUnavailable[0];
+    assert.match(first.reason, /authority unavailable/);
+    assert.equal(first.failures, 1);
+    assert.equal(await host.dispatchContinuation(park, run), "skipped");
+    assert.deepEqual(host.status().continuationUnavailable[0], first);
+    assert.equal(host.busy, false);
+    for (let i = 0; i < 130; i++) await host.dispatchContinuation({ ...park, waitId: `wait-${i}` }, run);
+    assert.equal(host.status().continuationUnavailable.length, 128);
+    assert.equal(host.busy, false);
+  } finally { await host.close(); }
 });
