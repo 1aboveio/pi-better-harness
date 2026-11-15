@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import { inspectDaemonOwner } from "../../packages/pi-better-server/src/daemon-owner.ts";
 
 export async function prepareOwnedRuntime(agentDir) {
+  // Fixture setup owns the canonical build prerequisite, once per test process.
+  await import("../sync-runtime-client.mjs");
   // Cleanup-only entry points do not require the generated standalone client.
   const { ensureRuntime } = await import("../../packages/pi-better-subagents/runtime-client/src/runtime/client.mjs");
   await ensureRuntime({ agentDir });
