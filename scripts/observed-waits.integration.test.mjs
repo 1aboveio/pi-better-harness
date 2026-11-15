@@ -39,6 +39,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, afterEach, test } from "node:test";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const fixtures = join(repoRoot, "scripts", "fixtures", "observed-waits");
@@ -108,8 +109,14 @@ const PARENT_EXTENSION = join(fixtures, "parent-provider.extension.mjs");
 const PARENT_SESSION = "parent-session-1";
 const BRANCH = "branch-1";
 const runningChildren = new Set();
+const runtimeOwners = new Map();
 
-afterEach(() => {
+afterEach(async () => {
+    for (const [agentDir, owner] of runtimeOwners) {
+        await stopOwnedRuntime(join(agentDir, "server"), owner);
+        removeOwnedFixture(agentDir);
+    }
+    runtimeOwners.clear();
     support.cleanupAll();
     for (const child of runningChildren) {
         try { child.kill("SIGKILL"); } catch { /* already gone */ }
@@ -800,6 +807,7 @@ async function openProductionParent(project) {
     // Background's store and the Subagents config both resolve the agent
     // directory from the environment, not from createAgentSession's option.
     process.env.PI_CODING_AGENT_DIR = agentDir;
+    runtimeOwners.set(agentDir, await prepareOwnedRuntime(agentDir));
     const parentTrace = join(agentDir, "parent-inventory.json");
     process.env.ACCEPTANCE_PARENT_TRACE = parentTrace;
     mkdirSync(join(agentDir, "extensions"), { recursive: true });

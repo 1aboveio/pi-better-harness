@@ -1,9 +1,46 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 import { claimDaemonOwner, inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+
+test("cleanup works in a clean source layout without a generated runtime client", () => {
+  const parent = new URL("../.work/753-ci3/", import.meta.url);
+  mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(new URL("clean-source-", parent));
+  try {
+    // Include canonical server sources, but never warm ignored build outputs.
+    const serverSources = execFileSync("git", ["ls-files", "-z", "--", "packages/pi-better-server"], {
+      cwd: new URL("../", import.meta.url), encoding: "utf8",
+    }).split("\0").filter(Boolean);
+    for (const relative of ["scripts/test-support/remove-owned-fixture.mjs", ...serverSources]) {
+      const target = join(root, relative);
+      mkdirSync(dirname(target), { recursive: true });
+      cpSync(new URL(`../${relative}`, import.meta.url), target);
+    }
+    assert.equal(existsSync(join(root, "packages/pi-better-subagents/runtime-client")), false);
+    const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import assert from "node:assert/strict";
+      import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+      import { join } from "node:path";
+      const { removeOwnedFixture, stopOwnedRuntime } = await import(process.argv[1]);
+      const fixture = process.argv[2];
+      const release = join(fixture, "agent/managed-runtime/releases/build");
+      mkdirSync(release, { recursive: true });
+      writeFileSync(join(release, "artifact.gz"), "owned fixture");
+      await stopOwnedRuntime(join(fixture, "agent/server"), undefined);
+      removeOwnedFixture(fixture);
+      assert.equal(existsSync(fixture), false);
+    `, pathToFileURL(join(root, "scripts/test-support/remove-owned-fixture.mjs")).href, join(root, "owned")], { cwd: root, encoding: "utf8" });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    removeOwnedFixture(root);
+  }
+});
 
 test("owned runtime cleanup refuses a replacement identity before signalling it", async () => {
   const parent = new URL("../.work/753-ci/", import.meta.url);

@@ -12,11 +12,12 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 import { setConfigForTests } from "../packages/pi-better-subagents/config.ts";
 import { loadCatalog } from "../packages/pi-better-subagents/catalog-store.ts";
 import { resolveSelection } from "../packages/pi-better-subagents/catalog-resolver.ts";
@@ -27,9 +28,14 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const EVIDENCE = join(ROOT, "packages/pi-better-subagents/docs/evidence/664-skill-catalog-tui");
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 
-test("the real /agents TUI configures, persists, reloads, and restores skill exposure", { skip: !hasTmux }, (t) => {
+test("the real /agents TUI configures, persists, reloads, and restores skill exposure", { skip: !hasTmux }, async (t) => {
     const fixture = mkdtempSync(join(tmpdir(), "pi-agents-skills-"));
     const agentDir = join(fixture, "agent");
+    let runtimeOwner;
+    t.after(async () => {
+        await stopOwnedRuntime(join(agentDir, "server"), runtimeOwner);
+        removeOwnedFixture(fixture);
+    });
     const rolePath = join(agentDir, "agents", "roles", "role.fixture.md");
     const agentPath = join(agentDir, "agents", "agents", "agent.fixture.md");
     const skillPath = join(fixture, "skills", "review", "SKILL.md");
@@ -79,6 +85,7 @@ test("the real /agents TUI configures, persists, reloads, and restores skill exp
     };
 
     try {
+        runtimeOwner = await prepareOwnedRuntime(agentDir);
         mkdirSync(EVIDENCE, { recursive: true });
         tmux("new-session", "-d", "-s", "agents", "-x", "100", "-y", "40", command);
         wait(/pi-better-subagents/);
@@ -154,5 +161,4 @@ test("the real /agents TUI configures, persists, reloads, and restores skill exp
     setConfigForTests(undefined);
 
     t.diagnostic(`Artifacts: ${EVIDENCE}`);
-    rmSync(fixture, { recursive: true, force: true });
 });
