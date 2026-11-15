@@ -26,6 +26,7 @@ const HERMETIC_TMPDIR = mkdtempSync(join(tmpdir(), "subagent-timing-"));
 process.env.TMPDIR = HERMETIC_TMPDIR;
 const stopRuntime = await startWorkRuntimeFixture();
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: betterSubagents, progressCacheIdsForTests, isHealthTickerActive, forgetProgressCacheForTests } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, runDir } = await import("../registry.ts");
@@ -67,7 +68,7 @@ function makeHarness(options = {}) {
         model: undefined,
         sessionManager: { getSessionId: () => options.sessionId ?? "timing-session" },
     };
-    betterSubagents(pi);
+    betterSubagents(pi, options.manager ? managedDomainPort() : undefined);
     const shutdown = () => handlers.get("session_shutdown")?.({}, ctx);
     return { pi, tools, handlers, sent, notes, ctx, shutdown };
 }
@@ -167,7 +168,7 @@ describe("harness timing: launch", () => {
     it("restores a session timeout over the environment while explicit launch values still win", async () => {
         const previous = process.env.PI_SUBAGENT_MAX_MINUTES;
         process.env.PI_SUBAGENT_MAX_MINUTES = "5";
-        const h = makeHarness();
+        const h = makeHarness({ manager: true });
         h.ctx.sessionManager.getBranch = () => [{
             type: "custom", customType: "pi-better-subagents-timing", data: { version: 1, maxMinutes: 90 },
         }];
@@ -188,7 +189,7 @@ describe("harness timing: launch", () => {
     });
 
     it("defaults to a 60-minute ceiling and stall detection and prepares explicit deadline support", async () => {
-        const h = makeHarness();
+        const h = makeHarness({ manager: true });
         try {
             const run = await spawnRun(h, { deadline_minutes: null, grace_minutes: null, max_minutes: null, stuck_minutes: null });
             const meta = readMeta(run.id);
@@ -211,7 +212,7 @@ describe("harness timing: launch", () => {
     });
 
     it("rejects an invalid timing value before anything launches", async () => {
-        const h = makeHarness();
+        const h = makeHarness({ manager: true });
         try {
             await assert.rejects(
                 h.tools.get("subagent_spawn").execute("tc", { prompt: "x", clean: true, sandbox: false, deadline_minutes: -1 }, undefined, undefined, h.ctx),
@@ -225,7 +226,7 @@ describe("harness timing: launch", () => {
     });
 
     it("batch jobs inherit shared timing and may override it per job", async () => {
-        const h = makeHarness();
+        const h = makeHarness({ manager: true });
         try {
             const res = await h.tools.get("subagent_spawn_batch").execute("tc", {
                 shared: { clean: true, sandbox: false, tools: "read,bash", cwd: tmpdir(), deadline_minutes: 12, max_minutes: 0 },
@@ -260,7 +261,7 @@ describe("shared supervision watcher", () => {
             writeFakePi(WAIT_SCRIPT);
             const intervals = mock.method(globalThis, "setInterval");
             const watcherStarts = () => intervals.mock.calls.filter((call) => call.arguments[1] === HEALTH_TICK_MS).length;
-            const h = makeHarness();
+            const h = makeHarness({ manager: true });
             h.ctx.isIdle = () => true;
             const runs = [];
             try {
@@ -277,7 +278,7 @@ describe("shared supervision watcher", () => {
                 assert.equal(isHealthTickerActive(), false, "the final exit stops supervision without another tick");
                 assert.ok(readMeta(second.id).completionCallbackPendingAt, "callback delivery is independent of supervision");
                 assert.equal(await getCallbackBatcher(h.pi).flush(), true);
-                assert.ok(readMeta(second.id).completionCallbackSentAt);
+                assert.equal(readMeta(second.id).completionCallbackSentAt, undefined, "manager cannot deliver into the recipient transcript; real SDK receipt is covered by runtime-assignment-sdk");
                 await h.handlers.get("session_start")({}, h.ctx);
                 assert.equal(isHealthTickerActive(), false, "terminal history must not restart the watcher");
                 const later = await spawnRun(h);
@@ -298,7 +299,7 @@ describe("shared supervision watcher", () => {
         await withFakeClock(async () => {
             writeFakePi(WAIT_SCRIPT);
             const intervals = mock.method(globalThis, "setInterval");
-            const h = makeHarness();
+            const h = makeHarness({ manager: true });
             const runs = [];
             try {
                 const first = await spawnRun(h, { callback: false });
@@ -869,6 +870,32 @@ describe("harness timing: a reload whose bounded log read lost the running call 
                 await reap(run);
                 first.shutdown();
             }
+        });
+    });
+});
+
+describe("managed timing notification ownership", () => {
+    it("enforces the child deadline while retaining an undelivered recipient wake", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness({ manager: true });
+            let run;
+            try {
+                run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0 });
+                await untilSteerRequested(run.id);
+                await waitFor(() => existsSync(steerPath(run.id)));
+                const meta = readMeta(run.id);
+                assert.equal(meta.timing.pendingWakes.filter(wake => wake.kind === "deadline").length, 1);
+                assert.equal(meta.timing.deadlineWakeSentAt, undefined);
+                assert.equal(h.sent.length, 0, "runtime manager cannot address a recipient transcript");
+                await tick();
+                assert.equal(readMeta(run.id).timing.pendingWakes.length, 1, "repeated enforcement retains one intent");
+                const { receiptTimingWake, timingWakeReceipt } = await import("../timing-notifications.ts");
+                receiptTimingWake(run.id, "deadline", Date.now());
+                await tick();
+                assert.ok(readMeta(run.id).timing.deadlineWakeSentAt);
+                assert.equal(readMeta(run.id).timing.pendingWakes.length, 0);
+                assert.equal(timingWakeReceipt(run.id, "deadline"), undefined, "folded receipts do not accumulate");
+            } finally { if (run) await reap(run); h.shutdown(); }
         });
     });
 });

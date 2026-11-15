@@ -65,6 +65,7 @@ export const DEFAULT_TIMING_MINUTES = Object.freeze({
 
 /** Durable timing policy and one-shot markers, stored on RunMeta at launch. */
 export interface RunTiming {
+    pendingWakes?: import("./timing-notifications.ts").PendingTimingWake[];
     /** Soft deadline (epoch ms): the child is told to wrap up. Absent = none. */
     deadlineAt?: number;
     /** Grace after the soft deadline before the run is stopped. */

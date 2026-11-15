@@ -580,7 +580,8 @@ export function createCallbackBatcher(host, options = {}) {
         }
         urgentInFlight.add(key);
         try {
-            const handoff = host.sendMessage({ customType: event.customType, content: formatUrgentCallback(event, { maxBytes }), display: true }, { deliverAs: "followUp", triggerTurn: true });
+            const handoff = host.sendMessage({ customType: event.customType, content: formatUrgentCallback(event, { maxBytes }), display: true,
+                ...(event.receiptId ? { details: { urgentEventId: event.receiptId } } : {}) }, { deliverAs: "followUp", triggerTurn: true });
             if (isPromiseLike(handoff)) {
                 return Promise.resolve(handoff).then(() => acknowledge(), () => false).finally(() => urgentInFlight.delete(key));
             }

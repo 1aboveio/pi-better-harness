@@ -157,6 +157,8 @@ export interface CallbackBatchEvent {
 }
 
 export interface UrgentCallbackEvent {
+  /** Durable recipient transcript identity for handoff/receipt crash recovery. */
+  receiptId?: string;
   source: CallbackSource;
   /** Notification identity (dedupe/receipts). */
   id: string;
@@ -742,7 +744,8 @@ export function createCallbackBatcher(
     urgentInFlight.add(key);
     try {
       const handoff = host.sendMessage(
-        { customType: event.customType, content: formatUrgentCallback(event, { maxBytes }), display: true },
+        { customType: event.customType, content: formatUrgentCallback(event, { maxBytes }), display: true,
+          ...(event.receiptId ? { details: { urgentEventId: event.receiptId } } : {}) },
         { deliverAs: "followUp", triggerTurn: true },
       );
       if (isPromiseLike(handoff)) {
