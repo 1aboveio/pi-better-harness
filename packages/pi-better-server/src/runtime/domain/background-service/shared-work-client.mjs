@@ -1,5 +1,6 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/shared-work-client.mjs. Do not edit directly.
 import { connect } from "node:net";
+import { performance } from "node:perf_hooks";
 /** SDK-free observation stream. Cached snapshots are the only synchronous read API. */
 export class WorkClient {
     socket;
@@ -106,7 +107,17 @@ export class WorkClient {
         this.accept(snapshot);
         return snapshot;
     }
-    async get(scope) { await this.ready; return this.request("runtime_get_snapshot", { scope }); }
+    async get(scope) {
+        await this.ready;
+        const until = performance.now() + 3500;
+        for (let attempt = 0;; attempt++) {
+            const value = await this.request("runtime_get_snapshot", { scope });
+            if (!scope?.id || value.status !== "rebuilding" || value.rows.length || performance.now() >= until)
+                return value;
+            // A newly written ID may join an inventory without holding the shared RPC queue.
+            await new Promise(resolve => setTimeout(resolve, Math.min(250, 50 * 2 ** attempt, until - performance.now())));
+        }
+    }
     fail(error) {
         if (this.closed)
             return;
