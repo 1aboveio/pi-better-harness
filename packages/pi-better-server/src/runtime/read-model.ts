@@ -201,7 +201,7 @@ export class WorkReadModel {
         const status = effectiveStatus(entry.meta); processes.set(entry.meta.id, status);
         if (status !== this.processes.get(entry.meta.id)) logFamilies.add(JSON.stringify([entry.meta.sessionId, entry.meta.cwd]));
       }
-      const healthConfig = readHealthConfig(this.agentDir);
+      const healthConfig = await readHealthConfig(this.agentDir, next.size > 0);
       const changed = next.size !== this.files.size || [...next].some(([path, entry]) => this.files.get(path)?.signature !== entry.signature);
       if (!changed && !logFamilies.size && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && this.state === "ready") return;
       const metas = new Map<string, any>();
