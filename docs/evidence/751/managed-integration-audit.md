@@ -8,12 +8,11 @@ A fresh `npm ci` in this worktree removed cross-checkout workspace aliases. All 
 
 Integration review added exact branch/Goal matching to upgrade dependency admission, active worker waits without claims to upgrade obligations, and durable completion for launch refusals that never created an attempt. The journal-only recovery fixture verifies original writer PID/recipe, original retry identity, terminal publication with no recipient, and no permanent accepted-intent obligation.
 
-## Still incomplete
+## Current acceptance gaps
 
-- The full-stack resource harness found three coordinator connections against the maximum of two. Sharing the query worker's reader removed one duplicate; a foreground `ObservedWaitHost` still owns a persistent connection and requires proper server mutation/admission migration. The failing report is retained without relaxing the budget.
-- Legacy Subagents fixtures still combine mechanical manager and foreground recipient behavior. Their migration has exposed and fixed a real timing-notification loss, but the full Subagents suite has not passed.
-- Post-lease/pre-journal recovery and tool-policy intersection are corrected (`03e5a3bd`); the real continuation matrix now includes that fault and unused-tool narrowing. Current/captured Background permission publication remains part of the pending Background ownership migration.
-- Final combined macOS/Linux resource matrices, packaging/upgrade checks, independent review and the requirement-by-requirement epic audit remain required.
+- Server-owned Background now meets the recorded macOS root connection budget at 1/5/10 clients. Final clean-head Linux/macOS resource and installed-package runs remain required.
+- Native fast-terminal observation exposed a missing discovery path. Indexed recent-terminal discovery and exact-recipient callback recovery are being completed; old owed callbacks must survive beyond display retention without history scans.
+- Mixed local/remote execution coverage and the final requirement-by-requirement epic audit remain required.
 
 ## Integrated recipient and installed-domain checks
 
@@ -32,3 +31,13 @@ The first combined CI run (43751198478) reproduced the three-connection budget f
 Five managed connection/lifecycle assertions pass under private Node 24, invoked successfully by an actual Node 22.22.2 host. The guardian recovery case passes after awaiting real protocol readiness before SIGKILL. Four native reload journeys pass against the installed fixed SDK and explicitly configured offline provider, including original-worker continuity, one exact completion, server-loss log finalization, and saved-conversation follow-up without Background. No PATH-injected worker CLI is used.
 
 The integrated terminal-failure replay group passes all eight tests. An old handled lost record can receive a new malformed log while its foreground is disconnected; the manager writes canonical failure evidence and the exact saved session receives the new notification once. Review of this new folding path must still establish bounded main-thread work and backlog behavior before final query-isolation acceptance.
+
+## Native integration checkpoint at `11c1d7e3`
+
+Background supervision and request recovery are server-owned. Explicit cross-session `all:true` cancellation retains the actual requester and the target's original owner/token/host/revision, with requester-scoped retry keys. Native same-workspace and cross-workspace cases also verify that the requester cannot fabricate the owner's evidence-read acknowledgment.
+
+The whole Harness sandbox journey now loads its published shims through a real SDK AgentSession. All nine checks pass, including server-owned durable Background execution and kernel-enforced writes. Native codemode passes six cases against Pi 0.99.1; actual Node 22 remote managed-connect passes all 20 cases. All workspace typechecks pass. The integrated Subagents health/lifecycle suite passes 46 tests, including all three cases that failed in CI run 43753106418.
+
+Large terminal-log folding now uses a separate mechanical worker with no SQLite connection, bounded indexed work, fair requeueing and epoch revocation. Eleven integrated tests pass, including a 128 MiB log, multi-batch drain and socket responsiveness. Background durable request recovery uses 128-row indexed batches with event-loop yields; its migration/query-plan fixture includes 10,000 completed requests and 260 pending requests. These checks close the earlier unbounded folding/recovery findings; final aggregate measurements still apply.
+
+CI run 43755946344 tests this checkpoint while callback-index and mixed-client work continues. It is not final-head acceptance.
