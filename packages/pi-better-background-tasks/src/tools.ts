@@ -722,21 +722,19 @@ async function runAction(
   }
 }
 
-/**
- * Durable rows are appended to the legacy list output only when they exist, so
- * the legacy surface is byte-for-byte unchanged for sessions that never launch a
- * supervised operation. Cursors stay legacy-only; durable rows are all shown on
- * the first page.
- */
+/** Shared history applies ownership, filters and paging before metadata crosses the socket. */
 async function durableAwareList(
   pi: ExtensionAPI,
   params: Record<string, unknown>,
   origin: BackgroundTaskCallbackOrigin | undefined,
   ctx: ExtensionContext,
 ): Promise<string> {
-  const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, true, params.all === true) : undefined;
+  const options = listOptions(params, origin);
+  const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, true, params.all === true,
+    { limit: options.limit, statuses: options.statuses, cursor: options.cursor }) : undefined;
   if (snapshot && snapshot.status !== "ready") throw new Error(snapshot.reason ?? "Background activity is unverified");
-  const legacy = formatList(listOptions(params, origin), snapshot?.backgroundIndex);
+  const legacy = formatList(options, snapshot?.backgroundIndex);
+  if (snapshot) return legacy;
   const host = getObservedWaitHost(pi);
   if ((!snapshot && !host?.available) || !origin || typeof params.cursor === "string") return legacy;
   const wanted = Array.isArray(params.status) && params.status.length > 0

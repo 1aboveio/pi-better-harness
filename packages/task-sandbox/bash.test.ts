@@ -3,7 +3,7 @@ import childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -175,7 +175,7 @@ test("real shell timeout and cancellation retire profiles after stopping childre
 
 test("confined Git inventory avoids optional locks in linked-worktree metadata (#419)", { skip: !kernel }, async (t) => {
     // Temp and hidden home entries permit removal; neither reproduces a normal repository's gitdir.
-    const base = realpathSync(mkdtempSync(join(import.meta.dirname, ".git-lock-fixture-")));
+    const base = realpathSync(mkdtempSync(join(homedir(), ".git-lock-fixture-")));
     t.after(() => rmSync(base, { recursive: true, force: true }));
     const home = join(base, "home"), repo = join(home, "projects", "repo");
     const root = join(repo, ".worktrees", "task"), control = join(base, "control");

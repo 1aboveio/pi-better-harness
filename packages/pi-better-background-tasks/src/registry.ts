@@ -158,6 +158,7 @@ export function inspectMeta(id: string): MetaInspection {
 export interface TaskIndex {
   records: MetaInspection[];
   indexError?: string;
+  page?: { total: number; before: number; contentRevision: string; failureRevision: string; unreadable: number; unknown: number };
 }
 
 /** List every task directory, including unreadable metadata. */

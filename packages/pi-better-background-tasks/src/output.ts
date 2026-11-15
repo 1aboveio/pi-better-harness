@@ -133,7 +133,7 @@ function stringifyObserved(value: unknown): string {
 
 /** Cursor scope: pagination and revision cursors never cross session scopes. */
 function scopeKey(options: OutputOptions): string {
-  return sessionScopeKey({ all: options.all, unavailable: options.sessionUnavailable, origin: options.origin });
+  return sessionScopeKey({ all: options.all, unavailable: options.sessionUnavailable, origin: options.origin, processId: process.pid });
 }
 
 function taskGaps(meta: BackgroundTaskMeta): EvidenceGap[] {
@@ -810,7 +810,8 @@ function compactRow(meta: BackgroundTaskMeta, incidents: number): string {
   const remote = meta.ssh ? ` ${oneLine(meta.ssh.target, 60)}${meta.remote?.session ? ` ${meta.remote.session}` : ""}` : "";
   const incident = incidents > 0 ? ` · ${incidents} incident${incidents === 1 ? "" : "s"}` : "";
   const label = meta.name ? ` ${oneLine(meta.name, 60)}` : "";
-  return `${meta.id} ${meta.status} ${meta.kind} ${age}${incident}${remote}${label}`;
+  const waits = (meta as BackgroundTaskMeta & { waits?: unknown[] }).waits?.length;
+  return `${meta.id} ${meta.status} ${meta.kind} ${age}${incident}${remote}${label}${waits ? ` waits=${waits}` : ""}`;
 }
 
 export function formatList(options: OutputOptions = {}, index = listTaskRecords()): string {
@@ -837,8 +838,8 @@ export function formatList(options: OutputOptions = {}, index = listTaskRecords(
     });
   }
   const wanted = options.statuses && options.statuses.length > 0 ? new Set(options.statuses) : undefined;
-  let unreadable = 0;
-  let unknown = 0;
+  let unreadable = index.page?.unreadable ?? 0;
+  let unknown = index.page?.unknown ?? 0;
   const allowed: BackgroundTaskMeta[] = [];
   for (const record of index.records) {
     if (!record.meta) {
@@ -847,7 +848,8 @@ export function formatList(options: OutputOptions = {}, index = listTaskRecords(
     }
     const ownership = classifyOwnership(record.meta, options);
     if (ownership === "allow") {
-      if (!wanted || wanted.has(record.meta.status)) allowed.push(record.meta);
+      if (!wanted || wanted.has(record.meta.status) || wanted.has("running") && (record.meta as BackgroundTaskMeta & { durable?: boolean; active?: boolean }).durable
+        && (record.meta as BackgroundTaskMeta & { active?: boolean }).active) allowed.push(record.meta);
     } else if (ownership === "unknown") {
       unknown += 1;
     }
@@ -856,12 +858,13 @@ export function formatList(options: OutputOptions = {}, index = listTaskRecords(
   const statusesKey = [...(options.statuses ?? [])].sort().join(",");
   const resource = `list:${scope}:${statusesKey}`;
   const limit = Math.max(1, Math.min(Math.floor(options.limit ?? DEFAULT_LIST_ENTRIES), MAX_LIST_ENTRIES));
+  const total = index.page?.total ?? allowed.length;
   const states = new Map(allowed.map((meta) => [meta.id, failureStateFor(meta.id)] as const));
   const incidentsOf = (id: string) => actionableFailures(states.get(id)!).length;
   const revision = inspectStatusRevision({
     resource,
-    contentRevision: revisionOf(allowed.map((meta) => [meta.id, meta.status, meta.endedAt ?? null])),
-    failureRevision: revisionOf(allowed.map((meta) => [meta.id, failureRevision(states.get(meta.id)!)])),
+    contentRevision: index.page?.contentRevision ?? revisionOf(allowed.map((meta) => [meta.id, meta.status, meta.endedAt ?? null])),
+    failureRevision: revisionOf([index.page?.failureRevision, allowed.map((meta) => [meta.id, failureRevision(states.get(meta.id)!)])]),
     cursor: cursorKind(options.cursor) === "s" ? options.cursor : undefined,
   });
   const scopeLabel = options.all ? "all sessions" : "current session";
@@ -870,7 +873,7 @@ export function formatList(options: OutputOptions = {}, index = listTaskRecords(
       surface: "list",
       maxBytes: options.maxBytes,
       sections: {
-        identity: `${allowed.length} background task${allowed.length === 1 ? "" : "s"} (${scopeLabel}) · unchanged`,
+        identity: `${total} background task${total === 1 ? "" : "s"} (${scopeLabel}) · unchanged`,
         decision: formatUnchangedEvidence(options.cursor),
       },
       statusCursor: revision.nextCursor,
@@ -883,7 +886,7 @@ export function formatList(options: OutputOptions = {}, index = listTaskRecords(
   const listFailure = (budget: number): string | undefined => {
     const newest = failing[0];
     if (!newest) return undefined;
-    const count = `${withIncidents} task${withIncidents === 1 ? "" : "s"} with unresolved incidents; newest ${newest.id} has ${incidentsOf(newest.id)}. Full incidents: bg_task_status id=${newest.id}.`;
+    const count = `${withIncidents} task${withIncidents === 1 ? "" : "s"}${index.page ? " on this page" : ""} with unresolved incidents; newest ${newest.id} has ${incidentsOf(newest.id)}. Full incidents: bg_task_status id=${newest.id}.`;
     const top = formatFailureLines(states.get(newest.id)!)[0] ?? "";
     // The lead-in is a pointer, not the incident page: at most a short preview.
     const room = Math.min(LIST_LEAD_PREVIEW_BYTES, budget - utf8ByteLength(count) - 1);
@@ -907,9 +910,9 @@ export function formatList(options: OutputOptions = {}, index = listTaskRecords(
     sections: {
       identity: options.sessionUnavailable && !options.all
         ? "Current session identity is unavailable; task ownership cannot be verified."
-        : allowed.length === 0
+        : total === 0
           ? `No background tasks found (${scopeLabel}).`
-          : `${allowed.length} background task${allowed.length === 1 ? "" : "s"} (${scopeLabel}), newest first`,
+          : `${total} background task${total === 1 ? "" : "s"} (${scopeLabel}), newest first${allowed.some(meta => (meta as BackgroundTaskMeta & { durable?: boolean }).durable) ? "; durable background operations included" : ""}`,
       failure: withIncidents ? listFailure : undefined,
       diagnostics: notes.join("\n") || undefined,
     },
@@ -920,6 +923,7 @@ export function formatList(options: OutputOptions = {}, index = listTaskRecords(
         resource,
         limit,
         maxBytes: budget,
+        ...(index.page ? { indexed: { total, before: index.page.before } } : {}),
         keyOf: (meta) => ({ time: meta.startedAt, id: meta.id }),
         render: (meta) => compactRow(meta, incidentsOf(meta.id)),
       }),

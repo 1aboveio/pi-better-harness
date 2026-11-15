@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { test, mock } from "node:test";
+import { test, mock, after } from "node:test";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { stopWorkObservation } from "../work-observation.ts";
 import { register } from "node:module";
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
@@ -18,6 +20,8 @@ const { openStore } = await import("../shared-operation-coordinator/index.ts");
 const { createObservedWaitHost } = await import("../../pi-better-background-tasks/src/observed-waits.ts");
 const { retainObservation, pendingObservations } = await import("../outage-observations.ts");
 const { reconcileParkedWaits } = await import("../worker-waits.ts");
+const stopRuntime = await startWorkRuntimeFixture();
+after(async () => { stopWorkObservation(); await stopRuntime(); });
 
 function host(sessionId = "parent", options = {}) {
     const tools = new Map(), handlers = new Map(), entries = options.entries ?? [], sent = [];

@@ -1135,6 +1135,20 @@ describe("pageRows", () => {
     assert.equal(second.text.split("\n")[0], "task_019 ok");
   });
 
+  it("keeps global counts and byte-budget continuation for indexed subsets", () => {
+    const first = pageRows(rows(3, 27), { ...request(undefined, 3), maxBytes: 24, indexed: { total: 30, before: 0 } });
+    assert.equal(first.shown, 2);
+    assert.equal(first.remaining, 28);
+    assert.equal(first.total, 30);
+    const second = pageRows(rows(3, 25), { ...request(first.nextCursor, 3), indexed: { total: 30, before: 2 } });
+    assert.equal(second.text.split("\n")[0], "task_027 ok");
+    assert.equal(second.before, 2);
+    assert.equal(second.remaining, 25);
+    const last = pageRows(rows(2), { ...request(second.nextCursor, 3), indexed: { total: 30, before: 28 } });
+    assert.equal(last.hasMore, false);
+    assert.equal(last.nextCursor, undefined);
+  });
+
   it("resets a cursor from another scope or filter", () => {
     const items = rows(30);
     const first = pageRows(items, request());
