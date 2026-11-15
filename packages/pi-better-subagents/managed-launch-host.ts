@@ -26,6 +26,7 @@ export class ManagedSubagentHost {
     private closeJournal: () => void;
     private epoch: number;
     private pending = 0;
+    private continuationFailures = new Map<string, { failures: number; retryAt: number; reason: string }>();
     private workerHost?: { start(ctx?: unknown): void; close(): void; service: { continuationReady: boolean } };
     private path: string;
     private capacityFor = createOwnerCapacityGates(({ pid, start }: { pid: number; start: string }) =>
@@ -34,7 +35,7 @@ export class ManagedSubagentHost {
     get busy() { return this.pending > 0; }
     status() {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
-            inFlight: this.pending, continuationReady: this.workerHost?.service.continuationReady ?? false, unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt: any) => !readMeta(attempt.id)).length };
+            inFlight: this.pending, continuationReady: this.workerHost?.service.continuationReady ?? false, continuationUnavailable: [...this.continuationFailures].map(([key, value]) => ({ key, ...value })), unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt: any) => !readMeta(attempt.id)).length };
     }
     constructor(private root: string, private instance: string, private catalog: any, sharedStore?: unknown, private createWorkerHost?: (pi: ExtensionAPI) => NonNullable<ManagedSubagentHost["workerHost"]>, private readPermissions?: () => unknown) {
         this.current = { pid: process.pid, start: processStartToken(process.pid), owner: { workspace: root, sessionId: "runtime-recovery" } };
@@ -171,6 +172,9 @@ export class ManagedSubagentHost {
                     getSessionFile: () => undefined, getEntries: () => branch } };
     }
     private dispatchContinuation(park: any, run: () => Promise<"resumed" | "held" | "skipped">) {
+        const retryKey = `${park.waitId}:${park.generation}`;
+        const failure = this.continuationFailures.get(retryKey);
+        if (failure && Date.now() < failure.retryAt) return Promise.resolve("skipped" as const);
         this.pending++;
         const result = this.tail.catch(() => undefined).then(async () => {
             const saved = this.journal.attempt(park.runId)?.launchAuthority;
@@ -184,7 +188,13 @@ export class ManagedSubagentHost {
             this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...permissions });
             const outcome = await run();
             if (outcome === "resumed") this.journal.finish(this.current.ownerKey, key, this.epoch, { status: outcome });
+            this.continuationFailures.delete(retryKey);
             return outcome;
+        }).catch(error => {
+            const failures = Math.min(6, (this.continuationFailures.get(retryKey)?.failures ?? 0) + 1);
+            if (this.continuationFailures.size >= 128 && !this.continuationFailures.has(retryKey)) this.continuationFailures.delete(this.continuationFailures.keys().next().value!);
+            this.continuationFailures.set(retryKey, { failures, retryAt: Date.now() + Math.min(30000, 1000 * 2 ** (failures - 1)), reason: String(error).slice(0, 500) });
+            return "skipped" as const;
         }).finally(() => { this.pending--; });
         this.tail = result;
         return result;

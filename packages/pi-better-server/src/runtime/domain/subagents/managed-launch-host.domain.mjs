@@ -30,6 +30,7 @@ export class ManagedSubagentHost {
     closeJournal;
     epoch;
     pending = 0;
+    continuationFailures = new Map();
     workerHost;
     path;
     capacityFor = createOwnerCapacityGates(({ pid, start }) => listActiveMetasForParent(pid).filter(meta => meta.spawnPidStartTime === start && effectiveStatus(meta) === "running").length
@@ -37,7 +38,7 @@ export class ManagedSubagentHost {
     get busy() { return this.pending > 0; }
     status() {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
-            inFlight: this.pending, continuationReady: this.workerHost?.service.continuationReady ?? false, unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt) => !readMeta(attempt.id)).length };
+            inFlight: this.pending, continuationReady: this.workerHost?.service.continuationReady ?? false, continuationUnavailable: [...this.continuationFailures].map(([key, value]) => ({ key, ...value })), unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt) => !readMeta(attempt.id)).length };
     }
     constructor(root, instance, catalog, sharedStore, createWorkerHost, readPermissions) {
         this.root = root;
@@ -204,6 +205,10 @@ export class ManagedSubagentHost {
                 getSessionFile: () => undefined, getEntries: () => branch } };
     }
     dispatchContinuation(park, run) {
+        const retryKey = `${park.waitId}:${park.generation}`;
+        const failure = this.continuationFailures.get(retryKey);
+        if (failure && Date.now() < failure.retryAt)
+            return Promise.resolve("skipped");
         this.pending++;
         const result = this.tail.catch(() => undefined).then(async () => {
             const saved = this.journal.attempt(park.runId)?.launchAuthority;
@@ -219,7 +224,14 @@ export class ManagedSubagentHost {
             const outcome = await run();
             if (outcome === "resumed")
                 this.journal.finish(this.current.ownerKey, key, this.epoch, { status: outcome });
+            this.continuationFailures.delete(retryKey);
             return outcome;
+        }).catch(error => {
+            const failures = Math.min(6, (this.continuationFailures.get(retryKey)?.failures ?? 0) + 1);
+            if (this.continuationFailures.size >= 128 && !this.continuationFailures.has(retryKey))
+                this.continuationFailures.delete(this.continuationFailures.keys().next().value);
+            this.continuationFailures.set(retryKey, { failures, retryAt: Date.now() + Math.min(30000, 1000 * 2 ** (failures - 1)), reason: String(error).slice(0, 500) });
+            return "skipped";
         }).finally(() => { this.pending--; });
         this.tail = result;
         return result;

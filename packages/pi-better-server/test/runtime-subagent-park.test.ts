@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { processMatchesStart } from "../src/daemon-owner.ts";
 
-test("managed worker parks and continues after its foreground parent exits", { timeout: 60000 }, async () => {
+for (const restart of [false, true]) test(`managed worker continues after parent exit${restart ? " and server SIGKILL" : ""}`, { timeout: 60000 }, async () => {
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, "launch-")), transport = realpathSync(mkdtempSync("/tmp/p761-"));
   const agent = join(root, "agent"), cwd = join(root, "workspace"); mkdirSync(join(agent, "agents/roles"), { recursive: true }); mkdirSync(cwd);
@@ -61,6 +61,13 @@ test("managed worker parks and continues after its foreground parent exits", { t
       assert.ok(Date.now() < parkedDeadline, `Worker did not park: ${errors}`);
       await delay(50);
     }
+    if (restart) {
+      await terminal(first.details.runId);
+      const death = once(daemon, "exit"); daemon.kill("SIGKILL"); await death;
+      daemon = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+      daemon.stderr!.on("data", data => { errors += data; });
+      await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
+    }
     writeFileSync(release, "release");
     const continuedDeadline = Date.now() + 25000;
     while (!existsSync(`${entered}.continued`)) {
@@ -73,6 +80,12 @@ test("managed worker parks and continues after its foreground parent exits", { t
     assert.equal(resumed.status, "completed");
     assert.equal(resumed.sessionId, metaFor(first.details.runId).sessionId);
     assert.equal(resumed.spawnPid, metaFor(first.details.runId).spawnPid);
+    const db = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
+    try {
+      const resumedIntents = db.prepare("SELECT attempts FROM subagent_launch_intents WHERE request_key LIKE 'continuation:%'").all() as any[];
+      assert.equal(resumedIntents.length, 1);
+      assert.equal(JSON.parse(resumedIntents[0].attempts).length, 1, "one admitted continuation token and writer");
+    } finally { db.close(); }
     assert.notEqual(JSON.parse(readFileSync(`${entered}.continued`, "utf8")).pid, metaFor(first.details.runId).pid);
   } catch (error) {
     console.error("Managed launch scenario failed:", error, errors);
