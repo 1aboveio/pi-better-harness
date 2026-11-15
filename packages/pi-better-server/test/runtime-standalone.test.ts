@@ -183,10 +183,24 @@ test("packed standalone packages use one pinned socket runtime, including cached
   await stop();
   // R1: durable transport registration survives both clean exit and a crashed cached connection.
   const recoveryScript = entryScript + `
-    import {readFileSync} from 'node:fs';
+    import {readFileSync,appendFileSync,existsSync} from 'node:fs';
+    import {connect} from 'node:net';
     const {inspectDaemonOwner}=await import(${JSON.stringify(new URL("../daemon-owner.mjs", pathToFileURL(clients[1]!)).href)});
     const transport=process.env.PI_SERVER_DIR;
     const registration=readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8');
+    let observedPid;
+    const trace=phase=>{
+      const current=inspectDaemonOwner(transport);if(current.owner)observedPid=current.owner.pid;
+      let stat;try{if(process.platform==='linux'&&observedPid)stat=readFileSync('/proc/'+observedPid+'/stat','utf8')}catch(error){stat=error.code}
+      appendFileSync(${JSON.stringify(join(evidence, "recovery-timeline.jsonl"))},JSON.stringify({phase,at:Date.now(),owner:current,stat,socket:existsSync(transport+'/pi-server.sock')})+'\\n');
+    };
+    const probe=()=>new Promise(resolve=>{
+      const socket=connect(transport+'/pi-server.sock');let buffer='';
+      const finish=result=>{clearTimeout(timer);socket.destroy();appendFileSync(${JSON.stringify(join(evidence, "recovery-timeline.jsonl"))},JSON.stringify({phase:'handshake',at:Date.now(),result})+'\\n');resolve()};
+      const timer=setTimeout(()=>finish({error:'probe deadline'}),2000);
+      socket.on('error',error=>finish({error:error.code}));socket.on('connect',()=>socket.write(JSON.stringify({id:'probe',type:'hello',protocolVersion:1,runtimeRoot:process.env.PI_CODING_AGENT_DIR})+'\\n'));
+      socket.on('data',data=>{buffer+=data;if(buffer.includes('\\n'))finish({reply:buffer.split('\\n')[0]})});
+    });
     const owner=()=>{const current=inspectDaemonOwner(transport);assert.equal(current.status,'live');return current.owner};
     const stop=async()=>{const previous=owner();process.kill(previous.pid,'SIGTERM');const deadline=Date.now()+10000;
       while(inspectDaemonOwner(transport).status==='live'&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));
@@ -195,13 +209,13 @@ test("packed standalone packages use one pinned socket runtime, including cached
     let paused;
     try {
       registerTools(pi);registerBackgroundTasksGoalProvider(pi);
-      await listed();const first=owner().pid;
+      trace('before-first-list');await listed();trace('first-list-ready');await probe();const first=owner().pid;
       await provider.getActivity(ctx); // retain this exact production client's connection
-      await stop();assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
-      assert.deepEqual((await provider.getActivity(ctx)).items,[]);assert.notEqual(owner().pid,first);await listed();
+      await stop();trace('clean-stop');assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
+      assert.deepEqual((await provider.getActivity(ctx)).items,[]);trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
       const crashed=owner().pid;process.kill(crashed,'SIGSTOP');
-      const interrupted=provider.getActivity(ctx);await new Promise(r=>setImmediate(r));process.kill(crashed,'SIGKILL');
-      assert.deepEqual((await interrupted).items,[]);assert.notEqual(owner().pid,crashed);await listed();
+      const interrupted=provider.getActivity(ctx);await new Promise(r=>setImmediate(r));trace('before-kill');process.kill(crashed,'SIGKILL');trace('kill-sent');
+      assert.deepEqual((await interrupted).items,[]);trace('crash-recovery-ready');assert.notEqual(owner().pid,crashed);await listed();
       await stop();closeBackgroundObservation(pi);await listed('bg_status');
       assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
       assert.deepEqual((await provider.getActivity({...ctx,sessionManager:{getSessionId:()=> 'foreign'}})).items,[]);
@@ -209,7 +223,8 @@ test("packed standalone packages use one pinned socket runtime, including cached
       await assert.rejects(listed(),/runtime-unhealthy:.*timed out/);assert.equal(owner().pid,paused);
       assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
       console.log(JSON.stringify({healthyRecovery:true,cachedDisconnectRecovered:true,interruptedQueryRecovered:true,liveOwnerRefused:true}));
-    } finally {if(paused)process.kill(paused,'SIGCONT');closeBackgroundObservation(pi)}
+    } catch(error) {trace('failure:'+String(error));await probe();throw error}
+    finally {if(paused)process.kill(paused,'SIGCONT');closeBackgroundObservation(pi)}
   `;
   const recovery = await execute(process.execPath, ["--input-type=module", "-e", recoveryScript], workspace, env);
   writeFileSync(join(evidence, "background-recovery.log"), recovery.stdout + recovery.stderr);
