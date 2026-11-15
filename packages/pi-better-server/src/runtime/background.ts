@@ -26,9 +26,11 @@ export class BackgroundObservation {
   reason?: string;
   get connectionCount() { return this.db ? 1 : 0; }
   get scopeCount() { return this.legacy.size; }
-  livenessReasons() {
-    this.enabled = true;
-    this.refresh();
+  livenessReasons(options: { refresh?: boolean } = {}) {
+    if (options.refresh !== false) {
+      this.enabled = true;
+      this.refresh();
+    }
     if (!this.db) return [];
     const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
     if (!["1", "2", "3", "4"].includes(version)) return [];

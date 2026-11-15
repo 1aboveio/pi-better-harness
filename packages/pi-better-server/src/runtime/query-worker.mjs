@@ -59,7 +59,7 @@ model.snapshot = scope => {
 };
 function revision() {
   revisionPending = true;
-  parentPort.postMessage({ type: "revision", metrics: metrics() });
+  parentPort.postMessage({ type: "revision", metrics: metrics(), observation: model.observation() });
 }
 model.onChange(() => {
   cache.clear(); cacheBytes = 0;
@@ -101,7 +101,8 @@ parentPort.on("message", async message => {
     const command = message.command;
     if (command.type === "runtime_get_liveness") {
       await model.reconcile();
-      parentPort.postMessage({ type: "reply", id: message.id, json: JSON.stringify(model.livenessReasons()), metrics: metrics() });
+      const observation = model.observation(model.livenessReasons());
+      parentPort.postMessage({ type: "reply", id: message.id, json: JSON.stringify(observation.reasons), metrics: metrics(), observation });
       return;
     }
     if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe"].includes(command.type)) throw new Error("Unsupported read operation");
