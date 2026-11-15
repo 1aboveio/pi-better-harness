@@ -489,6 +489,7 @@ test("committed activation survives observer cancellation and waits for shutdown
       const { existsSync, writeFileSync } = await import("node:fs");
       const shutdown = SessionRegistry.prototype.shutdown;
       SessionRegistry.prototype.shutdown = async function() {
+        writeFileSync(${JSON.stringify(join(env.gateDir, "shutdown.entered"))}, String(process.pid));
         await shutdown.call(this);
         writeFileSync(${JSON.stringify(join(env.gateDir, "shutdown.started"))}, String(process.pid));
         while (!existsSync(${JSON.stringify(join(env.gateDir, "shutdown.release"))})) await new Promise(resolve => setTimeout(resolve, 15));
@@ -500,7 +501,14 @@ test("committed activation survives observer cancellation and waits for shutdown
   const client = await connected(t, env, initial.readiness);
   await session(client, env);
   const pending = activate(env, after, "shutdown-upgrade");
-  await waitFor("old owner shutdown hook", gate(env, "shutdown").started);
+  let activationOutcome: unknown;
+  void pending.then(value => { activationOutcome = value; }, error => { activationOutcome = String(error); });
+  try { await waitFor("old owner shutdown hook", gate(env, "shutdown").started); }
+  catch (error) {
+    const journal = readActivationJournal(env.serverDir);
+    throw new Error(`${String(error)}; ${JSON.stringify({ enteredShutdown: existsSync(join(env.gateDir, "shutdown.entered")),
+      owner: inspectDaemonOwner(env.serverDir), phase: journal?.phase, reason: journal?.reason, activationOutcome })}`);
+  }
   const old = inspectDaemonOwner(env.serverDir);
   assert.equal(old.status, "live");
   if (old.status !== "live") throw new Error("old owner released too early");

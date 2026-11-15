@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { fork, execFileSync } from 'node:child_process';
 import { cpus, totalmem, release, arch } from 'node:os';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -49,7 +49,7 @@ try {
   const db = new (await import('node:sqlite')).DatabaseSync(join(agent,'operation-coordinator.sqlite'),{readOnly:true});
   const grant = JSON.parse(db.prepare("SELECT value FROM coordinator_state WHERE key=?").get(`result-supervision-v1:${bg.details.operationId}`).value); db.close();
   const claim = await until('runner claim', () => { try { return JSON.parse(readFileSync(join(grant.directory,'tasks',bg.details.id,'claim.json'),'utf8')); } catch { return false; } });
-  const legacy=await call(first,'bg_task_spawn_batch',{jobs:[0,1].map(index=>({shell:false,callback:false,argv:[execPath,'-e',`const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(join(cwd,'legacy-pid-'))}+${index},String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(cwd,'finish'))})){clearInterval(timer)}},50)`]}))});
+  const legacy=await call(first,'bg_task_spawn_batch',{jobs:[0,1].map(index=>({shell:false,callback:false,argv:[execPath,'-e',`const fs=require('node:fs');setImmediate(()=>{console.log('resource-ready');fs.writeFileSync(${JSON.stringify(join(cwd,'legacy-pid-'))}+${index},String(process.pid))});const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(cwd,'finish'))})){clearInterval(timer)}},50)`]}))});
   assert.equal(legacy.details.launched.length,2,JSON.stringify(legacy));
   await until('legacy commands',()=>[0,1].every(index=>{try{return Number(readFileSync(join(cwd,`legacy-pid-${index}`),'utf8'))>0;}catch{return false;}}));
   await work.request('runtime_cancellation_status');
@@ -63,22 +63,29 @@ try {
       const before=await work.get(scope);
       await Promise.all(clients.map(async child=>{const id=++seq,pending=message(child,m=>m.id===id);child.send({id,barrier:true});const reply=await pending;assert.equal(reply.error,undefined,reply.stack);}));
       const after=await work.get(scope), management=(await work.request('runtime_get_status')).backgroundManagement;
-      warmup.push({before:before.scopeRevision,after:after.scopeRevision,management});
+      const legacyReady=after.rows.filter(row=>!row.meta.durable).map(row=>{
+        const meta=row.meta;
+        try {const mtimeMs=Math.trunc(statSync(meta.logPath).mtimeMs);return {id:meta.id,mtimeMs,lastProgressAt:meta.lastProgressAt,ready:readFileSync(meta.logPath,'utf8').includes('resource-ready')&&(meta.lastProgressAt??meta.startedAt)>=mtimeMs};}
+        catch{return {id:meta.id,ready:false};}
+      });
+      warmup.push({before:before.scopeRevision,after:after.scopeRevision,management,legacyReady});
       return before.status==='ready'&&after.status==='ready'&&before.scopeRevision===after.scopeRevision
-        &&after.rows.filter(row=>!row.meta.durable).length===2&&after.rows.some(row=>row.meta.id===bg.details.id);
+        &&legacyReady.length===2&&legacyReady.every(row=>row.ready)&&after.rows.some(row=>row.meta.id===bg.details.id);
     });
     const observedLegacy=await work.get({background:true,cwd,sessionId:JSON.parse(readFileSync(sessionFile,'utf8').split('\n')[0]).id});
     assert.equal(observedLegacy.rows.filter(row=>!row.meta.durable).length,2);
     const managementBefore=(await work.request('runtime_get_status')).backgroundManagement;
-    writeFileSync(join(samples, 'generation'), String(count)); await delay(500);
+    writeFileSync(join(samples, 'generation'), String(count));
     const commandPid = Number(readFileSync(join(cwd,'command-pid'),'utf8'));
     const legacyPids=[0,1].map(index=>Number(readFileSync(join(cwd,`legacy-pid-${index}`),'utf8')));
-    const before=observed(), required=[...legacyPids,owner.pid,guardian.pid,worker.pid,claim.pid,commandPid,...clients.map(c=>c.pid)];
+    const required=[...legacyPids,owner.pid,guardian.pid,worker.pid,claim.pid,commandPid,...clients.map(c=>c.pid)];
+    const sampleAll=()=>until('all actual processes sampled in this measurement generation',()=>{const values=observed();return required.every(pid=>values.some(value=>value.identity.pid===pid&&value.generation===String(count)))?values:false;});
+    const before=await sampleAll();
     const role = pid => pid===owner.pid ? 'server' : pid===guardian.pid ? 'guardian' : pid===worker.pid ? 'worker' : pid===claim.pid ? 'runner' : pid===commandPid ? 'command' : legacyPids.includes(pid)?'legacy-command':'pi';
     for(const pid of required) assert.ok(before.some(v=>v.identity.pid===pid),`Missing instrumented actual process ${pid}`);
     const measurementStart=performance.now(), latencies=[]; const duration=count===10?60000:3000;
     while(performance.now()-measurementStart<duration) { const began=performance.now(); await work.request('runtime_get_status'); latencies.push(performance.now()-began); await delay(100); }
-    const after=observed(), metrics=await work.request('runtime_get_metrics'), status=await work.request('runtime_get_status');
+    const after=await sampleAll(), metrics=await work.request('runtime_get_metrics'), status=await work.request('runtime_get_status');
     assert.equal(status.hostedSessions,2); assert.equal(inspectDaemonOwner(transport).owner.pid,owner.pid);
     const resources=after.map(value=>{ const prior=before.find(v=>v.identity.pid===value.identity.pid); assert.ok(prior,'Unexpected process appeared during steady measurement'); return { ...value, role: role(value.identity.pid), cpuMs:((value.cpu.user-prior.cpu.user)+(value.cpu.system-prior.cpu.system))/1000,fsRead:value.usage.fsRead-prior.usage.fsRead,fsWrite:value.usage.fsWrite-prior.usage.fsWrite }; });
     const mainConnections=resources.reduce((sum,v)=>sum+v.connections.coordinator,0), derivedMain=resources.reduce((sum,v)=>sum+v.connections.derived,0);
