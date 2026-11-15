@@ -28,6 +28,15 @@ export default function offline(pi: ExtensionAPI) {
           const id = spawnResult.details?.id ?? text.match(/bgs_[a-f0-9]{20}/)?.[0];
           if (!id) throw new Error(`No task id: ${JSON.stringify(spawnResult)}`);
           call = { name: "wait_for_operations", arguments: { task_ids: [id], continuation_note: "Report completion after dependency settles." } };
+        } else if (!results.some(m => m.toolName === "bg_task_status")) {
+          call = { name: "bg_task_status", arguments: { id: waitResult.details.taskIds[0] } };
+        } else if (!results.some(m => m.toolName === "bg_task_log")) {
+          call = { name: "bg_task_log", arguments: { id: waitResult.details.taskIds[0] } };
+        } else if (!results.some(m => m.toolName === "acknowledge_operation_result")) {
+          const ready = results.find(m => m.toolName === "bg_task_status").details.waits[0];
+          call = { name: "acknowledge_operation_result", arguments: { wait_id: ready.waitId, generation: ready.generation,
+            terminal_revisions: ready.dependencies.map((d:any) => ({ operation_id: d.operationId, revision: d.terminalRevision })),
+            disposition: "assignment-complete", note: "Read exact completed dependency status and log." } };
         } else if (!results.some(m => m.toolName === "report_assignment_result")) {
           writeFileSync(`${entered}.continued`, JSON.stringify({ pid: process.pid }));
           call = { name: "report_assignment_result", arguments: { status: "complete", reason: "Dependency settled and original conversation resumed", evidence: [{ path: gate, explanation: "Dependency release evidence" }] } };

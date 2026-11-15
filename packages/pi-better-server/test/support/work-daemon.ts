@@ -16,6 +16,9 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
     statement.run = (...args: any[]) => {
       const result = run(...args);
       if (process.env.CONTINUATION_CRASH_POINT === "claim" && /INSERT INTO resume_claims/.test(sql)) this.crashAfterCommit = true;
+      if (process.env.CONTINUATION_CRASH_POINT === "spawn" && /UPDATE subagent_launch_intents SET attempts/.test(sql)
+          && JSON.parse(String(args[0])).some((attempt: any) => attempt.state === "spawned" && attempt.recoveryMeta?.resumedFrom)) this.crashAfterCommit = true;
+      if (process.env.CONTINUATION_CRASH_POINT === "result" && /INSERT INTO assignment_outcomes/.test(sql)) this.crashAfterCommit = true;
       return result;
     };
     return statement;

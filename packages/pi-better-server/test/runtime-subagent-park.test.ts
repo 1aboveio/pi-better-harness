@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { processMatchesStart } from "../src/daemon-owner.ts";
 
-for (const scenario of ["parent", "park", "claim"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: 60000 }, async () => {
+for (const scenario of ["parent", "park", "claim", "spawn", "result"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: 60000 }, async () => {
   const restart = scenario === "park";
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, "launch-")), transport = realpathSync(mkdtempSync("/tmp/p761-"));
@@ -20,7 +20,7 @@ for (const scenario of ["parent", "park", "claim"]) test(`managed worker continu
   writeFileSync(join(agent, "agents/roles/fixture.md"), "---\nschema: pi-agent/v1\nkind: role\nid: role.fixture\nname: Fixture\ndefaults:\n  model: openai/gpt-4.1\n---\nFrozen launch instructions.\n");
   const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root,
     LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: entered, LAUNCH_RELEASE: release,
-    ...(scenario === "claim" ? { CONTINUATION_CRASH_POINT: "claim", CONTINUATION_CRASH_MARKER: join(cwd, "crashed") } : {}) };
+    ...(["claim", "spawn", "result"].includes(scenario) ? { CONTINUATION_CRASH_POINT: scenario, CONTINUATION_CRASH_MARKER: join(cwd, "crashed") } : {}) };
   const execPath = process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath;
   let daemon = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
   let errors = ""; daemon.stderr!.on("data", data => { errors += data; });
@@ -53,7 +53,7 @@ for (const scenario of ["parent", "park", "claim"]) test(`managed worker continu
       const reply = once(child, "message"); child.send({ key, params, goalComplete }); const [message] = await reply;
       assert.equal(message.error, undefined, `${message.stack ?? message.error}\n${errors}`); return message.result;
     };
-    const params = { prompt: "Execute fixture", role: "fixture", model: "openai/gpt-4.1", callback: false, tools: "read,bg_task_spawn,bg_task_status,wait_for_operations", skills: [] };
+    const params = { prompt: "Execute fixture", role: "fixture", model: "openai/gpt-4.1", callback: false, tools: "read,bg_task_spawn,bg_task_status,bg_task_log,wait_for_operations,acknowledge_operation_result", skills: [] };
     const first = await launch(params);
     assert.equal(first.details.launched, true);
     attempts.push(first.details.runId);
@@ -71,7 +71,7 @@ for (const scenario of ["parent", "park", "claim"]) test(`managed worker continu
       await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
     }
     writeFileSync(release, "release");
-    if (scenario === "claim") {
+    if (["claim", "spawn", "result"].includes(scenario)) {
       await Promise.race([once(daemon, "exit"), delay(15000).then(() => { throw new Error("Claim crash was not reached"); })]);
       daemon = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
       daemon.stderr!.on("data", data => { errors += data; });
@@ -91,8 +91,9 @@ for (const scenario of ["parent", "park", "claim"]) test(`managed worker continu
     const db = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
     try {
       const resumedIntents = db.prepare("SELECT attempts FROM subagent_launch_intents WHERE request_key LIKE 'continuation:%'").all() as any[];
-      assert.equal(resumedIntents.length, 1);
-      assert.equal(JSON.parse(resumedIntents[0].attempts).length, 1, "one admitted continuation token and writer");
+      assert.ok(resumedIntents.length >= 1 && resumedIntents.length <= (scenario === "spawn" ? 2 : 1));
+      for (const intent of resumedIntents) assert.equal(JSON.parse(intent.attempts).length, 1, "one token per admitted attempt, including bounded safe repair");
+      assert.equal(db.prepare("SELECT count(*) AS n FROM operations").get()?.n, 1, "the external dependency side effect is never relaunched");
     } finally { db.close(); }
     assert.notEqual(JSON.parse(readFileSync(`${entered}.continued`, "utf8")).pid, metaFor(first.details.runId).pid);
   } catch (error) {

@@ -133,6 +133,8 @@ export class ManagedSubagentHost {
                     if (host.current.continuation) {
                         const permissions = intersectContinuationPermissions(host.current.capturedPermissions, host.readPermissions?.());
                         if (launchDigest(permissions) !== launchDigest(host.current.permissions)) throw new Error("continuation-permissions-changed");
+                        host.current.key = `${host.current.baseKey}:${input.id}`;
+                        host.current.digest = launchDigest({ key: host.current.key, runId: host.current.priorRunId });
                         host.journal.accept(host.current.ownerKey, host.current.key, host.current.digest, host.epoch);
                     } else {
                         const fresh = host.grant(host.current.authority);
@@ -197,13 +199,13 @@ export class ManagedSubagentHost {
             if (!saved) throw new Error("Captured continuation launch authority unavailable");
             const permissions = intersectContinuationPermissions(saved.permissions, this.readPermissions?.());
             const key = `continuation:${park.waitId}:${park.generation}`;
-            this.current = { ...saved, key, continuation: true, launchAuthority: saved,
+            this.current = { ...saved, key, baseKey: key, priorRunId: park.runId, continuation: true, launchAuthority: saved,
                 capturedPermissions: saved.permissions, permissions,
                 ownerKey: JSON.stringify([saved.owner.workspace, saved.owner.sessionId]),
                 digest: launchDigest({ key, runId: park.runId }) };
             this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...permissions });
             const outcome = await run();
-            if (outcome === "resumed") this.journal.finish(this.current.ownerKey, key, this.epoch, { status: outcome });
+            if (outcome === "resumed") this.journal.finish(this.current.ownerKey, this.current.key, this.epoch, { status: outcome });
             this.continuationFailures.delete(retryKey);
             return outcome;
         }).catch(error => {
