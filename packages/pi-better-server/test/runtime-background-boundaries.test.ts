@@ -1,7 +1,8 @@
 import test from "node:test";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { appendFileSync, mkdtempSync, renameSync, rmSync, unlinkSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Socket } from "node:net";
@@ -231,4 +232,101 @@ test("Background status filters accept runner states independently of Subagent s
   const text = formatList({ origin, statuses: ["running"], limit: 1 }, { records: [{ id: "starting-task", found: true, readable: true,
     meta: { id: "starting-task", durable: true, active: true, status: "starting", callbackOrigin: origin, kind: "process", startedAt: 1000 } }] } as any);
   assert.match(text, /starting-task starting/);
+});
+
+test("shared Background discovery bounds visible terminals independently of old callback obligations", async () => {
+  const root = mkdtempSync("/tmp/p751-bg-pending-");
+  let now = Date.now() - 60000;
+  const writer = openStore({ path: join(root, "operation-coordinator.sqlite"), now: () => now });
+  const observation = new BackgroundObservation(root);
+  const owner = { kind: "parent-session", sessionId: "owed-parent", workspace: root };
+  const taskId = (id: string) => `bgs_${createHash("sha256").update(id).digest("hex").slice(0, 20)}`;
+  const terminal = (operationId: string, pending: boolean, recipient = owner) => {
+    writer.registerOperation({ operationId, taskId: taskId(operationId), launchToken: operationId,
+      owner: recipient, observer: { kind: "local-supervisor", version: "1" } });
+    writer.setParentCallbackPending(taskId(operationId), pending);
+    writer.recordTerminalOutcome({ operationId, eventId: operationId, owner: recipient, outcome: "succeeded",
+      evidence: [{ kind: "terminal-record", ref: operationId }] });
+  };
+  try {
+    terminal("old-owed", true);
+    terminal("old-disabled", false);
+    terminal("foreign-owed", true, { ...owner, sessionId: "foreign" });
+    for (let index = 0; index < 300; index++) terminal(`old-pending-${String(index).padStart(4, "0")}`, true);
+    now = Date.now();
+    // All finish before the first shared observation, including a second page.
+    for (let index = 0; index < 300; index++) terminal(`recent-${String(index).padStart(4, "0")}`, false);
+    observation.read({ background: true, cwd: root, sessionId: owner.sessionId });
+    for (let page = 0; page < 4; page++) observation.refresh();
+    const rows = observation.read({ background: true, cwd: root, sessionId: owner.sessionId });
+    assert.equal(rows.filter((row: any) => row.operationId.startsWith("recent-")).length, 256);
+    assert.ok(rows.some((row: any) => row.operationId === "recent-0299"), "newest fast completion is discovered without observing it running");
+    assert.equal(rows.filter((row: any) => row.callbackPending).length, 256, "visible pointers cannot expand to the full obligation backlog");
+    assert.ok(rows.some((row: any) => row.operationId === "old-owed" && row.callbackPending));
+    assert.ok(!rows.some((row: any) => row.operationId === "old-disabled" || row.operationId === "foreign-owed"));
+    writer.setParentCallbackPending(taskId("old-owed"), false);
+    for (let page = 0; page < 4; page++) observation.refresh();
+    assert.ok(!observation.read({ background: true, cwd: root, sessionId: owner.sessionId }).some((row: any) => row.operationId === "old-owed"));
+  } finally { await observation.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("pending callback backlog exceeding the wire allowance stays compact without sidecar reads", async () => {
+  const root = mkdtempSync("/tmp/p751-bg-large-pending-");
+  const directory = join(root, "supervisor"), owner = { kind: "parent-session", sessionId: "parent", workspace: root };
+  const writer = openStore({ path: join(root, "operation-coordinator.sqlite"), now: () => Date.now() - 60000 });
+  const observation = new BackgroundObservation(root, directory);
+  mkdirSync(join(directory, "observed"), { recursive: true });
+  try {
+    for (let i = 0; i < 600; i++) {
+      const operationId = `pending-${String(i).padStart(4, "0")}`, taskId = `bgs_${i.toString(16).padStart(20, "0")}`;
+      writer.registerOperation({ operationId, taskId, launchToken: operationId, owner, observer: { kind: "local-supervisor", version: "1" } });
+      writer.recordTerminalOutcome({ operationId, eventId: operationId, owner, outcome: "succeeded", evidence: [{ kind: "terminal-record", ref: operationId }] });
+      writeFileSync(join(directory, "observed", `${taskId}.json`), JSON.stringify({ command: "x".repeat(8192), callback: false }));
+    }
+    const scope = { background: true, cwd: root, sessionId: owner.sessionId };
+    const initial = observation.read(scope);
+    assert.equal(initial.length, 256);
+    assert.ok(Buffer.byteLength(JSON.stringify(initial)) < 256 * 1024);
+    assert.equal(observation.metrics.runnerSnapshots, 0, "pending pointers never inspect runner or sidecar payloads");
+    for (let i = 0; i < 10; i++) observation.refresh();
+    assert.deepEqual(observation.read(scope), initial, "unchanged observations neither accumulate pages nor churn visible membership");
+    for (const row of initial) writer.setParentCallbackPending(row.id, false);
+    observation.refresh();
+    const next = observation.read(scope);
+    assert.equal(next.length, 256);
+    assert.ok(next.every((row: any) => !initial.some((old: any) => old.id === row.id)), "manager pruning advances visible pointers without requiring full backlog projection");
+    assert.equal(observation.metrics.runnerSnapshots, 0);
+  } finally { await observation.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("recent terminal cache follows atomic sidecar changes without timed rereads or foreign-scope crowding", async () => {
+  const root = mkdtempSync("/tmp/p751-bg-terminal-cache-"), directory = join(root, "supervisor");
+  let now = Date.now();
+  const writer = openStore({ path: join(root, "operation-coordinator.sqlite"), now: () => now });
+  const observation = new BackgroundObservation(root, directory);
+  const owner = { kind: "parent-session", sessionId: "parent", workspace: root };
+  mkdirSync(join(directory, "observed"), { recursive: true });
+  try {
+    for (let i = 0; i < 300; i++) {
+      const operationId = `cache-${i}`, taskId = `bgs_${i.toString(16).padStart(20, "0")}`, recipient = i ? { ...owner, sessionId: "foreign" } : owner;
+      writer.registerOperation({ operationId, taskId, launchToken: operationId, owner: recipient, observer: { kind: "local-supervisor", version: "1" } });
+      writer.recordTerminalOutcome({ operationId, eventId: operationId, owner: recipient, outcome: "succeeded", evidence: [{ kind: "terminal-record", ref: operationId }] });
+      writer.setParentCallbackPending(taskId, false);
+      now++;
+    }
+    const path = join(directory, "observed", "bgs_00000000000000000000.json");
+    writeFileSync(path, JSON.stringify({ name: "original" }));
+    const scope = { background: true, cwd: root, sessionId: owner.sessionId };
+    assert.equal(observation.read(scope)[0]?.name, "original", "foreign completions cannot crowd the exact owner's recent window");
+    observation.refresh();
+    const snapshots = observation.metrics.runnerSnapshots;
+    await delay(1100);
+    observation.refresh();
+    assert.equal(observation.metrics.runnerSnapshots, snapshots, "unchanged terminal projections have no periodic expiry");
+    writeFileSync(`${path}.tmp`, JSON.stringify({ name: "changed" }));
+    renameSync(`${path}.tmp`, path);
+    observation.refresh();
+    assert.equal(observation.read(scope)[0]?.name, "changed", "atomic sidecar replacement invalidates the cached projection");
+  } finally { await observation.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
