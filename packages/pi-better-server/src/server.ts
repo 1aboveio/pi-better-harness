@@ -205,12 +205,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           }
           if (type === "runtime_get_status") {
             if (!greeted) throw new Error("runtime_get_status requires hello");
+            const observation = workModel?.observeLiveness();
             return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
               capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, lifecycle: config,
               guardianBinding: guardianBinding?.identity ?? null,
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
                 ...registry.list().filter(session => session.live).map(session => ({ kind: "hosted-session", id: session.sessionId })),
-                ...(await workModel?.livenessReasons() ?? [])],
+                ...(observation?.reasons ?? [])],
+              livenessObservation: observation ?? { status: "unobserved", reasons: [], observedAt: null },
               nextIdleDeadline: runtimeClients.size > 0 || registry.activeCount > 0 ? null
                 : hostedUsed ? config.daemonIdleMs === 0 || zeroSince === undefined ? null : zeroSince + config.daemonIdleMs
                 : runtimeZeroSince === undefined ? null : runtimeZeroSince + config.runtimeIdleMs } });

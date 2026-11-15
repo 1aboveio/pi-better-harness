@@ -43,6 +43,8 @@ export class WorkQueryExecutor {
   private timeouts = 0;
   private durations: number[] = [];
   private options: QueryExecutorOptions;
+  private livenessSnapshot: { reasons: any[]; observedAt: number | null; reason?: string } = { reasons: [], observedAt: null };
+  private livenessObservation?: Promise<void>;
   readonly instanceId: string;
 
   constructor(agentDir: string, instanceId: string, options: QueryExecutorOptions = {}) {
@@ -78,7 +80,20 @@ export class WorkQueryExecutor {
 
   async livenessReasons(): Promise<any[]> {
     const result = await this.request(0, { type: "runtime_get_liveness" });
-    return JSON.parse(result.json);
+    const reasons = JSON.parse(result.json);
+    this.livenessSnapshot = { reasons, observedAt: Date.now() };
+    return reasons;
+  }
+
+  /** Diagnostic observation only. Idle admission must await livenessReasons instead. */
+  observeLiveness() {
+    if (!this.livenessObservation && !this.failure) {
+      this.livenessObservation = this.livenessReasons().then(() => undefined, error => {
+        this.livenessSnapshot = { ...this.livenessSnapshot, reason: String(error) };
+      }).finally(() => { this.livenessObservation = undefined; });
+    }
+    return { ...this.livenessSnapshot, status: this.failure || this.livenessSnapshot.reason ? "degraded" : "refreshing",
+      ...(this.failure ? { reason: this.failure.message } : {}) };
   }
 
   metrics() {

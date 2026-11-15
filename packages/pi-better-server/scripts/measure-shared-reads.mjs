@@ -80,6 +80,7 @@ try {
       await delay(20); indexed = await control.get({ cwd: root, active: true });
     }
     const rebuildMs = performance.now() - rebuildStarted;
+    assert.ok(rebuildLatencies.every(ms => ms < 250), 'status RPC must respond within 250 ms during index rebuild');
     assert.equal(indexed.activity.active, 2);
     assert.equal((await control.get({ cwd: root, active: false, limit: 1 })).totalMatching, history);
     for (const count of [1, 5, 10]) {
