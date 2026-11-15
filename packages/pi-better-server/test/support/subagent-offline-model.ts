@@ -27,6 +27,7 @@ export async function startContinuationModel(artifacts: string) {
     const content = body.messages?.filter((message: any) => message.role === "user").at(-1)?.content ?? "";
     const prompt = typeof content === "string" ? content : content.map((part: any) => part.text ?? "").join("");
     const key = createHash("sha256").update(prompt).digest("hex");
+    writeFileSync(join(artifacts, `request-${key}.json`), JSON.stringify({ model: body.model, prompt }));
     const path = join(artifacts, `control-${key}.json`);
     const pause = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")).sleepMs : 0;
     if (pause) await new Promise<void>(resolve => { const timer = setTimeout(() => { timers.delete(timer); resolve(); }, pause); timers.add(timer); });

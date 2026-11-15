@@ -28,17 +28,18 @@ export async function continuationFixture({ root, artifacts, workspace }) {
         const cwd = options.cwd ?? workspace, sessionId = options.sessionId ?? "owner-session";
         const child = fork(new URL("../../pi-better-server/test/support/subagent-launch-sdk.mjs", import.meta.url), [], {
             execPath: process.execPath, execArgv: ["--import", "tsx"],
-            env: { ...env, LAUNCH_WORKSPACE: cwd, CONTINUATION_CONTEXT: JSON.stringify({ sessionId, sessionDir: join(root, "parents"), sessionFile: options.sessionFile, policy }) },
+            env: { ...env, LAUNCH_WORKSPACE: cwd, CONTINUATION_CONTEXT: JSON.stringify({ sessionId, sessionDir: join(root, "parents"), sessionFile: options.sessionFile, ui: options.ui, failHealthNotify: options.failHealthNotify, policy }) },
             stdio: ["ignore", "ignore", "pipe", "ipc"],
         });
         actors.add(child); child.stderr.on("data", bytes => { errors += bytes; });
-        const tools = new Map(), sent = [], delivered = [];
+        const tools = new Map(), sent = [], delivered = [], notes = [];
         const update = state => {
             if (!state) return;
             entries = state.entries;
             actualSessionId = state.sessionId;
             actualSessionFile = state.sessionFile;
             delivered.splice(0, delivered.length, ...(state.deliveries ?? []));
+            notes.splice(0, notes.length, ...(state.notes ?? []));
             sent.splice(0, sent.length, ...entries.filter(entry => entry.type === "custom_message").map(entry => ({ message: entry })));
         };
         const ready = new Promise((resolve, reject) => {
@@ -74,26 +75,30 @@ export async function continuationFixture({ root, artifacts, workspace }) {
         const execute = async (tool, key, params) => {
             await ready; control(params);
             const id = ++sequence;
-            return new Promise((resolve, reject) => { requests.set(id, { resolve, reject }); child.send({ id, tool, key: `${key}-${actorId}-${id}`, params, policy }); });
+            return new Promise((resolve, reject) => {
+                requests.set(id, { resolve, reject });
+                child.send({ id, tool, key: `${key}-${actorId}-${id}`, params, policy }, error => { if (error) { requests.delete(id); reject(new Error(`${error.message}: ${errors}`)); } });
+            });
         };
         for (const tool of ["subagent_spawn", "subagent_spawn_batch", "subagent_result", "subagent_stop", "subagent_settings"]) {
             tools.set(tool, { execute: (key, params) => execute(tool, key, params) });
         }
         // Read-only SDK snapshots support the existing assertions, never tool execution.
-        return { tools, sent, delivered, ready, ctx: { cwd, sessionManager: { getSessionId: () => actualSessionId, getBranch: () => entries } },
+        return { tools, sent, delivered, notes, ready, ctx: { cwd, sessionManager: { getSessionId: () => actualSessionId, getBranch: () => entries } },
             pid: child.pid,
             get sessionFile() { return actualSessionFile; },
-            async inspect() { await ready; const id = ++sequence; return new Promise((resolve, reject) => { requests.set(id, { resolve, reject }); child.send({ id, inspect: true }); }); },
+            async inspect() { await ready; const id = ++sequence; return new Promise((resolve, reject) => { requests.set(id, { resolve, reject }); child.send({ id, inspect: true }, error => { if (error) { requests.delete(id); reject(new Error(`${error.message}: ${errors}`)); } }); }); },
             publishPolicy(next) { policy = next; },
-            shutdown() { return stopped ??= (async () => { await ready; if (child.exitCode === null) { const exited = once(child, "exit"); child.send({ stop: true }); await exited; } })(); },
+            shutdown() { return stopped ??= (async () => { await ready; if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); if (child.connected) child.send({ stop: true }, error => { if (error) errors += `\nShutdown IPC: ${error.message}`; }); await exited; } })(); },
         };
     }
-    return { makeHarness, healthOwner: () => stopDaemon.metrics(), runtimeDiagnostics: () => stopDaemon.diagnostics(), async observedTerminal(id) {
+    return { makeHarness, restart: () => stopDaemon.restart(), pauseRuntime: () => stopDaemon.pause(), resumeRuntime: () => stopDaemon.resume(),
+        healthOwner: () => stopDaemon.metrics(), runtimeDiagnostics: () => stopDaemon.diagnostics(), async observedTerminal(id) {
         const value = await observation.get({ id, limit: 1 });
         const row = value.rows[0];
         return row && !["running", "orphaned"].includes(row.meta.status);
     }, async close() {
-        for (const child of actors) { const exited = once(child, "exit"); child.send({ stop: true }); await exited; }
+        for (const child of actors) { const exited = once(child, "exit"); if (child.connected) child.send({ stop: true }, () => {}); await exited; }
         observation.close(); await stopDaemon(); await model.close();
         if (process.env.PI_CONTINUATION_EVIDENCE_DIR) {
             mkdirSync(process.env.PI_CONTINUATION_EVIDENCE_DIR, { recursive: true });

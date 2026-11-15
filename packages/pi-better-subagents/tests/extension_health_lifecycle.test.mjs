@@ -1,7 +1,7 @@
 /**
  * Extension-level lifecycle tests for the issue #63 production wiring.
- * The real-identity and late-lost-attention cases use actual SDK foregrounds,
- * the canonical daemon and managed workers. Remaining legacy cases below still
+ * The scoped UI, real-identity and retained orphaned/lost cases use actual SDK
+ * foregrounds, the canonical daemon and managed workers. Legacy cases below still
  * exercise the old factory fixture and are not server-ownership qualification.
  *
  * The pure seams (reconcileRun / needsMonitoring / registry identity) are
@@ -48,8 +48,10 @@
 import { describe, it, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import { continuationFixture } from "./managed-continuation-fixture.mjs";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { register } from "node:module";
-import { mkdtempSync, writeFileSync, appendFileSync, chmodSync, rmSync, readFileSync, readdirSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, appendFileSync, chmodSync, rmSync, readFileSync, readdirSync, mkdirSync, existsSync, watch } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1728,43 +1730,87 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
     });
 
     it("callback:false suppresses model follow-up but keeps human notify", async () => {
-        await withFakeClock(async () => {
-            const h = makeHarness();
+            const stage = name => { if (process.env.PI_CONTINUATION_EVIDENCE_DIR) appendFileSync(join(process.env.PI_CONTINUATION_EVIDENCE_DIR, "ui-stages.log"), `${name}\n`); };
+            const root = mkdtempSync(join(tmpdir(), "managed-human-health-")), artifacts = join(root, "children"); mkdirSync(artifacts);
+            const prior = Object.fromEntries(["PI_CODING_AGENT_DIR", "PI_SUBAGENT_DURABLE_DIR", "PI_CONTINUATION_SLEEP_MS"].map(key => [key, process.env[key]]));
+            process.env.PI_CONTINUATION_SLEEP_MS = "60000";
+            const fixture = await continuationFixture({ root, artifacts, workspace: root });
+            let h = fixture.makeHarness({ ui: true }); await h.ready; stage("initial-ui-ready");
+            let id, pid;
             try {
-                const id = nextRunId();
-                dirOnly.push(id);
-                writeMeta({
-                    id,
-                    status: "running",
-                    pid: DEAD_PID,
-                    pgid: DEAD_PID,
-                    pidStartTime: "gone-token",
-                    spawnPid: process.pid,
-                    cwd: tmpdir(),
-                    promptPreview: "p",
-                    startedAt: Date.now(),
-                    logPath: join(runDir(id), "output.log"),
-                    sessionId: id,
-                    callback: false,
-                });
-                writeFileSync(join(runDir(id), "output.log"), "quiet-lost\n");
-
-                await h.handlers.get("session_start")({}, h.ctx);
-                mock.timers.tick(HEALTH_TICK_MS);
+                ({ id, pid } = await spawnRun(h, { cwd: root, callback: false, prompt: "quiet-lost" }));
+                const requestPath = join(artifacts, `request-${createHash("sha256").update("quiet-lost").digest("hex")}.json`);
+                const entered = watch(artifacts);
+                try { while (!existsSync(requestPath)) await once(entered, "change"); } finally { entered.close(); }
+                const sessionFile = h.sessionFile;
+                if (!sessionFile || !existsSync(sessionFile)) throw new Error("actual UI recipient session was not saved");
+                const transcript = readFileSync(sessionFile, "utf8");
+                assert.equal((await h.inspect()).healthActive, false, "live UI foreground never competes with server health ownership");
+                const recipe = JSON.stringify(readMeta(id).recipe);
+                assert.equal((await fixture.healthOwner()).subagentHealthActive, true, "server owns live-worker mechanical supervision");
+                const epoch = readMeta(id).management.epoch;
+                await h.shutdown(); stage("initial-ui-stopped");
+                const branch = fixture.makeHarness({ ui: true }); await branch.ready;
+                stage("other-branch-ready"); await fixture.pauseRuntime(); stage("runtime-paused");
+                if (!await waitFor(async () => (await branch.inspect()).observation?.status === "degraded")) throw new Error("actual canonical disconnect was not observed");
+                assert.equal((await branch.inspect()).healthActive, false, "degraded UI never falls back to frontend reconciliation");
+                assert.equal(readMeta(id).lostCallbackSentAt, undefined, "degraded observation cannot consume a health receipt");
+                const changed = watch(runDir(id));
+                killProcessTree(pid, "SIGKILL");
+                stage("canonical-degraded"); await fixture.resumeRuntime(); stage("runtime-resumed");
+                try { while (readMeta(id)?.status !== "lost") await once(changed, "change"); } finally { changed.close(); }
+                assert.ok(readMeta(id).management.epoch > epoch, "replacement server re-proves management before publishing lost state");
+                stage("actual-worker-lost");
+                const foreign = fixture.makeHarness({ ui: true, sessionId: "other-health-ui" }); await foreign.ready;
+                stage("foreign-ui-ready");
+                const foreignTranscript = readFileSync(foreign.sessionFile, "utf8");
+                assert.equal(readMeta(id).lostCallbackSentAt, undefined, "foreign UI cannot consume the pending notification");
+                assert.equal(foreign.notes.filter(note => note.msg.includes(id)).length, 0);
+                await branch.inspect();
+                assert.equal(readMeta(id).lostCallbackSentAt, undefined, "a different saved branch cannot consume the recipient's notification");
+                assert.equal(branch.notes.filter(note => note.msg.includes(id)).length, 0);
+                await branch.shutdown(); stage("other-branch-stopped");
+                h = fixture.makeHarness({ ui: true, sessionFile, failHealthNotify: true }); await h.ready; stage("failing-ui-ready");
+                if (!await waitFor(async () => (await h.inspect()).uiFailures > 0)) throw new Error("actual SDK UI failure was not exercised");
+                assert.equal(readMeta(id).lostCallbackSentAt, undefined, "failed UI handoff cannot consume the health receipt");
+                assert.equal(h.delivered.length, 0, "failed quiet UI handoff cannot wake the model");
+                assert.equal(readFileSync(sessionFile, "utf8"), transcript);
+                await h.shutdown(); stage("failing-ui-stopped");
+                h = fixture.makeHarness({ ui: true, sessionFile }); await h.ready; stage("recipient-ui-ready");
+                if (!await waitFor(async () => { await h.inspect(); return readMeta(id)?.lostCallbackSentAt; })) throw new Error("scoped UI did not settle its human-only health notification");
 
                 assert.equal(readMeta(id).status, "lost");
+                assert.equal(JSON.stringify(readMeta(id).recipe), recipe, "UI health delivery never rewrites captured execution intent");
                 assert.equal(healthMsgsFor(h.sent, id).length, 0, "no model follow-up when callback:false");
                 assert.ok(
                     h.notes.some((n) => n.level === "warning" && n.msg.includes(id) && /lost/i.test(n.msg)),
                     "human notify still fires under callback:false",
                 );
+                assert.equal(h.notes.filter(note => note.level === "warning" && note.msg.includes(id) && /lost/i.test(note.msg)).length, 1, "canonical refreshes deliver one human warning");
                 // Marker still set after intentional callback:false suppression so
                 // recovery does not keep retrying the suppressed model path.
                 assert.ok(readMeta(id).lostCallbackSentAt > 0, "marker still written for dedupe");
+                assert.equal(h.delivered.length, 0, "UI-only health does not enqueue any model message");
+                assert.equal(readFileSync(sessionFile, "utf8"), transcript, "human notification does not append to the saved recipient transcript");
+                assert.equal(readFileSync(foreign.sessionFile, "utf8"), foreignTranscript, "another active SDK transcript is untouched");
+                assert.equal((await h.inspect()).healthActive, false);
+                await h.shutdown(); h = fixture.makeHarness({ ui: true, sessionFile }); await h.ready; await h.inspect();
+                assert.equal(h.notes.filter(note => note.msg.includes(id) && /lost/i.test(note.msg)).length, 0, "saved-branch reconnect never repeats the warning");
+                assert.equal(h.delivered.length, 0);
+                await foreign.shutdown(); stage("all-assertions-complete");
+            } catch (error) {
+                if (process.env.PI_CONTINUATION_EVIDENCE_DIR) writeFileSync(join(process.env.PI_CONTINUATION_EVIDENCE_DIR, "ui-first-failure.json"), JSON.stringify({ error: String(error), stack: error.stack, runtime: fixture.runtimeDiagnostics() }, null, 2));
+                throw error;
             } finally {
-                h.shutdown();
+                if (pid && realProcessProbe.pidExists(pid)) killProcessTree(pid, "SIGKILL");
+                try { await h.shutdown(); stage("final-recipient-stopped"); await fixture.close(); stage("fixture-closed"); }
+                catch (error) {
+                    if (process.env.PI_CONTINUATION_EVIDENCE_DIR) writeFileSync(join(process.env.PI_CONTINUATION_EVIDENCE_DIR, "ui-cleanup-failure.json"), JSON.stringify({ error: String(error), stack: error.stack, runtime: fixture.runtimeDiagnostics() }, null, 2));
+                    throw error;
+                }
+                rmSync(root, { recursive: true, force: true });
+                for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
             }
-        });
     });
 
     it("pre-marked meta does not re-fire after reload (durable dedupe)", async () => {
@@ -1808,19 +1854,24 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
     });
 
     it("persisted unmarked orphaned recovers one callback after reload without a fresh transition", async () => {
-        writeFakePi(TRAP_FAIL_SCRIPT);
-        await withFakeClock(async () => {
-            const h = makeHarness();
-            setIdentityProbeForTests(fakeSpawnIdentityProbe());
+            const root = mkdtempSync(join(tmpdir(), "managed-orphaned-health-")), artifacts = join(root, "children"); mkdirSync(artifacts);
+            const prior = Object.fromEntries(["PI_CODING_AGENT_DIR", "PI_SUBAGENT_DURABLE_DIR", "PI_CONTINUATION_SLEEP_MS"].map(key => [key, process.env[key]]));
+            process.env.PI_CONTINUATION_SLEEP_MS = "60000";
+            const fixture = await continuationFixture({ root, artifacts, workspace: root });
+            let h = fixture.makeHarness({ ui: true }); await h.ready;
+            let pid;
             try {
-                const { id, pid } = await spawnRun(h);
+                const run = await spawnRun(h, { cwd: root }); const id = run.id; pid = run.pid;
+                const sessionFile = h.sessionFile;
+                if (!sessionFile || !existsSync(sessionFile)) throw new Error("actual orphaned recipient session was not saved");
+                const captured = readMeta(id);
+                await h.shutdown();
                 // Persist orphaned from a prior session WITHOUT a handoff marker.
                 // Live process-group evidence keeps reconcileRun at changed:false
                 // (orphaned-kept), so recovery must not depend on a new transition.
                 writeMeta({
-                    ...readMeta(id),
+                    ...captured,
                     status: "orphaned",
-                    pid: DEAD_PID,
                     orphanedAt: Date.now() - 60_000,
                     callback: true,
                 });
@@ -1828,31 +1879,31 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 const disk = readMeta(id);
                 assert.equal(disk.orphanedCallbackSentAt, undefined, "fixture starts unmarked");
 
-                await h.handlers.get("session_start")({}, h.ctx);
-                mock.timers.tick(HEALTH_TICK_MS);
+                h = fixture.makeHarness({ ui: true, sessionFile }); await h.ready;
+                if (!await waitFor(async () => { await h.inspect(); return readMeta(id)?.orphanedCallbackSentAt && healthMsgsFor(h.delivered, id).length; })) throw new Error("actual scoped reconnect did not recover orphaned health");
 
                 assert.equal(readMeta(id).status, "orphaned", "live group evidence keeps orphaned");
-                const msgs = healthMsgsFor(h.sent, id);
+                const msgs = healthMsgsFor(h.delivered, id);
                 assert.equal(msgs.length, 1, `exactly one recovered orphaned callback; got ${msgs.length}`);
                 assert.equal(msgs[0].options.deliverAs, "followUp");
                 assert.equal(msgs[0].options.triggerTurn, true);
                 assert.match(msgs[0].message.content, /ATTENTION/i);
                 assert.match(msgs[0].message.content, /may still be alive/i);
                 assert.ok(readMeta(id).orphanedCallbackSentAt > 0, "marker written after successful handoff");
+                assert.equal(readMeta(id).pid, captured.pid, "retained orphaned health never substitutes a process identity");
+                assert.equal(realProcessProbe.pidExists(pid), true);
+                assert.equal((await h.inspect()).healthActive, false, "orphaned replay does not create a frontend health scanner");
 
                 // Reload + ticks must not re-fire.
-                mock.timers.tick(HEALTH_TICK_MS);
-                await h.handlers.get("session_start")({}, h.ctx);
-                mock.timers.tick(HEALTH_TICK_MS);
-                assert.equal(healthMsgsFor(h.sent, id).length, 1, "dedupe after recovered handoff");
+                await h.shutdown(); h = fixture.makeHarness({ ui: true, sessionFile }); await h.ready; await h.inspect();
+                assert.equal(healthMsgsFor(h.delivered, id).length, 0, "actual saved-branch reload does not repeat the recovered orphaned callback");
 
-                await reapRun({ id, pid });
+                await h.tools.get("subagent_stop").execute("cleanup", { id });
             } finally {
-                setIdentityProbeForTests(undefined);
-                h.shutdown();
-                writeFakePi(SLEEP_SCRIPT);
+                if (pid && realProcessProbe.pidExists(pid)) killProcessTree(pid, "SIGKILL");
+                await h.shutdown(); await fixture.close(); rmSync(root, { recursive: true, force: true });
+                for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
             }
-        });
     });
 
     it("persisted unmarked lost recovers one callback after reload", async () => {
