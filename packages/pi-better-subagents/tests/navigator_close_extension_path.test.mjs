@@ -26,7 +26,8 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "../../../scripts/test-support/remove-owned-fixture.mjs";
+import { removeOwnedFixture } from "../../../scripts/test-support/remove-owned-fixture.mjs";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import { requestWorkDetail } from "../work-observation.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -39,7 +40,7 @@ const DURABLE_DIR = join(RUNTIME, "durable");
 process.env.PI_SUBAGENT_DURABLE_DIR = DURABLE_DIR;
 const navigators = [];
 const sleepers = [];
-let ownedRuntime;
+let stopRuntime;
 
 const STUBS_DIR = mkdtempSync(join(RUNTIME, "stubs-"));
 const CHECKOUT_NODE_MODULES = join(REPO_ROOT, "node_modules");
@@ -230,7 +231,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
 
     const navigator = {
         async start() {
-            ownedRuntime = await prepareOwnedRuntime(AGENT_DIR);
+            stopRuntime ??= await startWorkRuntimeFixture();
             await handlers.session_start({}, ctx);
             // These assertions inspect real asynchronous observations, not placeholders.
             await waitFor(() => seededIds.every(id => requestWorkDetail(id)?.detail));
@@ -327,9 +328,7 @@ describe("registered extension path: main-window navigator actions", () => {
             child.kill("SIGTERM");
             assert.equal(await waitFor(() => child.exitCode !== null || child.signalCode !== null), true, "owned fixture child must exit before data removal");
         }
-        const serverDir = join(AGENT_DIR, "server");
         for (const navigator of navigators) await navigator.shutdown();
-        await stopOwnedRuntime(serverDir, ownedRuntime);
         // Cases own independent records, including deliberately unverified parks.
         for (const id of diskIds) {
             const directory = registry.runDir(id);
@@ -340,9 +339,8 @@ describe("registered extension path: main-window navigator actions", () => {
 
     after(async () => {
         assert.ok(sleepers.every(child => child.exitCode !== null || child.signalCode !== null), "fixture children must be gone before removal");
-        const serverDir = join(AGENT_DIR, "server");
         for (const navigator of navigators) await navigator.shutdown();
-        await stopOwnedRuntime(serverDir, ownedRuntime);
+        await stopRuntime?.();
         for (const id of diskIds) {
             try { rmSync(registry.runDir(id), { recursive: true, force: true }); } catch { /* best-effort */ }
         }

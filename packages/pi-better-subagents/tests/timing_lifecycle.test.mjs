@@ -17,11 +17,14 @@ import { register } from "node:module";
 import { mkdtempSync, writeFileSync, appendFileSync, chmodSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { stopWorkObservation } from "../work-observation.ts";
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
 const HERMETIC_TMPDIR = mkdtempSync(join(tmpdir(), "subagent-timing-"));
 process.env.TMPDIR = HERMETIC_TMPDIR;
+const stopRuntime = await startWorkRuntimeFixture();
 
 const { default: betterSubagents, progressCacheIdsForTests, isHealthTickerActive, forgetProgressCacheForTests } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
@@ -149,7 +152,9 @@ function editEvents(callId, at = Date.now()) {
     ];
 }
 
-after(() => {
+after(async () => {
+    stopWorkObservation();
+    await stopRuntime();
     process.env.PATH = originalPath;
     for (const { id, pid } of liveRuns) {
         killProcessTree(pid, "SIGKILL");
@@ -369,7 +374,10 @@ describe("harness timing: soft deadline", () => {
                 assert.match(completion[0].message.content, /status=killed; stopped: deadline/);
                 const result = (await h.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text;
                 assert.match(result, /Timing: stopped: deadline/);
-                const list = (await h.tools.get("subagent_list").execute("x", {}, undefined, undefined, h.ctx)).content[0].text;
+                const list = await waitFor(async () => {
+                    const text = (await h.tools.get("subagent_list").execute("x", {}, undefined, undefined, h.ctx)).content[0].text;
+                    return new RegExp(`${run.id}.*stopped: deadline`).test(text) ? text : undefined;
+                });
                 assert.match(list, new RegExp(`${run.id}.*stopped: deadline`));
                 const output = (await h.tools.get("subagent_output").execute("x", { id: run.id, max_bytes: 2048 }, undefined, undefined, h.ctx)).content[0].text;
                 assert.match(output, /Timing: stopped: deadline/);
@@ -594,7 +602,10 @@ describe("harness timing: stuck wake", () => {
                 assert.match(stuck[0].message.content, /no progress/);
                 assert.equal(stuck.filter((w) => w.message.content.includes(busy.id)).length, 0, "a progressing child never wakes the parent");
                 assert.equal(readMeta(idle.id).status, "running", "stuck never stops a run");
-                const list = (await h.tools.get("subagent_list").execute("x", {}, undefined, undefined, h.ctx)).content[0].text;
+                const list = await waitFor(async () => {
+                    const text = (await h.tools.get("subagent_list").execute("x", {}, undefined, undefined, h.ctx)).content[0].text;
+                    return new RegExp(`${idle.id}.*· stuck`).test(text) ? text : undefined;
+                });
                 assert.match(list, new RegExp(`${idle.id}.*· stuck`));
                 const output = (await h.tools.get("subagent_output").execute("x", { id: idle.id }, undefined, undefined, h.ctx)).content[0].text;
                 assert.match(output, /Timing: stuck/);

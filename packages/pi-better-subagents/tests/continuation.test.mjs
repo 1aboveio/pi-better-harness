@@ -53,6 +53,8 @@ import {
 import { EventEmitter, once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { stopWorkObservation } from "../work-observation.ts";
 
 const REAL_SDK_URL = import.meta.resolve("@earendil-works/pi-coding-agent");
 
@@ -64,6 +66,7 @@ const ARTIFACTS = join(RUNTIME, "children");
 mkdirSync(ARTIFACTS, { recursive: true });
 process.env.PI_CONTINUATION_ARTIFACTS = ARTIFACTS;
 process.env.PI_CONTINUATION_SDK_URL = REAL_SDK_URL;
+const stopRuntime = await startWorkRuntimeFixture();
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
@@ -327,7 +330,9 @@ function removeRun(id) {
     rmSync(runDir(id), { recursive: true, force: true });
 }
 
-after(() => {
+after(async () => {
+    stopWorkObservation();
+    await stopRuntime();
     process.env.PATH = originalPath;
     delete process.env.PI_CONTINUATION_SLEEP_MS;
     rmSync(RUNTIME, { recursive: true, force: true });
