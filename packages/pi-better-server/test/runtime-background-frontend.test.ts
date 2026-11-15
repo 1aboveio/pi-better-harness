@@ -26,7 +26,7 @@ test('standalone native Background tools use server ownership, replay once and s
         child.once('exit', exit);
         child.once('error', error);
     });
-    const daemon = start(new URL('./support/work-daemon.ts', import.meta.url));
+    let daemon = start(new URL('./support/work-daemon.ts', import.meta.url));
     let parent: ReturnType<typeof fork>;
     const call = async (tool: string, params: any, key = `native-${++sequence}`) => { const reply = wait(parent); parent.send({ id: ++sequence, key, tool, params }); const [value] = await reply; assert.equal(value.error, undefined, `${value.stack}\n${errors}`); return value.result; };
     try {
@@ -80,6 +80,29 @@ test('standalone native Background tools use server ownership, replay once and s
             await delay(100);
         }
         assert.equal(nativeMessages.length, 1);
+        // Legacy terminal callbacks remain obligations after UI retention and
+        // process restart; the shared visible snapshot intentionally omits them.
+        const legacyRelease=join(cwd,'legacy-release');
+        const legacyBatch=await call('bg_task_spawn_batch',{jobs:[{shell:false,callback:true,argv:[process.execPath,'-e',`const fs=require('node:fs');const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(legacyRelease)})){clearInterval(timer);console.log('old-legacy-result')}},20)`]}]});
+        const legacyId=legacyBatch.details.launched[0].id;
+        parent.kill('SIGKILL');await once(parent,'exit');writeFileSync(legacyRelease,'go');
+        const legacyPath=join(root,'pi-better-background-tasks','tasks',legacyId,'meta.json');
+        const legacyDeadline=Date.now()+10000;
+        while(JSON.parse(readFileSync(legacyPath,'utf8')).status==='running'){assert.ok(Date.now()<legacyDeadline,errors);await delay(50);}
+        daemon.kill('SIGKILL');await once(daemon,'exit');
+        const legacyMeta=JSON.parse(readFileSync(legacyPath,'utf8'));legacyMeta.endedAt=Date.now()-86400000;
+        delete legacyMeta.callbackSentAt;delete legacyMeta.callbackSuppressedAt;
+        writeFileSync(legacyPath,JSON.stringify(legacyMeta));
+        daemon=start(new URL('./support/work-daemon.ts',import.meta.url));await wait(daemon);
+        parent=start(new URL('../scripts/measure-full-runtime/frontend.ts',import.meta.url));await wait(parent);
+        const legacyReceipt=`background-legacy:${legacyId}:${legacyMeta.endedAt}`;
+        const recoveryDeadline=Date.now()+10000;let recovered=false;
+        while(!recovered){
+          await call('bg_task_status',{id:legacyId});
+          const pending=wait(parent);parent.send({id:++sequence,entries:true});const [reply]=await pending;
+          recovered=reply.result.some((entry:any)=>entry.type==='custom_message'&&entry.customType==='background-completion-batch'&&entry.details?.completionEventIds?.includes(legacyReceipt));
+          assert.ok(Date.now()<recoveryDeadline,`Old legacy callback did not recover: ${JSON.stringify(reply.result)} ${errors}`);await delay(100);
+        }
         // A mandatory Background profile is re-read by the server, independent of
         // whether this native process has the optional sandbox extension loaded.
         writeFileSync(join(agent, 'settings.json'), JSON.stringify({ piBetterHarness: { sandboxPermissions: { version: 1, permissions: { main: { enabled: true, projectFiles: 'read-write', outsideProject: 'off', storedCredentials: 'off', commands: false, network: false, shell: false, processAccess: 'off', commandTimeoutSeconds: 30 }, background: { enabled: true, projectFiles: 'read-write', outsideProject: 'off', storedCredentials: 'off', commands: false, network: false, shell: false, processAccess: 'off', commandTimeoutSeconds: 30 }, subagents: { enabled: true, projectFiles: 'read-write', outsideProject: 'off', storedCredentials: 'off', commands: false, network: false, shell: false, processAccess: 'off', commandTimeoutSeconds: 30 } } } } }));

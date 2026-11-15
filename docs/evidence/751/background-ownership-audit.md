@@ -8,13 +8,15 @@ Native completion and urgent delivery remain in the real frontend callback batch
 
 ## Verification
 
-- Actual standalone SDK + server: spawn, exact request replay, wait, kill foreground, server terminal publication, reopen native session, status, logs, stop, mandatory permission refusal, native completion receipt.
+- Actual standalone SDK + server: spawn, exact request replay, wait, kill foreground, server terminal publication, reopen native session, status, logs, stop, mandatory permission refusal, native completion receipt; restart server and frontend with an unreceipted legacy terminal callback aged one day, then verify its native receipt.
 - Fixed adapter: new-admission drain refusal, accepted replay, changed request/schema refusal, interrupted receipt recovery.
 - Canonical host: 64 observed-waits tests, including authority revocation after registration and before process spawn.
 - Native UI: 60 render reads issue zero provider requests; explicit selection fills evidence; normal/urgent structured transcript replay avoids duplicate delivery; delayed refresh survives session switch.
 - Navigator: 43 tests passed. Permission/query/journal focused run: 23 tests passed. Background/Server/Subagents/coordinator typechecks passed.
-- Full process resource run with real guardian, server, two HostedSessions, worker, runner, command, two legacy commands and 1/5/10 native clients: coordinator connections 2 and derived connections 1 throughout. Shared semantic refresh/reconcile, legacy inventories/index reads and terminal metadata rereads were zero during unchanged windows. Active-command supervision metadata reads were reported separately (14/12/154 over approximately 3/3/60 seconds), not represented as historical reads. The last ten-client RPC p95 was 1.46 ms; this is a measurement, not a portable latency guarantee.
+- Full process resource run with real guardian, server, two HostedSessions, worker, runner, command, two legacy commands and 1/5/10 native clients: coordinator connections 2 and derived connections 1 throughout. Shared semantic refresh/reconcile, legacy inventories/index reads and terminal metadata rereads were zero during unchanged windows. Active-command supervision metadata reads were reported separately (14/12/154 over approximately 3/3/60 seconds), not represented as historical reads. The clean cff852e4 ten-client RPC p95 was 0.925 ms (p99 2.30 ms); this is a measurement, not a portable latency guarantee.
 
 ## Remaining integration gates
 
 The five old Background extension fixtures still assume a local foreground host and incomplete fake SDK contexts: cached-factory-lifecycle, failure-attention-lifecycle, golden-path, e2e, sandbox-kernel (32 failures, 17 passes in that targeted run). They require migration to actual native/server entry or explicit canonical-domain fixtures. This is separate from the passing actual native acceptance test. Linux, packed standalone and current integrated worker-continuation tests must be rerun after integration; this document does not claim the whole epic is complete.
+
+Raw full-process evidence: `full-runtime-background-owned-macos.json`, clean source `cff852e430259eba338f008aee10260275f5b1fe`, Node 24.21.0, Apple M3 Max/16 CPUs/128 GiB. The ten-client window measured 4,407 ms aggregate CPU and 3,515,009,984 bytes aggregate RSS, including instrumentation. The source-stamped report covers two active legacy commands as well as a durable runner and managed worker; the separate archive harness retains the 4,416/10,000 history evidence.
