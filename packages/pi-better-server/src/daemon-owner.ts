@@ -42,8 +42,9 @@ export function processMatchesStart(pid: number, start: unknown): boolean {
     try {
       const observed = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
         encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000,
+        env: { ...process.env, LC_ALL: "C" },
       }).trim();
-      return observed.length > 0 && observed === start.trim();
+      return observed.length > 0 && observed.replace(/\s+/g, " ") === start.trim().replace(/\s+/g, " ");
     } catch { return false; }
   }
   const identity = processIdentity(pid);

@@ -33,6 +33,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { describe, it, before, beforeEach, after } from "node:test";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import assert from "node:assert/strict";
 import { inspectDaemonOwner } from "../../pi-better-server/src/daemon-owner.ts";
 import { removeOwnedFixture, stopOwnedRuntime } from "../../../scripts/test-support/remove-owned-fixture.mjs";
@@ -325,10 +326,15 @@ describe("subagent_spawn_batch end-to-end", () => {
     let registry;
     let capacity;
     let config;
+    let stopRuntime;
+    let originalAgentDir;
 
     before(async () => {
         origPath = process.env.PATH;
         setupStubs();
+        originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+        process.env.PI_CODING_AGENT_DIR = join(RUNTIME, "agent");
+        stopRuntime = await startWorkRuntimeFixture();
         assertCheckoutNodeModulesUntouched();
         const binDir = makeMockPi();
         process.env.PATH = `${binDir}:${origPath}`;
@@ -367,7 +373,9 @@ describe("subagent_spawn_batch end-to-end", () => {
             await foreground.handlers.session_shutdown?.({ reason: "shutdown" }, foreground.ctx ?? makeCtx());
         }
         await stopOwnedRuntime(serverDir, owner.status === "live" ? owner.owner : undefined);
-        await stopRuntime();
+        await stopRuntime?.();
+        if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
         removeOwnedFixture(RUNTIME);
         assertCheckoutNodeModulesUntouched();
     });
