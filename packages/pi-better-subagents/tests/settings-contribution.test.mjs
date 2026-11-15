@@ -1,3 +1,4 @@
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -8,6 +9,7 @@ import { join } from "node:path";
 
 const root = mkdtempSync(join(tmpdir(), "subagent-settings-contribution-"));
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+const stopCatalogRuntime = await startWorkRuntimeFixture();
 const { default: extension } = await import("../index.ts");
 const { setConfigPathForTests, setConfigForTests, loadConfig } = await import("../config.ts");
 const { TIMING_ENV } = await import("../timing.ts");
@@ -44,7 +46,10 @@ test("subagents contributes the standalone settings opener with shared session a
     };
     process.env[TIMING_ENV.toolWait] = "7";
     process.env[TIMING_ENV.stuck] = "13";
-    t.after(() => {
+    t.after(async () => {
+        const { closeCatalogHost } = await import("../catalog-host-admission.ts");
+        closeCatalogHost();
+        await stopCatalogRuntime();
         if (previousTimingEnv.toolWait === undefined) delete process.env[TIMING_ENV.toolWait];
         else process.env[TIMING_ENV.toolWait] = previousTimingEnv.toolWait;
         if (previousTimingEnv.stuck === undefined) delete process.env[TIMING_ENV.stuck];

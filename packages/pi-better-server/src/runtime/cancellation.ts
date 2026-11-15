@@ -1,8 +1,7 @@
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-// @ts-expect-error Generated fixed-version domain implementation.
-import { openStore } from "./domain/coordinator/index.mjs";
+import { acquireMutationStore } from "./mutation-store.ts";
 // @ts-expect-error Generated canonical supervisor; only stop is invoked here.
 import { createLocalSupervisor } from "./domain/background/supervisor/supervisor.mjs";
 // @ts-expect-error Generated canonical durable stop records.
@@ -28,15 +27,20 @@ export function hasPendingCancellation(root: string): boolean {
 /** Cancellation only: no arbitrary method, module, launch or wait dispatch. */
 export class RuntimeCancellation {
   private store: any;
+  private releaseStore: () => void;
   private pending = new Map<string, Promise<unknown>>();
   readonly epoch: number;
   private fault?: (stage: CancellationStage) => void;
   get busy() { return this.pending.size > 0; }
   constructor(root: string, instanceId: string, fault?: (stage: CancellationStage) => void) {
     this.fault = fault;
-    this.store = openStore({ path: join(root, "operation-coordinator.sqlite") });
-    this.epoch = this.store.cancellationRuntimeEpoch(instanceId);
-    for (const admission of this.store.pendingTaskCancellations()) void this.execute(admission);
+    const lease = acquireMutationStore(root);
+    this.store = lease.store;
+    this.releaseStore = lease.release;
+    try {
+      this.epoch = this.store.cancellationRuntimeEpoch(instanceId);
+      for (const admission of this.store.pendingTaskCancellations()) void this.execute(admission);
+    } catch (error) { this.releaseStore(); throw error; }
   }
   async handle(command: Record<string, unknown>) {
     if (Object.keys(command).some(key => !["id", "type", "credential"].includes(key))) throw new Error("not_accepted: unsupported cancellation field");
@@ -91,5 +95,5 @@ export class RuntimeCancellation {
     this.pending.set(key, execution);
     return execution;
   }
-  async close() { await Promise.all(this.pending.values()); this.store.close(); }
+  async close() { await Promise.all(this.pending.values()); this.releaseStore(); }
 }

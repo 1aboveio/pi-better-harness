@@ -1,3 +1,4 @@
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 /**
  * SPEC-03/04/06/07: current launchability, effective capabilities, the Pi
  * argument schema, and per-job clarification. Schema checks go through Pi's
@@ -19,7 +20,7 @@ mkdirSync(runtimeTmp, { recursive: true });
 process.env.TMPDIR = runtimeTmp;
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
-const stopRuntime = await startWorkRuntimeFixture();
+const stopCatalogRuntime = await startWorkRuntimeFixture();
 
 const { setConfigForTests } = await import("../config.ts");
 const { clarifyCatalogRequest } = await import("../catalog-runtime.ts");
@@ -55,7 +56,9 @@ function runNames() {
 
 describe("review runtime P1", () => {
     after(async () => {
-        await stopRuntime();
+        const { closeCatalogHost } = await import("../catalog-host-admission.ts");
+        closeCatalogHost();
+        await stopCatalogRuntime();
         setConfigForTests(undefined);
         rmSync(root, { recursive: true, force: true });
     });

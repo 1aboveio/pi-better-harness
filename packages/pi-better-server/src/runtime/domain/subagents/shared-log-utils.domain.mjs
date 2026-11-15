@@ -918,7 +918,7 @@ export function sessionScopeKey(input) {
     if (input.unavailable)
         return "session:unavailable";
     if (input.origin)
-        return `session:${originScopeDigest(input.origin)}`;
+        return `session:${originScopeDigest(input.origin)}${!input.origin.sessionId && input.processId !== undefined ? `:process:${input.processId}` : ""}`;
     return input.fallback ?? "none";
 }
 /**
@@ -958,6 +958,11 @@ function decodeRowCursor(cursor) {
 export function isRowCursor(cursor) {
     return decodeRowCursor(cursor) !== undefined;
 }
+/** Resolve a list anchor only in the scope/filter that issued it. */
+export function rowCursorKey(cursor, resource) {
+    const parsed = decodeRowCursor(cursor);
+    return parsed?.r === resourceTag(resource) && Number.isFinite(parsed.t) ? { time: parsed.t, id: parsed.i } : undefined;
+}
 /** Sorts before every real row: a cursor anchored here starts at the first row. */
 const HEAD_ROW_KEY = { time: Number.MAX_SAFE_INTEGER, id: "" };
 function rowOrder(a, b) {
@@ -985,7 +990,7 @@ function clipRow(row, maxBytes) {
 export function pageRows(items, request) {
     const keyed = items.map((item) => ({ item, key: request.keyOf(item) }))
         .sort((a, b) => rowOrder(a.key, b.key));
-    const total = keyed.length;
+    const total = request.indexed?.total ?? keyed.length;
     const limit = Math.max(1, Math.floor(request.limit));
     const maxBytes = Math.max(0, Math.floor(request.maxBytes));
     let start = 0;
@@ -1000,14 +1005,14 @@ export function pageRows(items, request) {
             const anchor = { time: parsed.t, id: parsed.i };
             start = keyed.findIndex((row) => rowOrder(row.key, anchor) > 0);
             if (start < 0)
-                start = total;
+                start = keyed.length;
         }
     }
     const lines = [];
     let used = 0;
     let clippedRows = 0;
     let index = start;
-    for (; index < total && lines.length < limit; index += 1) {
+    for (; index < keyed.length && lines.length < limit; index += 1) {
         const row = request.render(keyed[index].item);
         const sep = lines.length ? 1 : 0;
         const size = utf8ByteLength(row);
@@ -1028,11 +1033,12 @@ export function pageRows(items, request) {
         break;
     }
     const shown = lines.length;
-    const remaining = Math.max(0, total - index);
+    const before = request.indexed?.before ?? start;
+    const remaining = Math.max(0, total - before - lines.length);
     const current = request.cursor && !reset ? request.cursor : undefined;
     // The next page starts after the last row shown, or — when no row fit —
     // at this page's own start, so a caller can always retry with a larger page.
-    const anchor = shown > 0 ? keyed[index - 1].key : start > 0 ? keyed[start - 1].key : HEAD_ROW_KEY;
+    const anchor = shown > 0 ? keyed[index - 1].key : rowCursorKey(current, request.resource) ?? (start > 0 ? keyed[start - 1].key : HEAD_ROW_KEY);
     const nextCursor = remaining > 0
         ? encodeRowCursor({ k: "l", r: resource, t: anchor.time, i: anchor.id })
         : undefined;
@@ -1047,7 +1053,7 @@ export function pageRows(items, request) {
         gaps: [],
         shown,
         total,
-        before: start,
+        before,
         remaining,
         clippedRows,
     };

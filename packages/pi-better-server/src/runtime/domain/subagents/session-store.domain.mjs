@@ -27,6 +27,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 /**
  * Test-isolation override for the whole durable root. Production resolves the
  * Pi agent directory; the package's tests point this at a private directory so
@@ -136,9 +137,10 @@ export function archivePublicationPending(meta) {
 /**
  * Publish the compact record for a completed attempt, atomically.
  *
- * Returns true when this call published (or re-published) the record and false
- * when the attempt is not archivable at all. Rewriting an existing record is how
- * a failed publication is retried, so the call is idempotent. IO failures throw:
+ * Returns true when this call published or verified an identical record and
+ * false when the attempt is not archivable at all. Missing, corrupt or changed
+ * records are atomically replaced; redundant retries preserve source identity.
+ * IO failures throw:
  * the caller decides whether the volatile record is retained.
  */
 export function archiveCompletedAttempt(meta) {
@@ -149,18 +151,36 @@ export function archiveCompletedAttempt(meta) {
     const directory = durableAttemptsDir();
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const path = attemptPath(meta.id);
-    const temp = join(directory, `.${randomBytes(8).toString("hex")}.tmp`);
     const record = { version: ARCHIVE_VERSION, meta: compactAttempt(meta) };
+    const payload = JSON.stringify(record);
+    let previous;
     try {
-        writeFileSync(temp, JSON.stringify(record), { mode: 0o600, flag: "wx" });
-        renameSync(temp, path);
+        previous = readFileSync(path, "utf8");
     }
     catch (error) {
+        if (error.code !== "ENOENT")
+            throw error;
+    }
+    let identical = false;
+    if (previous !== undefined) {
         try {
-            unlinkSync(temp);
+            identical = isDeepStrictEqual(JSON.parse(previous), JSON.parse(payload));
         }
-        catch { /* best effort */ }
-        throw error;
+        catch { /* A corrupt record must be repaired by the real writer. */ }
+    }
+    if (!identical) {
+        const temp = join(directory, `.${randomBytes(8).toString("hex")}.tmp`);
+        try {
+            writeFileSync(temp, payload, { mode: 0o600, flag: "wx" });
+            renameSync(temp, path);
+        }
+        catch (error) {
+            try {
+                unlinkSync(temp);
+            }
+            catch { /* best effort */ }
+            throw error;
+        }
     }
     // The published record now speaks for this conversation, so a marker left by
     // an older non-completing attempt no longer applies.

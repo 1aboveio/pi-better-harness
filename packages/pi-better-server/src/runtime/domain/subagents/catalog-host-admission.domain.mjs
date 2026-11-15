@@ -2,7 +2,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { processStartToken } from "./registry.domain.mjs";
 import { WorkClient } from "./shared-work-client.mjs";
+import { overlayDigest } from "./catalog-overlay.domain.mjs";
+export { overlayDigest } from "./catalog-overlay.domain.mjs";
 export function createCatalogHostAdapter() {
     let current;
     let live;
@@ -55,7 +58,10 @@ export function createCatalogHostAdapter() {
         const client = new WorkClient(socketPath, agentDir, ["runtime-catalog-v1"]);
         try {
             const hello = await client.ready;
-            writeFileSync(staging, JSON.stringify({ version: 1, id, generation, serverInstance: hello.instanceId, pid: process.pid, secretHash: hash(secret), ...scope }), { mode: 0o600, flag: "wx" });
+            const pidStartTime = processStartToken(process.pid);
+            if (!pidStartTime)
+                throw new Error("catalog-host-identity-unavailable");
+            writeFileSync(staging, JSON.stringify({ version: 1, id, generation, serverInstance: hello.instanceId, pid: process.pid, pidStartTime, secretHash: hash(secret), ...scope }), { mode: 0o600, flag: "wx" });
             renameSync(staging, path);
             await client.request("runtime_bind_catalog_host", { authority });
             if (epoch !== admittedEpoch || !current)
@@ -77,7 +83,4 @@ export function createCatalogHostAdapter() {
     return { noteCatalogHostContext, closeCatalogHost, catalogHostAuthority };
 }
 export const { noteCatalogHostContext, closeCatalogHost, catalogHostAuthority } = createCatalogHostAdapter();
-export function overlayDigest(value = {}) {
-    return hash(JSON.stringify(Object.fromEntries(Object.keys(value).sort().map(id => [id, Object.fromEntries(Object.entries(value[id]).sort(([a], [b]) => a.localeCompare(b)))]))));
-}
 function hash(value) { return createHash("sha256").update(value).digest("hex"); }

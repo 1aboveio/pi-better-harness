@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { inspectDaemonOwner, ownerIsAlive, processMatchesStart } from "../src/daemon-owner.ts";
 import { startDaemon } from "../src/server.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { OwnershipStore } from "../src/core/ownership.ts";
 import { ownershipPathFor } from "../src/paths.ts";
@@ -23,10 +24,13 @@ test("real SQLite runner obligations exclude terminal history, unread waits and 
   const supervisor = createLocalSupervisor({ directory });
   const model = new WorkReadModel(root, "runner-instance", { supervisorDirectory: directory,
     baseDir: join(root, "subagents"), durableDir: join(root, "archives") });
+  const executor = new WorkQueryExecutor(root, "runner-executor", { modelOptions: {
+    supervisorDirectory: directory, baseDir: join(root, "subagents"), durableDir: join(root, "archives"),
+  } });
   let taskId: string | undefined;
   t.after(async () => {
     if (taskId && !supervisor.snapshot(taskId)?.terminal) await supervisor.stop(taskId);
-    await model.close(); store.close(); rmSync(root, { recursive: true, force: true });
+    await executor.close(); await model.close(); store.close(); rmSync(root, { recursive: true, force: true });
   });
   const started = await supervisor.start({ token: "755-real-runner", kind: "process", cwd: root,
     argv: [process.execPath, "-e", "const fs=require('fs'); const t=setInterval(()=>{if(fs.existsSync('finish')){clearInterval(t)}},20)"] });
@@ -46,12 +50,14 @@ test("real SQLite runner obligations exclude terminal history, unread waits and 
   mkdirSync(corrupt.dir, { recursive: true }); writeFileSync(corrupt.launch, "{");
   await model.reconcile();
   assert.deepEqual(model.livenessReasons().map(reason => reason.id), [taskId]);
+  assert.deepEqual((await executor.livenessReasons()).map(reason => reason.id), [taskId], "worker executor preserves valid runner retention alongside corrupt records");
   const claim = supervisor.snapshot(taskId)!.claim!;
   assert.equal(processMatchesStart(claim.pid, "Thu Jan  1 00:00:00 1970"), false, "a live PID with a different start identity cannot retain the runtime");
   writeFileSync(join(root, "finish"), "done");
   await waitFor("runner terminal record", () => supervisor.snapshot(taskId!)?.terminal);
   await model.reconcile();
   assert.deepEqual(model.livenessReasons(), []);
+  assert.deepEqual(await executor.livenessReasons(), [], "terminal runner and unread waits do not retain the runtime");
   assert.equal(store.listWaits({ owner })[0]!.phase, "waiting", "idle observation does not consume unread waits");
   assert.equal(store.getOperation("live-operation")!.terminalRevision, 0, "idle observation does not become terminal authority");
   assert.equal(model.backgroundMetrics.historyQueries, 0);
@@ -268,7 +274,7 @@ test("default runtime-only idle exits real server and guardian within 30s plus 5
   const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "--agent", "pi"], {
     env: { ...process.env, ...env.vars }, stdio: ["ignore", "pipe", "pipe"],
   });
-  let errors = ""; child.stderr.on("data", chunk => { errors += chunk; });
+  let errors = ""; child.stderr!.on("data", chunk => { errors += chunk; });
   const exited = once(child, "exit");
   t.after(async () => { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGTERM"); await exited; } });
   const owner = await waitFor("real server", () => {
@@ -327,4 +333,27 @@ test("SIGKILL of server recovers under the same guardian and persists restart ac
   assert.equal(guardian.status, "live");
   if (guardian.status === "live") assert.equal(guardian.owner.pid, child.pid);
   assert.equal(JSON.parse(readFileSync(join(env.serverDir, "guardian-restarts.json"), "utf8")).length, 1);
+});
+
+test("a failed read worker cannot retain a detached daemon indefinitely", { timeout: 15_000 }, async t => {
+  const env = makeEnv();
+  const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./support/failed-read-worker-daemon.ts", import.meta.url))], {
+    env: { ...process.env, ...env.vars }, stdio: ["ignore", "ignore", "pipe", "ipc"],
+  });
+  const exited = once(child, "exit");
+  let errors = ""; child.stderr!.on("data", chunk => { errors += chunk; });
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await exited; });
+  const [ready] = await Promise.race([once(child, "message"), exited.then(() => { throw new Error(errors); })]);
+  const client = new WorkClient(ready.socketPath, env.agentDir);
+  try {
+    await client.ready;
+    await assert.rejects(client.get({ cwd: env.agentDir }), /worker|runtime-unhealthy/);
+  } finally { client.close(); }
+  const disconnectedAt = Date.now();
+  const [code] = await exited;
+  assert.equal(code, 0, errors);
+  assert.ok(Date.now() - disconnectedAt < 5000, "failed observation must not exceed the shutdown budget");
+  assert.equal(inspectDaemonOwner(env.serverDir).status, "missing");
+  const checkpoint = JSON.parse(readFileSync(join(env.serverDir, "clean-stop.json"), "utf8"));
+  assert.equal(checkpoint.observation, "unavailable", "shutdown must disclose that obligations could not be verified");
 });

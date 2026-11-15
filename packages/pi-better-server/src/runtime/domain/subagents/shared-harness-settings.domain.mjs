@@ -30,12 +30,14 @@ function section(settings) {
     return Object.hasOwn(settings, NAMESPACE) ? object(settings[NAMESPACE], NAMESPACE) : {};
 }
 function acquire(path) {
-    for (let attempt = 0; attempt < 10; attempt++) {
+    // A live writer can be briefly descheduled; allow contention without stealing its lock.
+    const maxAttempts = 100;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
         try {
             return lockfile.lockSync(path, { realpath: false });
         }
         catch (error) {
-            if (error.code !== "ELOCKED" || attempt === 9)
+            if (error.code !== "ELOCKED" || attempt === maxAttempts - 1)
                 throw error;
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
         }

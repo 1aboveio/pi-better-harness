@@ -130,7 +130,13 @@ export class ManagedSubagentHost {
             const created = await createAgentSession({ cwd, agentDir: this.root, settingsManager, resourceLoader,
                 sessionManager: SessionManager.inMemory(cwd), noTools: "all" });
             this.session = created.session;
-            await this.session.bindExtensions({ mode: "print" });
+            const initializationErrors = [];
+            await this.session.bindExtensions({ mode: "print", onError: (error) => {
+                    if (!initializationErrors.length)
+                        initializationErrors.push(String(error.error ?? error.message ?? error));
+                } });
+            if (initializationErrors.length)
+                throw new Error(`Managed launch initialization failed: ${initializationErrors.join("; ")}`);
         })();
     }
     handle(command) {

@@ -81,6 +81,32 @@ const ctx = {
   sessionManager: { getSessionId: () => origin.sessionId },
 };
 
+it("keeps each interleaved read's captured scope across async dispatch and refuses absent or foreign owners", async () => {
+  const owned = fixture({ callbackOrigin: origin, logLines: ["private-owner-evidence"] });
+  const foreign = fixture({ callbackOrigin: otherOrigin, logLines: ["other-owner-evidence"] });
+  const tools = register();
+  const otherCtx = { ...ctx, sessionManager: { getSessionId: () => otherOrigin.sessionId } };
+  const results = await Promise.all([
+    tools.bg_task_log.execute("owned-log", { id: owned.id }, undefined, undefined, ctx),
+    tools.bg_task_status.execute("foreign-status", { id: owned.id }, undefined, undefined, otherCtx),
+    tools.bg_task_status.execute("owned-status", { id: owned.id }, undefined, undefined, ctx),
+    tools.bg_status.execute("foreign-alias", { action: "log", id: owned.id }, undefined, undefined, otherCtx),
+    tools.bg_task.execute("owned-alias", { action: "log", id: owned.id }, undefined, undefined, ctx),
+    tools.bg_task_list.execute("owned-list", {}, undefined, undefined, ctx),
+    tools.bg_status.execute("foreign-list", { action: "list" }, undefined, undefined, otherCtx),
+    tools.bg_task_log.execute("missing-owner", { id: owned.id }, undefined, undefined, undefined),
+  ]);
+  const bodies = results.map(textOf);
+  expect(bodies[0]).toContain("private-owner-evidence");
+  expect(bodies[2]).toContain("succeeded");
+  expect(bodies[4]).toContain("private-owner-evidence");
+  for (const index of [1, 3, 7]) expect(bodies[index]).not.toContain("private-owner-evidence");
+  expect(bodies[5]).toContain(owned.id);
+  expect(bodies[5]).not.toContain(foreign.id);
+  expect(bodies[6]).toContain(foreign.id);
+  expect(bodies[6]).not.toContain(owned.id);
+});
+
 describe("progress observations and launch provenance (#572)", () => {
   const startedAt = Date.parse("2026-10-25T00:00:00Z");
   let taskSequence = 0;

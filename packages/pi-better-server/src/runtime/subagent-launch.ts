@@ -17,6 +17,11 @@ export async function createSubagentLaunch(root: string, instance: string, catal
   const path = "./domain/subagents/managed-launch-host.domain.mjs";
   const { ManagedSubagentHost } = await import(path);
   const host = new ManagedSubagentHost(root, instance, catalog);
-  await host.recover();
-  return host;
+  try {
+    await host.recover();
+    return host;
+  } catch (error) {
+    await host.close();
+    throw error;
+  }
 }

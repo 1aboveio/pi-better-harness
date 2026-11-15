@@ -9,6 +9,7 @@
  * and leaves no partial record.
  */
 import { StoreError } from "./errors.domain.mjs";
+import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.domain.mjs";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.domain.mjs";
 import { repairFailedResume } from "./recovery.domain.mjs";
 import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.domain.mjs";
@@ -16,7 +17,7 @@ import { describeOwnerDiff, normalizeOwner, requireCounter, requireId, requirePa
 import { ensureSchema } from "./schema.domain.mjs";
 import { createContext, openDatabase } from "./sqlite.domain.mjs";
 import { getOperation as readOperationRecord, listOperations as readOperationRecords, listRunningSupervisedBy as readRunningSupervisedBy, releaseSupervision as writeSupervisionRelease, recordSupervision as writeSupervision, recordTerminalOutcome as writeTerminalOutcome, registerOperation as writeOperation, } from "./operations.domain.mjs";
-import { getChangeRevision as readChangeRevision, readDiscoveryClaim as readClaim, releaseDiscoveryClaim as deleteDiscoveryClaim, tryClaimDiscovery as writeDiscoveryClaim, } from "./discovery.domain.mjs";
+import { getChangeRevision as readChangeRevision, readDiscoveryClaim as readClaim, readDiscoveryState, releaseDiscoveryClaim as deleteDiscoveryClaim, tryClaimDiscovery as writeDiscoveryClaim, } from "./discovery.domain.mjs";
 import { acknowledgeResult as writeAcknowledgement, cancelWait as writeCancellation, claimResume as writeClaim, findPendingWaitForOwner, getWait as readWait, listDependencies as readDependencies, listEvidencePins as readPins, listEvidenceReads as readReads, listResumeClaims as readClaims, listUnreconciledClaims, listWaits as readWaits, publishResumeAttempt as writeAttemptPublication, recordEvidencePin as writePin, recordEvidenceRead as writeRead, registerWait as writeWait, releaseEvidencePins as writePinRelease, holdFailedResume as writeHoldFailedResume, releaseResumeClaim as writeClaimRelease, transitionWaitPhase as writePhase, } from "./waits.domain.mjs";
 import { claimOutbox as writeOutboxClaim, listDispatchableOutboxRecipients as readDispatchableOutboxRecipients, listOutbox as readOutbox, markOutboxDelivered as writeOutboxDelivery, releaseOutbox as writeOutboxRelease, } from "./outbox.domain.mjs";
 import { readOperationEvidence } from "./rows.domain.mjs";
@@ -44,6 +45,14 @@ export function openStore(options) {
         }
     };
     const store = {
+        resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
+        handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
+        resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
+        resultSupervisions(activeOnly) { alive(); return resultSupervisions(ctx, activeOnly); },
+        handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
+        handoffResultSupervisions(input) { alive(); return handoffResultSupervisions(ctx, input); },
+        recoverResultSupervision(input) { alive(); recoverResultSupervision(ctx, input); },
+        publishSupervisedResult(input) { alive(); return publishSupervisedResult(ctx, input); },
         unknownTaskCancellation(input) { alive(); return unknownTaskCancellation(ctx, input); },
         taskCancellationManaged(operationId) { alive(); return taskCancellationManaged(ctx, operationId); },
         pendingTaskCancellations() { alive(); return pendingTaskCancellations(ctx); },
@@ -99,6 +108,7 @@ export function openStore(options) {
             alive();
             return readOperationEvidence(ctx, requireId("operationId", operationId), terminalRevision === undefined ? undefined : requireCounter("terminalRevision", terminalRevision));
         },
+        readDiscoveryState(scope) { alive(); return readDiscoveryState(ctx, scope); },
         readDiscoveryClaim(scope) {
             alive();
             return readClaim(ctx, scope);

@@ -30,6 +30,9 @@ test("ordinary background clients share the canonical daemon without hosted owne
   let errors = "";
   daemon.stderr!.on("data", chunk => { errors += chunk; });
   const clients: WorkClient[] = [];
+  const supervisor = createLocalSupervisor({ directory: join(root, "pi-better-background-tasks", "supervisor") });
+  let taskId: string | undefined;
+  let store: any;
   try {
     const [ready] = await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
     for (let i = 0; i < 3; i++) {
@@ -44,11 +47,38 @@ test("ordinary background clients share the canonical daemon without hosted owne
     }
     const instances = await Promise.all(clients.map(client => client.get({ background: true, cwd: root, sessionId: "local-0" })));
     assert.equal(new Set(instances.map(snapshot => snapshot.instanceId)).size, 1);
+    store = openStore({ path: join(root, "operation-coordinator.sqlite") });
+    const owner = { kind: "parent-session", workspace: root, sessionId: "local-0" };
+    const started = await supervisor.start({ token: "754-daemon-runner", kind: "process", cwd: root,
+      argv: [process.execPath, "-e", "const fs=require('fs');const t=setInterval(()=>{if(fs.existsSync('finish')){clearInterval(t);process.exit(0)}},20)"] });
+    taskId = started.taskId;
+    store.registerOperation({ operationId: "754-daemon-operation", taskId, launchToken: started.token, owner, observer: { kind: "local-supervisor", version: "1" } });
+    const waitFor = async (matches: (value: any) => boolean) => {
+      const deadline = Date.now() + 10000;
+      for (;;) {
+        const value = await clients[0]!.get({ background: true, cwd: root, sessionId: "local-0" });
+        if (value.status === "ready" && matches(value)) return value;
+        assert.ok(Date.now() < deadline, JSON.stringify(value)); await delay(20);
+      }
+    };
+    await waitFor(value => value.activity.active === 1 && value.rows[0]?.meta.id === taskId);
+    assert.equal((await clients[1]!.get({ background: true, cwd: root, sessionId: "local-1" })).activity.active, 0);
+    store.registerWait({ waitId: "754-daemon-wait", owner, dependencies: [{ operationId: "754-daemon-operation" }], continuationNote: "Read exact runner evidence" });
+    await waitFor(value => value.rows[0]?.meta.waits[0]?.waitId === "754-daemon-wait");
+    writeFileSync(join(root, "finish"), "done");
+    await waitFor(value => value.activity.active === 0 && value.rows[0]?.meta.status === "succeeded");
+    assert.equal(store.getOperation("754-daemon-operation").terminalRevision, 0, "production worker never imports runner outcomes");
+    assert.equal(store.listWaits({ owner })[0].phase, "waiting");
+    assert.equal((await clients[0]!.request("runtime_get_status")).hostedSessions, 0);
+    const metrics = await clients[0]!.request("runtime_get_metrics");
+    assert.equal(metrics.background.history.inventories, 0, "real runner activity never builds completed history");
   } finally {
     for (const client of clients) client.close();
+    if (taskId && !supervisor.snapshot(taskId)?.terminal) await supervisor.stop(taskId);
     if (daemon.exitCode === null && daemon.signalCode === null) {
       const exited = once(daemon, "exit"); daemon.send("stop"); await exited;
     }
+    store?.close();
     rmSync(transport, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
   }
 });
@@ -81,9 +111,7 @@ test("shared query observes real runner and wait without taking supervision auth
       while (buffer.includes("\n")) {
         const end = buffer.indexOf("\n");
         const command = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
-        const result = command.type === "hello" ? checkHello(command, { agentDir: root })
-          : command.type === "runtime_register_client" ? { ok: true, data: { clientId: command.clientId } }
-          : { ok: true, data: queries.handle(command) };
+        const result = command.type === "hello" ? checkHello(command, { agentDir: root }) : { ok: true, data: queries.handle(command) };
         socket.write(JSON.stringify({ id: command.id, type: "response", success: result.ok, ...result }) + "\n");
       }
     });

@@ -1,3 +1,4 @@
+import { createLocalWorkClient } from "./runtime/local-client.ts";
 import { chmodSync, existsSync, realpathSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { connect, createServer, type Server, type Socket } from "node:net";
@@ -18,10 +19,11 @@ import type { IdleSessionsLease, UpgradeRequest } from "./startup/managed-types.
 import { HostedSession } from "./hosted-session.ts";
 import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts";
 import { runtimeRoot } from "./runtime/root.ts";
-import { WorkReadModel } from "./runtime/read-model.ts";
-import { WorkQueries } from "./runtime/queries.ts";
 import { RuntimeCancellation, hasPendingCancellation } from "./runtime/cancellation.ts";
+import { RuntimeResultSupervision, hasResultSupervision } from "./runtime/result-supervision.ts";
 import { SharedCatalog } from "./runtime/catalog.ts";
+import { mutationStoreMetrics } from "./runtime/mutation-store.ts";
+import { WorkQueryExecutor } from "./runtime/query-executor.ts";
 import { createSubagentLaunch, hasSubagentManagement } from "./runtime/subagent-launch.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
@@ -90,27 +92,49 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const owner = inspectDaemonOwner(serverDir);
     const instanceId = owner.status === "live" ? owner.owner.token : undefined;
     admitDaemonStartup({ canonicalServerDir: serverDir, agentDir: getAgentDir(), build, intent: startupIntentFromEnv(process.env) });
-    const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log, sessionIdleMs: config.sessionIdleMs, now });
-    cleanupStartup = () => registry.shutdown();
-    await registry.resumeAll();
-    const nativeHost = new NativeClientHost(registry);
-    const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
     let launches: Awaited<ReturnType<typeof createSubagentLaunch>> | undefined;
     let launchInitialization: ReturnType<typeof createSubagentLaunch> | undefined;
+    let cancellations: RuntimeCancellation | undefined;
+    let resultSupervision: RuntimeResultSupervision | undefined;
+    const resultPortKey = Symbol.for("pi-better-server:result-supervision-ports-v1");
+    const resultPorts: Map<string, any> = (globalThis as any)[resultPortKey] ??= new Map();
+    const resultRoot = realpathSync(getAgentDir());
+    const resultPort = { status() {
+      resultSupervision ??= new RuntimeResultSupervision(resultRoot, instanceId!);
+      resultSupervision.reconcile();
+      return { hostId: resultSupervision.hostId, epoch: resultSupervision.epoch, reason: resultSupervision.reason };
+    } };
+    let workModel: WorkQueryExecutor | undefined;
+    let registry!: SessionRegistry;
+    cleanupStartup = async () => {
+      try { await registry?.shutdown(); }
+      finally {
+        try { await cancellations?.close(); }
+        finally {
+          resultSupervision?.close();
+          if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
+          try { await (await launchInitialization?.catch(() => undefined))?.close(); }
+          finally { await workModel?.close(); }
+        }
+      }
+    };
+    if (hasResultSupervision(getAgentDir())) resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!);
+    resultPorts.set(resultRoot, resultPort);
+    if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
+    const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
     if (hasSubagentManagement(getAgentDir())) {
       launchInitialization = createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog);
       void launchInitialization.then(host => { launches = host; }, error => log(`Subagent supervision unavailable: ${String(error)}`));
     }
-    let workModel: WorkReadModel | undefined;
-    let cancellations: RuntimeCancellation | undefined;
-    if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
     const work = () => {
       if (!workModel) {
-        workModel = new WorkReadModel(realpathSync(getAgentDir()), instanceId!);
-        void workModel.reconcile();
+        workModel = new WorkQueryExecutor(realpathSync(getAgentDir()), instanceId!);
       }
       return workModel;
     };
+    registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log, sessionIdleMs: config.sessionIdleMs, now, workClient: () => createLocalWorkClient(work(), realpathSync(getAgentDir())) });
+    await registry.resumeAll();
+    const nativeHost = new NativeClientHost(registry);
     // Structural port permits independent integration with the shared maintenance owner.
     const sessionMaintenance = (registry as SessionRegistry & { maintenance?: {
       readonly busy: boolean;
@@ -139,6 +163,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     let idleStopping = false;
     const runtimeClients = new Map<Socket, string>();
     let guardianBinding: { socket: Socket; identity: import("./daemon-owner.ts").DaemonOwnerIdentity } | undefined;
+    let observationUnavailable = false;
     let runtimeZeroSince: number | undefined = now();
     let hostedUsed = registry.activeCount > 0;
     let zeroSince: number | undefined = registry.activeCount === 0 ? now() : undefined;
@@ -152,7 +177,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       let greeted = false;
       const catalogCommand = catalog.connection();
       let catalogSubscription: { close(): void } | undefined;
-      let workQueries: WorkQueries | undefined;
+      let workQueries: ReturnType<WorkQueryExecutor["connect"]> | undefined;
       let runtimeInFlight = 0;
 
       const dispatch = async (line: string): Promise<void> => {
@@ -180,7 +205,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return;
           }
           if (type === "hello") {
-            const verdict = checkHello(command, { build, instanceId, safeUpgrade, agentDir: realpathSync(getAgentDir()) });
+            const verdict = checkHello(command, { build, instanceId, safeUpgrade, runtimeLifecycle: true, agentDir: realpathSync(getAgentDir()) });
             if (verdict.ok) {
               reconnectControllers.set(control, Array.isArray(command.capabilities) && command.capabilities.includes("runtime-reconnect-v1"));
               if (!greeted && command.runtimeRoot === undefined) startupUntil = Math.max(startupUntil, now() + startupGraceMs);
@@ -193,16 +218,25 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           }
           if (type === "runtime_get_status") {
             if (!greeted) throw new Error("runtime_get_status requires hello");
+            // Status observes the last inventory; only idle shutdown requests a fresh liveness check.
+            const observation = workModel?.observation();
             return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
               capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, lifecycle: config,
               subagentManagement: launches?.status() ?? null,
               guardianBinding: guardianBinding?.identity ?? null,
+              workObservation: observation ? { status: observation.status, reason: observation.reason, observedAt: observation.observedAt } : null,
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
                 ...registry.list().filter(session => session.live).map(session => ({ kind: "hosted-session", id: session.sessionId })),
-                ...(workModel?.livenessReasons() ?? [])],
+                ...(observation?.reasons ?? [])],
+              livenessObservation: observation ?? { status: "unobserved", reasons: [], observedAt: null },
               nextIdleDeadline: runtimeClients.size > 0 || registry.activeCount > 0 ? null
                 : hostedUsed ? config.daemonIdleMs === 0 || zeroSince === undefined ? null : zeroSince + config.daemonIdleMs
                 : runtimeZeroSince === undefined ? null : runtimeZeroSince + config.runtimeIdleMs } });
+          }
+          if (type === "runtime_result_supervision") {
+            if (!greeted) throw new Error("not_accepted: supervision requires hello");
+            if (Object.keys(command).some(key => !["id", "type"].includes(key))) throw new Error("not_accepted: unsupported supervision field");
+            return reply({ data: resultPort.status() });
           }
           if (type === "runtime_cancel_task" || type === "runtime_query_cancellation" || type === "runtime_cancellation_status") {
             if (!greeted) throw new Error("not_accepted: cancellation requires hello");
@@ -228,7 +262,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               launchInitialization ??= createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog);
               launches = await launchInitialization;
               const data = await launches.handle(command);
-              await work().reconcile();
+              // The durable launch receipt must not fail because derived reads
+              // are rebuilding or overloaded. Refresh independently.
+              void work().livenessReasons().catch(error => log(`Launch snapshot refresh unavailable: ${String(error)}`));
               return reply({ data });
             } finally { runtimeInFlight--; }
           }
@@ -269,15 +305,21 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (type === "runtime_upgrade_status") return reply({ data: readActivationJournal(serverDir) ?? null });
           if (["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_metrics"].includes(type)) {
             if (!greeted) throw new Error(`${type} requires hello`);
+            if (id && id.length > 128) throw new Error("Runtime request ID exceeds 128 characters");
             if (runtimeInFlight >= 32) throw new Error("runtime-unhealthy: too many in-flight queries; resync and retry");
             if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
             runtimeInFlight++;
             try {
-              workQueries ??= new WorkQueries(work(), socket);
-              if (type === "runtime_get_snapshot" && command.scope && typeof command.scope === "object" && typeof (command.scope as { id?: unknown }).id === "string") {
-                await work().ensureId((command.scope as { id: string }).id);
+              workQueries ??= work().connect(socket);
+              const data = await workQueries.handle(command);
+              if (type === "runtime_get_metrics") {
+                return reply({ data: { ...JSON.parse(data.json), mutationSqlite: mutationStoreMetrics(getAgentDir()) } });
               }
-              return reply({ data: workQueries.handle(command) });
+              if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+              // Snapshot JSON is encoded in the worker; only the small envelope runs here.
+              const envelope = JSON.stringify({ id, type: "response", command: type, success: true });
+              if (!socket.destroyed) socket.write(envelope.slice(0, -1) + ',"data":' + data.json + "}\n");
+              return;
             } finally {
               runtimeInFlight--;
             }
@@ -419,6 +461,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     cleanupStartup = async () => {
       await cancellations?.close();
       await (await launchInitialization?.catch(() => undefined))?.close();
+      resultSupervision?.close();
+      if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
       await workModel?.close();
       for (const socket of sockets) socket.destroy();
       server.close();
@@ -491,11 +535,18 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (hostedUsed ? (config.daemonIdleMs === 0 || now() - zeroSince < config.daemonIdleMs || now() < startupUntil)
             : (now() - runtimeZeroSince < config.runtimeIdleMs || now() < startupUntil)) return;
           // Recheck durable activity before fencing admission; observation never adopts a writer.
-          await work().reconcile();
           if (draining) return;
-          if (work().livenessReasons().length > 0) {
-            runtimeZeroSince = undefined;
-            return;
+          try {
+            if ((await work().livenessReasons()).length > 0) {
+              runtimeZeroSince = undefined;
+              return;
+            }
+          } catch (error) {
+            // The executor already bounds query deadlines and terminates failed workers.
+            // Unknown obligations cannot keep an otherwise detached runtime alive forever.
+            // Stop only the management layer; leave runner evidence and writer leases intact.
+            observationUnavailable = true;
+            log(`runtime observation unavailable at idle shutdown: ${String(error)}`);
           }
           // No create/open can slip between this check and the synchronous admission fence.
           if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || launches?.busy || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
@@ -529,12 +580,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           await closed;
           await cancellations?.close();
           await (await launchInitialization?.catch(() => undefined))?.close();
+          resultSupervision?.close();
+          if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
           await workModel?.close();
           await registry.shutdown();
           await Promise.allSettled([...dispatches]);
           if (existsSync(socketPath)) unlinkSync(socketPath);
           const checkpoint = join(serverDir, `clean-stop-${instanceId}.tmp`);
-          writeFileSync(checkpoint, JSON.stringify({ pid: process.pid, token: instanceId, reason: "clean-stop" }), { mode: 0o600 });
+          writeFileSync(checkpoint, JSON.stringify({ pid: process.pid, token: instanceId, reason: "clean-stop", observation: observationUnavailable ? "unavailable" : "verified" }), { mode: 0o600 });
           renameSync(checkpoint, join(serverDir, "clean-stop.json"));
           releaseOwner();
           finishClosed();
@@ -550,8 +603,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     }
     return daemon;
   } catch (error) {
-    await cleanupStartup();
-    releaseOwner();
+    try { await cleanupStartup(); } finally { releaseOwner(); }
     throw error;
   }
 }

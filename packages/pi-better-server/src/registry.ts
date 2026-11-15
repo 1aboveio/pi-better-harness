@@ -37,6 +37,7 @@ export type CreateSessionRequest = Extract<DaemonCommand, { type: "create_sessio
 
 export interface SessionRegistryOptions {
   serverDir: string;
+  workClient?: () => import("./runtime/work-client.mjs").WorkClient;
   /** Inactivity expiry; zero disables it. Defaults to 24 hours. */
   sessionIdleMs?: number;
   now?: () => number;
@@ -375,7 +376,7 @@ export class SessionRegistry {
   private async start(entry: IndexEntry, manager?: SessionManager, useDefaultModel = false): Promise<HostedSession> {
     const sessionManager = manager ?? this.reopen(entry);
     this.maintenance.registerManager(sessionManager);
-    const activity = new SessionActivity(this.log, () => this.maintenance.enterTool(sessionManager), () => this.maintenance.enterSessionOperation());
+    const activity = new SessionActivity(this.log, () => this.maintenance.enterTool(sessionManager), () => this.maintenance.enterSessionOperation(), this.options.workClient);
     let session: AgentSession | undefined;
     let hosted: HostedSession | undefined;
     try {

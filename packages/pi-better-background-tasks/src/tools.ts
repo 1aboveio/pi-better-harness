@@ -22,6 +22,7 @@ import {
   getObservedWaitHost,
   observedWaitServiceUnavailableReason,
   type DurableTaskKind,
+  type DurableLaunch,
   type WaitView,
 } from "./observed-waits.js";
 import { backgroundObservation } from "./work-observation.js";
@@ -348,13 +349,15 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
     parameters: SpawnParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      activeSession = getCallbackOrigin(ctx);
-      const durable = await durableLaunchText(pi, "process", params, ctx);
+      const origin = getCallbackOrigin(ctx);
+      activeSession = origin;
+      let receipt: DurableLaunch | undefined;
+      const durable = await durableLaunchText(pi, "process", params, ctx, launch => { receipt = launch; });
       if (durable !== undefined) {
         refreshNavigator(ctx);
-        return text(durable);
+        return text(durable, launchReceipt(receipt));
       }
-      const launched = reportLaunch(() => spawnTask(pi, params, ctx.cwd, activeSession, getActiveSession));
+      const launched = reportLaunch(() => spawnTask(pi, params, ctx.cwd, origin, getActiveSession));
       refreshNavigator(ctx);
       return text(launched);
     },
@@ -381,13 +384,15 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
     parameters: WatchParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      activeSession = getCallbackOrigin(ctx);
-      const durable = await durableLaunchText(pi, "watch", params, ctx);
+      const origin = getCallbackOrigin(ctx);
+      activeSession = origin;
+      let receipt: DurableLaunch | undefined;
+      const durable = await durableLaunchText(pi, "watch", params, ctx, launch => { receipt = launch; });
       if (durable !== undefined) {
         refreshNavigator(ctx);
-        return text(durable);
+        return text(durable, launchReceipt(receipt));
       }
-      const launched = await launchWatch(pi, params, ctx.cwd, activeSession, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal, runtime);
+      const launched = await launchWatch(pi, params, ctx.cwd, origin, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal, runtime);
       refreshNavigator(ctx);
       return text(launched);
     },
@@ -410,10 +415,11 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     description: "Inspect one background task. Default output is a compact model-facing summary (1 KiB UTF-8) with matched condition, exit/signal, stop error, and failure counts before progress. Current-session only unless all:true; unknown ownership is a gap, not missing or healthy. Pass verbose:true only when full raw metadata is explicitly needed. Environment values are omitted. A raw log nextCursor passed as cursor continues the raw log page; an incidentCursor pages incidents that need action; history:true lists failure history too. After a terminal callback, call this first and call bg_task_log only if the summary is insufficient.",
     parameters: StatusParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      activeSession = getCallbackOrigin(ctx);
-      const durable = durableStatusText(pi, params.id, ctx);
+      const origin = getCallbackOrigin(ctx);
+      activeSession = origin;
+      const durable = await durableStatusText(pi, params.id, ctx);
       if (durable !== undefined) return text(durable);
-      return text(taskStatus(pi, params.id, params, statusOptions(params, activeSession)));
+      return text(taskStatus(pi, params.id, params, statusOptions(params, origin)));
     },
   });
 
@@ -426,10 +432,11 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
       return renderBackgroundTaskLogDisplay(result, options, theme);
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      activeSession = ctx ? getCallbackOrigin(ctx) : activeSession;
-      const durable = durableLogText(pi, params.id, params, ctx);
+      const origin = getCallbackOrigin(ctx);
+      activeSession = origin;
+      const durable = await durableLogText(pi, params.id, params, ctx);
       if (durable !== undefined) return text(durable);
-      return logText(params.id, logOptions(params, activeSession));
+      return logText(params.id, logOptions(params, origin));
     },
   });
 
@@ -439,13 +446,14 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     description: "Cancel a watcher or terminate a background task. Only a task owned by the current session stops; a foreign-session or unverifiable task is refused unless all:true. For a tmux-backed SSH task, stop kills its remote tmux session before marking it cancelled. Direct SSH stop only tears down the local client and may leave the remote process running.",
     parameters: Type.Object({ ...IdParams.properties, request_id: Type.Optional(Type.String({ description: "Stable cancellation request identity. Reuse this value after a disconnect." })) }),
     async execute(toolCallId, params, _signal, _onUpdate, ctx) {
-      activeSession = getCallbackOrigin(ctx);
+      const origin = getCallbackOrigin(ctx);
+      activeSession = origin;
       const durable = await durableStopText(pi, params.id, ctx, params.request_id ?? toolCallId);
       if (durable !== undefined) {
         refreshNavigator(ctx);
         return text(durable);
       }
-      const result = await formatStop(pi, params.id, ctx, getActiveSession, statusOptions(params, activeSession), runtime);
+      const result = await formatStop(pi, params.id, ctx, getActiveSession, statusOptions(params, origin), runtime);
       refreshNavigator(ctx);
       return text(result);
     },
@@ -496,7 +504,9 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
           ?? "Observed waits are unavailable in this session; inspect tasks directly and continue without a durable wait.");
       }
       try {
-        const wait = host.waitForParent(ctx, params.task_ids, params.continuation_note);
+        const wait = host.usesServerResults
+          ? await host.superviseParentWait(ctx, params.task_ids, params.continuation_note)
+          : host.waitForParent(ctx, params.task_ids, params.continuation_note);
         return text(formatWaitView(wait), wait);
       } catch (error) {
         return text(`Wait was not registered: ${readableError(error)}`);
@@ -592,6 +602,11 @@ export function text(textValue: string, details?: unknown) {
   return { content: [{ type: "text" as const, text: textValue }], details };
 }
 
+function launchReceipt(launch?: DurableLaunch) {
+  return launch ? { id: launch.id, operationId: launch.operationId, kind: launch.kind,
+    owner: launch.owner, started: launch.started, claimed: launch.claimed } : undefined;
+}
+
 /** Requested byte budget: canonical `max_bytes`, else the deprecated `maxBytes` alias (#321). */
 function requestedMaxBytes(params: Record<string, unknown>): number | undefined {
   const value = readOutputControls(params).maxBytes;
@@ -657,11 +672,13 @@ async function actionText(
   refreshNavigator: typeof refreshBackgroundTasksNavigator,
 ) {
   if (params.action === "log" && params.id) {
-    const durable = durableLogText(pi, String(params.id), params, ctx);
+    const durable = await durableLogText(pi, String(params.id), params, ctx);
     if (durable !== undefined) return text(durable);
     return logText(String(params.id), logOptions(params, callbackOrigin));
   }
-  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession, signal, runtime, refreshNavigator));
+  let receipt: DurableLaunch | undefined;
+  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession, signal, runtime, refreshNavigator,
+    launch => { receipt = launch; }), launchReceipt(receipt));
 }
 
 async function runAction(
@@ -673,18 +690,19 @@ async function runAction(
   signal: AbortSignal | undefined,
   runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime>,
   refreshNavigator: typeof refreshBackgroundTasksNavigator,
+  onLaunch?: (launch: DurableLaunch) => void,
 ): Promise<string> {
   const { spawnTask } = runtime;
   const withNavigatorRefresh = (ctx: ExtensionContext, result: string) => { refreshNavigator(ctx); return result; };
   switch (params.action) {
     case "spawn": {
-      const durable = await durableLaunchText(pi, "process", params, ctx);
+      const durable = await durableLaunchText(pi, "process", params, ctx, onLaunch);
       if (durable !== undefined) return withNavigatorRefresh(ctx, durable);
       return withNavigatorRefresh(ctx, reportLaunch(() => spawnTask(pi, params, ctx.cwd, callbackOrigin, getActiveSession)));
     }
     case "watch": {
       if (!params.success_when) return "Invalid parameters: watch requires success_when.";
-      const durable = await durableLaunchText(pi, "watch", params, ctx);
+      const durable = await durableLaunchText(pi, "watch", params, ctx, onLaunch);
       if (durable !== undefined) return withNavigatorRefresh(ctx, durable);
       return withNavigatorRefresh(ctx, await launchWatch(pi, params as unknown as WatchTaskParams, ctx.cwd, callbackOrigin, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal, runtime));
     }
@@ -692,13 +710,13 @@ async function runAction(
       return durableAwareList(pi, params, callbackOrigin, ctx);
     case "status": {
       if (!params.id) return "Invalid parameters: status requires id.";
-      const durable = durableStatusText(pi, String(params.id), ctx);
+      const durable = await durableStatusText(pi, String(params.id), ctx);
       if (durable !== undefined) return durable;
       return taskStatus(pi, String(params.id), params, statusOptions(params, callbackOrigin));
     }
     case "log": {
       if (!params.id) return "Invalid parameters: log requires id.";
-      const durable = durableLogText(pi, String(params.id), params, ctx);
+      const durable = await durableLogText(pi, String(params.id), params, ctx);
       if (durable !== undefined) return durable;
       return formatLog(String(params.id), logOptions(params, callbackOrigin));
     }
@@ -710,6 +728,7 @@ async function runAction(
     }
     case "clear": {
       const host = getObservedWaitHost(pi);
+      await host?.refreshManagedResults();
       const durableId = typeof params.id === "string" && params.id && host?.isDurableTask(params.id) === true;
       if (durableId) {
         return withNavigatorRefresh(ctx, dismissDurableForClear(pi, params, callbackOrigin)
@@ -724,21 +743,19 @@ async function runAction(
   }
 }
 
-/**
- * Durable rows are appended to the legacy list output only when they exist, so
- * the legacy surface is byte-for-byte unchanged for sessions that never launch a
- * supervised operation. Cursors stay legacy-only; durable rows are all shown on
- * the first page.
- */
+/** Shared history applies ownership, filters and paging before metadata crosses the socket. */
 async function durableAwareList(
   pi: ExtensionAPI,
   params: Record<string, unknown>,
   origin: BackgroundTaskCallbackOrigin | undefined,
   ctx: ExtensionContext,
 ): Promise<string> {
-  const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, true, params.all === true) : undefined;
+  const options = listOptions(params, origin);
+  const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, true, params.all === true,
+    { limit: options.limit, statuses: options.statuses, cursor: options.cursor }) : undefined;
   if (snapshot && snapshot.status !== "ready") throw new Error(snapshot.reason ?? "Background activity is unverified");
-  const legacy = formatList(listOptions(params, origin), snapshot?.backgroundIndex);
+  const legacy = formatList(options, snapshot?.backgroundIndex);
+  if (snapshot) return legacy;
   const host = getObservedWaitHost(pi);
   if ((!snapshot && !host?.available) || !origin || typeof params.cursor === "string") return legacy;
   const wanted = Array.isArray(params.status) && params.status.length > 0
@@ -778,13 +795,13 @@ function dismissDurableForClear(
     if (!host.isDurableTask(id)) return undefined;
     const task = host.readDurableTask(origin, id);
     if (!task) return `Durable operation ${id} belongs to another session; it was not dismissed.`;
-    if (!task.terminal) return `Durable operation ${id} is ${task.status}; stop it before dismissing it.`;
     const dismissed = host.dismissDurableTask(origin, id);
+    if (!dismissed && !task.terminal) return `Durable operation ${id} is ${task.status}; stop it before dismissing it.`;
     return dismissed
       ? `Dismissed durable operation ${id}. Its terminal evidence remains available through bg_task_status and bg_task_log.`
       : `Durable operation ${id} was not dismissed.`;
   }
-  const terminal = host.listDurableTasks(origin).filter((task) => task.terminal);
+  const terminal = host.listDurableTasks(origin, { fresh: true }).filter((task) => task.terminal);
   let dismissed = 0;
   for (const task of terminal) if (host.dismissDurableTask(origin, task.id)) dismissed += 1;
   return dismissed > 0
@@ -798,9 +815,10 @@ function readableError(error: unknown): string {
 
 /**
  * Route a local launch through the durable supervisor when the observed-waits
- * host is open. `undefined` means "use the legacy task route": remote/SSH work,
- * an extension installed without the durable host, or a session that has not
- * activated yet. Admission and sandboxing happen inside the host, through the
+ * host is installed. `undefined` means "use the legacy task route": remote/SSH
+ * work, an extension without the durable host, or a session not yet activated.
+ * A failed activation is never permission to start a second legacy command.
+ * Admission and sandboxing happen inside the host, through the
  * same `resolve*SandboxPlan` helpers the legacy route uses.
  */
 async function durableLaunchText(
@@ -808,11 +826,13 @@ async function durableLaunchText(
   kind: DurableTaskKind,
   params: Record<string, unknown>,
   ctx: ExtensionContext,
+  onLaunch?: (launch: DurableLaunch) => void,
 ): Promise<string | undefined> {
   const host = getObservedWaitHost(pi);
-  if (!host?.available || params.ssh) return undefined;
+  if (!host || params.ssh || !host.available && !host.hasActivated) return undefined;
   try {
     const launched = await host.launchParent({ kind, params, ctx });
+    onLaunch?.(launched);
     return host.formatLaunch(launched);
   } catch (error) {
     if (error instanceof ForegroundSandboxBlockedError) return error.message;
@@ -820,25 +840,26 @@ async function durableLaunchText(
   }
 }
 
-function durableStatusText(pi: ExtensionAPI, id: string, ctx: ExtensionContext): string | undefined {
+async function durableStatusText(pi: ExtensionAPI, id: string, ctx: ExtensionContext): Promise<string | undefined> {
   const host = getObservedWaitHost(pi);
-  if (!host?.available || !host.isDurableTask(id)) return undefined;
+  if (!host || !host.isDurableTask(id)) return undefined;
   try {
-    return host.formatStatus(host.statusForParent(ctx, id));
+    return host.formatStatus(await host.settledStatusForParent(ctx, id));
   } catch (error) {
     return readableError(error);
   }
 }
 
-function durableLogText(
+async function durableLogText(
   pi: ExtensionAPI,
   id: string,
   params: Record<string, unknown>,
   ctx: ExtensionContext,
-): string | undefined {
+): Promise<string | undefined> {
   const host = getObservedWaitHost(pi);
-  if (!host?.available || !host.isDurableTask(id)) return undefined;
+  if (!host || !host.isDurableTask(id)) return undefined;
   try {
+    await host.settledStatusForParent(ctx, id);
     const requested = typeof params.lines === "number" ? params.lines
       : typeof params.tail_lines === "number" ? params.tail_lines : 40;
     // `lines: 0` means the retained raw log on the legacy route; the durable
@@ -852,7 +873,7 @@ function durableLogText(
 
 async function durableStopText(pi: ExtensionAPI, id: string, ctx: ExtensionContext, requestId?: string): Promise<string | undefined> {
   const host = getObservedWaitHost(pi);
-  if (!host?.available || !host.isDurableTask(id)) return undefined;
+  if (!host || !host.isDurableTask(id)) return undefined;
   try {
     const status = host.formatStatus(await host.stopForParent(ctx, id, requestId));
     return requestId ? `Cancellation request: ${requestId}\n${status}` : status;

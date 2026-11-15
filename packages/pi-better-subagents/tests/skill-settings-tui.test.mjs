@@ -1,3 +1,4 @@
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 /**
  * The global skill setting through the real settings page, config store, and
  * launch argv.
@@ -20,6 +21,7 @@ import { createEventBus } from "@earendil-works/pi-coding-agent";
 const root = mkdtempSync(join(tmpdir(), "skill-settings-tui-"));
 const agentDir = join(root, "agent");
 process.env.PI_CODING_AGENT_DIR = agentDir;
+const stopCatalogRuntime = await startWorkRuntimeFixture();
 
 const { default: extension } = await import("../index.ts");
 const config = await import("../config.ts");
@@ -141,6 +143,7 @@ async function inspectRole(runtime) {
 
 async function agentsView(runtime) {
     const components = [];
+    let visibleScreen;
     const host = {
         cwd: root, mode: "tui", hasUI: true, isProjectTrusted: () => false,
         getSystemPromptOptions: () => ({ cwd: root, skills: promptSkills }),
@@ -158,6 +161,7 @@ async function agentsView(runtime) {
                         component.handleInput("\r");
                         screen = component.render(100).join("\n");
                     }
+                    visibleScreen = screen;
                     if (!settled) done(undefined);
                 });
             },
@@ -165,7 +169,7 @@ async function agentsView(runtime) {
     };
     await runtime.commands.get("agents").handler("show role.work", host);
     assert.ok(components.length > 0, "the /agents view must open");
-    return components.at(-1).render(100).join("\n");
+    return visibleScreen;
 }
 
 function skill(name) {
@@ -248,7 +252,10 @@ async function spawn(runtime, params = {}) {
     return { id, meta, argv, text: res.content[0].text };
 }
 
-test.after(() => {
+test.after(async () => {
+        const { closeCatalogHost } = await import("../catalog-host-admission.ts");
+        closeCatalogHost();
+        await stopCatalogRuntime();
     config.setConfigPathForTests(undefined);
     config.setConfigForTests(undefined);
     rmSync(root, { recursive: true, force: true });

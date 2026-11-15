@@ -2,14 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, watch, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+import { processMatchesStart } from "../src/daemon-owner.ts";
 
-test("registered SDK launch freezes shared catalog, retries one intent, and survives parent exit", { timeout: 30000 }, async () => {
+test("registered SDK launch freezes shared catalog, retries one intent, and survives parent exit", { timeout: 60000 }, async () => {
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
-  const root = mkdtempSync(join(base, "launch-")), transport = mkdtempSync("/tmp/p761-");
+  const root = mkdtempSync(join(base, "launch-")), transport = realpathSync(mkdtempSync("/tmp/p761-"));
   const agent = join(root, "agent"), cwd = join(root, "workspace"); mkdirSync(join(agent, "agents/roles"), { recursive: true }); mkdirSync(cwd);
   const entered = join(cwd, "entered.json"), release = join(cwd, "release");
   writeFileSync(join(agent, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "offline-fixture" } }));
@@ -26,9 +28,12 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
   let bootstrapProof: Record<string, unknown> | undefined;
   const metaFor = (id: string) => JSON.parse(readFileSync(join(root, "pi-better-subagents/runs", id, "meta.json"), "utf8"));
   const terminal = async (id: string) => {
-    const directory = join(root, "pi-better-subagents/runs", id), watcher = watch(directory);
-    try { while (["running", "orphaned"].includes(metaFor(id).status)) await once(watcher, "change"); }
-    finally { watcher.close(); }
+    // Recovered children have no exit listener; the current health pass is 15 s.
+    const deadline = Date.now() + 20000;
+    while (["running", "orphaned"].includes(metaFor(id).status)) {
+      assert.ok(Date.now() < deadline, `Terminal publication timed out for ${id}: ${errors}`);
+      await delay(25);
+    }
     return metaFor(id);
   };
   const waitFile = async (path: string) => {
@@ -122,12 +127,25 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
     assert.equal(continued.recipe.model, prior.recipe.model);
     assert.equal(continued.cwd, prior.cwd);
     assert.equal(continued.status, "completed");
+  } catch (error) {
+    console.error("Managed launch scenario failed:", error, errors);
+    throw error;
   } finally {
     writeFileSync(release, "release");
     if (parent?.exitCode === null) { const exit = once(parent, "exit"); parent.send({ stop: true }); await exit; }
     if (sibling?.exitCode === null) { const exit = once(sibling, "exit"); sibling.send({ stop: true }); await exit; }
-    for (const id of attempts) await terminal(id);
     if (daemon.exitCode === null) { const exit = once(daemon, "exit"); daemon.send("stop"); await exit; }
+    for (const id of attempts) {
+      const meta = metaFor(id);
+      if (processMatchesStart(meta.pid, meta.pidStartTime)) {
+        try { process.kill(-meta.pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+        const deadline = Date.now() + 2000;
+        while (processMatchesStart(meta.pid, meta.pidStartTime)) {
+          assert.ok(Date.now() < deadline, `Fixture worker ${id} did not exit`);
+          await delay(25);
+        }
+      }
+    }
     // Runtime artifacts remain owned evidence until every worker has been verified exited.
     rmSync(transport, { recursive: true, force: true });
   }

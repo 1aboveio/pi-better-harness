@@ -14,14 +14,12 @@ export async function openSharedCatalog(cwd, userRoot = defaultUserRoot(), sessi
     catch (error) {
         if (error.code !== "ENOENT")
             throw error;
-        const path = "./runtime-client/src/runtime/client.mjs";
-        const { ensureRuntime } = await import(path);
-        await ensureRuntime({ agentDir });
+        await ensureCatalogRuntime(agentDir);
         registration = JSON.parse(readFileSync(join(agentDir, "server-registration-v1.json"), "utf8"));
     }
     if (registration.version !== 1 || registration.agentDir !== agentDir)
         throw new Error("Invalid canonical runtime registration");
-    const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), agentDir, ["runtime-catalog-v1"]);
+    const client = await connectCatalogClient(agentDir, registration.serverDir);
     const register = async () => {
         const authority = await catalogHostAuthority(agentDir, cwd, join(registration.serverDir, "pi-server.sock"));
         await client.request("runtime_register_catalog", { cwd, sessionId: authority?.sessionId ?? sessionId, authority, projectAccess: projectAccess === false ? "deny" : undefined });
@@ -58,4 +56,32 @@ export async function openSharedCatalog(cwd, userRoot = defaultUserRoot(), sessi
         },
         close: () => client.close(),
     };
+}
+/** Retry connection establishment only; never replay a Catalog edit or authorization failure. */
+export async function connectCatalogClient(agentDir, serverDir, ensure = ensureCatalogRuntime) {
+    const connect = async () => {
+        const client = new WorkClient(join(serverDir, "pi-server.sock"), agentDir, ["runtime-catalog-v1"]);
+        try {
+            await client.ready;
+            return client;
+        }
+        catch (error) {
+            client.close();
+            throw error;
+        }
+    };
+    try {
+        return await connect();
+    }
+    catch (error) {
+        if (!["ENOENT", "ECONNREFUSED"].includes(error.code ?? ""))
+            throw error;
+        await ensure(agentDir);
+        return connect();
+    }
+}
+async function ensureCatalogRuntime(agentDir) {
+    const path = "./runtime-client/src/runtime/client.mjs";
+    const { ensureRuntime } = await import(path);
+    await ensureRuntime({ agentDir });
 }

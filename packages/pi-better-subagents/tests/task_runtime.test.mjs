@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
@@ -442,7 +442,7 @@ test('default SDK task can retrieve a synthetic macOS Keychain item', { skip: !s
 test('default Outside Write: caches work, sibling repos stay, controls and provenance stay unwritable', { skip: !supported || process.platform === 'win32' }, async (t) => {
     // A home outside every temp root: temp is always removable, so a fixture
     // home there would prove nothing about the home rules.
-    const f = fixture(t, { outsideProject: 'write' }, fileURLToPath(new URL('.', import.meta.url)));
+    const f = fixture(t, { outsideProject: 'write' }, homedir());
     const home = f.policy.home;
     const sibling = join(home, 'projects', 'other-repo');
     mkdirSync(join(home, '.cache'), { recursive: true });

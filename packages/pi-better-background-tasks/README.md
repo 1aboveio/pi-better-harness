@@ -320,6 +320,15 @@ keeps observing after the worker or Pi process exits. Status and logs recover
 from durable evidence; an ambiguous launch becomes `lost` and is not relaunched.
 SSH tasks and older `bg_` identifiers use the existing runtime.
 
+The canonical local server owns result supervision for newly admitted local
+tasks. Closing every frontend leaves the independent runner running. The server
+imports matching terminal evidence, advances already-authorized waits, and keeps
+notifications for their recorded recipients. Hosted sessions use the same root
+supervisor rather than starting another discovery loop. A live or unverified
+legacy owner blocks handoff; missing permission authority or execution evidence
+is reported without starting a replacement command. This transfer does not
+authorize a continuation, consume evidence, or start a parent model turn.
+
 Stop and timeout evidence can contain `groupCleanup=unproven` when the command's
 leader exits before cleanup can be verified. Descendants may remain running;
 inspect that evidence before interpreting the result.

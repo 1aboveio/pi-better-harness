@@ -41,6 +41,7 @@ import {
     type BackgroundWorkRow,
 } from "./shared-navigator.ts";
 import { spawnDetached, killProcessTree, type SpawnResult } from "./spawn.ts";
+import { abortUncommittedLaunch } from "./launch-abort.ts";
 import { parseRun, parseRunForLifecycle, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { selectSessionByName } from "./session-selection.ts";
@@ -92,7 +93,6 @@ import {
     sessionsDir,
     runDir,
     recordTaskRuntimeProvenance,
-    discardFailedLaunch,
     recordLaunchAttempt,
     clearLaunchAttempt,
     logPathFor,
@@ -169,7 +169,6 @@ import {
 } from "./widget.ts";
 import {
     executeNavigatorClose,
-    buildNavigatorRows,
     pendingNavigatorPark,
     buildNavigatorDetail,
 } from "./navigator.ts";
@@ -1453,28 +1452,6 @@ function createNavigatorProjector() {
     };
 }
 
-/** Rows for the overlay: visible current-parent runs, newest first (#44 seam). */
-function navigatorRows(visible?: RunMeta[], at?: number, project = createNavigatorProjector()) {
-    const now = at ?? Date.now();
-    return buildNavigatorRows(visible ?? sessionVisibleNavigatorRuns(now, project), {
-        project,
-        effectiveStatus,
-        shortModel,
-        fmtElapsed,
-        now,
-        spendFor: (m: RunMeta) => {
-            const snap = spendFor(m.id, now);
-            return fmtSpend(snap.usage);
-        },
-        toolFor: (m: RunMeta) => {
-            const snap = spendFor(m.id, now);
-            return snap.tool ?? "";
-        },
-        effortFor: (m: RunMeta) => m.effort,
-        healthFor: (m: RunMeta) => observeNavigatorHealth(m, now),
-    });
-}
-
 /** Runs that should advertise/open the left-arrow navigator affordance. */
 function navigatorRunningRuns(): RunMeta[] {
     const project = createAssignmentProjector();
@@ -1610,43 +1587,6 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
     if (!snapshot || snapshot.status !== "ready") rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Subagents",
         status: snapshot?.status ?? "degraded", statusTone: "warning", kind: "observation", elapsed: "", primary: workObservationFailure(), sortStartedAt: now });
     return rows;
-}
-
-function legacySubagentWorkRows(now: number): BackgroundWorkRow[] {
-    // One registry scan per rebuild: both the start times and the rows below are
-    // built from this snapshot.
-    const project = createNavigatorProjector();
-    const visible = sessionVisibleNavigatorRuns(now, project);
-    const metaById = new Map(visible.map((m) => [m.id, m]));
-    return navigatorRows(visible, now, project).map((row) => {
-        const bits = [];
-        if (row.model) bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
-        if (row.tool) bits.push(row.tool);
-        if (row.spend) bits.push(row.spend);
-        return {
-            providerId: "subagents",
-            id: row.id,
-            name: row.name,
-            model: row.model,
-            effort: row.effort,
-            tool: row.tool,
-            tokens: row.spend,
-            status: row.status,
-            statusTone: statusTone(row.status),
-            kind: "subagent",
-            elapsed: row.elapsed,
-            primary: bits.join(" · ") || "subagent run",
-            facts: row.healthFacts,
-            sortStartedAt: metaById.get(row.id)?.startedAt ?? now,
-            expiresAt: (() => {
-                const meta = metaById.get(row.id);
-                const endedAt = meta?.endedAt ?? meta?.lostAt;
-                return meta && isTerminalNavigatorStatus(row.status) && typeof endedAt === "number"
-                    ? endedAt + TERMINAL_NAVIGATOR_RETENTION_MS
-                    : undefined;
-            })(),
-        };
-    });
 }
 
 const DELEGATION_BLURB: Record<DelegationMode, string> = {
@@ -3447,12 +3387,10 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             // must not keep running unsupervised; its log goes with the
             // attempt, because a record without metadata can never be read.
             if (!committed) {
-                if (spawned) {
-                    killProcessTree(spawned.pid, "SIGKILL");
-                    await spawned.exit;
-                }
-                lease?.release();
-                discardFailedLaunch(id, { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch });
+                await abortUncommittedLaunch(id, {
+                    child: spawned, lease,
+                    artifacts: { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch },
+                });
             }
             throw error;
         }

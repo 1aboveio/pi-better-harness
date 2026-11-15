@@ -29,7 +29,8 @@ import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { disposeBackgroundWorkNavigator, ensureBackgroundWorkNavigator, isNavigatorUiAvailable, refreshBackgroundWorkNavigator, registerBackgroundWorkProvider, renderRegisteredWorkDetail, } from "./shared-navigator.domain.mjs";
-import { spawnDetached, killProcessTree } from "./spawn.domain.mjs";
+import { spawnDetached } from "./spawn.domain.mjs";
+import { abortUncommittedLaunch } from "./launch-abort.domain.mjs";
 import { parseRun, parseRunForLifecycle, resetParseRunCursor } from "./parse.domain.mjs";
 import { finalizeRun as finalizeRunCore } from "./finalization.domain.mjs";
 import { selectSessionByName } from "./session-selection.domain.mjs";
@@ -51,7 +52,7 @@ import { APPLY_PATCH, describeTaskTools, planTaskTools, selectEffectiveTaskTools
 import { announceExecutionAdapter, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions, } from "./permission-policy.domain.mjs";
 import { resolveSubagentWorkspace } from "./git-workspace.domain.mjs";
 import { dirname, isAbsolute, join } from "node:path";
-import { baseDir, taskWorkspaceDir, sessionsDir, runDir, recordTaskRuntimeProvenance, discardFailedLaunch, recordLaunchAttempt, clearLaunchAttempt, logPathFor, promptPathFor, nextRunId, writeMeta, readMeta, listMetas, listActiveMetasForParent, listMetasForOrigin, listMetasForParent, onMetaChanged, effectiveStatus, ownedByThisParent as ownedByFrontend, navigatorVisibleRuns, dismissRun, } from "./registry.domain.mjs";
+import { baseDir, taskWorkspaceDir, sessionsDir, runDir, recordTaskRuntimeProvenance, recordLaunchAttempt, clearLaunchAttempt, logPathFor, promptPathFor, nextRunId, writeMeta, readMeta, listMetas, listActiveMetasForParent, listMetasForOrigin, listMetasForParent, onMetaChanged, effectiveStatus, ownedByThisParent as ownedByFrontend, navigatorVisibleRuns, dismissRun, } from "./registry.domain.mjs";
 import { captureProcessIdentity, extractChildEventFactsFromLog, loadHealthThresholdsFromConfig, isAbandonedByParent, needsMonitoring, observeRunHealth, realProcessProbe, reconcileRun, resetChildEventLogCursor, } from "./health.domain.mjs";
 import { assignBatchJobNames, batchLaunchOutputSchema, batchLaunchResult, mergeJobOptions, nextBatchId, planBatchLaunches, validateBatchPlan, } from "./batch.mjs";
 import { formatCapacityRejectMessage, getSharedCapacityGate, } from "./capacity.mjs";
@@ -66,7 +67,7 @@ import { failureAttentionHandled, observeFailures } from "./shared-failure-obser
 import { subagentListTool, subagentOutputTool, subagentResultTool, subagentStopTool, } from "./tools.domain.mjs";
 import { stopRun } from "./stop.domain.mjs";
 import { WIDGET_CLEAR, fmtElapsed, fmtSpend, fmtTokens, shortModel, isSpendCacheFresh, resolveHealthLogExtraction, withinRefreshFloor, } from "./widget.domain.mjs";
-import { executeNavigatorClose, buildNavigatorRows, pendingNavigatorPark, buildNavigatorDetail, } from "./navigator.domain.mjs";
+import { executeNavigatorClose, pendingNavigatorPark, buildNavigatorDetail, } from "./navigator.domain.mjs";
 import { enforceRegistrySizeCapOnce, runDailyCleanupOnce } from "./cleanup.domain.mjs";
 import { ContinuationError, acquireConversationLease, assertContinuationExtensions, buildLaunchRecipe, planContinuation, } from "./continuation.domain.mjs";
 import { createHash } from "node:crypto";
@@ -1367,27 +1368,6 @@ function createNavigatorProjector() {
         return results.get(meta.id);
     };
 }
-/** Rows for the overlay: visible current-parent runs, newest first (#44 seam). */
-function navigatorRows(visible, at, project = createNavigatorProjector()) {
-    const now = at ?? Date.now();
-    return buildNavigatorRows(visible ?? sessionVisibleNavigatorRuns(now, project), {
-        project,
-        effectiveStatus,
-        shortModel,
-        fmtElapsed,
-        now,
-        spendFor: (m) => {
-            const snap = spendFor(m.id, now);
-            return fmtSpend(snap.usage);
-        },
-        toolFor: (m) => {
-            const snap = spendFor(m.id, now);
-            return snap.tool ?? "";
-        },
-        effortFor: (m) => m.effort,
-        healthFor: (m) => observeNavigatorHealth(m, now),
-    });
-}
 /** Runs that should advertise/open the left-arrow navigator affordance. */
 function navigatorRunningRuns() {
     const project = createAssignmentProjector();
@@ -1521,45 +1501,6 @@ function subagentWorkRows(now) {
         rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Subagents",
             status: snapshot?.status ?? "degraded", statusTone: "warning", kind: "observation", elapsed: "", primary: workObservationFailure(), sortStartedAt: now });
     return rows;
-}
-function legacySubagentWorkRows(now) {
-    // One registry scan per rebuild: both the start times and the rows below are
-    // built from this snapshot.
-    const project = createNavigatorProjector();
-    const visible = sessionVisibleNavigatorRuns(now, project);
-    const metaById = new Map(visible.map((m) => [m.id, m]));
-    return navigatorRows(visible, now, project).map((row) => {
-        const bits = [];
-        if (row.model)
-            bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
-        if (row.tool)
-            bits.push(row.tool);
-        if (row.spend)
-            bits.push(row.spend);
-        return {
-            providerId: "subagents",
-            id: row.id,
-            name: row.name,
-            model: row.model,
-            effort: row.effort,
-            tool: row.tool,
-            tokens: row.spend,
-            status: row.status,
-            statusTone: statusTone(row.status),
-            kind: "subagent",
-            elapsed: row.elapsed,
-            primary: bits.join(" · ") || "subagent run",
-            facts: row.healthFacts,
-            sortStartedAt: metaById.get(row.id)?.startedAt ?? now,
-            expiresAt: (() => {
-                const meta = metaById.get(row.id);
-                const endedAt = meta?.endedAt ?? meta?.lostAt;
-                return meta && isTerminalNavigatorStatus(row.status) && typeof endedAt === "number"
-                    ? endedAt + TERMINAL_NAVIGATOR_RETENTION_MS
-                    : undefined;
-            })(),
-        };
-    });
 }
 const DELEGATION_BLURB = {
     manual: "only when you or a workflow asks",
@@ -3344,12 +3285,10 @@ export default function (pi, managed) {
             // must not keep running unsupervised; its log goes with the
             // attempt, because a record without metadata can never be read.
             if (!committed) {
-                if (spawned) {
-                    killProcessTree(spawned.pid, "SIGKILL");
-                    await spawned.exit;
-                }
-                lease?.release();
-                discardFailedLaunch(id, { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch });
+                await abortUncommittedLaunch(id, {
+                    child: spawned, lease,
+                    artifacts: { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch },
+                });
             }
             throw error;
         }

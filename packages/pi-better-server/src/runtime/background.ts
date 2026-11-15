@@ -1,36 +1,45 @@
+import { processMatchesStart } from "../daemon-owner.ts";
 import { createRequire } from "node:module";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { processMatchesStart } from "../daemon-owner.ts";
 // @ts-expect-error Generated canonical passive runner observation.
 import { snapshot } from "./domain/background/snapshot.mjs";
 // @ts-expect-error Generated canonical registry queries.
-import { observeMetasForOrigin, listTaskRecords, belongsToOrigin, readMeta } from "./domain/background/registry.mjs";
+import { observeMetasForOrigin, belongsToOrigin, readMeta } from "./domain/background/registry.mjs";
+import { BackgroundHistory } from "./background-history.ts";
+import type { WorkScope } from "./read-model.ts";
 
 /** Root-owned query connection; never opens a supervisor or mutates source facts. */
 export class BackgroundObservation {
   private db: any;
+  private identity?: string;
+  private knownCoordinator = false;
   private rows: any[] = [];
   private signature = "";
   private root: string;
   private directory: string;
   private enabled = false;
-  private schemaReady = false;
-  private legacy = new Map<string, { origin: { cwd: string; sessionId?: string }; rows: any[] }>();
+  private history?: BackgroundHistory;
+  private legacy = new Map<string, { origin: { cwd: string; sessionId?: string }; rows: any[]; references: number }>();
   status: "ready" | "degraded" = "ready";
   reason?: string;
   get connectionCount() { return this.db ? 1 : 0; }
-  livenessReasons() {
-    this.enabled = true;
-    this.refresh();
-    if (!this.schemaReady) return [];
+  get scopeCount() { return this.legacy.size; }
+  livenessReasons(options: { refresh?: boolean } = {}) {
+    if (options.refresh !== false) {
+      this.enabled = true;
+      this.refresh();
+    }
+    if (!this.db) return [];
+    const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
+    if (!["1", "2", "3", "4"].includes(version)) return [];
     let operations: any[] = [];
     try { operations = this.db ? this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor' AND terminal_revision = 0").all() : []; }
     catch (error) { this.status = "degraded"; this.reason = String(error); return []; }
     return operations.flatMap((op: any) => {
       try {
-        const inspection = snapshot(this.directory, op.task_id);
+        const inspection = snapshot(this.directoryFor(op), op.task_id);
         const claim = inspection?.claim;
         return claim && !inspection.terminal && inspection.token === op.launch_token && processMatchesStart(claim.pid, claim.pidStartTime)
           ? [{ kind: "runner", id: op.task_id, owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace }, operationId: op.operation_id,
@@ -41,18 +50,36 @@ export class BackgroundObservation {
     });
   }
   readonly metrics = { runnerSnapshots: 0, activeQueries: 0, historyQueries: 0 };
-  constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor")) {
+  private directoryFor(op: any): string {
+    if (!op.supervision_host_id?.startsWith("server:")) return this.directory;
+    const row = this.db.prepare("SELECT value FROM coordinator_state WHERE key = ?").get(`result-supervision-v1:${op.operation_id}`);
+    if (!row) throw new Error("Captured result-supervision directory unavailable");
+    const grant = JSON.parse(row.value);
+    if (grant.launchToken !== op.launch_token || typeof grant.directory !== "string") throw new Error("Captured runner execution identity differs");
+    return grant.directory;
+  }
+  constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor"), indexDb?: any, changed = () => {}) {
     this.root = root; this.directory = directory;
+    if (indexDb) this.history = new BackgroundHistory(indexDb, directory, () => {
+      if (this.status === "degraded") throw new Error(this.reason);
+      return this.db;
+    }, operations => this.project(operations), changed);
   }
   refresh(): boolean {
     if (!this.enabled) return false;
     try {
       const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
-      if (existsSync(join(this.root, "operation-coordinator.sqlite"))) {
-        this.db ??= new DatabaseSync(join(this.root, "operation-coordinator.sqlite"), { readOnly: true });
+      const path = join(this.root, "operation-coordinator.sqlite");
+      let identity;
+      try { const info = statSync(path, { bigint: true }); identity = `${info.dev}:${info.ino}`; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (identity !== this.identity) { this.history?.invalidate(); this.db?.close(); this.db = undefined; this.identity = identity; }
+      if (!identity && this.knownCoordinator) throw new Error("Coordinator source disappeared; retaining the previous observation");
+      if (identity) {
+        this.db ??= new DatabaseSync(path, { readOnly: true });
+        this.knownCoordinator = true;
         const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
-        this.schemaReady = ["1", "2", "3", "4"].includes(version);
-        if (!this.schemaReady) throw new Error("Unsupported coordinator schema");
+        if (!["1", "2", "3", "4"].includes(version)) throw new Error("Unsupported coordinator schema");
       }
       this.metrics.activeQueries++;
       const operations = this.db ? this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor'").all() : [];
@@ -72,7 +99,9 @@ export class BackgroundObservation {
       }
       const signature = JSON.stringify([rows, [...this.legacy.values()].flatMap(entry => entry.rows).sort((a, b) => a.id.localeCompare(b.id))]);
       const changed = signature !== this.signature || this.status !== "ready";
+      if (changed) this.history?.invalidate();
       this.rows = rows; this.signature = signature; this.status = "ready"; this.reason = undefined;
+      this.history?.reconcile();
       return changed;
     } catch (error) {
       const reason = String(error);
@@ -81,17 +110,13 @@ export class BackgroundObservation {
       return changed;
     }
   }
-  private project(operations: any[], history = false) {
+  private project(operations: any[]) {
       return operations.map((op: any) => {
-        if (history) {
-          const observed = this.rows.find(row => row.operationId === op.operation_id);
-          if (observed) return observed;
-          if (op.phase === "running") return undefined;
-        }
         this.metrics.runnerSnapshots++;
-        const inspection = snapshot(this.directory, op.task_id);
+        const directory = this.directoryFor(op);
+        const inspection = snapshot(directory, op.task_id);
         let context: any = {};
-        try { context = JSON.parse(readFileSync(join(this.directory, "observed", `${op.task_id}.json`), "utf8")); }
+        try { context = JSON.parse(readFileSync(join(directory, "observed", `${op.task_id}.json`), "utf8")); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         const terminal = inspection?.terminal === true || op.terminal_revision > 0;
         const status = inspection?.terminal ? inspection.status : op.terminal_revision > 0 ? op.terminal_outcome : inspection?.status ?? "running";
@@ -109,27 +134,49 @@ export class BackgroundObservation {
           dismissedAt: context.dismissedAt, exitCode: inspection?.result?.exitCode ?? null, logPaths: inspection?.logs ?? {} };
       }).filter(Boolean);
   }
-  read(scope: { cwd?: string; sessionId?: string; active?: boolean; backgroundHistory?: boolean; backgroundAll?: boolean }, index?: any) {
-    if (!this.enabled) { this.enabled = true; this.refresh(); }
+  private legacyScope(scope: { cwd?: string; sessionId?: string }) {
     if (!scope.cwd) throw new Error("Background activity requires an exact workspace");
     const key = JSON.stringify([scope.cwd, scope.sessionId]);
-    let legacy = this.legacy.get(key);
-    if (!legacy) {
+    let entry = this.legacy.get(key);
+    if (!entry) {
+      if (this.legacy.size >= 128) {
+        const oldest = [...this.legacy].find(([, value]) => value.references === 0);
+        if (!oldest) throw new Error("runtime-overloaded: Background scope capacity reached; retry later");
+        this.legacy.delete(oldest[0]);
+      }
       const origin = { cwd: scope.cwd, sessionId: scope.sessionId };
-      legacy = { origin, rows: observeMetasForOrigin(origin) }; this.legacy.set(key, legacy);
+      entry = { origin, rows: observeMetasForOrigin(origin), references: 0 };
     }
-    const legacyRows = scope.backgroundHistory ? index.records.map((record: any) => record.meta).filter(Boolean) : legacy.rows;
-    if (scope.backgroundHistory) this.metrics.historyQueries++;
-    const rows = scope.backgroundAll && this.db ? this.project(this.db.prepare("SELECT * FROM operations WHERE owner_kind = 'parent-session' AND observer_kind = 'local-supervisor'").all(), true) : scope.backgroundHistory && this.db ? this.project(this.db.prepare(`SELECT * FROM operations
-      WHERE owner_kind = 'parent-session' AND observer_kind = 'local-supervisor' AND owner_workspace = ? AND owner_session_id = ?`).all(scope.cwd, scope.sessionId), true) : this.rows;
+    this.legacy.delete(key); this.legacy.set(key, entry);
+    return entry;
+  }
+  retain(scope: { cwd?: string; sessionId?: string }) {
+    const entry = this.legacyScope(scope);
+    entry.references++;
+    let released = false;
+    return () => { if (!released) { released = true; entry.references--; } };
+  }
+  read(scope: WorkScope, index?: any): any[] {
+    if (!this.enabled) { this.enabled = true; this.refresh(); }
+    const legacy = this.legacyScope(scope);
+    if (scope.backgroundHistory) { this.metrics.historyQueries++; return index.records.map((record: any) => record.meta); }
+    const legacyRows = legacy.rows;
+    const rows = this.rows;
     return [...rows.filter(row => row.owner.kind === "parent-session" && row.dismissedAt === undefined
       && (scope.backgroundAll || row.owner.workspace === scope.cwd && row.owner.sessionId === scope.sessionId) && (!scope.active || row.active)),
-      ...legacyRows.filter((row: any) => (scope.backgroundAll || row.callbackOrigin && belongsToOrigin(row, legacy.origin)) && (!scope.active || row.status === "running"))];
+      ...legacyRows.filter((row: any) => (scope.backgroundAll || row.callbackOrigin && belongsToOrigin(row, legacy.origin)
+        && (scope.sessionId || row.spawnPid === scope.processId)) && (!scope.active || row.status === "running"))];
   }
-  close() { this.db?.close(); }
-  historyIndex(scope: { cwd?: string; sessionId?: string; backgroundAll?: boolean }) {
-    const index = listTaskRecords();
-    return { ...index, records: index.records.filter((record: any) => scope.backgroundAll || !record.meta
-      || !record.meta.callbackOrigin || belongsToOrigin(record.meta, scope)) };
+  close(): Promise<void> {
+    if (this.history) return this.history.close().then(() => { this.db?.close(); });
+    this.db?.close(); return Promise.resolve();
+  }
+  get historyStatus() { return this.history?.status ?? "degraded"; }
+  get historyReason() { return this.history?.reason; }
+  get historyMetrics() { return this.history?.metrics; }
+  historyIndex(scope: WorkScope) {
+    this.read({ ...scope, backgroundHistory: false });
+    if (!this.history) throw new Error("Background history requires the shared root index");
+    return this.history.read(scope);
   }
 }
