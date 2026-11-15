@@ -124,6 +124,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     let idleStopping = false;
     const runtimeClients = new Map<Socket, string>();
     let guardianBinding: { socket: Socket; identity: import("./daemon-owner.ts").DaemonOwnerIdentity } | undefined;
+    let observationUnavailable = false;
     let runtimeZeroSince: number | undefined = now();
     let hostedUsed = registry.activeCount > 0;
     let zeroSince: number | undefined = registry.activeCount === 0 ? now() : undefined;
@@ -431,9 +432,17 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             : (now() - runtimeZeroSince < config.runtimeIdleMs || now() < startupUntil)) return;
           // Recheck durable activity before fencing admission; observation never adopts a writer.
           if (draining) return;
-          if ((await work().livenessReasons()).length > 0) {
-            runtimeZeroSince = undefined;
-            return;
+          try {
+            if ((await work().livenessReasons()).length > 0) {
+              runtimeZeroSince = undefined;
+              return;
+            }
+          } catch (error) {
+            // The executor already bounds query deadlines and terminates failed workers.
+            // Unknown obligations cannot keep an otherwise detached runtime alive forever.
+            // Stop only the management layer; leave runner evidence and writer leases intact.
+            observationUnavailable = true;
+            log(`runtime observation unavailable at idle shutdown: ${String(error)}`);
           }
           // No create/open can slip between this check and the synchronous admission fence.
           if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
@@ -470,7 +479,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           await Promise.allSettled([...dispatches]);
           if (existsSync(socketPath)) unlinkSync(socketPath);
           const checkpoint = join(serverDir, `clean-stop-${instanceId}.tmp`);
-          writeFileSync(checkpoint, JSON.stringify({ pid: process.pid, token: instanceId, reason: "clean-stop" }), { mode: 0o600 });
+          writeFileSync(checkpoint, JSON.stringify({ pid: process.pid, token: instanceId, reason: "clean-stop", observation: observationUnavailable ? "unavailable" : "verified" }), { mode: 0o600 });
           renameSync(checkpoint, join(serverDir, "clean-stop.json"));
           releaseOwner();
           finishClosed();

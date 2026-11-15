@@ -274,7 +274,7 @@ test("default runtime-only idle exits real server and guardian within 30s plus 5
   const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "--agent", "pi"], {
     env: { ...process.env, ...env.vars }, stdio: ["ignore", "pipe", "pipe"],
   });
-  let errors = ""; child.stderr.on("data", chunk => { errors += chunk; });
+  let errors = ""; child.stderr!.on("data", chunk => { errors += chunk; });
   const exited = once(child, "exit");
   t.after(async () => { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGTERM"); await exited; } });
   const owner = await waitFor("real server", () => {
@@ -333,4 +333,27 @@ test("SIGKILL of server recovers under the same guardian and persists restart ac
   assert.equal(guardian.status, "live");
   if (guardian.status === "live") assert.equal(guardian.owner.pid, child.pid);
   assert.equal(JSON.parse(readFileSync(join(env.serverDir, "guardian-restarts.json"), "utf8")).length, 1);
+});
+
+test("a failed read worker cannot retain a detached daemon indefinitely", { timeout: 15_000 }, async t => {
+  const env = makeEnv();
+  const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./support/failed-read-worker-daemon.ts", import.meta.url))], {
+    env: { ...process.env, ...env.vars }, stdio: ["ignore", "ignore", "pipe", "ipc"],
+  });
+  const exited = once(child, "exit");
+  let errors = ""; child.stderr!.on("data", chunk => { errors += chunk; });
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await exited; });
+  const [ready] = await Promise.race([once(child, "message"), exited.then(() => { throw new Error(errors); })]);
+  const client = new WorkClient(ready.socketPath, env.agentDir);
+  try {
+    await client.ready;
+    await assert.rejects(client.get({ cwd: env.agentDir }), /worker|runtime-unhealthy/);
+  } finally { client.close(); }
+  const disconnectedAt = Date.now();
+  const [code] = await exited;
+  assert.equal(code, 0, errors);
+  assert.ok(Date.now() - disconnectedAt < 5000, "failed observation must not exceed the shutdown budget");
+  assert.equal(inspectDaemonOwner(env.serverDir).status, "missing");
+  const checkpoint = JSON.parse(readFileSync(join(env.serverDir, "clean-stop.json"), "utf8"));
+  assert.equal(checkpoint.observation, "unavailable", "shutdown must disclose that obligations could not be verified");
 });
