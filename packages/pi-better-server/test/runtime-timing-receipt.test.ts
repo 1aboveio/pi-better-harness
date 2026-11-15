@@ -50,7 +50,7 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
     const binding = { version: 1 as const, assignmentId: id, owner: { ...recipient, kind: 'worker-conversation' as const, sessionId: id }, recipient };
     registerAssignmentAttempt(binding, id);
     mkdirSync(runDir(id), { recursive: true }); writeFileSync(logPathFor(id), 'retained result\n');
-    const meta: any = { id, sessionId: id, status: 'failed', pid: 0, spawnPid: process.pid, cwd, startedAt: Date.now(), endedAt: Date.now(), exitCode: 1, promptPreview: 'fixture', logPath: logPathFor(id), timing: { graceMs: 0, pendingWakes: [{ kind: "deadline", key: "deadline", content: "Retained timing notification fixture" }] }, assignment: binding, callbackOrigin: { sessionId: manager.getSessionId(), cwd }, callback: true };
+    const meta: any = { id, sessionId: id, status: 'failed', pid: 0, spawnPid: process.pid, cwd, startedAt: Date.now() - 120_000, endedAt: Date.now() - 60_000, exitCode: 1, promptPreview: 'fixture', logPath: logPathFor(id), timing: { graceMs: 0, pendingWakes: [{ kind: "deadline", key: "deadline", content: "Retained timing notification fixture" }] }, assignment: binding, callbackOrigin: { sessionId: manager.getSessionId(), cwd }, callback: true };
     writeMeta(meta); commitAssignmentTerminal(meta);
     const deadline = Date.now() + 5000;
     while (!readOutcome(meta)?.deliveryReceipt && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));

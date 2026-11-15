@@ -12,12 +12,13 @@ export function workScope(input: unknown): WorkScope {
   if (value.detail !== undefined && (typeof value.detail !== "boolean" || (value.detail && !value.id))) throw new Error("Detail requires an exact run ID");
   const statuses = value.background === true ? ["starting", "running", "succeeded", "failed", "cancelled", "timed_out", "lost"] : ["running", "waiting", "completed", "failed", "cancelled", "killed", "exited", "orphaned", "lost"];
   if (value.statuses !== undefined && (!Array.isArray(value.statuses) || value.statuses.length > statuses.length || value.statuses.some(s => typeof s !== "string" || !statuses.includes(s)))) throw new Error("Invalid assignment status filter");
+  if (value.pendingRecipient !== undefined && (typeof value.pendingRecipient !== "boolean" || !value.sessionId || !value.cwd)) throw new Error("Pending recipient query requires an exact conversation");
   if (value.background !== undefined && typeof value.background !== "boolean") throw new Error("Invalid background scope");
   if (value.processId !== undefined && (!Number.isSafeInteger(value.processId) || Number(value.processId) <= 0 || value.background !== true)) throw new Error("Invalid background process identity");
   if (value.backgroundHistory !== undefined && typeof value.backgroundHistory !== "boolean") throw new Error("Invalid background history scope");
   if (value.backgroundAll !== undefined && (typeof value.backgroundAll !== "boolean" || value.backgroundAll && !value.backgroundHistory)) throw new Error("All backgrounds requires an explicit history query");
   return { processId: value.processId as number | undefined, backgroundAll: value.backgroundAll as boolean | undefined, backgroundHistory: value.backgroundHistory as boolean | undefined, background: value.background as boolean | undefined, cwd: value.cwd as string | undefined, sessionId: value.sessionId as string | undefined, id: value.id as string | undefined,
-    cursor: value.cursor as string | undefined, limit: value.limit as number | undefined, active: value.active as boolean | undefined, endedAfter: value.endedAfter as number | undefined, detail: value.detail as boolean | undefined, statuses: value.statuses as string[] | undefined };
+    pendingRecipient: value.pendingRecipient as boolean | undefined, cursor: value.cursor as string | undefined, limit: value.limit as number | undefined, active: value.active as boolean | undefined, endedAfter: value.endedAfter as number | undefined, detail: value.detail as boolean | undefined, statuses: value.statuses as string[] | undefined };
 }
 
 /** Snapshot capture and observer installation execute at one synchronous serial point. */

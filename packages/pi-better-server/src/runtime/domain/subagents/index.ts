@@ -500,6 +500,18 @@ let outcomeHost = createOutcomeHost();
 const outcomeAdmission = new Map<string, () => boolean>();
 const outcomeEnqueuing = new Set<string>();
 let outcomeTicker: ReturnType<typeof setInterval> | undefined;
+const pendingRecipientRecovery = new Map<string, Set<"timing" | "health" | "failure" | "completion" | "assignment">>();
+const observedRecipientRows = new Map<string, string>();
+function trackRecipientRecovery(id: string, kind: "timing" | "health" | "failure" | "completion" | "assignment"): void {
+    let pending = pendingRecipientRecovery.get(id);
+    if (!pending) pendingRecipientRecovery.set(id, pending = new Set());
+    pending.add(kind);
+}
+function finishRecipientRecovery(id: string, kind: "timing" | "health" | "failure" | "completion" | "assignment"): void {
+    const pending = pendingRecipientRecovery.get(id);
+    pending?.delete(kind);
+    if (!pending?.size) pendingRecipientRecovery.delete(id);
+}
 
 /**
  * "The rightful conversation is not the active one", not "this notification is
@@ -676,32 +688,54 @@ async function tryEnqueueAssignmentOutcome(pi: ExtensionAPI, meta: RunMeta): Pro
  * path never takes a live pi's terminal callback (#625, DEV-226 criterion 5).
  */
 function recoverAssignmentOutcomes(pi: ExtensionAPI): void {
-    for (const meta of activeCallbackOrigin ? listMetasForOrigin(activeCallbackOrigin) : []) {
-        replayTimingWakes(pi, meta);
-        if (meta.assignment) {
-            try { if (commitAssignmentTerminal(meta)) void enqueueAssignmentOutcome(pi, meta); } catch { /* keep unverified; no legacy handoff */ }
+    for (const [id, pending] of pendingRecipientRecovery) {
+        const meta = readMeta(id);
+        if (!meta) { pendingRecipientRecovery.delete(id); continue; }
+        if (pending.has("timing")) {
+            replayTimingWakes(pi, meta);
+            if (!meta.timing?.pendingWakes?.some(wake => !timingWakeReceipt(runDir(id), wake.key))) finishRecipientRecovery(id, "timing");
+        }
+        if (pending.has("health")) {
+            if ((meta.status !== "orphaned" && meta.status !== "lost") || isHealthCallbackHandled(meta, meta.status)) finishRecipientRecovery(id, "health");
+            else deliverHealthCallback(pi, meta, meta.status, Date.now());
+        }
+        if (pending.has("failure")) deliverFailureAttention(pi, meta, Date.now());
+        if (pending.has("completion")) {
+            if (meta.completionCallbackSentAt !== undefined || meta.completionCallbackSuppressedAt !== undefined) finishRecipientRecovery(id, "completion");
+            else enqueueCompletionCallback(pi, id);
+        }
+        if (pending.has("assignment")) {
+            try {
+                const outcome = readOutcome(meta);
+                if (outcome?.deliveryReceipt || outcome?.disposition) finishRecipientRecovery(id, "assignment");
+                else if (outcome) void enqueueAssignmentOutcome(pi, meta);
+            } catch { /* retry only the recorded pending handoff */ }
         }
     }
 }
+function observeRecipientNotifications(pi: ExtensionAPI): void {
+    const observation = workObservation();
+    if (sessionTornDown || observation?.status !== "ready") return;
+    const ids = new Set<string>();
+    for (const row of observation.rows) {
+        const meta = row.meta as RunMeta;
+        ids.add(meta.id);
+        const revision = JSON.stringify(row);
+        if (observedRecipientRows.get(meta.id) === revision) continue;
+        observedRecipientRows.set(meta.id, revision);
+        if (meta.timing?.pendingWakes?.length) trackRecipientRecovery(meta.id, "timing");
+        if (!meta.assignment && meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined
+            && (meta.management || ownedByThisParent(meta) || (meta.supervisionInterruptedAt !== undefined && isAbandonedByParent(meta, realProcessProbe)))) trackRecipientRecovery(meta.id, "completion");
+        if ((meta.status === "orphaned" || meta.status === "lost") && !isHealthCallbackHandled(meta, meta.status)) trackRecipientRecovery(meta.id, "health");
+        if (meta.assignment && ["completed", "failed", "killed", "lost"].includes(meta.status)) trackRecipientRecovery(meta.id, "assignment");
+        if (["running", "orphaned", "lost"].includes(meta.status)) deliverFailureAttention(pi, meta, Date.now());
+    }
+    for (const id of observedRecipientRows.keys()) if (!ids.has(id)) observedRecipientRows.delete(id);
+    recoverAssignmentOutcomes(pi);
+}
 
 function recoverCompletionCallbacks(pi: ExtensionAPI): void {
-    recoverAssignmentOutcomes(pi);
-    for (const meta of listMetasForParent(process.pid)) {
-        if (!ownedByThisParent(meta)) continue;
-        enqueueCompletionCallback(pi, meta.id);
-    }
-    const activeSessionId = activeCallbackOrigin?.sessionId;
-    if (!activeSessionId) return;
-    for (const summary of listMetas()) {
-        if (ownedByThisParent(summary) || summary.supervisionInterruptedAt === undefined) continue;
-        if (summary.status === "running" || summary.status === "orphaned") continue;
-        // A live foreign parent still owns its run's callback: never deliver for it.
-        if (!isAbandonedByParent(summary, realProcessProbe)) continue;
-        const meta = readMeta(summary.id);
-        if (!meta || meta.status === "running" || meta.status === "orphaned") continue;
-        if (meta.callbackOrigin?.sessionId !== activeSessionId) continue;
-        enqueueCompletionCallback(pi, meta.id);
-    }
+    observeRecipientNotifications(pi);
 }
 
 function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, now: number): void {
@@ -714,8 +748,10 @@ function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, no
     // orphaned run's health callback is handled there is no later callback that is sure to come
     // (the run may stay orphaned), so gaps found after it are delivered now (#325).
     const pending = pendingFailureAttention(state, now, { deferObservationGaps: meta.status === "running" });
-    if (!pending || (meta.status !== "running" && meta.status !== "orphaned" && meta.completionCallbackPendingAt !== undefined
+    if (!pending) { finishRecipientRecovery(meta.id, "failure"); return; }
+    if ((meta.status !== "running" && meta.status !== "orphaned" && meta.completionCallbackPendingAt !== undefined
         && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined)) return;
+    trackRecipientRecovery(meta.id, "failure");
     // Only the pending incidents are rendered; earlier deliveries are counted, not repeated (#315).
     void getCallbackBatcher(pi).deliverUrgent({
         ...failureAttentionFields(meta, state, pending),
@@ -725,7 +761,7 @@ function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, no
             if (!current) throw new Error("Subagent metadata is unavailable; defer failure notification");
             return callbackSuppressionReason(current);
         },
-        onDelivered: (at) => { markFailureAttentionDelivered(failurePath(meta.id), pending, at); },
+        onDelivered: (at) => { markFailureAttentionDelivered(failurePath(meta.id), pending, at); finishRecipientRecovery(meta.id, "failure"); },
     });
 }
 
@@ -4450,20 +4486,15 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         catch { mainAgentStartedAt = undefined; }
         mainAgentTools.clear();
         activeCallbackOrigin = callbackOriginFromContext(ctx);
+        pendingRecipientRecovery.clear();
+        observedRecipientRows.clear();
         if (!managed && activeCallbackOrigin) await startWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => {
             refreshBackgroundWorkNavigator(ctx);
-            const observation = workObservation();
-            if (sessionTornDown || observation?.status !== "ready") return;
-            for (const row of observation.rows) {
-                replayTimingWakes(pi, row.meta);
-                if (!row.meta.assignment && row.meta.completionCallbackPendingAt !== undefined) enqueueCompletionCallback(pi, row.meta.id);
-                if (row.meta.status === "orphaned" || row.meta.status === "lost") deliverHealthCallback(pi, row.meta, row.meta.status, Date.now());
-                if (["running", "orphaned", "lost"].includes(row.meta.status)) deliverFailureAttention(pi, row.meta, Date.now());
-            }
+            observeRecipientNotifications(pi);
         });
         if (!managed) {
             recoverCompletionCallbacks(pi);
-            for (const meta of activeCallbackOrigin ? listMetasForOrigin(activeCallbackOrigin) : []) replayTimingWakes(pi, meta);
+            observeRecipientNotifications(pi);
         }
         // Admission can defer before batcher enqueue, even after the last child
         // exits. Keep reconciliation independent of the live-run health ticker.

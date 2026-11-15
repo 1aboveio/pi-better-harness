@@ -179,8 +179,7 @@ export function isAbandonedByParent(meta, probe, parentPid = process.pid) {
 }
 export function needsMonitoring(metas, parentPid = process.pid) {
     return metas.some((m) => ownedByThisParent(m, parentPid) && (m.status === "running"
-        || m.status === "orphaned"
-        || (m.status === "lost" && m.lostCallbackSentAt === undefined && m.lostCallbackSuppressedAt === undefined)));
+        || m.status === "orphaned"));
 }
 // ---- real OS-backed probe -------------------------------------------------
 /** Linux: start-time identity from /proc/<pid>/stat field 22 (jiffies since boot). */

@@ -17,7 +17,7 @@ import { extractChildEventFactsFromLog, healthThresholdsForConfig } from "./doma
 import { BackgroundObservation } from "./background.ts";
 import { readHealthConfig } from "./health-config.ts";
 
-export interface WorkScope { processId?: number; backgroundAll?: boolean; background?: boolean; backgroundHistory?: boolean; cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; endedAfter?: number; detail?: boolean; limit?: number; cursor?: string }
+export interface WorkScope { processId?: number; backgroundAll?: boolean; background?: boolean; backgroundHistory?: boolean; cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; pendingRecipient?: boolean; endedAfter?: number; detail?: boolean; limit?: number; cursor?: string }
 export interface WorkSnapshot {
   instanceId: string; runtimeEpoch: string; scopeRevision: string; seq: number;
   observedRevisionVector: { inventory: number; coordinator: string; healthConfig: string };
@@ -37,7 +37,7 @@ export class WorkReadModel {
   private db: any;
   private reader: ReturnType<typeof createAssignmentReader>;
   private files = new Map<string, { signature: string; meta: any }>();
-  private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string }; health?: any }>();
+  private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string }; health?: any; recipientPending?: boolean }>();
   private logs = new Map<string, string>();
   private processes = new Map<string, string>();
   private healthRevision = "";
@@ -72,11 +72,12 @@ export class WorkReadModel {
     this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"));
     this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(), refresh => this.reader.connection(refresh));
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
-      started REAL, state TEXT, active INTEGER, ended REAL, payload TEXT);
+      started REAL, state TEXT, active INTEGER, ended REAL, recipient_pending INTEGER, payload TEXT);
       CREATE INDEX work_folder ON rows(cwd, started DESC, id DESC);
       CREATE INDEX work_origin ON rows(origin_cwd, origin_session, started DESC, id DESC);
       CREATE INDEX work_active ON rows(active, started DESC, id DESC);
       CREATE INDEX work_terminal ON rows(active, ended, started DESC, id DESC);
+      CREATE INDEX work_recipient_pending ON rows(origin_cwd, origin_session, recipient_pending, started DESC, id DESC);
       CREATE INDEX work_state ON rows(state, started DESC, id DESC);`);
     this.runs = join(options.baseDir ?? join(realpathSync(tmpdir()), "pi-better-subagents"), "runs");
     this.archives = join(options.durableDir ?? process.env.PI_SUBAGENT_DURABLE_DIR ?? join(agentDir, "subagents"), "attempts");
@@ -260,7 +261,13 @@ export class WorkReadModel {
           const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRun(meta.id, { logPath: join(this.runs, meta.id, "output.log") }) : undefined;
           const display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.toolCalls.at(-1) ?? "" };
           const health = logs.has(meta.id) ? { ...extractChildEventFactsFromLog(meta.id, { logPath: join(this.runs, meta.id, "output.log") }), thresholds: healthThresholdsForConfig(healthConfig.config) } : undefined;
-          row = { meta, assignment, display, health, sourceRevision: hash([meta, assignment.revision, display, health]) };
+          const outcome = meta.assignment ? this.reader.read({ ...meta.assignment.owner, assignmentId: meta.assignment.assignmentId }).outcome : undefined;
+          const recipientPending = Boolean(meta.timing?.pendingWakes?.length
+            || (meta.status === "orphaned" && meta.orphanedCallbackSentAt === undefined && meta.orphanedCallbackSuppressedAt === undefined)
+            || (meta.status === "lost" && meta.lostCallbackSentAt === undefined && meta.lostCallbackSuppressedAt === undefined)
+            || (meta.callback !== false && (meta.assignment ? outcome && !outcome.deliveryReceipt && !outcome.disposition
+              : meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined)));
+          row = { meta, assignment, display, health, recipientPending, sourceRevision: hash([meta, assignment.revision, display, health, recipientPending]) };
         }
         rows.push(row);
         if (++batch % 256 === 0) await yieldTurn();
@@ -288,7 +295,7 @@ export class WorkReadModel {
       }
       if (this.closed) return;
       this.db.exec("BEGIN");
-      const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");
       let semanticChange = false;
       try {
@@ -298,7 +305,7 @@ export class WorkReadModel {
           semanticChange = true;
           const m = row.meta;
           insert.run(m.id, m.cwd, m.callbackOrigin?.cwd ?? m.cwd, m.callbackOrigin?.sessionId ?? null,
-            m.startedAt, row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, m.endedAt ?? m.lostAt ?? null, JSON.stringify(row));
+            m.startedAt, row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, m.endedAt ?? m.lostAt ?? null, row.recipientPending ? 1 : 0, JSON.stringify(row));
         }
         this.db.exec("COMMIT");
       } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -337,6 +344,10 @@ export class WorkReadModel {
     else if (scope.cwd) { const cwd = resolve(scope.cwd); clauses.push("(cwd = ? OR substr(cwd, 1, ?) = ?)"); args.push(cwd, (cwd.endsWith(sep) ? cwd : cwd + sep).length, cwd.endsWith(sep) ? cwd : cwd + sep); }
     // Activity describes the scope, independently of history filters and pagination.
     const active = Number(this.db.prepare(`SELECT count(*) AS n FROM rows WHERE ${[...clauses, "active = 1"].join(" AND ")}`).get(...args).n);
+    if (scope.pendingRecipient !== undefined) {
+      if (!scope.sessionId || !scope.cwd) throw new Error("Pending recipient query requires an exact conversation");
+      clauses.push("recipient_pending = ?"); args.push(scope.pendingRecipient ? 1 : 0);
+    }
     if (scope.active !== undefined) { clauses.push("active = ?"); args.push(scope.active ? 1 : 0); }
     if (scope.endedAfter !== undefined) { clauses.push("(ended IS NULL OR ended >= ?)"); args.push(scope.endedAfter); }
     if (scope.statuses?.length) { clauses.push(`state IN (${scope.statuses.map(() => "?").join(",")})`); args.push(...scope.statuses); }

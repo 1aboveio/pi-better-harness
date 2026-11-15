@@ -244,7 +244,6 @@ export function needsMonitoring(
         (m) => ownedByThisParent(m, parentPid) && (
             m.status === "running"
             || m.status === "orphaned"
-            || (m.status === "lost" && m.lostCallbackSentAt === undefined && m.lostCallbackSuppressedAt === undefined)
         ),
     );
 }

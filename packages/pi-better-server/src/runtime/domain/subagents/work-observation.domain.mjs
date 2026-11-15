@@ -73,7 +73,17 @@ async function collect(candidate, current) {
                         throw new Error("resync_required: history changed");
                     if (current !== generation || candidate !== client)
                         return;
-                    snapshot = { ...first, rows: [...rows, ...history.rows], nextCursor: undefined,
+                    const owed = [];
+                    let owedCursor;
+                    do {
+                        const page = await candidate.get({ ...context.origin, pendingRecipient: true, limit: 200, ...(owedCursor ? { cursor: owedCursor } : {}) });
+                        if (page.seq !== first.seq || page.instanceId !== first.instanceId)
+                            throw new Error("resync_required: recipient page changed");
+                        owed.push(...page.rows);
+                        owedCursor = page.nextCursor;
+                    } while (owedCursor);
+                    const allRows = [...new Map([...rows, ...history.rows, ...owed].map(row => [row.meta.id, row])).values()];
+                    snapshot = { ...first, rows: allRows, nextCursor: undefined,
                         totalMatching: first.totalMatching + history.totalMatching, activity: { active: rows.length } };
                     completed = true;
                     refresh();

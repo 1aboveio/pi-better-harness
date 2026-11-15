@@ -513,3 +513,31 @@ test("a paused real socket has bounded queued snapshots and receives explicit re
     await model.close(); rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
   }
 });
+
+test("pending recipient query retains old terminal obligations with scoped bounded pages", async () => {
+  const root = fixtureRoot("pending-recipient");
+  const runs = join(root, "runs"); mkdirSync(runs);
+  for (let i = 0; i < 205; i++) {
+    const id = `sa_owed_${i}`; mkdirSync(join(runs, id));
+    writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, sessionId: id, cwd: root,
+      callbackOrigin: { cwd: root, sessionId: i === 204 ? "foreign" : "parent" }, status: "completed",
+      startedAt: i, endedAt: 1, callback: true, completionCallbackPendingAt: 1,
+      ...(i === 203 ? { completionCallbackSentAt: 2 } : {}) }));
+  }
+  const model = new WorkReadModel(root, "pending-instance", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    assert.equal(model.snapshot({ cwd: root, sessionId: "parent", active: false, endedAfter: Date.now() - 30000 }).rows.length, 0);
+    const scope = { cwd: root, sessionId: "parent", pendingRecipient: true, limit: 200 };
+    const before = { ...model.metrics };
+    const first = model.snapshot(scope);
+    assert.equal(first.totalMatching, 203); assert.equal(first.rows.length, 200); assert.ok(first.nextCursor);
+    const second = model.snapshot({ ...scope, cursor: first.nextCursor });
+    assert.equal(second.rows.length, 3); assert.equal(second.nextCursor, undefined);
+    assert.equal(new Set([...first.rows, ...second.rows].map(row => row.meta.id)).size, 203);
+    assert.throws(() => model.snapshot({ pendingRecipient: true }), /exact conversation/);
+    for (let i = 0; i < 10; i++) model.snapshot(scope);
+    assert.equal(model.metrics.metadataReads, before.metadataReads);
+    assert.equal(model.metrics.projections, before.projections);
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+});

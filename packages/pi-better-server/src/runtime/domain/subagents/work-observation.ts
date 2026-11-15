@@ -65,7 +65,15 @@ async function collect(candidate: WorkClient, current: number) {
                     const history = await candidate.get({ ...context!.origin, active: false, endedAfter: Date.now() - TERMINAL_NAVIGATOR_RETENTION_MS, limit: 200 });
                     if (history.seq !== first.seq || history.instanceId !== first.instanceId) throw new Error("resync_required: history changed");
                     if (current !== generation || candidate !== client) return;
-                    snapshot = { ...first, rows: [...rows, ...history.rows], nextCursor: undefined,
+                    const owed = [];
+                    let owedCursor: string | undefined;
+                    do {
+                        const page = await candidate.get({ ...context!.origin, pendingRecipient: true, limit: 200, ...(owedCursor ? { cursor: owedCursor } : {}) });
+                        if (page.seq !== first.seq || page.instanceId !== first.instanceId) throw new Error("resync_required: recipient page changed");
+                        owed.push(...page.rows); owedCursor = page.nextCursor;
+                    } while (owedCursor);
+                    const allRows = [...new Map([...rows, ...history.rows, ...owed].map(row => [row.meta.id, row])).values()];
+                    snapshot = { ...first, rows: allRows, nextCursor: undefined,
                         totalMatching: first.totalMatching + history.totalMatching, activity: { active: rows.length } };
                     completed = true; refresh();
                 } catch (error) {
