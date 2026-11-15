@@ -1173,7 +1173,8 @@ export class ObservedWaitHost {
     if (!this.store || this.closed) return;
     this.authorityPassCache = new Map();
     try {
-      if (this.options.serverOwnedResults || this.store.resultScopeManaged(this.discoveryScope)) {
+      const discovery = this.options.serverOwnedResults ? undefined : this.store.readDiscoveryState(this.discoveryScope);
+      if (this.options.serverOwnedResults || discovery?.managed) {
         this.releaseDiscoveryAuthority();
         if (!this.options.serverOwnedResults) this.reconcileFollowerRunning();
         this.reconcileOwnerChanges();
@@ -1181,7 +1182,7 @@ export class ObservedWaitHost {
         await this.dispatchOutbox();
         return;
       }
-      const role = this.refreshDiscoveryAuthority();
+      const role = this.refreshDiscoveryAuthority(discovery!.claim);
       this.noteDiscoveryRole(role);
       if (role === "holder") {
         this.discoverObservedTasks();
@@ -1304,16 +1305,9 @@ export class ObservedWaitHost {
    * Acquire or confirm the one shared discovery claim. Process identity and
    * explicit close evidence decide replacement; elapsed time is not a lease.
    */
-  private refreshDiscoveryAuthority(): "holder" | "follower" {
+  private refreshDiscoveryAuthority(claim: ReturnType<Store["readDiscoveryClaim"]>): "holder" | "follower" {
     const store = this.store;
     if (!store) return "follower";
-    if (store.resultScopeManaged(this.discoveryScope)) return "follower";
-    let claim;
-    try {
-      claim = store.readDiscoveryClaim(this.discoveryScope);
-    } catch {
-      return "follower";
-    }
     if (claim?.hostId === this.hostId) {
       this.discoveryToken = claim.token;
       return "holder";
@@ -3061,7 +3055,7 @@ export class ObservedWaitHost {
 
   private reconcileOperation(operation: OperationRecord): void {
     if (operation.terminalRevision > 0) return;
-    if (this.resultHandoffs.has(operation.operationId) || this.store?.resultSupervision(operation.operationId)) return;
+    if (this.resultHandoffs.has(operation.operationId) || (operation.resultManaged ?? !!this.store?.resultSupervision(operation.operationId))) return;
     if (this.options.serverOwnedResults) return;
     const authority = this.supervisionAuthority(operation);
     if (authority === "foreign") return;

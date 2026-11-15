@@ -1,5 +1,5 @@
 import { rmSync } from "node:fs";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import extension from "./index.js";
 import { createBackgroundTaskRuntime } from "./runtime.js";
@@ -9,6 +9,13 @@ import { readMeta, taskDir } from "./registry.js";
 import { registerBackgroundWorkProvider, disposeBackgroundWorkNavigator, type BackgroundWorkProvider } from "./shared-navigator.ts";
 import { registerTools } from "./tools.js";
 import type { BackgroundTaskMeta } from "./types.js";
+import { startWorkRuntime } from "./test-support/work-runtime.js";
+
+// Exercise the canonical daemon, not a cold pinned-runtime installation, in
+// the unchanged five-second factory lifecycle budget.
+let stopRuntime: (() => Promise<void>) | undefined;
+beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
+afterAll(async () => { await stopRuntime?.(); });
 
 // Deliberately import once: SDK extension factories share this cached module.
 function host() {

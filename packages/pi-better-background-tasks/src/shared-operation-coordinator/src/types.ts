@@ -114,6 +114,8 @@ export interface RegisterOperationInput {
 }
 
 export interface OperationRecord {
+    /** Grant presence in the same snapshot as a bulk operation read. */
+    resultManaged?: boolean;
     operationId: string;
     taskId: string;
     launchToken: string;

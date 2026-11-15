@@ -16,7 +16,7 @@ import { describeOwnerDiff, normalizeOwner, requireCounter, requireId, requirePa
 import { ensureSchema } from "./schema.mjs";
 import { createContext, openDatabase } from "./sqlite.mjs";
 import { getOperation as readOperationRecord, listOperations as readOperationRecords, listRunningSupervisedBy as readRunningSupervisedBy, releaseSupervision as writeSupervisionRelease, recordSupervision as writeSupervision, recordTerminalOutcome as writeTerminalOutcome, registerOperation as writeOperation, } from "./operations.mjs";
-import { getChangeRevision as readChangeRevision, readDiscoveryClaim as readClaim, releaseDiscoveryClaim as deleteDiscoveryClaim, tryClaimDiscovery as writeDiscoveryClaim, } from "./discovery.mjs";
+import { getChangeRevision as readChangeRevision, readDiscoveryClaim as readClaim, readDiscoveryState, releaseDiscoveryClaim as deleteDiscoveryClaim, tryClaimDiscovery as writeDiscoveryClaim, } from "./discovery.mjs";
 import { acknowledgeResult as writeAcknowledgement, cancelWait as writeCancellation, claimResume as writeClaim, findPendingWaitForOwner, getWait as readWait, listDependencies as readDependencies, listEvidencePins as readPins, listEvidenceReads as readReads, listResumeClaims as readClaims, listUnreconciledClaims, listWaits as readWaits, publishResumeAttempt as writeAttemptPublication, recordEvidencePin as writePin, recordEvidenceRead as writeRead, registerWait as writeWait, releaseEvidencePins as writePinRelease, holdFailedResume as writeHoldFailedResume, releaseResumeClaim as writeClaimRelease, transitionWaitPhase as writePhase, } from "./waits.mjs";
 import { claimOutbox as writeOutboxClaim, listDispatchableOutboxRecipients as readDispatchableOutboxRecipients, listOutbox as readOutbox, markOutboxDelivered as writeOutboxDelivery, releaseOutbox as writeOutboxRelease, } from "./outbox.mjs";
 import { readOperationEvidence } from "./rows.mjs";
@@ -107,6 +107,7 @@ export function openStore(options) {
             alive();
             return readOperationEvidence(ctx, requireId("operationId", operationId), terminalRevision === undefined ? undefined : requireCounter("terminalRevision", terminalRevision));
         },
+        readDiscoveryState(scope) { alive(); return readDiscoveryState(ctx, scope); },
         readDiscoveryClaim(scope) {
             alive();
             return readClaim(ctx, scope);

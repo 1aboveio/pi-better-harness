@@ -45,11 +45,17 @@ test("scope handoff fences discovery transactionally without stealing a changed 
     const { store } = createHarness();
     registerOperation(store);
     const claim = store.tryClaimDiscovery({ scope: "scope-760", hostId: "host-1", token: "discovery-1", expected: null })!;
+    assert.deepEqual(store.readDiscoveryState(claim.scope), { managed: false, claim });
+    assert.equal(store.listOperations()[0].resultManaged, false);
     assert.throws(() => store.handoffResultScope({ scope: claim.scope, expectedDiscovery: null, grants: [transfer("op-build-1")] }), /discovery owner changed/);
     assert.equal(store.resultScopeManaged(claim.scope), false);
     assert.equal(store.resultSupervision("op-build-1"), null);
     store.handoffResultScope({ scope: claim.scope, expectedDiscovery: claim, grants: [transfer("op-build-1")] });
     assert.equal(store.resultScopeManaged(claim.scope), true);
+    assert.deepEqual(store.readDiscoveryState(claim.scope), { managed: true, claim: null });
+    assert.equal(store.listOperations()[0].resultManaged, true);
+    assert.equal(store.listRunningSupervisedBy("server:epoch-1")[0].resultManaged, true);
+    assert.deepEqual(store.listRunningSupervisedBy("host-1"), []);
     assert.equal(store.readDiscoveryClaim(claim.scope), null);
     assert.equal(store.tryClaimDiscovery({ scope: claim.scope, expected: null, hostId: "old-host", token: "discovery-2" }), null);
     assert.equal(store.getOperation("op-build-1")?.supervision?.hostId, "server:epoch-1");

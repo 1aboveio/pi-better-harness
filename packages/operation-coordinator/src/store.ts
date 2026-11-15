@@ -34,6 +34,7 @@ import {
 import {
     getChangeRevision as readChangeRevision,
     readDiscoveryClaim as readClaim,
+    readDiscoveryState,
     releaseDiscoveryClaim as deleteDiscoveryClaim,
     tryClaimDiscovery as writeDiscoveryClaim,
 } from "./discovery.ts";
@@ -191,6 +192,7 @@ export interface Store {
 
     /** The shared discovery leader for this store/supervisor scope, if recorded. */
     readDiscoveryClaim(scope: string): DiscoveryClaimRecord | null;
+    readDiscoveryState(scope: string): ReturnType<typeof readDiscoveryState>;
     /**
      * Compare-and-swap a discovery claim. The caller must name the exact claim it
      * observed, or null for none; a stale contender receives null and must not
@@ -399,6 +401,7 @@ export function openStore(options: StoreOptions): Store {
                 terminalRevision === undefined ? undefined : requireCounter("terminalRevision", terminalRevision),
             );
         },
+        readDiscoveryState(scope) { alive(); return readDiscoveryState(ctx, scope); },
         readDiscoveryClaim(scope) {
             alive();
             return readClaim(ctx, scope);

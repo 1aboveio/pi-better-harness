@@ -433,8 +433,8 @@ export function listOperations(
         params.push(requireId("taskId", filter.taskId));
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
-    return getRows(ctx, `SELECT * FROM operations ${where} ORDER BY created_at, operation_id`, ...params)
-        .map(mapOperation);
+    return getRows(ctx, `SELECT *, EXISTS(SELECT 1 FROM coordinator_state s WHERE s.key = 'result-supervision-v1:' || operations.operation_id) AS result_managed FROM operations ${where} ORDER BY created_at, operation_id`, ...params)
+        .map(row => ({ ...mapOperation(row), resultManaged: Number(row.result_managed) === 1 }));
 }
 
 /** Running operations assigned to one supervising host, using the phase/host index. */
@@ -444,9 +444,9 @@ export function listRunningSupervisedBy(
 ): OperationRecord[] {
     return getRows(
         ctx,
-        "SELECT * FROM operations WHERE phase = 'running' AND supervision_host_id = ? ORDER BY created_at, operation_id",
+        "SELECT *, EXISTS(SELECT 1 FROM coordinator_state s WHERE s.key = 'result-supervision-v1:' || operations.operation_id) AS result_managed FROM operations WHERE phase = 'running' AND supervision_host_id = ? ORDER BY created_at, operation_id",
         requireId("hostId", hostId),
-    ).map(mapOperation);
+    ).map(row => ({ ...mapOperation(row), resultManaged: Number(row.result_managed) === 1 }));
 }
 
 function listOutboxForRevision(
