@@ -504,8 +504,14 @@ test("local and direct-SSH processes that exit after /reload deliver their compl
       await dumpDurableCallbackDiagnostics(host, id, project);
       throw error;
     }
-    const meta = bgRegistry.readMeta(id);
+    let meta = bgRegistry.readMeta(id);
     if (meta) {
+      // Native transcript delivery precedes the asynchronous Server receipt RPC.
+      // Observe its durable acknowledgment before asserting or reloading again.
+      meta = await waitFor(`${id} durable completion receipt`, () => {
+        const current = bgRegistry.readMeta(id);
+        return current?.callbackSentAt > 0 ? current : undefined;
+      });
       assert.equal(meta.callbackSuppressedAt, undefined, `${id} was suppressed: ${meta.callbackSuppressedReason}`);
       assert.ok(meta.callbackSentAt > 0);
     } else {
