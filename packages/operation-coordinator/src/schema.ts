@@ -36,6 +36,11 @@ const BACKGROUND_CALLBACK_DDL = [
         owner_workspace TEXT NOT NULL,
         owner_session_id TEXT NOT NULL
     )`,
+    `CREATE TRIGGER IF NOT EXISTS background_parent_callback_registration
+        AFTER INSERT ON operations
+        WHEN NEW.owner_kind='parent-session' AND NEW.observer_kind='local-supervisor'
+        BEGIN INSERT OR IGNORE INTO background_parent_callbacks(operation_id,owner_kind,owner_workspace,owner_session_id)
+            VALUES(NEW.operation_id,NEW.owner_kind,NEW.owner_workspace,NEW.owner_session_id); END`,
     `CREATE INDEX IF NOT EXISTS background_parent_callbacks_owner ON background_parent_callbacks(owner_kind,owner_workspace,owner_session_id,operation_id)`,
     `CREATE INDEX IF NOT EXISTS operations_background_recent ON operations(terminal_at,operation_id) WHERE observer_kind='local-supervisor' AND terminal_revision>0`,
     `CREATE INDEX IF NOT EXISTS operations_background_owner_recent ON operations(owner_kind,owner_workspace,owner_session_id,terminal_at,operation_id) WHERE observer_kind='local-supervisor' AND terminal_revision>0`,

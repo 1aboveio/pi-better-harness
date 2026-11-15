@@ -16,12 +16,15 @@ function history(db: DatabaseSync, count: number) {
         VALUES (?,?,?,'parent-session',?,?,'local-supervisor','1','terminal','active',1,1,1,1,'{}')`);
     for(let i=0;i<count;i++) {const id=`history-${String(i).padStart(5,'0')}`;insert.run(id,`task-${id}`,`token-${id}`,scope.workspace,scope.sessionId);}
     db.exec("UPDATE operations SET supervision_json='invalid historical payload' WHERE operation_id LIKE 'history-%'");
+    db.exec("DELETE FROM background_parent_callbacks WHERE operation_id LIKE 'history-%'");
     db.exec('COMMIT');
 }
 test('pending obligations retain exact owner scope across branches, receipts and reopen',()=>{
     const h=createHarness(), store=h.store;
     operation(store,'a');operation(store,'b',{...parentOwner,branchId:'other'});
     operation(store,'foreign',{...parentOwner,sessionId:'foreign'});operation(store,'worker',workerOwner);
+    assert.equal(store.setParentCallbackPending('task-a',true),false,'registration conservatively creates the obligation before sidecar writes');
+    store.setParentCallbackPending('task-a',false);
     const before=store.getChangeRevision();
     assert.equal(store.setParentCallbackPending('task-a',true),true);
     const revision=store.getChangeRevision();assert.notEqual(revision,before);
@@ -47,6 +50,7 @@ test('pending and recent queries decode only bounded relevant rows among 10000 h
     db.exec("UPDATE operations SET terminal_revision=1,terminal_at=100,phase='terminal' WHERE operation_id LIKE 'recent-%'");
     db.exec("UPDATE operations SET supervision_json='invalid foreign payload',terminal_revision=1,terminal_at=100,phase='terminal' WHERE operation_id='foreign'");
     h.store.setParentCallbackPending('task-recent-a',true);
+    h.store.setParentCallbackPending('task-recent-b',false);h.store.setParentCallbackPending('task-recent-c',false);
     assert.deepEqual(h.store.listPendingParentCallbacks(scope).map(op=>op.operationId),['recent-a']);
     const first=h.store.listRecentBackgroundTerminals({since:100,owner:scope,limit:2});
     assert.deepEqual(first.map(op=>op.operationId),['recent-a','recent-b']);
@@ -63,7 +67,7 @@ test('legacy seeding is bounded, durable across restart and never repeats a comp
     const h=createHarness(), db=new DatabaseSync(h.path);
     history(db,600);
     // Simulate a prior schema with callback sidecars but no obligation index.
-    db.exec('DROP TABLE background_parent_callbacks; DROP TABLE background_parent_callback_migration');
+    db.exec('DROP TRIGGER background_parent_callback_registration; DROP TABLE background_parent_callbacks; DROP TABLE background_parent_callback_migration');
     db.close();h.reopen();
     const initialRevision=h.store.getChangeRevision();
     assert.deepEqual(h.store.seedPendingParentCallbacks({limit:10000}),{done:false,seeded:256});
