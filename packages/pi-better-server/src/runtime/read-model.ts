@@ -13,9 +13,10 @@ import { parseRun, readRunTranscript } from "./domain/parse.mjs";
 import { fmtSpend } from "./domain/widget.mjs";
 import { effectiveStatus } from "./domain/process-status.mjs";
 import { extractChildEventFactsFromLog, healthThresholdsForConfig } from "./domain/health-observation.mjs";
+import { BackgroundObservation } from "./background.ts";
 import { readHealthConfig } from "./health-config.ts";
 
-export interface WorkScope { cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; endedAfter?: number; detail?: boolean; limit?: number; cursor?: string }
+export interface WorkScope { processId?: number; backgroundAll?: boolean; background?: boolean; backgroundHistory?: boolean; cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; endedAfter?: number; detail?: boolean; limit?: number; cursor?: string }
 export interface WorkSnapshot {
   instanceId: string; runtimeEpoch: string; scopeRevision: string; seq: number;
   observedRevisionVector: { inventory: number; coordinator: string; healthConfig: string };
@@ -23,6 +24,7 @@ export interface WorkSnapshot {
   rows: Array<{ meta: any; assignment: any; sourceRevision: string }>;
   nextCursor?: string; activity: { active: number }; nextDeadline: number | null;
   totalMatching: number;
+  backgroundIndex?: any;
   resyncRequired?: boolean; resyncReason?: string;
 }
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -30,6 +32,7 @@ const safeId = /^[A-Za-z0-9_-]+$/;
 
 /** Reconstructable query state. It never authorizes execution or writes source records. */
 export class WorkReadModel {
+  private background: BackgroundObservation;
   private db: any;
   private reader: ReturnType<typeof createAssignmentReader>;
   private files = new Map<string, { signature: string; meta: any }>();
@@ -57,10 +60,11 @@ export class WorkReadModel {
   readonly agentDir: string;
   readonly instanceId: string;
 
-  constructor(agentDir: string, instanceId: string, options: { baseDir?: string; durableDir?: string; intervalMs?: number } = {}) {
+  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number } = {}) {
     this.agentDir = agentDir; this.instanceId = instanceId;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
+    this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish());
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
       started REAL, state TEXT, active INTEGER, ended REAL, payload TEXT);
       CREATE INDEX work_folder ON rows(cwd, started DESC, id DESC);
@@ -84,14 +88,25 @@ export class WorkReadModel {
     this.timer.unref();
   }
 
-  onChange(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
+  onChange(listener: () => void, scope?: WorkScope) {
+    const release = scope?.background ? this.background.retain(scope) : undefined;
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); release?.(); };
+  }
+  get backgroundMetrics() { return { ...this.background.metrics, scopes: this.background.scopeCount, history: this.background.historyMetrics }; }
   async ensureId(id: string) {
     if (!safeId.test(id)) throw new Error("Invalid run ID");
     if (this.state === "rebuilding") await this.reconcile();
     if (this.db.prepare("SELECT id FROM rows WHERE id = ?").get(id)) return;
     try { await stat(join(this.runs, id, "meta.json")); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-    await this.reconcile();
+    // An exact-ID read may race the writer's atomic replacement during inventory.
+    // Join the bounded repair passes before treating that freshly written ID as absent.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.reconcile();
+      if (this.db.prepare("SELECT id FROM rows WHERE id = ?").get(id) || !this.dirty && !this.pending) break;
+      await yieldTurn();
+    }
   }
   invalidate(reason: string) {
     this.state = "degraded"; this.reason = reason;
@@ -118,6 +133,7 @@ export class WorkReadModel {
 
   private async scan() {
     this.metrics.inventories++;
+    if (this.background.refresh()) this.publish();
     try {
       const next = new Map<string, { signature: string; meta: any }>();
       let batch = 0;
@@ -256,6 +272,21 @@ export class WorkReadModel {
   }
 
   snapshot(scope: WorkScope = {}): WorkSnapshot {
+    if (scope.background) {
+      if (scope.backgroundHistory && this.background.refresh()) this.publish();
+      const index = scope.backgroundHistory ? this.background.historyIndex(scope) : undefined;
+      const tasks = this.background.read(scope, index);
+      const status = this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
+      const active = (index ? this.background.read({ ...scope, backgroundHistory: false, active: true }) : tasks).filter(task => task.durable ? task.active : task.status === "running").length;
+      this.metrics.coordinatorConnections = 1 + this.background.connectionCount;
+      return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, tasks, status, index?.page, active]), seq: this.revision,
+        observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
+        status, reason: this.background.reason ?? (index ? this.background.historyReason : undefined),
+        rows: tasks.map(meta => ({ meta, assignment: null, sourceRevision: hash(meta) })), totalMatching: index?.page.total ?? tasks.length,
+        ...(index?.page.nextCursor ? { nextCursor: index.page.nextCursor } : {}),
+        ...(index ? { backgroundIndex: index } : {}),
+        activity: { active }, nextDeadline: null };
+    }
     const clauses: string[] = [], args: any[] = [];
     if (scope.id) { clauses.push("id = ?"); args.push(scope.id); }
     if (scope.sessionId) { clauses.push("origin_session = ? AND origin_cwd = ?"); args.push(scope.sessionId, scope.cwd); }
@@ -308,6 +339,6 @@ export class WorkReadModel {
   async close() {
     this.closed = true; if (this.timer) clearInterval(this.timer);
     for (const watcher of this.watchers) watcher.close();
-    await this.pending; this.listeners.clear(); this.reader.close(); this.db.close();
+    await this.pending; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
   }
 }

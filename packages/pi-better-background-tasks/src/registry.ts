@@ -158,6 +158,7 @@ export function inspectMeta(id: string): MetaInspection {
 export interface TaskIndex {
   records: MetaInspection[];
   indexError?: string;
+  page?: { total: number; before: number; contentRevision: string; failureRevision: string; unreadable: number; unknown: number };
 }
 
 /** List every task directory, including unreadable metadata. */
@@ -229,6 +230,20 @@ export function listActiveMetasForOrigin(origin: BackgroundTaskCallbackOrigin): 
     .map(readOwnedMeta)
     .filter((meta): meta is BackgroundTaskMeta => meta !== undefined && meta.status === "running" && belongsToOrigin(meta, origin))
     .sort((a, b) => b.startedAt - a.startedAt);
+}
+
+/** Passive shared-runtime query: no backfill, cache repair, or completed-history scan. */
+export function observeMetasForOrigin(origin: BackgroundTaskCallbackOrigin, activeOnly = true): BackgroundTaskMeta[] {
+  const directory = activeOnly ? originActiveIndexDir(origin) : originIndexDir(origin);
+  let ids: string[];
+  try { ids = readdirSync(directory).filter(id => id !== ".initialized"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  return ids.map(id => {
+    const record = inspectMeta(id);
+    if (record.found && !record.meta) throw new Error(`Unverified background task ${id}: ${record.error}`);
+    return record.meta;
+  }).filter((meta): meta is BackgroundTaskMeta => !!meta && !!meta.callbackOrigin && belongsToOrigin(meta, origin)
+    && (!activeOnly || meta.status === "running")).sort((a, b) => b.startedAt - a.startedAt);
 }
 
 function readMetaForSweep(id: string): BackgroundTaskMeta | undefined {

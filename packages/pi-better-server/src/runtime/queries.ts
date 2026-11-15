@@ -10,8 +10,13 @@ export function workScope(input: unknown): WorkScope {
   if (value.active !== undefined && typeof value.active !== "boolean") throw new Error("Invalid active scope");
   if (value.endedAfter !== undefined && (typeof value.endedAfter !== "number" || !Number.isFinite(value.endedAfter))) throw new Error("Invalid history deadline");
   if (value.detail !== undefined && (typeof value.detail !== "boolean" || (value.detail && !value.id))) throw new Error("Detail requires an exact run ID");
-  if (value.statuses !== undefined && (!Array.isArray(value.statuses) || value.statuses.length > 9 || value.statuses.some(s => typeof s !== "string" || !["running", "waiting", "completed", "failed", "cancelled", "killed", "exited", "orphaned", "lost"].includes(s)))) throw new Error("Invalid assignment status filter");
-  return { cwd: value.cwd as string | undefined, sessionId: value.sessionId as string | undefined, id: value.id as string | undefined,
+  const statuses = value.background === true ? ["starting", "running", "succeeded", "failed", "cancelled", "timed_out", "lost"] : ["running", "waiting", "completed", "failed", "cancelled", "killed", "exited", "orphaned", "lost"];
+  if (value.statuses !== undefined && (!Array.isArray(value.statuses) || value.statuses.length > statuses.length || value.statuses.some(s => typeof s !== "string" || !statuses.includes(s)))) throw new Error("Invalid assignment status filter");
+  if (value.background !== undefined && typeof value.background !== "boolean") throw new Error("Invalid background scope");
+  if (value.processId !== undefined && (!Number.isSafeInteger(value.processId) || Number(value.processId) <= 0 || value.background !== true)) throw new Error("Invalid background process identity");
+  if (value.backgroundHistory !== undefined && typeof value.backgroundHistory !== "boolean") throw new Error("Invalid background history scope");
+  if (value.backgroundAll !== undefined && (typeof value.backgroundAll !== "boolean" || value.backgroundAll && !value.backgroundHistory)) throw new Error("All backgrounds requires an explicit history query");
+  return { processId: value.processId as number | undefined, backgroundAll: value.backgroundAll as boolean | undefined, backgroundHistory: value.backgroundHistory as boolean | undefined, background: value.background as boolean | undefined, cwd: value.cwd as string | undefined, sessionId: value.sessionId as string | undefined, id: value.id as string | undefined,
     cursor: value.cursor as string | undefined, limit: value.limit as number | undefined, active: value.active as boolean | undefined, endedAfter: value.endedAfter as number | undefined, detail: value.detail as boolean | undefined, statuses: value.statuses as string[] | undefined };
 }
 
@@ -24,6 +29,8 @@ export class WorkQueries {
   private maxQueuedBytes: number;
   constructor(model: WorkReadModel, socket: Socket, maxQueuedBytes = 4 * 1024 * 1024) {
     this.model = model; this.socket = socket; this.maxQueuedBytes = maxQueuedBytes;
+    // A failed peer owns no usable subscription; terminate its queued writes too.
+    socket.on("error", () => { this.close(); socket.destroy(); });
     socket.once("close", () => this.close());
     socket.on("drain", () => {
       if (!this.paused) return;
@@ -58,7 +65,7 @@ export class WorkQueries {
           this.close();
           this.event({ type: "resync_required", reason: String(error).slice(0, 512), instanceId: this.model.instanceId });
         }
-      });
+      }, scope);
       if (command.sinceSeq !== undefined && (command.instanceId !== snapshot.instanceId || command.sinceSeq !== snapshot.seq)) {
         return { ...snapshot, resyncRequired: true, resyncReason: command.instanceId !== snapshot.instanceId ? "instance-changed" : "replay-truncated" };
       }

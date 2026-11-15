@@ -1,5 +1,7 @@
 import { appendFileSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { startWorkRuntime } from "./test-support/work-runtime.js";
+import { backgroundObservation, closeBackgroundObservation } from "./work-observation.js";
 import { failurePath, recordFailure } from "./failures.js";
 import { markFailureAttentionDelivered, pendingFailureAttention, readFailureState } from "./shared-failure-observations.js";
 import { packCallbackBatch } from "./shared-callback-batcher.js";
@@ -17,14 +19,20 @@ import {
 } from "./output.js";
 import { inspectMeta, logPathFor, metaPathFor, taskDir, writeMeta } from "./registry.js";
 import { registerTools } from "./tools.js";
-import { ensureBackgroundTasksNavigator, ensureBackgroundTasksNavigatorProvider } from "./navigator-provider.js";
+import { clearBackgroundTasksNavigatorSession, ensureBackgroundTasksNavigator, ensureBackgroundTasksNavigatorProvider } from "./navigator-provider.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, Condition } from "./types.js";
 
 const createdIds: string[] = [];
+const apis: any[] = [];
+let stopRuntime: () => Promise<void>;
+beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
+afterAll(async () => { await stopRuntime(); });
 const origin: BackgroundTaskCallbackOrigin = { cwd: "/tmp/output-scope", sessionId: "session-a" };
 const otherOrigin: BackgroundTaskCallbackOrigin = { cwd: "/tmp/output-scope", sessionId: "session-b" };
 
 afterEach(() => {
+  clearBackgroundTasksNavigatorSession();
+  for (const api of apis.splice(0)) closeBackgroundObservation(api);
   for (const id of createdIds.splice(0)) rmSync(taskDir(id), { recursive: true, force: true });
 });
 
@@ -59,10 +67,12 @@ function textOf(result: { content: Array<{ text?: string }> }): string {
 
 function register(): Record<string, any> {
   const tools: Record<string, any> = {};
-  registerTools({
+  const api = {
     on() {},
     registerTool(tool: any) { tools[tool.name] = tool; },
-  } as any);
+  };
+  apis.push(api);
+  registerTools(api as any);
   return tools;
 }
 
@@ -887,6 +897,9 @@ describe("review regressions (#312)", () => {
     const list = textOf(await tools.bg_task_list.execute("tc", { limit: 100, max_bytes: 4096 }, undefined, undefined, sessionless));
     expect(list).not.toContain(`${legacy.id} `);
     expect(list).toContain(`${ours.id} `);
+    const observed = await backgroundObservation(apis.at(-1), sessionless as any, true);
+    expect(observed.rows.some((row: any) => row.meta.id === legacy.id)).toBe(false);
+    expect(observed.rows.some((row: any) => row.meta.id === ours.id)).toBe(true);
   });
 });
 
