@@ -54,7 +54,7 @@ export class WorkReadModel {
   private revision = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
   private reason: string | undefined = "Initial source inventory is rebuilding.";
-  readonly metrics = { inventories: 0, metadataReads: 0, projections: 0, coordinatorConnections: 1, indexConnections: 1 };
+  readonly metrics = { inventories: 0, metadataReads: 0, projections: 0, coordinatorConnections: 0, indexConnections: 1 };
   readonly runs: string;
   readonly archives: string;
   readonly markers: string;
@@ -319,7 +319,7 @@ export class WorkReadModel {
       const tasks = this.background.read(scope, index);
       const status = this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
       const active = (index ? this.background.read({ ...scope, backgroundHistory: false, active: true }) : tasks).filter(task => task.durable ? task.active : task.status === "running").length;
-      this.metrics.coordinatorConnections = 1 + this.background.connectionCount;
+      this.metrics.coordinatorConnections = Number(Boolean(this.reader.connection(false))) + this.background.connectionCount;
       return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, tasks, status, index?.page, active]), seq: this.revision,
         observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
         status, reason: this.background.reason ?? (index ? this.background.historyReason : undefined),
