@@ -12,7 +12,9 @@ import type { WorkScope } from "./read-model.ts";
 
 /** Root-owned query connection; never opens a supervisor or mutates source facts. */
 export class BackgroundObservation {
-  private db: any;
+  private ownDb: any;
+  private readConnection?: (refresh?: boolean) => any;
+  private get db(): any { return this.readConnection ? this.readConnection(false) : this.ownDb; }
   private identity?: string;
   private knownCoordinator = false;
   private rows: any[] = [];
@@ -24,7 +26,7 @@ export class BackgroundObservation {
   private legacy = new Map<string, { origin: { cwd: string; sessionId?: string }; rows: any[]; references: number }>();
   status: "ready" | "degraded" = "ready";
   reason?: string;
-  get connectionCount() { return this.db ? 1 : 0; }
+  get connectionCount() { return this.readConnection ? 0 : this.ownDb ? 1 : 0; }
   get scopeCount() { return this.legacy.size; }
   livenessReasons(options: { refresh?: boolean } = {}) {
     if (options.refresh !== false) {
@@ -58,7 +60,8 @@ export class BackgroundObservation {
     if (grant.launchToken !== op.launch_token || typeof grant.directory !== "string") throw new Error("Captured runner execution identity differs");
     return grant.directory;
   }
-  constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor"), indexDb?: any, changed = () => {}) {
+  constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor"), indexDb?: any, changed = () => {}, readConnection?: (refresh?: boolean) => any) {
+    this.readConnection = readConnection;
     this.root = root; this.directory = directory;
     if (indexDb) this.history = new BackgroundHistory(indexDb, directory, () => {
       if (this.status === "degraded") throw new Error(this.reason);
@@ -73,10 +76,11 @@ export class BackgroundObservation {
       let identity;
       try { const info = statSync(path, { bigint: true }); identity = `${info.dev}:${info.ino}`; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      if (identity !== this.identity) { this.history?.invalidate(); this.db?.close(); this.db = undefined; this.identity = identity; }
+      if (identity !== this.identity) { this.history?.invalidate(); this.ownDb?.close(); this.ownDb = undefined; this.identity = identity; }
       if (!identity && this.knownCoordinator) throw new Error("Coordinator source disappeared; retaining the previous observation");
       if (identity) {
-        this.db ??= new DatabaseSync(path, { readOnly: true });
+        if (this.readConnection) this.readConnection();
+        else this.ownDb ??= new DatabaseSync(path, { readOnly: true });
         this.knownCoordinator = true;
         const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
         if (!["1", "2", "3", "4"].includes(version)) throw new Error("Unsupported coordinator schema");
@@ -168,8 +172,8 @@ export class BackgroundObservation {
         && (scope.sessionId || row.spawnPid === scope.processId)) && (!scope.active || row.status === "running"))];
   }
   close(): Promise<void> {
-    if (this.history) return this.history.close().then(() => { this.db?.close(); });
-    this.db?.close(); return Promise.resolve();
+    if (this.history) return this.history.close().then(() => { this.ownDb?.close(); });
+    this.ownDb?.close(); return Promise.resolve();
   }
   get historyStatus() { return this.history?.status ?? "degraded"; }
   get historyReason() { return this.history?.reason; }

@@ -225,3 +225,17 @@ test("diagnostic observation uses pushed state without initiating another invent
       "diagnostic polling must not initiate expensive fresh inventories");
   } finally { await f.close(); }
 });
+
+test('Subagents and Background share one coordinator read connection in the query worker', async () => {
+  const f = await fixture();
+  const { openStore } = await import(new URL('../../operation-coordinator/index.ts', import.meta.url).href);
+  const store = openStore({ path: join(f.root, 'operation-coordinator.sqlite') }); store.close();
+  try {
+    const client = await f.client();
+    await f.executor.livenessReasons();
+    await client.get({ cwd: f.root, active: true });
+    await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
+    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator plus one derived index, regardless of domain');
+    assert.equal(f.executor.metrics().coordinatorConnections, 1);
+  } finally { await f.close(); }
+});

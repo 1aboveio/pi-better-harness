@@ -65,6 +65,8 @@ export function createAssignmentReader(path) {
             db ??= new DatabaseSync(path, { readOnly: true });
             return `${identity}:${db.prepare("PRAGMA data_version").get().data_version}`;
         },
+        connection(refresh = true) { if (refresh)
+            this.revision(); return db; },
         read(owner) {
             try {
                 this.revision();

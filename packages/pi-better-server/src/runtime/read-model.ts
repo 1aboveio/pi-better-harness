@@ -65,7 +65,8 @@ export class WorkReadModel {
     this.agentDir = agentDir; this.instanceId = instanceId;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
-    this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish());
+    this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"));
+    this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(), refresh => this.reader.connection(refresh));
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
       started REAL, state TEXT, active INTEGER, ended REAL, payload TEXT);
       CREATE INDEX work_folder ON rows(cwd, started DESC, id DESC);
@@ -73,7 +74,6 @@ export class WorkReadModel {
       CREATE INDEX work_active ON rows(active, started DESC, id DESC);
       CREATE INDEX work_terminal ON rows(active, ended, started DESC, id DESC);
       CREATE INDEX work_state ON rows(state, started DESC, id DESC);`);
-    this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"));
     this.runs = join(options.baseDir ?? join(realpathSync(tmpdir()), "pi-better-subagents"), "runs");
     this.archives = join(options.durableDir ?? process.env.PI_SUBAGENT_DURABLE_DIR ?? join(agentDir, "subagents"), "attempts");
     this.markers = join(this.archives, "../session-state");
