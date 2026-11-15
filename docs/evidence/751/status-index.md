@@ -17,7 +17,7 @@ This index supersedes status claims in earlier checkpoint audits. Their initial 
 | #749/#747 provider and archive budgets | Actual registered provider; 1/50-row rendering and 60 unchanged paints; 4,416/10,000-history × 1/5/10-client matrix with zero unchanged metadata/projection/provider archive/marker work | Validated in green CI8 |
 | Healthy event publication | External atomic commit to matching pushed Unix subscription event, no polling shortcut; directory-entry watchers survive repeated file/child/root replacement | 320/320 platform observations <=1 s; maximum 243.19 ms |
 
-Foundational lifecycle, transport, cancellation, Catalog and Background work remains part of the integrated runtime. Default 30-second idle plus five-second shutdown, 100 admission/shutdown races, exact PID/start/token recovery, query isolation and no foreground mechanical fallback were preserved. The unavailable-continuation fixture advances the existing idle-clock seam only after durable terminal facts and actual client detachment; independent wall-clock lifecycle tests remain intact.
+Foundational lifecycle, transport, cancellation, Catalog and Background work remains part of the integrated runtime. Default 30-second idle plus five-second shutdown, 100 admission/shutdown races, exact PID/start/token recovery, query isolation and no foreground mechanical fallback were preserved. The unavailable-continuation fixture deliberately starts the fixed-runtime successor, verifies its identity and durable terminal facts, then measures real shutdown after client detachment against the default 30-second idle plus five-second shutdown budget. Its focused run measured 30.735 seconds; no clock seam changes the runtime deadline.
 
 ## Final resource conclusions and scope
 
