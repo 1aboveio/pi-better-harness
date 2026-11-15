@@ -186,3 +186,42 @@ test("worker events coalesce behind one acknowledgment and scope changes discard
   } finally { await f.close(); }
 });
 
+
+test("diagnostic liveness does not wait behind SQLite while fresh idle checks still do", { timeout: 20000 }, async () => {
+  const f = await fixture();
+  try {
+    const client = await f.client();
+    await ready(client);
+    await f.executor.livenessReasons();
+    const { finished } = await f.stall();
+    const began = performance.now();
+    const observation = f.executor.observation();
+    assert.ok(performance.now() - began < 100, "diagnostics must not block on the read worker");
+    assert.equal(observation.status, "ready");
+    assert.ok(observation.observedAt);
+    const queued = f.executor.metrics().executor.queued;
+    for (let i = 0; i < 100; i++) f.executor.observation();
+    assert.equal(f.executor.metrics().executor.queued, queued, "status probes enqueue no worker work");
+    let checked = false;
+    const fresh = f.executor.livenessReasons().then(() => { checked = true; });
+    assert.equal(checked, false, "fresh shutdown checks cannot use the diagnostic cache");
+    await finished;
+    await fresh;
+  } finally { await f.close(); }
+});
+
+test("diagnostic observation uses pushed state without initiating another inventory", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const client = await f.client();
+    await ready(client);
+    await f.executor.livenessReasons();
+    const before = f.executor.metrics();
+    assert.equal(typeof before.inventories, "number");
+    f.executor.observation();
+    assert.equal(f.executor.metrics().executor.completed, before.executor.completed,
+      "diagnostic polling uses the pushed observation without a worker request");
+    assert.equal(f.executor.metrics().inventories, before.inventories,
+      "diagnostic polling must not initiate expensive fresh inventories");
+  } finally { await f.close(); }
+});

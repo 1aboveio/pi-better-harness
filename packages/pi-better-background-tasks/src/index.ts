@@ -18,6 +18,7 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   // Created before registerTools so the tools can resolve it lazily; the durable
   // store opens on session activation and closes on switch/unload.
   const observedWaits = createObservedWaitHost(pi, {
+    serverOwnedResults: true,
     notifyParent: (notification, delivery) => {
       getCallbackBatcher(pi).enqueue({
         source: "background-task",

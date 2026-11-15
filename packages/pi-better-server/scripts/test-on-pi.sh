@@ -25,11 +25,11 @@ printf '{ "name": "pi-compat", "private": true }\n' > "$PREFIX/package.json"
 cp "$ROOT_DIR/scripts/isolate-registry.mjs" "$PREFIX/scripts/"
 cp -R "$PKG_DIR/src" "$PKG_DIR/test" "$PKG_DIR/scripts" "$PKG_DIR/package.json" "$PKG_DIR/tsconfig.json" "$PREFIX/packages/pi-better-server/"
 [ -d "$PKG_DIR/codex-plugin" ] && cp -R "$PKG_DIR/codex-plugin" "$PREFIX/packages/pi-better-server/"
-# Background-activity regressions load the real sibling provider against this SDK.
+# Activity and permission regressions load the real sibling providers against this SDK.
 node --input-type=module - "$ROOT_DIR" "$PREFIX" <<'NODE'
 import { cpSync } from "node:fs";
 import { basename, join } from "node:path";
-for (const name of ["pi-better-subagents", "pi-better-background-tasks", "operation-coordinator"]) {
+for (const name of ["pi-better-subagents", "pi-better-background-tasks", "pi-better-sandbox", "operation-coordinator"]) {
   cpSync(join(process.argv[2], "packages", name), join(process.argv[3], "packages", name), {
     recursive: true, filter: path => !["node_modules", ".work", ".pi-compat"].includes(basename(path)),
   });
@@ -39,6 +39,7 @@ NODE
 # Its host-provided peers must keep resolving to the requested Pi above.
 (cd "$PREFIX/packages/pi-better-subagents" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
 (cd "$PREFIX/packages/pi-better-background-tasks" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
+(cd "$PREFIX/packages/pi-better-sandbox" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
 
 cd "$PREFIX/packages/pi-better-server"
 installed="$(node -p "require('$PREFIX/node_modules/@earendil-works/pi-coding-agent/package.json').version")"

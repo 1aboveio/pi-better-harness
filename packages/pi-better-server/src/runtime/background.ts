@@ -39,7 +39,7 @@ export class BackgroundObservation {
     catch (error) { this.status = "degraded"; this.reason = String(error); return []; }
     return operations.flatMap((op: any) => {
       try {
-        const inspection = snapshot(this.directory, op.task_id);
+        const inspection = snapshot(this.directoryFor(op), op.task_id);
         const claim = inspection?.claim;
         return claim && !inspection.terminal && inspection.token === op.launch_token && processMatchesStart(claim.pid, claim.pidStartTime)
           ? [{ kind: "runner", id: op.task_id, owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace }, operationId: op.operation_id,
@@ -50,6 +50,14 @@ export class BackgroundObservation {
     });
   }
   readonly metrics = { runnerSnapshots: 0, activeQueries: 0, historyQueries: 0 };
+  private directoryFor(op: any): string {
+    if (!op.supervision_host_id?.startsWith("server:")) return this.directory;
+    const row = this.db.prepare("SELECT value FROM coordinator_state WHERE key = ?").get(`result-supervision-v1:${op.operation_id}`);
+    if (!row) throw new Error("Captured result-supervision directory unavailable");
+    const grant = JSON.parse(row.value);
+    if (grant.launchToken !== op.launch_token || typeof grant.directory !== "string") throw new Error("Captured runner execution identity differs");
+    return grant.directory;
+  }
   constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor"), indexDb?: any, changed = () => {}) {
     this.root = root; this.directory = directory;
     if (indexDb) this.history = new BackgroundHistory(indexDb, directory, () => {
@@ -105,9 +113,10 @@ export class BackgroundObservation {
   private project(operations: any[]) {
       return operations.map((op: any) => {
         this.metrics.runnerSnapshots++;
-        const inspection = snapshot(this.directory, op.task_id);
+        const directory = this.directoryFor(op);
+        const inspection = snapshot(directory, op.task_id);
         let context: any = {};
-        try { context = JSON.parse(readFileSync(join(this.directory, "observed", `${op.task_id}.json`), "utf8")); }
+        try { context = JSON.parse(readFileSync(join(directory, "observed", `${op.task_id}.json`), "utf8")); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         const terminal = inspection?.terminal === true || op.terminal_revision > 0;
         const status = inspection?.terminal ? inspection.status : op.terminal_revision > 0 ? op.terminal_outcome : inspection?.status ?? "running";

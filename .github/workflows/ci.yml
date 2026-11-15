@@ -79,7 +79,7 @@ jobs:
 
       - name: Real SDK cancellation and exact-token crash recovery
         working-directory: packages/pi-better-server
-        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
 
   windows-verify:
     name: windows-verify
@@ -524,7 +524,7 @@ jobs:
 
       - name: Prove cancellation authority and crash recovery with real processes
         working-directory: packages/pi-better-server
-        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
 
       - name: Run macOS compatibility golden paths
         timeout-minutes: 5

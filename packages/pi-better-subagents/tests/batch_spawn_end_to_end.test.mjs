@@ -45,7 +45,6 @@ process.env.TMPDIR = RUNTIME;
 const AGENT_DIR = join(RUNTIME, "agent");
 process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
 const foregrounds = [];
-const stopRuntime = await startWorkRuntimeFixture();
 
 // All stub packages live under a temp root. Checkout node_modules is never touched.
 const STUBS_DIR = mkdtempSync(join(RUNTIME, "stubs-"));
@@ -325,10 +324,15 @@ describe("subagent_spawn_batch end-to-end", () => {
     let registry;
     let capacity;
     let config;
+    let stopRuntime;
+    let originalAgentDir;
 
     before(async () => {
         origPath = process.env.PATH;
         setupStubs();
+        originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+        process.env.PI_CODING_AGENT_DIR = join(RUNTIME, "agent");
+        stopRuntime = await startWorkRuntimeFixture();
         assertCheckoutNodeModulesUntouched();
         const binDir = makeMockPi();
         process.env.PATH = `${binDir}:${origPath}`;
@@ -367,7 +371,9 @@ describe("subagent_spawn_batch end-to-end", () => {
             await foreground.handlers.session_shutdown?.({ reason: "shutdown" }, foreground.ctx ?? makeCtx());
         }
         await stopOwnedRuntime(serverDir, owner.status === "live" ? owner.owner : undefined);
-        await stopRuntime();
+        await stopRuntime?.();
+        if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
         removeOwnedFixture(RUNTIME);
         assertCheckoutNodeModulesUntouched();
     });

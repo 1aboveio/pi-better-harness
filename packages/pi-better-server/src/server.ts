@@ -20,6 +20,9 @@ import { HostedSession } from "./hosted-session.ts";
 import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts";
 import { runtimeRoot } from "./runtime/root.ts";
 import { RuntimeCancellation, hasPendingCancellation } from "./runtime/cancellation.ts";
+import { RuntimeResultSupervision, hasResultSupervision } from "./runtime/result-supervision.ts";
+import { SharedCatalog } from "./runtime/catalog.ts";
+import { mutationStoreMetrics } from "./runtime/mutation-store.ts";
 import { WorkQueryExecutor } from "./runtime/query-executor.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
@@ -89,16 +92,39 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const instanceId = owner.status === "live" ? owner.owner.token : undefined;
     admitDaemonStartup({ canonicalServerDir: serverDir, agentDir: getAgentDir(), build, intent: startupIntentFromEnv(process.env) });
     let cancellations: RuntimeCancellation | undefined;
-    if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
+    let resultSupervision: RuntimeResultSupervision | undefined;
+    const resultPortKey = Symbol.for("pi-better-server:result-supervision-ports-v1");
+    const resultPorts: Map<string, any> = (globalThis as any)[resultPortKey] ??= new Map();
+    const resultRoot = realpathSync(getAgentDir());
+    const resultPort = { status() {
+      resultSupervision ??= new RuntimeResultSupervision(resultRoot, instanceId!);
+      resultSupervision.reconcile();
+      return { hostId: resultSupervision.hostId, epoch: resultSupervision.epoch, reason: resultSupervision.reason };
+    } };
     let workModel: WorkQueryExecutor | undefined;
+    let registry!: SessionRegistry;
+    cleanupStartup = async () => {
+      try { await registry?.shutdown(); }
+      finally {
+        try { await cancellations?.close(); }
+        finally {
+          resultSupervision?.close();
+          if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
+          await workModel?.close();
+        }
+      }
+    };
+    if (hasResultSupervision(getAgentDir())) resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!);
+    resultPorts.set(resultRoot, resultPort);
+    if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
+    const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
     const work = () => {
       if (!workModel) {
         workModel = new WorkQueryExecutor(realpathSync(getAgentDir()), instanceId!);
       }
       return workModel;
     };
-    const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log, sessionIdleMs: config.sessionIdleMs, now, workClient: () => createLocalWorkClient(work(), realpathSync(getAgentDir())) });
-    cleanupStartup = async () => { await registry.shutdown(); await cancellations?.close(); await workModel?.close(); };
+    registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log, sessionIdleMs: config.sessionIdleMs, now, workClient: () => createLocalWorkClient(work(), realpathSync(getAgentDir())) });
     await registry.resumeAll();
     const nativeHost = new NativeClientHost(registry);
     // Structural port permits independent integration with the shared maintenance owner.
@@ -141,6 +167,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       };
       const control = new ConnectionControl(send);
       let greeted = false;
+      const catalogCommand = catalog.connection();
+      let catalogSubscription: { close(): void } | undefined;
       let workQueries: ReturnType<WorkQueryExecutor["connect"]> | undefined;
       let runtimeInFlight = 0;
 
@@ -191,9 +219,15 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
                 ...registry.list().filter(session => session.live).map(session => ({ kind: "hosted-session", id: session.sessionId })),
                 ...(observation?.reasons ?? [])],
+              livenessObservation: observation ?? { status: "unobserved", reasons: [], observedAt: null },
               nextIdleDeadline: runtimeClients.size > 0 || registry.activeCount > 0 ? null
                 : hostedUsed ? config.daemonIdleMs === 0 || zeroSince === undefined ? null : zeroSince + config.daemonIdleMs
                 : runtimeZeroSince === undefined ? null : runtimeZeroSince + config.runtimeIdleMs } });
+          }
+          if (type === "runtime_result_supervision") {
+            if (!greeted) throw new Error("not_accepted: supervision requires hello");
+            if (Object.keys(command).some(key => !["id", "type"].includes(key))) throw new Error("not_accepted: unsupported supervision field");
+            return reply({ data: resultPort.status() });
           }
           if (type === "runtime_cancel_task" || type === "runtime_query_cancellation" || type === "runtime_cancellation_status") {
             if (!greeted) throw new Error("not_accepted: cancellation requires hello");
@@ -204,6 +238,25 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               cancellations ??= new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
               return reply({ data: await cancellations.handle(command) });
             } finally { runtimeInFlight--; }
+          }
+          if (type === "runtime_bind_catalog_host") {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            catalog.admission.bind(command.authority, socket);
+            return reply({ data: { bound: true } });
+          }
+          if (type === "runtime_subscribe_catalog") {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            catalogSubscription?.close();
+            const subscription = catalog.observe(() => catalogCommand({ type: "runtime_get_catalog", overlay: command.overlay }), snapshot => {
+              if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+              send({ type: "event", event: { type: "runtime_catalog_snapshot", snapshot } } as unknown as ServerMessage);
+            });
+            catalogSubscription = subscription;
+            return reply({ data: subscription.snapshot });
+          }
+          if (["runtime_register_catalog", "runtime_get_catalog", "runtime_get_catalog_scope", "runtime_edit_catalog"].includes(type)) {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            return reply({ data: catalogCommand(command) });
           }
           if (type === "runtime_register_client") {
             if (!greeted) throw new Error("runtime_register_client requires hello");
@@ -235,6 +288,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             try {
               workQueries ??= work().connect(socket);
               const data = await workQueries.handle(command);
+              if (type === "runtime_get_metrics") {
+                return reply({ data: { ...JSON.parse(data.json), mutationSqlite: mutationStoreMetrics(getAgentDir()) } });
+              }
               if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
               // Snapshot JSON is encoded in the worker; only the small envelope runs here.
               const envelope = JSON.stringify({ id, type: "response", command: type, success: true });
@@ -366,6 +422,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       socket.on("data", (chunk: string) => decoder.push(chunk));
       socket.on("error", () => undefined);
       socket.on("close", () => {
+        catalogSubscription?.close();
+        catalog.admission.close(socket);
         workQueries?.close();
         sockets.delete(socket);
         runtimeClients.delete(socket);
@@ -378,6 +436,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
     cleanupStartup = async () => {
       await cancellations?.close();
+      resultSupervision?.close();
+      if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
       await workModel?.close();
       for (const socket of sockets) socket.destroy();
       server.close();
@@ -494,6 +554,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           for (const socket of sockets) socket.destroy();
           await closed;
           await cancellations?.close();
+          resultSupervision?.close();
+          if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
           await workModel?.close();
           await registry.shutdown();
           await Promise.allSettled([...dispatches]);
@@ -515,8 +577,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     }
     return daemon;
   } catch (error) {
-    await cleanupStartup();
-    releaseOwner();
+    try { await cleanupStartup(); } finally { releaseOwner(); }
     throw error;
   }
 }

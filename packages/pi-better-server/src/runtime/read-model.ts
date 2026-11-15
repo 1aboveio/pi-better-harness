@@ -154,34 +154,46 @@ export class WorkReadModel {
         let names: string[];
         try { names = await readdir(directory); }
         catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
-        for (const name of names) {
-          const id = archived ? name.replace(/\.json$/, "") : name;
-          if (!safeId.test(id) || (archived && !name.endsWith(".json"))) continue;
-          const path = archived ? join(directory, name) : join(directory, name, "meta.json");
-          try {
-            const info = await stat(path, { bigint: true });
-            const signature = `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
-            let entry = this.files.get(path);
-            if (entry?.signature !== signature) {
-              this.metrics.metadataReads++;
-              const raw = await readFile(path, "utf8");
-              if (directory === this.markers) {
-                const marker = parseArchivedSessionState(raw, id);
-                if (!marker) throw new Error(`Unusable session marker: ${id}`);
-                entry = { signature, meta: marker };
-                next.set(path, entry);
-                continue;
+        // Bound filesystem concurrency without serializing every archive round trip.
+        const candidates = names.filter(name => safeId.test(archived ? name.replace(/\.json$/, "") : name)
+          && (!archived || name.endsWith(".json")));
+        for (let offset = 0; offset < candidates.length; offset += 32) {
+          const group = candidates.slice(offset, offset + 32);
+          const observations = await Promise.all(group.map(async name => {
+            const path = archived ? join(directory, name) : join(directory, name, "meta.json");
+            try { return { info: await stat(path, { bigint: true }) }; }
+            catch (error) { return { error }; }
+          }));
+          for (const [index, name] of group.entries()) {
+            const id = archived ? name.replace(/\.json$/, "") : name;
+            const path = archived ? join(directory, name) : join(directory, name, "meta.json");
+            try {
+              const observation = observations[index]!;
+              if (!observation.info) throw observation.error;
+              const info = observation.info;
+              const signature = `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
+              let entry = this.files.get(path);
+              if (entry?.signature !== signature) {
+                this.metrics.metadataReads++;
+                const raw = await readFile(path, "utf8");
+                if (directory === this.markers) {
+                  const marker = parseArchivedSessionState(raw, id);
+                  if (!marker) throw new Error(`Unusable session marker: ${id}`);
+                  entry = { signature, meta: marker };
+                  next.set(path, entry);
+                  continue;
+                }
+                const meta = archived ? parseArchivedAttempt(raw, id, join(this.archives, "../sessions")) : JSON.parse(raw);
+                if (meta?.id !== id || typeof meta.cwd !== "string" || !Number.isFinite(meta.startedAt) || typeof meta.status !== "string") throw new Error(`Unusable run record: ${id}`);
+                entry = { signature, meta };
               }
-              const meta = archived ? parseArchivedAttempt(raw, id, join(this.archives, "../sessions")) : JSON.parse(raw);
-              if (meta?.id !== id || typeof meta.cwd !== "string" || !Number.isFinite(meta.startedAt) || typeof meta.status !== "string") throw new Error(`Unusable run record: ${id}`);
-              entry = { signature, meta };
+              next.set(path, entry!);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
             }
-            next.set(path, entry!);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            if (++batch % 256 === 0) await yieldTurn();
+            if (this.closed) return;
           }
-          if (++batch % 256 === 0) await yieldTurn();
-          if (this.closed) return;
         }
       }
       let coordinator: string;
@@ -245,14 +257,23 @@ export class WorkReadModel {
       let after: string;
       try { after = this.reader.revision(); } catch { after = "unknown"; }
       if (after !== coordinator) { this.state = "degraded"; this.reason = "Coordinator changed during observation; retrying."; this.dirty = true; this.publish(); return; }
-      for (const [path, entry] of next) {
-        if (!affected.has(family(entry.meta))) continue;
-        const info = await stat(path, { bigint: true });
-        if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
-          this.dirty = true;
-          throw new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
+      const verify = [...next].filter(([, entry]) => affected.has(family(entry.meta)));
+      for (let offset = 0; offset < verify.length; offset += 32) {
+        const group = verify.slice(offset, offset + 32);
+        const observations = await Promise.all(group.map(async ([path]) => {
+          try { return { info: await stat(path, { bigint: true }) }; }
+          catch (error) { return { error }; }
+        }));
+        for (const [index, [, entry]] of group.entries()) {
+          const observation = observations[index]!;
+          if (!observation.info) throw observation.error;
+          const info = observation.info;
+          if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
+            this.dirty = true;
+            throw new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
+          }
+          if (++batch % 256 === 0) await yieldTurn();
         }
-        if (++batch % 256 === 0) await yieldTurn();
       }
       if (this.closed) return;
       this.db.exec("BEGIN");

@@ -7,6 +7,7 @@
  * and leaves no partial record.
  */
 import { StoreError } from "./errors.ts";
+import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.ts";
 import type { TaskCancellationIntent, TaskCancellationRequest } from "./task-cancellation.ts";
 import { repairFailedResume, type RepairResumeInput } from "./recovery.ts";
@@ -33,6 +34,7 @@ import {
 import {
     getChangeRevision as readChangeRevision,
     readDiscoveryClaim as readClaim,
+    readDiscoveryState,
     releaseDiscoveryClaim as deleteDiscoveryClaim,
     tryClaimDiscovery as writeDiscoveryClaim,
 } from "./discovery.ts";
@@ -117,6 +119,14 @@ import {
 } from "./types.ts";
 
 export interface Store {
+    resultScopeManaged(scope: string): boolean;
+    handoffResultScope(input: Parameters<typeof handoffResultScope>[1]): ReturnType<typeof handoffResultScope>;
+    resultSupervision(operationId: string): ReturnType<typeof resultSupervision>;
+    resultSupervisions(activeOnly?: boolean): ReturnType<typeof resultSupervisions>;
+    handoffResultSupervision(input: Parameters<typeof handoffResultSupervision>[1]): ReturnType<typeof handoffResultSupervision>;
+    handoffResultSupervisions(input: Parameters<typeof handoffResultSupervisions>[1]): ReturnType<typeof handoffResultSupervisions>;
+    recoverResultSupervision(input: Parameters<typeof recoverResultSupervision>[1]): void;
+    publishSupervisedResult(input: Parameters<typeof publishSupervisedResult>[1]): ReturnType<typeof publishSupervisedResult>;
     unknownTaskCancellation(input: TaskCancellationRequest): TaskCancellationIntent;
     taskCancellationManaged(operationId: string): boolean;
     pendingTaskCancellations(): ReturnType<typeof pendingTaskCancellations>;
@@ -182,6 +192,7 @@ export interface Store {
 
     /** The shared discovery leader for this store/supervisor scope, if recorded. */
     readDiscoveryClaim(scope: string): DiscoveryClaimRecord | null;
+    readDiscoveryState(scope: string): ReturnType<typeof readDiscoveryState>;
     /**
      * Compare-and-swap a discovery claim. The caller must name the exact claim it
      * observed, or null for none; a stale contender receives null and must not
@@ -324,6 +335,14 @@ export function openStore(options: StoreOptions): Store {
     };
 
     const store: Store = {
+        resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
+        handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
+        resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
+        resultSupervisions(activeOnly) { alive(); return resultSupervisions(ctx, activeOnly); },
+        handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
+        handoffResultSupervisions(input) { alive(); return handoffResultSupervisions(ctx, input); },
+        recoverResultSupervision(input) { alive(); recoverResultSupervision(ctx, input); },
+        publishSupervisedResult(input) { alive(); return publishSupervisedResult(ctx, input); },
         unknownTaskCancellation(input) { alive(); return unknownTaskCancellation(ctx, input); },
         taskCancellationManaged(operationId) { alive(); return taskCancellationManaged(ctx, operationId); },
         pendingTaskCancellations() { alive(); return pendingTaskCancellations(ctx); },
@@ -382,6 +401,7 @@ export function openStore(options: StoreOptions): Store {
                 terminalRevision === undefined ? undefined : requireCounter("terminalRevision", terminalRevision),
             );
         },
+        readDiscoveryState(scope) { alive(); return readDiscoveryState(ctx, scope); },
         readDiscoveryClaim(scope) {
             alive();
             return readClaim(ctx, scope);

@@ -47,6 +47,14 @@ export function readDiscoveryClaim(ctx: StoreContext, scope: unknown): Discovery
     return readClaim(ctx, requireId("scope", scope));
 }
 
+/** Read scope transfer and its discovery claim from one SQLite snapshot. */
+export function readDiscoveryState(ctx: StoreContext, scope: string): { managed: boolean; claim: DiscoveryClaimRecord | null } {
+    scope = requireId("scope", scope);
+    const row = getRow(ctx, `SELECT d.*, EXISTS(SELECT 1 FROM coordinator_state WHERE key = ?) AS managed
+        FROM (SELECT 1) LEFT JOIN discovery_claims d ON d.scope = ?`, "result-scope-v1:" + scope, scope)!;
+    return { managed: Number(row.managed) === 1, claim: row.scope == null ? null : mapClaim(row) };
+}
+
 export function tryClaimDiscovery(
     ctx: StoreContext,
     input: TryClaimDiscoveryInput,
@@ -61,6 +69,7 @@ export function tryClaimDiscovery(
     const expectedToken = input.expected === null ? null : requireId("expected.token", input.expected.token);
 
     return ctx.transaction(() => {
+        if (getRow(ctx, "SELECT value FROM coordinator_state WHERE key = ?", "result-scope-v1:" + scope)) return null;
         const current = readClaim(ctx, scope);
         if (input.expected === null) {
             if (current) return null;

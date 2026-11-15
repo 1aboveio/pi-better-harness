@@ -17,6 +17,18 @@ import { SCHEMA_VERSION } from "./types.ts";
 import { StoreError } from "./errors.ts";
 import { columnText, getRow, getRows, run, type StoreContext } from "./sqlite.ts";
 
+// Enforce the handoff even for an older process still using its bundled store.
+// Unknown legacy scopes conservatively conflict with any managed root scope.
+const RESULT_ADMISSION_FENCE = `CREATE TRIGGER IF NOT EXISTS result_scope_admission_v1
+    BEFORE INSERT ON operations
+    WHEN NEW.observer_kind = 'local-supervisor'
+      AND COALESCE(json_extract(NEW.supervision_json, '$.resultAdapter'), 0) != 1
+      AND EXISTS (SELECT 1 FROM coordinator_state
+          WHERE key LIKE 'result-scope-v1:%'
+            AND (json_extract(NEW.supervision_json, '$.resultScope') IS NULL
+              OR key = 'result-scope-v1:' || json_extract(NEW.supervision_json, '$.resultScope')))
+    BEGIN SELECT RAISE(ABORT, 'permission-unavailable: legacy launch into managed result scope'); END`;
+
 const DDL: readonly string[] = [
     `CREATE TABLE task_cancellation_authorities (
         credential_hash TEXT PRIMARY KEY,
@@ -237,6 +249,7 @@ const DDL: readonly string[] = [
         generation INTEGER NOT NULL,
         PRIMARY KEY (wait_id, generation)
     )`,
+    RESULT_ADMISSION_FENCE,
 ];
 
 const SCHEMA_VERSION_KEY = "schema_version";
@@ -293,6 +306,7 @@ export function ensureSchema(ctx: StoreContext): void {
     if (recorded < SCHEMA_VERSION) {
         if (recorded === 3) {
             ctx.transaction(() => {
+                ensureAdditiveSchema(ctx);
                 ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE assignment_repairs"))!);
                 run(ctx, "UPDATE schema_meta SET value = ? WHERE key = ?", String(SCHEMA_VERSION), SCHEMA_VERSION_KEY);
             });
@@ -339,7 +353,10 @@ function ensureAdditiveSchema(ctx: StoreContext): void {
         && hasTable("task_cancellation_requests")
         && hasTable("task_cancellation_authorities")
         && getRows(ctx, "PRAGMA table_info(task_cancellation_requests)").some(row => row.name === "result_json")
-    ) return;
+    ) {
+        ctx.db.exec(RESULT_ADMISSION_FENCE);
+        return;
+    }
 
     ctx.transaction(() => {
         ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE task_cancellation_requests"))!.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
@@ -365,6 +382,7 @@ function ensureAdditiveSchema(ctx: StoreContext): void {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )`);
+        ctx.db.exec(RESULT_ADMISSION_FENCE);
     });
 }
 

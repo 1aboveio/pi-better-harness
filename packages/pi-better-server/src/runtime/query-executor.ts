@@ -13,7 +13,7 @@ interface Query {
 }
 export type ReadStream = Pick<Duplex, "destroyed" | "writableLength" | "write" | "on" | "once" | "off">;
 interface Stream { socket: ReadStream; paused: boolean; generation: number; drain: () => void; close: () => void }
-interface WorkerMetrics { sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
+interface WorkerMetrics { inventories?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
 export interface QueryExecutorOptions {
   capacity?: number; timeoutMs?: number; maxConnections?: number;
   workerUrl?: URL;
