@@ -36,6 +36,7 @@ export class BackgroundHistory {
   private scheduled = false;
   private timer?: ReturnType<typeof setInterval>;
   private changes = 0;
+  private observedVersion = "";
   status: "ready" | "rebuilding" | "degraded" = "rebuilding";
   reason?: string;
   readonly metrics = { inventories: 0, metadataReads: 0, projections: 0 };
@@ -81,6 +82,12 @@ export class BackgroundHistory {
     setImmediate(() => { this.scheduled = false; if (!this.closed && !this.pending) this.startRefresh(); });
   }
 
+  reconcile() {
+    if (!this.activated || this.closed) return;
+    const version = this.sourceVersion();
+    if (version !== this.observedVersion) { this.observedVersion = version; this.invalidate(); }
+  }
+
   private startRefresh(version?: string) {
     if (this.closed || this.pending) return;
     const previous = this.status, changes = this.changes;
@@ -102,6 +109,7 @@ export class BackgroundHistory {
       this.timer = setInterval(() => this.startRefresh(), 30000); this.timer.unref();
     }
     const version = this.sourceVersion();
+    this.observedVersion = version;
     // Legacy writers have no entity notification yet; share one slower signature inventory.
     if (!this.pending && (this.version !== version || Date.now() - this.completed >= 30000)) {
       this.startRefresh(version);

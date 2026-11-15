@@ -69,6 +69,7 @@ export class BackgroundObservation {
       const changed = signature !== this.signature || this.status !== "ready";
       if (changed) this.history?.invalidate();
       this.rows = rows; this.signature = signature; this.status = "ready"; this.reason = undefined;
+      this.history?.reconcile();
       return changed;
     } catch (error) {
       const reason = String(error);

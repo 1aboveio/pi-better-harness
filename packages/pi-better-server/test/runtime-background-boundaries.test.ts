@@ -18,7 +18,7 @@ test("Background history queries observe work completed between shared active re
   const executor = new WorkQueryExecutor(root, "history-instance", {
     modelOptions: { baseDir: join(root, "subagents"), durableDir: join(root, "archives"), intervalMs: 50 },
   });
-  const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0, write: () => true });
+  const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0, write: (_line: string): boolean => true });
   const client = executor.connect(socket as unknown as Socket);
   const scope = { background: true, backgroundHistory: true, cwd: root, sessionId: "parent" };
   const read = async () => {
@@ -42,7 +42,14 @@ test("Background history queries observe work completed between shared active re
     const history = await read();
     assert.equal(history.rows.length, 1, "a warmed history scope must include a newly completed operation");
     assert.equal(history.rows[0].meta.status, "succeeded");
+    const events: any[] = [];
+    socket.write = (line: string) => { events.push(JSON.parse(line)); return true; };
+    await client.handle({ type: "runtime_subscribe", scope });
     writer.registerWait({ waitId: "terminal-wait", owner, dependencies: [{ operationId: "history-op" }], continuationNote: "Read terminal evidence" });
+    const deadline = Date.now() + 5000;
+    while (!events.some(event => event.event?.snapshot?.status === "ready" && event.event.snapshot.rows[0]?.meta.waits[0]?.waitId === "terminal-wait")) {
+      assert.ok(Date.now() < deadline, "coordinator-only terminal history changes did not notify the subscriber"); await delay(20);
+    }
     assert.equal((await read()).rows[0].meta.waits[0].waitId, "terminal-wait", "waits added after completion invalidate the indexed projection");
   } finally {
     client.close(); await executor.close(); writer.close(); rmSync(root, { recursive: true, force: true });
