@@ -10,12 +10,12 @@ import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 
-async function fixture(options: { capacity?: number; timeoutMs?: number } = {}) {
+async function fixture(options: { capacity?: number; timeoutMs?: number; workerUrl?: URL } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
   mkdirSync(join(root, "runs"));
   const transport = mkdtempSync("/tmp/query-socket-");
   const executor = new WorkQueryExecutor(root, "query-instance", { ...options,
-    workerUrl: new URL("./support/slow-query-worker.mjs", import.meta.url),
+    workerUrl: options.workerUrl ?? new URL("./support/slow-query-worker.mjs", import.meta.url),
     modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 } });
   const sockets = new Set<Socket>();
   const server = createServer(socket => {
@@ -73,6 +73,108 @@ async function ready(client: WorkClient) {
     const stop = client.onChange(snapshot => { if (snapshot.status === "ready") { clearTimeout(timeout); stop(); resolve(); } });
   });
 }
+
+test("an exact-ID query returns rebuilding without blocking all reads on the initial inventory", { timeout: 10000 }, async () => {
+  const f = await fixture({ timeoutMs: 500, workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
+  try {
+    const blocked = new Promise<void>(resolve => {
+      f.worker.on("message", message => { if (message.type === "inventory-blocked") resolve(); });
+    });
+    const client = await f.client();
+    await blocked;
+    const [exact, other] = await Promise.all([
+      client.get({ id: "sa_initial_inventory", limit: 1 }),
+      client.get({ limit: 2 }),
+    ]);
+    assert.equal(exact.status, "rebuilding");
+    assert.equal(other.status, "rebuilding");
+    assert.equal(f.executor.metrics().executor.timeouts, 0);
+    assert.equal(f.executor.metrics().executor.worker, "running");
+    f.worker.postMessage({ type: "release-inventory" });
+    await ready(client);
+    assert.equal((await client.get({ id: "sa_initial_inventory", limit: 1 })).status, "ready");
+  } finally { await f.close(); }
+});
+
+test("a failed worker recovers existing subscriptions under a new observation epoch", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const directory = join(f.root, "runs", "sa_recovery");
+    mkdirSync(directory);
+    const write = (name: string) => writeFileSync(join(directory, "meta.json"), JSON.stringify({
+      id: "sa_recovery", cwd: f.root, status: "completed", startedAt: 1, name,
+    }));
+    write("first");
+    const client = await f.client();
+    await ready(client);
+    await client.subscribe({ id: "sa_recovery", limit: 1 });
+    write("latest");
+    const until = Date.now() + 3000;
+    while (client.snapshot?.rows[0]?.meta.name !== "latest") {
+      assert.ok(Date.now() < until, "the original subscription did not observe the source update");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const previous = client.snapshot!;
+    assert.ok(previous.seq > 1);
+    let resynced = false;
+    const recovered = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { stop(); reject(new Error("read worker never recovered the existing subscription")); }, 3000);
+      const stop = client.onChange(snapshot => {
+        if (snapshot.instanceId !== previous.instanceId && snapshot.resyncRequired) resynced = true;
+        if (snapshot.status === "ready" && snapshot.instanceId !== previous.instanceId && snapshot.rows[0]?.meta.name === "latest") {
+          clearTimeout(timer); stop(); resolve();
+        }
+      });
+    });
+    await f.worker.terminate();
+    await recovered;
+    assert.equal(client.closed, false);
+    assert.equal(resynced, true);
+    assert.equal(f.executor.metrics().executor.worker, "running");
+    assert.equal((await client.get({ id: "sa_recovery", limit: 1 })).rows[0]!.meta.name, "latest");
+  } finally { await f.close(); }
+});
+
+test("repeated worker failures exhaust a bounded recovery budget", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const client = await f.client();
+    await ready(client);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const epoch = client.snapshot!.instanceId;
+      const worker = (f.executor as unknown as { worker: Worker }).worker;
+      await worker.terminate();
+      if (attempt < 2) {
+        const until = Date.now() + 3000;
+        while (client.snapshot?.status !== "ready" || client.snapshot.instanceId === epoch) {
+          assert.ok(Date.now() < until, "a permitted recovery did not finish");
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      }
+    }
+    await assert.rejects(client.get({}), /recovery budget exhausted/);
+    await new Promise(resolve => setTimeout(resolve, 700));
+    assert.equal(f.executor.metrics().executor.restarts, 2);
+    assert.equal(f.executor.metrics().executor.worker, "stopped");
+    assert.equal(f.executor.metrics().executor.recoveryPending, false);
+    assert.equal((await client.request("ping")).ok, true);
+  } finally { await f.close(); }
+});
+
+test("closing an executor cancels pending recovery without starting another worker", { timeout: 5000 }, async () => {
+  const f = await fixture();
+  try {
+    const client = await f.client();
+    await ready(client);
+    await f.worker.terminate();
+    assert.equal(f.executor.metrics().executor.recoveryPending, true);
+    await f.executor.close();
+    await new Promise(resolve => setTimeout(resolve, 700));
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+    assert.equal(f.executor.metrics().executor.recoveryPending, false);
+    assert.equal(f.executor.metrics().executor.worker, "stopped");
+  } finally { await f.close(); }
+});
 
 test("slow real SQLite work leaves socket RPC responsive and overlapping reads share bounded admission", { timeout: 20000 }, async t => {
   const f = await fixture({ capacity: 2 });

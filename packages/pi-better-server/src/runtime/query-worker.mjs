@@ -106,10 +106,11 @@ parentPort.on("message", async message => {
       return;
     }
     if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe"].includes(command.type)) throw new Error("Unsupported read operation");
-    if (command.type === "runtime_get_snapshot" && command.scope?.id) await model.ensureId(command.scope.id);
+    const indexed = command.type !== "runtime_get_snapshot" || !command.scope?.id || await model.ensureId(command.scope.id);
     const state = session(message.connection);
     state.generation = message.generation; state.pending = undefined;
-    const value = state.queries.handle(command);
+    let value = state.queries.handle(command);
+    if (!indexed && value.status === "ready") value = { ...value, status: "rebuilding", reason: "The requested run is being indexed; retry after reconciliation." };
     parentPort.postMessage({ type: "reply", id: message.id, json: encoded.get(value) ?? JSON.stringify(value), metrics: metrics() });
   } catch (error) {
     parentPort.postMessage({ type: "reply", id: message.id, error: String(error).slice(0, 512), metrics: metrics() });

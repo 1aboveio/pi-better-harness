@@ -47,6 +47,7 @@ export function readAssignmentWaits(path, owner, connection) {
 export function createAssignmentReader(path) {
     let db;
     let identity;
+    let snapshot = false;
     const statements = new Map();
     return {
         revision() {
@@ -54,6 +55,7 @@ export function createAssignmentReader(path) {
             const stat = statSync(path, { bigint: true });
             const next = `${stat.dev}:${stat.ino}`;
             if (identity !== next) {
+                if (snapshot) throw new Error("Coordinator identity changed during observation");
                 db?.close();
                 db = undefined;
                 statements.clear();
@@ -62,6 +64,21 @@ export function createAssignmentReader(path) {
             const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
             db ??= new DatabaseSync(path, { readOnly: true });
             return `${identity}:${db.prepare("PRAGMA data_version").get().data_version}`;
+        },
+        beginSnapshot() {
+            this.revision();
+            if (snapshot) throw new Error("Coordinator snapshot already open");
+            db.exec("BEGIN");
+            snapshot = true;
+            const release = () => {
+                if (!snapshot) return;
+                try { db.exec("ROLLBACK"); } finally { snapshot = false; }
+            };
+            try {
+                // Pin the WAL read view before recording its revision; other writers keep advancing.
+                db.prepare("SELECT count(*) FROM sqlite_schema").get();
+                return { revision: this.revision(), release };
+            } catch (error) { release(); throw error; }
         },
         read(owner) {
             try {
@@ -98,6 +115,6 @@ export function createAssignmentReader(path) {
                 return new Map([...hashes].map(([key, hash]) => [key, hash.digest("hex")]));
             } catch { return undefined; }
         },
-        close() { db?.close(); db = undefined; statements.clear(); identity = undefined; },
+        close() { if (snapshot) { db.exec("ROLLBACK"); snapshot = false; } db?.close(); db = undefined; statements.clear(); identity = undefined; },
     };
 }

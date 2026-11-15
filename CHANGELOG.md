@@ -4,6 +4,57 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.48.0] - 2026-11-16
+
+### Added
+
+- Bundle shared Catalog management and durable Background result supervision from the unified runtime. (#751, #789)
+
+### Fixed
+
+- Keep exact-ID reads responsive during large initial inventories and recover failed read workers with a bounded restart budget and a fresh observation epoch.
+- Reuse unpublished parsing work after source changes, observe coordinator writes through a coherent read snapshot, and avoid scheduling another inventory solely because the current scan is slow.
+- Bundle Server 0.4.0, Subagents 0.34.0, Background Tasks 0.17.0 and Goal 0.14.2.
+
+## [pi-better-server@0.4.0] - 2026-11-16
+
+### Added
+
+- Manage scoped Catalog observations and mutations, launch admission, and durable Background result supervision in the unified runtime. (#751, #789)
+
+### Fixed
+
+- Return an explicit rebuilding result for an ID awaiting indexing without blocking the shared read queue.
+- Restart failed read workers at most twice per minute while clients remain connected; resynchronize existing subscriptions under a fresh observation epoch and cancel pending recovery on shutdown.
+- Yield inventory work by elapsed time, retain unpublished retry caches after concurrent metadata changes, and pin a read-only coordinator snapshot so unrelated writes cannot discard the initial inventory.
+- Avoid periodic rescan requests while an inventory is already running.
+
+## [pi-better-subagents@0.34.0] - 2026-11-16
+
+### Added
+
+- Route Catalog reads, edits and launch admission through the shared runtime, with reconnect support and launch cancellation. (#751, #789)
+
+### Fixed
+
+- Carry the coordinator reader's bounded read-snapshot support in standalone and bundled installations.
+
+## [pi-better-background-tasks@0.17.0] - 2026-11-16
+
+### Added
+
+- Persist Background result-supervision phases and recover terminal publication through the shared runtime. (#751, #789)
+
+### Fixed
+
+- Carry the coordinator reader's bounded read-snapshot support in standalone and bundled installations.
+
+## [pi-better-goal@0.14.2] - 2026-11-16
+
+### Fixed
+
+- Carry the shared coordinator reader's read-only snapshot support while retaining standalone Goal behavior.
+
 ## [pi-better-harness@0.47.0] - 2026-11-16
 
 ### Added
