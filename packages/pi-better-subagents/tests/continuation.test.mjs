@@ -376,6 +376,7 @@ describe("completed-subagent continuation", () => {
             // terminal callback. Let that handoff settle before snapshotting, so the
             // only thing this test observes changing later is continuation's work.
             await deliveredOutcome(h, killedId, 6000);
+            await waitTerminal(killedId);
 
             // The killed attempt is now a saved conversation, while the other
             // terminal outcomes keep their existing refusal.

@@ -2221,7 +2221,11 @@ function continuationPlanFor(sessionId: string, origin: RunCallbackOrigin | unde
             `Check the session id reported by the launching attempt, or omit session_id to start a new conversation.`,
         );
     }
-    return planContinuation({ id: latest.id, prior: latest, origin, others });
+    // The activity index chooses the attempt, not its frozen execution recipe.
+    // Another process may have republished the authoritative record since indexing.
+    const current = readMeta(latest.id);
+    if (!current) throw new ContinuationError(`Cannot continue ${latest.id}: its saved run record is unavailable.`);
+    return planContinuation({ id: latest.id, prior: current, origin, others });
 }
 
 function timingSchemaFields() {
