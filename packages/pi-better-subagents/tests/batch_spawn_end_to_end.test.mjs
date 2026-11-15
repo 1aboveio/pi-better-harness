@@ -33,7 +33,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { describe, it, before, beforeEach, after } from "node:test";
-import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import assert from "node:assert/strict";
 import { inspectDaemonOwner } from "../../pi-better-server/src/daemon-owner.ts";
 import { removeOwnedFixture, stopOwnedRuntime } from "../../../scripts/test-support/remove-owned-fixture.mjs";
@@ -46,7 +45,6 @@ process.env.TMPDIR = RUNTIME;
 const AGENT_DIR = join(RUNTIME, "agent");
 process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
 const foregrounds = [];
-const stopRuntime = await startWorkRuntimeFixture();
 
 // All stub packages live under a temp root. Checkout node_modules is never touched.
 const STUBS_DIR = mkdtempSync(join(RUNTIME, "stubs-"));
