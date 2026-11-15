@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 
 /** Read-only, bounded projection input. Never creates/migrates a database. */
 export function readAssignmentWaits(path, owner, connection) {
@@ -71,6 +72,29 @@ export function createAssignmentReader(path) {
             } catch {
                 return { verified: false, waits: [], reason: "Coordinator state is unverified; compatible supervision is unavailable." };
             }
+        },
+        conversationRevisions() {
+            try {
+                this.revision();
+                const hashes = new Map();
+                const add = (sessionId, workspace, value) => {
+                    const key = JSON.stringify([sessionId, workspace]);
+                    if (!hashes.has(key)) hashes.set(key, createHash("sha256"));
+                    hashes.get(key).update(JSON.stringify(value));
+                };
+                // One source pass per changed database revision, instead of one
+                // projection/query/log parse for every historical attempt.
+                for (const row of db.prepare(`SELECT w.*, (SELECT json_group_array(attempt_id)
+                    FROM resume_claims c WHERE c.wait_id = w.wait_id AND c.generation = w.generation) AS claimed_attempts
+                    FROM waits w WHERE owner_kind = 'worker-conversation' ORDER BY wait_id, generation`).all()) {
+                    add(row.owner_session_id, row.owner_workspace, row);
+                }
+                for (const row of db.prepare("SELECT record_json FROM assignment_outcomes ORDER BY assignment_id").all()) {
+                    const record = JSON.parse(row.record_json);
+                    add(record.owner.sessionId, record.owner.workspace, record);
+                }
+                return new Map([...hashes].map(([key, hash]) => [key, hash.digest("hex")]));
+            } catch { return undefined; }
         },
         close() { db?.close(); db = undefined; statements.clear(); identity = undefined; },
     };

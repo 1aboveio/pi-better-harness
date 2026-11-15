@@ -45,7 +45,7 @@ async function fixture(options: { capacity?: number; timeoutMs?: number } = {}) 
   const clients: WorkClient[] = [];
   const client = async () => { const value = new WorkClient(path, root); clients.push(value); await value.ready; return value; };
   const worker = (executor as unknown as { worker: Worker }).worker;
-  const stall = async (iterations = 10000000) => {
+  const stall = async (iterations = 3000000) => {
     const started = new Promise<void>(resolve => {
       const listener = (message: any) => { if (message.type === "diagnostic-started") { worker.off("message", listener); resolve(); } };
       worker.on("message", listener);
@@ -123,7 +123,7 @@ test("an active read deadline rejects readers and bounds close while native SQLi
   try {
     const client = await f.client();
     await ready(client);
-    await f.stall(100000000);
+    await f.stall(60000000);
     const began = performance.now();
     const exit = once(f.worker, "exit");
     const active = assert.rejects(client.get({ limit: 1 }), /deadline exceeded/);

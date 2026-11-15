@@ -12,6 +12,12 @@ Normal operation retains one derived-index connection and at most one coordinato
 connection. Both are counted by actual database constructor/close instrumentation
 inside the worker; test budgets add any main-thread connections separately.
 
+A coordinator revision change performs one read-only source pass to fingerprint
+waits, resume-claim lineage and assignment outcomes by conversation. Only changed
+conversations are reprojected; unknown source/schema state conservatively retries
+coordinator-bound rows. An unrelated wait update does not reparse historical logs
+or reproject every archived attempt.
+
 The main event loop handles the existing bounded LF-JSON protocol, small response
 envelopes, pre-encoded snapshot writes, admission, deadlines and event delivery.
 It does not run read-model SQLite, filesystem inventory, log parsing or projections.
@@ -63,7 +69,7 @@ The close API stops waiting after one second, but neither worker `unref()` nor
 `process.exit()` proves that the process has exited while native SQLite is busy.
 The guardian/lifecycle implementation in #755 must enforce and verify the process
 hard-stop budget after graceful shutdown; this query slice does not claim that
-epic acceptance criterion. A test-only 100-million-row recursive SQLite query
+epic acceptance criterion. A test-only 60-million-row recursive SQLite query
 demonstrates the limitation without exposing arbitrary SQL over the protocol.
 
 ## Measurements And Remaining Evidence

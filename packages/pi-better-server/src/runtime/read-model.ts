@@ -46,6 +46,7 @@ export class WorkReadModel {
   private closed = false;
   private inventory = 0;
   private coordinator = "unknown";
+  private coordinatorConversations?: Map<string, string>;
   private revision = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
   private reason: string | undefined = "Initial source inventory is rebuilding.";
@@ -156,6 +157,7 @@ export class WorkReadModel {
       }
       let coordinator: string;
       try { coordinator = this.reader.revision(); } catch { coordinator = "unknown"; }
+      const coordinatorConversations = coordinator === this.coordinator ? this.coordinatorConversations : this.reader.conversationRevisions();
       const logs = new Map<string, string>();
       const processes = new Map<string, string>();
       const logFamilies = new Set<string>();
@@ -190,11 +192,17 @@ export class WorkReadModel {
       for (const [path, entry] of [...this.files, ...next]) {
         if (this.files.get(path)?.signature !== next.get(path)?.signature) affected.add(family(entry.meta));
       }
+      if (coordinator !== this.coordinator) for (const meta of attempts) {
+        if (!(meta.assignment || meta.operations || meta.park)) continue;
+        const owner = JSON.stringify([meta.operations?.conversationId ?? meta.sessionId, meta.operations?.workspace ?? meta.cwd]);
+        if (!coordinatorConversations || !this.coordinatorConversations ||
+            coordinatorConversations.get(owner) !== this.coordinatorConversations.get(owner)) affected.add(family(meta));
+      }
       const project = createAssignmentProjector({ attempts, observe: (owner: any) => this.reader.read(owner) });
       const rows = [];
       for (const meta of attempts) {
         let row = this.projected.get(meta.id);
-        if (!row || coordinator !== this.coordinator || healthConfig.revision !== this.healthRevision || affected.has(family(meta))) {
+        if (!row || !row.assignment.verified || healthConfig.revision !== this.healthRevision || affected.has(family(meta))) {
           this.metrics.projections++;
           const assignment = project(meta, processes.get(meta.id) ?? meta.status);
           const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRun(meta.id, { logPath: join(this.runs, meta.id, "output.log") }) : undefined;
@@ -209,7 +217,7 @@ export class WorkReadModel {
       try { after = this.reader.revision(); } catch { after = "unknown"; }
       if (after !== coordinator) { this.state = "degraded"; this.reason = "Coordinator changed during observation; retrying."; this.dirty = true; this.publish(); return; }
       for (const [path, entry] of next) {
-        if (coordinator === this.coordinator && !affected.has(family(entry.meta))) continue;
+        if (!affected.has(family(entry.meta))) continue;
         const info = await stat(path, { bigint: true });
         if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
           this.dirty = true;
@@ -234,6 +242,7 @@ export class WorkReadModel {
         this.db.exec("COMMIT");
       } catch (error) { this.db.exec("ROLLBACK"); throw error; }
       this.files = next; this.logs = logs; this.processes = processes; this.healthRevision = healthConfig.revision; this.coordinator = coordinator; this.inventory++;
+      this.coordinatorConversations = coordinatorConversations;
       this.projected = new Map(rows.map(row => [row.meta.id, row]));
       const previousState = this.state;
       const previousReason = this.reason;

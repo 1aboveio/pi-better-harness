@@ -354,6 +354,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
   const durable = join(root, "durable"), archives = join(durable, "attempts"), sessions = join(durable, "sessions");
   mkdirSync(archives, { recursive: true });
   const meta = (i: number) => ({ id: `sa_history_${i}`, sessionId: `conversation-${i}`, cwd: root, status: "completed", startedAt: i,
+    assignment: { assignmentId: `history-assignment-${i}` },
     recipe: { version: 1, sessionId: `conversation-${i}`, cwd: root, sessionDir: sessions } });
   for (let i = 0; i < 10000; i++) writeFileSync(join(archives, `sa_history_${i}.json`), JSON.stringify({ version: 1, meta: meta(i) }));
   const runs = join(root, "runs"); mkdirSync(runs);
@@ -361,6 +362,9 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     const id = `sa_active_${i}`; mkdirSync(join(runs, id));
     writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, status: "running", startedAt: 20000 + i }));
   }
+  const coordinatorPath = new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href;
+  const { openStore } = await import(coordinatorPath);
+  const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
   const model = new WorkReadModel(root, "history-instance", { baseDir: root, durableDir: durable, intervalMs: 60000 });
   try {
     await model.reconcile();
@@ -384,7 +388,25 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     writeFileSync(join(markers, "conversation-9999.json"), JSON.stringify({ version: 1, sessionId: "conversation-9999", attemptId: "sa_newer_failed", status: "failed", startedAt: 30000, at: Date.now() }));
     await model.reconcile();
     assert.equal(model.snapshot({ id: changed.id }).rows.length, 0, "a later failed conversation marker hides the stale completed archive");
-  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+    const projected = model.metrics.projections;
+    const owner = { kind: "worker-conversation" as const, sessionId: "conversation-9998", workspace: root };
+    writer.registerOperation({ operationId: "history-op", taskId: "history-task", launchToken: "history-token", owner,
+      observer: { kind: "background-tasks", version: "1" }, supervision: { hostId: "history-host", runnerId: "history-runner" }, authorityRef: "scope" });
+    writer.registerWait({ waitId: "history-wait", owner, dependencies: [{ operationId: "history-op" }],
+      origin: { attemptId: "sa_history_9998", assignmentRef: "history-assignment-9998" }, continuationNote: "Interpret evidence." });
+    await model.reconcile();
+    assert.equal(model.snapshot({ id: "sa_history_9998" }).rows[0]!.assignment.state, "waiting");
+    assert.equal(model.metrics.projections - projected, 1, "one coordinator change must not reproject unrelated historical conversations");
+    const beforeOutcome = model.metrics.projections;
+    const decision = { assignmentId: "history-assignment-9997", owner: { ...owner, sessionId: "conversation-9997" },
+      recipient: { kind: "parent-session", sessionId: "parent", workspace: root }, revision: 1,
+      outcome: "failed", reason: "Retained diagnosis", evidence: [], waits: [], processUncertain: false };
+    writer.registerAssignment(decision);
+    writer.recordAssignmentOutcome(decision);
+    await model.reconcile();
+    assert.equal(model.snapshot({ id: "sa_history_9997" }).rows[0]!.assignment.state, "failed");
+    assert.equal(model.metrics.projections - beforeOutcome, 1, "outcome-only changes invalidate their own conversation");
+  } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("watch overflow and lost notifications reconcile external writes once and retain stale degraded rows", { timeout: 10000 }, async () => {
