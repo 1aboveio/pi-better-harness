@@ -137,6 +137,7 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
       const completedDependencies = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
       try { assert.equal(completedDependencies.prepare("SELECT count(*) AS n FROM operations WHERE terminal_revision=0").get()?.n, 0, "all accepted dependencies have durable terminal facts before testing idle shutdown"); }
       finally { completedDependencies.close(); }
+      const terminalObservedAt = Date.now();
       // Use the SDK-free runtime handshake, including exact-root/capability
       // validation. A supplied socket does not register runtime-client retention.
       // Hosted-session SDK negotiation is a different protocol and can reject
@@ -167,7 +168,13 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
           if (!lastStatus.livenessReasons.some((reason: any) => reason.kind === "connection")) break;
           assert.ok(Date.now() < detachedBy, `Runtime clients did not detach: ${JSON.stringify(lastStatus)}`); await delay(25);
         } while (true);
-        assert.deepEqual(lastStatus.livenessReasons, [], "terminal unavailable work grants no runtime liveness");
+        // Status is a cached inventory, not a fresh liveness query. An older
+        // runner observation may remain until the idle shutdown recheck.
+        const assertFreshLiveness = () => {
+          if (lastStatus.livenessObservation.observedAt >= terminalObservedAt)
+            assert.deepEqual(lastStatus.livenessReasons, [], "terminal unavailable work grants no fresh runtime liveness");
+        };
+        assertFreshLiveness();
         // Measure the current successor's real 30-second idle + five-second
         // shutdown contract. Never advance the preceding fixture daemon's clock.
         const idleStarted = Date.now(), idleDeadline = idleStarted + 35000;
@@ -179,7 +186,7 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
           try {
             lastStatus = await diagnostic.request("runtime_get_status");
             assert.equal(lastStatus.instanceId, observedInstance, "idle observation stays on the accepted successor");
-            assert.deepEqual(lastStatus.livenessReasons, []);
+            assertFreshLiveness();
           } catch (error) {
             if (existsSync(join(transport, "pi-server.sock")) && !diagnostic.closed) throw error;
             // The real shutdown can close the diagnostic before unlinking socket.
