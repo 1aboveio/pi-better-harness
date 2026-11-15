@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
+import { openStore } from "./shared-operation-coordinator/index.ts";
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
 const ordered = value => value === null || typeof value !== "object" ? value
     : Array.isArray(value) ? value.map(ordered)
@@ -9,13 +10,23 @@ export const launchDigest = value => createHash("sha256").update(JSON.stringify(
 /** Durable external-launch intent; no bridge credentials or provider auth. */
 export class LaunchJournal {
     constructor(path) {
+        // The coordinator owns this shared file's bootstrap and schema admission.
+        // Unknown or future databases must refuse before any journal DDL runs.
+        const coordinator = openStore({ path });
+        coordinator.close();
         this.db = new DatabaseSync(path);
-        this.db.exec("PRAGMA busy_timeout=5000");
-        this.db.exec(`CREATE TABLE IF NOT EXISTS subagent_launch_intents (
+        try {
+            this.db.exec("PRAGMA busy_timeout=5000");
+            this.db.exec(`CREATE TABLE IF NOT EXISTS subagent_launch_intents (
             owner TEXT NOT NULL, request_key TEXT NOT NULL, digest TEXT NOT NULL,
             epoch INTEGER NOT NULL, state TEXT NOT NULL, attempts TEXT NOT NULL, result TEXT,
             PRIMARY KEY(owner, request_key));
             CREATE TABLE IF NOT EXISTS subagent_management (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance TEXT NOT NULL, epoch INTEGER NOT NULL);`);
+        } catch (error) {
+            try { this.db.close(); }
+            catch (cleanupError) { throw new AggregateError([error, cleanupError], "Launch journal initialization and SQLite cleanup failed", { cause: error }); }
+            throw error;
+        }
     }
     transaction(run) {
         this.db.exec("BEGIN IMMEDIATE");
