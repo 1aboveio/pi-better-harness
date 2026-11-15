@@ -10,7 +10,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -29,7 +29,7 @@ const broad: SandboxPermissions = {
  * path in it removable and prove nothing about the home rules.
  */
 function fixture(run: (paths: { base: string; home: string; project: string; sibling: string }) => void): void {
-    const base = realpathSync(mkdtempSync(join(import.meta.dirname, ".broad-fixture-")));
+    const base = realpathSync(mkdtempSync(join(homedir(), ".broad-fixture-")));
     const home = join(base, "home");
     const project = join(home, "projects", "task");
     const sibling = join(home, "projects", "other-repo");

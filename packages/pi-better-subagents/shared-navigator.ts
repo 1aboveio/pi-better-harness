@@ -111,7 +111,7 @@ type NavigatorState = {
   detailOverlayRows?: number;
   dispose?: () => void;
   /** The mounted detail overlay, reused instead of stacking a second one. */
-  overlay?: { showDetail(navigatorId: string): void; focus(): void };
+  overlay?: { showDetail(navigatorId: string): void; refreshDetail(): void; focus(): void };
 };
 
 const GLOBAL_KEY = Symbol.for("pi-better-harness.navigator.state");
@@ -262,6 +262,7 @@ export function refreshBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   if (!isNavigatorUiAvailable(activeCtx)) return;
   try {
     refreshMainListWidget();
+    s.overlay?.refreshDetail();
   } catch { /* ignore */ }
 }
 
@@ -954,6 +955,7 @@ function openNavigator(): void {
       }, selectedId);
       overlayRef = {
         showDetail: (navigatorId) => component.showDetail(navigatorId),
+        refreshDetail: () => component.refreshDetail(),
         focus: () => {
         if (s.overlay !== overlayRef) return;
         try { handle?.focus?.(); } catch { /* ignore */ }
@@ -1260,6 +1262,15 @@ function createOverlayComponent(
       else if (deps.matchKey(data, "escape")) {
         backToMain();
       }
+    },
+    /** Observation arrival updates this row without resetting selection or folded sections. */
+    refreshDetail() {
+      if (closed) return;
+      const wasLoading = detail?.status === "rebuilding";
+      detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+      if (wasLoading) applyDefaultExpandedSections(detail, expandedSections);
+      startDetailTimer();
+      requestRender();
     },
     /** Show another row's detail in this overlay (the main list moved while it was unfocused). */
     showDetail(navigatorId: string) {

@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 const piCli = process.env.PI_SUBAGENTS_SETTINGS_CLI ?? join(root, "node_modules/.bin/pi");
 
-test("subagent settings edit mode, timing, and cap, validate, save, reset, survive reload, and open Agents in the real TUI", { skip: !hasTmux }, () => {
+test("subagent settings edit mode, timing, and cap, validate, save, reset, survive reload, and open Agents in the real TUI", { skip: !hasTmux }, async () => {
     const fixture = mkdtempSync(join(tmpdir(), "pi-subagent-settings-"));
+    const agentDir = join(fixture, "agent");
+    let runtimeOwner;
     const config = join(fixture, "settings.json");
     const wrapper = join(fixture, "settings-extension.ts");
     writeFileSync(config, JSON.stringify({ piBetterHarness: { subagents: { delegationMode: "adaptive", maxConcurrent: 4, defaultTools: "read" } } }));
@@ -38,6 +41,7 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         assert.fail(`Missing ${pattern}:\n${screen}`);
     };
     try {
+        runtimeOwner = await prepareOwnedRuntime(agentDir);
         tmux("new-session", "-d", "-s", "settings", "-x", "100", "-y", "30", command);
         wait(/settings-extension\.ts/);
         literal("/subagents settings"); wait(/\/subagents settings/); key("Tab"); key("Enter");
@@ -106,6 +110,7 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         wait(/^(?![\s\S]*Agents\s+.*definitions)/);
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
-        rmSync(fixture, { recursive: true, force: true });
+        await stopOwnedRuntime(join(agentDir, "server"), runtimeOwner);
+        removeOwnedFixture(fixture);
     }
 });

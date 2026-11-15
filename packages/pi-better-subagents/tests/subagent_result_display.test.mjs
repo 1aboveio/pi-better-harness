@@ -13,6 +13,10 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { writeMeta, runDir, logPathFor } from "../registry.ts";
 import { buildSubagentResultText } from "../finalization.ts";
 import { subagentResultTool } from "../tools.ts";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { stopWorkObservation } from "../work-observation.ts";
+
+const stopRuntime = await startWorkRuntimeFixture();
 
 const THIS_PID = process.pid;
 const diskIds = [];
@@ -21,7 +25,9 @@ function trackDisk(id) {
     return id;
 }
 
-after(() => {
+after(async () => {
+    stopWorkObservation();
+    await stopRuntime();
     for (const id of diskIds) {
         try { rmSync(runDir(id), { recursive: true, force: true }); } catch { /* best-effort */ }
     }

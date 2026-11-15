@@ -106,7 +106,7 @@ export function formatSubagentListRow(meta, p) {
         : "";
     const assignment = p.assignment ?? assignmentFor(meta, p.processStatus ?? meta.status);
     const diagnostic = meta.operations || meta.park || status !== assignment.processStatus || status === "failed"
-        ? `\n    ${assignmentDiagnostic(assignment)}` : "";
+        ? `\n    ${assignmentDiagnostic(assignment, { includeEvidence: !p.compact })}` : "";
     return `• ${name}${meta.id}  [${status}]  session_id=${meta.sessionId ?? "unavailable"}  ${bounded(meta.model ?? "?", 60)}  ${elapsed}${health}${timing}${batch}${failure}\n    ${promptPreview(meta)} · r${assignment.revision}${diagnostic}`;
 }
 

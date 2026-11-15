@@ -5,12 +5,15 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 
 test("large archive history stays bounded across independent readers and publications", { timeout: 120_000 }, async (t) => {
     const root = mkdtempSync(join(tmpdir(), "archive-budget-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     mkdirSync(join(root, "attempts"));
     mkdirSync(join(root, "pi-better-subagents", "runs"), { recursive: true });
+    const stopRuntime = await startWorkRuntimeFixture({ ...process.env, TMPDIR: root, TMP: root, TEMP: root, PI_SUBAGENT_DURABLE_DIR: root });
+    t.after(stopRuntime);
     for (let i = 0; i < 4416; i++) {
         const meta = { id: `sa_archive_${i}`, sessionId: `conversation-${i}`, status: "completed",
             startedAt: i, endedAt: i + 1, cwd: root,

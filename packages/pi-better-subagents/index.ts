@@ -24,6 +24,9 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { initializeNavigatorPanels } from "./shared-navigator-panels.ts";
+import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail, TERMINAL_NAVIGATOR_RETENTION_MS } from "./work-observation.ts";
+import { withAssignmentObservations } from "./assignment-projection.mjs";
+import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
 import {
@@ -163,7 +166,6 @@ import {
 } from "./widget.ts";
 import {
     executeNavigatorClose,
-    buildNavigatorRows,
     pendingNavigatorPark,
     buildNavigatorDetail,
 } from "./navigator.ts";
@@ -1394,7 +1396,6 @@ let unregisterSubagentProvider: (() => void) | undefined;
 let acceptanceProviderRef: BackgroundWorkProvider | undefined;
 let acceptanceSpawnToolRef: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
 let acceptanceStopToolRef: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
-const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 let mainAgentStartedAt: number | undefined;
 const mainAgentTools = new Map<string, string>();
 
@@ -1419,36 +1420,18 @@ function createNavigatorProjector() {
     };
 }
 
-/** Rows for the overlay: visible current-parent runs, newest first (#44 seam). */
-function navigatorRows(visible?: RunMeta[], at?: number, project = createNavigatorProjector()) {
-    const now = at ?? Date.now();
-    return buildNavigatorRows(visible ?? sessionVisibleNavigatorRuns(now, project), {
-        project,
-        effectiveStatus,
-        shortModel,
-        fmtElapsed,
-        now,
-        spendFor: (m: RunMeta) => {
-            const snap = spendFor(m.id, now);
-            return fmtSpend(snap.usage);
-        },
-        toolFor: (m: RunMeta) => {
-            const snap = spendFor(m.id, now);
-            return snap.tool ?? "";
-        },
-        effortFor: (m: RunMeta) => m.effort,
-        healthFor: (m: RunMeta) => observeNavigatorHealth(m, now),
-    });
-}
-
 /** Runs that should advertise/open the left-arrow navigator affordance. */
 function navigatorRunningRuns(): RunMeta[] {
     const project = createAssignmentProjector();
     return sessionVisibleNavigatorRuns(Date.now(), project).filter((m) => ["running", "waiting"].includes(project(m, effectiveStatus(m)).state));
 }
 
+const pendingNavigatorDismissals = new Set<string>();
+
 function navigatorRunningCount(): number {
-    return navigatorRunningRuns().length;
+    const snapshot = workObservation();
+    return (snapshot?.rows.filter((row: any) => !pendingNavigatorDismissals.has(row.meta.id) && !row.meta.dismissedAt && ["running", "waiting"].includes(row.assignment.state)).length ?? 0) +
+        (!snapshot || snapshot.status !== "ready" ? 1 : 0);
 }
 
 /**
@@ -1505,6 +1488,8 @@ function navigatorCloseRun(id: string) {
             .then((cancelled) => {
                 if (!cancelled) throw new Error("The pending wait changed; inspect it again.");
                 dismissRun(id);
+                pendingNavigatorDismissals.add(id);
+                refreshBackgroundWorkNavigator(uiCtx);
                 uiCtx?.ui.notify(`Cancelled the pending wait of ${id}. Writer termination may remain unproven.`, "info");
             })
             .catch((error) => uiCtx?.ui.notify(`Cancellation failed for ${id}: ${String(error)}. The wait remains available for inspection and retry.`, "warning"));
@@ -1517,6 +1502,7 @@ function navigatorCloseRun(id: string) {
         stopRun,
         dismissRun,
     });
+    if (outcome.action === "dismissed" || outcome.action === "stopped-and-dismissed") pendingNavigatorDismissals.add(id);
     // A closed row is off the hot path: release its caches and retained events.
     spendCache.delete(id);
     healthLogCache.delete(id);
@@ -1546,40 +1532,29 @@ function statusTone(status: string): BackgroundWorkRow["statusTone"] {
 }
 
 function subagentWorkRows(now: number): BackgroundWorkRow[] {
-    // One registry scan per rebuild: both the start times and the rows below are
-    // built from this snapshot.
-    const project = createNavigatorProjector();
-    const visible = sessionVisibleNavigatorRuns(now, project);
-    const metaById = new Map(visible.map((m) => [m.id, m]));
-    return navigatorRows(visible, now, project).map((row) => {
-        const bits = [];
-        if (row.model) bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
-        if (row.tool) bits.push(row.tool);
-        if (row.spend) bits.push(row.spend);
-        return {
-            providerId: "subagents",
-            id: row.id,
-            name: row.name,
-            model: row.model,
-            effort: row.effort,
-            tool: row.tool,
-            tokens: row.spend,
-            status: row.status,
-            statusTone: statusTone(row.status),
-            kind: "subagent",
-            elapsed: row.elapsed,
-            primary: bits.join(" · ") || "subagent run",
-            facts: row.healthFacts,
-            sortStartedAt: metaById.get(row.id)?.startedAt ?? now,
-            expiresAt: (() => {
-                const meta = metaById.get(row.id);
-                const endedAt = meta?.endedAt ?? meta?.lostAt;
-                return meta && isTerminalNavigatorStatus(row.status) && typeof endedAt === "number"
-                    ? endedAt + TERMINAL_NAVIGATOR_RETENTION_MS
-                    : undefined;
-            })(),
-        };
+    const snapshot = workObservation();
+    const sourceRows = snapshot?.rows ?? [];
+    if (snapshot?.status === "ready" && pendingNavigatorDismissals.size) {
+        // A successful local dismissal is already durable; hide its old observation until acknowledged.
+        const undismissed = new Set(sourceRows.filter((row: any) => !row.meta.dismissedAt).map((row: any) => row.meta.id));
+        for (const id of pendingNavigatorDismissals) if (!undismissed.has(id)) pendingNavigatorDismissals.delete(id);
+    }
+    const rows: BackgroundWorkRow[] = sourceRows.filter((row: any) => !pendingNavigatorDismissals.has(row.meta.id) && !row.meta.dismissedAt &&
+        (["running", "waiting"].includes(row.assignment.state) || typeof (row.meta.endedAt ?? row.meta.lostAt) !== "number" ||
+            now - (row.meta.endedAt ?? row.meta.lostAt) < TERMINAL_NAVIGATOR_RETENTION_MS)).map((row: any) => {
+        const meta = row.meta;
+        const health = row.health ? observeRunHealth({ ...row.health, status: row.assignment.processStatus === "exited" ? meta.status : row.assignment.processStatus, now, startedAt: meta.startedAt }) : undefined;
+        const terminal = !["running", "waiting"].includes(row.assignment.state);
+        return { providerId: "subagents", id: meta.id, name: meta.name || meta.id,
+            model: shortModel(meta.model), effort: meta.effort, status: row.assignment.state,
+            tool: row.display?.tool, tokens: row.display?.spend,
+            statusTone: statusTone(row.assignment.state), kind: "subagent", elapsed: fmtElapsed((meta.endedAt ?? now) - meta.startedAt),
+            primary: [shortModel(meta.model), meta.effort, row.display?.tool, row.display?.spend].filter(Boolean).join(" ") || "subagent run", facts: formatNavigatorHealthFacts(health), sortStartedAt: meta.startedAt,
+            expiresAt: terminal && typeof meta.endedAt === "number" ? meta.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS : undefined };
     });
+    if (!snapshot || snapshot.status !== "ready") rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Subagents",
+        status: snapshot?.status ?? "degraded", statusTone: "warning", kind: "observation", elapsed: "", primary: workObservationFailure(), sortStartedAt: now });
+    return rows;
 }
 
 const DELEGATION_BLURB: Record<DelegationMode, string> = {
@@ -1656,12 +1631,19 @@ function mainAgentWorkDetail(now: number): BackgroundWorkDetail {
 
 function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
     if (id === "main") return mainAgentWorkDetail(now);
-    const detail = navigatorDetail(id, now);
+    const row = requestWorkDetail(id);
+    if (!row?.detail) return { providerId: "subagents", id, title: id, status: row?.observationError ? "degraded" : "rebuilding", statusTone: "warning", metadata: [], evidence: { label: "observation", text: row?.observationError ?? workObservationFailure() } };
+    const health = row.health ? observeRunHealth({ ...row.health, status: row.assignment.processStatus === "exited" ? row.meta.status : row.assignment.processStatus, now, startedAt: row.meta.startedAt }) : undefined;
+    const detail = withAssignmentObservations([row], () => buildNavigatorDetail(id, {
+        readMeta: () => row.meta, effectiveStatus: () => row.assignment.processStatus, parseRun: () => row.detail.parsed,
+        shortModel, fmtElapsed, fmtSpend, now, effortFor: (meta: RunMeta) => meta.effort, healthFor: () => health,
+    }));
     if (!detail) return null;
     void options;
-    const transcript = readRunTranscript(id);
+    const transcript = row.detail.transcript;
     const metadata = [
         { label: "provider", value: "Subagents" },
+        ...(row.observationError ? [{ label: "observation", value: row.observationError }] : []),
         { label: "id", value: detail.id },
         ...(detail.role ? [{ label: "role", value: String(detail.role) }] : []),
         { label: "model", value: detail.effort ? `${detail.model} · effort ${detail.effort}` : detail.model },
@@ -1754,7 +1736,7 @@ function ensureSubagentProvider(): void {
         label: "Subagents",
         priority: 10,
         visibleCount: () => navigatorRunningCount(),
-        showSection: (rows) => rows.some((row) => row.status === "running" || ["parking", "waiting", "ready", "resuming", "held"].includes(row.status)),
+        showSection: (rows) => rows.some((row) => row.status === "running" || ["parking", "waiting", "ready", "resuming", "held", "degraded", "rebuilding"].includes(row.status)),
         parentRow: (now) => mainAgentWorkRow(now),
         listRows: (now) => subagentWorkRows(now),
         detail: (id, now, options) => subagentWorkDetail(id, now, options),
@@ -4043,6 +4025,8 @@ export default function (pi: ExtensionAPI) {
     // The foreground origin from session_start; otherwise the calling context's
     // own session. An unreadable session id stays unavailable (never cwd-wide).
     const toolSession = {
+        observeAssignment: observedAssignment,
+        observeList: observedList,
         inspectOutcome: (meta: RunMeta, params: Record<string, unknown>, callCtx?: unknown) => {
             if (params.disposition !== undefined && params.disposition !== "consumed" && params.disposition !== "dismissed") throw new Error("Outcome disposition must be consumed or dismissed.");
             if (!readOutcome(meta)) {
@@ -4342,6 +4326,7 @@ export default function (pi: ExtensionAPI) {
         // switch), so the previous session's teardown no longer applies: the
         // replacing session owns this instance's supervision loops (#625).
         sessionTornDown = false;
+        pendingNavigatorDismissals.clear();
         outcomeHost = createOutcomeHost();
         setCallbackBatchContext(pi, ctx);
         agentSessionSettings.restore(ctx);
@@ -4352,6 +4337,7 @@ export default function (pi: ExtensionAPI) {
         catch { mainAgentStartedAt = undefined; }
         mainAgentTools.clear();
         activeCallbackOrigin = callbackOriginFromContext(ctx);
+        if (activeCallbackOrigin) await startWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => refreshBackgroundWorkNavigator(ctx));
         recoverCompletionCallbacks(pi);
         // Admission can defer before batcher enqueue, even after the last child
         // exits. Keep reconciliation independent of the live-run health ticker.
@@ -4406,6 +4392,8 @@ export default function (pi: ExtensionAPI) {
 
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (event, ctx) => {
+        stopWorkObservation();
+        pendingNavigatorDismissals.clear();
         if (outcomeTicker) clearInterval(outcomeTicker);
         outcomeTicker = undefined;
         outcomeAdmission.clear();

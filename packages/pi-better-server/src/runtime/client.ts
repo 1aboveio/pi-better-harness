@@ -9,6 +9,7 @@ import { inspectDaemonOwner } from "../daemon-owner.ts";
 import type { RunRemote, ServerArtifact } from "../startup/managed-types.ts";
 import { runtimeRoot } from "./root.ts";
 import { socketPathFor } from "./socket.ts";
+export { WorkClient } from "./work-client.mjs";
 
 export interface RuntimeOptions {
   agentDir: string;

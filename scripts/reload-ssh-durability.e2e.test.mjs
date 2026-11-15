@@ -36,6 +36,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
+import { inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+import { removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 // `npm run test:live-ssh` sets PI_LIVE_SSH_REQUIRED so a missing host fails instead of skipping.
 const liveHost = process.env.PI_LIVE_SSH_HOST;
@@ -50,6 +52,8 @@ const fixtures = realpathSync(mkdtempSync(join(fixtureRoot, "pi-reload-ssh-")));
 const dir = (name) => { const path = join(fixtures, name); mkdirSync(path, { recursive: true }); return path; };
 const tmp = dir("tmp");
 const agentDir = dir("agent");
+const serverDir = join(agentDir, "server");
+let runtimeOwner;
 const fakeBin = dir("fake-bin");
 const sshLog = join(fixtures, "ssh-argv.log");
 
@@ -75,13 +79,14 @@ const originalPath = process.env.PATH ?? "";
 const originalWindow = process.env.PI_BETTER_CALLBACK_BATCH_MS;
 const originalObservedDebug = process.env.PI_BG_OBSERVED_WAITS_DEBUG;
 let retainFixtures = false;
-after(() => {
+after(async () => {
   process.env.PATH = originalPath;
   if (originalWindow === undefined) delete process.env.PI_BETTER_CALLBACK_BATCH_MS;
   else process.env.PI_BETTER_CALLBACK_BATCH_MS = originalWindow;
   if (originalObservedDebug === undefined) delete process.env.PI_BG_OBSERVED_WAITS_DEBUG;
   else process.env.PI_BG_OBSERVED_WAITS_DEBUG = originalObservedDebug;
-  if (!retainFixtures) rmSync(fixtures, { recursive: true, force: true });
+  await stopOwnedRuntime(serverDir, runtimeOwner);
+  if (!retainFixtures) removeOwnedFixture(fixtures);
 });
 
 const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
@@ -172,7 +177,13 @@ async function openSession(project) {
     requests,
     errors,
     sessionId: session.sessionManager.getSessionId(),
-    start: () => session.bindExtensions({ onError: (error) => errors.push(error) }),
+    start: async () => {
+      await session.bindExtensions({ onError: (error) => errors.push(error) });
+      const owner = inspectDaemonOwner(serverDir);
+      assert.equal(owner.status, "live", "fixture runtime must have a verified owner");
+      runtimeOwner ??= owner.owner;
+      assert.deepEqual(owner.owner, runtimeOwner, "fixture runtime must not be replaced between sessions");
+    },
     // Tools are looked up per call: after a reload they belong to the new extension instances.
     async call(name, params) {
       const tool = session.agent.state.tools.find((candidate) => candidate.name === name);
@@ -365,6 +376,7 @@ test("a real /reload keeps pending callback receipts, the incident journal, and 
   await delay(400);
   assert.equal(host.completions(pendingId).length, 1, "receipts survive a second reload");
   assert.deepEqual(host.errors, []);
+  await host.session._extensionRunner.emit({ type: "session_shutdown" });
   host.session.dispose();
 });
 
@@ -435,6 +447,7 @@ test("local and direct-SSH processes that exit after /reload deliver their compl
   t.after(async () => {
     try { await cleanupExitChildren(host, project, children); }
     finally {
+      await host.session._extensionRunner.emit({ type: "session_shutdown" });
       host.session.dispose();
       process.env.PATH = originalPath;
     }
@@ -505,6 +518,7 @@ for (const mode of ["release", "partial-spawn", "stop", "failed-reload"]) {
     t.after(async () => {
       try { await cleanupExitChildren(host, project, children); }
       finally {
+        await host.session._extensionRunner.emit({ type: "session_shutdown" });
         host.session.dispose();
         process.env.PATH = originalPath;
       }
@@ -675,6 +689,7 @@ async function sshScenario(transport) {
     assert.equal(host.completions(watchId).length, 1, "the watch receipt survives another reload");
     assert.deepEqual(host.errors, []);
   } finally {
+    await host.session._extensionRunner.emit({ type: "session_shutdown" });
     host.session.dispose();
     transport.cleanup();
     process.env.PATH = originalPath;
