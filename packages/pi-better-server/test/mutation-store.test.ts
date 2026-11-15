@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -6,6 +9,21 @@ import { DatabaseSync } from "node:sqlite";
 import { acquireMutationStore, mutationStoreMetrics } from "../src/runtime/mutation-store.ts";
 import { makeEnv } from "./helpers.ts";
 
+// The user-facing host supports Node 22; the fixed managed domain runs on private Node 24.
+// Keep these shared-connection assertions in one process, using that actual runtime.
+if (Number(process.versions.node.split(".")[0]) < 24) {
+  test("managed mutation-store lifecycle on the private Node runtime", { timeout: 60000 }, async t => {
+    const runtime = process.env.PI_TEST_PRIVATE_RUNTIME_NODE;
+    assert.ok(runtime, "Set PI_TEST_PRIVATE_RUNTIME_NODE to the verified private Node 24 binary");
+    const execute = promisify(execFile);
+    const version = await execute(runtime, ["-p", "process.versions.node"]);
+    assert.ok(Number(version.stdout.trim().split(".")[0]) >= 24, "Private runtime must support the managed domain");
+    const { NODE_TEST_CONTEXT: _context, ...env } = process.env;
+    const result = await execute(runtime, ["--import", "tsx", "--import", "../../scripts/isolate-registry.mjs",
+      "--test", fileURLToPath(import.meta.url)], { cwd: fileURLToPath(new URL("..", import.meta.url)), env, maxBuffer: 4 * 1024 * 1024 });
+    t.diagnostic(result.stdout);
+  });
+} else {
 test("managed launch shares the mutation connection and releases only its lease", async () => {
   const env = makeEnv();
   const { createSubagentLaunch } = await import("../src/runtime/subagent-launch.ts");
@@ -114,3 +132,5 @@ test("managed SDK shutdown publishes worker unavailability before disposing exte
   assert.equal(disposed, true);
   assert.deepEqual(mutationStoreMetrics(env.agentDir), { active: 0, leases: 0 });
 });
+
+}
