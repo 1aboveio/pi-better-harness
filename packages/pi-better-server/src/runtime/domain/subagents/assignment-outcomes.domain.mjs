@@ -1,10 +1,11 @@
 // Generated fixed launch domain from packages/pi-better-subagents/assignment-outcomes.ts. Do not edit directly.
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { join, relative, isAbsolute } from "node:path";
 import { openSync, closeSync, fstatSync, readSync, realpathSync, constants } from "node:fs";
 import { openStore, ownerDiff, StoreError } from "./shared-operation-coordinator/index.domain.mjs";
-import { processStartToken } from "./registry.domain.mjs";
+import { processStartToken, readMeta } from "./registry.domain.mjs";
 import { credentialFilePaths } from "./shared-sandbox-core.domain.mjs";
 import { readAssignmentReport } from "./assignment-report.domain.mjs";
 export const ASSIGNMENT_OUTCOMES_VERSION = 1;
@@ -111,8 +112,14 @@ export function commitAssignmentTerminal(meta, recoveryFailure = false) {
             // still refuses rewrites; return only the same captured binding's winner.
             if (error instanceof StoreError && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
                 const winner = store.getAssignmentOutcome(binding.assignmentId);
+                const current = readMeta(meta.id);
                 if (winner && winner.assignmentId === binding.assignmentId && ownerDiff(winner.owner, binding.owner) === "none"
                     && ownerDiff(winner.recipient, binding.recipient) === "none"
+                    && current?.assignment?.assignmentId === binding.assignmentId
+                    && ownerDiff(current.assignment.owner, binding.owner) === "none" && ownerDiff(current.assignment.recipient, binding.recipient) === "none"
+                    && current.sessionId === meta.sessionId && current.cwd === meta.cwd && current.pid === meta.pid && current.pidStartTime === meta.pidStartTime
+                    && isDeepStrictEqual(current.management, meta.management)
+                    && current.operations?.resumeLaunchToken === meta.operations?.resumeLaunchToken
                     && winner.evidence.some(evidence => evidence.kind === "log" && evidence.ref === meta.logPath))
                     return winner;
             }

@@ -1,10 +1,11 @@
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { join, relative, isAbsolute } from "node:path";
 import { openSync, closeSync, fstatSync, readSync, realpathSync, constants } from "node:fs";
 import { openStore, ownerDiff, StoreError, type OwnerIdentity, type AssignmentOutcomeRecord } from "./shared-operation-coordinator/index.ts";
 import type { RunMeta } from "./registry.ts";
-import { processStartToken } from "./registry.ts";
+import { processStartToken, readMeta } from "./registry.ts";
 import type { PermissionSnapshot } from "./permission-policy.ts";
 import { credentialFilePaths } from "./shared-sandbox-core.ts";
 import { readAssignmentReport } from "./assignment-report.ts";
@@ -86,8 +87,14 @@ export function commitAssignmentTerminal(meta: RunMeta, recoveryFailure = false)
             // still refuses rewrites; return only the same captured binding's winner.
             if (error instanceof StoreError && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
                 const winner = store.getAssignmentOutcome(binding.assignmentId);
+                const current = readMeta(meta.id);
                 if (winner && winner.assignmentId === binding.assignmentId && ownerDiff(winner.owner, binding.owner) === "none"
                     && ownerDiff(winner.recipient, binding.recipient) === "none"
+                    && current?.assignment?.assignmentId === binding.assignmentId
+                    && ownerDiff(current.assignment.owner, binding.owner) === "none" && ownerDiff(current.assignment.recipient, binding.recipient) === "none"
+                    && current.sessionId === meta.sessionId && current.cwd === meta.cwd && current.pid === meta.pid && current.pidStartTime === meta.pidStartTime
+                    && isDeepStrictEqual(current.management, meta.management)
+                    && current.operations?.resumeLaunchToken === meta.operations?.resumeLaunchToken
                     && winner.evidence.some(evidence => evidence.kind === "log" && evidence.ref === meta.logPath)) return winner;
             }
             throw error;
