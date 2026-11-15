@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Socket } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -62,7 +62,7 @@ async function fixture(options: { capacity?: number; timeoutMs?: number; workerU
     await new Promise<void>(resolve => server.close(() => resolve())); await executor.close();
     rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
   };
-  return { executor, client, stall, worker, close, root };
+  return { executor, client, stall, worker, close, root, path };
 }
 
 async function ready(client: WorkClient) {
@@ -508,4 +508,42 @@ for (const outcome of ["success", "failure"]) test(`old fold ${outcome} cannot a
     assert.equal(f.executor.metrics().executor.restarts, 1);
     await client.get({});
   } finally { await f.close(); }
+});
+
+
+test("directory entry watchers publish repeated atomic commits without the inventory fallback", { timeout: 15000 }, async () => {
+  const f = await fixture(); // fallback interval is 60 seconds, longer than this test
+  const { measureEventPublication } = await import(new URL("../scripts/event-publication/measure.mjs", import.meta.url).href);
+  try {
+    const id = "sa_atomic", directory = join(f.root, "runs", id), metaPath = join(directory, "meta.json");
+    mkdirSync(directory);
+    const meta = { id, sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1, endedAt: Date.now(),
+      callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "original" };
+    writeFileSync(metaPath, JSON.stringify(meta));
+    const client = await f.client(); await ready(client);
+    const scope = { cwd: f.root, sessionId: "parent", limit: 10 };
+    for (const subscribers of [1, 5, 10]) {
+      const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers, commits: 5 });
+      assert.ok(report.ms.max <= 1000, JSON.stringify(report));
+      assert.equal(f.executor.metrics().sourceWatchers, 2, "one root and one raw directory, independent of clients/files");
+    }
+    // Replacing the directory itself must retire its old inode watcher.
+    renameSync(directory, join(f.root, "old-run")); mkdirSync(directory);
+    writeFileSync(metaPath, JSON.stringify({ ...meta, name: "replaced-directory" }));
+    await client.subscribe(scope);
+    const until = Date.now() + 1000;
+    while (client.snapshot?.rows[0]?.meta.name !== "replaced-directory") {
+      assert.ok(Date.now() < until, "directory replacement was not published"); await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5 });
+    assert.ok(report.ms.max <= 1000, JSON.stringify(report));
+    rmSync(directory, { recursive: true });
+    const removedBy = Date.now() + 1000;
+    while (client.snapshot?.rows.length) {
+      assert.ok(Date.now() < removedBy, "directory deletion was not published"); await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    await client.get(scope);
+    assert.equal(f.executor.metrics().sourceWatchers, 1, "deleted raw directories release their watchers");
+  } finally { await f.close(); }
+  assert.equal(f.executor.metrics().executor.worker, "stopped");
 });

@@ -13,7 +13,7 @@ interface Query {
 }
 export type ReadStream = Pick<Duplex, "destroyed" | "writableLength" | "write" | "on" | "once" | "off">;
 interface Stream { socket: ReadStream; paused: boolean; generation: number; drain: () => void; close: () => void }
-interface WorkerMetrics { inventories?: number; coordinatorConnections?: number; indexConnections?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
+interface WorkerMetrics { sourceWatchers?: number; inventories?: number; coordinatorConnections?: number; indexConnections?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
 export interface QueryExecutorOptions {
   capacity?: number; timeoutMs?: number; maxConnections?: number;
   workerUrl?: URL;
@@ -73,7 +73,7 @@ export class WorkQueryExecutor {
       if (worker !== this.worker) return;
       this.exited = true;
       const sqlite = this.workerMetrics.sqlite;
-      this.workerMetrics = { ...this.workerMetrics, coordinatorConnections: 0, indexConnections: 0,
+      this.workerMetrics = { ...this.workerMetrics, sourceWatchers: 0, coordinatorConnections: 0, indexConnections: 0,
         ...(sqlite ? { sqlite: { ...sqlite, active: 0 } } : {}) };
       this.fail(new Error(`runtime-unhealthy: read worker exited (${code}); rebuilding reads after recovery`));
       this.scheduleRecovery();

@@ -52,7 +52,7 @@ export class WorkReadModel {
   };
   private healthRevision = "";
   private details = new Map<string, { revision: string; value: any }>();
-  private watchers: FSWatcher[] = [];
+  private watchers = new Map<string, FSWatcher>();
   private listeners = new Set<() => void>();
   private timer?: ReturnType<typeof setInterval>;
   private pending?: Promise<void>;
@@ -68,7 +68,7 @@ export class WorkReadModel {
   private counters = { inventories: 0, metadataReads: 0, projections: 0 };
   get metrics() {
     return { ...this.counters, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
-      indexConnections: this.closed ? 0 : 1 };
+      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size };
   }
   readonly runs: string;
   readonly archives: string;
@@ -95,16 +95,36 @@ export class WorkReadModel {
     this.runs = join(options.baseDir ?? join(realpathSync(tmpdir()), "pi-better-subagents"), "runs");
     this.archives = join(options.durableDir ?? process.env.PI_SUBAGENT_DURABLE_DIR ?? join(agentDir, "subagents"), "attempts");
     this.markers = join(this.archives, "../session-state");
-    // Notifications accelerate discovery; a shared bounded inventory repairs lost hints.
-    for (const path of [this.runs, this.archives, this.markers]) {
-      try {
-        const watcher = watch(path, { recursive: true }, () => { void this.reconcile(); });
-        watcher.on("error", () => this.invalidate("Watcher overflow or failure; reconciling source inventory."));
-        this.watchers.push(watcher);
-      } catch { /* Missing roots are discovered by the compatibility inventory. */ }
-    }
+    // Watch directory entries, not file inodes. Node's Linux recursive watcher
+    // can retain a replaced file's old inode after atomic rename and miss later
+    // commits. Flat archives need one watcher; raw runs use one per directory.
+    for (const path of [this.runs, this.archives, this.markers]) this.watchDirectory(path);
     this.timer = setInterval(() => { if (!this.pending) void this.reconcile(); }, options.intervalMs ?? 1000);
     this.timer.unref();
+  }
+
+  private unwatchDirectory(path: string) {
+    this.watchers.get(path)?.close(); this.watchers.delete(path);
+  }
+  private watchDirectory(path: string) {
+    if (this.closed || this.watchers.has(path)) return;
+    try {
+      const watcher = watch(path, (_event, filename) => {
+        if (path === this.runs) {
+          // A raw directory may itself have been removed/replaced. Reattach
+          // from the shared inventory, never retain its preceding inode.
+          if (filename && safeId.test(String(filename))) this.unwatchDirectory(join(this.runs, String(filename)));
+          else for (const watched of this.watchers.keys()) if (watched.startsWith(this.runs + sep)) this.unwatchDirectory(watched);
+        }
+        void this.reconcile();
+      });
+      watcher.on("error", () => {
+        if (this.watchers.get(path) !== watcher) return;
+        this.unwatchDirectory(path);
+        this.invalidate("Watcher overflow or failure; reconciling source inventory.");
+      });
+      this.watchers.set(path, watcher);
+    } catch { /* Missing roots are discovered by the existing compatibility inventory. */ }
   }
 
   onChange(listener: () => void, scope?: WorkScope) {
@@ -186,13 +206,24 @@ export class WorkReadModel {
       for (const [directory, archived] of [[this.markers, true], [this.archives, true], [this.runs, false]] as const) {
         let names: string[];
         try { names = await readdir(directory); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          this.unwatchDirectory(directory);
+          if (!archived) for (const watched of this.watchers.keys()) if (watched.startsWith(this.runs + sep)) this.unwatchDirectory(watched);
+          continue;
+        }
+        this.watchDirectory(directory);
+        if (!archived) {
+          const present = new Set(names.filter(name => safeId.test(name)).map(name => join(directory, name)));
+          for (const watched of this.watchers.keys()) if (watched.startsWith(this.runs + sep) && !present.has(watched)) this.unwatchDirectory(watched);
+        }
         // Bound filesystem concurrency without serializing every archive round trip.
         const candidates = names.filter(name => safeId.test(archived ? name.replace(/\.json$/, "") : name)
           && (!archived || name.endsWith(".json")));
         for (let offset = 0; offset < candidates.length; offset += 32) {
           const group = candidates.slice(offset, offset + 32);
           const observations = await Promise.all(group.map(async name => {
+            if (!archived) this.watchDirectory(join(directory, name));
             const path = archived ? join(directory, name) : join(directory, name, "meta.json");
             try { return { info: await stat(path, { bigint: true }) }; }
             catch (error) { return { error }; }
@@ -460,7 +491,8 @@ export class WorkReadModel {
 
   async close() {
     this.closed = true; if (this.timer) clearInterval(this.timer);
-    for (const watcher of this.watchers) watcher.close();
+    for (const watcher of this.watchers.values()) watcher.close();
+    this.watchers.clear();
     await this.pending; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
   }
 }
