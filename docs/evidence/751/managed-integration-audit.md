@@ -12,7 +12,7 @@ Integration review added exact branch/Goal matching to upgrade dependency admiss
 
 - The full-stack resource harness found three coordinator connections against the maximum of two. Sharing the query worker's reader removed one duplicate; a foreground `ObservedWaitHost` still owns a persistent connection and requires proper server mutation/admission migration. The failing report is retained without relaxing the budget.
 - Legacy Subagents fixtures still combine mechanical manager and foreground recipient behavior. Their migration has exposed and fixed a real timing-notification loss, but the full Subagents suite has not passed.
-- Continuation crash/bridge/capability fixes are integrated and the 17-test combined continuation group passes. Review identified an additional post-lease/pre-journal crash window and tool-policy intersection gap; both require correction and real fault coverage before acceptance.
+- Post-lease/pre-journal recovery and tool-policy intersection are corrected (`03e5a3bd`); the real continuation matrix now includes that fault and unused-tool narrowing. Current/captured Background permission publication remains part of the pending Background ownership migration.
 - Final combined macOS/Linux resource matrices, packaging/upgrade checks, independent review and the requirement-by-requirement epic audit remain required.
 
 ## Integrated recipient and installed-domain checks
@@ -24,3 +24,11 @@ The standalone package test now imports and initializes the fixed managed SDK/do
 The Linux/macOS resource CI lane now includes the full process tree measurement, standalone installed-domain/offline qualification, and real socket backpressure recovery. CI results at the final integrated head remain required; configuration alone is not platform evidence.
 
 The broader integrated Server run, using the verified private Node 24.14.1, passes 898 tests (877 passed, 21 skipped, zero failures; 321.9 seconds). It excludes standalone packaging, opt-in remote network installation and the separately validated Subagent runtime matrix. No skipped test is claimed as platform evidence. Initial CI run 43751198478 reproduces the known three-coordinator-connection failure on Linux; the pending Background ownership migration must pass the unchanged bound on both platforms.
+
+## CI follow-up and native reload
+
+The first combined CI run (43751198478) reproduced the three-connection budget failure on both Linux and macOS. It also exposed Node 22 directly running managed-domain tests, an outcome-commit assertion race, old foreground-manager fixture assumptions, and a guardian test killing its first process before protocol readiness. The fixture corrections preserve the production private Node requirement and the accepted connection bound.
+
+Five managed connection/lifecycle assertions pass under private Node 24, invoked successfully by an actual Node 22.22.2 host. The guardian recovery case passes after awaiting real protocol readiness before SIGKILL. Four native reload journeys pass against the installed fixed SDK and explicitly configured offline provider, including original-worker continuity, one exact completion, server-loss log finalization, and saved-conversation follow-up without Background. No PATH-injected worker CLI is used.
+
+The integrated terminal-failure replay group passes all eight tests. An old handled lost record can receive a new malformed log while its foreground is disconnected; the manager writes canonical failure evidence and the exact saved session receives the new notification once. Review of this new folding path must still establish bounded main-thread work and backlog behavior before final query-isolation acceptance.
