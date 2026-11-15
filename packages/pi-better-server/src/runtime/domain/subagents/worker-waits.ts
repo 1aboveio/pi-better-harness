@@ -2034,7 +2034,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
                 waitId: park.waitId,
                 generation: park.generation,
                 expectedCancelEpoch,
-                lease: { ownerId: `subagents:${process.pid}`, pid: process.pid },
+                lease: { ownerId: `subagents:${process.pid}`, pid: process.pid, processStartToken: processStartToken(process.pid) ? Buffer.from(processStartToken(process.pid)!).toString("base64url") : undefined },
                 reservedCheckpointId: park.record.checkpoint?.entryId ?? park.waitId,
             });
             const claimId = String(claim.claimId ?? "");

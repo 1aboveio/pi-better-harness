@@ -85,7 +85,7 @@ test("unavailable continuation authority backs off without retaining active work
     assert.deepEqual(host.status().continuationUnavailable[0], first);
     assert.equal(host.busy, false);
     for (let i = 0; i < 130; i++) await host.dispatchContinuation({ ...park, waitId: `wait-${i}` }, run);
-    assert.equal(host.status().continuationUnavailable.length, 128);
+    assert.equal(host.status().continuationUnavailable.length, 32, "global admission budget also bounds a flood of distinct generations");
     assert.equal(host.busy, false);
   } finally { await host.close(); }
 });

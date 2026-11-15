@@ -31,6 +31,7 @@ export class ManagedSubagentHost {
     closeJournal;
     epoch;
     pending = 0;
+    continuationWindow = { started: 0, admitted: 0 };
     continuationFailures = new Map();
     workerHost;
     path;
@@ -70,6 +71,20 @@ export class ManagedSubagentHost {
                 }
             }
             this.epoch = this.journal.epoch(instance);
+            // An unpublished reservation cannot have dispatched task code. Release
+            // only a proven-dead manager's claim before SDK reconciliation sees it.
+            for (const claim of sharedStore?.listResumeClaims({ state: "claimed" }) ?? []) {
+                if (claim.state !== "claimed" || !claim.lease?.ownerId?.startsWith("subagents:"))
+                    continue;
+                const pid = claim.lease.pid;
+                if (!pid)
+                    continue;
+                if (processExists(pid) && (!claim.lease.processStartToken || Buffer.from(processStartToken(pid) ?? "").toString("base64url") === claim.lease.processStartToken || !processStartToken(pid)))
+                    continue;
+                sharedStore.releaseResumeClaim({ waitId: claim.waitId, generation: claim.generation,
+                    claimId: claim.claimId, claimToken: claim.claimToken, outcome: "ready",
+                    reason: "Recovered unpublished reservation after exact manager exit" });
+            }
             for (const attempt of this.journal.unresolvedAttempts()) {
                 if (readMeta(attempt.id))
                     continue;
@@ -207,10 +222,16 @@ export class ManagedSubagentHost {
                 getSessionFile: () => undefined, getEntries: () => branch } };
     }
     dispatchContinuation(park, run) {
+        const now = Date.now();
+        if (now - this.continuationWindow.started >= 1000)
+            this.continuationWindow = { started: now, admitted: 0 };
+        if (this.continuationWindow.admitted >= 32)
+            return Promise.resolve("skipped");
         const retryKey = `${park.waitId}:${park.generation}`;
         const failure = this.continuationFailures.get(retryKey);
         if (failure && Date.now() < failure.retryAt)
             return Promise.resolve("skipped");
+        this.continuationWindow.admitted++;
         this.pending++;
         const result = this.tail.catch(() => undefined).then(async () => {
             const saved = this.journal.attempt(park.runId)?.launchAuthority;

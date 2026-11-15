@@ -9,7 +9,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { processMatchesStart } from "../src/daemon-owner.ts";
 
-for (const restart of [false, true]) test(`managed worker continues after parent exit${restart ? " and server SIGKILL" : ""}`, { timeout: 60000 }, async () => {
+for (const scenario of ["parent", "park", "claim"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: 60000 }, async () => {
+  const restart = scenario === "park";
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, "launch-")), transport = realpathSync(mkdtempSync("/tmp/p761-"));
   const agent = join(root, "agent"), cwd = join(root, "workspace"); mkdirSync(join(agent, "agents/roles"), { recursive: true }); mkdirSync(cwd);
@@ -18,7 +19,8 @@ for (const restart of [false, true]) test(`managed worker continues after parent
   writeFileSync(join(agent, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: { providerExtensions: { openai: new URL("./support/subagent-park-model.ts", import.meta.url).pathname }, defaultTools: "read", maxConcurrent: 1 } } }));
   writeFileSync(join(agent, "agents/roles/fixture.md"), "---\nschema: pi-agent/v1\nkind: role\nid: role.fixture\nname: Fixture\ndefaults:\n  model: openai/gpt-4.1\n---\nFrozen launch instructions.\n");
   const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root,
-    LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: entered, LAUNCH_RELEASE: release };
+    LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: entered, LAUNCH_RELEASE: release,
+    ...(scenario === "claim" ? { CONTINUATION_CRASH_POINT: "claim", CONTINUATION_CRASH_MARKER: join(cwd, "crashed") } : {}) };
   const execPath = process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath;
   let daemon = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
   let errors = ""; daemon.stderr!.on("data", data => { errors += data; });
@@ -69,6 +71,12 @@ for (const restart of [false, true]) test(`managed worker continues after parent
       await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
     }
     writeFileSync(release, "release");
+    if (scenario === "claim") {
+      await Promise.race([once(daemon, "exit"), delay(15000).then(() => { throw new Error("Claim crash was not reached"); })]);
+      daemon = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+      daemon.stderr!.on("data", data => { errors += data; });
+      await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
+    }
     const continuedDeadline = Date.now() + 25000;
     while (!existsSync(`${entered}.continued`)) {
       assert.ok(Date.now() < continuedDeadline, `Worker did not continue: ${errors}`);
