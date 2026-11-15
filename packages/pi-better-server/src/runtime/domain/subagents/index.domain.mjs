@@ -3018,7 +3018,7 @@ export default function (pi, managed) {
                 });
             }
             const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] }
-                : managed ? { file: process.execPath, fileArgs: [join(selfDir(), "managed-worker.mjs"), ...args] }
+                : managed ? managed.workerCommand(args)
                     : { file: process.execPath, fileArgs: [join(selfDir(), "child-runtime.mjs"), resolvePiBinary(), ...args] };
             const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
             // Reservations prevent competing admissions, but do not grandfather

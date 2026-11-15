@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "./index.ts";
 import { catalogSnapshotFromWire } from "./catalog-store.ts";
@@ -89,6 +90,7 @@ export class ManagedSubagentHost {
                 assertCurrent: () => host.journal.current(host.epoch),
                 capacity: () => host.capacityFor(host.current),
                 attempt: () => nextRunId(),
+                workerCommand: args => ({ file: process.execPath, fileArgs: [fileURLToPath(new URL("./managed-worker.mjs", import.meta.url)), ...args] }),
                 snapshot: async configuration => {
                     const command = host.catalog.connection();
                     command({ type: "runtime_register_catalog", cwd: host.current.owner.workspace,

@@ -47,6 +47,7 @@ process.env.TMPDIR = RUNTIME;
 const AGENT_DIR = join(RUNTIME, "agent");
 process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
 const foregrounds = [];
+let domainPort;
 
 // All stub packages live under a temp root. Checkout node_modules is never touched.
 const STUBS_DIR = mkdtempSync(join(RUNTIME, "stubs-"));
@@ -170,7 +171,7 @@ function clearRuns() {
     }
 }
 
-function writeRunningMeta({ writeMeta, nextRunId }, name) {
+function writeRunningMeta({ writeMeta, nextRunId, processStartToken }, name) {
     const id = nextRunId();
     const startedAt = Date.now();
     writeMeta({
@@ -179,6 +180,7 @@ function writeRunningMeta({ writeMeta, nextRunId }, name) {
         status: "running",
         pid: process.pid,
         spawnPid: process.pid,
+        spawnPidStartTime: processStartToken(process.pid),
         cwd: RUNTIME,
         promptPreview: "fake",
         startedAt,
@@ -265,7 +267,7 @@ function loadExtension(mod, permissionSnapshot) {
             messages.push({ msg, opts });
         },
     };
-    mod.default(pi);
+    mod.default(pi, domainPort());
     const foreground = { tools, commands, handlers, entries, events, messages };
     foregrounds.push(foreground);
     return foreground;
@@ -339,6 +341,7 @@ describe("subagent_spawn_batch end-to-end", () => {
         const binDir = makeMockPi();
         process.env.PATH = `${binDir}:${origPath}`;
         mod = await import("../index.ts");
+        ({ managedDomainPort: domainPort } = await import("./managed-domain-port.mjs"));
         registry = await import("../registry.ts");
         process.env.PI_SUBAGENTS_TEST_REGISTRY = registry.baseDir();
         capacity = await import("../capacity.mjs");
@@ -505,7 +508,7 @@ describe("subagent_spawn_batch end-to-end", () => {
         });
     });
 
-    it("session catalog model and effort apply to discovery and launches after branch restoration", async () => {
+    it("managed launch kernel freezes session catalog model and effort after branch restoration", async () => {
         const h = sessionHarness(mod);
         h.ctx.isProjectTrusted = () => false;
         h.ctx.modelRegistry = { getAvailable: () => [{ provider: "test", id: "model", reasoning: true }], find: () => undefined };
@@ -514,9 +517,8 @@ describe("subagent_spawn_batch end-to-end", () => {
             { type: "custom", customType: "pi-better-subagents-agent-settings", data: { version: 1, id: "role.developer", key: "effort", value: "low" } },
         );
         await h.handlers.session_tree({}, h.ctx);
-        const discovery = await h.tools.agents_catalog.execute("session-discovery", { action: "inspect", id: "developer" }, null, null, h.ctx);
-        assert.equal(discovery.details.view.fields.model.value, "test/model");
-        assert.equal(discovery.details.view.fields.effort.value, "low");
+        // Catalog transport/discovery is covered by real registered Catalog hosts.
+        // This trusted adapter fixture verifies the frozen launch snapshot only.
         await withHeldChildren(registry, h.tools, h.ctx, async () => {
             const single = await h.tools.subagent_spawn.execute("session-model", {
                 role: "developer", prompt: "use session preferences", tools: "read,bash", sandbox: false,
@@ -535,8 +537,14 @@ describe("subagent_spawn_batch end-to-end", () => {
         });
         h.entries.length = 0;
         await h.handlers.session_tree({}, h.ctx);
-        const baseline = await h.tools.agents_catalog.execute("baseline-discovery", { action: "inspect", id: "developer" }, null, null, h.ctx);
-        assert.notEqual(baseline.details.view.fields.model.value, "test/model");
+        await withHeldChildren(registry, h.tools, h.ctx, async () => {
+            const baseline = await h.tools.subagent_spawn.execute("baseline-launch", {
+                role: "developer", prompt: "restored defaults", tools: "read,bash", sandbox: false,
+            }, null, null, h.ctx);
+            const id = baseline.content[0].text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
+            assert.ok(id);
+            assert.notEqual(registry.readMeta(id).catalog.effective.model.value, "test/model");
+        });
     });
 
     it("launch-available rechecks a lowered cap before reserving later jobs", async () => {
