@@ -1,6 +1,6 @@
 # Unified runtime acceptance status
 
-**Validation complete. PR merge and issue closure pending.** [CI8 run 43766305095](https://github.com/1aboveio/pi-better-harness/actions/runs/43766305095) passed all 18 jobs on `9acbc1a90b53695d60672e680950d7df966f5cab`, including the aggregate `ci` gate. The [final validation record](ci8-final-validation.md), [job summary](ci8-jobs.json) and [resource summary](ci8-resources/summary.json) are the current evidence. Documentation added after that source does not change the validated runtime.
+**Validation complete.** Merge and issue status are tracked in [PR #794](https://github.com/1aboveio/pi-better-harness/pull/794) and [epic #751](https://github.com/1aboveio/pi-better-harness/issues/751). [CI8 run 43766305095](https://github.com/1aboveio/pi-better-harness/actions/runs/43766305095) passed all 18 jobs on `9acbc1a90b53695d60672e680950d7df966f5cab`, including the aggregate `ci` gate. The [final validation record](ci8-final-validation.md), [job summary](ci8-jobs.json) and [resource summary](ci8-resources/summary.json) are the current evidence. Documentation added after that source does not change the validated runtime.
 
 This index supersedes status claims in earlier checkpoint audits. Their initial failures, incomplete matrices and pending-CI statements remain historical evidence, not current blockers. Passing validation does not itself merge a PR or close an issue.
 
@@ -27,9 +27,8 @@ Remote evidence uses two real RemoteClientSession adapters over loopback Unix tr
 
 All final reports identify the CI8 source and preserve nonempty installation-related dirty fields for `cli.ts`/`remote-cli.ts`; they are not labeled clean-checkout measurements. Older clean local reports remain useful historical evidence, but final supported-platform qualification comes from CI8.
 
-## Completion actions
+## Delivery record
 
-1. Review the documentation-only acceptance delta, merge the implementation PR and reconcile engineering issue status with this evidence.
-2. Close the epic and implementation issues only after merge/closure actions are actually completed. No implementation or validation gap is left open in this index.
+[PR #794](https://github.com/1aboveio/pi-better-harness/pull/794) records the implementation merge and links the completed engineering issues. No implementation or validation gap is left open in this index. GitHub records the merge and issue states separately from this validation snapshot.
 
 Earlier [acceptance](acceptance-audit.md), [managed integration](managed-integration-audit.md), [launch](subagent-launch-audit.md), [continuation](subagent-continuation-audit.md), [delivery](recipient-delivery-audit.md), [Background ownership](background-ownership-audit.md), [upgrade](upgrade-audit.md), [final gates](final-acceptance-gates.md), [CI6](ci6-resource-validation.md) and [CI7](ci7-resource-validation.md) records are retained for audit history.

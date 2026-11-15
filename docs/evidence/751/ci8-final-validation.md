@@ -1,6 +1,6 @@
 # Final integrated validation
 
-**CI8 passed all 18 jobs on `9acbc1a90b53695d60672e680950d7df966f5cab`. Validation is complete; PR merge and issue closure remain pending.** [Run 43766305095](https://github.com/1aboveio/pi-better-harness/actions/runs/43766305095) and the [retained job summary](ci8-jobs.json) identify the exact successful source and every lane.
+**CI8 passed all 18 jobs on `9acbc1a90b53695d60672e680950d7df966f5cab`. Validation is complete; [PR #794](https://github.com/1aboveio/pi-better-harness/pull/794) and [epic #751](https://github.com/1aboveio/pi-better-harness/issues/751) track delivery status.** [Run 43766305095](https://github.com/1aboveio/pi-better-harness/actions/runs/43766305095) and the [retained job summary](ci8-jobs.json) identify the exact successful source and every lane.
 
 This includes all three Server shards, four workspace/script shards, both Pi compatibility shards, Pi extension compatibility at 1.0.0 and 1.3.0, Linux/macOS/Node 24 sandbox lanes, Windows verification, both supported-platform resource lanes and the aggregate `ci` gate. A passing lane is not a claim that every optional test ran; skipped tests are not counted as coverage. Runtime support and performance acceptance remain macOS/Linux; Windows verification does not establish a Windows managed-runtime resource matrix.
 
