@@ -2,11 +2,8 @@ import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { readOwnBuild } from "./startup/artifact.ts";
 import type { ServerBuild } from "./startup/managed-types.ts";
 import { PROTOCOL_VERSION, type HelloCommand, type HelloData } from "./protocol.ts";
-
-/** Kept equal to package.json `version`; a test pins that. */
-export const SERVER_VERSION = "0.2.4";
-
-export const SERVER_EXTENSION_VERSIONS: Readonly<Record<string, string>> = { "pi-better-server": SERVER_VERSION };
+import { SERVER_EXTENSION_VERSIONS } from "./version.ts";
+export { SERVER_VERSION, SERVER_EXTENSION_VERSIONS } from "./version.ts";
 
 export interface HelloIdentity { build?: ServerBuild; instanceId?: string; safeUpgrade?: boolean; agentDir?: string }
 

@@ -35,11 +35,16 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { describe, it, before, beforeEach, after } from "node:test";
 import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import assert from "node:assert/strict";
+import { inspectDaemonOwner } from "../../pi-better-server/src/daemon-owner.ts";
+import { removeOwnedFixture, stopOwnedRuntime } from "../../../scripts/test-support/remove-owned-fixture.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(__dirname);
 const RUNTIME = mkdtempSync(join(tmpdir(), "batch-spawn-e2e-"));
 process.env.TMPDIR = RUNTIME;
+const AGENT_DIR = join(RUNTIME, "agent");
+process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
+const foregrounds = [];
 
 // All stub packages live under a temp root. Checkout node_modules is never touched.
 const STUBS_DIR = mkdtempSync(join(RUNTIME, "stubs-"));
@@ -259,14 +264,17 @@ function loadExtension(mod, permissionSnapshot) {
         },
     };
     mod.default(pi);
-    return { tools, commands, handlers, entries, events, messages };
+    const foreground = { tools, commands, handlers, entries, events, messages };
+    foregrounds.push(foreground);
+    return foreground;
 }
 
 function sessionHarness(mod) {
     const harness = loadExtension(mod);
     const ctx = makeCtx();
     ctx.sessionManager = { getBranch: () => harness.entries };
-    return { ...harness, ctx };
+    harness.ctx = ctx;
+    return harness;
 }
 
 async function withHeldChildren(registry, tools, ctx, run) {
@@ -355,11 +363,18 @@ describe("subagent_spawn_batch end-to-end", () => {
             .map((meta) => waitForFinished(registry.readMeta, meta.id)));
         process.env.PATH = origPath;
         config.setConfigForTests(undefined);
+        // Result reads can open the shared observation without session_start.
+        // Close every real foreground before its runtime and sealed fixture.
+        const serverDir = join(AGENT_DIR, "server");
+        const owner = inspectDaemonOwner(serverDir);
+        for (const foreground of foregrounds) {
+            await foreground.handlers.session_shutdown?.({ reason: "shutdown" }, foreground.ctx ?? makeCtx());
+        }
+        await stopOwnedRuntime(serverDir, owner.status === "live" ? owner.owner : undefined);
         await stopRuntime?.();
         if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
-        // Cleanup owns only the temp RUNTIME tree created by this suite.
-        rmSync(RUNTIME, { recursive: true, force: true });
+        removeOwnedFixture(RUNTIME);
         assertCheckoutNodeModulesUntouched();
     });
 

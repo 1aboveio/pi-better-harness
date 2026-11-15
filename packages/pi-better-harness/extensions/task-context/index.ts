@@ -91,6 +91,8 @@ const WorkflowUpdateSchema = Type.Object({
     humanWords: Type.String({ description: "The human's words, quoted or closely paraphrased." }),
     changes: Type.String({ description: "What the decision changes: units, validation, forbidden actions." }),
     supersedes: Type.Optional(Type.String({ description: "Id of the earlier decision this one replaces." })),
+    answers: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Answer-file keys resolved by this decision, e.g. results/127-impl-1.json." })),
+    source: Type.Optional(Type.String({ minLength: 1, description: "Decision provenance, e.g. agent-recommendation." })),
   }, { description: "A human decision to record with this transition." })),
   profiling: Type.Optional(Type.Object({}, {
     additionalProperties: true,
