@@ -14,7 +14,13 @@ export class SessionActivity {
   private readonly runtimeUnsubscribers = new Set<() => void>();
   /** Extensions share the host bus, but their subscriptions end at each loader reload. */
   readonly runtimeEvents: EventBus = {
-    emit: (channel, data) => { if (!this.runtimeRevoked && !this.disposed) this.events.emit(channel, data); },
+    emit: (channel, data) => {
+      if (this.runtimeRevoked || this.disposed) {
+        if (channel === "pi-better-runtime:connect") (data as { reject?: (error: Error) => void })?.reject?.(new Error("runtime-unavailable: hosted session revoked"));
+        return;
+      }
+      this.events.emit(channel, data);
+    },
     on: (channel, handler) => {
       if (this.disposed || this.runtimeRevoked) return () => undefined;
       const unsubscribe = this.events.on(channel, (data) => {
@@ -56,11 +62,21 @@ export class SessionActivity {
   private readonly enterCommand: () => () => void;
   private pendingHandlers = 0;
   private runtimeRevoked = false;
+  private readonly workClients = new Set<{ close(): void }>();
 
-  constructor(log: (message: string) => void, enterTool: () => () => void = () => () => undefined, enterCommand = enterTool) {
+  constructor(log: (message: string) => void, enterTool: () => () => void = () => () => undefined, enterCommand = enterTool, workClient?: () => import("./runtime/work-client.mjs").WorkClient) {
     this.enterTool = enterTool;
     this.enterCommand = enterCommand;
     this.log = log;
+    this.events.on("pi-better-runtime:connect", (request: any) => {
+      if (!workClient || this.disposed || this.runtimeRevoked || typeof request?.accept !== "function") return;
+      try {
+        const client = workClient();
+        this.workClients.add(client);
+        client.onChange(() => { if (client.closed) this.workClients.delete(client); });
+        request.accept(client);
+      } catch (error) { request.reject?.(error); }
+    });
     this.events.on("pi-better-goal:register-provider", (value) => {
       const provider = value as ActivityProvider | undefined;
       if (!provider || typeof provider.id !== "string" || typeof provider.getActivity !== "function" || this.disposed) return;
@@ -102,6 +118,8 @@ export class SessionActivity {
 
   /** After shutdown, before any new factories run; the host admission guard has already proved idleness. */
   resetRuntime(): void {
+    for (const client of this.workClients) client.close();
+    this.workClients.clear();
     for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
     this.unsubscribers.clear();
     for (const unsubscribe of this.runtimeUnsubscribers) unsubscribe();
@@ -113,6 +131,8 @@ export class SessionActivity {
   /** A fenced runtime cannot receive late bus callbacks or register new background providers. */
   revokeRuntime(): void {
     this.runtimeRevoked = true;
+    for (const client of this.workClients) client.close();
+    this.workClients.clear();
     for (const unsubscribe of this.runtimeUnsubscribers) unsubscribe();
   }
 

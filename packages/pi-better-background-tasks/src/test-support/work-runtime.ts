@@ -33,9 +33,7 @@ export async function startWorkRuntime() {
         const end = buffer.indexOf("\n");
         const command = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
         try {
-          const result = command.type === "hello" ? checkHello(command, { agentDir: root })
-            : command.type === "runtime_register_client" ? { ok: true, data: { clientId: command.clientId } }
-            : { ok: true, data: queries.handle(command) };
+          const result = command.type === "hello" ? checkHello(command, { agentDir: root }) : { ok: true, data: queries.handle(command) };
           reply({ id: command.id, type: "response", success: result.ok, ...result });
         } catch (error) { reply({ id: command.id, type: "response", success: false, error: String(error) }); }
       }
