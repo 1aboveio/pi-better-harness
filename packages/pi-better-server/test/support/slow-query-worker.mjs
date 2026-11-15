@@ -1,6 +1,8 @@
 import { parentPort } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 
+await import("../../src/runtime/query-worker.mjs");
+
 parentPort.on("message", message => {
   if (message.type !== "diagnostic-stall") return;
   const db = new DatabaseSync(":memory:");
@@ -12,4 +14,3 @@ parentPort.on("message", message => {
   } finally { db.close(); }
   parentPort.postMessage({ type: "diagnostic-finished", durationMs: performance.now() - started });
 });
-await import("../../src/runtime/query-worker.mjs");
