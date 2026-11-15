@@ -256,6 +256,7 @@ export interface ParentNotification {
  * `notifyParent` is not delivery.
  */
 export interface ParentDelivery {
+  readonly receiptId?: string;
   delivered(): void;
   defer(reason: string): void;
 }
@@ -557,6 +558,10 @@ function rpcCode(error: unknown): string {
 }
 
 export interface ObservedWaitHostOptions {
+  /** Fixed server admission guard, checked immediately before external dispatch. */
+  assertAdmission?: () => void;
+  prepareWorkerPolicy?: (run: WorkerRunScope) => (() => void);
+  beforeParentOperation?: (operation: { operationId: string; taskId: string; token: string }) => void;
   /** Runtime-owned coordinator handle. The caller retains its lifetime lease. */
   sharedStore?: Store;
   /** Production adapters leave global discovery and terminal import to the server. */
@@ -647,6 +652,8 @@ export function createObservedWaitHost(pi: ExtensionAPI, options: ObservedWaitHo
   hosts.set(pi as unknown as object, host);
   return host;
 }
+
+export function registerObservedWaitClient(pi: ExtensionAPI, host: ObservedWaitHost): void { hosts.set(pi as object, host); }
 
 export function getObservedWaitHost(pi: unknown): ObservedWaitHost | undefined {
   return pi && typeof pi === "object" ? hosts.get(pi as object) : undefined;
@@ -1374,6 +1381,8 @@ export class ObservedWaitHost {
     const operationId = `op_${randomUUID()}`;
     const token = `launch_${randomUUID()}`;
     const taskId = supervisorTaskIdForToken(token);
+    this.options.assertAdmission?.();
+    this.options.beforeParentOperation?.({ operationId, taskId, token });
     store.registerOperation({
       operationId,
       taskId,
@@ -2119,6 +2128,7 @@ export class ObservedWaitHost {
       const client = await this.resultSupervisionClient();
       client.close();
     }
+    const assertWorkerPolicy = this.options.prepareWorkerPolicy?.(run);
     const prepared = this.prepareLaunch(
       input.kind,
       input.params,
@@ -2158,7 +2168,7 @@ export class ObservedWaitHost {
     this.launches.set(taskId, launchContext);
     if (this.options.serverOwnedResults) await this.handoffResults([store.getOperation(operationId)!]);
     const started = await this.startSupervisor({
-      token, taskId, kind: input.kind, params: input.params, prepared, operationId,
+      token, taskId, kind: input.kind, params: input.params, prepared, operationId, assertDispatch: assertWorkerPolicy,
     });
     this.launches.set(taskId, launchContext);
     this.emitDurableTaskChange(owner);
@@ -2989,6 +2999,7 @@ export class ObservedWaitHost {
     params: Record<string, unknown>;
     prepared: ReturnType<ObservedWaitHost["prepareLaunch"]>;
     operationId: string;
+    assertDispatch?: () => void;
   }): Promise<{ started: boolean; claimed: boolean }> {
     const { token, taskId, kind, params, prepared, operationId } = input;
     const profilePath = join(supervisorPaths(this.directory, taskId).dir, "sandbox.sb");
@@ -3016,6 +3027,15 @@ export class ObservedWaitHost {
       ...(typeof params.max_log_bytes === "number" ? { maxLogBytes: params.max_log_bytes } : {}),
       ...(kind === "watch" ? this.watchOptions(params) : this.processTimeout(params)),
     };
+    try { this.options.assertAdmission?.(); input.assertDispatch?.(); }
+    catch (error) {
+      const operation = this.requireStore().getOperation(operationId);
+      if (operation && operation.terminalRevision === 0) this.requireStore().recordTerminalOutcome({
+        operationId, eventId: `admission_refused_${randomUUID()}`, owner: operation.owner,
+        outcome: "failed", evidence: [], reason: `External dispatch refused before spawn: ${String(error)}`,
+      });
+      throw error;
+    }
     const started = await this.supervisor.start(options);
     return { started: started.started, claimed: started.claimed };
   }
@@ -3375,6 +3395,7 @@ export class ObservedWaitHost {
     const claimToken = context.callbackClaimToken;
     let settled = false;
     const delivery: ParentDelivery = {
+      receiptId: `background-terminal:${operation.operationId}`,
       delivered: () => {
         if (settled) return;
         settled = true;
@@ -3693,6 +3714,7 @@ export class ObservedWaitHost {
             }
             let settled = false;
             const delivery: ParentDelivery = {
+              receiptId: event.eventId,
               delivered: () => {
                 if (settled) return;
                 settled = true;
@@ -4000,8 +4022,9 @@ export class ObservedWaitHost {
    * on every session_tree/branch navigation. Branch changes must be visible to
    * a queued callback *before* the batcher decides whether to deliver it.
    */
-  noteParentContext(ctx: ExtensionContext): void {
-    this.setActiveOrigin(ctx);
+  noteParentContext(ctx: ExtensionContext, options: {recover?: boolean} = {}): void {
+    this.setActiveOrigin(ctx, options.recover !== false);
+    if(options.recover === false)return;
     if (!this.store) return;
     this.recoverAbandonedDeliveries();
     if (this.terminalRecoveryNeeded) {
@@ -4013,7 +4036,7 @@ export class ObservedWaitHost {
     this.writeHostDebug();
   }
 
-  private setActiveOrigin(ctx: ExtensionContext): void {
+  private setActiveOrigin(ctx: ExtensionContext, debug = true): void {
     const previous = this.activeContext;
     const previousKey = previous ? this.contextKey(previous) : undefined;
     const nextSessionId = this.sessionIdIfAvailable(ctx);
@@ -4033,7 +4056,7 @@ export class ObservedWaitHost {
       this.terminalRecoveryNeeded = true;
       this.lastChangeRevision = -1;
     }
-    this.writeHostDebug();
+    if(debug)this.writeHostDebug();
   }
 
   private contextKey(ctx: ExtensionContext): string | undefined {

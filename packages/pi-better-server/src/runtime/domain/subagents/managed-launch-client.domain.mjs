@@ -1,4 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-subagents/managed-launch-client.ts. Do not edit directly.
+import { nativeBackgroundCapability } from "./managed-background-capability.domain.mjs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -38,7 +39,7 @@ export async function submitManagedLaunch(pi, ctx, key, tool, params) {
         const settings = ctx.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType.startsWith("pi-better-subagents-"));
         const payload = { version: 1, id, secretHash: createHash("sha256").update(secret).digest("hex"), instanceId: hello.instanceId,
             owner, pid: process.pid, start: processStartToken(process.pid), projectTrusted: ctx.isProjectTrusted(),
-            background: { available: getWorkerOperationService(pi)?.assignmentContinuation === 1, tools: [...resolveProductionSchemas(pi, DEFAULT_WORKER_BRIDGE_TOOLS).schemas.keys()] },
+            background: { available: getWorkerOperationService(pi)?.assignmentContinuation === 1 || nativeBackgroundCapability(pi), tools: [...resolveProductionSchemas(pi, DEFAULT_WORKER_BRIDGE_TOOLS).schemas.keys()] },
             permissions: currentSandboxPermissions(pi) ?? {}, settings, model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
             catalogAuthority, key, tool, params };
         const staging = `${path}.tmp`;

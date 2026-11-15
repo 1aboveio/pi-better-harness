@@ -247,7 +247,7 @@ const BACKGROUND_ORCHESTRATION_GUIDELINES = [
     "When a structured plan is active, keep it as the coordinator ledger: launch relevant background work early, continue unblocked foreground work without polling, and update the plan after inspecting each terminal result or failure.",
     "Do not treat launch as completion of the parent milestone; relevant background work must be terminal, inspected, and integrated before verification or completion.",
 ];
-export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = refreshBackgroundTasksNavigator) {
+export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = refreshBackgroundTasksNavigator, options = {}) {
     const { resumeRunningTask, spawnTask } = runtime;
     let activeSession;
     const getActiveSession = () => activeSession;
@@ -262,12 +262,14 @@ export function registerTools(pi, runtime = defaultRuntime, refreshNavigator = r
     pi.on("session_start", async (_event, ctx) => {
         setCallbackBatchContext(pi, ctx);
         activeSession = getCallbackOrigin(ctx);
-        for (const meta of listMetasForOrigin(activeSession)) {
-            if (meta.status === "running" || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)) {
-                resumeRunningTask(pi, meta, getActiveSession);
+        if (options.resumeLocal !== false) {
+            for (const meta of listMetasForOrigin(activeSession)) {
+                if (meta.status === "running" || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)) {
+                    resumeRunningTask(pi, meta, getActiveSession);
+                }
             }
+            runTaskMaintenance({ activeOrigin: activeSession });
         }
-        runTaskMaintenance({ activeOrigin: activeSession });
     });
     pi.on("agent_start", (_event, ctx) => {
         setCallbackBatchContext(pi, ctx);

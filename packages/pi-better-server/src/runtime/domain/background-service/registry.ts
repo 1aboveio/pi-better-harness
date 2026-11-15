@@ -12,12 +12,13 @@ const metaCache = new Map<string, BackgroundTaskMeta>();
 const indexIdsCache = new Map<string, { ids: Set<string>; signature: string }>();
 const initializedIndexes = new Set<string>();
 const metaChangedListeners = new Set<() => void>();
-const registryIo = { fullDirectoryReads: 0, indexDirectoryReads: 0, metadataFileReads: 0, indexRevisionChecks: 0 };
+const registryIo = { fullDirectoryReads: 0, indexDirectoryReads: 0, metadataFileReads: 0, terminalMetadataFileReads: 0, indexRevisionChecks: 0 };
 
 export interface RegistryIoMetrics {
   fullDirectoryReads: number;
   indexDirectoryReads: number;
   metadataFileReads: number;
+  terminalMetadataFileReads: number;
   indexRevisionChecks: number;
 }
 
@@ -29,6 +30,7 @@ export function resetRegistryIoMetrics(): void {
   registryIo.fullDirectoryReads = 0;
   registryIo.indexDirectoryReads = 0;
   registryIo.metadataFileReads = 0;
+  registryIo.terminalMetadataFileReads = 0;
   registryIo.indexRevisionChecks = 0;
 }
 
@@ -129,6 +131,7 @@ export function inspectMeta(id: string): MetaInspection {
     const raw = readFileSync(path, "utf8");
     try {
       const meta = JSON.parse(raw) as BackgroundTaskMeta;
+      if(isTerminalStatus(meta.status))registryIo.terminalMetadataFileReads++;
       const invalid = metaShapeProblem(meta, id);
       if (invalid) {
         metaCache.delete(id);
@@ -223,6 +226,18 @@ export function listMetasForOrigin(origin: BackgroundTaskCallbackOrigin): Backgr
     .sort((a, b) => b.startedAt - a.startedAt);
 }
 
+/** Durable pending callbacks are independent of the Navigator's terminal retention. */
+export function listPendingCallbackMetasForOrigin(origin: BackgroundTaskCallbackOrigin): BackgroundTaskMeta[] {
+  const directory=join(baseDir(),'by-origin-callback',originKey(origin));
+  if(!initializedIndexes.has(directory)){
+    try {readFileSync(join(directory,'.initialized'));}
+    catch {for(const meta of listMetasForOrigin(origin))if(pendingCallback(meta))writeIndexEntry(directory,meta.id);mkdirSync(directory,{recursive:true});writeFileSync(join(directory,'.initialized'),'1');}
+    initializedIndexes.add(directory);
+  }
+  return readIndexIds(directory).map(readOwnedMeta).filter((meta):meta is BackgroundTaskMeta=>!!meta&&belongsToOrigin(meta,origin)&&pendingCallback(meta));
+}
+function pendingCallback(meta:BackgroundTaskMeta):boolean {return isTerminalStatus(meta.status)&&meta.status!=='cancelled'&&meta.callback!==false&&!meta.callbackSentAt&&!meta.callbackSuppressedAt;}
+
 export function listActiveMetasForOrigin(origin: BackgroundTaskCallbackOrigin): BackgroundTaskMeta[] {
   const directory = originActiveIndexDir(origin);
   ensureOriginActiveIndex(origin, directory);
@@ -288,6 +303,8 @@ function indexMeta(meta: BackgroundTaskMeta): void {
   try {
     const directory = originIndexDir(originOf(meta));
     writeIndexEntry(directory, meta.id);
+    const callbackDirectory=join(baseDir(),'by-origin-callback',originKey(originOf(meta)));
+    if(pendingCallback(meta))writeIndexEntry(callbackDirectory,meta.id);else removeIndexEntry(callbackDirectory,meta.id);
     const activeDirectory = originActiveIndexDir(originOf(meta));
     if (meta.status === "running") writeIndexEntry(activeDirectory, meta.id);
     else removeIndexEntry(activeDirectory, meta.id);

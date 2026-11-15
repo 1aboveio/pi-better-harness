@@ -174,6 +174,7 @@ export function createObservedWaitHost(pi, options = {}) {
     hosts.set(pi, host);
     return host;
 }
+export function registerObservedWaitClient(pi, host) { hosts.set(pi, host); }
 export function getObservedWaitHost(pi) {
     return pi && typeof pi === "object" ? hosts.get(pi) : undefined;
 }
@@ -861,6 +862,8 @@ export class ObservedWaitHost {
         const operationId = `op_${randomUUID()}`;
         const token = `launch_${randomUUID()}`;
         const taskId = supervisorTaskIdForToken(token);
+        this.options.assertAdmission?.();
+        this.options.beforeParentOperation?.({ operationId, taskId, token });
         store.registerOperation({
             operationId,
             taskId,
@@ -1629,6 +1632,7 @@ export class ObservedWaitHost {
             const client = await this.resultSupervisionClient();
             client.close();
         }
+        const assertWorkerPolicy = this.options.prepareWorkerPolicy?.(run);
         const prepared = this.prepareLaunch(input.kind, input.params, input.kind === "watch" ? "bg_task_watch" : "bg_task_spawn", owner, input.policy, run.workspace);
         if (this.options.serverOwnedResults)
             this.assertResultAdmission(prepared.provenance);
@@ -1663,7 +1667,7 @@ export class ObservedWaitHost {
         if (this.options.serverOwnedResults)
             await this.handoffResults([store.getOperation(operationId)]);
         const started = await this.startSupervisor({
-            token, taskId, kind: input.kind, params: input.params, prepared, operationId,
+            token, taskId, kind: input.kind, params: input.params, prepared, operationId, assertDispatch: assertWorkerPolicy,
         });
         this.launches.set(taskId, launchContext);
         this.emitDurableTaskChange(owner);
@@ -2489,6 +2493,19 @@ export class ObservedWaitHost {
             ...(typeof params.max_log_bytes === "number" ? { maxLogBytes: params.max_log_bytes } : {}),
             ...(kind === "watch" ? this.watchOptions(params) : this.processTimeout(params)),
         };
+        try {
+            this.options.assertAdmission?.();
+            input.assertDispatch?.();
+        }
+        catch (error) {
+            const operation = this.requireStore().getOperation(operationId);
+            if (operation && operation.terminalRevision === 0)
+                this.requireStore().recordTerminalOutcome({
+                    operationId, eventId: `admission_refused_${randomUUID()}`, owner: operation.owner,
+                    outcome: "failed", evidence: [], reason: `External dispatch refused before spawn: ${String(error)}`,
+                });
+            throw error;
+        }
         const started = await this.supervisor.start(options);
         return { started: started.started, claimed: started.claimed };
     }
@@ -2864,6 +2881,7 @@ export class ObservedWaitHost {
         const claimToken = context.callbackClaimToken;
         let settled = false;
         const delivery = {
+            receiptId: `background-terminal:${operation.operationId}`,
             delivered: () => {
                 if (settled)
                     return;
@@ -3210,6 +3228,7 @@ export class ObservedWaitHost {
                         }
                         let settled = false;
                         const delivery = {
+                            receiptId: event.eventId,
                             delivered: () => {
                                 if (settled)
                                     return;
@@ -3522,8 +3541,10 @@ export class ObservedWaitHost {
      * on every session_tree/branch navigation. Branch changes must be visible to
      * a queued callback *before* the batcher decides whether to deliver it.
      */
-    noteParentContext(ctx) {
-        this.setActiveOrigin(ctx);
+    noteParentContext(ctx, options = {}) {
+        this.setActiveOrigin(ctx, options.recover !== false);
+        if (options.recover === false)
+            return;
         if (!this.store)
             return;
         this.recoverAbandonedDeliveries();
@@ -3535,7 +3556,7 @@ export class ObservedWaitHost {
         this.retryPendingTerminalCallbacks();
         this.writeHostDebug();
     }
-    setActiveOrigin(ctx) {
+    setActiveOrigin(ctx, debug = true) {
         const previous = this.activeContext;
         const previousKey = previous ? this.contextKey(previous) : undefined;
         const nextSessionId = this.sessionIdIfAvailable(ctx);
@@ -3556,7 +3577,8 @@ export class ObservedWaitHost {
             this.terminalRecoveryNeeded = true;
             this.lastChangeRevision = -1;
         }
-        this.writeHostDebug();
+        if (debug)
+            this.writeHostDebug();
     }
     contextKey(ctx) {
         try {

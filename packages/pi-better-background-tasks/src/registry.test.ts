@@ -1,6 +1,6 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { baseDir, ensureTaskDir, taskDir, getRegistryIoMetrics, listActiveMetasForOrigin, inspectMeta, listMetas, listMetasForOrigin, listTaskRecords, logPathFor, metaPathFor, readMeta, resetRegistryIoMetrics, writeMeta } from "./registry.js";
+import { baseDir, ensureTaskDir, taskDir, getRegistryIoMetrics, listPendingCallbackMetasForOrigin, listActiveMetasForOrigin, inspectMeta, listMetas, listMetasForOrigin, listTaskRecords, logPathFor, metaPathFor, readMeta, resetRegistryIoMetrics, writeMeta } from "./registry.js";
 import type { BackgroundTaskMeta } from "./types.js";
 
 describe("registry meta sweep cache", () => {
@@ -106,6 +106,7 @@ describe("session-owned registry index", () => {
       fullDirectoryReads: 0,
       indexDirectoryReads: 0,
       metadataFileReads: 0,
+      terminalMetadataFileReads: 0,
       indexRevisionChecks: 100,
     });
   });
@@ -135,4 +136,12 @@ describe("metadata inspection", () => {
     expect(inspection.error).toMatch(/invalid JSON/);
     expect(listTaskRecords().records.some((record) => record.id === meta.id && !record.readable)).toBe(true);
   });
+});
+
+it('indexes old pending callbacks independently of visible retention and removes native receipts',()=>{
+ const meta=fixtureMeta('succeeded','old undelivered');meta.callbackOrigin={cwd:'/pending',sessionId:meta.id};meta.callback=true;meta.endedAt=Date.now()-86400000;
+ writeMeta(meta);expect(listPendingCallbackMetasForOrigin(meta.callbackOrigin).map(row=>row.id)).toContain(meta.id);
+ resetRegistryIoMetrics();for(let i=0;i<60;i++)listPendingCallbackMetasForOrigin(meta.callbackOrigin);
+ expect(getRegistryIoMetrics().metadataFileReads).toBe(0);expect(getRegistryIoMetrics().fullDirectoryReads).toBe(0);
+ meta.callbackSentAt=Date.now();writeMeta(meta);expect(listPendingCallbackMetasForOrigin(meta.callbackOrigin)).toEqual([]);
 });

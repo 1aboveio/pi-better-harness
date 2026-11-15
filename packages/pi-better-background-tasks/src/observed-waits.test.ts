@@ -2814,3 +2814,16 @@ describe("callback origin and delivery receipt", () => {
     })).rejects.toThrow(/outside the registered workspace/);
   });
 });
+
+it('rechecks accepted foreground authority at external dispatch and records refusal without spawning', async()=>{
+  const root=workspace('admission-revoked'),harness=createHarness(),storePath=join(root,'operations.sqlite');
+  let assertions=0,operationId='';
+  const host=createObservedWaitHost(harness.pi,{storePath,supervisorDirectory:join(root,'supervisor'),pollMs:0,
+    assertAdmission(){if(++assertions===2)throw new Error('captured permission revoked');},
+    beforeParentOperation(operation){operationId=operation.operationId;}});
+  host.start(createCtx(root));cleanups.push(()=>host.close());
+  const marker=join(root,'must-not-launch');
+  await expect(host.launchParent({kind:'process',params:{shell:false,argv:[process.execPath,'-e',`require('node:fs').writeFileSync(${JSON.stringify(marker)},'bad')`]},ctx:createCtx(root)})).rejects.toThrow('captured permission revoked');
+  expect(existsSync(marker)).toBe(false);
+  const store=openStore({path:storePath});try{expect(store.getOperation(operationId)?.terminalOutcome).toBe('failed');}finally{store.close();}
+});

@@ -637,6 +637,13 @@ function fitRight(value, width) {
 function singleLine(value) {
     return String(value ?? "").replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
 }
+function prepareDetail(navigatorId, options) {
+    const { providerId, id } = splitRowKey(navigatorId);
+    try {
+        state().providers.get(providerId)?.prepareDetail?.(id, options);
+    }
+    catch { /* observation failure retains cached detail */ }
+}
 function detailFor(navigatorId, now = Date.now(), options) {
     const { providerId, id } = splitRowKey(navigatorId);
     const provider = state().providers.get(providerId);
@@ -931,6 +938,7 @@ function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, i
     const expandedSections = new Set();
     let detailId = initialDetailId;
     const initialRow = initialRows.find((row) => row.navigatorId === detailId);
+    prepareDetail(detailId, { logTailLines: logTailRows });
     let detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? (initialRow ? fallbackDetail(initialRow) : null);
     applyDefaultExpandedSections(detail, expandedSections);
     {
@@ -1021,6 +1029,7 @@ function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, i
         clearCloseArm();
         detailId = row.navigatorId;
         expandedSections.clear();
+        prepareDetail(detailId, { logTailLines: logTailRows });
         detail = detailFor(row.navigatorId, Date.now(), { logTailLines: logTailRows }) ?? fallbackDetail(row);
         applyDefaultExpandedSections(detail, expandedSections);
         startDetailTimer();
@@ -1207,6 +1216,7 @@ function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, i
             }
             else if (data === "l" || data === "L") {
                 logTailRows = cycleLogTailRows(logTailRows);
+                prepareDetail(detailId, { logTailLines: logTailRows });
                 if (detailId)
                     detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
                 requestRender();
@@ -1220,6 +1230,7 @@ function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, i
             if (closed)
                 return;
             const wasLoading = detail?.status === "rebuilding";
+            prepareDetail(detailId, { logTailLines: logTailRows });
             detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
             if (wasLoading)
                 applyDefaultExpandedSections(detail, expandedSections);

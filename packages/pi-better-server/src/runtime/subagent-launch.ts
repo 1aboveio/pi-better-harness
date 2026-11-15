@@ -1,3 +1,4 @@
+import { effectiveBackgroundPolicy } from './background-policy.ts';
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -28,8 +29,24 @@ export async function createSubagentLaunch(root: string, instance: string, catal
     const runtimePath = "./domain/background-service/runtime.domain.mjs";
     const { registerTools } = await import(toolsPath);
     const { createBackgroundTaskRuntime } = await import(runtimePath);
+    const sandboxPath="./domain/background-service/sandbox.domain.mjs";
+    const sandbox=await import(sandboxPath);
     host = new ManagedSubagentHost(root, instance, catalog, lease.store, (pi: any) => {
-      const service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, "operation-coordinator.sqlite"), serverOwnedResults: true });
+      const service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, "operation-coordinator.sqlite"), serverOwnedResults: true,
+        prepareWorkerPolicy(run:any){
+          const resolve=()=>{
+            const attempt=lease.store.subagentLaunchJournal().attempt(run.runId);
+            if(!attempt?.launchAuthority)throw new Error('permission-unavailable: captured worker launch authority missing');
+            const saved=attempt.launchAuthority.permissions;
+            const captured=saved?.backgroundPolicy ?? (saved?.subagentPermissions?{state:saved.subagentPermissions.enabled?'enabled':'inactive',permissions:saved.subagentPermissions}:undefined);
+            return effectiveBackgroundPolicy(captured,readPermissionSettings({agentDir:()=>root}).background,run.workspace) ?? {state:'inactive'};
+          };
+          const workerPolicy=resolve();sandbox.clearForegroundSandboxPolicy(pi);
+          pi.events.emit('pi-better-sandbox:policy',{...workerPolicy,background:workerPolicy});
+          const expected=JSON.stringify(workerPolicy);
+          return ()=>{if(JSON.stringify(resolve())!==expected)throw new Error('permission-unavailable: Background policy changed before worker dispatch');};
+        }
+      });
       const runtime = createBackgroundTaskRuntime();
       registerTools(pi, runtime, () => undefined);
       const close = service.close.bind(service);

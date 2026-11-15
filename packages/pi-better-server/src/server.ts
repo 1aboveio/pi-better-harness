@@ -1,3 +1,4 @@
+import { createBackgroundTools, hasBackgroundRequests } from "./runtime/background-tools.ts";
 import { createLocalWorkClient } from "./runtime/local-client.ts";
 import { chmodSync, existsSync, realpathSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
@@ -94,6 +95,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     admitDaemonStartup({ canonicalServerDir: serverDir, agentDir: getAgentDir(), build, intent: startupIntentFromEnv(process.env) });
     let launches: Awaited<ReturnType<typeof createSubagentLaunch>> | undefined;
     let launchInitialization: ReturnType<typeof createSubagentLaunch> | undefined;
+    let backgroundInitialization: ReturnType<typeof createBackgroundTools> | undefined;
+    let backgroundTools: Awaited<ReturnType<typeof createBackgroundTools>> | undefined;
+    const initializeBackground = () => backgroundInitialization ??= createBackgroundTools(realpathSync(getAgentDir()), instanceId!, () => Boolean(pendingUpgrade), scope => work().snapshot(scope)).then(host => backgroundTools = host).catch(error => { backgroundInitialization = undefined; throw error; });
     let cancellations: RuntimeCancellation | undefined;
     let resultSupervision: RuntimeResultSupervision | undefined;
     const resultPortKey = Symbol.for("pi-better-server:result-supervision-ports-v1");
@@ -113,7 +117,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         finally {
           resultSupervision?.close();
           if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
-          try { await (await launchInitialization?.catch(() => undefined))?.close(); }
+          try { await (await launchInitialization?.catch(() => undefined))?.close();
+          await (await backgroundInitialization?.catch(() => undefined))?.close(); }
           finally { await workModel?.close(); }
         }
       }
@@ -161,6 +166,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const safeUpgrade = !!(build && instanceId && sessionMaintenance
       && typeof sessionMaintenance.withIdleSessions === "function" && "publishRuntimeEvent" in HostedSession.prototype);
     let pendingUpgrade: UpgradeRequest | undefined;
+    if(hasBackgroundRequests(resultRoot)) void initializeBackground().catch(error => log(`Background request recovery unavailable: ${String(error)}`));
     const reconnectControllers = new Map<ConnectionControl, boolean>();
     const setUpgradeFence = (epoch: string | null) => {
       const lease = acquireMutationStore(realpathSync(getAgentDir()));
@@ -251,6 +257,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
               capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, lifecycle: config,
               subagentManagement: launches?.status() ?? null,
+              backgroundManagement: backgroundTools?.metrics() ?? null,
               guardianBinding: guardianBinding?.identity ?? null,
               workObservation: observation ? { status: observation.status, reason: observation.reason, observedAt: observation.observedAt } : null,
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
@@ -280,6 +287,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             if (!greeted) throw new Error(`${type} requires hello`);
             catalog.admission.bind(command.authority, socket);
             return reply({ data: { bound: true } });
+          }
+          if (type === "runtime_background_tool") {
+            if (!greeted) throw new Error("Background tools require hello");
+            if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+            if (runtimeInFlight >= 32) throw new Error("runtime-overloaded");
+            runtimeInFlight++;
+            try { return reply({data: await (await initializeBackground()).handle(command)}); } finally { runtimeInFlight--; }
           }
           if (type === "runtime_launch_subagent") {
             if (!greeted) throw new Error("not_accepted: launch requires hello");
@@ -492,6 +506,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     cleanupStartup = async () => {
       await cancellations?.close();
       await (await launchInitialization?.catch(() => undefined))?.close();
+          await (await backgroundInitialization?.catch(() => undefined))?.close();
       resultSupervision?.close();
       if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
       await workModel?.close();
@@ -589,7 +604,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             log(`runtime observation unavailable at idle shutdown: ${String(error)}`);
           }
           // No create/open can slip between this check and the synchronous admission fence.
-          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || launches?.busy || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
+          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || launches?.busy || backgroundTools?.busy || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
           draining = true;
           idleStopping = true;
           log("idle timeout with no active sessions; shutting down");
@@ -620,6 +635,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           await closed;
           await cancellations?.close();
           await (await launchInitialization?.catch(() => undefined))?.close();
+          await (await backgroundInitialization?.catch(() => undefined))?.close();
           resultSupervision?.close();
           if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
           await workModel?.close();

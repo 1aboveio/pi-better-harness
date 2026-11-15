@@ -1,0 +1,65 @@
+// Generated fixed launch domain from packages/pi-better-background-tasks/src/managed-client.ts. Do not edit directly.
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { getAgentDir } from '@earendil-works/pi-coding-agent';
+import { backgroundDigest } from "./managed-authority.domain.mjs";
+import { readProcessStartTokenFresh } from "./process-identity.domain.mjs";
+import { currentForegroundSandboxPolicy, FOREGROUND_SANDBOX_POLICY_CHANNEL } from "./sandbox.domain.mjs";
+import { backgroundObservation } from "./work-observation.domain.mjs";
+/** Native host proof carries scope and captured policy, never a transcript or module path. */
+export async function requestBackgroundTool(pi, ctx, key, tool, params, parameters, signal) {
+    if (signal?.aborted)
+        throw new Error('Background request cancelled before admission');
+    await backgroundObservation(pi, ctx);
+    const root = realpathSync(getAgentDir()), registration = JSON.parse(readFileSync(join(root, 'server-registration-v1.json'), 'utf8'));
+    if (registration.version !== 1 || registration.agentDir !== root)
+        throw new Error('Invalid runtime registration');
+    const module = new URL('./shared-work-client.mjs', import.meta.url).href;
+    const { WorkClient } = await import(module);
+    const directory = join(root, 'background-tool-admission');
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const stat = lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o077))
+        throw new Error('Unsafe Background admission directory');
+    const client = new WorkClient(join(registration.serverDir, 'pi-server.sock'), root, ['runtime-background-execution-v1']);
+    const id = randomUUID(), secret = randomBytes(32).toString('hex'), path = join(directory, `${id}.json`);
+    let off;
+    const abort = () => client.close();
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+        const hello = await client.ready;
+        const policy = currentForegroundSandboxPolicy(pi);
+        const branchIds = ctx.sessionManager.getBranch().map(entry => entry.id).filter((value) => typeof value === 'string');
+        const sessionId = ctx.sessionManager.getSessionId();
+        if (!sessionId)
+            throw new Error('Background tools require a native session identity');
+        const record = { version: 1, id, secretHash: createHash('sha256').update(secret).digest('hex'), instanceId: hello.instanceId,
+            owner: { kind: 'parent-session', sessionId, workspace: realpathSync(ctx.cwd) }, branchIds, projectTrusted: ctx.isProjectTrusted(),
+            pid: process.pid, start: readProcessStartTokenFresh(process.pid), key, tool, params, parametersDigest: parameters === undefined ? undefined : backgroundDigest(parameters), policy };
+        const staged = `${path}.tmp`;
+        writeFileSync(staged, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
+        renameSync(staged, path);
+        let checking = false;
+        off = pi.events.on(FOREGROUND_SANDBOX_POLICY_CHANNEL, () => {
+            if (checking)
+                return;
+            checking = true;
+            try {
+                if (backgroundDigest(currentForegroundSandboxPolicy(pi) ?? null) !== backgroundDigest(policy ?? null))
+                    rmSync(path, { force: true });
+            }
+            finally {
+                checking = false;
+            }
+        });
+        return await client.request('runtime_background_tool', { authority: { id, secret } });
+    }
+    finally {
+        if (typeof off === 'function')
+            off();
+        signal?.removeEventListener('abort', abort);
+        client.close();
+        rmSync(path, { force: true });
+    }
+}

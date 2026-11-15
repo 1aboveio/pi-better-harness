@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { fork } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { fork, execFileSync } from 'node:child_process';
+import { cpus, totalmem, release, arch } from 'node:os';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,15 +13,17 @@ import { WorkClient } from '../src/runtime/work-client.mjs';
 import { DaemonClient } from '../src/client.ts';
 const root = realpathSync(mkdtempSync('/tmp/p751-full-')), agent = join(root, 'agent'), transport = join(root, 's'), cwd = join(root, 'workspace'), samples = join(root, 'samples');
 for (const path of [agent, transport, cwd, samples, join(agent, 'agents/roles')]) mkdirSync(path, { recursive: true });
+const sessionFile=join(root,'resource-session.jsonl');
+writeFileSync(sessionFile,JSON.stringify({type:'session',version:3,id:randomUUID(),timestamp:new Date().toISOString(),cwd})+'\n');
 const probe = new URL('./measure-full-runtime/probe.mjs', import.meta.url).href;
 const execPath = process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath;
 const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root, TMP: root, TEMP: root, PI_RESOURCE_REPORT_DIR: samples,
-  NODE_OPTIONS: `--import ${probe}`, LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: join(cwd, 'entered'), LAUNCH_RELEASE: join(cwd, 'release'), PI_OFFLINE: '1' };
+  BACKGROUND_SESSION_FILE:sessionFile,NODE_OPTIONS: `--import ${probe}`, LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: join(cwd, 'entered'), LAUNCH_RELEASE: join(cwd, 'release'), PI_OFFLINE: '1' };
 writeFileSync(join(agent, 'auth.json'), JSON.stringify({ openai: { type: 'api_key', key: 'offline-fixture' } }));
 writeFileSync(join(agent, 'settings.json'), JSON.stringify({ piBetterHarness: { subagents: { providerExtensions: { openai: fileURLToPath(new URL('../test/support/subagent-offline-model.ts', import.meta.url)) }, defaultTools: 'read', maxConcurrent: 1 } } }));
 writeFileSync(join(agent, 'agents/roles/fixture.md'), '---\nschema: pi-agent/v1\nkind: role\nid: role.fixture\nname: Fixture\ndefaults:\n  model: openai/gpt-4.1\n---\nOffline resource fixture.\n');
 let errors = '', seq = 0; const children = [], clients = [];
-const report = { root, platform: process.platform, node: process.version, scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two HostedSessions; sampler overhead included', scenarios: [] };
+const report = { root, platform: process.platform, node: process.version, machine:{release:release(),arch:arch(),cpus:cpus().length,cpuModel:cpus()[0]?.model,totalMemory:totalmem()}, source:{head:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),dirty:execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim()}, scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two HostedSessions; sampler overhead included', scenarios: [] };
 const output = process.env.PI_FULL_RUNTIME_REPORT ?? join(root, 'report.json');
 function start(url) { const child = fork(url, [], { execPath, execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); children.push(child); child.stdout.resume(); child.stderr.on('data', d => { errors += d; }); return child; }
 async function until(label, fn, timeout = 30000) { const deadline = Date.now()+timeout; while (Date.now()<deadline) { const value = await fn(); if (value) return value; await delay(25); } throw new Error(`${label} timed out: ${errors.slice(-4000)}`); }
@@ -45,24 +49,36 @@ try {
   const db = new (await import('node:sqlite')).DatabaseSync(join(agent,'operation-coordinator.sqlite'),{readOnly:true});
   const grant = JSON.parse(db.prepare("SELECT value FROM coordinator_state WHERE key=?").get(`result-supervision-v1:${bg.details.operationId}`).value); db.close();
   const claim = await until('runner claim', () => { try { return JSON.parse(readFileSync(join(grant.directory,'tasks',bg.details.id,'claim.json'),'utf8')); } catch { return false; } });
+  const legacy=await call(first,'bg_task_spawn_batch',{jobs:[0,1].map(index=>({shell:false,callback:false,argv:[execPath,'-e',`const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(join(cwd,'legacy-pid-'))}+${index},String(process.pid));const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(cwd,'finish'))})){clearInterval(timer)}},50)`]}))});
+  assert.equal(legacy.details.launched.length,2,JSON.stringify(legacy));
+  await until('legacy commands',()=>[0,1].every(index=>{try{return Number(readFileSync(join(cwd,`legacy-pid-${index}`),'utf8'))>0;}catch{return false;}}));
   await work.request('runtime_cancellation_status');
   for (const count of [1,5,10]) {
     while(clients.length<count) { const child=start(new URL('./measure-full-runtime/frontend.ts',import.meta.url)); await message(child,m=>m.ready); clients.push(child); }
-    await work.get({cwd,active:true}); await delay(1200);
+    await work.get({cwd,active:true}); await delay(1500);
+    const observedLegacy=await work.get({background:true,cwd,sessionId:JSON.parse(readFileSync(sessionFile,'utf8').split('\n')[0]).id});
+    assert.equal(observedLegacy.rows.filter(row=>!row.meta.durable).length,2);
+    const managementBefore=(await work.request('runtime_get_status')).backgroundManagement;
     writeFileSync(join(samples, 'generation'), String(count)); await delay(500);
     const commandPid = Number(readFileSync(join(cwd,'command-pid'),'utf8'));
-    const before=observed(), required=[owner.pid,guardian.pid,worker.pid,claim.pid,commandPid,...clients.map(c=>c.pid)];
-    const role = pid => pid===owner.pid ? 'server' : pid===guardian.pid ? 'guardian' : pid===worker.pid ? 'worker' : pid===claim.pid ? 'runner' : pid===commandPid ? 'command' : 'pi';
+    const legacyPids=[0,1].map(index=>Number(readFileSync(join(cwd,`legacy-pid-${index}`),'utf8')));
+    const before=observed(), required=[...legacyPids,owner.pid,guardian.pid,worker.pid,claim.pid,commandPid,...clients.map(c=>c.pid)];
+    const role = pid => pid===owner.pid ? 'server' : pid===guardian.pid ? 'guardian' : pid===worker.pid ? 'worker' : pid===claim.pid ? 'runner' : pid===commandPid ? 'command' : legacyPids.includes(pid)?'legacy-command':'pi';
     for(const pid of required) assert.ok(before.some(v=>v.identity.pid===pid),`Missing instrumented actual process ${pid}`);
-    const start=performance.now(), latencies=[]; const duration=count===10?60000:3000;
-    while(performance.now()-start<duration) { const began=performance.now(); await work.request('runtime_get_status'); latencies.push(performance.now()-began); await delay(100); }
+    const measurementStart=performance.now(), latencies=[]; const duration=count===10?60000:3000;
+    while(performance.now()-measurementStart<duration) { const began=performance.now(); await work.request('runtime_get_status'); latencies.push(performance.now()-began); await delay(100); }
     const after=observed(), metrics=await work.request('runtime_get_metrics'), status=await work.request('runtime_get_status');
     assert.equal(status.hostedSessions,2); assert.equal(inspectDaemonOwner(transport).owner.pid,owner.pid);
     const resources=after.map(value=>{ const prior=before.find(v=>v.identity.pid===value.identity.pid); assert.ok(prior,'Unexpected process appeared during steady measurement'); return { ...value, role: role(value.identity.pid), cpuMs:((value.cpu.user-prior.cpu.user)+(value.cpu.system-prior.cpu.system))/1000,fsRead:value.usage.fsRead-prior.usage.fsRead,fsWrite:value.usage.fsWrite-prior.usage.fsWrite }; });
     const mainConnections=resources.reduce((sum,v)=>sum+v.connections.coordinator,0), derivedMain=resources.reduce((sum,v)=>sum+v.connections.derived,0);
     const derivedWorker=metrics.indexConnections, coordinatorWorker=metrics.sqlite.active-derivedWorker;
     const connections={coordinator:mainConnections+coordinatorWorker,derived:derivedMain+derivedWorker};
-    report.scenarios.push({clients:count,elapsedMs:performance.now()-start,resources,connections,metrics,totalCpuMs:resources.reduce((s,v)=>s+v.cpuMs,0),totalRss:resources.reduce((s,v)=>s+v.rss,0),rpcMs:{p50:latencies.sort((a,b)=>a-b)[Math.floor(latencies.length*.5)],p95:latencies[Math.floor(latencies.length*.95)],p99:latencies[Math.floor(latencies.length*.99)]}});
+    const managementAfter=status.backgroundManagement;
+    const managementDelta=Object.fromEntries(['scopeRefreshes','reconciles'].map(key=>[key,managementAfter[key]-managementBefore[key]]));
+    const registryDelta=Object.fromEntries(Object.keys(managementAfter.registry).map(key=>[key,managementAfter.registry[key]-managementBefore.registry[key]]));
+    assert.equal(managementDelta.reconciles,0,'Unchanged same-owner foregrounds must not multiply canonical reconciliation');
+    assert.equal(registryDelta.fullDirectoryReads,0);assert.equal(registryDelta.terminalMetadataFileReads,0);
+    report.scenarios.push({managementDelta,registryDelta,legacyRows:2,clients:count,elapsedMs:performance.now()-measurementStart,resources,connections,metrics,totalCpuMs:resources.reduce((s,v)=>s+v.cpuMs,0),totalRss:resources.reduce((s,v)=>s+v.rss,0),rpcMs:{p50:latencies.sort((a,b)=>a-b)[Math.floor(latencies.length*.5)],p95:latencies[Math.floor(latencies.length*.95)],p99:latencies[Math.floor(latencies.length*.99)]}});
     writeFileSync(output,JSON.stringify(report,null,2));
     assert.ok(connections.coordinator<=2,`Root coordinator budget exceeded: ${JSON.stringify(connections)}`); assert.ok(connections.derived<=2);
   }

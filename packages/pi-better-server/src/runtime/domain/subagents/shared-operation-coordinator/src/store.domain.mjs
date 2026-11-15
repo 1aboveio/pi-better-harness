@@ -9,6 +9,7 @@
  * and leaves no partial record.
  */
 import { setUpgradeFence } from "./upgrade.domain.mjs";
+import { BackgroundRequests } from "./background-requests.domain.mjs";
 import { StoreError } from "./errors.domain.mjs";
 import { SubagentLaunchJournal } from "./subagent-launch.domain.mjs";
 import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.domain.mjs";
@@ -79,6 +80,7 @@ export function openStore(options) {
             closed = true;
             db.close();
         },
+        backgroundRequests() { alive(); return new BackgroundRequests(ctx, alive); },
         setUpgradeFence(epoch) { alive(); setUpgradeFence(ctx, epoch); },
         registerOperation(input) {
             alive();

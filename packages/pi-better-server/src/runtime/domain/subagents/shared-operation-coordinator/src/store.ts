@@ -8,6 +8,7 @@
  * and leaves no partial record.
  */
 import { setUpgradeFence } from "./upgrade.ts";
+import { BackgroundRequests } from "./background-requests.ts";
 import { StoreError } from "./errors.ts";
 import { SubagentLaunchJournal } from "./subagent-launch.ts";
 import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
@@ -164,6 +165,7 @@ export interface Store {
      * returns `created: false`, and any difference is refused with
      * `operation-conflict` or `task-ownership`.
      */
+    backgroundRequests(): BackgroundRequests;
     setUpgradeFence(epoch: string | null): void;
     registerOperation(input: RegisterOperationInput): RegisterOperationResult;
     /**
@@ -371,6 +373,7 @@ export function openStore(options: StoreOptions): Store {
             closed = true;
             db.close();
         },
+        backgroundRequests() { alive(); return new BackgroundRequests(ctx, alive); },
         setUpgradeFence(epoch) { alive(); setUpgradeFence(ctx, epoch); },
         registerOperation(input) {
             alive();

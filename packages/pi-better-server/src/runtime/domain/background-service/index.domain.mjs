@@ -3,42 +3,17 @@ import { initializeNavigatorPanels } from "./shared-navigator-panels.domain.mjs"
 import { registerBackgroundTasksGoalProvider } from "./goal-provider.domain.mjs";
 import { createBackgroundTasksNavigator } from "./navigator-provider.domain.mjs";
 import { createBackgroundTaskRuntime } from "./runtime.domain.mjs";
-import { createObservedWaitHost } from "./observed-waits.domain.mjs";
-import { getCallbackBatcher } from "./shared-callback-batcher.domain.mjs";
+import { createManagedBackgroundFrontend } from "./managed-frontend.domain.mjs";
 import { observeForegroundSandboxPolicy } from "./sandbox.domain.mjs";
 import { registerTools } from "./tools.domain.mjs";
 import { deliverBackgroundTasksPrompt } from "./prompt.domain.mjs";
 import { closeBackgroundObservation } from "./work-observation.domain.mjs";
 export default function backgroundTasksExtension(pi) {
-    // Each cached factory invocation owns its runtime, failure timers, navigator
-    // projection, and durable host. Nothing here is shared module state (#460).
+    // The frontend owns native UI/delivery only. Mechanical tools run in the
+    // fixed server service; this runtime supplies registration metadata only.
     const runtime = createBackgroundTaskRuntime();
-    const navigator = createBackgroundTasksNavigator(runtime);
-    // Created before registerTools so the tools can resolve it lazily; the durable
-    // store opens on session activation and closes on switch/unload.
-    const observedWaits = createObservedWaitHost(pi, {
-        serverOwnedResults: true,
-        notifyParent: (notification, delivery) => {
-            getCallbackBatcher(pi).enqueue({
-                source: "background-task",
-                id: notification.taskId,
-                label: notification.taskId,
-                status: notification.waitId
-                    ? `${notification.status}; wait ${notification.waitId} ready`
-                    : notification.status,
-                detailTool: "bg_task_status",
-                outcome: notification.outcome,
-                callback: true,
-                // The batcher can hold the event across a busy turn or a session switch.
-                // Receipt is the durable outbox/sidecar acknowledgement, not enqueue.
-                getSuppressionReason: () => observedWaits.isParentOriginActive(notification.origin, notification.branchId)
-                    ? undefined
-                    : "the originating session or branch is no longer active",
-                onDelivered: () => delivery.delivered(),
-                onSuppressed: (reason) => delivery.defer(reason ?? "callback delivery was suppressed"),
-            });
-        },
-    });
+    const { host: observedWaits, proxy, ui } = createManagedBackgroundFrontend(pi);
+    const navigator = createBackgroundTasksNavigator(runtime, ui);
     initializeNavigatorPanels(pi);
     // Sections on a host that renders them; text only where it renders none.
     // Returning a prompt on modern pi would set forceSystemPrompt, and the request
@@ -67,7 +42,7 @@ export default function backgroundTasksExtension(pi) {
         runtime.suspendScheduledWork();
         navigator.clearBackgroundTasksNavigatorSession();
     });
-    registerTools(pi, runtime, navigator.refreshBackgroundTasksNavigator);
+    registerTools(proxy, runtime, navigator.refreshBackgroundTasksNavigator, { resumeLocal: false });
     // Registered after registerTools so the callback batcher has its session
     // context before a reconciled delivery can enqueue a parent notification.
     pi.on("session_start", async (_event, ctx) => {

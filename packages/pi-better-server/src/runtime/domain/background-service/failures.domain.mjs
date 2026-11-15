@@ -94,7 +94,7 @@ export function recoverDeclaredOperation(meta, at = Date.now()) {
             observeFailures(path, events);
     }
 }
-export function createFailureAttention() {
+export function createFailureAttention(deliverUrgent) {
     const attentionTimers = new Map();
     let attentionSuspended = false;
     /** Session shutdown: stop this instance's attention timers; the next session_start reschedules (#324). */
@@ -152,7 +152,9 @@ export function createFailureAttention() {
         const state = readFailureState(failurePath(id));
         const pending = pendingFailureAttention(state, Date.now());
         if (pending) {
-            const delivery = getCallbackBatcher(pi).deliverUrgent({
+            const deliver = (event) => deliverUrgent ? deliverUrgent(meta.callbackOrigin, event) : getCallbackBatcher(pi).deliverUrgent(event);
+            const delivery = deliver({
+                receiptId: `background-failure:${meta.id}:${pending.key}`,
                 ...failureAttentionFields(meta, state, pending),
                 isDelivered: () => {
                     const current = readMeta(id);

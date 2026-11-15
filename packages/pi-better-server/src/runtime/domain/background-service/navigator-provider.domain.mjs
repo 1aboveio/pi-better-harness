@@ -12,7 +12,7 @@ import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.d
 const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 const DURABLE_ROW_CACHE_MS = 1_000;
 let durableRowCache;
-export function createBackgroundTasksNavigator(runtime = { stopTask }) {
+export function createBackgroundTasksNavigator(runtime = { stopTask }, managed) {
     const owner = Symbol("background-tasks navigator factory");
     let unregister;
     let navigatorContext;
@@ -76,21 +76,24 @@ export function createBackgroundTasksNavigator(runtime = { stopTask }) {
         priority: 20,
         visibleCount: () => {
             const now = Date.now();
-            return visibleMetas(now).filter((meta) => meta.status === "running").length
+            return (managed ? managed.rows().filter(row => row.status === "running").length : visibleMetas(now).filter((meta) => meta.status === "running").length)
                 + visibleDurableTasks(now).filter((task) => task.active).length;
         },
         listRows: (now) => [
-            ...visibleMetas(now).map((meta) => rowFromMeta(meta, now)),
+            ...(managed ? managed.rows() : visibleMetas(now).map((meta) => rowFromMeta(meta, now))),
             ...durableRows(visibleDurableTasks(now), now),
         ],
+        prepareDetail: (id, options) => managed?.prepareDetail(id, options),
         detail: (id, now, options) => {
             const durable = durableTask(id);
             if (durable)
                 return detailFromDurable(durable, options);
-            return detailFromMeta(readMeta(id), now, options);
+            return managed ? managed.detail(id, now, options) : detailFromMeta(readMeta(id), now, options);
         },
         armCloseLabel: (row) => row.status === "running" || row.status === "starting" ? "x again to stop" : "x again to dismiss",
         close: (id) => {
+            if (managed)
+                return managed.close(id);
             const durable = durableTask(id);
             if (durable) {
                 const host = navigatorHost();
@@ -308,7 +311,7 @@ function isExpiredTerminalNavigatorRow(meta, now) {
     const endedAt = meta.endedAt;
     return typeof endedAt === "number" && now - endedAt >= TERMINAL_NAVIGATOR_RETENTION_MS;
 }
-function rowFromMeta(meta, now) {
+export function rowFromMeta(meta, now) {
     // Only a failure that needs action replaces the row's command; history stays in the detail view (#332).
     const view = failureView(meta.id);
     const failure = view.actionable ? view.text : "";
@@ -332,7 +335,7 @@ function rowFromMeta(meta, now) {
             : meta.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS,
     };
 }
-function detailFromMeta(meta, now, options) {
+export function detailFromMeta(meta, now, options) {
     if (!meta)
         return null;
     const view = failureView(meta.id);

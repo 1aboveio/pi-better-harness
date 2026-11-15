@@ -133,6 +133,11 @@ export function createAssignmentReader(path) {
                     reasons.push({ kind: "launch-intent", id: row.request_key, owner: row.owner, attempts: JSON.parse(row.attempts).map(attempt => attempt.id) });
                 }
             }
+            for (const row of db.prepare("SELECT value FROM coordinator_state WHERE key LIKE 'background-request-v1:%'").all()) {
+                const request = JSON.parse(row.value);
+                if (request.state !== 'returned')
+                    reasons.push({ kind: 'background-request', id: request.key, owner: request.owner });
+            }
             return [...obligations, ...reasons];
         },
         close() { db?.close(); db = undefined; statements.clear(); identity = undefined; },

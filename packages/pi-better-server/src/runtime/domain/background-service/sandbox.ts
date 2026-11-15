@@ -901,3 +901,10 @@ function blocked(plan: ForegroundSandboxPlan & { confined: true }, detail: strin
     detail,
   );
 }
+
+/** Fixed server adapter clears only its own scope mirror before publishing another captured grant. */
+export function clearForegroundSandboxPolicy(pi: unknown): void {
+  observeForegroundSandboxPolicy(pi);
+  const events=eventBusOf(pi), mirror=events && mirrors.get(events);
+  if(mirror){mirror.policy=undefined;mirror.error=undefined;mirror.processAccess="off";mirror.mainConfined=false;}
+}

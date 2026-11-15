@@ -57,6 +57,7 @@ export function resolveCommandSettings(
 export type PermissionSnapshot = Readonly<{
     permissions?: PermissionProfile;
     subagentPermissions?: PermissionProfile;
+    backgroundPolicy?: Readonly<{state:string;permissions?:PermissionProfile;writableRoot?:string;denyWrite?:readonly string[];reason?:string}>;
     subagentTools?: SubagentToolSettings;
 }>;
 
@@ -95,11 +96,22 @@ function profile(value: unknown): PermissionProfile {
     });
 }
 
+function backgroundPolicy(value:unknown): NonNullable<PermissionSnapshot['backgroundPolicy']> {
+    if(!value||typeof value!=='object')throw new Error('Invalid Background policy snapshot');
+    const p=value as Record<string,unknown>;
+    if(!['inactive','enabled','disabled','unavailable','failed'].includes(String(p.state)))throw new Error('Invalid Background policy state');
+    return Object.freeze({state:String(p.state),...(p.permissions?{permissions:profile(p.permissions)}:{}),
+      ...(typeof p.writableRoot==='string'?{writableRoot:p.writableRoot}:{}),
+      ...(Array.isArray(p.denyWrite)&&p.denyWrite.every(item=>typeof item==='string')?{denyWrite:[...p.denyWrite] as string[]}:{}),
+      ...(typeof p.reason==='string'?{reason:p.reason}:{})});
+}
+
 function readPolicy(data: unknown): PermissionSnapshot | undefined {
     if (!data || typeof data !== "object") return undefined;
     const p = data as Record<string, unknown>;
     if (!["inactive", "enabled", "disabled", "unavailable", "failed"].includes(String(p.state))) return undefined;
     return Object.freeze({
+        ...(p.background === undefined ? {} : {backgroundPolicy: backgroundPolicy(p.background)}),
         ...(p.permissions === undefined ? {} : { permissions: profile(p.permissions) }),
         ...(p.subagentPermissions === undefined ? {} : { subagentPermissions: profile(p.subagentPermissions) }),
         ...(p.subagentTools === undefined ? {} : { subagentTools: parseSubagentTools(p.subagentTools) }),

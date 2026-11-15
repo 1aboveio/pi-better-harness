@@ -82,6 +82,8 @@ export class WorkQueryExecutor {
     return { handle: (command: Record<string, unknown>) => this.request(connection, command), close };
   }
 
+  async snapshot(scope: Record<string, unknown>): Promise<any> { return JSON.parse((await this.request(0, {type:"runtime_get_snapshot",scope})).json); }
+
   async upgradeObligations(): Promise<any[]> {
     return JSON.parse((await this.request(0, { type: "runtime_get_upgrade_obligations" })).json);
   }

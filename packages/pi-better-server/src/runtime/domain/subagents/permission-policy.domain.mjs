@@ -52,6 +52,17 @@ function profile(value) {
         ...(p.commandTimeoutSeconds === undefined ? {} : { commandTimeoutSeconds: p.commandTimeoutSeconds }),
     });
 }
+function backgroundPolicy(value) {
+    if (!value || typeof value !== 'object')
+        throw new Error('Invalid Background policy snapshot');
+    const p = value;
+    if (!['inactive', 'enabled', 'disabled', 'unavailable', 'failed'].includes(String(p.state)))
+        throw new Error('Invalid Background policy state');
+    return Object.freeze({ state: String(p.state), ...(p.permissions ? { permissions: profile(p.permissions) } : {}),
+        ...(typeof p.writableRoot === 'string' ? { writableRoot: p.writableRoot } : {}),
+        ...(Array.isArray(p.denyWrite) && p.denyWrite.every(item => typeof item === 'string') ? { denyWrite: [...p.denyWrite] } : {}),
+        ...(typeof p.reason === 'string' ? { reason: p.reason } : {}) });
+}
 function readPolicy(data) {
     if (!data || typeof data !== "object")
         return undefined;
@@ -59,6 +70,7 @@ function readPolicy(data) {
     if (!["inactive", "enabled", "disabled", "unavailable", "failed"].includes(String(p.state)))
         return undefined;
     return Object.freeze({
+        ...(p.background === undefined ? {} : { backgroundPolicy: backgroundPolicy(p.background) }),
         ...(p.permissions === undefined ? {} : { permissions: profile(p.permissions) }),
         ...(p.subagentPermissions === undefined ? {} : { subagentPermissions: profile(p.subagentPermissions) }),
         ...(p.subagentTools === undefined ? {} : { subagentTools: parseSubagentTools(p.subagentTools) }),

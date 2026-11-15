@@ -298,7 +298,7 @@ const BACKGROUND_ORCHESTRATION_GUIDELINES = [
   "Do not treat launch as completion of the parent milestone; relevant background work must be terminal, inspected, and integrated before verification or completion.",
 ];
 
-export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime> = defaultRuntime, refreshNavigator = refreshBackgroundTasksNavigator): void {
+export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime> = defaultRuntime, refreshNavigator = refreshBackgroundTasksNavigator, options: { resumeLocal?: boolean } = {}): void {
   const { resumeRunningTask, spawnTask } = runtime;
   let activeSession: BackgroundTaskCallbackOrigin | undefined;
   const getActiveSession = () => activeSession;
@@ -314,12 +314,14 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
   pi.on("session_start", async (_event, ctx) => {
     setCallbackBatchContext(pi, ctx);
     activeSession = getCallbackOrigin(ctx);
+    if (options.resumeLocal !== false) {
     for (const meta of listMetasForOrigin(activeSession)) {
       if (meta.status === "running" || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)) {
         resumeRunningTask(pi, meta, getActiveSession);
       }
     }
     runTaskMaintenance({ activeOrigin: activeSession });
+    }
   });
   pi.on("agent_start", (_event, ctx) => {
     setCallbackBatchContext(pi, ctx);
