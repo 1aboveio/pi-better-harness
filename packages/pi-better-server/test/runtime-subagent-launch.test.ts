@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { processMatchesStart } from "../src/daemon-owner.ts";
 
-test("registered SDK launch freezes shared catalog, retries one intent, and survives parent exit", { timeout: 60000 }, async () => {
+for (const journalOnly of [false, true]) test(`registered SDK launch survives parent exit and ${journalOnly ? "journal-only crash recovery" : "ordinary restart"}`, { timeout: 60000 }, async () => {
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, "launch-")), transport = realpathSync(mkdtempSync("/tmp/p761-"));
   const agent = join(root, "agent"), cwd = join(root, "workspace"); mkdirSync(join(agent, "agents/roles"), { recursive: true }); mkdirSync(cwd);
@@ -97,25 +97,51 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
       assert.equal(runtime.subagentManagement.owner, "server");
       assert.equal(runtime.subagentManagement.instanceId, runtime.instanceId);
     } finally { observer.close(); }
+    const originalWriter = metaFor(first.details.runId).pid;
     const beforeRestart = JSON.stringify(metaFor(first.details.runId).recipe);
-    const daemonExit = once(daemon, "exit"); daemon.send("stop"); await daemonExit;
+    const daemonExit = once(daemon, "exit");
+    if (journalOnly) daemon.kill("SIGKILL"); else daemon.send("stop");
+    await daemonExit;
+    if (journalOnly) {
+      // Restore the durable crash window after bootstrap but before metadata and
+      // receipt publication; the real detached writer stays alive throughout.
+      const crashed = new DatabaseSync(join(agent, "operation-coordinator.sqlite"));
+      try {
+        crashed.prepare("UPDATE subagent_launch_intents SET state='accepted', result=NULL WHERE json_array_length(attempts)>0").run();
+      } finally { crashed.close(); }
+      for (const id of attempts) rmSync(join(root, "pi-better-subagents/runs", id, "meta.json"));
+    }
     daemon = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
     daemon.stderr!.on("data", data => { errors += data; });
     await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
     const recovered = await launch({ ...params, role: undefined }, "independent-owner", sibling);
-    assert.equal(recovered.details.runId, independent.details.runId);
+    if (journalOnly) {
+      assert.equal(recovered.details.status, "recovered");
+      assert.deepEqual(recovered.details.attempts, [independent.details.runId]);
+      assert.equal(recovered.details.runs[0].sessionId, independent.details.sessionId);
+    } else assert.equal(recovered.details.runId, independent.details.runId);
+    assert.equal(metaFor(first.details.runId).pid, originalWriter, "recovery keeps the exact original writer");
     assert.equal(JSON.stringify(metaFor(first.details.runId).recipe), beforeRestart, "runtime replacement retains the frozen execution recipe");
     const stale = duplicateBootstrap(); assert.equal(stale.status, 1); assert.match(stale.stderr, /epoch\/token is no longer admitted/);
     const journal = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
     try {
       const records = journal.prepare("SELECT attempts FROM subagent_launch_intents").all() as any[];
       assert.equal(records.flatMap(row => JSON.parse(row.attempts)).length, 2, "replacement does not create another attempt/token");
+      assert.equal(journal.prepare("SELECT count(*) AS n FROM subagent_launch_intents WHERE state='accepted'").get()?.n, 0,
+        "reconciled attempts and empty admissions do not leave permanent upgrade obligations");
     } finally { journal.close(); }
     writeFileSync(release, "release");
     for (const id of attempts) {
       const meta = await terminal(id);
       assert.equal(meta.status, "completed", `${id}: ${meta.lifecycleClassification}\n${errors}`);
     }
+    const outcomes = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
+    try {
+      const binding = metaFor(first.details.runId).assignment;
+      assert.ok(binding, "real launch retains assignment authority");
+      assert.ok(outcomes.prepare("SELECT 1 FROM assignment_outcomes WHERE assignment_id=?").get(binding.assignmentId),
+        "server publishes a terminal outcome while the original recipient is absent");
+    } finally { outcomes.close(); }
     const prior = metaFor(independent.details.runId);
     const followup = await launch({ prompt: "Continue in the saved worker conversation", session_id: independent.details.sessionId, callback: false }, "saved-followup", sibling);
     attempts.push(followup.details.runId);

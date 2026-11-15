@@ -361,13 +361,14 @@ function markCompletionCallbackSent(id, now) {
 }
 /** Queue one durable ordinary terminal event on the host-shared batch. */
 function enqueueCompletionCallback(pi, id) {
-    // The server persists outcomes but never writes or activates the parent's transcript.
-    if (managementPort)
-        return;
     const meta = readMeta(id);
     if (meta?.assignment) {
         try {
             const outcome = commitAssignmentTerminal(meta);
+            // Persist mechanically even when the recipient is absent. Only its
+            // attached foreground may write or activate the parent transcript.
+            if (managementPort)
+                return;
             if (outcome) {
                 void enqueueAssignmentOutcome(pi, meta);
                 return;
@@ -383,6 +384,8 @@ function enqueueCompletionCallback(pi, id) {
             return;
         }
     }
+    if (managementPort)
+        return;
     if (!meta
         || meta.callback === false
         || meta.completionCallbackPendingAt === undefined
@@ -3136,34 +3139,15 @@ export default function (pi, managed) {
                 alias: resume ? resume.recipe.alias : p.alias, catalog: launchCatalog, extensionArgs: extArgs, baseExtensionArgs,
                 trustedExtensions: resume?.recipe.trustedExtensions ?? taskTools?.trusted.map(({ name, package: owner, loadPath }) => ({ name, package: owner, loadPath })),
             });
-            const dispatchGuard = await internal?.beforeSpawn?.({ runId: id, permissionPlan });
-            const managedEnv = managed?.beforeSpawn({ id, sessionId, lease: lease.token, leasePath: lease.path,
-                preflightPath, policyPath: taskRuntime?.policyPath, permissions: permissionPlan, recipe });
-            spawned = releaseChild(dispatchGuard, () => spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
-                env: {
-                    [STEER_FILE_ENV]: steerPathFor(id),
-                    [PREFLIGHT_ENV]: preflightPath,
-                    ...(workerBridge?.env ?? {}),
-                    ...(managedEnv ?? {}),
-                } }));
-            managed?.spawned(id, spawned.pid);
-            internal?.onSpawned?.();
-            // Record process identity (pgid, start-time token) so health
-            // reconciliation can tell a supervised child from a recycled pid
-            // or an orphaned process group (#63). Best-effort: when the OS
-            // probes are unavailable the fields stay absent and the run is
-            // reconciled via the conservative old-metadata path.
-            const identity = captureProcessIdentity(spawned.pid, spawnIdentityProbe);
             const startedAt = Date.now();
             const meta = {
                 assignment,
                 outcomeSupport: { version: 1, available: Boolean(assignment), ...(!assignment ? { reason: "Legacy host has no verified parent session/transcript; durable assignment delivery is unavailable." } : {}) },
                 id, name: launchName, status: "running",
-                pid: spawned.pid, spawnPid: managed?.owner.pid ?? process.pid, spawnPidStartTime: managed?.owner.start ?? parentStartToken(), model,
+                pid: 0, spawnPid: managed?.owner.pid ?? process.pid, spawnPidStartTime: managed?.owner.start ?? parentStartToken(), model,
                 effort: thinking, cwd,
                 ...(skills.mode === "inherit" ? {} : { skills: [...skills.paths] }),
                 skillsSource: skills.source,
-                ...identity,
                 promptPreview: p.prompt.slice(0, 200),
                 startedAt, logPath: logPathFor(id), sessionId,
                 rootRunId,
@@ -3207,6 +3191,25 @@ export default function (pi, managed) {
                 } : {}),
                 timing: resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt }),
             };
+            const dispatchGuard = await internal?.beforeSpawn?.({ runId: id, permissionPlan });
+            const managedEnv = managed?.beforeSpawn({ id, sessionId, lease: lease.token, leasePath: lease.path,
+                preflightPath, policyPath: taskRuntime?.policyPath, permissions: permissionPlan, recipe, recoveryMeta: meta });
+            spawned = releaseChild(dispatchGuard, () => spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
+                env: {
+                    [STEER_FILE_ENV]: steerPathFor(id),
+                    [PREFLIGHT_ENV]: preflightPath,
+                    ...(workerBridge?.env ?? {}),
+                    ...(managedEnv ?? {}),
+                } }));
+            managed?.spawned(id, spawned.pid);
+            internal?.onSpawned?.();
+            // Record process identity (pgid, start-time token) so health
+            // reconciliation can tell a supervised child from a recycled pid
+            // or an orphaned process group (#63). Best-effort: when the OS
+            // probes are unavailable the fields stay absent and the run is
+            // reconciled via the conservative old-metadata path.
+            const identity = captureProcessIdentity(spawned.pid, spawnIdentityProbe);
+            Object.assign(meta, { pid: spawned.pid, ...identity });
             // This instance holds the exit observer for a run it actually
             // started; only it can finalize on the exit event (#625).
             directlySupervisedRunIds.add(id);
@@ -4299,6 +4302,11 @@ export default function (pi, managed) {
         // `lost` would otherwise win the race and hide the result.
         if (managed)
             recoverInterruptedSubagents(pi);
+        if (managed)
+            for (const meta of managed.supervised()) {
+                if (meta.assignment)
+                    commitAssignmentTerminal(meta);
+            }
         // Adopt records left non-terminal by a pi that died without a clean
         // shutdown, so the age sweep can eventually retire them.
         if (managed)

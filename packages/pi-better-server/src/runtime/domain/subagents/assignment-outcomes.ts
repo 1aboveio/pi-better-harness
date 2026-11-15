@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { join, relative, isAbsolute } from "node:path";
+import { join, relative, isAbsolute, dirname, resolve } from "node:path";
 import { openSync, closeSync, fstatSync, readSync, realpathSync, constants } from "node:fs";
 import { openStore, ownerDiff, StoreError, type OwnerIdentity, type AssignmentOutcomeRecord } from "./shared-operation-coordinator/index.ts";
 import type { RunMeta } from "./registry.ts";
@@ -44,8 +44,29 @@ export function coordinatorPath(): string {
     return join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "operation-coordinator.sqlite");
 }
 function withStore<T>(body: (store: ReturnType<typeof openStore>) => T): T {
-    const store = openStore({ path: coordinatorPath() });
+    const path = coordinatorPath();
+    const borrowed = runtimeStores.get(canonicalRoot(dirname(path)));
+    if (borrowed) return body(borrowed.store);
+    const store = openStore({ path });
     try { return body(store); } finally { store.close(); }
+}
+const runtimeStores = new Map<string, { store: ReturnType<typeof openStore>; leases: number }>();
+function canonicalRoot(root: string): string {
+    try { return realpathSync(root); } catch { return resolve(root); }
+}
+/** Fixed runtime adapter borrows its mutation connection; it retains ownership. */
+export function bindRuntimeOutcomeStore(root: string, store: ReturnType<typeof openStore>): () => void {
+    const key = canonicalRoot(root);
+    let entry = runtimeStores.get(key);
+    if (entry && entry.store !== store) throw new Error("Assignment runtime store already bound");
+    if (!entry) { entry = { store, leases: 0 }; runtimeStores.set(key, entry); }
+    entry.leases++;
+    let released = false;
+    return () => {
+        if (released) return;
+        released = true;
+        if (--entry.leases === 0) runtimeStores.delete(key);
+    };
 }
 export function registerAssignmentAttempt(binding: AssignmentBinding, attemptId: string): void {
     if (binding.version !== ASSIGNMENT_OUTCOMES_VERSION) throw new Error("Unsupported assignment outcome capability.");

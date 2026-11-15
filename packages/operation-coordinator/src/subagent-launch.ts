@@ -17,6 +17,9 @@ export interface LaunchAttempt {
     state: "prepared" | "spawned";
     pid?: number;
     writerPid?: number;
+    writerStartTime?: string;
+    pidStartTime?: string;
+    recoveryMeta?: unknown;
     bootstrapped?: boolean;
 }
 export interface LaunchIntent {
@@ -26,7 +29,11 @@ export interface LaunchIntent {
 
 /** Fixed launch journal on the coordinator's existing connection and transaction. */
 export class SubagentLaunchJournal {
-    constructor(private context: StoreContext, private alive: () => void) {
+    private context: StoreContext;
+    private alive: () => void;
+    constructor(context: StoreContext, alive: () => void) {
+        this.context = context;
+        this.alive = alive;
         this.transaction(() => this.db.exec(`CREATE TABLE IF NOT EXISTS subagent_launch_intents (
             owner TEXT NOT NULL, request_key TEXT NOT NULL, digest TEXT NOT NULL,
             epoch INTEGER NOT NULL, state TEXT NOT NULL, attempts TEXT NOT NULL, result TEXT,
@@ -55,6 +62,16 @@ export class SubagentLaunchJournal {
     unresolvedAttempts() {
         return this.db.prepare("SELECT j.value AS attempt FROM subagent_launch_intents, json_each(subagent_launch_intents.attempts) j WHERE subagent_launch_intents.state='accepted'").all().map(row => JSON.parse(String(row.attempt)));
     }
+    pendingIntents(): LaunchIntent[] {
+        return this.db.prepare("SELECT * FROM subagent_launch_intents WHERE state='accepted'").all() as unknown as LaunchIntent[];
+    }
+    finishRecovery(owner: string, key: string, epoch: number, result: unknown) {
+        this.transaction(() => {
+            this.current(epoch);
+            this.db.prepare("UPDATE subagent_launch_intents SET state='returned', result=? WHERE owner=? AND request_key=? AND state='accepted' AND epoch<?")
+                .run(JSON.stringify(result), owner, key, epoch);
+        });
+    }
     accept(owner: string, key: string, digest: string, epoch: number) {
         return this.transaction(() => {
             this.current(epoch);
@@ -80,14 +97,14 @@ export class SubagentLaunchJournal {
             return attempt;
         });
     }
-    spawned(owner: string, key: string, epoch: number, id: string, pid: number) {
+    spawned(owner: string, key: string, epoch: number, id: string, pid: number, pidStartTime?: string) {
         this.transaction(() => {
             this.current(epoch);
             const attempts = JSON.parse(this.read(owner, key)!.attempts) as LaunchAttempt[];
             const attempt = attempts.find(value => value.id === id);
             if (!attempt || attempt.state !== "prepared") throw new Error("Launch publication is ambiguous");
             if (attempt.writerPid && attempt.writerPid !== pid) throw new Error("Launch writer does not match spawned process");
-            Object.assign(attempt, { state: "spawned", pid });
+            Object.assign(attempt, { state: "spawned", pid, pidStartTime });
             this.db.prepare("UPDATE subagent_launch_intents SET attempts=? WHERE owner=? AND request_key=?").run(JSON.stringify(attempts), owner, key);
         });
     }
