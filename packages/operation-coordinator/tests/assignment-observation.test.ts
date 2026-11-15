@@ -75,7 +75,7 @@ test("v4 missing required fields remains unverified and missing storage is never
 
 test("upgrade obligations retain accepted intents until durable resolution", async () => {
     const h = createHarness();
-    const { createAssignmentReader } = await import('../assignment-observation.mjs');
+    const { createAssignmentReader } = await import(new URL('../assignment-observation.mjs', import.meta.url).href);
     const db = new DatabaseSync(h.path);
     db.exec(`CREATE TABLE subagent_launch_intents (owner TEXT, request_key TEXT, attempts TEXT, state TEXT);
       INSERT INTO subagent_launch_intents VALUES ('parent', 'request', '[{"id":"attempt"}]', 'accepted');`);

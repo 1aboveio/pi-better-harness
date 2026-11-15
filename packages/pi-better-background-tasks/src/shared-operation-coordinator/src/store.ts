@@ -7,6 +7,7 @@
  * synchronous and transactional; a refusal throws `StoreError` with a typed code
  * and leaves no partial record.
  */
+import { setUpgradeFence } from "./upgrade.ts";
 import { StoreError } from "./errors.ts";
 import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.ts";
@@ -161,6 +162,7 @@ export interface Store {
      * returns `created: false`, and any difference is refused with
      * `operation-conflict` or `task-ownership`.
      */
+    setUpgradeFence(epoch: string | null): void;
     registerOperation(input: RegisterOperationInput): RegisterOperationResult;
     /**
      * Replace supervision identity and/or report observer health
@@ -366,6 +368,7 @@ export function openStore(options: StoreOptions): Store {
             closed = true;
             db.close();
         },
+        setUpgradeFence(epoch) { alive(); setUpgradeFence(ctx, epoch); },
         registerOperation(input) {
             alive();
             return writeOperation(ctx, input);

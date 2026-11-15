@@ -22,7 +22,7 @@ import { runtimeRoot } from "./runtime/root.ts";
 import { RuntimeCancellation, hasPendingCancellation } from "./runtime/cancellation.ts";
 import { RuntimeResultSupervision, hasResultSupervision } from "./runtime/result-supervision.ts";
 import { SharedCatalog } from "./runtime/catalog.ts";
-import { mutationStoreMetrics } from "./runtime/mutation-store.ts";
+import { acquireMutationStore, mutationStoreMetrics } from "./runtime/mutation-store.ts";
 import { WorkQueryExecutor } from "./runtime/query-executor.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
@@ -137,6 +137,12 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       && typeof sessionMaintenance.withIdleSessions === "function" && "publishRuntimeEvent" in HostedSession.prototype);
     let pendingUpgrade: UpgradeRequest | undefined;
     const reconnectControllers = new Map<ConnectionControl, boolean>();
+    const setUpgradeFence = (epoch: string | null) => {
+      const lease = acquireMutationStore(realpathSync(getAgentDir()));
+      try { lease.store.setUpgradeFence(epoch); } finally { lease.release(); }
+    };
+    // Startup ownership has proved the preceding manager exited.
+    setUpgradeFence(null);
     let upgradeCommitted = false;
     let upgradeBlockers: unknown[] = [];
     const companions = new CompanionManager({
@@ -318,6 +324,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               || journal.previousOwner?.token !== instanceId || journal.phase !== "prepared") throw new Error("Upgrade request does not match this daemon's activation journal");
             if (!compatibleUpgrade(build, runtime.build)) throw new Error("Unsafe SDK downgrade or incompatible protocol");
             if (pendingUpgrade && pendingUpgrade.operationId !== command.operationId) throw new Error("activation-conflict: another upgrade is pending");
+            setUpgradeFence(instanceId!);
             pendingUpgrade = { runtime, operationId: command.operationId, serverDir, agentDir: command.agentDir as string };
             setImmediate(() => { void daemon.sweepIdle().catch(error => log(`upgrade maintenance failed: ${String(error)}`)); });
             return reply({ data: { status: "deferred", operationId: command.operationId, reason: "Waiting for accepted runtime work and idle sessions" } });
@@ -479,7 +486,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (pendingUpgrade && sessionMaintenance) {
             const request = pendingUpgrade;
             const journal = readActivationJournal(serverDir);
-            if (!journal || journal.operationId !== request.operationId || !hasActivationReservations(journal)) { pendingUpgrade = undefined; upgradeBlockers = []; }
+            if (!journal || journal.operationId !== request.operationId || !hasActivationReservations(journal)) { setUpgradeFence(null); pendingUpgrade = undefined; upgradeBlockers = []; }
             else {
               try {
                 upgradeBlockers = [];

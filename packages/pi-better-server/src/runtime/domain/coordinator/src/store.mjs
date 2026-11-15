@@ -7,6 +7,7 @@
  * synchronous and transactional; a refusal throws `StoreError` with a typed code
  * and leaves no partial record.
  */
+import { setUpgradeFence } from "./upgrade.mjs";
 import { StoreError } from "./errors.mjs";
 import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.mjs";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.mjs";
@@ -75,6 +76,7 @@ export function openStore(options) {
             closed = true;
             db.close();
         },
+        setUpgradeFence(epoch) { alive(); setUpgradeFence(ctx, epoch); },
         registerOperation(input) {
             alive();
             return writeOperation(ctx, input);
