@@ -4,6 +4,7 @@ import type { RunMeta } from "./registry.ts";
 
 /** Fixed server adapter port; never deserialized from a socket request. */
 export interface ManagedLaunchPort {
+    backgroundTools(): readonly string[];
     readonly owner: { pid: number; start?: string };
     readonly identity: { root: string; instance: string; epoch: number };
     continuationContext?(): import("@earendil-works/pi-coding-agent").ExtensionContext | undefined;

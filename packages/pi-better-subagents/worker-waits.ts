@@ -25,6 +25,7 @@
  * host reads as an unavailable capability instead of a broken import.
  */
 import { randomUUID } from "node:crypto";
+import { managedWorkerBridge } from "./managed-worker-bridge.ts";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -784,6 +785,8 @@ export const recipeCheckpointEvidenceValidator: CheckpointEvidenceValidator = (i
 };
 
 export interface WorkerOperationRegistration {
+    /** Restored only from protected runtime admission storage. */
+    token?: string;
     assignment?: AssignmentBinding;
     /** Subagent attempt id. Equal to the bridge run id. */
     runId: string;
@@ -828,6 +831,7 @@ export class WorkerOperationsHostUnavailable extends Error {
 }
 
 export interface WorkerOperationsHostOptions {
+    managedRoot?: string;
     pi: unknown;
     /** Request/reply fence calls. Injectable for tests. */
     rpc?: WorkerOperationsRpc;
@@ -882,6 +886,7 @@ function scopeOf(registration: {
  * sees the tasks that conversation launched earlier).
  */
 export function createWorkerOperationsHost(options: WorkerOperationsHostOptions): WorkerOperationsHost {
+    const durable = options.managedRoot ? managedWorkerBridge(options.managedRoot) : undefined;
     const created: { host?: OperationBridgeHost } = {};
     const hosting: { promise?: Promise<OperationBridgeHost> } = {};
     const starting: { promise?: Promise<boolean> } = {};
@@ -896,6 +901,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
         if (!hosting.promise) {
             const factory = options.hostFactory ?? createOperationBridgeHost;
             hosting.promise = factory({
+                ...(durable ? { socketPath: durable.socketPath } : {}),
                 ...(options.logger ? { logger: options.logger } : {}),
                 ...(options.now ? { now: options.now } : {}),
             }).then((host) => { created.host = host; return host; })
@@ -915,6 +921,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             await ensureHost();
             capability.service = service;
             capability.available = true;
+            for (const registration of durable?.restore() ?? []) await register(registration);
             return true;
         })();
         return starting.promise;
@@ -1176,6 +1183,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
         }
 
         const handle = host.registerRun({
+            ...(registration.token ? { token: registration.token } : {}),
             runId: registration.runId,
             conversationId: registration.conversationId,
             workspace: registration.workspace,
@@ -1185,6 +1193,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             ownership: (taskId) => ownsTask(taskId),
             handlers,
         });
+        durable?.save(registration, handle.token);
         return {
             runId: registration.runId,
             conversationId: registration.conversationId,
@@ -1199,6 +1208,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
     };
 
     const release = (runId: string, reason: string): void => {
+        durable?.remove(runId);
         runs.delete(runId);
         try { created.host?.unregisterRun(runId); } catch { /* already gone */ }
         if (capability.service) void rpc.call("release-run", { runId, reason }).catch(() => {});
@@ -1709,6 +1719,7 @@ export function createOwnedAttemptStopper(options: {
 }
 
 export interface ResumeOrchestrationOptions {
+    leaseOwnerId?: string;
     pi: unknown;
     service: () => WorkerOperationService | undefined;
     rpc: WorkerOperationsRpc;
@@ -2034,7 +2045,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
                 waitId: park.waitId,
                 generation: park.generation,
                 expectedCancelEpoch,
-                lease: { ownerId: `subagents:${process.pid}`, pid: process.pid, processStartToken: processStartToken(process.pid) ? Buffer.from(processStartToken(process.pid)!).toString("base64url") : undefined },
+                lease: { ownerId: options.leaseOwnerId ?? `subagents:${process.pid}`, pid: process.pid, processStartToken: processStartToken(process.pid) ? Buffer.from(processStartToken(process.pid)!).toString("base64url") : undefined },
                 reservedCheckpointId: park.record.checkpoint?.entryId ?? park.waitId,
             });
             const claimId = String(claim.claimId ?? "");

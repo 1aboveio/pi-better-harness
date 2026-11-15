@@ -2376,6 +2376,7 @@ export default function (pi, managed) {
     // the bridge is optional and parking refuses instead of pretending.
     const workerOperations = createWorkerOperationsHost({
         pi,
+        managedRoot: managed?.identity.root,
         childExtensionPath: childBridgeExtensionPath(selfDir()),
     });
     let resumeOrchestration;
@@ -2878,6 +2879,15 @@ export default function (pi, managed) {
                 explicitTools: requestedTools !== undefined,
                 productionSchemas: new Set(productionBridgeSchemas.schemas.keys()),
             });
+            if (managed) {
+                const captured = new Set(managed.backgroundTools());
+                bridgePlan.tools = bridgePlan.tools.filter(name => captured.has(name));
+                if (requestedTools && requestedTools.split(",").some(name => DEFAULT_WORKER_BRIDGE_TOOLS.includes(name.trim()) && !captured.has(name.trim()))) {
+                    throw new Error("The original Pi host did not authorize the requested Background capability");
+                }
+                const has = (name) => bridgePlan.tools.includes(name);
+                bridgePlan.capabilities = { background: { spawn: has("bg_task_spawn"), watch: has("bg_task_watch"), status: has("bg_task_status"), log: has("bg_task_log") }, wait: has("wait_for_operations"), acknowledge: has("acknowledge_operation_result"), parking: has("wait_for_operations") };
+            }
             const parent = ownerBindingFromContext(ctx);
             const assignment = internal?.resumeWait && resume?.prior.assignment
                 ? resume.prior.assignment
@@ -3541,6 +3551,7 @@ export default function (pi, managed) {
     function ensureResumeOrchestration() {
         resumeOrchestration ??= createResumeOrchestration({
             pi,
+            leaseOwnerId: managed ? `managed-subagents:${managed.identity.instance}` : undefined,
             service: () => workerOperations.service,
             rpc: workerOperations.rpc,
             context: () => managed?.continuationContext?.() ?? uiCtx,

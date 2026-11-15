@@ -1,4 +1,5 @@
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, initTheme } from "@earendil-works/pi-coding-agent";
+import backgroundExtension from "../../../pi-better-background-tasks/src/index.ts";
 import extension, { isHealthTickerActive } from "../../../pi-better-subagents/index.ts";
 import { workObservation } from "../../../pi-better-subagents/work-observation.ts";
 const cwd = process.env.LAUNCH_WORKSPACE, agentDir = process.env.PI_CODING_AGENT_DIR;
@@ -10,7 +11,7 @@ let uiFailures = 0;
 const settingsManager = SettingsManager.inMemory(fixture ? { defaultProvider: "test", defaultModel: "model" } : {});
 if (fixture?.ui) initTheme(settingsManager.getTheme(), false);
 const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true,
-    noContextFiles: true, noThemes: true, noPromptTemplates: true, extensionFactories: [pi => extension({ ...pi,
+    noContextFiles: true, noThemes: true, noPromptTemplates: true, extensionFactories: [...(process.env.LAUNCH_BACKGROUND === "1" ? [backgroundExtension] : []), pi => extension({ ...pi,
         sendMessage(message, options) { pi.sendMessage(message, options); deliveries.push({ message, options }); },
     }), pi => {
         pi.events.on("pi-better-sandbox:policy-request", () => { if (policy) pi.events.emit("pi-better-sandbox:policy", policy); });
@@ -20,7 +21,7 @@ const sessionManager = fixture?.sessionFile ? SessionManager.open(fixture.sessio
     : fixture ? SessionManager.create(cwd, fixture.sessionDir, { id: fixture.sessionId }) : SessionManager.inMemory(cwd);
 if (fixture?.ui && !fixture.sessionFile) sessionManager.appendCustomEntry("health-ui-recipient", {});
 const { session } = await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader,
-    sessionManager, noTools: "all" });
+    sessionManager, ...(process.env.LAUNCH_BACKGROUND === "1" ? {} : { noTools: "all" }) });
 await session.bindExtensions(fixture?.ui ? { mode: "tui", uiContext: { ...session.extensionRunner.getUIContext(),
     notify(msg, level = "info") {
         if (fixture?.failHealthNotify && / is lost |\(orphaned\)/.test(msg)) { uiFailures++; throw new Error("UI adapter unavailable"); }

@@ -3,7 +3,7 @@ import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, w
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { currentSandboxPermissions } from "./permission-policy.ts";
-import { ownerBindingFromContext } from "./worker-waits.ts";
+import { ownerBindingFromContext, getWorkerOperationService, resolveProductionSchemas, DEFAULT_WORKER_BRIDGE_TOOLS } from "./worker-waits.ts";
 import { processStartToken } from "./registry.ts";
 import { WorkClient } from "./shared-work-client.mjs";
 import { catalogHostAuthority } from "./catalog-host-admission.ts";
@@ -35,6 +35,7 @@ export async function submitManagedLaunch(pi: ExtensionAPI, ctx: ExtensionContex
         const settings = ctx.sessionManager.getBranch().filter(entry => entry.type === "custom" && entry.customType.startsWith("pi-better-subagents-"));
         const payload = { version: 1, id, secretHash: createHash("sha256").update(secret).digest("hex"), instanceId: hello.instanceId,
             owner, pid: process.pid, start: processStartToken(process.pid), projectTrusted: ctx.isProjectTrusted(),
+            background: { available: getWorkerOperationService(pi)?.assignmentContinuation === 1, tools: [...resolveProductionSchemas(pi, DEFAULT_WORKER_BRIDGE_TOOLS).schemas.keys()] },
             permissions: currentSandboxPermissions(pi) ?? {}, settings, model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
             catalogAuthority, key, tool, params };
         const staging = `${path}.tmp`;
