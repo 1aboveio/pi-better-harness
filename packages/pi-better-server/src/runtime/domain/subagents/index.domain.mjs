@@ -519,7 +519,8 @@ async function tryEnqueueAssignmentOutcome(pi, meta) {
  * path never takes a live pi's terminal callback (#625, DEV-226 criterion 5).
  */
 function recoverAssignmentOutcomes(pi) {
-    for (const meta of activeCallbackOrigin ? listMetasForOrigin(activeCallbackOrigin) : [])
+    for (const meta of activeCallbackOrigin ? listMetasForOrigin(activeCallbackOrigin) : []) {
+        replayTimingWakes(pi, meta);
         if (meta.assignment) {
             try {
                 if (commitAssignmentTerminal(meta))
@@ -527,6 +528,7 @@ function recoverAssignmentOutcomes(pi) {
             }
             catch { /* keep unverified; no legacy handoff */ }
         }
+    }
 }
 function recoverCompletionCallbacks(pi) {
     recoverAssignmentOutcomes(pi);
@@ -4360,6 +4362,8 @@ export default function (pi, managed) {
                     return;
                 for (const row of observation.rows) {
                     replayTimingWakes(pi, row.meta);
+                    if (!row.meta.assignment && row.meta.completionCallbackPendingAt !== undefined)
+                        enqueueCompletionCallback(pi, row.meta.id);
                     if (row.meta.status === "orphaned" || row.meta.status === "lost")
                         deliverHealthCallback(pi, row.meta, row.meta.status, Date.now());
                     if (["running", "orphaned", "lost"].includes(row.meta.status))
