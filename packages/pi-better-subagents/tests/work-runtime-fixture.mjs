@@ -12,9 +12,11 @@ export async function startWorkRuntimeFixture(env = process.env) {
         execArgv: ["--import", "tsx"], env: { ...env, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"],
     });
     let error = ""; child.stderr.on("data", chunk => { error += chunk; });
-    await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(`Fixture daemon exited: ${error}`); })]);
-    return async () => {
+    const [ready] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(`Fixture daemon exited: ${error}`); })]);
+    const stop = async () => {
         if (child.exitCode === null) { child.send("stop"); await once(child, "exit"); }
         rmSync(transport, { recursive: true, force: true });
     };
+    stop.socketPath = ready.ready;
+    return stop;
 }

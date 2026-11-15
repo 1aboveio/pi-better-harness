@@ -111,8 +111,9 @@ async function waitFor(fn, { timeoutMs = 8000, intervalMs = 20 } = {}) {
 
 async function deliveredOutcome(h, id, timeoutMs) {
     const receipt = await waitFor(() => {
-        const outcome = readOutcome(readMeta(id));
-        return outcome?.deliveryReceipt && outcomeTranscriptReceipt(h.ctx.sessionManager.getBranch(), outcome.eventId) ? outcome.deliveryReceipt : undefined;
+        const meta = readMeta(id);
+        const outcome = readOutcome(meta);
+        return meta.completionCallbackSentAt !== undefined && outcome?.deliveryReceipt && outcomeTranscriptReceipt(h.ctx.sessionManager.getBranch(), outcome.eventId) ? outcome.deliveryReceipt : undefined;
     }, { timeoutMs });
     assert.ok(receipt, "the completion has a durable recipient receipt");
     const outcome = readOutcome(readMeta(id));
@@ -128,6 +129,7 @@ async function waitTerminal(id) {
         return current && current.status !== "running" && current.status !== "orphaned" ? current : undefined;
     });
     assert.ok(meta, `run ${id} never reached a terminal status`);
+    if (!await waitFor(() => fixture.observedTerminal(id))) throw new Error(`run ${id} never reached a terminal shared observation`);
     return meta;
 }
 

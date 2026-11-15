@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import { startContinuationModel, continuationModels } from "../../pi-better-server/test/support/subagent-offline-model.ts";
+import { WorkClient } from "../../pi-better-server/src/runtime/work-client.mjs";
 
 /** Real SDK foregrounds share a real daemon. Only the remote model is substituted. */
 export async function continuationFixture({ root, artifacts, workspace }) {
@@ -18,6 +19,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
     const env = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${observer}`.trim(),
         PI_CONTINUATION_ARTIFACTS: artifacts };
     const stopDaemon = await startWorkRuntimeFixture(env);
+    const observation = new WorkClient(stopDaemon.socketPath, agent);
     const actors = new Set();
     let nextActor = 0;
     function makeHarness(options = {}) {
@@ -81,9 +83,13 @@ export async function continuationFixture({ root, artifacts, workspace }) {
             shutdown() { return stopped ??= (async () => { await ready; if (child.exitCode === null) { const exited = once(child, "exit"); child.send({ stop: true }); await exited; } })(); },
         };
     }
-    return { makeHarness, async close() {
+    return { makeHarness, async observedTerminal(id) {
+        const value = await observation.get({ id, limit: 1 });
+        const row = value.rows[0];
+        return row && !["running", "orphaned"].includes(row.meta.status);
+    }, async close() {
         for (const child of actors) { const exited = once(child, "exit"); child.send({ stop: true }); await exited; }
-        await stopDaemon(); await model.close();
+        observation.close(); await stopDaemon(); await model.close();
         if (process.env.PI_CONTINUATION_EVIDENCE_DIR) {
             mkdirSync(process.env.PI_CONTINUATION_EVIDENCE_DIR, { recursive: true });
             cpSync(root, mkdtempSync(join(process.env.PI_CONTINUATION_EVIDENCE_DIR, "continuation-")), { recursive: true });
