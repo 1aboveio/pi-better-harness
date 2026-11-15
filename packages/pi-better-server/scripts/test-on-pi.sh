@@ -26,14 +26,19 @@ cp "$ROOT_DIR/scripts/isolate-registry.mjs" "$PREFIX/scripts/"
 cp -R "$PKG_DIR/src" "$PKG_DIR/test" "$PKG_DIR/scripts" "$PKG_DIR/package.json" "$PKG_DIR/tsconfig.json" "$PREFIX/packages/pi-better-server/"
 [ -d "$PKG_DIR/codex-plugin" ] && cp -R "$PKG_DIR/codex-plugin" "$PREFIX/packages/pi-better-server/"
 # Background-activity regressions load the real sibling provider against this SDK.
-node --input-type=module - "$ROOT_DIR/packages/pi-better-subagents" "$PREFIX/packages/pi-better-subagents" <<'NODE'
+node --input-type=module - "$ROOT_DIR" "$PREFIX" <<'NODE'
 import { cpSync } from "node:fs";
-import { basename } from "node:path";
-cpSync(process.argv[2], process.argv[3], { recursive: true, filter: path => basename(path) !== "node_modules" });
+import { basename, join } from "node:path";
+for (const name of ["pi-better-subagents", "pi-better-background-tasks", "operation-coordinator"]) {
+  cpSync(join(process.argv[2], "packages", name), join(process.argv[3], "packages", name), {
+    recursive: true, filter: path => !["node_modules", ".work", ".pi-compat"].includes(basename(path)),
+  });
+}
 NODE
 # Install the consumer's declared runtime closure, not just the host's transitives.
 # Its host-provided peers must keep resolving to the requested Pi above.
 (cd "$PREFIX/packages/pi-better-subagents" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
+(cd "$PREFIX/packages/pi-better-background-tasks" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
 
 cd "$PREFIX/packages/pi-better-server"
 installed="$(node -p "require('$PREFIX/node_modules/@earendil-works/pi-coding-agent/package.json').version")"
