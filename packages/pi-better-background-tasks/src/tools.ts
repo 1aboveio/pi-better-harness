@@ -11,6 +11,7 @@ import {
   formatMissingTask,
   formatMutationRefusal,
   formatStatus,
+  formatDurableStatusMetadata,
   formatStopResult,
   type OutputOptions,
 } from "./output.js";
@@ -298,7 +299,7 @@ const BACKGROUND_ORCHESTRATION_GUIDELINES = [
   "Do not treat launch as completion of the parent milestone; relevant background work must be terminal, inspected, and integrated before verification or completion.",
 ];
 
-export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime> = defaultRuntime, refreshNavigator = refreshBackgroundTasksNavigator): void {
+export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime> = defaultRuntime, refreshNavigator = refreshBackgroundTasksNavigator, options: { resumeLocal?: boolean } = {}): void {
   const { resumeRunningTask, spawnTask } = runtime;
   let activeSession: BackgroundTaskCallbackOrigin | undefined;
   const getActiveSession = () => activeSession;
@@ -314,12 +315,14 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
   pi.on("session_start", async (_event, ctx) => {
     setCallbackBatchContext(pi, ctx);
     activeSession = getCallbackOrigin(ctx);
+    if (options.resumeLocal !== false) {
     for (const meta of listMetasForOrigin(activeSession)) {
       if (meta.status === "running" || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)) {
         resumeRunningTask(pi, meta, getActiveSession);
       }
     }
     runTaskMaintenance({ activeOrigin: activeSession });
+    }
   });
   pi.on("agent_start", (_event, ctx) => {
     setCallbackBatchContext(pi, ctx);
@@ -417,7 +420,7 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const origin = getCallbackOrigin(ctx);
       activeSession = origin;
-      const durable = await durableStatusText(pi, params.id, ctx);
+      const durable = await durableStatusText(pi, params.id, ctx, params);
       if (durable !== undefined) return text(durable);
       return text(taskStatus(pi, params.id, params, statusOptions(params, origin)));
     },
@@ -710,7 +713,7 @@ async function runAction(
       return durableAwareList(pi, params, callbackOrigin, ctx);
     case "status": {
       if (!params.id) return "Invalid parameters: status requires id.";
-      const durable = await durableStatusText(pi, String(params.id), ctx);
+      const durable = await durableStatusText(pi, String(params.id), ctx, params);
       if (durable !== undefined) return durable;
       return taskStatus(pi, String(params.id), params, statusOptions(params, callbackOrigin));
     }
@@ -840,11 +843,24 @@ async function durableLaunchText(
   }
 }
 
-async function durableStatusText(pi: ExtensionAPI, id: string, ctx: ExtensionContext): Promise<string | undefined> {
+async function durableStatusText(pi: ExtensionAPI, id: string, ctx: ExtensionContext, params: Record<string, unknown>): Promise<string | undefined> {
   const host = getObservedWaitHost(pi);
   if (!host || !host.isDurableTask(id)) return undefined;
   try {
-    return host.formatStatus(await host.settledStatusForParent(ctx, id));
+    const view = await host.settledStatusForParent(ctx, id);
+    if (params.verbose === true || cursorKind(typeof params.cursor === "string" ? params.cursor : undefined) === "t") {
+      const origin = { cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() };
+      const task = host.readDurableTask(origin, id);
+      if (!task) return `Background task ${id} is outside the current session scope.`;
+      const meta = {
+        ...task, kind: task.kind === "watch" ? "command_watch" : "process", status: view.status,
+        argv: task.argv ? [...task.argv] : undefined,
+        logPath: task.logPaths.stdout, callbackOrigin: origin,
+        lastExitCode: view.exitCode, result: task.terminal ? { exitCode: view.exitCode, signal: view.signal } : undefined,
+      };
+      return formatDurableStatusMetadata(meta, statusOptions(params, origin));
+    }
+    return host.formatStatus(view);
   } catch (error) {
     return readableError(error);
   }

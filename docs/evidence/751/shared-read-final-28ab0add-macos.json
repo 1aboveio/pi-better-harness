@@ -1,0 +1,2943 @@
+{
+  "source": {
+    "head": "28ab0add38421ffd6a18cfd09f137239e4148adb",
+    "dirty": "",
+    "kind": "git-checkout",
+    "manifest": {
+      "algorithm": "sha256",
+      "scope": "packages and scripts excluding node_modules/dist/coverage, plus root package manifests",
+      "files": 2000,
+      "sha256": "9c0bc7ab96487872822b884558392d292d32c6cf5349af1ecafd2698123d5301"
+    }
+  },
+  "machine": {
+    "cpu": "Apple M3 Max",
+    "logicalCpus": 16,
+    "memoryBytes": 137438953472,
+    "osRelease": "24.6.0"
+  },
+  "platform": "darwin",
+  "arch": "arm64",
+  "node": "v24.21.0",
+  "sdk": "0.82.1",
+  "scope": "Real Pi RPC processes with standalone Subagents, control RPC at 10 Hz, seeded read-only work records; no guardian in slice #753.",
+  "scenarios": [
+    {
+      "history": 4416,
+      "clients": 1,
+      "elapsedMs": 3054.5077089999995,
+      "resources": [
+        {
+          "pid": 6088,
+          "identity": {
+            "pid": 6088,
+            "token": "dddfac9a-1415-4a85-89f1-80a7c4f0f2d9",
+            "start": "1794776058000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 12.897,
+          "rss": 489058688,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.313151,
+            "p95": 12.042239,
+            "p99": 12.075007
+          }
+        },
+        {
+          "pid": 5459,
+          "identity": {
+            "pid": 5459,
+            "token": "fd591271-d0f5-4b69-8ded-45a70f7a50ed",
+            "start": "1794776057000"
+          },
+          "role": "server",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 157.389,
+          "rss": 400189504,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.591679,
+            "p95": 12.042239,
+            "p99": 12.058623
+          }
+        },
+        {
+          "pid": 5458,
+          "identity": {
+            "pid": 5458,
+            "token": "819559fb-18ce-4cbd-9294-c2866eb205db",
+            "start": "1794776057000"
+          },
+          "role": "work",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 4.319,
+          "rss": 26533440,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.378687,
+            "p95": 12.042239,
+            "p99": 12.050431
+          }
+        }
+      ],
+      "actualProviderRefresh": true,
+      "providerRows": [
+        2
+      ],
+      "totalFsRead": 0,
+      "totalFsWrite": 0,
+      "totalCpuMs": 174.605,
+      "totalRss": 915781632,
+      "rpcMs": {
+        "samples": 30,
+        "p50": 0.4170829999993657,
+        "p95": 0.5715000000000146,
+        "p99": 0.5765000000001237,
+        "max": 0.5765000000001237
+      },
+      "inventoryDelta": 3,
+      "metadataReadDelta": 0,
+      "projectionDelta": 0,
+      "sqlite": {
+        "opens": 2,
+        "active": 2,
+        "maximum": 2
+      },
+      "rebuild": {
+        "ms": 804.9035830000001,
+        "controlRpcMs": {
+          "samples": 18,
+          "p50": 0.13504199999988487,
+          "p95": 0.22025000000007822,
+          "p99": 0.22025000000007822,
+          "max": 0.22025000000007822
+        }
+      },
+      "eventPublication": {
+        "boundary": "external atomic metadata commit to matching real Unix subscription event",
+        "subscribers": 1,
+        "commits": 5,
+        "healthyBudgetMs": 1000,
+        "ms": {
+          "samples": 5,
+          "p50": 39.460042,
+          "p95": 48.887375,
+          "p99": 48.887375,
+          "max": 48.887375
+        },
+        "observations": [
+          {
+            "commit": 0,
+            "committedNs": "4727809479158958",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727809528046333",
+                "seq": 2,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 48.887375
+              }
+            ]
+          },
+          {
+            "commit": 1,
+            "committedNs": "4727809528680291",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727809568140333",
+                "seq": 3,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 39.460042
+              }
+            ]
+          },
+          {
+            "commit": 2,
+            "committedNs": "4727809568718125",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727809602094125",
+                "seq": 4,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 33.376
+              }
+            ]
+          },
+          {
+            "commit": 3,
+            "committedNs": "4727809602662458",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727809636401958",
+                "seq": 5,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 33.7395
+              }
+            ]
+          },
+          {
+            "commit": 4,
+            "committedNs": "4727809636972750",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727809678443041",
+                "seq": 6,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 41.470291
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "history": 4416,
+      "clients": 5,
+      "elapsedMs": 3073.2757500000007,
+      "resources": [
+        {
+          "pid": 6088,
+          "identity": {
+            "pid": 6088,
+            "token": "dddfac9a-1415-4a85-89f1-80a7c4f0f2d9",
+            "start": "1794776058000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 70.85,
+          "rss": 140411392,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.788287,
+            "p95": 12.066815,
+            "p99": 13.950975
+          }
+        },
+        {
+          "pid": 9570,
+          "identity": {
+            "pid": 9570,
+            "token": "078bfe1a-e49b-444a-910b-48ebfee063cd",
+            "start": "1794776065000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 15.285,
+          "rss": 165434496,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.812863,
+            "p95": 12.287999,
+            "p99": 15.220735
+          }
+        },
+        {
+          "pid": 9848,
+          "identity": {
+            "pid": 9848,
+            "token": "06fb8b64-2aa2-47fc-b751-adc05cb6e407",
+            "start": "1794776065000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 15.477,
+          "rss": 180690624,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.665407,
+            "p95": 12.050431,
+            "p99": 14.295039
+          }
+        },
+        {
+          "pid": 10042,
+          "identity": {
+            "pid": 10042,
+            "token": "5f62c555-6c2c-412c-aefd-fc7474481f01",
+            "start": "1794776066000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 15.593,
+          "rss": 168223296,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.501567,
+            "p95": 12.287999,
+            "p99": 14.295039
+          }
+        },
+        {
+          "pid": 10314,
+          "identity": {
+            "pid": 10314,
+            "token": "9ccec148-b659-4225-bd5b-46d96eef871a",
+            "start": "1794776066000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 15.189,
+          "rss": 180838336,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.714559,
+            "p95": 12.287999,
+            "p99": 16.113663
+          }
+        },
+        {
+          "pid": 5459,
+          "identity": {
+            "pid": 5459,
+            "token": "fd591271-d0f5-4b69-8ded-45a70f7a50ed",
+            "start": "1794776057000"
+          },
+          "role": "server",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 164.809,
+          "rss": 423326144,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.780095,
+            "p95": 12.058623,
+            "p99": 14.262271
+          }
+        },
+        {
+          "pid": 5458,
+          "identity": {
+            "pid": 5458,
+            "token": "819559fb-18ce-4cbd-9294-c2866eb205db",
+            "start": "1794776057000"
+          },
+          "role": "work",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 5.15,
+          "rss": 26812032,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.837439,
+            "p95": 12.058623,
+            "p99": 14.237695
+          }
+        }
+      ],
+      "actualProviderRefresh": true,
+      "providerRows": [
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "totalFsRead": 0,
+      "totalFsWrite": 0,
+      "totalCpuMs": 302.35299999999995,
+      "totalRss": 1285736320,
+      "rpcMs": {
+        "samples": 30,
+        "p50": 0.5309170000000449,
+        "p95": 2.7310840000009193,
+        "p99": 7.422625000001062,
+        "max": 7.422625000001062
+      },
+      "inventoryDelta": 3,
+      "metadataReadDelta": 0,
+      "projectionDelta": 0,
+      "sqlite": {
+        "opens": 2,
+        "active": 2,
+        "maximum": 2
+      },
+      "rebuild": {
+        "ms": 804.9035830000001,
+        "controlRpcMs": {
+          "samples": 18,
+          "p50": 0.13504199999988487,
+          "p95": 0.22025000000007822,
+          "p99": 0.22025000000007822,
+          "max": 0.22025000000007822
+        }
+      },
+      "eventPublication": {
+        "boundary": "external atomic metadata commit to matching real Unix subscription event",
+        "subscribers": 5,
+        "commits": 5,
+        "healthyBudgetMs": 1000,
+        "ms": {
+          "samples": 25,
+          "p50": 39.204708,
+          "p95": 98.63225,
+          "p99": 98.646417,
+          "max": 98.646417
+        },
+        "observations": [
+          {
+            "commit": 0,
+            "committedNs": "4727816255846458",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727816294990333",
+                "seq": 7,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 39.143875
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727816295030875",
+                "seq": 7,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 39.184417
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727816295051166",
+                "seq": 7,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 39.204708
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727816295067625",
+                "seq": 7,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 39.221167
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727816295088375",
+                "seq": 7,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 39.241917
+              }
+            ]
+          },
+          {
+            "commit": 1,
+            "committedNs": "4727816295719458",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727816332774458",
+                "seq": 8,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.055
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727816332823458",
+                "seq": 8,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.104
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727816332841958",
+                "seq": 8,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.1225
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727816332856625",
+                "seq": 8,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.137167
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727816332870458",
+                "seq": 8,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.151
+              }
+            ]
+          },
+          {
+            "commit": 2,
+            "committedNs": "4727816333554958",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727816371713416",
+                "seq": 9,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 38.158458
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727816371758625",
+                "seq": 9,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 38.203667
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727816371780833",
+                "seq": 9,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 38.225875
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727816371795791",
+                "seq": 9,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 38.240833
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727816371810000",
+                "seq": 9,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 38.255042
+              }
+            ]
+          },
+          {
+            "commit": 3,
+            "committedNs": "4727816372439500",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727816417645875",
+                "seq": 10,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 45.206375
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727816417690541",
+                "seq": 10,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 45.251041
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727816417707666",
+                "seq": 10,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 45.268166
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727816417722416",
+                "seq": 10,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 45.282916
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727816417736666",
+                "seq": 10,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 45.297166
+              }
+            ]
+          },
+          {
+            "commit": 4,
+            "committedNs": "4727816419920041",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727816518483125",
+                "seq": 11,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 98.563084
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727816518519791",
+                "seq": 11,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 98.59975
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727816518537166",
+                "seq": 11,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 98.617125
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727816518552291",
+                "seq": 11,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 98.63225
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727816518566458",
+                "seq": 11,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 98.646417
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "history": 4416,
+      "clients": 10,
+      "elapsedMs": 3070.954750000001,
+      "resources": [
+        {
+          "pid": 6088,
+          "identity": {
+            "pid": 6088,
+            "token": "dddfac9a-1415-4a85-89f1-80a7c4f0f2d9",
+            "start": "1794776058000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 13.708,
+          "rss": 141329216,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.411455,
+            "p95": 12.042239,
+            "p99": 12.206079
+          }
+        },
+        {
+          "pid": 9570,
+          "identity": {
+            "pid": 9570,
+            "token": "078bfe1a-e49b-444a-910b-48ebfee063cd",
+            "start": "1794776065000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 13.094,
+          "rss": 119053440,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.263999,
+            "p95": 12.042239,
+            "p99": 12.124159
+          }
+        },
+        {
+          "pid": 9848,
+          "identity": {
+            "pid": 9848,
+            "token": "06fb8b64-2aa2-47fc-b751-adc05cb6e407",
+            "start": "1794776065000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 12.971,
+          "rss": 120905600,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.427839,
+            "p95": 12.050431,
+            "p99": 12.566527
+          }
+        },
+        {
+          "pid": 10042,
+          "identity": {
+            "pid": 10042,
+            "token": "5f62c555-6c2c-412c-aefd-fc7474481f01",
+            "start": "1794776066000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 13.076,
+          "rss": 111714560,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.198463,
+            "p95": 12.042239,
+            "p99": 12.304383
+          }
+        },
+        {
+          "pid": 10314,
+          "identity": {
+            "pid": 10314,
+            "token": "9ccec148-b659-4225-bd5b-46d96eef871a",
+            "start": "1794776066000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 13.228,
+          "rss": 123248448,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.280383,
+            "p95": 12.042239,
+            "p99": 12.115967
+          }
+        },
+        {
+          "pid": 12834,
+          "identity": {
+            "pid": 12834,
+            "token": "4cf9bb15-3d80-45e5-944c-1e5b5e613ff9",
+            "start": "1794776071000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 15.371,
+          "rss": 191291328,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.395071,
+            "p95": 12.042239,
+            "p99": 12.271615
+          }
+        },
+        {
+          "pid": 13159,
+          "identity": {
+            "pid": 13159,
+            "token": "1fb880d0-fea5-4b0e-88a1-6fbba0148727",
+            "start": "1794776072000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 15.349,
+          "rss": 183509568,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.378687,
+            "p95": 12.042239,
+            "p99": 12.451839
+          }
+        },
+        {
+          "pid": 13408,
+          "identity": {
+            "pid": 13408,
+            "token": "9c3c7b51-c873-4a82-aa2b-f2f6cd654c4b",
+            "start": "1794776073000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 15.593,
+          "rss": 171089984,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.460607,
+            "p95": 12.042239,
+            "p99": 12.394495
+          }
+        },
+        {
+          "pid": 13677,
+          "identity": {
+            "pid": 13677,
+            "token": "cbb7ffe9-6659-46c8-95a7-62de0603e7c1",
+            "start": "1794776073000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 14.741,
+          "rss": 174711168,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.534335,
+            "p95": 12.115967,
+            "p99": 12.312575
+          }
+        },
+        {
+          "pid": 13906,
+          "identity": {
+            "pid": 13906,
+            "token": "27e321af-f8d3-4813-ae88-35a5d8e1a562",
+            "start": "1794776074000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 15.493,
+          "rss": 170614784,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.460607,
+            "p95": 12.042239,
+            "p99": 12.247039
+          }
+        },
+        {
+          "pid": 5459,
+          "identity": {
+            "pid": 5459,
+            "token": "fd591271-d0f5-4b69-8ded-45a70f7a50ed",
+            "start": "1794776057000"
+          },
+          "role": "server",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 164.944,
+          "rss": 430209728,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.558911,
+            "p95": 12.042239,
+            "p99": 12.075007
+          }
+        },
+        {
+          "pid": 5458,
+          "identity": {
+            "pid": 5458,
+            "token": "819559fb-18ce-4cbd-9294-c2866eb205db",
+            "start": "1794776057000"
+          },
+          "role": "work",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 4.411,
+          "rss": 26877568,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.517951,
+            "p95": 12.042239,
+            "p99": 12.050431
+          }
+        }
+      ],
+      "actualProviderRefresh": true,
+      "providerRows": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "totalFsRead": 0,
+      "totalFsWrite": 0,
+      "totalCpuMs": 311.979,
+      "totalRss": 1964555392,
+      "rpcMs": {
+        "samples": 30,
+        "p50": 0.668082999996841,
+        "p95": 1.2615420000001905,
+        "p99": 2.440207999999984,
+        "max": 2.440207999999984
+      },
+      "inventoryDelta": 3,
+      "metadataReadDelta": 0,
+      "projectionDelta": 0,
+      "sqlite": {
+        "opens": 2,
+        "active": 2,
+        "maximum": 2
+      },
+      "rebuild": {
+        "ms": 804.9035830000001,
+        "controlRpcMs": {
+          "samples": 18,
+          "p50": 0.13504199999988487,
+          "p95": 0.22025000000007822,
+          "p99": 0.22025000000007822,
+          "max": 0.22025000000007822
+        }
+      },
+      "eventPublication": {
+        "boundary": "external atomic metadata commit to matching real Unix subscription event",
+        "subscribers": 10,
+        "commits": 5,
+        "healthyBudgetMs": 1000,
+        "ms": {
+          "samples": 50,
+          "p50": 37.338917,
+          "p95": 46.316959,
+          "p99": 46.342542,
+          "max": 46.342542
+        },
+        "observations": [
+          {
+            "commit": 0,
+            "committedNs": "4727823919980291",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727823966180750",
+                "seq": 12,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 46.200459
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727823966207500",
+                "seq": 12,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 46.227209
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727823966222541",
+                "seq": 12,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 46.24225
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727823966236333",
+                "seq": 12,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 46.256042
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727823966253916",
+                "seq": 12,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 46.273625
+              },
+              {
+                "subscriber": 5,
+                "visibleNs": "4727823966267291",
+                "seq": 12,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 46.287
+              },
+              {
+                "subscriber": 6,
+                "visibleNs": "4727823966279833",
+                "seq": 12,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 46.299542
+              },
+              {
+                "subscriber": 7,
+                "visibleNs": "4727823966297250",
+                "seq": 12,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 46.316959
+              },
+              {
+                "subscriber": 8,
+                "visibleNs": "4727823966310458",
+                "seq": 12,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 46.330167
+              },
+              {
+                "subscriber": 9,
+                "visibleNs": "4727823966322833",
+                "seq": 12,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 46.342542
+              }
+            ]
+          },
+          {
+            "commit": 1,
+            "committedNs": "4727823967016708",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727824003989125",
+                "seq": 13,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 36.972417
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727824004032333",
+                "seq": 13,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.015625
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727824004049208",
+                "seq": 13,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.0325
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727824004063250",
+                "seq": 13,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.046542
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727824004077208",
+                "seq": 13,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.0605
+              },
+              {
+                "subscriber": 5,
+                "visibleNs": "4727824004090375",
+                "seq": 13,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.073667
+              },
+              {
+                "subscriber": 6,
+                "visibleNs": "4727824004102708",
+                "seq": 13,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.086
+              },
+              {
+                "subscriber": 7,
+                "visibleNs": "4727824004115625",
+                "seq": 13,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.098917
+              },
+              {
+                "subscriber": 8,
+                "visibleNs": "4727824004128541",
+                "seq": 13,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.111833
+              },
+              {
+                "subscriber": 9,
+                "visibleNs": "4727824004141208",
+                "seq": 13,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.1245
+              }
+            ]
+          },
+          {
+            "commit": 2,
+            "committedNs": "4727824004656958",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727824041052583",
+                "seq": 14,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 36.395625
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727824041084833",
+                "seq": 14,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 36.427875
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727824041100833",
+                "seq": 14,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 36.443875
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727824041115083",
+                "seq": 14,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 36.458125
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727824041128333",
+                "seq": 14,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 36.471375
+              },
+              {
+                "subscriber": 5,
+                "visibleNs": "4727824041142000",
+                "seq": 14,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 36.485042
+              },
+              {
+                "subscriber": 6,
+                "visibleNs": "4727824041158833",
+                "seq": 14,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 36.501875
+              },
+              {
+                "subscriber": 7,
+                "visibleNs": "4727824041170916",
+                "seq": 14,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 36.513958
+              },
+              {
+                "subscriber": 8,
+                "visibleNs": "4727824041183708",
+                "seq": 14,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 36.52675
+              },
+              {
+                "subscriber": 9,
+                "visibleNs": "4727824041198416",
+                "seq": 14,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 36.541458
+              }
+            ]
+          },
+          {
+            "commit": 3,
+            "committedNs": "4727824041856208",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727824081910000",
+                "seq": 15,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 40.053792
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727824081960083",
+                "seq": 15,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 40.103875
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727824081977500",
+                "seq": 15,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 40.121292
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727824081992000",
+                "seq": 15,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 40.135792
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727824082005166",
+                "seq": 15,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 40.148958
+              },
+              {
+                "subscriber": 5,
+                "visibleNs": "4727824082018000",
+                "seq": 15,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 40.161792
+              },
+              {
+                "subscriber": 6,
+                "visibleNs": "4727824082030250",
+                "seq": 15,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 40.174042
+              },
+              {
+                "subscriber": 7,
+                "visibleNs": "4727824082046333",
+                "seq": 15,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 40.190125
+              },
+              {
+                "subscriber": 8,
+                "visibleNs": "4727824082058916",
+                "seq": 15,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 40.202708
+              },
+              {
+                "subscriber": 9,
+                "visibleNs": "4727824082071041",
+                "seq": 15,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 40.214833
+              }
+            ]
+          },
+          {
+            "commit": 4,
+            "committedNs": "4727824082729166",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727824119966583",
+                "seq": 16,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.237417
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727824120009875",
+                "seq": 16,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.280709
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727824120027833",
+                "seq": 16,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.298667
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727824120041250",
+                "seq": 16,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.312084
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727824120053750",
+                "seq": 16,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.324584
+              },
+              {
+                "subscriber": 5,
+                "visibleNs": "4727824120068083",
+                "seq": 16,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.338917
+              },
+              {
+                "subscriber": 6,
+                "visibleNs": "4727824120081375",
+                "seq": 16,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.352209
+              },
+              {
+                "subscriber": 7,
+                "visibleNs": "4727824120093875",
+                "seq": 16,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.364709
+              },
+              {
+                "subscriber": 8,
+                "visibleNs": "4727824120105750",
+                "seq": 16,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.376584
+              },
+              {
+                "subscriber": 9,
+                "visibleNs": "4727824120117375",
+                "seq": 16,
+                "instanceId": "e1002c5c-c8fc-4974-b497-4eb8c8620a5d",
+                "latencyMs": 37.388209
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "history": 10000,
+      "clients": 1,
+      "elapsedMs": 3052.7804590000014,
+      "resources": [
+        {
+          "pid": 18484,
+          "identity": {
+            "pid": 18484,
+            "token": "563a3f85-5cb3-45fa-a785-79e97c8d54e1",
+            "start": "1794776082000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 13.447,
+          "rss": 497022400,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.345919,
+            "p95": 12.050431,
+            "p99": 12.124159
+          }
+        },
+        {
+          "pid": 17474,
+          "identity": {
+            "pid": 17474,
+            "token": "7501d54e-ec59-4414-a152-b44f0a15be96",
+            "start": "1794776080000"
+          },
+          "role": "server",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 360.086,
+          "rss": 425164224,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.862015,
+            "p95": 12.050431,
+            "p99": 12.050431
+          }
+        },
+        {
+          "pid": 17473,
+          "identity": {
+            "pid": 17473,
+            "token": "60f431ff-d400-4954-8d60-4c6418f05f2a",
+            "start": "1794776080000"
+          },
+          "role": "work",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 4.39,
+          "rss": 29466368,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.558911,
+            "p95": 12.042239,
+            "p99": 12.050431
+          }
+        }
+      ],
+      "actualProviderRefresh": true,
+      "providerRows": [
+        2
+      ],
+      "totalFsRead": 0,
+      "totalFsWrite": 0,
+      "totalCpuMs": 377.923,
+      "totalRss": 951652992,
+      "rpcMs": {
+        "samples": 30,
+        "p50": 0.38383299999986775,
+        "p95": 0.5107500000012806,
+        "p99": 0.5107909999969706,
+        "max": 0.5107909999969706
+      },
+      "inventoryDelta": 3,
+      "metadataReadDelta": 0,
+      "projectionDelta": 0,
+      "sqlite": {
+        "opens": 2,
+        "active": 2,
+        "maximum": 2
+      },
+      "rebuild": {
+        "ms": 1283.8742500000008,
+        "controlRpcMs": {
+          "samples": 38,
+          "p50": 0.12962500000139698,
+          "p95": 0.19329099999958999,
+          "p99": 0.21737500000017462,
+          "max": 0.21737500000017462
+        }
+      },
+      "eventPublication": {
+        "boundary": "external atomic metadata commit to matching real Unix subscription event",
+        "subscribers": 1,
+        "commits": 5,
+        "healthyBudgetMs": 1000,
+        "ms": {
+          "samples": 5,
+          "p50": 77.757541,
+          "p95": 102.834792,
+          "p99": 102.834792,
+          "max": 102.834792
+        },
+        "observations": [
+          {
+            "commit": 0,
+            "committedNs": "4727833633473958",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727833736308750",
+                "seq": 2,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 102.834792
+              }
+            ]
+          },
+          {
+            "commit": 1,
+            "committedNs": "4727833736906083",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727833822767875",
+                "seq": 3,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 85.861792
+              }
+            ]
+          },
+          {
+            "commit": 2,
+            "committedNs": "4727833823446750",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727833899535916",
+                "seq": 4,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 76.089166
+              }
+            ]
+          },
+          {
+            "commit": 3,
+            "committedNs": "4727833900136791",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727833973839708",
+                "seq": 5,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 73.702917
+              }
+            ]
+          },
+          {
+            "commit": 4,
+            "committedNs": "4727833974439750",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727834052197291",
+                "seq": 6,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 77.757541
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "history": 10000,
+      "clients": 5,
+      "elapsedMs": 3053.601791999994,
+      "resources": [
+        {
+          "pid": 18484,
+          "identity": {
+            "pid": 18484,
+            "token": "563a3f85-5cb3-45fa-a785-79e97c8d54e1",
+            "start": "1794776082000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 64.664,
+          "rss": 150718144,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.370495,
+            "p95": 12.042239,
+            "p99": 12.369919
+          }
+        },
+        {
+          "pid": 21463,
+          "identity": {
+            "pid": 21463,
+            "token": "285dc704-44e6-4adc-8b66-6456479f091e",
+            "start": "1794776089000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 13.094,
+          "rss": 178315200,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.378687,
+            "p95": 12.042239,
+            "p99": 12.050431
+          }
+        },
+        {
+          "pid": 21817,
+          "identity": {
+            "pid": 21817,
+            "token": "2e29e0e7-783e-4b8f-8c2a-1a18b5bec728",
+            "start": "1794776090000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 13.03,
+          "rss": 168582720,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.509759,
+            "p95": 12.042239,
+            "p99": 12.443647
+          }
+        },
+        {
+          "pid": 22040,
+          "identity": {
+            "pid": 22040,
+            "token": "a9a554bd-0f18-4dc4-bca1-3c927840dd05",
+            "start": "1794776090000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 12.865,
+          "rss": 169434112,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.542527,
+            "p95": 12.042239,
+            "p99": 12.115967
+          }
+        },
+        {
+          "pid": 22459,
+          "identity": {
+            "pid": 22459,
+            "token": "feb60a0f-acfd-41f8-91c9-b9d5be4b4019",
+            "start": "1794776091000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 12.823,
+          "rss": 170647936,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.411455,
+            "p95": 12.042239,
+            "p99": 12.050431
+          }
+        },
+        {
+          "pid": 17474,
+          "identity": {
+            "pid": 17474,
+            "token": "7501d54e-ec59-4414-a152-b44f0a15be96",
+            "start": "1794776080000"
+          },
+          "role": "server",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 347.77,
+          "rss": 458397376,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.796479,
+            "p95": 12.042239,
+            "p99": 12.050431
+          }
+        },
+        {
+          "pid": 17473,
+          "identity": {
+            "pid": 17473,
+            "token": "60f431ff-d400-4954-8d60-4c6418f05f2a",
+            "start": "1794776080000"
+          },
+          "role": "work",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 3.601,
+          "rss": 29531904,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.624447,
+            "p95": 12.042239,
+            "p99": 12.042239
+          }
+        }
+      ],
+      "actualProviderRefresh": true,
+      "providerRows": [
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "totalFsRead": 0,
+      "totalFsWrite": 0,
+      "totalCpuMs": 467.847,
+      "totalRss": 1325627392,
+      "rpcMs": {
+        "samples": 30,
+        "p50": 0.45612500000424916,
+        "p95": 0.5714169999992009,
+        "p99": 0.5797499999971478,
+        "max": 0.5797499999971478
+      },
+      "inventoryDelta": 3,
+      "metadataReadDelta": 0,
+      "projectionDelta": 0,
+      "sqlite": {
+        "opens": 2,
+        "active": 2,
+        "maximum": 2
+      },
+      "rebuild": {
+        "ms": 1283.8742500000008,
+        "controlRpcMs": {
+          "samples": 38,
+          "p50": 0.12962500000139698,
+          "p95": 0.19329099999958999,
+          "p99": 0.21737500000017462,
+          "max": 0.21737500000017462
+        }
+      },
+      "eventPublication": {
+        "boundary": "external atomic metadata commit to matching real Unix subscription event",
+        "subscribers": 5,
+        "commits": 5,
+        "healthyBudgetMs": 1000,
+        "ms": {
+          "samples": 25,
+          "p50": 74.790417,
+          "p95": 85.41225,
+          "p99": 85.426209,
+          "max": 85.426209
+        },
+        "observations": [
+          {
+            "commit": 0,
+            "committedNs": "4727840632608416",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727840717954541",
+                "seq": 7,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 85.346125
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727840717990125",
+                "seq": 7,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 85.381709
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727840718006250",
+                "seq": 7,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 85.397834
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727840718020666",
+                "seq": 7,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 85.41225
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727840718034625",
+                "seq": 7,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 85.426209
+              }
+            ]
+          },
+          {
+            "commit": 1,
+            "committedNs": "4727840718603375",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727840795001291",
+                "seq": 8,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 76.397916
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727840795037416",
+                "seq": 8,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 76.434041
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727840795058958",
+                "seq": 8,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 76.455583
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727840795074000",
+                "seq": 8,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 76.470625
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727840795087625",
+                "seq": 8,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 76.48425
+              }
+            ]
+          },
+          {
+            "commit": 2,
+            "committedNs": "4727840795684333",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727840870419208",
+                "seq": 9,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 74.734875
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727840870454291",
+                "seq": 9,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 74.769958
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727840870474750",
+                "seq": 9,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 74.790417
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727840870488916",
+                "seq": 9,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 74.804583
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727840870502916",
+                "seq": 9,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 74.818583
+              }
+            ]
+          },
+          {
+            "commit": 3,
+            "committedNs": "4727840871096083",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727840942736291",
+                "seq": 10,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 71.640208
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727840942774291",
+                "seq": 10,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 71.678208
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727840942796541",
+                "seq": 10,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 71.700458
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727840942811583",
+                "seq": 10,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 71.7155
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727840942825250",
+                "seq": 10,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 71.729167
+              }
+            ]
+          },
+          {
+            "commit": 4,
+            "committedNs": "4727840943436166",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727841014976125",
+                "seq": 11,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 71.539959
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727841015008083",
+                "seq": 11,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 71.571917
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727841015024250",
+                "seq": 11,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 71.588084
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727841015039041",
+                "seq": 11,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 71.602875
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727841015053666",
+                "seq": 11,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 71.6175
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "history": 10000,
+      "clients": 10,
+      "elapsedMs": 60054.28575,
+      "resources": [
+        {
+          "pid": 18484,
+          "identity": {
+            "pid": 18484,
+            "token": "563a3f85-5cb3-45fa-a785-79e97c8d54e1",
+            "start": "1794776082000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 243.115,
+          "rss": 154257408,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.214847,
+            "p95": 12.042239,
+            "p99": 12.287999
+          }
+        },
+        {
+          "pid": 21463,
+          "identity": {
+            "pid": 21463,
+            "token": "285dc704-44e6-4adc-8b66-6456479f091e",
+            "start": "1794776089000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 235.976,
+          "rss": 125952512,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.231231,
+            "p95": 12.042239,
+            "p99": 12.255231
+          }
+        },
+        {
+          "pid": 21817,
+          "identity": {
+            "pid": 21817,
+            "token": "2e29e0e7-783e-4b8f-8c2a-1a18b5bec728",
+            "start": "1794776090000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 235.458,
+          "rss": 116547712,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.214847,
+            "p95": 12.042239,
+            "p99": 12.271615
+          }
+        },
+        {
+          "pid": 22040,
+          "identity": {
+            "pid": 22040,
+            "token": "a9a554bd-0f18-4dc4-bca1-3c927840dd05",
+            "start": "1794776090000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 233.63,
+          "rss": 115940736,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.206655,
+            "p95": 12.042239,
+            "p99": 12.320767
+          }
+        },
+        {
+          "pid": 22459,
+          "identity": {
+            "pid": 22459,
+            "token": "feb60a0f-acfd-41f8-91c9-b9d5be4b4019",
+            "start": "1794776091000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 232.807,
+          "rss": 117875648,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.206655,
+            "p95": 12.042239,
+            "p99": 12.279807
+          }
+        },
+        {
+          "pid": 25134,
+          "identity": {
+            "pid": 25134,
+            "token": "5c67157b-a2ed-485f-81db-47bd9d169a98",
+            "start": "1794776096000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 302.223,
+          "rss": 124462272,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.247615,
+            "p95": 12.042239,
+            "p99": 12.214271
+          }
+        },
+        {
+          "pid": 25447,
+          "identity": {
+            "pid": 25447,
+            "token": "166390b6-cbd2-4155-8f78-b3884914ce23",
+            "start": "1794776097000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 308.926,
+          "rss": 127540864,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.231231,
+            "p95": 12.042239,
+            "p99": 12.271615
+          }
+        },
+        {
+          "pid": 25991,
+          "identity": {
+            "pid": 25991,
+            "token": "754b93ec-fe0f-4d08-9816-1c8886c4105c",
+            "start": "1794776097000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 305.355,
+          "rss": 121233728,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.223039,
+            "p95": 12.042239,
+            "p99": 12.263423
+          }
+        },
+        {
+          "pid": 26267,
+          "identity": {
+            "pid": 26267,
+            "token": "f928f149-afeb-4f19-a17c-b981d291d956",
+            "start": "1794776098000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 303.905,
+          "rss": 111337920,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.206655,
+            "p95": 12.042239,
+            "p99": 12.304383
+          }
+        },
+        {
+          "pid": 26440,
+          "identity": {
+            "pid": 26440,
+            "token": "012e43e2-cc93-4fe9-a8b3-834a0fdfb4cd",
+            "start": "1794776098000"
+          },
+          "role": "pi",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 314.818,
+          "rss": 122658816,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.255807,
+            "p95": 12.042239,
+            "p99": 12.296191
+          }
+        },
+        {
+          "pid": 17474,
+          "identity": {
+            "pid": 17474,
+            "token": "7501d54e-ec59-4414-a152-b44f0a15be96",
+            "start": "1794776080000"
+          },
+          "role": "server",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 7652.71,
+          "rss": 478657536,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.280383,
+            "p95": 12.042239,
+            "p99": 12.066815
+          }
+        },
+        {
+          "pid": 17473,
+          "identity": {
+            "pid": 17473,
+            "token": "60f431ff-d400-4954-8d60-4c6418f05f2a",
+            "start": "1794776080000"
+          },
+          "role": "work",
+          "archiveReadDelta": 0,
+          "markerStatDelta": 0,
+          "cpuMs": 76.242,
+          "rss": 29810432,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "lagMs": {
+            "p50": 11.329535,
+            "p95": 12.042239,
+            "p99": 12.066815
+          }
+        }
+      ],
+      "actualProviderRefresh": true,
+      "providerRows": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "totalFsRead": 0,
+      "totalFsWrite": 0,
+      "totalCpuMs": 10445.164999999999,
+      "totalRss": 1746275584,
+      "rpcMs": {
+        "samples": 589,
+        "p50": 0.4919170000066515,
+        "p95": 1.1454590000066673,
+        "p99": 4.423041000001831,
+        "max": 6.8990409999969415
+      },
+      "inventoryDelta": 60,
+      "metadataReadDelta": 0,
+      "projectionDelta": 0,
+      "sqlite": {
+        "opens": 2,
+        "active": 2,
+        "maximum": 2
+      },
+      "rebuild": {
+        "ms": 1283.8742500000008,
+        "controlRpcMs": {
+          "samples": 38,
+          "p50": 0.12962500000139698,
+          "p95": 0.19329099999958999,
+          "p99": 0.21737500000017462,
+          "max": 0.21737500000017462
+        }
+      },
+      "eventPublication": {
+        "boundary": "external atomic metadata commit to matching real Unix subscription event",
+        "subscribers": 10,
+        "commits": 5,
+        "healthyBudgetMs": 1000,
+        "ms": {
+          "samples": 50,
+          "p50": 80.647125,
+          "p95": 102.5855,
+          "p99": 102.607958,
+          "max": 102.607958
+        },
+        "observations": [
+          {
+            "commit": 0,
+            "committedNs": "4727905168002125",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727905270477333",
+                "seq": 12,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 102.475208
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727905270507416",
+                "seq": 12,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 102.505291
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727905270525750",
+                "seq": 12,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 102.523625
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727905270538958",
+                "seq": 12,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 102.536833
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727905270551416",
+                "seq": 12,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 102.549291
+              },
+              {
+                "subscriber": 5,
+                "visibleNs": "4727905270563750",
+                "seq": 12,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 102.561625
+              },
+              {
+                "subscriber": 6,
+                "visibleNs": "4727905270575708",
+                "seq": 12,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 102.573583
+              },
+              {
+                "subscriber": 7,
+                "visibleNs": "4727905270587625",
+                "seq": 12,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 102.5855
+              },
+              {
+                "subscriber": 8,
+                "visibleNs": "4727905270598708",
+                "seq": 12,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 102.596583
+              },
+              {
+                "subscriber": 9,
+                "visibleNs": "4727905270610083",
+                "seq": 12,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 102.607958
+              }
+            ]
+          },
+          {
+            "commit": 1,
+            "committedNs": "4727905272050750",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727905352613791",
+                "seq": 13,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 80.563041
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727905352646500",
+                "seq": 13,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 80.59575
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727905352661125",
+                "seq": 13,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 80.610375
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727905352673583",
+                "seq": 13,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 80.622833
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727905352685875",
+                "seq": 13,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 80.635125
+              },
+              {
+                "subscriber": 5,
+                "visibleNs": "4727905352697875",
+                "seq": 13,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 80.647125
+              },
+              {
+                "subscriber": 6,
+                "visibleNs": "4727905352709125",
+                "seq": 13,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 80.658375
+              },
+              {
+                "subscriber": 7,
+                "visibleNs": "4727905352720916",
+                "seq": 13,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 80.670166
+              },
+              {
+                "subscriber": 8,
+                "visibleNs": "4727905352732541",
+                "seq": 13,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 80.681791
+              },
+              {
+                "subscriber": 9,
+                "visibleNs": "4727905352746875",
+                "seq": 13,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 80.696125
+              }
+            ]
+          },
+          {
+            "commit": 2,
+            "committedNs": "4727905353307458",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727905437030125",
+                "seq": 14,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 83.722667
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727905437057500",
+                "seq": 14,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 83.750042
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727905437073416",
+                "seq": 14,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 83.765958
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727905437086875",
+                "seq": 14,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 83.779417
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727905437099625",
+                "seq": 14,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 83.792167
+              },
+              {
+                "subscriber": 5,
+                "visibleNs": "4727905437111750",
+                "seq": 14,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 83.804292
+              },
+              {
+                "subscriber": 6,
+                "visibleNs": "4727905437123875",
+                "seq": 14,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 83.816417
+              },
+              {
+                "subscriber": 7,
+                "visibleNs": "4727905437141208",
+                "seq": 14,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 83.83375
+              },
+              {
+                "subscriber": 8,
+                "visibleNs": "4727905437154583",
+                "seq": 14,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 83.847125
+              },
+              {
+                "subscriber": 9,
+                "visibleNs": "4727905437167125",
+                "seq": 14,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 83.859667
+              }
+            ]
+          },
+          {
+            "commit": 3,
+            "committedNs": "4727905437736375",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727905516876500",
+                "seq": 15,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 79.140125
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727905516904041",
+                "seq": 15,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 79.167666
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727905516917583",
+                "seq": 15,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 79.181208
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727905516929583",
+                "seq": 15,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 79.193208
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727905516941250",
+                "seq": 15,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 79.204875
+              },
+              {
+                "subscriber": 5,
+                "visibleNs": "4727905516952750",
+                "seq": 15,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 79.216375
+              },
+              {
+                "subscriber": 6,
+                "visibleNs": "4727905516966041",
+                "seq": 15,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 79.229666
+              },
+              {
+                "subscriber": 7,
+                "visibleNs": "4727905516977625",
+                "seq": 15,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 79.24125
+              },
+              {
+                "subscriber": 8,
+                "visibleNs": "4727905516988416",
+                "seq": 15,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 79.252041
+              },
+              {
+                "subscriber": 9,
+                "visibleNs": "4727905516999250",
+                "seq": 15,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 79.262875
+              }
+            ]
+          },
+          {
+            "commit": 4,
+            "committedNs": "4727905517473333",
+            "recipients": [
+              {
+                "subscriber": 0,
+                "visibleNs": "4727905595552666",
+                "seq": 16,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 78.079333
+              },
+              {
+                "subscriber": 1,
+                "visibleNs": "4727905595587416",
+                "seq": 16,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 78.114083
+              },
+              {
+                "subscriber": 2,
+                "visibleNs": "4727905595602708",
+                "seq": 16,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 78.129375
+              },
+              {
+                "subscriber": 3,
+                "visibleNs": "4727905595616708",
+                "seq": 16,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 78.143375
+              },
+              {
+                "subscriber": 4,
+                "visibleNs": "4727905595630041",
+                "seq": 16,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 78.156708
+              },
+              {
+                "subscriber": 5,
+                "visibleNs": "4727905595648833",
+                "seq": 16,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 78.1755
+              },
+              {
+                "subscriber": 6,
+                "visibleNs": "4727905595661208",
+                "seq": 16,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 78.187875
+              },
+              {
+                "subscriber": 7,
+                "visibleNs": "4727905595674041",
+                "seq": 16,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 78.200708
+              },
+              {
+                "subscriber": 8,
+                "visibleNs": "4727905595687791",
+                "seq": 16,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 78.214458
+              },
+              {
+                "subscriber": 9,
+                "visibleNs": "4727905595712375",
+                "seq": 16,
+                "instanceId": "d48ffec6-be01-4370-8f7c-f96722d8b4e0",
+                "latencyMs": 78.239042
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "phase": {
+    "step": "complete"
+  },
+  "lastMetrics": {
+    "inventories": 89,
+    "metadataReads": 10012,
+    "projections": 10012,
+    "coordinatorConnections": 1,
+    "indexConnections": 1,
+    "background": {
+      "runnerSnapshots": 0,
+      "activeQueries": 0,
+      "historyQueries": 0,
+      "scopes": 0,
+      "history": {
+        "inventories": 0,
+        "metadataReads": 0,
+        "projections": 0
+      }
+    },
+    "sqlite": {
+      "opens": 2,
+      "active": 2,
+      "maximum": 2
+    },
+    "cacheHits": 148,
+    "queryCount": 65,
+    "cacheBytes": 14358,
+    "cacheEntries": 13,
+    "queryDurationMs": [
+      0.4209170000000313,
+      0.2165829999999005,
+      1.9535419999999704,
+      0.16666600000007747,
+      0.08887500000037107,
+      0.06575000000020736,
+      0.10016700000005585,
+      0.16525000000001455,
+      0.1412079999990965,
+      0.08933299999989686,
+      0.09795800000028976,
+      0.05500000000029104,
+      0.11579100000017206,
+      0.065959000001385,
+      0.09495799999967858,
+      0.04829100000097242,
+      0.12125000000014552,
+      0.06674999999995634,
+      0.10029200000099081,
+      0.04741699999976845,
+      0.10525000000052387,
+      0.06420900000011898,
+      0.06112500000017462,
+      0.07466699999895354,
+      0.11004099999991013,
+      0.05912499999976717,
+      0.10804199999984121,
+      0.04591700000128185,
+      0.14454200000000128,
+      0.06583399999908579,
+      0.11320800000066811,
+      0.08312499999919964,
+      0.11495800000011513,
+      0.06112500000017462,
+      0.09470900000087568,
+      0.18550000000141154,
+      0.1212919999998121,
+      0.06424999999944703,
+      0.10141699999985576,
+      0.09858400000121037,
+      0.10808299999916926,
+      0.057874999998603016,
+      0.11162500000136788,
+      0.08391699999992852,
+      0.12249999999949068,
+      0.06062500000007276,
+      0.11295900000004622,
+      0.05762500000128057,
+      0.10604199999943376,
+      0.06129099999998289,
+      0.11404199999924458,
+      0.09337500000037835,
+      0.11095799999930023,
+      0.05999999999949068,
+      0.08945800000037707,
+      0.07287499999983993,
+      0.12387500000113505,
+      0.09916700000030687,
+      0.1090409999997064,
+      0.09070900000006077,
+      0.10733299999992596,
+      0.05408299999908195,
+      0.12583300000187592,
+      0.08699999999953434,
+      0.17116600000008475
+    ],
+    "executor": {
+      "active": 0,
+      "queued": 0,
+      "clients": 11,
+      "completed": 153,
+      "singleflightHits": 59,
+      "rejected": 0,
+      "cancelled": 0,
+      "timeouts": 0,
+      "capacity": 64,
+      "waitMs": [
+        0.016792000000123153,
+        0.0183750000001055,
+        0.013709000000062588,
+        0.014791999999943073,
+        0.015041999999994005,
+        0.014374999999972715,
+        0.014416999999866675,
+        0.01304100000015751,
+        0.017666999999846666,
+        0.013541999999915788,
+        0.012083999999958905,
+        0.013625000000047294,
+        0.010291999999935797,
+        0.013999999999896318,
+        0.00924999999983811,
+        0.00891700000011042,
+        0.0075839999999516294,
+        0.006708000000344327,
+        0.003749999999854481,
+        0.0047090000002754095,
+        0.004915999999866472,
+        0.006791000000248459,
+        0.014874999999847205,
+        0.019957999999860476,
+        0.011040999999750056,
+        0.014208999999027583,
+        0.003875000000334694,
+        0.006000000001222361,
+        0.01450000000113505,
+        0.009374999999636202,
+        0.006332999999358435,
+        0.014166999999360996,
+        0.004750000000058208,
+        0.0068750000009458745,
+        0.01358299999992596,
+        0.006417000000510598,
+        0.010500000000320142,
+        0.013915999999881024,
+        0.010874999999941792,
+        0.0061659999992116354,
+        0.009000000000014552,
+        0.003875000000334694,
+        0.006209000001035747,
+        0.0037500000016734703,
+        0.003083000001424807,
+        0.00220900000022084,
+        0.004416999998284155,
+        0.010541999999986729,
+        0.006792000000132248,
+        0.006417000000510598,
+        0.005708000000595348,
+        0.004499999999097781,
+        0.006124999999883585,
+        0.003584000000046217,
+        0.008792000000539701,
+        0.003749999999854481,
+        0.005708000000595348,
+        0.0028750000001309672,
+        0.006583000000318862,
+        0.003917000000001281,
+        0.003459000001384993,
+        0.010125000000698492,
+        0.0069590000002790475,
+        0.006041999999069958,
+        0.006042000000888947,
+        0.004999999999199645,
+        0.004249999999956344,
+        0.014417000000321423,
+        0.021000000000640284,
+        0.01729200000045239,
+        0.008207999999285676,
+        0.0043750000004365575,
+        0.005874999998923158,
+        0.005250000000160071,
+        0.005291999999826658,
+        0.012708000000202446,
+        0.003832999998849118,
+        0.009707999999591266,
+        0.0037909999991825316,
+        0.015750000000480213,
+        0.007332999999562162,
+        0.0037909999991825316,
+        0.01283299999886367,
+        0.006667000001471024,
+        0.009667000000263215,
+        0.015207999998892774,
+        0.009249999999155989,
+        0.004415999999764608,
+        0.010624999998981366,
+        0.005666999999448308,
+        0.008458999998765648,
+        0.009582999999111053,
+        0.0038340000010066433,
+        0.002541999998356914,
+        0.006500000001324224,
+        0.0037080000001878943,
+        0.002624999999170541,
+        0.002166999998735264,
+        0.009374999997817213,
+        0.005916999998589745,
+        0.0070410000007541385,
+        0.0040829999998095445,
+        0.002790999998978805,
+        0.00225000000136788,
+        0.005042000000685221,
+        0.009667000002082204,
+        0.005790999999589985,
+        0.003457999999227468,
+        0.002334000000701053,
+        0.006499999999505235,
+        0.004499999999097781,
+        0.007375000001047738,
+        0.009000000001833541,
+        0.007166999999753898,
+        0.003457999999227468,
+        0.007165999999415362,
+        0.0036249999975552782,
+        0.0024999999986903276,
+        0.0020000000004074536,
+        0.009083000000828179,
+        0.0032910000008996576,
+        0.006999999997788109,
+        0.0058339999995951075,
+        0.0031249999992724042,
+        0.0022080000017012935,
+        0.0072089999994204845,
+        0.015625,
+        0.013124999997671694
+      ],
+      "readMs": [
+        0.10237500000016553,
+        0.12416699999994307,
+        0.10254200000008495,
+        0.11599999999998545,
+        0.1412920000000213,
+        0.09916599999996834,
+        0.11366700000007768,
+        0.10312500000009095,
+        1.319833000000017,
+        326.44345799999996,
+        0.33400000000006,
+        1.5638750000000528,
+        0.08975000000009459,
+        92.62887499999988,
+        2.015292000000045,
+        0.9607089999999516,
+        0.07275000000026921,
+        0.15095800000017334,
+        0.11408399999982066,
+        0.04758400000037,
+        0.15933300000006057,
+        0.048624999999901775,
+        0.15091599999959726,
+        0.14825000000018917,
+        0.30274999999983265,
+        0.09658399999898393,
+        0.14420799999970768,
+        0.12770799999998417,
+        0.0959579999998823,
+        0.15162499999860302,
+        0.0967080000009446,
+        0.1321669999997539,
+        0.17687499999919964,
+        0.11162500000136788,
+        0.0794579999983398,
+        0.11495900000045367,
+        0.15099999999983993,
+        0.7331249999988358,
+        0.18208299999969313,
+        0.10537499999918509,
+        0.14833399999952235,
+        0.054500000000189175,
+        0.20320900000115216,
+        0.046750000001338776,
+        0.04808299999967858,
+        0.10545899999851827,
+        0.051291999998284155,
+        0.1448339999988093,
+        0.06812499999978172,
+        0.17137500000171713,
+        0.04820800000015879,
+        0.07233400000041001,
+        0.12520799999947485,
+        0.03616700000020501,
+        0.13679200000115088,
+        0.05645800000093004,
+        0.17120799999975134,
+        0.04408300000068266,
+        0.05529200000091805,
+        0.10212499999943248,
+        0.037917000001471024,
+        0.16041699999914272,
+        0.06220900000153051,
+        0.15395800000078452,
+        0.04445800000030431,
+        0.05033299999922747,
+        0.03800000000046566,
+        0.0689170000005106,
+        0.3350000000009459,
+        0.15670800000043528,
+        0.13562500000080036,
+        0.07283300000017334,
+        0.06658400000014808,
+        0.051541000000725035,
+        0.07554200000049605,
+        0.0921249999992142,
+        0.053374999999505235,
+        0.1632499999996071,
+        0.17416599999887694,
+        0.10558399999899848,
+        0.1943329999994603,
+        0.15583300000071176,
+        0.1123329999991256,
+        0.19620899999972607,
+        0.12058299999989686,
+        0.10216699999909906,
+        0.2124999999996362,
+        0.1570000000010623,
+        0.2587920000005397,
+        0.14750000000094587,
+        0.13670899999851827,
+        0.12379200000032142,
+        0.043000000001484295,
+        0.1564589999998134,
+        0.053583000000799075,
+        0.044874999999592546,
+        0.03970900000058464,
+        0.04387499999938882,
+        0.12954199999876437,
+        0.0836669999989681,
+        0.1726249999992433,
+        0.0403329999971902,
+        0.051332999999431195,
+        0.03329200000007404,
+        0.07262500000069849,
+        0.14395900000090478,
+        0.0470000000022992,
+        0.15474999999787542,
+        0.045583999999507796,
+        0.07066699999995762,
+        0.14554199999838602,
+        0.06325000000288128,
+        0.12895800000114832,
+        0.06949999999778811,
+        0.1474579999994603,
+        0.043207999999140156,
+        0.04045899999982794,
+        0.08287500000005821,
+        0.03645900000265101,
+        0.13358299999890733,
+        0.04204100000060862,
+        0.1765419999974256,
+        0.045958999999129446,
+        0.04129100000136532,
+        0.11575000000084401,
+        0.05837500000052387,
+        0.3385840000009921,
+        0.17429100000299513
+      ],
+      "eventLoopLagMs": {
+        "p50": 11.354111,
+        "p95": 12.042239,
+        "p99": 12.066815
+      },
+      "worker": "running",
+      "restarts": 0,
+      "recoveryPending": false,
+      "status": "ready"
+    },
+    "mutationSqlite": {
+      "active": 0,
+      "leases": 0
+    }
+  }
+}

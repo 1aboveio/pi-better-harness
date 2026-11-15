@@ -1,3 +1,4 @@
+import { createBackgroundTools, hasBackgroundRequests } from "./runtime/background-tools.ts";
 import { createLocalWorkClient } from "./runtime/local-client.ts";
 import { chmodSync, existsSync, realpathSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
@@ -22,8 +23,9 @@ import { runtimeRoot } from "./runtime/root.ts";
 import { RuntimeCancellation, hasPendingCancellation } from "./runtime/cancellation.ts";
 import { RuntimeResultSupervision, hasResultSupervision } from "./runtime/result-supervision.ts";
 import { SharedCatalog } from "./runtime/catalog.ts";
-import { mutationStoreMetrics } from "./runtime/mutation-store.ts";
+import { acquireMutationStore, mutationStoreMetrics } from "./runtime/mutation-store.ts";
 import { WorkQueryExecutor } from "./runtime/query-executor.ts";
+import { createSubagentLaunch, hasSubagentManagement } from "./runtime/subagent-launch.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
   /** Defaults to `~/.pi/agent/server` (or `$PI_SERVER_DIR`). */
@@ -91,6 +93,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const owner = inspectDaemonOwner(serverDir);
     const instanceId = owner.status === "live" ? owner.owner.token : undefined;
     admitDaemonStartup({ canonicalServerDir: serverDir, agentDir: getAgentDir(), build, intent: startupIntentFromEnv(process.env) });
+    let launches: Awaited<ReturnType<typeof createSubagentLaunch>> | undefined;
+    let launchInitialization: ReturnType<typeof createSubagentLaunch> | undefined;
+    let backgroundInitialization: ReturnType<typeof createBackgroundTools> | undefined;
+    let backgroundTools: Awaited<ReturnType<typeof createBackgroundTools>> | undefined;
+    const initializeBackground = () => backgroundInitialization ??= createBackgroundTools(realpathSync(getAgentDir()), instanceId!, () => Boolean(pendingUpgrade), scope => work().snapshot(scope)).then(host => backgroundTools = host).catch(error => { backgroundInitialization = undefined; throw error; });
     let cancellations: RuntimeCancellation | undefined;
     let resultSupervision: RuntimeResultSupervision | undefined;
     const resultPortKey = Symbol.for("pi-better-server:result-supervision-ports-v1");
@@ -110,7 +117,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         finally {
           resultSupervision?.close();
           if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
-          await workModel?.close();
+          try { await (await launchInitialization?.catch(() => undefined))?.close();
+          await (await backgroundInitialization?.catch(() => undefined))?.close(); }
+          finally { await workModel?.close(); }
         }
       }
     };
@@ -118,9 +127,30 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     resultPorts.set(resultRoot, resultPort);
     if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
     const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
+    const initializeLaunch = () => {
+      if (!launchInitialization) {
+        const pending = createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog);
+        launchInitialization = pending;
+        void pending.then(host => { launches = host; }, () => {
+          // The factory releases partial resources before rejection. A later
+          // request may retry after the underlying recovery fault is repaired.
+          if (launchInitialization === pending) launchInitialization = undefined;
+        });
+      }
+      return launchInitialization;
+    };
+    if (hasSubagentManagement(getAgentDir())) {
+      void initializeLaunch().catch(error => log(`Subagent supervision unavailable: ${String(error)}`));
+    }
     const work = () => {
       if (!workModel) {
-        workModel = new WorkQueryExecutor(realpathSync(getAgentDir()), instanceId!);
+        workModel = new WorkQueryExecutor(realpathSync(getAgentDir()), instanceId!, {
+          onTerminalLogsChanged: async ids => {
+            if (!launchInitialization && !hasSubagentManagement(getAgentDir())) return;
+            const host = await initializeLaunch();
+            await host.foldTerminalFailures(ids);
+          },
+        });
       }
       return workModel;
     };
@@ -136,8 +166,16 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const safeUpgrade = !!(build && instanceId && sessionMaintenance
       && typeof sessionMaintenance.withIdleSessions === "function" && "publishRuntimeEvent" in HostedSession.prototype);
     let pendingUpgrade: UpgradeRequest | undefined;
+    if(hasBackgroundRequests(resultRoot)) void initializeBackground().catch(error => log(`Background request recovery unavailable: ${String(error)}`));
     const reconnectControllers = new Map<ConnectionControl, boolean>();
+    const setUpgradeFence = (epoch: string | null) => {
+      const lease = acquireMutationStore(realpathSync(getAgentDir()));
+      try { lease.store.setUpgradeFence(epoch); } finally { lease.release(); }
+    };
+    // Startup ownership has proved the preceding manager exited.
+    setUpgradeFence(null);
     let upgradeCommitted = false;
+    let upgradeBlockers: unknown[] = [];
     const companions = new CompanionManager({
       socketPath,
       ...options.companion,
@@ -190,6 +228,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           send(failure(id, type || "unknown", "Daemon is shutting down; reconnect to start it again"));
           return;
         }
+        if (pendingUpgrade && type === "runtime_launch_subagent") {
+          send(failure(id, type, "runtime-draining: new execution is deferred while a fixed-build upgrade is pending"));
+          return;
+        }
         inFlight++;
         try {
           if (!type) {
@@ -214,6 +256,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             const observation = workModel?.observation();
             return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
               capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, lifecycle: config,
+              subagentManagement: launches?.status() ?? null,
+              backgroundManagement: backgroundTools?.metrics() ?? null,
               guardianBinding: guardianBinding?.identity ?? null,
               workObservation: observation ? { status: observation.status, reason: observation.reason, observedAt: observation.observedAt } : null,
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
@@ -243,6 +287,27 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             if (!greeted) throw new Error(`${type} requires hello`);
             catalog.admission.bind(command.authority, socket);
             return reply({ data: { bound: true } });
+          }
+          if (type === "runtime_background_tool") {
+            if (!greeted) throw new Error("Background tools require hello");
+            if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+            if (runtimeInFlight >= 32) throw new Error("runtime-overloaded");
+            runtimeInFlight++;
+            try { return reply({data: await (await initializeBackground()).handle(command)}); } finally { runtimeInFlight--; }
+          }
+          if (type === "runtime_launch_subagent") {
+            if (!greeted) throw new Error("not_accepted: launch requires hello");
+            if (runtimeInFlight >= 32) throw new Error("not_accepted: too many in-flight runtime requests");
+            if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+            runtimeInFlight++;
+            try {
+              launches = await initializeLaunch();
+              const data = await launches.handle(command);
+              // The durable launch receipt must not fail because derived reads
+              // are rebuilding or overloaded. Refresh independently.
+              void work().livenessReasons().catch(error => log(`Launch snapshot refresh unavailable: ${String(error)}`));
+              return reply({ data });
+            } finally { runtimeInFlight--; }
           }
           if (type === "runtime_subscribe_catalog") {
             if (!greeted) throw new Error(`${type} requires hello`);
@@ -278,7 +343,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             guardianBinding = { socket, identity: guardian.owner };
             return reply({ data: { server: current.owner, guardian: guardian.owner } });
           }
-          if (type === "runtime_upgrade_status") return reply({ data: readActivationJournal(serverDir) ?? null });
+          if (type === "runtime_upgrade_status") {
+            const journal = readActivationJournal(serverDir);
+            return reply({ data: journal ? { ...journal, blockers: upgradeBlockers } : null });
+          }
           if (["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_metrics"].includes(type)) {
             if (!greeted) throw new Error(`${type} requires hello`);
             if (id && id.length > 128) throw new Error("Runtime request ID exceeds 128 characters");
@@ -310,9 +378,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               || journal.previousOwner?.token !== instanceId || journal.phase !== "prepared") throw new Error("Upgrade request does not match this daemon's activation journal");
             if (!compatibleUpgrade(build, runtime.build)) throw new Error("Unsafe SDK downgrade or incompatible protocol");
             if (pendingUpgrade && pendingUpgrade.operationId !== command.operationId) throw new Error("activation-conflict: another upgrade is pending");
+            setUpgradeFence(instanceId!);
             pendingUpgrade = { runtime, operationId: command.operationId, serverDir, agentDir: command.agentDir as string };
             setImmediate(() => { void daemon.sweepIdle().catch(error => log(`upgrade maintenance failed: ${String(error)}`)); });
-            return reply({ data: { status: "deferred", operationId: command.operationId, reason: "Waiting for idle sessions" } });
+            return reply({ data: { status: "deferred", operationId: command.operationId, reason: "Waiting for accepted runtime work and idle sessions" } });
           }
           if (NATIVE_HOST_COMMANDS.has(type)) return reply({ data: await nativeHost.handle(command) });
           if ((sessionMaintenance?.busy || nativeHost.busy) && !["list_sessions", "client_snapshot", "subscribe", "acquire_control", "release_control", "extension_ui_response"].includes(type)) {
@@ -436,6 +505,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
     cleanupStartup = async () => {
       await cancellations?.close();
+      await (await launchInitialization?.catch(() => undefined))?.close();
+          await (await backgroundInitialization?.catch(() => undefined))?.close();
       resultSupervision?.close();
       if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
       await workModel?.close();
@@ -471,9 +542,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (pendingUpgrade && sessionMaintenance) {
             const request = pendingUpgrade;
             const journal = readActivationJournal(serverDir);
-            if (!journal || journal.operationId !== request.operationId || !hasActivationReservations(journal)) pendingUpgrade = undefined;
+            if (!journal || journal.operationId !== request.operationId || !hasActivationReservations(journal)) { setUpgradeFence(null); pendingUpgrade = undefined; upgradeBlockers = []; }
             else {
               try {
+                upgradeBlockers = [];
                 // Observe background completion before taking the idle fence. A slow or
                 // failed provider must leave admitted work and dialog answers usable.
                 const live = registry.list().filter(item => item.live).map(item => registry.get(item.sessionId)!);
@@ -485,6 +557,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                   const legacyController = () => live.some(hosted => hosted.controllerIs(controller =>
                     !(controller instanceof ConnectionControl) || reconnectControllers.get(controller) !== true));
                   if (legacyController()) throw new Error("Waiting for legacy controllers to detach");
+                  // HostedSession idleness does not cover detached accepted work.
+                  // Unknown observation fails closed for an irreversible activation.
+                  upgradeBlockers = await work().upgradeObligations();
+                  if (upgradeBlockers.length) throw new Error(`Waiting for runtime work: ${JSON.stringify(upgradeBlockers)}`);
+                  if (inFlight > 0 || cancellations?.busy) throw new Error("Waiting for in-flight runtime admission");
                   commitActivationStop(request, lease, () => { draining = true; upgradeCommitted = true; });
                   for (const hosted of live) {
                     (hosted as HostedSession & { publishRuntimeEvent(event: unknown): void }).publishRuntimeEvent({
@@ -492,7 +569,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                     });
                   }
                 });
-              } catch (error) { log(`upgrade waiting: ${String(error)}`); }
+              } catch (error) {
+                if (!upgradeBlockers.length) upgradeBlockers = [{ kind: "upgrade-unavailable", reason: String(error) }];
+                log(`upgrade waiting: ${String(error)}`);
+              }
               // Pending upgrades take priority over expiry and release their idle fence on busy passes.
               return;
             }
@@ -524,7 +604,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             log(`runtime observation unavailable at idle shutdown: ${String(error)}`);
           }
           // No create/open can slip between this check and the synchronous admission fence.
-          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
+          if (runtimeClients.size > 0 || registry.activeCount > 0 || inFlight > 0 || launches?.busy || backgroundTools?.busy || cancellations?.busy || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
           draining = true;
           idleStopping = true;
           log("idle timeout with no active sessions; shutting down");
@@ -554,6 +634,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           for (const socket of sockets) socket.destroy();
           await closed;
           await cancellations?.close();
+          await (await launchInitialization?.catch(() => undefined))?.close();
+          await (await backgroundInitialization?.catch(() => undefined))?.close();
           resultSupervision?.close();
           if (resultPorts.get(resultRoot) === resultPort) resultPorts.delete(resultRoot);
           await workModel?.close();

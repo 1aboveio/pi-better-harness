@@ -1,10 +1,11 @@
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { join, relative, isAbsolute } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { join, relative, isAbsolute, dirname, resolve } from "node:path";
 import { openSync, closeSync, fstatSync, readSync, realpathSync, constants } from "node:fs";
-import { openStore, type OwnerIdentity, type AssignmentOutcomeRecord } from "./shared-operation-coordinator/index.ts";
+import { openStore, ownerDiff, StoreError, type OwnerIdentity, type AssignmentOutcomeRecord } from "./shared-operation-coordinator/index.ts";
 import type { RunMeta } from "./registry.ts";
-import { processStartToken } from "./registry.ts";
+import { processStartToken, readMeta } from "./registry.ts";
 import type { PermissionSnapshot } from "./permission-policy.ts";
 import { credentialFilePaths } from "./shared-sandbox-core.ts";
 import { readAssignmentReport } from "./assignment-report.ts";
@@ -43,8 +44,29 @@ export function coordinatorPath(): string {
     return join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "operation-coordinator.sqlite");
 }
 function withStore<T>(body: (store: ReturnType<typeof openStore>) => T): T {
-    const store = openStore({ path: coordinatorPath() });
+    const path = coordinatorPath();
+    const borrowed = runtimeStores.get(canonicalRoot(dirname(path)));
+    if (borrowed) return body(borrowed.store);
+    const store = openStore({ path });
     try { return body(store); } finally { store.close(); }
+}
+const runtimeStores = new Map<string, { store: ReturnType<typeof openStore>; leases: number }>();
+function canonicalRoot(root: string): string {
+    try { return realpathSync(root); } catch { return resolve(root); }
+}
+/** Fixed runtime adapter borrows its mutation connection; it retains ownership. */
+export function bindRuntimeOutcomeStore(root: string, store: ReturnType<typeof openStore>): () => void {
+    const key = canonicalRoot(root);
+    let entry = runtimeStores.get(key);
+    if (entry && entry.store !== store) throw new Error("Assignment runtime store already bound");
+    if (!entry) { entry = { store, leases: 0 }; runtimeStores.set(key, entry); }
+    entry.leases++;
+    let released = false;
+    return () => {
+        if (released) return;
+        released = true;
+        if (--entry.leases === 0) runtimeStores.delete(key);
+    };
 }
 export function registerAssignmentAttempt(binding: AssignmentBinding, attemptId: string): void {
     if (binding.version !== ASSIGNMENT_OUTCOMES_VERSION) throw new Error("Unsupported assignment outcome capability.");
@@ -69,7 +91,7 @@ export function commitAssignmentTerminal(meta: RunMeta, recoveryFailure = false)
         catch { if (meta.status === "completed") invalidReport = "Assignment completion is unverified: retained report evidence is unavailable or changed."; }
         const complete = meta.status === "completed" && (report ? report.status === "complete"
             : !invalidReport && waits.some((w) => w.acknowledgement?.disposition === "assignment-complete"));
-        return store.recordAssignmentOutcome({ ...binding, revision: 1,
+        try { return store.recordAssignmentOutcome({ ...binding, revision: 1,
             outcome: complete ? "succeeded" : meta.status === "killed" ? "cancelled" : "failed",
             reason: meta.failureReason || invalidReport || (meta.status === "completed" && report ? report.reason : complete ? "Assigned work and required interpretation are complete."
                 : meta.status === "completed" ? "Assignment completion is unverified: the attempt exited without an evidence-backed completion decision. Inspect retained output and continue unfinished work or report a concrete blocker."
@@ -81,7 +103,23 @@ export function commitAssignmentTerminal(meta: RunMeta, recoveryFailure = false)
                 ...(report ? [{ kind: "artifact" as const, ref: meta.assignmentReport!.path, summary: report.reason },
                     ...report.evidence.map((e) => ({ kind: "artifact" as const, ref: e.path, summary: e.explanation }))] : [])],
             waits: waits.map((w) => ({ waitId: w.waitId, generation: w.generation, cancelEpoch: w.cancelEpoch })),
-        });
+        }); } catch (error) {
+            // A competing finalizer may commit after our initial read. The store
+            // still refuses rewrites; return only the same captured binding's winner.
+            if (error instanceof StoreError && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
+                const winner = store.getAssignmentOutcome(binding.assignmentId);
+                const current = readMeta(meta.id);
+                if (winner && winner.assignmentId === binding.assignmentId && ownerDiff(winner.owner, binding.owner) === "none"
+                    && ownerDiff(winner.recipient, binding.recipient) === "none"
+                    && current?.assignment?.assignmentId === binding.assignmentId
+                    && ownerDiff(current.assignment.owner, binding.owner) === "none" && ownerDiff(current.assignment.recipient, binding.recipient) === "none"
+                    && current.sessionId === meta.sessionId && current.cwd === meta.cwd && current.pid === meta.pid && current.pidStartTime === meta.pidStartTime
+                    && isDeepStrictEqual(current.management, meta.management)
+                    && current.operations?.resumeLaunchToken === meta.operations?.resumeLaunchToken
+                    && winner.evidence.some(evidence => evidence.kind === "log" && evidence.ref === meta.logPath)) return winner;
+            }
+            throw error;
+        }
     });
 }
 export function readOutcome(meta: RunMeta): AssignmentOutcomeRecord | null {

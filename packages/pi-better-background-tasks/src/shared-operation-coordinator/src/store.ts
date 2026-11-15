@@ -7,7 +7,11 @@
  * synchronous and transactional; a refusal throws `StoreError` with a typed code
  * and leaves no partial record.
  */
+import { setUpgradeFence } from "./upgrade.ts";
+import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgroundTerminals, seedPendingParentCallbacks, type ParentCallbackScope, type ParentCallbackPage, type RecentBackgroundTerminalPage } from './background-parent-callbacks.ts';
+import { BackgroundRequests } from "./background-requests.ts";
 import { StoreError } from "./errors.ts";
+import { SubagentLaunchJournal } from "./subagent-launch.ts";
 import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.ts";
 import type { TaskCancellationIntent, TaskCancellationRequest } from "./task-cancellation.ts";
@@ -120,6 +124,7 @@ import {
 } from "./types.ts";
 
 export interface Store {
+    subagentLaunchJournal(): SubagentLaunchJournal;
     resultScopeManaged(scope: string): boolean;
     handoffResultScope(input: Parameters<typeof handoffResultScope>[1]): ReturnType<typeof handoffResultScope>;
     resultSupervision(operationId: string): ReturnType<typeof resultSupervision>;
@@ -161,6 +166,12 @@ export interface Store {
      * returns `created: false`, and any difference is refused with
      * `operation-conflict` or `task-ownership`.
      */
+    backgroundRequests(): BackgroundRequests;
+    setParentCallbackPending(taskId: string, pending: boolean): boolean;
+    listPendingParentCallbacks(scope: ParentCallbackScope, options?: ParentCallbackPage): OperationRecord[];
+    listRecentBackgroundTerminals(options: RecentBackgroundTerminalPage): OperationRecord[];
+    seedPendingParentCallbacks(options?: { limit?: number }): { done: boolean; seeded: number };
+    setUpgradeFence(epoch: string | null): void;
     registerOperation(input: RegisterOperationInput): RegisterOperationResult;
     /**
      * Replace supervision identity and/or report observer health
@@ -336,6 +347,7 @@ export function openStore(options: StoreOptions): Store {
     };
 
     const store: Store = {
+        subagentLaunchJournal() { alive(); return new SubagentLaunchJournal(ctx, alive); },
         resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
@@ -366,6 +378,12 @@ export function openStore(options: StoreOptions): Store {
             closed = true;
             db.close();
         },
+        setParentCallbackPending(taskId, pending) { alive(); return setParentCallbackPending(ctx, taskId, pending); },
+        listPendingParentCallbacks(scope, options) { alive(); return listPendingParentCallbacks(ctx, scope, options); },
+        listRecentBackgroundTerminals(options) { alive(); return listRecentBackgroundTerminals(ctx, options); },
+        seedPendingParentCallbacks(options) { alive(); return seedPendingParentCallbacks(ctx, options); },
+        backgroundRequests() { alive(); return new BackgroundRequests(ctx, alive); },
+        setUpgradeFence(epoch) { alive(); setUpgradeFence(ctx, epoch); },
         registerOperation(input) {
             alive();
             return writeOperation(ctx, input);

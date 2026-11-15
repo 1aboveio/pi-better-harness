@@ -1256,7 +1256,8 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("opens detail only as an overlay with a 25/10 rolling tail and default-expanded command", () => {
+  for (const delayed of [false, true]) it(`opens detail only as an overlay with a 25/10 rolling tail and default-expanded command (delayed=${delayed})`, () => {
+    let detailReady = !delayed;
     const detailCalls: Array<number | undefined> = [];
     const unregister = registerBackgroundWorkProvider({
       id: "background-tasks",
@@ -1277,6 +1278,7 @@ describe("shared background work navigator", () => {
       }],
       detail: (_id, _now, options) => {
         detailCalls.push(options?.logTailLines);
+        if (!detailReady) return null;
         return {
           providerId: "background-tasks",
           id: "bg-1",
@@ -1329,6 +1331,12 @@ describe("shared background work navigator", () => {
       editor.handleInput("left");
       editor.handleInput("enter");
 
+      if (delayed) {
+        assert.doesNotMatch(component.render(72).join("\n"), /Enter collapse/);
+        detailReady = true;
+        component.refreshDetail();
+      }
+
       const overlayOptions = customOptions?.overlayOptions?.();
       const { visible, ...layoutOptions } = overlayOptions;
       const navigatorRows = renderWidget(widgets.at(-1)?.[1], 72, ui.theme).length;
@@ -1377,6 +1385,9 @@ describe("shared background work navigator", () => {
       component.handleInput("enter");
       rendered = component.render(120).join("\n");
       assert.match(rendered, /command.*folded/);
+      component.refreshDetail();
+      assert.match(component.render(120).join("\n"), /command.*folded/, "observation refresh preserves the user's collapse choice");
+
 
       component.handleInput("l");
       assert.equal(detailCalls.at(-1), 25);

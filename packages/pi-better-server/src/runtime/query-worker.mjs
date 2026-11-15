@@ -27,6 +27,17 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
 const { WorkReadModel } = await import("./read-model.ts");
 const { WorkQueries } = await import("./queries.ts");
 const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);
+// One bounded in-flight batch. Remaining obligations stay in the reconstructable
+// inventory index; an acknowledgement cannot erase a newer revision of an ID.
+let terminalLogsPending;
+const sendTerminalLogs = () => {
+  if (terminalLogsPending) return;
+  const batch = model.terminalLogChanges();
+  if (!batch.length) return;
+  terminalLogsPending = batch;
+  parentPort.postMessage({ type: "terminal-logs", ids: batch.map(entry => entry.id) });
+};
+model.onTerminalLogsChanged = sendTerminalLogs;
 const sessions = new Map();
 const cache = new Map();
 const encoded = new WeakMap();
@@ -85,6 +96,7 @@ function session(id) {
 }
 
 parentPort.on("message", async message => {
+  if (message.type === "terminal-logs-consumed") { if (terminalLogsPending) model.acknowledgeTerminalLogs(terminalLogsPending); terminalLogsPending = undefined; sendTerminalLogs(); return; }
   if (message.type === "revision-consumed") {
     revisionPending = false;
     if (revisionDirty) { revisionDirty = false; revision(); }
@@ -99,9 +111,9 @@ parentPort.on("message", async message => {
   if (message.type !== "query") return;
   try {
     const command = message.command;
-    if (command.type === "runtime_get_liveness") {
+    if (["runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(command.type)) {
       await model.reconcile();
-      const observation = model.observation(model.livenessReasons());
+      const observation = model.observation(command.type === "runtime_get_upgrade_obligations" ? model.upgradeObligations() : model.livenessReasons());
       parentPort.postMessage({ type: "reply", id: message.id, json: JSON.stringify(observation.reasons), metrics: metrics(), observation });
       return;
     }

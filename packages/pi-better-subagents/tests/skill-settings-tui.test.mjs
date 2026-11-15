@@ -23,6 +23,10 @@ const agentDir = join(root, "agent");
 process.env.PI_CODING_AGENT_DIR = agentDir;
 const stopCatalogRuntime = await startWorkRuntimeFixture();
 
+const catalogHost = await import("../catalog-host-admission.ts");
+let activeRuntime;
+function withHostContext(context) { catalogHost.noteCatalogHostContext(context, () => ({})); return context; }
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: extension } = await import("../index.ts");
 const config = await import("../config.ts");
 const registry = await import("../registry.ts");
@@ -70,10 +74,10 @@ function reloadedConfig() {
 }
 
 function ctx() {
-    return {
+    return withHostContext({
         cwd: root, mode: "tui", hasUI: true, isProjectTrusted: () => false,
         getSystemPromptOptions: () => ({ cwd: root, skills: promptSkills }),
-        sessionManager: { getBranch: () => [] },
+        sessionManager: { getBranch: () => activeRuntime?.entries ?? [] },
         ui: {
             notify() {},
             setWidget() {}, setStatus() {},
@@ -94,7 +98,7 @@ function ctx() {
                 });
             },
         },
-    };
+    });
 }
 
 function selectedRowText(page) {
@@ -200,10 +204,10 @@ function createRuntime() {
         appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
         sendMessage() {},
         sendUserMessage() {},
-    });
+    }, managedDomainPort());
     const contribution = registrations.find((item) => item.id === "subagents");
     assert.equal(contribution.command, "/subagents settings", "the harness-settings link points at this page");
-    return { events, registrations, tools, commands, entries, contribution };
+    return activeRuntime = { events, registrations, tools, commands, entries, contribution };
 }
 
 async function openSettings(keysOrLabel, runtime = createRuntime()) {
@@ -213,14 +217,14 @@ async function openSettings(keysOrLabel, runtime = createRuntime()) {
 }
 
 function toolCtx() {
-    return {
+    return withHostContext({
         cwd: root,
         model: { provider: "test", id: "model" },
         hasUI: false,
         isProjectTrusted: () => false,
         ui: { notify() {}, setWidget() {} },
-        sessionManager: { getBranch: () => [] },
-    };
+        sessionManager: { getBranch: () => activeRuntime?.entries ?? [] },
+    });
 }
 
 function clearRuns() {
@@ -253,6 +257,7 @@ async function spawn(runtime, params = {}) {
 }
 
 test.after(async () => {
+    catalogHost.closeCatalogHost();
         const { closeCatalogHost } = await import("../catalog-host-admission.ts");
         closeCatalogHost();
         await stopCatalogRuntime();

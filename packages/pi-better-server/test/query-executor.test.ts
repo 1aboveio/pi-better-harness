@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Socket } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -10,7 +10,7 @@ import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 
-async function fixture(options: { capacity?: number; timeoutMs?: number; workerUrl?: URL } = {}) {
+async function fixture(options: { capacity?: number; timeoutMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
   mkdirSync(join(root, "runs"));
   const transport = mkdtempSync("/tmp/query-socket-");
@@ -62,7 +62,7 @@ async function fixture(options: { capacity?: number; timeoutMs?: number; workerU
     await new Promise<void>(resolve => server.close(() => resolve())); await executor.close();
     rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
   };
-  return { executor, client, stall, worker, close, root };
+  return { executor, client, stall, worker, close, root, path };
 }
 
 async function ready(client: WorkClient) {
@@ -311,6 +311,8 @@ test("an active read deadline rejects readers and bounds close while native SQLi
     assert.ok(closeMs < 1500, "native SQLite cannot retain executor shutdown beyond its close budget");
     await exit;
     assert.equal((f.executor.metrics().sqlite as { active: number }).active, 0, "worker exit releases its actual database connections");
+    assert.equal(f.executor.metrics().coordinatorConnections, 0);
+    assert.equal(f.executor.metrics().indexConnections, 0);
     t.diagnostic(JSON.stringify({ rejectedMs, closeMs, workerExitMs: performance.now() - began,
       limitation: "Native SQLite completion delays worker/process exit; the guardian owns the process hard-stop budget." }));
   } finally { await f.close(); }
@@ -392,4 +394,168 @@ test("diagnostic observation uses pushed state without initiating another invent
     assert.equal(f.executor.metrics().inventories, before.inventories,
       "diagnostic polling must not initiate expensive fresh inventories");
   } finally { await f.close(); }
+});
+
+test('Subagents and Background share one coordinator read connection in the query worker', async () => {
+  const f = await fixture();
+  const { openStore } = await import(new URL('../../operation-coordinator/index.ts', import.meta.url).href);
+  const store = openStore({ path: join(f.root, 'operation-coordinator.sqlite') }); store.close();
+  try {
+    const client = await f.client();
+    await f.executor.livenessReasons();
+    await client.get({ cwd: f.root, active: true });
+    await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
+    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator plus one derived index, regardless of domain');
+    assert.equal(f.executor.metrics().coordinatorConnections, 1);
+  } finally { await f.close(); }
+});
+
+
+test("real runner timeout and canonical result supervision progress during stalled SQLite reads", { timeout: 20000 }, async t => {
+  const { acquireMutationStore } = await import("../src/runtime/mutation-store.ts");
+  const { RuntimeResultSupervision } = await import("../src/runtime/result-supervision.ts");
+  const { createLocalSupervisor } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
+  const { supervisorTaskIdForToken } = await import(new URL("../../pi-better-background-tasks/src/supervisor/store.ts", import.meta.url).href);
+  const f = await fixture();
+  const lease = acquireMutationStore(f.root);
+  const directory = join(f.root, "supervisor");
+  const supervisor = createLocalSupervisor({ directory });
+  const token = "slow-read-deadline", taskId = supervisorTaskIdForToken(token), operationId = "slow-read-operation";
+  const owner = { kind: "parent-session", sessionId: "exact-recipient", workspace: f.root };
+  let host: InstanceType<typeof RuntimeResultSupervision> | undefined;
+  try {
+    const client = await f.client(); await ready(client);
+    lease.store.registerOperation({ operationId, taskId, launchToken: token, owner,
+      observer: { kind: "local-supervisor", version: "1" }, supervision: { hostId: "accepted-host" }, authorityRef: "explicit-test-command" });
+    lease.store.handoffResultSupervision({ operationId, expectedHostId: "accepted-host", directory,
+      hostId: "server:slow-read-epoch", epoch: "slow-read-epoch",
+      capability: { adapter: "background-results-v1", captured: { authorized: true }, current: { authorized: true } } });
+    lease.store.registerWait({ waitId: "slow-read-wait", owner, dependencies: [{ operationId }], continuationNote: "Inspect timeout evidence" });
+    host = new RuntimeResultSupervision(f.root, "slow-read-epoch");
+    const busy = await f.stall(12000000);
+    let readFinished = false;
+    void busy.finished.then(() => { readFinished = true; });
+    const began = performance.now();
+    await supervisor.start({ token, operationId, cwd: f.root, timeoutSeconds: 0.2,
+      argv: [process.execPath, "-e", "setInterval(()=>{},1000)"] });
+    const sockets: number[] = [];
+    while (lease.store.getOperation(operationId).terminalRevision === 0) {
+      assert.ok(performance.now() - began < 2000, "runner deadline must reach canonical terminal state within two seconds despite slow reads");
+      const started = performance.now(); await client.request("ping"); sockets.push(performance.now() - started);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    const publicationMs = performance.now() - began;
+    assert.equal(readFinished, false, "supervision must complete while the real SQLite query is still blocked");
+    const operation = lease.store.getOperation(operationId);
+    assert.equal(operation.terminalOutcome, "failed");
+    assert.equal(operation.terminalRevision, 1);
+    assert.equal(lease.store.listOutbox({ recipient: owner }).length, 1);
+    assert.equal(lease.store.listOutbox({ recipient: { ...owner, sessionId: "foreign" } }).length, 0);
+    sockets.sort((a,b)=>a-b);
+    assert.ok(sockets.at(-1)! < 250, "socket control response remains within the documented rebuild budget");
+    t.diagnostic(JSON.stringify({ sqliteMs: await busy.finished, publicationMs,
+      socketMs: { p50: sockets[Math.floor(sockets.length*.5)], p95: sockets[Math.floor(sockets.length*.95)], p99: sockets.at(-1) } }));
+  } finally {
+    await supervisor.stop(taskId).catch(() => undefined);
+    host?.close(); lease.release(); await f.close();
+  }
+});
+
+
+test("explicit internal read demand recovers without foreground connections", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    await f.executor.snapshot({});
+    await f.worker.terminate();
+    assert.equal(f.executor.metrics().executor.clients, 0);
+    assert.equal(f.executor.metrics().executor.recoveryPending, false);
+    await assert.rejects(f.executor.livenessReasons(), /runtime-unhealthy/);
+    const until = Date.now() + 4000;
+    while (f.executor.metrics().executor.restarts === 0) {
+      assert.ok(Date.now() < until); await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.deepEqual(await f.executor.livenessReasons(), []);
+    assert.equal(f.executor.metrics().executor.clients, 0);
+    assert.equal(f.executor.metrics().executor.worker, "running");
+  } finally { await f.close(); }
+});
+
+for (const outcome of ["success", "failure"]) test(`old fold ${outcome} cannot affect a replacement read worker`, { timeout: 10000 }, async () => {
+  const folds: Array<{ resolve(): void; reject(error: Error): void }> = [];
+  const f = await fixture({ workerUrl: new URL("./support/fold-recovery-worker.mjs", import.meta.url),
+    onTerminalLogsChanged: () => new Promise<void>((resolve, reject) => folds.push({ resolve, reject })) });
+  const waitFor = async (predicate: () => boolean) => {
+    const until = Date.now() + 4000;
+    while (!predicate()) { assert.ok(Date.now() < until); await new Promise(resolve => setTimeout(resolve, 10)); }
+  };
+  try {
+    const client = await f.client(); await ready(client);
+    f.worker.postMessage({ type: "diagnostic-fold", id: "old" });
+    await waitFor(() => folds.length === 1);
+    await f.worker.terminate();
+    await waitFor(() => f.executor.metrics().executor.restarts === 1);
+    const replacement = (f.executor as unknown as { worker: Worker }).worker;
+    let acknowledgements = 0;
+    replacement.on("message", message => { if (message.type === "diagnostic-fold-ack") acknowledgements++; });
+    replacement.postMessage({ type: "diagnostic-fold", id: "new" });
+    await waitFor(() => folds.length === 2);
+    if (outcome === "success") folds[0]!.resolve(); else folds[0]!.reject(new Error("old fold failed"));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(acknowledgements, 0, "old completion must not acknowledge the new batch");
+    assert.equal(f.executor.metrics().executor.worker, "running", "old failure must not terminate replacement");
+    folds[1]!.resolve();
+    await waitFor(() => acknowledgements === 1);
+    assert.equal(f.executor.metrics().executor.restarts, 1);
+    await client.get({});
+  } finally { await f.close(); }
+});
+
+
+test("directory entry watchers publish repeated atomic commits without the inventory fallback", { timeout: 15000 }, async () => {
+  const f = await fixture(); // fallback interval is 60 seconds, longer than this test
+  const { measureEventPublication } = await import(new URL("../scripts/event-publication/measure.mjs", import.meta.url).href);
+  try {
+    const id = "sa_atomic", directory = join(f.root, "runs", id), metaPath = join(directory, "meta.json");
+    mkdirSync(directory);
+    const meta = { id, sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1, endedAt: Date.now(),
+      callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "original" };
+    writeFileSync(metaPath, JSON.stringify(meta));
+    const client = await f.client(); await ready(client);
+    const scope = { cwd: f.root, sessionId: "parent", limit: 10 };
+    for (const subscribers of [1, 5, 10]) {
+      const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers, commits: 5 });
+      assert.ok(report.ms.max <= 1000, JSON.stringify(report));
+      assert.equal(f.executor.metrics().sourceWatchers, 2, "one root and one raw directory, independent of clients/files");
+    }
+    // Replacing the directory itself must retire its old inode watcher.
+    renameSync(directory, join(f.root, "old-run")); mkdirSync(directory);
+    writeFileSync(metaPath, JSON.stringify({ ...meta, name: "replaced-directory" }));
+    await client.subscribe(scope);
+    const until = Date.now() + 1000;
+    while (client.snapshot?.rows[0]?.meta.name !== "replaced-directory") {
+      assert.ok(Date.now() < until, "directory replacement was not published"); await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5 });
+    assert.ok(report.ms.max <= 1000, JSON.stringify(report));
+    // The entire source root can also move while its pathname is immediately
+    // recreated. Identity checks must rebind both root and child watchers.
+    renameSync(join(f.root, "runs"), join(f.root, "old-runs-root"));
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(metaPath, JSON.stringify({ ...meta, name: "replaced-root" }));
+    const rootBy = Date.now() + 1000;
+    while (client.snapshot?.rows[0]?.meta.name !== "replaced-root") {
+      assert.ok(Date.now() < rootBy, "root replacement was not published"); await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const rootReport = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5 });
+    assert.ok(rootReport.ms.max <= 1000, JSON.stringify(rootReport));
+    assert.equal(f.executor.metrics().sourceWatchers, 2);
+    rmSync(directory, { recursive: true });
+    const removedBy = Date.now() + 1000;
+    while (client.snapshot?.rows.length) {
+      assert.ok(Date.now() < removedBy, "directory deletion was not published"); await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    await client.get(scope);
+    assert.equal(f.executor.metrics().sourceWatchers, 1, "deleted raw directories release their watchers");
+  } finally { await f.close(); }
+  assert.equal(f.executor.metrics().executor.worker, "stopped");
 });

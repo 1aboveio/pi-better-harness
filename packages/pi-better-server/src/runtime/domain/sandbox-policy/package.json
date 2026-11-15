@@ -1,0 +1,66 @@
+{
+  "name": "pi-better-sandbox",
+  "version": "0.14.2",
+  "description": "Pi extension with independent Main and Subagents permission profiles, file guards, and OS sandbox enforcement.",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.ts",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "sandbox",
+    "seatbelt",
+    "bubblewrap"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "image": "https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-sandbox.png"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1aboveio/pi-better-harness.git",
+    "directory": "packages/pi-better-sandbox"
+  },
+  "bugs": {
+    "url": "https://github.com/1aboveio/pi-better-harness/issues"
+  },
+  "homepage": "https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "pretypecheck": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
+    "pretest": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
+    "prepack": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "verify": "npm run typecheck && npm test"
+  },
+  "files": [
+    "*.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.82.1",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.82.0",
+    "@earendil-works/pi-tui": "^0.82.0",
+    "@types/node": "^25.0.0",
+    "tsx": "^4.22.3",
+    "typebox": "^1.1.39",
+    "typescript": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2"
+  }
+}

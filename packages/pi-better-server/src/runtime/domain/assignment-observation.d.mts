@@ -1,1 +1,1 @@
-export function createAssignmentReader(path: string): { revision(): string; beginSnapshot(): { revision: string; release(): void }; read(owner: any): any; conversationRevisions(): Map<string, string> | undefined; close(): void };
+export function createAssignmentReader(path: string): { revision(): string; connection(refresh?: boolean): any; beginSnapshot(): { revision: string; release(): void }; read(owner: any): any; conversationRevisions(): Map<string, string> | undefined; upgradeObligations(): any[]; close(): void };

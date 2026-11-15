@@ -273,6 +273,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
         isIdle: () => true,
         ui,
         cwd: RUNTIME,
+        sessionManager: { getSessionId: () => "reload-recipient" },
         model: { provider: "test", id: "model" },
     };
 
@@ -376,6 +377,7 @@ describe("registered extension path: session_start reload cleanup", () => {
             pid: 0,
             spawnPid: THIS_PID,
             cwd: RUNTIME,
+            callbackOrigin: { cwd: RUNTIME, sessionId: "reload-recipient" },
             promptPreview: "reload-ext",
             startedAt: 1,
             logPath: join(RUNTIME, "reload.log"),
@@ -461,7 +463,7 @@ describe("registered extension path: session_start reload cleanup", () => {
         nav.pressEditor("down");
         const component = await nav.openDetailViaEnter();
         nav.press("x");
-        assert.equal(timerSpies.pendingIntervals(), 2, "health and assignment reconciliation each retain one interval");
+        assert.equal(timerSpies.pendingIntervals(), 1, "foreground retains only recipient reconciliation");
         const intervalsBeforeReload = new Set(timerSpies.intervalIds());
         assert.equal(timerSpies.pendingTimeouts(), 3, "main-list polling, detail refresh and close-arm deadlines are live");
         const deadlinesBeforeReload = new Set(timerSpies.timeoutIds());
@@ -476,9 +478,9 @@ describe("registered extension path: session_start reload cleanup", () => {
 
         // 5a) Prior overlay timers + confirmation cleared by the registered
         // session_start path (disposeBackgroundWorkNavigator).
-        assert.equal(timerSpies.pendingIntervals(), 2, "reload keeps exactly health and assignment reconciliation");
-        assert.equal(timerSpies.intervalIds().filter((id) => intervalsBeforeReload.has(id)).length, 1,
-            "health remains attached while the previous outcome reconciliation interval is replaced");
+        assert.equal(timerSpies.pendingIntervals(), 1, "reload keeps exactly recipient reconciliation");
+        assert.equal(timerSpies.intervalIds().filter((id) => intervalsBeforeReload.has(id)).length, 0,
+            "reload replaces the prior recipient reconciliation interval");
         assert.equal(timerSpies.pendingTimeouts(), 1, "reload keeps only the new session's main-list poll");
         assert.ok(timerSpies.timeoutIds().every(id => !deadlinesBeforeReload.has(id)), "reload clears every old session deadline");
         assert.deepEqual(nav.statusCalls, []);

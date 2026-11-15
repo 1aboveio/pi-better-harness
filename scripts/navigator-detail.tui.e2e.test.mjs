@@ -31,7 +31,8 @@ let tmuxArgs = ["-L", session];
 const evidenceDir = resolve(process.env.PI_NAVIGATOR_EVIDENCE_DIR ?? join(tmpdir(), `${goldenSession}-evidence`));
 const unicodeLog = `GOLDEN_LOG_BEGIN${"甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳".repeat(4)}GOLDEN_LOG_END`;
 const taskTitle = `background golden path ${"中文任务标题".repeat(8)}`;
-const fixtures = mkdtempSync(join(tmpdir(), "pi-navigator-e2e-"));
+// Keep the private Unix socket below macOS's 103-byte limit.
+const fixtures = realpathSync(mkdtempSync("/tmp/pi-nav-"));
 const agentDir = join(fixtures, "agent");
 const serverDir = join(agentDir, "server");
 let runtimeOwner;
@@ -877,7 +878,9 @@ function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagen
     startedAt: now - 30_000,
     logPath: taskLog,
     cwd,
-    command: "printf 'background task output\\n'",
+    // The canonical server resumes this watch; every real poll retains the
+    // Unicode evidence instead of pushing the initial seeded log out of the tail.
+    command: `printf '%s\\n' '${unicodeLog}'`,
     shell: true,
     pid: piPid,
     pgid: piPid,
@@ -941,10 +944,13 @@ function captureScreen() {
 
 function waitForScreen(matches, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
-  let screen = "";
+  let screen = "", previous;
   while (Date.now() < deadline) {
     screen = captureScreen();
-    if (matches(screen)) return screen;
+    // tmux can expose a partially applied frame with both old and new rows.
+    // Require the same matching frame twice before asserting its exact layout.
+    if (matches(screen) && screen === previous) return screen;
+    previous = screen;
     sleep(50);
   }
   throw new Error(`Timed out waiting for navigator page. Current screen:\n${screen}`);

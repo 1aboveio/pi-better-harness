@@ -35,6 +35,11 @@ register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 const HERMETIC = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "subagent-completion-once-"));
 process.env.TMPDIR = HERMETIC;
 
+const { startWorkRuntimeFixture } = await import("./work-runtime-fixture.mjs");
+const stopRuntime = await startWorkRuntimeFixture();
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
+const { sdkRecipient } = await import("./sdk-recipient-fixture.mjs");
+const recipients = [];
 const { default: betterSubagents } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, nextRunId, runDir, logPathFor } = await import("../registry.ts");
@@ -56,7 +61,7 @@ process.env.PATH = `${binDir}:${originalPath}`;
 const liveRuns = [];
 const dirOnly = [];
 
-function makeHarness({ cwd, sessionId, idle = () => true, sent = [] } = {}) {
+async function makeHarness({ cwd, sessionId, idle = () => true, sent = [] } = {}) {
     const tools = new Map();
     const handlers = new Map();
     const notes = [];
@@ -73,12 +78,16 @@ function makeHarness({ cwd, sessionId, idle = () => true, sent = [] } = {}) {
         model: undefined,
         sessionManager: { getSessionId: () => sessionId },
     };
-    betterSubagents(pi);
+    betterSubagents(pi, managedDomainPort());
+    await Promise.all(recipients.map(recipient => recipient.close()));
+    const recipient = await sdkRecipient({ cwd, sessionId, sent, notes });
+    recipients.push(recipient);
+    if (!idle()) await recipient.busy();
     return {
-        pi, tools, handlers, sent, notes, ctx,
-        shutdown: () => handlers.get("session_shutdown")?.({}, ctx),
-        start: () => handlers.get("session_start")({}, ctx),
-        settle: () => handlers.get("agent_settled")({}, ctx),
+        pi, tools, handlers, sent, notes, ctx, recipient,
+        shutdown: async () => { await recipient.close(); await handlers.get("session_shutdown")?.({}, ctx); },
+        start: async () => { await handlers.get("session_start")({}, ctx); await recipient.start(); },
+        settle: () => recipient.settle(),
     };
 }
 
@@ -118,7 +127,9 @@ async function withFakeClock(fn) {
     try { await fn(); } finally { mock.timers.reset(); }
 }
 
-after(() => {
+after(async () => {
+    await Promise.all(recipients.map(recipient => recipient.close()));
+    await stopRuntime();
     process.env.PATH = originalPath;
     for (const { id, pid } of liveRuns) {
         try { killProcessTree(pid, "SIGKILL"); } catch { /* already reaped */ }
@@ -131,7 +142,7 @@ after(() => {
 
 describe("#624 one completion per terminal run", () => {
     it("a stopped run records its completion obligation and reports killed exactly once", async () => {
-        const h = makeHarness({ cwd: mkdtempSync(join(HERMETIC, "stop-cwd-")), sessionId: "stop-session" });
+        const h = await makeHarness({ cwd: mkdtempSync(join(HERMETIC, "stop-cwd-")), sessionId: "stop-session" });
         try {
             await h.start();
             const { id, pid } = await spawnRun(h);
@@ -156,12 +167,12 @@ describe("#624 one completion per terminal run", () => {
             await waitFor(() => readMeta(id).status !== "running");
             await h.start();
             await h.settle();
-            await getCallbackBatcher(h.pi).flush();
+            await h.recipient.flush();
             assert.equal(completionMessages(h.sent).length, 1, "no second delivery after reload/exit");
             assert.equal(rowsFor(h.sent, id).length, 1);
             assert.equal(readMeta(id).completionCallbackSentAt, delivered, "the sent marker is never rewritten");
             killProcessTree(pid, "SIGKILL");
-        } finally { h.shutdown(); }
+        } finally { await h.shutdown(); }
     });
 
     it("a run interrupted while the caller was busy is recovered once by the next extension instance", async () => {
@@ -172,7 +183,7 @@ describe("#624 one completion per terminal run", () => {
         // whose completion the busy turn never delivered. The durable record, not
         // the drain mechanism, is what the next instance recovers.
         const firstSent = [];
-        const first = makeHarness({ cwd, sessionId, sent: firstSent, idle: () => false });
+        const first = await makeHarness({ cwd, sessionId, sent: firstSent, idle: () => false });
         const secondSent = [];
         try {
             await first.start();
@@ -185,48 +196,50 @@ describe("#624 one completion per terminal run", () => {
             assert.equal(completionMessages(firstSent).length, 0, "the stopping instance never delivers into the busy turn");
 
             // The resuming instance recovers the pending record exactly once.
-            const second = makeHarness({ cwd, sessionId, sent: secondSent });
+            const second = await makeHarness({ cwd, sessionId, sent: secondSent });
             await second.start();
             assert.equal(await waitFor(() => completionMessages(secondSent).length), 1);
             assert.equal(rowsFor(secondSent, id).length, 1);
             assert.match(completionMessages(secondSent)[0].message.content, /status=killed/);
+            await waitFor(() => readMeta(id).completionCallbackSentAt > 0);
             assert.ok(readMeta(id).completionCallbackSentAt > 0);
 
             await second.start();
-            await getCallbackBatcher(second.pi).flush();
+            await second.recipient.flush();
             assert.equal(completionMessages(secondSent).length, 1, "a second session_start must not re-deliver");
             assert.equal(completionMessages(firstSent).length, 0);
             killProcessTree(pid, "SIGKILL");
-            second.shutdown();
-        } finally { first.shutdown(); }
+            await second.shutdown();
+        } finally { await first.shutdown(); }
     });
 
     it("an ordinary completion whose status snapshot changes before delivery is reported once", async () => {
         await withFakeClock(async () => {
             let idle = false;
-            const h = makeHarness({ cwd: mkdtempSync(join(HERMETIC, "dup-cwd-")), sessionId: "dup-session", idle: () => idle });
+            const h = await makeHarness({ cwd: mkdtempSync(join(HERMETIC, "dup-cwd-")), sessionId: "dup-session", idle: () => idle });
             const id = nextRunId();
             const keeper = nextRunId();
             dirOnly.push(id, keeper);
             try {
                 mkdirSync(runDir(id), { recursive: true });
                 mkdirSync(runDir(keeper), { recursive: true });
-                writeMeta({ id, status: "completed", pid: DEAD_PID, spawnPid: process.pid, cwd: h.ctx.cwd,
+                writeMeta({ id, status: "completed", pid: DEAD_PID, spawnPid: DEAD_PID, supervisionInterruptedAt: Date.now() - 1000, cwd: h.ctx.cwd,
                     callbackOrigin: { cwd: h.ctx.cwd, sessionId: "dup-session" }, promptPreview: "done",
                     startedAt: Date.now() - 60_000, endedAt: Date.now(), exitCode: 0,
                     logPath: logPathFor(id), sessionId: id, callback: true, completionCallbackPendingAt: Date.now() });
                 writeFileSync(logPathFor(id), `${JSON.stringify({ type: "message_end",
                     message: { role: "assistant", content: [{ type: "text", text: "finished" }] } })}\n`);
                 // Another monitored run keeps supervision ticking; callback:false keeps it silent.
-                writeMeta({ id: keeper, status: "orphaned", pid: process.pid, spawnPid: process.pid, cwd: h.ctx.cwd,
+                writeMeta({ id: keeper, status: "orphaned", pid: process.pid, spawnPid: DEAD_PID, supervisionInterruptedAt: Date.now() - 1000, cwd: h.ctx.cwd,
                     callbackOrigin: { cwd: h.ctx.cwd, sessionId: "dup-session" }, promptPreview: "keeper",
                     startedAt: Date.now() - 60_000, orphanedAt: Date.now(),
                     logPath: logPathFor(keeper), sessionId: keeper, callback: false });
                 writeFileSync(logPathFor(keeper), "");
 
                 await h.start();
-                const batcher = getCallbackBatcher(h.pi);
-                assert.equal(batcher.pendingCount(), 1, "the pending completion is queued while the caller is busy");
+                const batcher = h.recipient;
+                await waitFor(async () => (await batcher.pendingCount()) === 1);
+                assert.equal(await batcher.pendingCount(), 1, "the pending completion is queued while the caller is busy");
 
                 // The child log gains an unreadable row: the status snapshot gains an observation gap.
                 appendFileSync(logPathFor(id), '{"type":"tool_execution_end","toolCallId":"broken"}\n');
@@ -234,7 +247,8 @@ describe("#624 one completion per terminal run", () => {
                 await new Promise((resolve) => setImmediate(resolve));
                 mock.timers.tick(HEALTH_TICK_MS);
                 await new Promise((resolve) => setImmediate(resolve));
-                assert.equal(batcher.pendingCount(), 1, "a changed status must not queue the same run twice");
+                await waitFor(async () => (await batcher.pendingCount()) === 1);
+                assert.equal(await batcher.pendingCount(), 1, "a changed status must not queue the same run twice");
 
                 idle = true;
                 await h.settle();
@@ -243,19 +257,20 @@ describe("#624 one completion per terminal run", () => {
                 assert.equal(messages.length, 1);
                 assert.equal(rowsFor(h.sent, id).length, 1, "one batch row for one run");
                 assert.match(messages[0].message.content, /^1 background completion is ready:/);
-                assert.ok(readMeta(id).completionCallbackSentAt > 0);
-            } finally { h.shutdown(); }
+                await waitFor(() => readMeta(id).completionCallbackSentAt > 0);
+            assert.ok(readMeta(id).completionCallbackSentAt > 0);
+            } finally { await h.shutdown(); }
         });
     });
 
     it("orphaned cleanup that finalizes from coherent log evidence still reports its completion", async () => {
-        const h = makeHarness({ cwd: mkdtempSync(join(HERMETIC, "cleanup-cwd-")), sessionId: "cleanup-session" });
+        const h = await makeHarness({ cwd: mkdtempSync(join(HERMETIC, "cleanup-cwd-")), sessionId: "cleanup-session" });
         const id = nextRunId();
         dirOnly.push(id);
         try {
             await h.start();
             mkdirSync(runDir(id), { recursive: true });
-            writeMeta({ id, status: "orphaned", pid: DEAD_PID, pgid: DEAD_PID, spawnPid: process.pid, cwd: h.ctx.cwd,
+            writeMeta({ id, status: "orphaned", pid: DEAD_PID, pgid: DEAD_PID, spawnPid: DEAD_PID, supervisionInterruptedAt: Date.now() - 1000, cwd: h.ctx.cwd,
                 callbackOrigin: { cwd: h.ctx.cwd, sessionId: "cleanup-session" }, promptPreview: "orphan",
                 startedAt: Date.now() - 120_000, orphanedAt: Date.now() - 60_000,
                 logPath: logPathFor(id), sessionId: id, callback: true });
@@ -273,14 +288,15 @@ describe("#624 one completion per terminal run", () => {
             assert.equal(await waitFor(() => completionMessages(h.sent).length), 1);
             assert.equal(rowsFor(h.sent, id).length, 1);
             assert.match(completionMessages(h.sent)[0].message.content, /status=completed/);
+            await waitFor(() => readMeta(id).completionCallbackSentAt > 0);
             assert.ok(readMeta(id).completionCallbackSentAt > 0);
-        } finally { h.shutdown(); }
+        } finally { await h.shutdown(); }
     });
 
     it("a callback:false run interrupted while the caller was busy stays silent and records no obligation", async () => {
         const cwd = mkdtempSync(join(HERMETIC, "quiet-cwd-"));
         const sessionId = "quiet-session";
-        const first = makeHarness({ cwd, sessionId, idle: () => false });
+        const first = await makeHarness({ cwd, sessionId, idle: () => false });
         const secondSent = [];
         try {
             await first.start();
@@ -290,13 +306,13 @@ describe("#624 one completion per terminal run", () => {
             assert.equal(meta.status, "killed");
             assert.equal(meta.completionCallbackPendingAt, undefined);
 
-            const second = makeHarness({ cwd, sessionId, sent: secondSent });
+            const second = await makeHarness({ cwd, sessionId, sent: secondSent });
             await second.start();
-            await getCallbackBatcher(second.pi).flush();
+            await second.recipient.flush();
             assert.deepEqual(completionMessages(secondSent), []);
             assert.equal(readMeta(id).completionCallbackSentAt, undefined);
             killProcessTree(pid, "SIGKILL");
-            second.shutdown();
-        } finally { first.shutdown(); }
+            await second.shutdown();
+        } finally { await first.shutdown(); }
     });
 });

@@ -40,6 +40,7 @@ const loader = `export async function resolve(specifier, context, nextResolve) {
 }`;
 register("data:text/javascript," + encodeURIComponent(loader));
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: extension } = await import("../index.ts");
 const registry = await import("../registry.ts");
 const capacity = await import("../capacity.mjs");
@@ -63,7 +64,7 @@ function harness(t) {
         appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
         on(name, handler) { handlers[name] = handler; },
         sendMessage() {},
-    });
+    }, managedDomainPort());
     const model = { provider: "local", id: "fixture", reasoning: true };
     const ctx = { cwd: root, model, hasUI: false, isProjectTrusted: () => false,
         sessionManager: { getBranch: () => entries }, modelRegistry: { getAvailable: () => [model] },

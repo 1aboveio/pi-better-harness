@@ -1,0 +1,748 @@
+{
+  "run": "https://github.com/1aboveio/pi-better-harness/actions/runs/43766305095",
+  "source": "9acbc1a90b53695d60672e680950d7df966f5cab",
+  "resourceLanes": "passed",
+  "platforms": {
+    "linux": {
+      "job": "https://github.com/1aboveio/pi-better-harness/actions/runs/43766305095/job/132972062697",
+      "reports": {
+        "full-runtime": {
+          "raw": "linux-full-runtime.json.gz",
+          "uncompressedSha256": "de8710f4c1f47a2411ae732b9962984b5afda0db4434208dcb28632b106c0fcb",
+          "source": {
+            "head": "9acbc1a90b53695d60672e680950d7df966f5cab",
+            "dirty": "M packages/pi-better-server/src/cli.ts\n M packages/pi-better-server/src/remote-cli.ts",
+            "kind": "git-checkout",
+            "manifest": {
+              "algorithm": "sha256",
+              "scope": "packages and scripts excluding node_modules/dist/coverage, plus root package manifests",
+              "files": 2002,
+              "sha256": "111b95c2c164dcd91d7a230e19f2e4e991dd5a8e6a809d79c804f765512aa953"
+            }
+          },
+          "machine": {
+            "release": "7.0.0-1017-azure",
+            "arch": "x64",
+            "cpus": 4,
+            "cpuModel": "AMD EPYC 7763 64-Core Processor",
+            "totalMemory": 16760344576
+          },
+          "node": "v24.14.1",
+          "scenarios": [
+            {
+              "clients": 1,
+              "elapsedMs": 3047.4386410000006,
+              "connections": {
+                "coordinator": 2,
+                "derived": 1
+              },
+              "managementDelta": {
+                "scopeRefreshes": 0,
+                "reconciles": 0
+              },
+              "registryDelta": {
+                "fullDirectoryReads": 0,
+                "indexDirectoryReads": 0,
+                "metadataFileReads": 12,
+                "terminalMetadataFileReads": 0,
+                "indexRevisionChecks": 0
+              },
+              "totalCpuMs": 439.32199999999995,
+              "totalRss": 2328670208,
+              "rpcMs": {
+                "p50": 0.4616839999980584,
+                "p95": 12.233195000000705,
+                "p99": 17.418782999997347
+              },
+              "sourceWatchers": 2
+            },
+            {
+              "clients": 5,
+              "elapsedMs": 3018.2045099999996,
+              "connections": {
+                "coordinator": 2,
+                "derived": 1
+              },
+              "managementDelta": {
+                "scopeRefreshes": 0,
+                "reconciles": 0
+              },
+              "registryDelta": {
+                "fullDirectoryReads": 0,
+                "indexDirectoryReads": 0,
+                "metadataFileReads": 12,
+                "terminalMetadataFileReads": 0,
+                "indexRevisionChecks": 0
+              },
+              "totalCpuMs": 268.505,
+              "totalRss": 2935808000,
+              "rpcMs": {
+                "p50": 0.4833199999993667,
+                "p95": 0.6448080000045593,
+                "p99": 0.6621799999993527
+              },
+              "sourceWatchers": 2
+            },
+            {
+              "clients": 10,
+              "elapsedMs": 60072.108393,
+              "connections": {
+                "coordinator": 2,
+                "derived": 1
+              },
+              "managementDelta": {
+                "scopeRefreshes": 0,
+                "reconciles": 0
+              },
+              "registryDelta": {
+                "fullDirectoryReads": 0,
+                "indexDirectoryReads": 0,
+                "metadataFileReads": 156,
+                "terminalMetadataFileReads": 0,
+                "indexRevisionChecks": 0
+              },
+              "totalCpuMs": 5713.360000000001,
+              "totalRss": 4360093696,
+              "rpcMs": {
+                "p50": 0.47991300000285264,
+                "p95": 0.6888049999979557,
+                "p99": 15.896547999996983
+              },
+              "sourceWatchers": 2
+            }
+          ],
+          "mixed": {
+            "transport": "loopback Unix RemoteClientSession, not cross-machine SSH",
+            "recipient": "03158b74-1662-457e-800e-360abef78c7e",
+            "otherRecipient": "950ddd90-d145-4610-ac15-33918badb226",
+            "operationId": "op_ce321896-50b5-4786-8dd4-59b875f40324",
+            "localExtensionHandlers": false,
+            "canonicalRoot": "/tmp/p751-full-dTWHT9/agent",
+            "localWorker": "sa_mwidipui_1",
+            "serverInstance": "f43a8fd3-9d87-40dd-bc2c-affa8577ff71",
+            "exactRecipientReceipt": "background-terminal:op_ce321896-50b5-4786-8dd4-59b875f40324",
+            "isolation": true
+          }
+        },
+        "shared-read": {
+          "raw": "linux-shared-read.json.gz",
+          "uncompressedSha256": "04818d19947a2eec083119c609fdcaf0a1e2d2841164dc59c69269146b3d619b",
+          "source": {
+            "head": "9acbc1a90b53695d60672e680950d7df966f5cab",
+            "dirty": "M packages/pi-better-server/src/cli.ts\n M packages/pi-better-server/src/remote-cli.ts",
+            "kind": "git-checkout",
+            "manifest": {
+              "algorithm": "sha256",
+              "scope": "packages and scripts excluding node_modules/dist/coverage, plus root package manifests",
+              "files": 2002,
+              "sha256": "111b95c2c164dcd91d7a230e19f2e4e991dd5a8e6a809d79c804f765512aa953"
+            }
+          },
+          "machine": {
+            "cpu": "AMD EPYC 7763 64-Core Processor",
+            "logicalCpus": 4,
+            "memoryBytes": 16760344576,
+            "osRelease": "7.0.0-1017-azure"
+          },
+          "node": "v24.14.1",
+          "scenarios": [
+            {
+              "history": 4416,
+              "clients": 1,
+              "elapsedMs": 3024.522224999999,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 474.85699999999997,
+              "totalRss": 915116032,
+              "rpcMs": {
+                "samples": 30,
+                "p50": 0.6135169999997743,
+                "p95": 0.9339369999997871,
+                "p99": 0.9735209999998915,
+                "max": 0.9735209999998915
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 3,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 1,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 5,
+                  "p50": 105.562572,
+                  "p95": 117.50185,
+                  "p99": 117.50185,
+                  "max": 117.50185
+                }
+              }
+            },
+            {
+              "history": 4416,
+              "clients": 5,
+              "elapsedMs": 3044.004313999998,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 536.946,
+              "totalRss": 1472540672,
+              "rpcMs": {
+                "samples": 30,
+                "p50": 1.307478999999148,
+                "p95": 1.627000999997108,
+                "p99": 2.3141619999987597,
+                "max": 2.3141619999987597
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 3,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 5,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 25,
+                  "p50": 96.953849,
+                  "p95": 119.264751,
+                  "p99": 119.328329,
+                  "max": 119.328329
+                }
+              }
+            },
+            {
+              "history": 4416,
+              "clients": 10,
+              "elapsedMs": 3072.885402,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 890.981,
+              "totalRss": 2247335936,
+              "rpcMs": {
+                "samples": 30,
+                "p50": 1.9867039999990084,
+                "p95": 4.127903000000515,
+                "p99": 6.517088000000513,
+                "max": 6.517088000000513
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 3,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 10,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 50,
+                  "p50": 96.4434,
+                  "p95": 120.350146,
+                  "p99": 120.431178,
+                  "max": 120.431178
+                }
+              }
+            },
+            {
+              "history": 10000,
+              "clients": 1,
+              "elapsedMs": 3022.7215179999985,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 1009.6529999999999,
+              "totalRss": 1025150976,
+              "rpcMs": {
+                "samples": 30,
+                "p50": 0.5624979999993229,
+                "p95": 0.7660069999983534,
+                "p99": 0.8223020000004908,
+                "max": 0.8223020000004908
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 3,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 1,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 5,
+                  "p50": 222.879964,
+                  "p95": 232.582846,
+                  "p99": 232.582846,
+                  "max": 232.582846
+                }
+              }
+            },
+            {
+              "history": 10000,
+              "clients": 5,
+              "elapsedMs": 3042.3606909999944,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 1084.157,
+              "totalRss": 1576710144,
+              "rpcMs": {
+                "samples": 30,
+                "p50": 1.1294990000023972,
+                "p95": 2.5728739999976824,
+                "p99": 2.6080999999976484,
+                "max": 2.6080999999976484
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 3,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 5,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 25,
+                  "p50": 222.611756,
+                  "p95": 243.154499,
+                  "p99": 243.193842,
+                  "max": 243.193842
+                }
+              }
+            },
+            {
+              "history": 10000,
+              "clients": 10,
+              "elapsedMs": 60066.861771,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 24578.142000000003,
+              "totalRss": 2198011904,
+              "rpcMs": {
+                "samples": 589,
+                "p50": 1.7025830000056885,
+                "p95": 2.8189630000124453,
+                "p99": 4.147448000003351,
+                "max": 9.665213000000222
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 60,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 10,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 50,
+                  "p50": 223.051949,
+                  "p95": 237.208897,
+                  "p99": 237.302533,
+                  "max": 237.302533
+                }
+              }
+            }
+          ],
+          "lastSourceWatchers": 4
+        }
+      }
+    },
+    "macos": {
+      "job": "https://github.com/1aboveio/pi-better-harness/actions/runs/43766305095/job/132972062428",
+      "reports": {
+        "full-runtime": {
+          "raw": "macos-full-runtime.json.gz",
+          "uncompressedSha256": "94ee500c69204df00ee34c3c11412148bd2d9453bd28826735641e2bc648e492",
+          "source": {
+            "head": "9acbc1a90b53695d60672e680950d7df966f5cab",
+            "dirty": "M packages/pi-better-server/src/cli.ts\n M packages/pi-better-server/src/remote-cli.ts",
+            "kind": "git-checkout",
+            "manifest": {
+              "algorithm": "sha256",
+              "scope": "packages and scripts excluding node_modules/dist/coverage, plus root package manifests",
+              "files": 2002,
+              "sha256": "a4e460962535adb2d4e46a04d2dccf8ab5a2637774dcfd19bffef6086fd9e6ec"
+            }
+          },
+          "machine": {
+            "release": "25.6.0",
+            "arch": "arm64",
+            "cpus": 3,
+            "cpuModel": "Apple M1 (Virtual)",
+            "totalMemory": 7516192768
+          },
+          "node": "v24.14.1",
+          "scenarios": [
+            {
+              "clients": 1,
+              "elapsedMs": 3120.730374999999,
+              "connections": {
+                "coordinator": 2,
+                "derived": 1
+              },
+              "managementDelta": {
+                "scopeRefreshes": 0,
+                "reconciles": 0
+              },
+              "registryDelta": {
+                "fullDirectoryReads": 0,
+                "indexDirectoryReads": 0,
+                "metadataFileReads": 12,
+                "terminalMetadataFileReads": 0,
+                "indexRevisionChecks": 0
+              },
+              "totalCpuMs": 672.893,
+              "totalRss": 2370748416,
+              "rpcMs": {
+                "p50": 1.2373330000009446,
+                "p95": 18.237207999998645,
+                "p99": 25.721000000001368
+              },
+              "sourceWatchers": 2
+            },
+            {
+              "clients": 5,
+              "elapsedMs": 3220.2389580000017,
+              "connections": {
+                "coordinator": 2,
+                "derived": 1
+              },
+              "managementDelta": {
+                "scopeRefreshes": 0,
+                "reconciles": 0
+              },
+              "registryDelta": {
+                "fullDirectoryReads": 0,
+                "indexDirectoryReads": 0,
+                "metadataFileReads": 12,
+                "terminalMetadataFileReads": 0,
+                "indexRevisionChecks": 0
+              },
+              "totalCpuMs": 696.645,
+              "totalRss": 2730786816,
+              "rpcMs": {
+                "p50": 1.1540830000012647,
+                "p95": 4.043292000002111,
+                "p99": 4.598334000002069
+              },
+              "sourceWatchers": 2
+            },
+            {
+              "clients": 10,
+              "elapsedMs": 60202.80025,
+              "connections": {
+                "coordinator": 2,
+                "derived": 1
+              },
+              "managementDelta": {
+                "scopeRefreshes": 0,
+                "reconciles": 0
+              },
+              "registryDelta": {
+                "fullDirectoryReads": 0,
+                "indexDirectoryReads": 0,
+                "metadataFileReads": 156,
+                "terminalMetadataFileReads": 0,
+                "indexRevisionChecks": 0
+              },
+              "totalCpuMs": 13094.745000000003,
+              "totalRss": 3370024960,
+              "rpcMs": {
+                "p50": 0.96875,
+                "p95": 6.998915999996825,
+                "p99": 21.971042000004672
+              },
+              "sourceWatchers": 2
+            }
+          ],
+          "mixed": {
+            "transport": "loopback Unix RemoteClientSession, not cross-machine SSH",
+            "recipient": "6b5b36b6-2723-45d3-a975-9f9b96f1c19f",
+            "otherRecipient": "fa1b30c4-2c22-4575-8793-b330451191c6",
+            "operationId": "op_e2120da6-df0b-480c-992c-71557e827104",
+            "localExtensionHandlers": false,
+            "canonicalRoot": "/private/tmp/p751-full-z5Rsab/agent",
+            "localWorker": "sa_mwidj39l_1",
+            "serverInstance": "235701ce-fa4a-460f-afec-ce2d9fe1f6da",
+            "exactRecipientReceipt": "background-terminal:op_e2120da6-df0b-480c-992c-71557e827104",
+            "isolation": true
+          }
+        },
+        "shared-read": {
+          "raw": "macos-shared-read.json.gz",
+          "uncompressedSha256": "72d03a5014353ac7a18fe1b1d7da8f5e7df916e25ee5935c5a447d84d002afda",
+          "source": {
+            "head": "9acbc1a90b53695d60672e680950d7df966f5cab",
+            "dirty": "M packages/pi-better-server/src/cli.ts\n M packages/pi-better-server/src/remote-cli.ts",
+            "kind": "git-checkout",
+            "manifest": {
+              "algorithm": "sha256",
+              "scope": "packages and scripts excluding node_modules/dist/coverage, plus root package manifests",
+              "files": 2002,
+              "sha256": "a4e460962535adb2d4e46a04d2dccf8ab5a2637774dcfd19bffef6086fd9e6ec"
+            }
+          },
+          "machine": {
+            "cpu": "Apple M1 (Virtual)",
+            "logicalCpus": 3,
+            "memoryBytes": 7516192768,
+            "osRelease": "25.6.0"
+          },
+          "node": "v24.14.1",
+          "scenarios": [
+            {
+              "history": 4416,
+              "clients": 1,
+              "elapsedMs": 3008.0493749999987,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 296.685,
+              "totalRss": 1090355200,
+              "rpcMs": {
+                "samples": 29,
+                "p50": 0.7432499999995343,
+                "p95": 1.33941699999923,
+                "p99": 1.5525830000005953,
+                "max": 1.5525830000005953
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 3,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 1,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 5,
+                  "p50": 58.913958,
+                  "p95": 77.61275,
+                  "p99": 77.61275,
+                  "max": 77.61275
+                }
+              }
+            },
+            {
+              "history": 4416,
+              "clients": 5,
+              "elapsedMs": 3011.342457999999,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 426.542,
+              "totalRss": 1631404032,
+              "rpcMs": {
+                "samples": 29,
+                "p50": 1.4809580000001006,
+                "p95": 3.1258339999985765,
+                "p99": 3.7092090000005555,
+                "max": 3.7092090000005555
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 3,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 5,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 25,
+                  "p50": 68.986833,
+                  "p95": 95.42175,
+                  "p99": 95.476375,
+                  "max": 95.476375
+                }
+              }
+            },
+            {
+              "history": 4416,
+              "clients": 10,
+              "elapsedMs": 3009.315999999999,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 1173.203,
+              "totalRss": 2468347904,
+              "rpcMs": {
+                "samples": 27,
+                "p50": 2.751750000003085,
+                "p95": 51.88550000000032,
+                "p99": 101.39054100000067,
+                "max": 101.39054100000067
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 3,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 10,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 50,
+                  "p50": 76.9455,
+                  "p95": 97.09525,
+                  "p99": 97.139792,
+                  "max": 97.139792
+                }
+              }
+            },
+            {
+              "history": 10000,
+              "clients": 1,
+              "elapsedMs": 3116.3916669999962,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 542.3960000000001,
+              "totalRss": 1089421312,
+              "rpcMs": {
+                "samples": 30,
+                "p50": 0.723666999998386,
+                "p95": 1.7664169999989099,
+                "p99": 3.831207999995968,
+                "max": 3.831207999995968
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 3,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 1,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 5,
+                  "p50": 189.526,
+                  "p95": 203.66125,
+                  "p99": 203.66125,
+                  "max": 203.66125
+                }
+              }
+            },
+            {
+              "history": 10000,
+              "clients": 5,
+              "elapsedMs": 3016.3900839999988,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 769.506,
+              "totalRss": 1671217152,
+              "rpcMs": {
+                "samples": 29,
+                "p50": 1.5100420000017039,
+                "p95": 4.866457999996783,
+                "p99": 7.296125000000757,
+                "max": 7.296125000000757
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 3,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 5,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 25,
+                  "p50": 210.500166,
+                  "p95": 235.465833,
+                  "p99": 235.481,
+                  "max": 235.481
+                }
+              }
+            },
+            {
+              "history": 10000,
+              "clients": 10,
+              "elapsedMs": 60011.10520799999,
+              "metadataReadDelta": 0,
+              "projectionDelta": 0,
+              "totalCpuMs": 16872.239999999998,
+              "totalRss": 2396520448,
+              "rpcMs": {
+                "samples": 572,
+                "p50": 1.9942080000037095,
+                "p95": 6.574500000002445,
+                "p99": 13.231583000000683,
+                "max": 33.22866599999543
+              },
+              "sqlite": {
+                "opens": 2,
+                "active": 2,
+                "maximum": 2
+              },
+              "inventoryDelta": 59,
+              "totalFsRead": 0,
+              "totalFsWrite": 0,
+              "eventPublication": {
+                "boundary": "external atomic metadata commit to matching real Unix subscription event",
+                "subscribers": 10,
+                "commits": 5,
+                "healthyBudgetMs": 1000,
+                "ms": {
+                  "samples": 50,
+                  "p50": 130.083583,
+                  "p95": 160.410083,
+                  "p99": 160.439083,
+                  "max": 160.439083
+                }
+              }
+            }
+          ],
+          "lastSourceWatchers": 4
+        }
+      }
+    }
+  },
+  "aggregateCI": "completed success; all 18 jobs passed"
+}

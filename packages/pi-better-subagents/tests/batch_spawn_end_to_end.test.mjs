@@ -1,5 +1,6 @@
 /**
- * End-to-end batch spawn test using a fake `pi` binary.
+ * Legacy batch fixtures use a fake `pi` binary; the concurrent batch/single
+ * capacity witness below uses real registered SDK actors and managed workers.
  *
  * This exercises the real index.ts spawn path without a model: a fake `pi`
  * executable is placed on PATH, the extension is loaded with a stubbed
@@ -33,10 +34,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { describe, it, before, beforeEach, after } from "node:test";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { continuationFixture } from "./managed-continuation-fixture.mjs";
 import assert from "node:assert/strict";
 import { inspectDaemonOwner } from "../../pi-better-server/src/daemon-owner.ts";
 import { removeOwnedFixture, stopOwnedRuntime } from "../../../scripts/test-support/remove-owned-fixture.mjs";
-import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(__dirname);
@@ -45,6 +47,7 @@ process.env.TMPDIR = RUNTIME;
 const AGENT_DIR = join(RUNTIME, "agent");
 process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
 const foregrounds = [];
+let domainPort;
 
 // All stub packages live under a temp root. Checkout node_modules is never touched.
 const STUBS_DIR = mkdtempSync(join(RUNTIME, "stubs-"));
@@ -168,7 +171,7 @@ function clearRuns() {
     }
 }
 
-function writeRunningMeta({ writeMeta, nextRunId }, name) {
+function writeRunningMeta({ writeMeta, nextRunId, processStartToken }, name) {
     const id = nextRunId();
     const startedAt = Date.now();
     writeMeta({
@@ -177,6 +180,7 @@ function writeRunningMeta({ writeMeta, nextRunId }, name) {
         status: "running",
         pid: process.pid,
         spawnPid: process.pid,
+        spawnPidStartTime: processStartToken(process.pid),
         cwd: RUNTIME,
         promptPreview: "fake",
         startedAt,
@@ -263,7 +267,7 @@ function loadExtension(mod, permissionSnapshot) {
             messages.push({ msg, opts });
         },
     };
-    mod.default(pi);
+    mod.default(pi, domainPort());
     const foreground = { tools, commands, handlers, entries, events, messages };
     foregrounds.push(foreground);
     return foreground;
@@ -337,6 +341,7 @@ describe("subagent_spawn_batch end-to-end", () => {
         const binDir = makeMockPi();
         process.env.PATH = `${binDir}:${origPath}`;
         mod = await import("../index.ts");
+        ({ managedDomainPort: domainPort } = await import("./managed-domain-port.mjs"));
         registry = await import("../registry.ts");
         process.env.PI_SUBAGENTS_TEST_REGISTRY = registry.baseDir();
         capacity = await import("../capacity.mjs");
@@ -396,9 +401,19 @@ describe("subagent_spawn_batch end-to-end", () => {
         assert.ok(tools.subagent_spawn.promptGuidelines.some((line) => line.includes("after a completion or attention callback")));
     });
 
-    it("launches multiple jobs and records batchId/batchName in each meta", async () => {
-        const { tools } = loadExtension(mod);
-        const ctx = makeCtx();
+    it("launches multiple jobs and records batchId/batchName in each meta", async (t) => {
+        const root = join(RUNTIME, "managed-batch"); mkdirSync(root, { recursive: true });
+        const artifacts = join(root, "children"); mkdirSync(artifacts);
+        const prior = Object.fromEntries(["PI_CODING_AGENT_DIR", "PI_SUBAGENT_DURABLE_DIR", "PI_CONTINUATION_SLEEP_MS"].map(key => [key, process.env[key]]));
+        process.env.PI_CONTINUATION_SLEEP_MS = "30000";
+        const fixture = await continuationFixture({ root, artifacts, workspace: RUNTIME });
+        const h = fixture.makeHarness(); await h.ready;
+        const tools = Object.fromEntries(h.tools), ctx = h.ctx;
+        t.after(async () => {
+            for (const meta of registry.listMetas().filter(meta => meta.callbackOrigin?.sessionId === ctx.sessionManager.getSessionId() && ["running", "orphaned"].includes(meta.status))) await tools.subagent_stop.execute("cleanup", { id: meta.id });
+            await h.shutdown(); await fixture.close();
+            for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+        });
 
         const res = await tools.subagent_spawn_batch.execute(
             "tc1",
@@ -493,7 +508,7 @@ describe("subagent_spawn_batch end-to-end", () => {
         });
     });
 
-    it("session catalog model and effort apply to discovery and launches after branch restoration", async () => {
+    it("managed launch kernel freezes session catalog model and effort after branch restoration", async () => {
         const h = sessionHarness(mod);
         h.ctx.isProjectTrusted = () => false;
         h.ctx.modelRegistry = { getAvailable: () => [{ provider: "test", id: "model", reasoning: true }], find: () => undefined };
@@ -502,9 +517,8 @@ describe("subagent_spawn_batch end-to-end", () => {
             { type: "custom", customType: "pi-better-subagents-agent-settings", data: { version: 1, id: "role.developer", key: "effort", value: "low" } },
         );
         await h.handlers.session_tree({}, h.ctx);
-        const discovery = await h.tools.agents_catalog.execute("session-discovery", { action: "inspect", id: "developer" }, null, null, h.ctx);
-        assert.equal(discovery.details.view.fields.model.value, "test/model");
-        assert.equal(discovery.details.view.fields.effort.value, "low");
+        // Catalog transport/discovery is covered by real registered Catalog hosts.
+        // This trusted adapter fixture verifies the frozen launch snapshot only.
         await withHeldChildren(registry, h.tools, h.ctx, async () => {
             const single = await h.tools.subagent_spawn.execute("session-model", {
                 role: "developer", prompt: "use session preferences", tools: "read,bash", sandbox: false,
@@ -523,8 +537,14 @@ describe("subagent_spawn_batch end-to-end", () => {
         });
         h.entries.length = 0;
         await h.handlers.session_tree({}, h.ctx);
-        const baseline = await h.tools.agents_catalog.execute("baseline-discovery", { action: "inspect", id: "developer" }, null, null, h.ctx);
-        assert.notEqual(baseline.details.view.fields.model.value, "test/model");
+        await withHeldChildren(registry, h.tools, h.ctx, async () => {
+            const baseline = await h.tools.subagent_spawn.execute("baseline-launch", {
+                role: "developer", prompt: "restored defaults", tools: "read,bash", sandbox: false,
+            }, null, null, h.ctx);
+            const id = baseline.content[0].text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
+            assert.ok(id);
+            assert.notEqual(registry.readMeta(id).catalog.effective.model.value, "test/model");
+        });
     });
 
     it("launch-available rechecks a lowered cap before reserving later jobs", async () => {
@@ -633,24 +653,35 @@ describe("subagent_spawn_batch end-to-end", () => {
         });
     }
 
-    it("reject-mode batch + concurrent single-spawn never exceeds maxConcurrent", async () => {
+    it("reject-mode batch + concurrent single-spawn never exceeds maxConcurrent", async (t) => {
         // Class counterexample: maxConcurrent free slots = 2. A two-job reject
         // batch and a concurrent single spawn race. Without shared reservation,
         // batch launches job 1, yields, single takes a slot, batch launches job 2
         // → 3 new runs (plus the 2 pre-filled = 5 > 4). With reservation, either
         // the batch takes both free slots or the single takes one and the batch
         // is rejected wholesale — never oversubscribe.
-        const { tools } = loadExtension(mod);
-        const ctx = makeCtx();
-
+        const root = join(RUNTIME, "managed-race"); mkdirSync(root, { recursive: true });
+        const artifacts = join(root, "children"); mkdirSync(artifacts);
+        const prior = Object.fromEntries(["PI_CODING_AGENT_DIR", "PI_SUBAGENT_DURABLE_DIR", "PI_CONTINUATION_SLEEP_MS"].map(key => [key, process.env[key]]));
+        process.env.PI_CONTINUATION_SLEEP_MS = "30000";
+        const fixture = await continuationFixture({ root, artifacts, workspace: RUNTIME });
+        writeFileSync(join(root, "agent/settings.json"), JSON.stringify({ piBetterHarness: { subagents: { defaultTools: "read,bash", maxConcurrent: 4 } } }));
+        const h = fixture.makeHarness(); await h.ready;
+        const tools = Object.fromEntries(h.tools), ctx = h.ctx;
+        let owner;
+        t.after(async () => {
+            for (const meta of registry.listMetas().filter(meta => meta.spawnPid === owner && ["running", "orphaned"].includes(meta.status))) {
+                await tools.subagent_stop.execute("cleanup", { id: meta.id });
+            }
+            await h.shutdown(); await fixture.close();
+            for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+        });
         for (let i = 0; i < 2; i++) {
-            writeRunningMeta(registry, `prefill-${i}`);
+            const result = await tools.subagent_spawn.execute(`prefill-${i}`, { prompt: `prefill-${i}`, clean: true, sandbox: false, tools: "read,bash" });
+            owner = registry.readMeta(result.details.runId).spawnPid;
         }
-        const before = countOwnedRunning(
-            registry.listMetas,
-            registry.effectiveStatus,
-            registry.ownedByThisParent,
-        );
+        const ownedRunning = () => registry.listMetas().filter(meta => meta.spawnPid === owner && registry.effectiveStatus(meta) === "running").length;
+        const before = ownedRunning();
         assert.equal(before, 2);
 
         const batchP = tools.subagent_spawn_batch.execute(
@@ -685,11 +716,7 @@ describe("subagent_spawn_batch end-to-end", () => {
             singleP,
         ]);
 
-        const after = countOwnedRunning(
-            registry.listMetas,
-            registry.effectiveStatus,
-            registry.ownedByThisParent,
-        );
+        const after = ownedRunning();
         assert.ok(
             after <= 4,
             `owned running must not exceed maxConcurrent=4; got ${after} ` +

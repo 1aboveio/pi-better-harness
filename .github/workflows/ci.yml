@@ -16,7 +16,7 @@ jobs:
   shared-read-resources:
     name: shared-read-resources (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -28,7 +28,24 @@ jobs:
           node-version: 24.14.1
           cache: npm
       - run: npm ci
+        id: install
+      - name: Export pinned private runtime Node
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "PI_TEST_PRIVATE_RUNTIME_NODE=" + process.execPath + "\n")'
+      - name: Measure the complete managed runtime
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          PI_FULL_RUNTIME_REPORT: ${{ runner.temp }}/full-runtime-resources.json
+        run: node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs
+      - name: Qualify packed standalone domains and cached offline restart
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        working-directory: packages/pi-better-server
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-standalone.test.ts
+      - name: Prove real socket recipient backpressure recovery
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        working-directory: packages/pi-better-server
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-assignment-slow-socket.test.ts
       - name: Measure real Pi and Server shared reads
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         env:
           PI_SHARED_READ_REPORT: ${{ runner.temp }}/shared-read-resources.json
         run: node packages/pi-better-server/scripts/measure-shared-reads.mjs
@@ -37,8 +54,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: shared-read-resources-${{ matrix.os }}
-          path: ${{ runner.temp }}/shared-read-resources.json
+          path: |
+            ${{ runner.temp }}/shared-read-resources.json
+            ${{ runner.temp }}/full-runtime-resources.json
+            .work/standalone-*/measurements.json
+            .work/standalone-*/packaged-domain.log
           if-no-files-found: warn
+          include-hidden-files: true
 
   node24-sandbox:
     name: node24-sandbox
@@ -80,6 +102,10 @@ jobs:
       - name: Real SDK cancellation and exact-token crash recovery
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
+
+      - name: Real SDK subagent launch and bootstrap fences
+        working-directory: packages/pi-better-server
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-subagent-*.test.ts
 
   windows-verify:
     name: windows-verify
@@ -499,7 +525,9 @@ jobs:
   macos-sandbox:
     name: macos-sandbox
     runs-on: macos-latest
-    timeout-minutes: 10
+    # Sequential native lifecycle, cancellation and confinement journeys exceed
+    # ten minutes on hosted macOS; individual behavioral deadlines stay intact.
+    timeout-minutes: 20
     env:
       # Turns "no backend, so skip" into a hard failure on the lane whose whole
       # job is that backend. A silently skipped confinement suite is a green run
@@ -525,6 +553,18 @@ jobs:
       - name: Prove cancellation authority and crash recovery with real processes
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Prove subagent launch and bootstrap ownership on Node 24
+        working-directory: packages/pi-better-server
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-subagent-*.test.ts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Run macOS compatibility golden paths
         timeout-minutes: 5

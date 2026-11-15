@@ -283,6 +283,22 @@ test("packed standalone packages use one pinned socket runtime, including cached
   await stop();
   const release = join(agentDir, "managed-runtime/releases", status.build.contentId);
   const node = join(release, "node/bin/node"), savedNode = readFileSync(node);
+  const domainAgent = join(evidence, "packaged-domain-agent"); mkdirSync(domainAgent);
+  const domainScript = `
+    const {createSubagentLaunch}=await import(${JSON.stringify(pathToFileURL(join(release, "src/runtime/subagent-launch.ts")).href)});
+    const host=await createSubagentLaunch(${JSON.stringify(domainAgent)},'packaged-domain',{});
+    try {
+      await host.initialize();
+      if(!host.status().continuationReady)throw new Error('Packaged continuation adapter unavailable');
+      console.log(JSON.stringify({fixedDomainInitialized:true,status:host.status()}));
+    } finally {await host.close()}
+  `;
+  const domain = await execute(node, ["--input-type=module", "-e", domainScript], evidence,
+    { ...env, PI_CODING_AGENT_DIR: domainAgent });
+  writeFileSync(join(evidence, "packaged-domain.log"), domain.stdout + domain.stderr);
+  assert.equal(domain.code, 0, domain.stderr);
+  assert.equal(JSON.parse(domain.stdout).fixedDomainInitialized, true,
+    "the installed artifact initializes its SDK and bundled domains without repository imports");
   chmodSync(node, 0o700); writeFileSync(node, "corrupt private executable");
   try {
     const corruptNode = await execute(process.execPath, [clients[1]!], workspace, env);

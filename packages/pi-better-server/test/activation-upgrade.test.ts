@@ -187,6 +187,14 @@ test("busy daemon keeps both views usable, then sends restarting events and resu
   const pending = await activate(env, after, "upgrade");
   assert.equal(pending.status, "deferred");
   assert.equal(pending.operationId, "upgrade");
+  const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
+  const foreground = openStore({ path: join(env.agentDir, "operation-coordinator.sqlite") });
+  try {
+    assert.throws(() => foreground.registerOperation({ operationId: "new-during-upgrade", taskId: "new-task",
+      launchToken: "new-launch", owner: { kind: "parent-session", sessionId, workspace: env.cwd },
+      observer: { kind: "local-supervisor", version: "1" } }), /runtime-draining/);
+  } finally { foreground.close(); }
+
   assert.equal(hasActivationReservations(readActivationJournal(env.serverDir)!), true, "a deferred caller leaves its request reserved");
   assert.equal((await b.call({ type: "list_sessions" })).data.sessions.length, 1);
   assert.equal((await b.call({ type: "runtime_upgrade_status" })).data.phase, "prepared");
@@ -481,6 +489,7 @@ test("committed activation survives observer cancellation and waits for shutdown
       const { existsSync, writeFileSync } = await import("node:fs");
       const shutdown = SessionRegistry.prototype.shutdown;
       SessionRegistry.prototype.shutdown = async function() {
+        writeFileSync(${JSON.stringify(join(env.gateDir, "shutdown.entered"))}, String(process.pid));
         await shutdown.call(this);
         writeFileSync(${JSON.stringify(join(env.gateDir, "shutdown.started"))}, String(process.pid));
         while (!existsSync(${JSON.stringify(join(env.gateDir, "shutdown.release"))})) await new Promise(resolve => setTimeout(resolve, 15));
@@ -492,7 +501,14 @@ test("committed activation survives observer cancellation and waits for shutdown
   const client = await connected(t, env, initial.readiness);
   await session(client, env);
   const pending = activate(env, after, "shutdown-upgrade");
-  await waitFor("old owner shutdown hook", gate(env, "shutdown").started);
+  let activationOutcome: unknown;
+  void pending.then(value => { activationOutcome = value; }, error => { activationOutcome = String(error); });
+  try { await waitFor("old owner shutdown hook", gate(env, "shutdown").started); }
+  catch (error) {
+    const journal = readActivationJournal(env.serverDir);
+    throw new Error(`${String(error)}; ${JSON.stringify({ enteredShutdown: existsSync(join(env.gateDir, "shutdown.entered")),
+      owner: inspectDaemonOwner(env.serverDir), phase: journal?.phase, reason: journal?.reason, activationOutcome })}`);
+  }
   const old = inspectDaemonOwner(env.serverDir);
   assert.equal(old.status, "live");
   if (old.status !== "live") throw new Error("old owner released too early");

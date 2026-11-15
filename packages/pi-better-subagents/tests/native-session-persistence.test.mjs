@@ -60,6 +60,7 @@ const stopRuntime = await startWorkRuntimeFixture();
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: betterSubagents } = await import("../index.ts");
 const {
     baseDir,
@@ -159,7 +160,7 @@ function makeHarness() {
         ui: { notify() {}, setWidget() {} },
         sessionManager: { getSessionId: () => "foreground-session", getBranch: () => [] },
     };
-    betterSubagents(pi);
+    betterSubagents(pi, managedDomainPort());
     return {
         tools, ctx,
         shutdown() { handlers.get("session_shutdown")?.({}, ctx); },

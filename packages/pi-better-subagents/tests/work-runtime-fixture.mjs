@@ -1,19 +1,40 @@
 import { fork } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { WorkClient } from "../../pi-better-server/src/runtime/work-client.mjs";
 
 /** Real query server for registered-extension fixtures; no model or HostedSession. */
 export async function startWorkRuntimeFixture(env = process.env) {
     const transport = mkdtempSync("/tmp/p753-");
     mkdirSync(env.PI_CODING_AGENT_DIR, { recursive: true });
-    const child = fork(new URL("../../pi-better-server/test/support/work-daemon.ts", import.meta.url), [], {
-        execArgv: ["--import", "tsx"], env: { ...env, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"],
-    });
-    let error = ""; child.stderr.on("data", chunk => { error += chunk; });
-    await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(`Fixture daemon exited: ${error}`); })]);
-    return async () => {
-        if (child.exitCode === null) { child.send("stop"); await once(child, "exit"); }
+    const daemonEnv = { ...env, PI_SERVER_DIR: transport };
+    let child, retention, error = "";
+    const start = async () => {
+        child = fork(new URL("../../pi-better-server/test/support/work-daemon.ts", import.meta.url), [], {
+            execPath: daemonEnv.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath,
+            execArgv: ["--import", "tsx"], env: daemonEnv, stdio: ["ignore", "ignore", "pipe", "ipc"],
+        });
+        child.stderr.on("data", chunk => { error += chunk; });
+        const [ready] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(`Fixture daemon exited: ${error}`); })]);
+        // This file-scoped query fixture outlives individual recipients and
+        // other-root native journeys. Retain it through the real protocol;
+        // daemonIdleMs:0 does not disable runtime-only automatic idle exit.
+        retention = new WorkClient(ready.ready, realpathSync(daemonEnv.PI_CODING_AGENT_DIR));
+        await retention.ready;
+        return ready;
+    };
+    const ready = await start();
+    const stopChild = async () => { retention?.close(); retention = undefined; if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.send("stop"); await exited; } };
+    const stop = async () => {
+        await stopChild();
         rmSync(transport, { recursive: true, force: true });
     };
+    stop.socketPath = ready.ready;
+    stop.restart = async () => { await stopChild(); await start(); };
+    stop.pause = stopChild;
+    stop.resume = start;
+    stop.metrics = async () => { const reply = once(child, "message"); child.send("metrics"); return (await reply)[0]; };
+    stop.diagnostics = () => ({ exitCode: child.exitCode, stderr: error });
+    return stop;
 }

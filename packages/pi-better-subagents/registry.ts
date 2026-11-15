@@ -233,6 +233,8 @@ export interface RunMeta {
     resumedFrom?: string;
     /** Effective launch recipe, frozen at launch for continuation. */
     recipe?: LaunchRecipe;
+    /** Mechanical manager, separate from the original spawnPid capacity domain. */
+    management?: { root: string; instance: string; epoch: number };
     /** Foreground session that is allowed to receive unsolicited callbacks. */
     callbackOrigin?: RunCallbackOrigin;
     /** Durable ordinary-completion callback recovery and successful-handoff markers. */

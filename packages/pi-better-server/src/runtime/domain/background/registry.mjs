@@ -10,7 +10,7 @@ const metaCache = new Map();
 const indexIdsCache = new Map();
 const initializedIndexes = new Set();
 const metaChangedListeners = new Set();
-const registryIo = { fullDirectoryReads: 0, indexDirectoryReads: 0, metadataFileReads: 0, indexRevisionChecks: 0 };
+const registryIo = { fullDirectoryReads: 0, indexDirectoryReads: 0, metadataFileReads: 0, terminalMetadataFileReads: 0, indexRevisionChecks: 0 };
 export function getRegistryIoMetrics() {
     return { ...registryIo };
 }
@@ -18,6 +18,7 @@ export function resetRegistryIoMetrics() {
     registryIo.fullDirectoryReads = 0;
     registryIo.indexDirectoryReads = 0;
     registryIo.metadataFileReads = 0;
+    registryIo.terminalMetadataFileReads = 0;
     registryIo.indexRevisionChecks = 0;
 }
 export function baseDir() {
@@ -104,6 +105,8 @@ export function inspectMeta(id) {
         const raw = readFileSync(path, "utf8");
         try {
             const meta = JSON.parse(raw);
+            if (isTerminalStatus(meta.status))
+                registryIo.terminalMetadataFileReads++;
             const invalid = metaShapeProblem(meta, id);
             if (invalid) {
                 metaCache.delete(id);
@@ -198,6 +201,25 @@ export function listMetasForOrigin(origin) {
         .filter((meta) => meta !== undefined && belongsToOrigin(meta, origin))
         .sort((a, b) => b.startedAt - a.startedAt);
 }
+/** Durable pending callbacks are independent of the Navigator's terminal retention. */
+export function listPendingCallbackMetasForOrigin(origin) {
+    const directory = join(baseDir(), 'by-origin-callback', originKey(origin));
+    if (!initializedIndexes.has(directory)) {
+        try {
+            readFileSync(join(directory, '.initialized'));
+        }
+        catch {
+            for (const meta of listMetasForOrigin(origin))
+                if (pendingCallback(meta))
+                    writeIndexEntry(directory, meta.id);
+            mkdirSync(directory, { recursive: true });
+            writeFileSync(join(directory, '.initialized'), '1');
+        }
+        initializedIndexes.add(directory);
+    }
+    return readIndexIds(directory).map(readOwnedMeta).filter((meta) => !!meta && belongsToOrigin(meta, origin) && pendingCallback(meta));
+}
+function pendingCallback(meta) { return isTerminalStatus(meta.status) && meta.status !== 'cancelled' && meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt; }
 export function listActiveMetasForOrigin(origin) {
     const directory = originActiveIndexDir(origin);
     ensureOriginActiveIndex(origin, directory);
@@ -264,6 +286,11 @@ function indexMeta(meta) {
     try {
         const directory = originIndexDir(originOf(meta));
         writeIndexEntry(directory, meta.id);
+        const callbackDirectory = join(baseDir(), 'by-origin-callback', originKey(originOf(meta)));
+        if (pendingCallback(meta))
+            writeIndexEntry(callbackDirectory, meta.id);
+        else
+            removeIndexEntry(callbackDirectory, meta.id);
         const activeDirectory = originActiveIndexDir(originOf(meta));
         if (meta.status === "running")
             writeIndexEntry(activeDirectory, meta.id);

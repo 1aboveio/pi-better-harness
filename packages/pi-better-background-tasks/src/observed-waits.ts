@@ -21,7 +21,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -256,6 +256,7 @@ export interface ParentNotification {
  * `notifyParent` is not delivery.
  */
 export interface ParentDelivery {
+  readonly receiptId?: string;
   delivered(): void;
   defer(reason: string): void;
 }
@@ -557,6 +558,14 @@ function rpcCode(error: unknown): string {
 }
 
 export interface ObservedWaitHostOptions {
+  /** Fixed server admission guard, checked immediately before external dispatch. */
+  assertAdmission?: () => void;
+  /** Fixed native adapter alone may authorize an explicit cross-owner stop. */
+  authorizeParentCancellation?: (input: { requester: OwnerIdentity; operation: OperationRecord; requestId: string }) => { requestId: string; reason: string };
+  prepareWorkerPolicy?: (run: WorkerRunScope) => (() => void);
+  beforeParentOperation?: (operation: { operationId: string; taskId: string; token: string }) => void;
+  /** Runtime-owned coordinator handle. The caller retains its lifetime lease. */
+  sharedStore?: Store;
   /** Production adapters leave global discovery and terminal import to the server. */
   serverOwnedResults?: boolean;
   /** SQLite path. Defaults under the Pi agent directory. */
@@ -645,6 +654,8 @@ export function createObservedWaitHost(pi: ExtensionAPI, options: ObservedWaitHo
   hosts.set(pi as unknown as object, host);
   return host;
 }
+
+export function registerObservedWaitClient(pi: ExtensionAPI, host: ObservedWaitHost): void { hosts.set(pi as object, host); }
 
 export function getObservedWaitHost(pi: unknown): ObservedWaitHost | undefined {
   return pi && typeof pi === "object" ? hosts.get(pi as object) : undefined;
@@ -918,7 +929,26 @@ export class ObservedWaitHost {
   private authorityPassCache?: Map<string, "live" | "dead" | "unknown">;
   /** Running operations this follower is currently assigned to supervise. */
   private readonly followerRunningTasks = new Set<string>();
-  private lastChangeRevision = -1;
+  private readonly unscopedCallbackRecovery = { revision: -1, branch: "", delivery: undefined as string | undefined, claims: undefined as string | undefined };
+  private readonly callbackRecoveryScopes = new Map<string, { revision: number; delivery?: string; claims?: string; branch: string }>();
+  private recoveryScopeState() {
+    if (!this.activeOrigin) return this.unscopedCallbackRecovery;
+    const key = JSON.stringify([this.activeOrigin?.cwd, this.activeOrigin?.sessionId]);
+    let state = this.callbackRecoveryScopes.get(key);
+    if (!state) {
+      if (this.callbackRecoveryScopes.size >= 128) this.callbackRecoveryScopes.delete(this.callbackRecoveryScopes.keys().next().value!);
+      state = { revision: -1, branch: "" }; this.callbackRecoveryScopes.set(key, state);
+    }
+    return state;
+  }
+  private get lastChangeRevision() { return this.recoveryScopeState().revision; }
+  private set lastChangeRevision(value: number) { this.recoveryScopeState().revision = value; }
+  private get pendingCallbackCursor() { return this.recoveryScopeState().delivery; }
+  private set pendingCallbackCursor(value: string | undefined) { this.recoveryScopeState().delivery = value; }
+  private get pendingClaimCursor() { return this.recoveryScopeState().claims; }
+  private set pendingClaimCursor(value: string | undefined) { this.recoveryScopeState().claims = value; }
+  private get activeBranchSignature() { return this.recoveryScopeState().branch; }
+  private set activeBranchSignature(value: string) { this.recoveryScopeState().branch = value; }
   private lastOwnedTerminalAt = 0;
 
   constructor(private readonly pi: ExtensionAPI, options: ObservedWaitHostOptions = {}) {
@@ -1003,7 +1033,7 @@ export class ObservedWaitHost {
     this.closed = false;
     this.unavailableReason = undefined;
     try {
-      this.store = openStore({
+      this.store = this.options.sharedStore ?? openStore({
         path: this.storePath,
         ...(this.options.now ? { now: this.options.now } : {}),
       });
@@ -1037,7 +1067,7 @@ export class ObservedWaitHost {
     this.timer = undefined;
     this.releaseDiscoveryAuthority();
     this.releaseSupervisionAuthority();
-    try { this.store?.close(); } catch { /* already closed */ }
+    try { if (!this.options.sharedStore) this.store?.close(); } catch { /* already closed */ }
     this.store = undefined;
     this.launches.clear();
     this.rpcRuns.clear();
@@ -1048,6 +1078,7 @@ export class ObservedWaitHost {
     this.activeContext = undefined;
     this.terminalRecoveryNeeded = false;
     this.pendingTerminalCallbacks.clear();
+    this.callbackRecoveryScopes.clear();
     this.watchedRunningTasks.clear();
     this.discoveredTaskSidecars.clear();
     this.durableProjectionCache = undefined;
@@ -1069,13 +1100,14 @@ export class ObservedWaitHost {
     }
   }
 
-  private activeParentTerminalOperations(): OperationRecord[] {
+  private activeParentTerminalOperations(claims = false): OperationRecord[] {
     const origin = this.activeOrigin;
     if (!this.store || !origin?.sessionId) return [];
-    return this.store.listOperations({
-      phase: "terminal",
-      ownerScope: { kind: "parent-session", sessionId: origin.sessionId, workspace: origin.cwd },
-    });
+    const page = this.store.listPendingParentCallbacks({ sessionId: origin.sessionId, workspace: origin.cwd },
+      { after: claims ? this.pendingClaimCursor : this.pendingCallbackCursor, limit: 256 });
+    const next = page.length === 256 ? page.at(-1)!.operationId : undefined;
+    if (claims) this.pendingClaimCursor = next; else this.pendingCallbackCursor = next;
+    return page;
   }
 
   /**
@@ -1122,9 +1154,18 @@ export class ObservedWaitHost {
    * pending set is seeded once at activation and by each terminal attempt; it is
    * not a scan of the historical terminal table on every 250 ms tick.
    */
+  hasPendingParentCallbackRecovery(): boolean { return this.lastChangeRevision < 0 || this.pendingCallbackCursor !== undefined || this.pendingClaimCursor !== undefined; }
+
+  private rememberPendingCallback(taskId: string): void {
+    if (!this.pendingTerminalCallbacks.has(taskId) && this.pendingTerminalCallbacks.size >= 256)
+      this.pendingTerminalCallbacks.delete(this.pendingTerminalCallbacks.values().next().value!);
+    this.pendingTerminalCallbacks.add(taskId);
+  }
+
   private retryPendingTerminalCallbacks(): void {
     if (!this.store || this.pendingTerminalCallbacks.size === 0) return;
-    for (const taskId of [...this.pendingTerminalCallbacks]) {
+    for (const taskId of [...this.pendingTerminalCallbacks].slice(0, 64)) {
+      this.pendingTerminalCallbacks.delete(taskId); this.rememberPendingCallback(taskId);
       const operation = this.operationForTask(taskId);
       if (!operation || operation.terminalRevision === 0) {
         this.pendingTerminalCallbacks.delete(taskId);
@@ -1260,14 +1301,11 @@ export class ObservedWaitHost {
     } catch {
       return;
     }
-    if (revision === this.lastChangeRevision) return;
+    if (revision === this.lastChangeRevision && !this.pendingCallbackCursor) return;
     this.lastChangeRevision = revision;
     let operations: OperationRecord[];
     try {
-      operations = store.listOperations({
-        ownerScope: { kind: "parent-session", sessionId, workspace: ctx.cwd },
-        phase: "terminal",
-      });
+      operations = this.activeParentTerminalOperations();
     } catch {
       return;
     }
@@ -1372,6 +1410,8 @@ export class ObservedWaitHost {
     const operationId = `op_${randomUUID()}`;
     const token = `launch_${randomUUID()}`;
     const taskId = supervisorTaskIdForToken(token);
+    this.options.assertAdmission?.();
+    this.options.beforeParentOperation?.({ operationId, taskId, token });
     store.registerOperation({
       operationId,
       taskId,
@@ -1522,7 +1562,11 @@ export class ObservedWaitHost {
   /** Called from an actual admitted parent tool context, not a wire owner claim. */
   authorizeCancellationForParent(ctx: ExtensionContext, taskId: string, requestId: string): string {
     if (this.localCancels.has(taskId)) throw new Error("not_accepted: old cancellation admission is still draining");
-    const operation = this.ownedOperation(taskId, this.ownerFor(ctx));
+    const requester = this.ownerFor(ctx), operation = this.operationForTask(taskId);
+    if (!operation) throw new Error(`Unknown task ${taskId}`);
+    const admission = this.options.authorizeParentCancellation?.({ requester, operation, requestId });
+    if (!ownerMatchesOperation(operation, requester) && !admission) throw new Error(`Task ${taskId} belongs to another execution owner.`);
+    requestId = admission?.requestId ?? requestId;
     const managed = this.requireStore().resultSupervision(operation.operationId);
     if (this.supervisionAuthority(operation) === "foreign" && !(managed?.launchToken === operation.launchToken && managed.hostId === operation.supervision?.hostId)) throw new Error("permission-unavailable: live legacy or unknown supervisor prevents cancellation handoff");
     const proof = cancellationCredential();
@@ -1531,13 +1575,12 @@ export class ObservedWaitHost {
     this.requireStore().admitTaskCancellation({ credentialHash: proof.hash, directory: this.directory, request: previous ?? {
       owner: operation.owner, idempotencyKey: requestId, operationId: operation.operationId,
       expectedLaunchToken: operation.launchToken, expectedTerminalRevision: operation.terminalRevision,
-      expectedHostId: operation.supervision?.hostId ?? "unavailable", reason: "explicit stop",
+      expectedHostId: operation.supervision?.hostId ?? "unavailable", reason: admission?.reason ?? "explicit stop",
     } });
     return proof.credential;
   }
 
   private async stopThroughRuntime(ctx: ExtensionContext, taskId: string, requestId: string): Promise<StatusView> {
-    this.ownedOperation(taskId, this.ownerFor(ctx));
     const root = realpathSync(dirname(this.storePath));
     const registrationPath = join(root, "server-registration-v1.json");
     if (!existsSync(registrationPath)) {
@@ -1561,7 +1604,12 @@ export class ObservedWaitHost {
         receipt = await client.request("runtime_cancel_task", { credential });
       }
       if (receipt.state === "outcome_unknown" || !receipt.result) throw new Error(`${receipt.state}: cancellation ${requestId}; query the same request before retrying`);
-      return this.statusForParent(ctx, taskId);
+      // The credential above authorizes this exact recorded owner/token. Keep
+      // the requester context intact even when its explicit all:true grant won.
+      const operation = this.requireStore().getOperation(receipt.operationId);
+      if (!operation || operation.taskId !== taskId || operation.launchToken !== receipt.expectedLaunchToken
+        || !sameOwner(operation.owner, receipt.owner)) throw new Error('outcome_unknown: cancellation target identity changed');
+      return this.statusForOperation(operation, this.ownerFor(ctx));
     } catch (error) {
       const message = String(error);
       if (/not_accepted|accepted:|outcome_unknown/.test(message)) throw error;
@@ -1809,8 +1857,11 @@ export class ObservedWaitHost {
   }
 
   private status(taskId: string, owner: OwnerIdentity): StatusView {
-    const store = this.requireStore();
-    const operation = this.ownedOperation(taskId, owner);
+    return this.statusForOperation(this.ownedOperation(taskId, owner), owner);
+  }
+
+  private statusForOperation(operation: OperationRecord, owner: OwnerIdentity): StatusView {
+    const store = this.requireStore(), taskId = operation.taskId;
     const inspection = this.inspect(taskId);
     this.reconcileInspection(operation, inspection);
     const current = store.getOperation(operation.operationId) ?? operation;
@@ -2117,6 +2168,7 @@ export class ObservedWaitHost {
       const client = await this.resultSupervisionClient();
       client.close();
     }
+    const assertWorkerPolicy = this.options.prepareWorkerPolicy?.(run);
     const prepared = this.prepareLaunch(
       input.kind,
       input.params,
@@ -2156,7 +2208,7 @@ export class ObservedWaitHost {
     this.launches.set(taskId, launchContext);
     if (this.options.serverOwnedResults) await this.handoffResults([store.getOperation(operationId)!]);
     const started = await this.startSupervisor({
-      token, taskId, kind: input.kind, params: input.params, prepared, operationId,
+      token, taskId, kind: input.kind, params: input.params, prepared, operationId, assertDispatch: assertWorkerPolicy,
     });
     this.launches.set(taskId, launchContext);
     this.emitDurableTaskChange(owner);
@@ -2987,6 +3039,7 @@ export class ObservedWaitHost {
     params: Record<string, unknown>;
     prepared: ReturnType<ObservedWaitHost["prepareLaunch"]>;
     operationId: string;
+    assertDispatch?: () => void;
   }): Promise<{ started: boolean; claimed: boolean }> {
     const { token, taskId, kind, params, prepared, operationId } = input;
     const profilePath = join(supervisorPaths(this.directory, taskId).dir, "sandbox.sb");
@@ -3014,6 +3067,15 @@ export class ObservedWaitHost {
       ...(typeof params.max_log_bytes === "number" ? { maxLogBytes: params.max_log_bytes } : {}),
       ...(kind === "watch" ? this.watchOptions(params) : this.processTimeout(params)),
     };
+    try { this.options.assertAdmission?.(); input.assertDispatch?.(); }
+    catch (error) {
+      const operation = this.requireStore().getOperation(operationId);
+      if (operation && operation.terminalRevision === 0) this.requireStore().recordTerminalOutcome({
+        operationId, eventId: `admission_refused_${randomUUID()}`, owner: operation.owner,
+        outcome: "failed", evidence: [], reason: `External dispatch refused before spawn: ${String(error)}`,
+      });
+      throw error;
+    }
     const started = await this.supervisor.start(options);
     return { started: started.started, claimed: started.claimed };
   }
@@ -3307,13 +3369,14 @@ export class ObservedWaitHost {
     if (!this.options.notifyParent) return;
     if (operation.owner.kind !== "parent-session") return;
     if (!context) return;
-    if (context.callback === false) return;
+    if (context.callback === false) { this.store?.setParentCallbackPending(operation.taskId, false); return; }
     // Never write any journal field while a newer or unprovable other host owns
     // the claim. In particular, a stale host's reconcile must not rewrite its
     // cached claim token over the current shared one.
     const claim = this.claimState(context.callbackClaimedBy);
     if (claim === "live" || claim === "unknown") return;
     if (context.callbackDeliveredAt !== undefined) {
+      this.store?.setParentCallbackPending(operation.taskId, false);
       this.pendingTerminalCallbacks.delete(operation.taskId);
       skip("already delivered");
       return;
@@ -3353,7 +3416,7 @@ export class ObservedWaitHost {
     // A terminal result can become eligible later: the live session may have
     // been settling when the record was produced, or the owner may navigate
     // back to an eligible descendant branch. Keep retrying only this id.
-    this.pendingTerminalCallbacks.add(operation.taskId);
+    this.rememberPendingCallback(operation.taskId);
     const origin = context.parentOrigin ?? { cwd: operation.owner.workspace, sessionId: operation.owner.sessionId };
     const branchId = context.branchId ?? operation.owner.branchId;
     if (!this.isParentOriginActive(origin, branchId)) {
@@ -3373,6 +3436,7 @@ export class ObservedWaitHost {
     const claimToken = context.callbackClaimToken;
     let settled = false;
     const delivery: ParentDelivery = {
+      receiptId: `background-terminal:${operation.operationId}`,
       delivered: () => {
         if (settled) return;
         settled = true;
@@ -3429,13 +3493,13 @@ export class ObservedWaitHost {
     if (!context || context.callbackDeliveredAt !== undefined) return;
     const claim = this.claimState(context.callbackClaimedBy);
     if (claim === "live" || claim === "unknown") {
-      this.pendingTerminalCallbacks.add(taskId);
+      this.rememberPendingCallback(taskId);
       return; // preserve the current owner's claim without any write
     }
     context.callbackPendingAt ??= Date.now();
     this.launches.set(taskId, context);
     this.writeLaunchContext(taskId, context);
-    this.pendingTerminalCallbacks.add(taskId);
+    this.rememberPendingCallback(taskId);
   }
 
   private completeTerminalCallback(taskId: string, claimToken?: string): void {
@@ -3465,7 +3529,7 @@ export class ObservedWaitHost {
     if (!context || context.callbackDeliveredAt !== undefined) return;
     // A stale suppression must not clear the claim of a newer attempt.
     if (claimToken !== undefined && context.callbackClaimToken !== claimToken) return;
-    this.pendingTerminalCallbacks.add(taskId);
+    this.rememberPendingCallback(taskId);
     context.callbackDeferredReason = oneLine(reason, 200);
     context.callbackAttemptedAt = Date.now();
     context.callbackSkipReason = `deferred: ${oneLine(reason, 160)}`;
@@ -3568,7 +3632,7 @@ export class ObservedWaitHost {
         });
       } catch { /* another host already recovered it */ }
     }
-    for (const operation of this.activeParentTerminalOperations()) {
+    for (const operation of this.activeParentTerminalOperations(true)) {
       const context = this.currentLaunchContext(operation.taskId);
       if (!context?.callbackClaimedBy || context.callbackClaimedBy === this.hostId) continue;
       if (this.claimState(context.callbackClaimedBy) !== "dead") continue;
@@ -3691,6 +3755,7 @@ export class ObservedWaitHost {
             }
             let settled = false;
             const delivery: ParentDelivery = {
+              receiptId: event.eventId,
               delivered: () => {
                 if (settled) return;
                 settled = true;
@@ -3998,8 +4063,9 @@ export class ObservedWaitHost {
    * on every session_tree/branch navigation. Branch changes must be visible to
    * a queued callback *before* the batcher decides whether to deliver it.
    */
-  noteParentContext(ctx: ExtensionContext): void {
-    this.setActiveOrigin(ctx);
+  noteParentContext(ctx: ExtensionContext, options: {recover?: boolean} = {}): void {
+    this.setActiveOrigin(ctx, options.recover !== false);
+    if(options.recover === false)return;
     if (!this.store) return;
     this.recoverAbandonedDeliveries();
     if (this.terminalRecoveryNeeded) {
@@ -4011,7 +4077,7 @@ export class ObservedWaitHost {
     this.writeHostDebug();
   }
 
-  private setActiveOrigin(ctx: ExtensionContext): void {
+  private setActiveOrigin(ctx: ExtensionContext, debug = true): void {
     const previous = this.activeContext;
     const previousKey = previous ? this.contextKey(previous) : undefined;
     const nextSessionId = this.sessionIdIfAvailable(ctx);
@@ -4027,11 +4093,16 @@ export class ObservedWaitHost {
     // A tool call or activation for a different session/workspace must seed the
     // terminal callback journal once. Same-session calls keep the live context
     // current without rescanning historical terminal records.
-    if (!previous || previousKey !== nextKey) {
-      this.terminalRecoveryNeeded = true;
+    const branchSignature = JSON.stringify(branchIdsOf(ctx));
+    const branchChanged = branchSignature !== this.activeBranchSignature;
+    if (!previous || previousKey !== nextKey || branchChanged) this.terminalRecoveryNeeded = true;
+    if (branchChanged) {
       this.lastChangeRevision = -1;
+      this.pendingCallbackCursor = undefined;
+      this.pendingClaimCursor = undefined;
     }
-    this.writeHostDebug();
+    this.activeBranchSignature = branchSignature;
+    if(debug)this.writeHostDebug();
   }
 
   private contextKey(ctx: ExtensionContext): string | undefined {
@@ -4104,10 +4175,21 @@ export class ObservedWaitHost {
 
   private writeLaunchContext(taskId: string, context: LaunchContext): void {
     try {
+      const operation = this.operationForTask(taskId);
+      const parent = operation?.owner.kind === "parent-session";
+      const outboxDelivered = operation && Object.values(context.outboxDelivered ?? {}).some(proof => proof.terminalRevision === operation.terminalRevision);
+      const pending = context.callback !== false && context.callbackDeliveredAt === undefined && !outboxDelivered;
+      // Publish the obligation before the sidecar: a crash may leave a pending
+      // candidate, but cannot hide an accepted callback. Retire only after the
+      // delivered/disabled sidecar is durable, so replay can prove suppression.
+      if (parent && pending) this.store?.setParentCallbackPending(taskId, true);
       const path = this.sidecarPath(taskId);
       mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, JSON.stringify(context), { mode: 0o600 });
-    } catch { /* notification metadata is best-effort; durable state is in SQLite */ }
+      const staged = `${path}.${randomUUID()}.tmp`;
+      try { writeFileSync(staged, JSON.stringify(context), { mode: 0o600, flag: "wx" }); renameSync(staged, path); }
+      finally { rmSync(staged, { force: true }); }
+      if (parent && !pending) this.store?.setParentCallbackPending(taskId, false);
+    } catch { /* retain an obligation if the exact sidecar cannot be persisted */ }
   }
 
   private readLaunchContext(taskId: string): LaunchContext | undefined {

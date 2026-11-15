@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -85,13 +86,14 @@ async function harness(config: SandboxPermissionSettings, backgroundFirst = fals
     runner.onError((error) => errors.push(error));
     await runner.emit({ type: "session_start", reason: "startup" });
     assert.deepEqual(errors, []);
-    const gate = (name: string, input: Record<string, unknown> = {}) => runner.emitToolCall({ type: "tool_call", toolName: name, toolCallId: "admission-test", input });
+    const gate = (name: string, input: Record<string, unknown> = {}, toolCallId = randomUUID()) => runner.emitToolCall({ type: "tool_call", toolName: name, toolCallId, input });
     const execute = async (name: string, input: Record<string, unknown>) => {
-        const refusal = await gate(name, input);
+        const toolCallId = randomUUID();
+        const refusal = await gate(name, input, toolCallId);
         if (refusal?.block) return { blocked: true, text: refusal.reason ?? "Tool call blocked" };
         const tool = runner.getToolDefinition(name);
         assert.ok(tool);
-        const result = await tool.execute("admission-test", input, undefined, undefined, runner.createContext());
+        const result = await tool.execute(toolCallId, input, undefined, undefined, runner.createContext());
         return { blocked: false, text: result.content.map((part) => part.type === "text" ? part.text : "").join("\n") };
     };
     return { root, runner, loaded, events, gate, execute, async policy(next: SandboxPermissionSettings) {

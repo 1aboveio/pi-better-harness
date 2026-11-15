@@ -1,0 +1,351 @@
+import { createHash, timingSafeEqual } from "node:crypto";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { verifyParkCheckpoint } from "./park-checkpoint.ts";
+import { intersectContinuationPermissions } from "./continuation-authority.ts";
+import extension from "./index.ts";
+import { bindRuntimeOutcomeStore } from "./assignment-outcomes.ts";
+import { catalogSnapshotFromWire } from "./catalog-store.ts";
+import { openLaunchJournal, launchDigest } from "./managed-launch-journal.mjs";
+import { nextRunId, processStartToken, listMetas, writeMeta, listActiveMetasForParent, effectiveStatus, readMeta, readParkRecord, updateParkRecord } from "./registry.ts";
+import { recoverLaunchMetadata } from "./managed-launch-recovery.ts";
+import { assertSubagentHandoff } from "./managed-launch-ownership.ts";
+import { createOwnerCapacityGates } from "./capacity.mjs";
+import { readConversationLease, releaseUnspawnedConversationLease } from "./continuation.ts";
+import { Worker } from "node:worker_threads";
+import { processExists } from "./spawn.ts";
+import type { ManagedLaunchPort } from "./managed-launch-port.ts";
+
+// Revocation only: the journal remains the authority. A new same-process
+// manager revokes a previous worker before advancing the journal epoch.
+const failureFoldRevocations = new Map<string, Int32Array>();
+
+/** One fixed SDK adapter per runtime, not a client-selected module or transcript writer. */
+export class ManagedSubagentHost {
+    private foldRevocation = new Int32Array(new SharedArrayBuffer(4));
+    private failureWorker?: Worker;
+    private failureWorkerError?: Error;
+    private failureResponse?: { resolve(): void; reject(error: Error): void };
+    private current: any;
+    private api!: ExtensionAPI;
+    private session: any;
+    private initializing?: Promise<void>;
+    private tail: Promise<unknown> = Promise.resolve();
+    private journal: ReturnType<typeof openLaunchJournal>["journal"];
+    private closeJournal: () => void;
+    private epoch: number;
+    private pending = 0;
+    private continuationWindow = { started: 0, admitted: 0 };
+    private continuationFailures = new Map<string, { failures: number; retryAt: number; reason: string }>();
+    private workerHost?: { start(ctx?: unknown): void; close(): void; service: { continuationReady: boolean } };
+    private path: string;
+    private capacityFor = createOwnerCapacityGates(({ pid, start }: { pid: number; start: string }) =>
+        listActiveMetasForParent(pid).filter(meta => meta.spawnPidStartTime === start && effectiveStatus(meta) === "running").length
+        + this.journal.unresolvedAttempts().filter((attempt: any) => attempt.capacityOwner?.pid === pid && attempt.capacityOwner?.start === start && !readMeta(attempt.id)).length);
+    get busy() { return this.pending > 0 || Boolean(this.failureResponse); }
+    status() {
+        return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
+            inFlight: this.pending, failureFold: { worker: Boolean(this.failureWorker), inFlight: Boolean(this.failureResponse) }, continuationReady: this.workerHost?.service.continuationReady ?? false, continuationUnavailable: [...this.continuationFailures].map(([key, value]) => ({ key, ...value })), unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt: any) => !readMeta(attempt.id)).length };
+    }
+    constructor(private root: string, private instance: string, private catalog: any, sharedStore?: unknown, private createWorkerHost?: (pi: ExtensionAPI) => NonNullable<ManagedSubagentHost["workerHost"]>, private readPermissions?: () => unknown) {
+        this.current = { pid: process.pid, start: processStartToken(process.pid), owner: { workspace: root, sessionId: "runtime-recovery" } };
+        this.path = join(root, "operation-coordinator.sqlite");
+        const active = listMetas({ includeArchived: false });
+        assertSubagentHandoff(active, root);
+        const opened = openLaunchJournal(this.path, sharedStore);
+        this.journal = opened.journal;
+        const unbind = sharedStore ? bindRuntimeOutcomeStore(root, sharedStore as Parameters<typeof bindRuntimeOutcomeStore>[1]) : () => {};
+        this.closeJournal = () => { try { unbind(); } finally { opened.close(); } };
+        try {
+            for (const meta of active) {
+                if (meta.management?.root !== root || !processExists(meta.pid) || processStartToken(meta.pid) !== meta.pidStartTime) continue;
+                const attempt = this.journal.attempt(meta.id), lease = readConversationLease(meta.sessionId);
+                if (!attempt || attempt.sessionId !== meta.sessionId || !lease || lease.token !== attempt.lease || lease.attemptId !== meta.id) {
+                    throw new Error(`writer-authority-unknown: ${meta.id}`);
+                }
+            }
+            const priorFold = failureFoldRevocations.get(root);
+            if (priorFold) Atomics.store(priorFold, 0, 1);
+            this.epoch = this.journal.epoch(instance);
+            failureFoldRevocations.set(root, this.foldRevocation);
+            // An unpublished reservation cannot have dispatched task code. Release
+            // only a proven-dead manager's claim before SDK reconciliation sees it.
+            for (const claim of (sharedStore as any)?.listResumeClaims() ?? []) {
+                if (!["claimed", "published"].includes(claim.state) || !/^(managed-)?subagents:/.test(claim.lease?.ownerId ?? "")) continue;
+                const pid = claim.lease.pid;
+                if (!pid) continue;
+                if (processExists(pid) && (!claim.lease.processStartToken || Buffer.from(processStartToken(pid) ?? "").toString("base64url") === claim.lease.processStartToken || !processStartToken(pid))) continue;
+                if (claim.state === "published") {
+                    // This fixed adapter journals before spawning. Its exact old
+                    // manager is dead and its epoch fenced; absence of a journal
+                    // intent proves this publication never dispatched a child.
+                    if (!claim.attemptId || this.journal.attempt(claim.attemptId) || readMeta(claim.attemptId)) continue;
+                    const wait = (sharedStore as any).getWait({ waitId: claim.waitId, generation: claim.generation });
+                    const prior = wait?.park?.attemptId ? readMeta(wait.park.attemptId) : undefined;
+                    const park = prior ? readParkRecord(prior.id) : undefined;
+                    if (!prior || prior.management?.root !== root || claim.lease.ownerId !== `managed-subagents:${prior.management.instance}` || !park?.checkpoint) continue;
+                    if (readConversationLease(prior.sessionId) && (!claim.lease.processStartToken || !releaseUnspawnedConversationLease({
+                        sessionId: prior.sessionId, attemptId: claim.attemptId, managerPid: pid, managerStart: claim.lease.processStartToken,
+                        canProveUnspawned: () => { this.journal.current(this.epoch); return !this.journal.attempt(claim.attemptId) && !readMeta(claim.attemptId); },
+                    }))) continue;
+                    verifyParkCheckpoint({ ...park.checkpoint, version: 1, waitId: claim.waitId, generation: claim.generation });
+                    const result = (sharedStore as any).repairFailedResume({ waitId: claim.waitId, generation: claim.generation,
+                        claimId: claim.claimId, claimToken: claim.claimToken, attemptId: claim.attemptId, launchToken: claim.launchToken,
+                        proof: { writerPidGone: true, writerLeaseReleased: true }, checkpointId: wait.park.checkpointId,
+                        expectedCancelEpoch: wait.cancelEpoch, reason: "Exact managed publication never reached pre-spawn journal" });
+                    updateParkRecord(prior.id, { phase: result.phase, resumeExitReconciledClaimId: claim.claimId });
+                    continue;
+                }
+                (sharedStore as any).releaseResumeClaim({ waitId: claim.waitId, generation: claim.generation,
+                    claimId: claim.claimId, claimToken: claim.claimToken, outcome: "ready",
+                    reason: "Recovered unpublished reservation after exact manager exit" });
+            }
+            for (const attempt of this.journal.unresolvedAttempts()) {
+                if (readMeta(attempt.id)) continue;
+                const meta = recoverLaunchMetadata(attempt, { root, instance, epoch: this.epoch }, {
+                    pidExists: processExists, startToken: processStartToken, lease: readConversationLease,
+                });
+                writeMeta(meta, { ifAbsent: true });
+                active.push(meta);
+            }
+            for (const intent of this.journal.pendingIntents()) {
+                this.journal.finishRecovery(intent.owner, intent.request_key, this.epoch, this.recoveredResult(intent));
+            }
+            for (const meta of active) {
+                if (meta.management?.root !== root || (meta.status !== "running" && meta.status !== "orphaned")) continue;
+                writeMeta({ ...meta, management: { root, instance, epoch: this.epoch },
+                    supervisionInterruptedAt: meta.supervisionInterruptedAt ?? Date.now(), supervisionInterruptedReason: "runtime-recovery" });
+            }
+        } catch (error) {
+            Atomics.store(this.foldRevocation, 0, 1);
+            if (failureFoldRevocations.get(root) === this.foldRevocation) failureFoldRevocations.delete(root);
+            this.closeJournal(); throw error;
+        }
+    }
+    async recover() {
+        if (listMetas({ includeArchived: false }).some(meta => meta.management?.root === this.root)) await this.initialize();
+    }
+    private grant(authority: any) {
+        if (!authority || !/^[a-f0-9-]{36}$/.test(authority.id) || !/^[a-f0-9]{64}$/.test(authority.secret)) throw new Error("launch-authority-refused");
+        const directory = join(this.root, "subagent-launch-admission"), path = join(directory, `${authority.id}.json`);
+        const dir = lstatSync(directory), stat = lstatSync(path);
+        if (!dir.isDirectory() || dir.isSymbolicLink() || dir.uid !== process.getuid?.() || (dir.mode & 0o077)
+            || !stat.isFile() || stat.isSymbolicLink() || stat.uid !== dir.uid || (stat.mode & 0o077) || stat.size > 1024 * 1024) throw new Error("launch-authority-refused");
+        const record = JSON.parse(readFileSync(path, "utf8"));
+        const digest = createHash("sha256").update(authority.secret).digest("hex");
+        if (record.version !== 1 || record.instanceId !== this.instance || record.id !== authority.id || typeof record.secretHash !== "string"
+            || record.secretHash.length !== digest.length || !timingSafeEqual(Buffer.from(record.secretHash), Buffer.from(digest))
+            || !record.owner?.sessionId
+            || !Number.isSafeInteger(record.pid)
+            || !["subagent_spawn", "subagent_spawn_batch"].includes(record.tool) || typeof record.key !== "string" || !record.key) throw new Error("launch-authority-refused");
+        if (record.owner.workspace !== realpathSync(record.owner.workspace)) throw new Error("launch-authority-refused: noncanonical workspace");
+        if (!record.start) throw new Error("launch-authority-refused: host process start identity unavailable");
+        const start = processStartToken(record.pid);
+        if (!start) throw new Error("launch-authority-refused: server cannot verify host process start identity");
+        if (start !== record.start) throw new Error("launch-authority-refused: host process identity changed");
+        process.kill(record.pid, 0);
+        return record;
+    }
+    private initialize() {
+        return this.initializing ??= (async () => {
+            const host = this;
+            const port: ManagedLaunchPort = {
+                backgroundTools: () => host.current.background?.available === true ? host.current.background.tools : [],
+                get owner() { return { pid: host.current.pid, start: host.current.start }; },
+                get identity() { return { root: host.root, instance: host.instance, epoch: host.epoch }; },
+                continuationContext: () => host.executionContext(host.current),
+                dispatchContinuation: (park, run) => host.dispatchContinuation(park, run),
+                supervised: () => listMetas({ includeArchived: false }).filter(meta => port.owns(meta)),
+                owns: meta => meta.management?.root === host.root && meta.management?.instance === host.instance && meta.management?.epoch === host.epoch,
+                assertCurrent: () => host.journal.current(host.epoch),
+                capacity: () => host.capacityFor(host.current),
+                attempt: () => nextRunId(),
+                workerCommand: args => ({ file: process.execPath, fileArgs: [fileURLToPath(new URL("./managed-worker.mjs", import.meta.url)), ...args] }),
+                snapshot: async configuration => {
+                    const command = host.catalog.connection();
+                    command({ type: "runtime_register_catalog", cwd: host.current.owner.workspace,
+                        sessionId: host.current.owner.sessionId, authority: host.current.catalogAuthority });
+                    return catalogSnapshotFromWire(command({ type: "runtime_get_catalog", overlay: configuration.getSessionSettings?.() ?? configuration.sessionSettings }));
+                },
+                beforeSpawn: input => {
+                    assertSubagentHandoff(listMetas({ includeArchived: false }), host.root);
+                    if (host.current.continuation) {
+                        const permissions = intersectContinuationPermissions(host.current.capturedPermissions, host.readPermissions?.());
+                        if (launchDigest(permissions) !== launchDigest(host.current.permissions)) throw new Error("continuation-permissions-changed");
+                        host.current.key = `${host.current.baseKey}:${input.id}`;
+                        host.current.digest = launchDigest({ key: host.current.key, runId: host.current.priorRunId });
+                        host.journal.accept(host.current.ownerKey, host.current.key, host.current.digest, host.epoch);
+                    } else {
+                        const fresh = host.grant(host.current.authority);
+                        if (launchDigest(fresh) !== host.current.grantDigest) throw new Error("launch-authority-changed");
+                    }
+                    const preflightDigest = launchDigest(JSON.parse(readFileSync(input.preflightPath, "utf8")));
+                    const policyDigest = input.policyPath ? launchDigest(JSON.parse(readFileSync(input.policyPath, "utf8"))) : undefined;
+                    const attempt = host.journal.prepare(host.current.ownerKey, host.current.key, host.epoch, { ...input, preflightDigest, policyDigest,
+                        capacityOwner: { pid: host.current.pid, start: host.current.start },
+                        launchAuthority: host.current.launchAuthority ?? { owner: host.current.owner, pid: host.current.pid, start: host.current.start, settings: host.current.settings, model: host.current.model, projectTrusted: host.current.projectTrusted, background: host.current.background, permissions: host.current.permissions } });
+                    return { PI_MANAGED_SUBAGENT: JSON.stringify({ path: host.path, owner: host.current.ownerKey,
+                        key: host.current.key, epoch: host.epoch, id: input.id, token: attempt.token }) };
+                },
+                spawned: (id, pid) => host.journal.spawned(host.current.ownerKey, host.current.key, host.epoch, id, pid, processStartToken(pid)),
+            };
+            const cwd = this.root;
+            const settingsManager = SettingsManager.inMemory({});
+            const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: this.root, settingsManager,
+                noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
+                extensionFactories: [(pi: ExtensionAPI) => {
+                    const registered: any[] = [];
+                    const adapterPi = { ...pi,
+                        registerTool: (tool: any) => { registered.push(tool); pi.registerTool(tool); },
+                        getAllTools: () => [...registered, ...pi.getAllTools()],
+                    } as ExtensionAPI;
+                    this.api = adapterPi;
+                    this.workerHost = this.createWorkerHost?.(adapterPi);
+                    if (this.workerHost) pi.on("session_start", (_event, ctx) => this.workerHost!.start(ctx));
+                    extension(adapterPi, port);
+                }] });
+            await resourceLoader.reload();
+            const created = await createAgentSession({ cwd, agentDir: this.root, settingsManager, resourceLoader,
+                sessionManager: SessionManager.inMemory(cwd), noTools: "all" });
+            this.session = created.session;
+            const initializationErrors: string[] = [];
+            await this.session.bindExtensions({ mode: "print", onError: (error: any) => {
+                if (!initializationErrors.length) initializationErrors.push(String(error.error ?? error.message ?? error));
+            } });
+            if (initializationErrors.length) throw new Error(`Managed launch initialization failed: ${initializationErrors.join("; ")}`);
+        })();
+    }
+    private executionContext(record: any) {
+            const ctx = this.session.extensionRunner.createContext();
+            const branch = [...record.settings, ...(record.owner.goalId ? [{ type: "custom", customType: "pi-better-goal", data: { kind: "set", goal: { goalId: record.owner.goalId } } }] : []), { id: record.owner.branchId }];
+            const model = record.model?.split("/");
+            return { ...ctx, cwd: record.owner.workspace, hasUI: false, isProjectTrusted: () => record.projectTrusted,
+                model: model ? ctx.modelRegistry.find(model[0], model.slice(1).join("/")) : undefined,
+                sessionManager: { getSessionId: () => record.owner.sessionId, getBranch: () => branch, getLeafId: () => record.owner.branchId,
+                    getSessionFile: () => undefined, getEntries: () => branch } };
+    }
+    private dispatchContinuation(park: any, run: () => Promise<"resumed" | "held" | "skipped">) {
+        const now = Date.now();
+        if (now - this.continuationWindow.started >= 1000) this.continuationWindow = { started: now, admitted: 0 };
+        if (this.continuationWindow.admitted >= 32) return Promise.resolve("skipped" as const);
+        const retryKey = `${park.waitId}:${park.generation}`;
+        const failure = this.continuationFailures.get(retryKey);
+        if (failure && Date.now() < failure.retryAt) return Promise.resolve("skipped" as const);
+        this.continuationWindow.admitted++;
+        this.pending++;
+        const result = this.tail.catch(() => undefined).then(async () => {
+            const saved = this.journal.attempt(park.runId)?.launchAuthority;
+            if (!saved) throw new Error("Captured continuation launch authority unavailable");
+            const permissions = intersectContinuationPermissions(saved.permissions, this.readPermissions?.());
+            const key = `continuation:${park.waitId}:${park.generation}`;
+            this.current = { ...saved, key, baseKey: key, priorRunId: park.runId, continuation: true, launchAuthority: saved,
+                capturedPermissions: saved.permissions, permissions,
+                ownerKey: JSON.stringify([saved.owner.workspace, saved.owner.sessionId]),
+                digest: launchDigest({ key, runId: park.runId }) };
+            this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...permissions });
+            const outcome = await run();
+            if (outcome === "resumed") this.journal.finish(this.current.ownerKey, this.current.key, this.epoch, { status: outcome });
+            this.continuationFailures.delete(retryKey);
+            return outcome;
+        }).catch(error => {
+            const failures = Math.min(6, (this.continuationFailures.get(retryKey)?.failures ?? 0) + 1);
+            if (this.continuationFailures.size >= 128 && !this.continuationFailures.has(retryKey)) this.continuationFailures.delete(this.continuationFailures.keys().next().value!);
+            this.continuationFailures.set(retryKey, { failures, retryAt: Date.now() + Math.min(30000, 1000 * 2 ** (failures - 1)), reason: String(error).slice(0, 500) });
+            return "skipped" as const;
+        }).finally(() => { this.pending--; });
+        this.tail = result;
+        return result;
+    }
+    private recoveredResult(intent: { attempts: string }) {
+        const ids = JSON.parse(intent.attempts).map(({ id }: any) => id);
+        const runs = ids.map((id: string) => readMeta(id));
+        const status = !ids.length ? "not_launched" : runs.every(Boolean) ? "recovered" : "outcome_unknown";
+        return { details: { status, attempts: ids, runs: runs.filter(Boolean).map((meta: any) => ({
+            runId: meta.id, sessionId: meta.sessionId, status: meta.status,
+        })) }, content: [{ type: "text", text: `Original launch ${status}; no replacement attempt was dispatched.` }] };
+    }
+    handle(command: Record<string, unknown>) {
+        if (Object.keys(command).some(key => !["id", "type", "authority"].includes(key))) return Promise.reject(new Error("unsupported launch field"));
+        this.pending++;
+        const result = this.tail.catch(() => undefined).then(async () => {
+            const record = this.grant(command.authority);
+            // A retried tool call keeps its accepted recipient even after Goal/branch edits.
+            const ownerKey = JSON.stringify([record.owner.workspace, record.owner.sessionId]);
+            const digest = launchDigest({ tool: record.tool, params: record.params });
+            const intent = this.journal.accept(ownerKey, record.key, digest, this.epoch);
+            if (intent.prior) {
+                if (intent.result) return JSON.parse(intent.result);
+                return this.recoveredResult(intent);
+            }
+            try {
+                this.current = { ...record, authority: command.authority, ownerKey, grantDigest: launchDigest(record) };
+                await this.initialize();
+                this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...record.permissions });
+                const context = this.executionContext(record);
+                const tool = this.session.extensionRunner.getToolDefinition(record.tool);
+                if (!tool) throw new Error("Fixed subagent adapter unavailable");
+                const response = await tool.execute(record.key, record.params, undefined, undefined, context);
+                this.journal.finish(ownerKey, record.key, this.epoch, response);
+                return response;
+            } catch (error) {
+                const pending = this.journal.read(ownerKey, record.key);
+                if (pending?.state === "accepted" && JSON.parse(pending.attempts).length === 0) {
+                    this.journal.finish(ownerKey, record.key, this.epoch, this.recoveredResult(pending));
+                }
+                throw error;
+            }
+        }).finally(() => { this.pending--; });
+        this.tail = result;
+        return result;
+    }
+    /** One root mechanical worker; no coordinator connection or query mutations. */
+    foldTerminalFailures(ids: readonly string[]): Promise<void> {
+        const result = this.tail.catch(() => undefined).then(async () => {
+            this.journal.current(this.epoch);
+            if (Atomics.load(this.foldRevocation, 0)) throw new Error("failure-fold-owner-revoked");
+            if (this.failureWorkerError) throw this.failureWorkerError;
+            if (ids.length > 128) throw new Error("failure-fold-batch-overflow");
+            if (!this.failureWorker) {
+                const worker = this.failureWorker = new Worker(new URL("./managed-failure-worker.mjs", import.meta.url), {
+                    execArgv: [], workerData: { root: this.root, epoch: this.epoch, revocation: this.foldRevocation.buffer },
+                });
+                const fail = (error: Error) => {
+                    this.failureWorkerError = error;
+                    this.failureResponse?.reject(error); this.failureResponse = undefined;
+                };
+                worker.on("message", message => {
+                    const response = this.failureResponse; this.failureResponse = undefined;
+                    if (message.error) response?.reject(new Error(message.error)); else response?.resolve();
+                });
+                worker.on("error", fail);
+                worker.on("exit", code => fail(new Error(`failure-fold-worker-exited: ${code}`)));
+                worker.unref();
+            }
+            await new Promise<void>((resolve, reject) => {
+                this.failureResponse = { resolve, reject };
+                this.failureWorker!.postMessage({ ids });
+            });
+        });
+        this.tail = result;
+        return result;
+    }
+    async close() {
+        Atomics.store(this.foldRevocation, 0, 1);
+        await this.tail.catch(() => undefined);
+        await this.failureWorker?.terminate(); this.failureWorker = undefined;
+        if (failureFoldRevocations.get(this.root) === this.foldRevocation) failureFoldRevocations.delete(this.root);
+        const session = this.session;
+        this.session = undefined;
+        const workerHost = this.workerHost;
+        this.workerHost = undefined;
+        try {
+            if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+        } finally {
+            try { workerHost?.close(); } finally {
+                try { session?.dispose(); } finally { this.closeJournal(); }
+            }
+        }
+    }
+}

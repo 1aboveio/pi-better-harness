@@ -1,13 +1,10 @@
 /**
  * Completed-subagent continuation (#owner-continuation).
  *
- * The extension-level tests load the REAL extension with a fake ExtensionAPI
- * and a PATH-injected fake `pi` child. That child is a real Node process that
- * reopens/appends the saved conversation through the installed Pi SDK's REAL
- * SessionManager, so "same conversation" is proven against real session
- * persistence rather than a mock. No model call is made: the child writes a
- * terminal `agent_end` event and exits 0, which is exactly the lifecycle
- * evidence the registry/parse/finalization path consumes.
+ * Real SDK foregrounds invoke registered tools through the managed server.
+ * Workers run the fixed bootstrap and the SDK's real model transport against
+ * an offline provider. A read-only worker observer records actual argv and
+ * native history; no fixture creates or appends worker session messages.
  *
  * Covered contract:
  * - every launch saves its native conversation durably, and `subagent_spawn`
@@ -36,10 +33,8 @@
  */
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { register } from "node:module";
 import { spawn } from "node:child_process";
 import {
-    chmodSync,
     existsSync,
     mkdirSync,
     mkdtempSync,
@@ -50,27 +45,22 @@ import {
     utimesSync,
     writeFileSync,
 } from "node:fs";
-import { EventEmitter, once } from "node:events";
-import { tmpdir } from "node:os";
+import { once } from "node:events";
 import { join } from "node:path";
-import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
-import { stopWorkObservation } from "../work-observation.ts";
-
-const REAL_SDK_URL = import.meta.resolve("@earendil-works/pi-coding-agent");
+import { fileURLToPath } from "node:url";
+import { continuationFixture } from "./managed-continuation-fixture.mjs";
+import { splitNativeFraming } from "../../pi-better-server/test/support/native-message-framing.mjs";
 
 // Hermetic registry + child artifacts: everything this file writes lives under
 // one per-run temp directory, never a checked-in path or the machine registry.
-const RUNTIME = mkdtempSync(join(tmpdir(), "subagent-continuation-"));
+const evidenceRoot = fileURLToPath(new URL("../../../.work/761/", import.meta.url));
+mkdirSync(evidenceRoot, { recursive: true });
+const RUNTIME = mkdtempSync(join(evidenceRoot, "subagent-continuation-"));
 process.env.TMPDIR = RUNTIME;
+process.env.PI_CODING_AGENT_DIR = join(RUNTIME, "agent");
+process.env.PI_SUBAGENT_DURABLE_DIR = join(RUNTIME, "agent/subagents");
 const ARTIFACTS = join(RUNTIME, "children");
 mkdirSync(ARTIFACTS, { recursive: true });
-process.env.PI_CONTINUATION_ARTIFACTS = ARTIFACTS;
-process.env.PI_CONTINUATION_SDK_URL = REAL_SDK_URL;
-const stopRuntime = await startWorkRuntimeFixture();
-
-register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
-
-const { default: betterSubagents } = await import("../index.ts");
 const {
     baseDir,
     listMetas,
@@ -98,122 +88,17 @@ const {
 } = await import("../continuation.ts");
 const { runDailyCleanupOnce, enforceRegistrySizeCapOnce } = await import("../cleanup.ts");
 const { killProcessTree, processExists } = await import("../spawn.ts");
-const { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } = await import("../permission-policy.ts");
 const { readOutcome, outcomeTranscriptReceipt } = await import("../assignment-outcomes.ts");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WORKSPACE = join(RUNTIME, "workspace");
 mkdirSync(WORKSPACE, { recursive: true });
 
-// ---- fake `pi` binary (real SDK session writes, no model calls) -----------
-const fakePi = `#!/usr/bin/env node
-const fs = require("node:fs");
-const path = require("node:path");
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-(async () => {
-    const { SessionManager } = await import(process.env.PI_CONTINUATION_SDK_URL);
-    const argv = process.argv.slice(2);
-    let sessionPath;
-    let sessionDir;
-    let sessionId;
-    for (let i = 0; i < argv.length; i += 1) {
-        const arg = argv[i];
-        if (arg === "--session") sessionPath = argv[++i];
-        else if (arg === "--session-dir") sessionDir = argv[++i];
-        else if (arg === "--session-id") sessionId = argv[++i];
-    }
-    const prompt = argv[argv.length - 1];
-    const record = { pid: process.pid, argv, sessionPath: sessionPath ?? null, sessionDir, sessionId: sessionId ?? null, prompt };
-    const recordPath = path.join(process.env.PI_CONTINUATION_ARTIFACTS, process.pid + ".json");
-    const finish = (extra) => {
-        fs.writeFileSync(recordPath, JSON.stringify({ ...record, ...extra }));
-        process.stdout.write(JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: extra.answer }] }] }) + "\\n");
-        process.exit(0);
-    };
-    try {
-        const pause = Number(process.env.PI_CONTINUATION_SLEEP_MS || 0);
-        const manager = sessionPath
-            ? SessionManager.open(sessionPath, sessionDir)
-            : SessionManager.create(process.cwd(), sessionDir, { id: sessionId });
-        const before = manager.getEntries().filter((entry) => entry.type === "message").length;
-        if (pause > 0) await sleep(pause);
-        if (sessionPath) {
-            manager.appendMessage({ role: "user", content: [{ type: "text", text: prompt }] });
-            manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "FOLLOWUP:" + prompt }] });
-        } else {
-            manager.appendMessage({ role: "user", content: [{ type: "text", text: "INITIAL TASK" }] });
-            manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "INITIAL ANSWER" }] });
-        }
-        const answer = sessionPath ? "FOLLOWUP:" + prompt : "INITIAL ANSWER";
-        // Test seam for an interrupted attempt: save the turn, then wait to be
-        // stopped instead of writing a terminal agent_end event.
-        const holdAfterWrite = Number(process.env.PI_CONTINUATION_HOLD_AFTER_WRITE_MS || 0);
-        if (holdAfterWrite > 0) await sleep(holdAfterWrite);
-        finish({
-            sessionFile: manager.getSessionFile(),
-            sessionIdAfter: manager.getSessionId(),
-            before,
-            after: manager.getEntries().filter((entry) => entry.type === "message").length,
-            answer,
-        });
-    } catch (error) {
-        fs.writeFileSync(recordPath, JSON.stringify({ ...record, error: String(error && error.message || error) }));
-        process.exit(1);
-    }
-})();
-`;
-
-const binDir = mkdtempSync(join(RUNTIME, "fake-bin-"));
-// Workspace-local temp directories must not inherit the repository's ESM mode.
-writeFileSync(join(binDir, "package.json"), JSON.stringify({ type: "commonjs" }));
-const fakePiPath = join(binDir, "pi");
-writeFileSync(fakePiPath, fakePi);
-chmodSync(fakePiPath, 0o755);
-const originalPath = process.env.PATH ?? "";
-process.env.PATH = `${binDir}:${originalPath}`;
-
 const policyMain = { enabled: false, projectFiles: "read-write", outsideProject: "read", storedCredentials: "read", commands: true, network: true };
 const policyChildEnforced = { ...policyMain, enabled: true };
 
-// ---- harness ---------------------------------------------------------------
-function makeHarness(options = {}) {
-    const events = new EventEmitter();
-    let snapshot = options.policy;
-    events.on(SANDBOX_POLICY_REQUEST_CHANNEL, () => {
-        if (snapshot) events.emit(SANDBOX_POLICY_CHANNEL, snapshot);
-    });
-    const tools = new Map();
-    const handlers = new Map();
-    const sent = [];
-    const entries = [];
-    const pi = {
-        events,
-        registerTool: (definition) => tools.set(definition.name, definition),
-        registerCommand: () => {},
-        appendEntry: () => {},
-        on: (event, handler) => handlers.set(event, handler),
-        sendMessage: (message, sendOptions) => {
-            sent.push({ message, options: sendOptions });
-            entries.push({ id: `callback-${entries.length}`, type: "custom_message", ...message });
-        },
-    };
-    const ctx = {
-        cwd: options.cwd ?? WORKSPACE,
-        model: { provider: "test", id: "model" },
-        hasUI: false,
-        isIdle: () => true,
-        ui: { notify() {}, setWidget() {} },
-        sessionManager: { getSessionId: () => options.sessionId ?? "owner-session", getBranch: () => entries },
-    };
-    betterSubagents(pi);
-    return {
-        pi, tools, handlers, sent, ctx,
-        publishPolicy(next) { snapshot = next; events.emit(SANDBOX_POLICY_CHANNEL, next); },
-        shutdown() { handlers.get("session_shutdown")?.({}, ctx); },
-    };
-}
+const fixture = await continuationFixture({ root: RUNTIME, artifacts: ARTIFACTS, workspace: WORKSPACE });
+const { makeHarness } = fixture;
 
 async function waitFor(fn, { timeoutMs = 8000, intervalMs = 20 } = {}) {
     const deadline = Date.now() + timeoutMs;
@@ -226,7 +111,11 @@ async function waitFor(fn, { timeoutMs = 8000, intervalMs = 20 } = {}) {
 }
 
 async function deliveredOutcome(h, id, timeoutMs) {
-    const receipt = await waitFor(() => readOutcome(readMeta(id))?.deliveryReceipt, { timeoutMs });
+    const receipt = await waitFor(() => {
+        const meta = readMeta(id);
+        const outcome = readOutcome(meta);
+        return meta.completionCallbackSentAt !== undefined && outcome?.deliveryReceipt && outcomeTranscriptReceipt(h.ctx.sessionManager.getBranch(), outcome.eventId) ? outcome.deliveryReceipt : undefined;
+    }, { timeoutMs });
     assert.ok(receipt, "the completion has a durable recipient receipt");
     const outcome = readOutcome(readMeta(id));
     assert.equal(outcome.recipient.sessionId, h.ctx.sessionManager.getSessionId());
@@ -241,6 +130,7 @@ async function waitTerminal(id) {
         return current && current.status !== "running" && current.status !== "orphaned" ? current : undefined;
     });
     assert.ok(meta, `run ${id} never reached a terminal status`);
+    if (!await waitFor(() => fixture.observedTerminal(id))) throw new Error(`run ${id} never reached a terminal shared observation`);
     return meta;
 }
 
@@ -292,15 +182,17 @@ function childRecord(pid) {
 }
 
 function sessionMessages(path) {
-    return readFileSync(path, "utf-8")
+    const messages = readFileSync(path, "utf-8")
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line))
         .filter((entry) => entry.type === "message")
         .map((entry) => ({
             role: entry.message.role,
-            text: (entry.message.content ?? []).map((block) => block.text ?? "").join(""),
+            text: typeof entry.message.content === "string" ? entry.message.content
+                : (entry.message.content ?? []).map((block) => block.text ?? "").join(""),
         }));
+    return splitNativeFraming(messages).conversation;
 }
 
 function sessionHeader(path) {
@@ -331,10 +223,8 @@ function removeRun(id) {
 }
 
 after(async () => {
-    stopWorkObservation();
-    await stopRuntime();
-    process.env.PATH = originalPath;
     delete process.env.PI_CONTINUATION_SLEEP_MS;
+    await fixture.close();
     rmSync(RUNTIME, { recursive: true, force: true });
 });
 
@@ -421,7 +311,7 @@ describe("completed-subagent continuation", () => {
             }
         } finally {
             await reap([rootId, resumedId].filter(Boolean));
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
@@ -488,6 +378,7 @@ describe("completed-subagent continuation", () => {
             // terminal callback. Let that handoff settle before snapshotting, so the
             // only thing this test observes changing later is continuation's work.
             await deliveredOutcome(h, killedId, 6000);
+            await waitTerminal(killedId);
 
             // The killed attempt is now a saved conversation, while the other
             // terminal outcomes keep their existing refusal.
@@ -580,7 +471,7 @@ describe("completed-subagent continuation", () => {
         } finally {
             if (holder?.pid) killProcessTree(holder.pid, "SIGKILL");
             await reap([killedId, resumedId].filter(Boolean));
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
@@ -605,7 +496,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(await runningCount(h), 0, "completion frees the slot again");
         } finally {
             await reap([rootId, resumedId].filter(Boolean));
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
@@ -661,7 +552,7 @@ describe("completed-subagent continuation", () => {
         } finally {
             if (holder?.pid) killProcessTree(holder.pid, "SIGKILL");
             await reap([rootId, resumedId].filter(Boolean));
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
@@ -890,8 +781,8 @@ describe("completed-subagent continuation", () => {
             );
         } finally {
             await reap([rootId, resumedId].filter(Boolean));
-            owner.shutdown();
-            successor.shutdown();
+            await owner.shutdown();
+            await successor.shutdown();
         }
     });
 
@@ -927,7 +818,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(listMetas().length, before, "refused selectors launch no replacement attempt");
         } finally {
             await reap(ids);
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
@@ -995,8 +886,8 @@ describe("completed-subagent continuation", () => {
         } finally {
             if (holder?.pid) killProcessTree(holder.pid, "SIGKILL");
             await reap([rootId, resumedId].filter(Boolean));
-            owner.shutdown();
-            successor.shutdown();
+            await owner.shutdown();
+            await successor.shutdown();
         }
     });
 
@@ -1046,8 +937,8 @@ describe("completed-subagent continuation", () => {
             assert.equal(listMetas().filter((meta) => meta.sessionId === confinedId).length, 1, "no attempt launched under refused policy");
         } finally {
             await reap(ids);
-            h.shutdown();
-            successor?.shutdown();
+            await h.shutdown();
+            await successor?.shutdown();
         }
     });
 
@@ -1102,7 +993,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(listMetas().length, before, "a missing session launches nothing");
         } finally {
             await reap([rootId, resumedId, secondId].filter(Boolean));
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
@@ -1143,7 +1034,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(readMeta(rootId).recipe.model, "test/model", "the prior attempt keeps its frozen model");
         } finally {
             await reap([rootId, matchingId].filter(Boolean));
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
@@ -1185,7 +1076,7 @@ describe("completed-subagent continuation", () => {
             assert.deepEqual(compatible.recipe.skills, [skillPath]);
         } finally {
             await reap([rootId, replayedId, compatibleId].filter(Boolean));
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
@@ -1214,7 +1105,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(argv.includes("--no-skills"), false, "a pre-#664 recipe keeps the user catalog");
         } finally {
             await reap([rootId, legacyId].filter(Boolean));
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
@@ -1277,7 +1168,7 @@ describe("completed-subagent continuation", () => {
                 "a frozen empty list still reaches the child as --no-skills");
         } finally {
             await reap([discoveryId, noneId, noneReplayId, legacyId].filter(Boolean));
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
@@ -1308,7 +1199,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(continued.sessionId, root.sessionId);
             assert.equal(continued.recipe.tools, "read,bash");
             assert.ok(continued.operations.tools.includes("report_assignment_result"));
-        } finally { await reap(ids); h.shutdown(); }
+        } finally { await reap(ids); await h.shutdown(); }
     });
 
     it("continues per-job session ids in a batch alongside fresh jobs without sharing one writer", async () => {
@@ -1382,7 +1273,7 @@ describe("completed-subagent continuation", () => {
             removeRun(partial.details.launched[0].id);
         } finally {
             await reap([rootId, freshId, continuedId].filter(Boolean));
-            h.shutdown();
+            await h.shutdown();
         }
     });
 

@@ -151,3 +151,13 @@ describe("subagent permission policy", () => {
         assert.equal(resolveSubagentPermissions(fixture().pi, undefined).sandboxEnabled, true);
     });
 });
+
+it('captures immutable Background policy alongside worker permissions for restored admission',()=>{
+ const events=new EventEmitter();const pi={events};
+ const background={state:'enabled',writableRoot:'/background',denyWrite:['/private'],permissions:{enabled:true,projectFiles:'read',outsideProject:'off',storedCredentials:'off',commands:false,network:false}};
+ events.on('pi-better-sandbox:policy-request',()=>events.emit('pi-better-sandbox:policy',{state:'enabled',background}));
+ const captured=currentSandboxPermissions(pi);
+ assert.equal(captured.backgroundPolicy.permissions.commands,false);
+ background.permissions.commands=true;assert.equal(captured.backgroundPolicy.permissions.commands,false);
+ assert.equal(currentSandboxPermissions(pi).backgroundPolicy.permissions.commands,true);
+});

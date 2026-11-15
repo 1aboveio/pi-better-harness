@@ -110,7 +110,7 @@ export type FirstCheckWaitEnd = "timeout" | "aborted" | "suspended";
 export type FirstCheckOutcome = FirstWatchCheck | { pending: FirstCheckWaitEnd; waitedMs: number } | undefined;
 
 /** Each cached extension factory owns its scheduling and suspension state. */
-export function createBackgroundTaskRuntime(attention = createFailureAttention()) {
+export function createBackgroundTaskRuntime(attention = createFailureAttention(), deliverCompletion?: (origin: BackgroundTaskCallbackOrigin | undefined, event: Parameters<ReturnType<typeof getCallbackBatcher>["enqueue"]>[0]) => void, admission?: { assert(): void; prepared?(id: string): void }) {
 const { resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention } = attention;
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const remoteSessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -298,6 +298,7 @@ function spawnTask(
   getActiveSession?: ActiveSessionProvider,
   dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
+  admission?.assert();
   // Resolved before any task directory, log, or metadata exists so a blocked
   // launch leaves nothing behind. Structured SSH must also honor launch restrictions.
   const intent = readTaskIntent(params);
@@ -314,6 +315,7 @@ function spawnTask(
   assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
   const commandLimits = backgroundExecutionLimits(sandboxPlan);
   const id = nextTaskId();
+  admission?.prepared?.(id);
   const logPath = logPathFor(id);
   ensureTaskDir(id);
   const remoteTask = params.ssh
@@ -611,6 +613,7 @@ function startWatchTask(
   getActiveSession?: ActiveSessionProvider,
   dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
+  admission?.assert();
   for (const [name, condition] of [["success_when", params.success_when], ["failure_when", params.failure_when]] as const) {
     const error = condition && validateCondition(condition);
     if (error) throw new Error(`${name}: ${error}`);
@@ -625,6 +628,7 @@ function startWatchTask(
   assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
   const commandLimits = backgroundExecutionLimits(sandboxPlan);
   const id = nextTaskId();
+  admission?.prepared?.(id);
   const now = Date.now();
   const timeoutSeconds = resolveWatchTimeoutSeconds(params.timeout_seconds);
   const remoteTask = params.ssh
@@ -1363,7 +1367,9 @@ async function notifyTerminal(
   const pending = terminalFailureAttention(latest.id);
   const label = latest.name ? `${latest.name} (${latest.id})` : latest.id;
   const facts = formatCallbackFacts(latest);
-  getCallbackBatcher(pi).enqueue({
+  const enqueue = (event: Parameters<ReturnType<typeof getCallbackBatcher>["enqueue"]>[0]) => deliverCompletion ? deliverCompletion(latest.callbackOrigin, event) : getCallbackBatcher(pi).enqueue(event);
+  enqueue({
+    receiptId: `background-legacy:${latest.id}:${latest.endedAt ?? latest.startedAt}`,
     source: "background-task",
     id: latest.id,
     label,

@@ -13,10 +13,11 @@ interface Query {
 }
 export type ReadStream = Pick<Duplex, "destroyed" | "writableLength" | "write" | "on" | "once" | "off">;
 interface Stream { socket: ReadStream; paused: boolean; generation: number; drain: () => void; close: () => void }
-interface WorkerMetrics { inventories?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
+interface WorkerMetrics { sourceWatchers?: number; inventories?: number; coordinatorConnections?: number; indexConnections?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
 export interface QueryExecutorOptions {
   capacity?: number; timeoutMs?: number; maxConnections?: number;
   workerUrl?: URL;
+  onTerminalLogsChanged?: (ids: string[]) => Promise<void>;
   modelOptions?: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number };
 }
 
@@ -37,6 +38,7 @@ export class WorkQueryExecutor {
   private closed = false;
   private workerGeneration = 0;
   private recoveryAttempts: number[] = [];
+  private internalRecoveryDemand = false;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private workerMetrics: WorkerMetrics = {};
   private lastObservation: Omit<ReturnType<WorkReadModel["observation"]>, "observedAt"> & { observedAt: number | null } = {
@@ -71,7 +73,8 @@ export class WorkQueryExecutor {
       if (worker !== this.worker) return;
       this.exited = true;
       const sqlite = this.workerMetrics.sqlite;
-      if (sqlite) this.workerMetrics = { ...this.workerMetrics, sqlite: { ...sqlite, active: 0 } };
+      this.workerMetrics = { ...this.workerMetrics, sourceWatchers: 0, coordinatorConnections: 0, indexConnections: 0,
+        ...(sqlite ? { sqlite: { ...sqlite, active: 0 } } : {}) };
       this.fail(new Error(`runtime-unhealthy: read worker exited (${code}); rebuilding reads after recovery`));
       this.scheduleRecovery();
     });
@@ -79,7 +82,7 @@ export class WorkQueryExecutor {
   }
 
   private scheduleRecovery() {
-    if (this.closed || !this.exited || this.recoveryTimer || !this.streams.size) return;
+    if (this.closed || !this.exited || this.recoveryTimer || (!this.streams.size && !this.internalRecoveryDemand)) return;
     const now = Date.now();
     this.recoveryAttempts = this.recoveryAttempts.filter(attempt => now - attempt < 60_000);
     if (this.recoveryAttempts.length >= 2) {
@@ -90,9 +93,10 @@ export class WorkQueryExecutor {
     }
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = undefined;
-      if (this.closed || !this.streams.size) return;
+      if (this.closed || (!this.streams.size && !this.internalRecoveryDemand)) return;
       this.recoveryAttempts.push(Date.now());
       this.workerGeneration++;
+      this.internalRecoveryDemand = false;
       this.exited = false; this.failure = undefined; this.termination = undefined;
       this.workerMetrics = {}; this.workerConnections.clear(); this.revision++;
       this.lastObservation = { status: "rebuilding", reason: "Read worker is recovering its source inventory.", observedAt: null, reasons: [] };
@@ -126,6 +130,11 @@ export class WorkQueryExecutor {
     return { handle: (command: Record<string, unknown>) => this.request(connection, command), close };
   }
 
+  async snapshot(scope: Record<string, unknown>): Promise<any> { return JSON.parse((await this.request(0, {type:"runtime_get_snapshot",scope})).json); }
+
+  async upgradeObligations(): Promise<any[]> {
+    return JSON.parse((await this.request(0, { type: "runtime_get_upgrade_obligations" })).json);
+  }
   async livenessReasons(): Promise<any[]> {
     const result = await this.request(0, { type: "runtime_get_liveness" });
     return JSON.parse(result.json);
@@ -149,12 +158,15 @@ export class WorkQueryExecutor {
   private request(connection: number, input: Record<string, unknown>): Promise<EncodedRead> {
     if (connection !== 0 && !this.streams.has(connection)) return Promise.reject(new Error("runtime-unavailable: client disconnected"));
     if (input.type === "runtime_get_metrics") return Promise.resolve({ json: JSON.stringify(this.metrics()) });
-    if (this.failure) { this.scheduleRecovery(); return Promise.reject(this.failure); }
-    if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_liveness"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
+    if (this.failure) {
+      if (connection === 0) this.internalRecoveryDemand = true;
+      this.scheduleRecovery(); return Promise.reject(this.failure);
+    }
+    if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
     if (input.sinceSeq !== undefined && !Number.isSafeInteger(input.sinceSeq)) return Promise.reject(new Error("Invalid replay sequence"));
     if (input.instanceId !== undefined && (typeof input.instanceId !== "string" || input.instanceId.length > 256)) return Promise.reject(new Error("Invalid runtime instance"));
     const command: Record<string, unknown> = { type: input.type, sinceSeq: input.sinceSeq, instanceId: input.instanceId };
-    if (command.type !== "runtime_unsubscribe" && command.type !== "runtime_get_liveness") {
+    if (command.type !== "runtime_unsubscribe" && command.type !== "runtime_get_liveness" && command.type !== "runtime_get_upgrade_obligations") {
       const scope = workScope(input.scope);
       if (scope.cwd) scope.cwd = resolve(scope.cwd);
       scope.limit ??= scope.backgroundHistory ? 10 : 50;
@@ -197,6 +209,15 @@ export class WorkQueryExecutor {
     if (this.failure) return;
     if (message.metrics) this.workerMetrics = message.metrics;
     if (message.observation) this.lastObservation = message.observation;
+    if (message.type === "terminal-logs") {
+      const sourceWorker = this.worker;
+      const ids = Array.isArray(message.ids) ? message.ids.filter((id: unknown): id is string => typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id)).slice(0, 128) : [];
+      void Promise.resolve().then(() => this.options.onTerminalLogsChanged?.(ids)).then(
+        () => { if (!this.failure && this.worker === sourceWorker) sourceWorker.postMessage({ type: "terminal-logs-consumed" }); },
+        error => { if (!this.failure && this.worker === sourceWorker) this.fail(new Error(`runtime-unhealthy: terminal failure supervision failed: ${String(error)}`)); },
+      );
+      return;
+    }
     if (message.type === "revision") { this.revision++; this.worker.postMessage({ type: "revision-consumed" }); return; }
     if (message.type === "event") {
       if (this.streams.get(message.connection)?.generation === message.generation) this.event(message.connection, message.line);
@@ -255,6 +276,8 @@ export class WorkQueryExecutor {
 
   private fail(error: Error) {
     if (this.failure) return;
+    if ([...this.queue, ...(this.active ? [this.active] : [])].some(query =>
+      [...query.waiters].some(waiter => waiter.connection === 0))) this.internalRecoveryDemand = true;
     this.failure = error; this.lag.disable();
     for (const query of [...this.queue, ...(this.active ? [this.active] : [])]) this.finish(query, error);
     this.queue = []; this.active = undefined;

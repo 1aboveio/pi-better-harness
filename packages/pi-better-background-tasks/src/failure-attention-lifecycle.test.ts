@@ -2,12 +2,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import extension from "./index.js";
 import {
-  failurePath, recordFailure, resumeFailureAttention, scheduleFailureAttention,
+  createFailureAttention, failurePath, recordFailure, resumeFailureAttention, scheduleFailureAttention,
   stopFailureAttention, suspendFailureAttention,
 } from "./failures.js";
 import { currentProcessStartToken } from "./process-identity.js";
 import { removeMeta, taskDir, writeMeta } from "./registry.js";
-import { resumeRunningTask, resumeScheduledWork, suspendScheduledWork } from "./runtime.js";
+import { createBackgroundTaskRuntime, resumeRunningTask, resumeScheduledWork, suspendScheduledWork } from "./runtime.js";
 import { readFailureState } from "./shared-failure-observations.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
 
@@ -44,25 +44,21 @@ function runningFailure(id: string, origin: BackgroundTaskCallbackOrigin = { cwd
   return meta;
 }
 
-function extensionHost(sessionId: string) {
-  const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
-  const pi = {
-    on(name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) {
-      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
-    },
-    registerTool() {},
-    events: { on() {}, emit() {} },
-    sendMessage: vi.fn(),
-  } as unknown as ExtensionAPI;
+/** Mechanical manager lifecycle kernel. Native delivery is covered separately by
+ * runtime-background-frontend.test.ts; no frontend extension owns these timers. */
+function managerHost(sessionId: string) {
+  const pi = host();
   const origin = { cwd: process.cwd(), sessionId };
-  const ctx = {
-    cwd: origin.cwd, mode: "rpc", hasUI: false, isIdle: () => true,
-    sessionManager: { getSessionId: () => sessionId },
-  } as unknown as ExtensionContext;
+  const attention = createFailureAttention();
+  const runtime = createBackgroundTaskRuntime(attention);
   const emit = async (name: string) => {
-    for (const handler of handlers.get(name) ?? []) await handler({}, ctx);
+    if (name === "session_shutdown") runtime.suspendScheduledWork();
+    if (name === "session_start") {
+      runtime.resumeScheduledWork();
+      for (const task of tasks.filter(task => task.callbackOrigin?.sessionId === sessionId))
+        runtime.resumeRunningTask(pi, task, () => origin);
+    }
   };
-  extension(pi);
   shutdowns.push(() => emit("session_shutdown"));
   return { pi, origin, emit };
 }
@@ -116,9 +112,9 @@ describe("failure attention lifecycle ownership", () => {
     expect(Object.keys(readFailureState(failurePath(task.id)).delivered)).toHaveLength(1);
   });
 
-  it("cached extension factories keep attention independent of each other and the legacy singleton", async () => {
-    const parent = extensionHost("attention-parent");
-    const child = extensionHost("attention-child");
+  it("canonical manager instances keep attention independent of each other and the legacy singleton", async () => {
+    const parent = managerHost("attention-parent");
+    const child = managerHost("attention-child");
     const parentTask = runningFailure("bg_factory_parent", parent.origin);
     const childTask = runningFailure("bg_factory_child", child.origin);
     await parent.emit("session_start");

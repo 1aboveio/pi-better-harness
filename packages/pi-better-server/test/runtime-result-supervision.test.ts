@@ -17,7 +17,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
   const root = mkdtempSync(resolve(".work/760/flow-"));
   const runnerRoot = join(root, "frontend-volatile");
   mkdirSync(runnerRoot);
-  const directory = join(runnerRoot, process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor");
+  let directory = join(runnerRoot, process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor");
   const transport = mkdtempSync("/tmp/p760-");
   const children: ReturnType<typeof fork>[] = [];
   const clients: WorkClient[] = [];
@@ -37,6 +37,15 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
     const frontend = frontends[0]!;
     taskIds.push(...frontends.map(frontend => frontend.ready.taskId));
     taskId = frontend.ready.taskId;
+    // The fixed runtime owns launch evidence now. Follow its persisted exact
+    // grant rather than inferring a supervisor path from the frontend's TMPDIR.
+    const evidenceStore = new DatabaseSync(join(root, "operation-coordinator.sqlite"), { readOnly: true });
+    try {
+      const grant = evidenceStore.prepare("SELECT value FROM coordinator_state WHERE key='result-supervision-v1:'||(SELECT operation_id FROM operations WHERE task_id=?)").get(taskId!);
+      assert.ok(grant, 'accepted task has a durable result supervision grant');
+      directory = JSON.parse(String(grant.value)).directory;
+      assert.ok(existsSync(supervisorPaths(directory, taskId!).launch), 'captured launch evidence exists before fault injection');
+    } finally { evidenceStore.close(); }
     const wait = frontend.ready.wait;
     for (const frontend of frontends) {
       const exited = once(frontend.child, "exit"); frontend.child.kill("SIGKILL"); await exited;

@@ -1,4 +1,5 @@
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
 import { fork } from "node:child_process";
@@ -215,7 +216,16 @@ test("real Pi SDK loads the Background extension and executes the socket cancell
     const store = openStore({ path: join(root, "operation-coordinator.sqlite") });
     try {
       const operation = store.listOperations({ taskId })[0]!;
-      const receipt = store.getTaskCancellation({ owner: operation.owner, idempotencyKey: "sdk-cancel|fc-759" });
+      // Native request keys include the requester scope. Find the exact durable
+      // target intent rather than assuming the public tool key is the ledger key.
+      const ledger = new DatabaseSync(join(root, "operation-coordinator.sqlite"), { readOnly: true });
+      let requestKey: string;
+      try {
+        const intents = ledger.prepare("SELECT request_key FROM task_cancellation_requests WHERE operation_id=?").all(operation.operationId);
+        assert.equal(intents.length, 1);
+        requestKey = String(intents[0]!.request_key);
+      } finally { ledger.close(); }
+      const receipt = store.getTaskCancellation({ owner: operation.owner, idempotencyKey: requestKey });
       assert.equal(receipt?.result?.status, "cancelled");
       assert.equal(receipt?.expectedLaunchToken, operation.launchToken);
       assert.equal(operation.terminalOutcome, "cancelled");

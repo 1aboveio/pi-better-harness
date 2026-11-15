@@ -7,7 +7,11 @@
  * synchronous and transactional; a refusal throws `StoreError` with a typed code
  * and leaves no partial record.
  */
+import { setUpgradeFence } from "./upgrade.mjs";
+import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgroundTerminals, seedPendingParentCallbacks } from './background-parent-callbacks.mjs';
+import { BackgroundRequests } from "./background-requests.mjs";
 import { StoreError } from "./errors.mjs";
+import { SubagentLaunchJournal } from "./subagent-launch.mjs";
 import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.mjs";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.mjs";
 import { repairFailedResume } from "./recovery.mjs";
@@ -44,6 +48,7 @@ export function openStore(options) {
         }
     };
     const store = {
+        subagentLaunchJournal() { alive(); return new SubagentLaunchJournal(ctx, alive); },
         resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
@@ -75,6 +80,12 @@ export function openStore(options) {
             closed = true;
             db.close();
         },
+        setParentCallbackPending(taskId, pending) { alive(); return setParentCallbackPending(ctx, taskId, pending); },
+        listPendingParentCallbacks(scope, options) { alive(); return listPendingParentCallbacks(ctx, scope, options); },
+        listRecentBackgroundTerminals(options) { alive(); return listRecentBackgroundTerminals(ctx, options); },
+        seedPendingParentCallbacks(options) { alive(); return seedPendingParentCallbacks(ctx, options); },
+        backgroundRequests() { alive(); return new BackgroundRequests(ctx, alive); },
+        setUpgradeFence(epoch) { alive(); setUpgradeFence(ctx, epoch); },
         registerOperation(input) {
             alive();
             return writeOperation(ctx, input);

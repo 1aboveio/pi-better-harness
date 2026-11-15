@@ -8,7 +8,7 @@ let stopRuntime: () => Promise<void>;
 beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
 afterAll(async () => { await stopRuntime(); });
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import backgroundTasksExtension from "./index.js";
+import { nativeBackground } from "./test-support/native-background.js";
 
 type ToolResult = { content: Array<{ type: string; text: string }>; details?: unknown };
 type RegisteredTool = {
@@ -18,13 +18,14 @@ type RegisteredTool = {
 
 describe("golden path: background process journey", () => {
   it("launches a task, observes it running, then verifies final result and logs", async () => {
-    const harness = createHarness();
+    const harness = await nativeBackground();
     const directory = mkdtempSync(join(tmpdir(), "bg-golden-"));
     const release = join(directory, "release");
     let id: string | undefined;
     try {
       const launchText = await harness.execute("bg_task_spawn", {
-        name: "golden path process",
+        name: `golden path process ${"x".repeat(2000)} final-name-marker`,
+        env: { BACKGROUND_PRIVATE_TOKEN: "never-render-this-value" },
         shell: false,
         argv: [process.execPath, "-e", `
           const fs = require('node:fs');
@@ -53,6 +54,22 @@ describe("golden path: background process journey", () => {
       expect(finalStatus).toMatchObject({ id, kind: "process", status: "succeeded", lastExitCode: 0 });
       expect(finalStatus.result).toMatchObject({ exitCode: 0, signal: null });
 
+      let page = await harness.execute("bg_task_status", { id, verbose: true, max_bytes: 1024 });
+      expect(Buffer.byteLength(page)).toBeLessThanOrEqual(1024);
+      let cursor = page.match(/nextCursor=(\S+)/)?.[1];
+      expect(cursor).toBeDefined();
+      let metadataPages = page;
+      for (let count = 0; cursor && count < 20; count++) {
+        page = await harness.execute("bg_task_status", { id, cursor, max_bytes: 1024 });
+        expect(Buffer.byteLength(page)).toBeLessThanOrEqual(1024);
+        expect(page).not.toContain("reset=source-replaced");
+        metadataPages += page;
+        cursor = page.match(/nextCursor=(\S+)/)?.[1];
+      }
+      expect(cursor).toBeUndefined();
+      expect(metadataPages).toContain("final-name-marker");
+      expect(metadataPages).not.toContain("never-render-this-value");
+
       const logText = await harness.execute("bg_task_log", { id, tail_lines: 40 });
       expect(logText).toContain("golden:start");
       expect(logText).toContain("golden:done");
@@ -61,45 +78,14 @@ describe("golden path: background process journey", () => {
       expect(listText).toContain(id);
     } finally {
       if (id) await harness.execute("bg_task_stop", { id });
+      await harness.close();
       rmSync(directory, { recursive: true, force: true });
     }
   }, 10_000);
 });
 
-function createHarness() {
-  const tools = new Map<string, RegisteredTool>();
-  const pi = {
-    registerTool(tool: RegisteredTool) {
-      tools.set(tool.name, tool);
-    },
-    on() {
-      // The golden path drives a fresh task and does not need session recovery.
-    },
-    async sendUserMessage() {
-      // callback:false keeps this path quiet; this exists for API completeness.
-    },
-  } as unknown as ExtensionAPI;
-
-  backgroundTasksExtension(pi);
-
-  return {
-    async execute(name: string, params: Record<string, unknown>) {
-      const tool = tools.get(name);
-      if (!tool) throw new Error(`tool not registered: ${name}`);
-      const result = await tool.execute(
-        "golden-path-call",
-        params,
-        new AbortController().signal,
-        undefined,
-        { cwd: process.cwd(), hasUI: false },
-      );
-      return result.content.map((part) => part.text).join("\n");
-    },
-  };
-}
-
 async function waitForPublicStatus(
-  harness: ReturnType<typeof createHarness>,
+  harness: Awaited<ReturnType<typeof nativeBackground>>,
   id: string,
   done: (status: Record<string, unknown>) => boolean,
   timeoutMs = 5000,
@@ -115,7 +101,7 @@ async function waitForPublicStatus(
 }
 
 function extractTaskId(text: string): string {
-  const match = text.match(/bg_[a-z0-9_]+/);
+  const match = text.match(/bgs_[0-9a-f]{20}|bg_[a-z0-9_]+/);
   if (!match) throw new Error(`no task id in text: ${text}`);
   return match[0]!;
 }

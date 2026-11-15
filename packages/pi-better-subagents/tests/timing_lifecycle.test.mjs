@@ -26,9 +26,11 @@ const HERMETIC_TMPDIR = mkdtempSync(join(tmpdir(), "subagent-timing-"));
 process.env.TMPDIR = HERMETIC_TMPDIR;
 const stopRuntime = await startWorkRuntimeFixture();
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: betterSubagents, progressCacheIdsForTests, isHealthTickerActive, forgetProgressCacheForTests } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, runDir } = await import("../registry.ts");
+const { timingWakeReceipt } = await import("../timing-notifications.ts");
 const { killProcessTree } = await import("../spawn.ts");
 
 const HEALTH_TICK_MS = 15_000;
@@ -46,8 +48,10 @@ const originalPath = process.env.PATH ?? "";
 process.env.PATH = `${binDir}:${originalPath}`;
 
 const liveRuns = [];
+const recipients = [];
+const { sdkRecipient } = await import("./sdk-recipient-fixture.mjs");
 
-function makeHarness(options = {}) {
+async function makeHarness(options = {}) {
     const tools = new Map();
     const handlers = new Map();
     const sent = [];
@@ -67,9 +71,12 @@ function makeHarness(options = {}) {
         model: undefined,
         sessionManager: { getSessionId: () => options.sessionId ?? "timing-session" },
     };
-    betterSubagents(pi);
-    const shutdown = () => handlers.get("session_shutdown")?.({}, ctx);
-    return { pi, tools, handlers, sent, notes, ctx, shutdown };
+    betterSubagents(pi, managedDomainPort());
+    if (!options.manager) await Promise.all(recipients.filter(item => item.sessionId === ctx.sessionManager.getSessionId()).map(item => item.recipient.close()));
+    const recipient = options.manager ? undefined : await sdkRecipient({ cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), sent, notes });
+    if (recipient) { recipients.push({ recipient, sessionId: ctx.sessionManager.getSessionId(), failSend: options.failSend }); await recipient.failure(Boolean(options.failSend?.())); }
+    const shutdown = async () => { await recipient?.close(); await handlers.get("session_shutdown")?.({}, ctx); };
+    return { pi, tools, handlers, sent, notes, ctx, shutdown, recipient };
 }
 
 async function spawnRun(h, { noWaitForLaunch, ...overrides } = {}) {
@@ -103,8 +110,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const settle = () => new Promise((r) => setImmediate(r));
 
 async function tick() {
+    for (const { recipient, failSend } of recipients) if (failSend) await recipient.failure(Boolean(failSend()));
     mock.timers.tick(HEALTH_TICK_MS);
     await settle();
+    await sleep(100);
 }
 
 async function reap({ id, pid }) {
@@ -134,11 +143,25 @@ const MINUTE = 60_000;
 
 async function withFakeClock(fn) {
     mock.timers.enable({ apis: ["setInterval"] });
-    try { await fn(); } finally { mock.timers.reset(); }
+    const firstRun = liveRuns.length;
+    try { await fn(); } finally {
+        // An assertion failure must not leave owed alerts for the next test's
+        // same-session recipient. Reload cases intentionally share that scope.
+        try {
+            for (const run of liveRuns.slice(firstRun)) if (existsSync(runDir(run.id))) await reap(run);
+        } finally { mock.timers.reset(); }
+    }
 }
 
 const wakes = (h, kind) => h.sent.filter((entry) => entry.message.customType === `subagent-${kind}`);
 const steerPath = (id) => join(runDir(id), "steer.json");
+
+async function waitForToolWakes(h, id, count) {
+    if (await waitFor(() => wakes(h, "tool-wait").length === count)) return;
+    assert.fail(`tool-wait delivery timed out: ${JSON.stringify({ expected: count,
+        delivered: wakes(h, "tool-wait"), meta: readMeta(id), runtime: stopRuntime.diagnostics(),
+        recipient: await h.recipient.diagnostics(id) })}`);
+}
 
 function appendEvents(id, events) {
     appendFileSync(join(runDir(id), "output.log"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
@@ -154,6 +177,7 @@ function editEvents(callId, at = Date.now()) {
 
 after(async () => {
     stopWorkObservation();
+    await Promise.all(recipients.map(({ recipient }) => recipient.close()));
     await stopRuntime();
     process.env.PATH = originalPath;
     for (const { id, pid } of liveRuns) {
@@ -167,7 +191,7 @@ describe("harness timing: launch", () => {
     it("restores a session timeout over the environment while explicit launch values still win", async () => {
         const previous = process.env.PI_SUBAGENT_MAX_MINUTES;
         process.env.PI_SUBAGENT_MAX_MINUTES = "5";
-        const h = makeHarness();
+        const h = await makeHarness({ manager: true });
         h.ctx.sessionManager.getBranch = () => [{
             type: "custom", customType: "pi-better-subagents-timing", data: { version: 1, maxMinutes: 90 },
         }];
@@ -181,14 +205,14 @@ describe("harness timing: launch", () => {
             assert.equal(readMeta(disabled.id).timing.ceilingAt, undefined);
             await reap(disabled);
         } finally {
-            h.shutdown();
+            await h.shutdown();
             if (previous === undefined) delete process.env.PI_SUBAGENT_MAX_MINUTES;
             else process.env.PI_SUBAGENT_MAX_MINUTES = previous;
         }
     });
 
     it("defaults to a 60-minute ceiling and stall detection and prepares explicit deadline support", async () => {
-        const h = makeHarness();
+        const h = await makeHarness({ manager: true });
         try {
             const run = await spawnRun(h, { deadline_minutes: null, grace_minutes: null, max_minutes: null, stuck_minutes: null });
             const meta = readMeta(run.id);
@@ -207,11 +231,11 @@ describe("harness timing: launch", () => {
             assert.match(log, /--extension \S*child-ownership\.ts/, "single clean launches carry ownership enforcement");
             assert.ok(log.includes(`"steerFile":"${steerPath(run.id)}"`), "the child learns where its steer requests appear");
             await reap(run);
-        } finally { h.shutdown(); }
+        } finally { await h.shutdown(); }
     });
 
     it("rejects an invalid timing value before anything launches", async () => {
-        const h = makeHarness();
+        const h = await makeHarness({ manager: true });
         try {
             await assert.rejects(
                 h.tools.get("subagent_spawn").execute("tc", { prompt: "x", clean: true, sandbox: false, deadline_minutes: -1 }, undefined, undefined, h.ctx),
@@ -221,11 +245,11 @@ describe("harness timing: launch", () => {
                 shared: { clean: true, sandbox: false, stuck_minutes: "soon" }, jobs: [{ prompt: "a" }],
             }, undefined, undefined, h.ctx).catch((error) => error);
             assert.match(String(batch?.message ?? batch?.content?.[0]?.text), /stuck_minutes must be a number of minutes/);
-        } finally { h.shutdown(); }
+        } finally { await h.shutdown(); }
     });
 
     it("batch jobs inherit shared timing and may override it per job", async () => {
-        const h = makeHarness();
+        const h = await makeHarness({ manager: true });
         try {
             const res = await h.tools.get("subagent_spawn_batch").execute("tc", {
                 shared: { clean: true, sandbox: false, tools: "read,bash", cwd: tmpdir(), deadline_minutes: 12, max_minutes: 0 },
@@ -244,7 +268,7 @@ describe("harness timing: launch", () => {
                 assert.ok(await waitFor(() => readFileSync(meta.logPath, "utf8").includes("child-ownership.ts")), "each batch launch carries ownership enforcement");
                 await reap({ id: meta.id, pid: meta.pid });
             }
-        } finally { h.shutdown(); }
+        } finally { await h.shutdown(); }
     });
 });
 
@@ -260,7 +284,7 @@ describe("shared supervision watcher", () => {
             writeFakePi(WAIT_SCRIPT);
             const intervals = mock.method(globalThis, "setInterval");
             const watcherStarts = () => intervals.mock.calls.filter((call) => call.arguments[1] === HEALTH_TICK_MS).length;
-            const h = makeHarness();
+            const h = await makeHarness({ manager: true });
             h.ctx.isIdle = () => true;
             const runs = [];
             try {
@@ -277,7 +301,7 @@ describe("shared supervision watcher", () => {
                 assert.equal(isHealthTickerActive(), false, "the final exit stops supervision without another tick");
                 assert.ok(readMeta(second.id).completionCallbackPendingAt, "callback delivery is independent of supervision");
                 assert.equal(await getCallbackBatcher(h.pi).flush(), true);
-                assert.ok(readMeta(second.id).completionCallbackSentAt);
+                assert.equal(readMeta(second.id).completionCallbackSentAt, undefined, "manager cannot deliver into the recipient transcript; real SDK receipt is covered by runtime-assignment-sdk");
                 await h.handlers.get("session_start")({}, h.ctx);
                 assert.equal(isHealthTickerActive(), false, "terminal history must not restart the watcher");
                 const later = await spawnRun(h);
@@ -287,7 +311,7 @@ describe("shared supervision watcher", () => {
                 assert.equal(isHealthTickerActive(), false, "stopping the last worker also stops supervision immediately");
             } finally {
                 for (const run of runs) await reap(run);
-                h.shutdown();
+                await h.shutdown();
                 intervals.mock.restore();
                 writeFakePi(IDLE_SCRIPT);
             }
@@ -298,7 +322,7 @@ describe("shared supervision watcher", () => {
         await withFakeClock(async () => {
             writeFakePi(WAIT_SCRIPT);
             const intervals = mock.method(globalThis, "setInterval");
-            const h = makeHarness();
+            const h = await makeHarness({ manager: true });
             const runs = [];
             try {
                 const first = await spawnRun(h, { callback: false });
@@ -327,7 +351,7 @@ describe("shared supervision watcher", () => {
                 assert.equal(isHealthTickerActive(), false, "a failed launch must not create a watcher");
             } finally {
                 for (const run of runs) await reap(run);
-                h.shutdown();
+                await h.shutdown();
                 intervals.mock.restore();
                 writeFakePi(IDLE_SCRIPT);
             }
@@ -338,7 +362,7 @@ describe("shared supervision watcher", () => {
 describe("harness timing: soft deadline", () => {
     it("steers the child once and wakes the parent once, then stops after grace with reason deadline", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0 });
                 await untilSteerRequested(run.id);
@@ -369,7 +393,8 @@ describe("harness timing: soft deadline", () => {
                 assert.ok(await waitFor(() => { try { process.kill(run.pid, 0); return false; } catch { return true; } }), "the child process is gone");
 
                 assert.equal(await getCallbackBatcher(h.pi).flush(), true);
-                const completion = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
+                const completion = await waitFor(() => { const delivered = h.sent.filter((entry) => entry.message.customType === "background-completion-batch"); return delivered.length ? delivered : undefined; });
+                assert.ok(completion, "native recipient eventually receives the terminal callback");
                 assert.equal(completion.length, 1);
                 assert.match(completion[0].message.content, /status=killed; stopped: deadline/);
                 const result = (await h.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text;
@@ -384,14 +409,14 @@ describe("harness timing: soft deadline", () => {
                 await tick();
                 assert.equal(wakes(h, "deadline").length, 1);
                 await reap(run);
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 
     it("a child that finishes inside grace is not killed and reports deadline: finished in grace", async () => {
         await withFakeClock(async () => {
             writeFakePi("#!/bin/sh\nsleep 0.4\necho '{\"type\":\"agent_end\"}'\nexit 0\n");
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0, noWaitForLaunch: true });
                 await sleep(80);
@@ -407,22 +432,24 @@ describe("harness timing: soft deadline", () => {
                 await tick();
                 assert.notEqual(readMeta(run.id).status, "killed", "a later tick does not stop a finished run");
                 assert.equal(await getCallbackBatcher(h.pi).flush(), true);
-                const completion = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
+                const completion = await waitFor(() => { const delivered = h.sent.filter((entry) => entry.message.customType === "background-completion-batch"); return delivered.length ? delivered : undefined; });
+                assert.ok(completion, "native recipient eventually receives the terminal callback");
                 assert.match(completion.at(-1).message.content, /deadline: finished in grace/);
+                await h.shutdown();
                 rmSync(runDir(run.id), { recursive: true, force: true });
             } finally {
                 writeFakePi(IDLE_SCRIPT);
-                h.shutdown();
+                await h.shutdown();
             }
         });
     });
 
     it("keeps the deadline and its one-shot markers across a reload", async () => {
         await withFakeClock(async () => {
-            const first = makeHarness();
+            const first = await makeHarness();
             const run = await spawnRun(first, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0 });
             // Reload: a fresh extension instance over the same durable registry.
-            const second = makeHarness();
+            const second = await makeHarness();
             try {
                 await second.handlers.get("session_start")({}, second.ctx);
                 const persisted = readMeta(run.id).timing;
@@ -434,13 +461,13 @@ describe("harness timing: soft deadline", () => {
                 assert.equal(wakes(second, "deadline").length, 1);
                 const steeredAt = readMeta(run.id).timing.steerRequestedAt;
 
-                const third = makeHarness();
+                const third = await makeHarness();
                 await third.handlers.get("session_start")({}, third.ctx);
                 await tick();
                 assert.equal(readMeta(run.id).timing.steerRequestedAt, steeredAt, "no second steer after another reload");
                 assert.equal(wakes(third, "deadline").length, 0, "no second deadline wake after another reload");
                 await reap(run);
-            } finally { second.shutdown(); first.shutdown(); }
+            } finally { await second.shutdown(); await first.shutdown(); }
         });
     });
 });
@@ -460,7 +487,7 @@ describe("harness timing: a steer queued behind a long tool call", () => {
     it("holds the deadline stop until the steer is delivered, then a child finishing inside grace is not killed", async () => {
         await withFakeClock(async () => {
             writeFakePi(WAIT_SCRIPT);
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0 });
                 appendEvents(run.id, longCallStart("long"));
@@ -485,19 +512,21 @@ describe("harness timing: a steer queued behind a long tool call", () => {
                 assert.equal(done.status, "completed");
                 assert.equal(done.timing.stopReason, undefined);
                 assert.equal(await getCallbackBatcher(h.pi).flush(), true);
-                const completion = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
+                const completion = await waitFor(() => { const delivered = h.sent.filter((entry) => entry.message.customType === "background-completion-batch"); return delivered.length ? delivered : undefined; });
+                assert.ok(completion, "native recipient eventually receives the terminal callback");
                 assert.match(completion.at(-1).message.content, /status=completed; deadline: finished in grace/);
+                await h.shutdown();
                 rmSync(runDir(run.id), { recursive: true, force: true });
             } finally {
                 writeFakePi(IDLE_SCRIPT);
-                h.shutdown();
+                await h.shutdown();
             }
         });
     });
 
     it("a tool call that never ends is bounded by the ceiling", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 10, stuck_minutes: 0 });
                 appendEvents(run.id, longCallStart("hang"));
@@ -512,7 +541,7 @@ describe("harness timing: a steer queued behind a long tool call", () => {
                 assert.equal(meta.status, "killed");
                 assert.equal(meta.timing.stopReason, "ceiling");
                 await reap(run);
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 });
@@ -520,7 +549,7 @@ describe("harness timing: a steer queued behind a long tool call", () => {
 describe("harness timing: ceiling", () => {
     it("stops at the hard ceiling without grace and reports reason ceiling", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const run = await spawnRun(h, { deadline_minutes: 0, max_minutes: 0.001, stuck_minutes: 0 });
                 await sleep(80);
@@ -530,12 +559,13 @@ describe("harness timing: ceiling", () => {
                 assert.equal(meta.timing.stopReason, "ceiling");
                 assert.equal(existsSync(steerPath(run.id)), false, "a ceiling stop does not steer");
                 assert.equal(await getCallbackBatcher(h.pi).flush(), true);
-                const completion = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
+                const completion = await waitFor(() => { const delivered = h.sent.filter((entry) => entry.message.customType === "background-completion-batch"); return delivered.length ? delivered : undefined; });
+                assert.ok(completion, "native recipient eventually receives the terminal callback");
                 assert.match(completion.at(-1).message.content, /stopped: ceiling/);
                 const result = (await h.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text;
                 assert.match(result, /Timing: stopped: ceiling/);
                 await reap(run);
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 });
@@ -543,7 +573,7 @@ describe("harness timing: ceiling", () => {
 describe("harness timing: orphaned runs and memory", () => {
     it("the ceiling also stops an orphaned run whose process group is still alive", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const run = await spawnRun(h, { deadline_minutes: 0, max_minutes: 0.001, stuck_minutes: 0 });
                 const meta = readMeta(run.id);
@@ -558,13 +588,13 @@ describe("harness timing: orphaned runs and memory", () => {
                 assert.equal(after.timing.stopReason, "ceiling");
                 assert.ok(await waitFor(() => { try { process.kill(run.pid, 0); return false; } catch { return true; } }), "the group is gone");
                 await reap(run);
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 
     it("releases a run's progress state once it is no longer live, whatever ended it", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const run = await spawnRun(h, { deadline_minutes: 0, max_minutes: 0, stuck_minutes: 5 });
                 await tick();
@@ -577,7 +607,7 @@ describe("harness timing: orphaned runs and memory", () => {
                 await tick();
                 assert.equal(progressCacheIdsForTests().includes(run.id), false, "released after reconcile marks it lost");
                 await reap(run);
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 });
@@ -585,7 +615,7 @@ describe("harness timing: orphaned runs and memory", () => {
 describe("harness timing: stuck wake", () => {
     it("wakes the parent once for a child with no progress, and never for a progressing child", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const idle = await spawnRun(h, { name: "idle", deadline_minutes: 0, max_minutes: 0, stuck_minutes: 0.002 });
                 const busy = await spawnRun(h, { name: "busy", deadline_minutes: 0, max_minutes: 0, stuck_minutes: 0.002 });
@@ -611,13 +641,13 @@ describe("harness timing: stuck wake", () => {
                 assert.match(output, /Timing: stuck/);
                 await reap(idle);
                 await reap(busy);
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 
     it("a read-only research child making distinct successful calls is never stuck; one looping the same read is", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const research = await spawnRun(h, { name: "research", deadline_minutes: 0, max_minutes: 0, stuck_minutes: 0.005 });
                 const looping = await spawnRun(h, { name: "looping", deadline_minutes: 0, max_minutes: 0, stuck_minutes: 0.005 });
@@ -643,13 +673,13 @@ describe("harness timing: stuck wake", () => {
                 assert.equal(stuck.filter((w) => w.message.content.includes(research.id)).length, 0, "distinct reads are progress");
                 await reap(research);
                 await reap(looping);
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 
     it("does not count time inside a running tool call, and re-arms after new progress", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const run = await spawnRun(h, { deadline_minutes: 0, max_minutes: 0, stuck_minutes: 0.002 });
                 appendEvents(run.id, [
@@ -668,9 +698,11 @@ describe("harness timing: stuck wake", () => {
                 assert.equal(wakes(h, "stuck").length, 1);
                 await tick();
                 assert.equal(wakes(h, "stuck").length, 1, "once per stuck spell");
+                const previousStuckAnchor = readMeta(run.id).timing.stuckAnchorAt;
                 appendEvents(run.id, editEvents("fix"));
                 await tick();
-                assert.equal(readMeta(run.id).timing.lastProgressAt > readMeta(run.id).timing.stuckAnchorAt, true);
+                assert.equal(readMeta(run.id).timing.lastProgressAt > previousStuckAnchor, true,
+                    "the edit advances progress beyond the previous stuck spell");
                 const result = (await h.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text;
                 assert.doesNotMatch(result, /Timing: stuck/, "progress clears the stuck reason");
                 await sleep(160);
@@ -678,7 +710,7 @@ describe("harness timing: stuck wake", () => {
                 await waitFor(() => wakes(h, "stuck").length === 2);
                 assert.equal(wakes(h, "stuck").length, 2, "a new stuck spell after progress wakes again");
                 await reap(run);
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 });
@@ -694,13 +726,13 @@ describe("harness timing: tool wait", () => {
 
     it("wakes once per open call with facts, never stops the run, and lets the next call alert independently", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const run = await spawnRun(h, { name: "builder", deadline_minutes: 0, max_minutes: 0, tool_wait_minutes: 0.002, stuck_minutes: 0 });
                 appendEvents(run.id, startCall("long-test"));
                 await sleep(200);
                 await tick();
-                await waitFor(() => wakes(h, "tool-wait").length === 1);
+                await waitForToolWakes(h, run.id, 1);
                 const first = wakes(h, "tool-wait");
                 assert.equal(first.length, 1, "a long normal tool call still alerts once");
                 assert.match(first[0].message.content, new RegExp(run.id));
@@ -712,7 +744,9 @@ describe("harness timing: tool wait", () => {
                 assert.doesNotMatch(first[0].message.content, /before deciding|no action is needed|Inspect it with/i);
                 const meta = readMeta(run.id);
                 assert.equal(meta.status, "running", "the alert does not stop or cancel the run");
-                assert.deepEqual(meta.timing.toolWaitAlerted, ["long-test"]);
+                await waitFor(() => timingWakeReceipt(run.id, "tool-wait:long-test"));
+                await tick();
+                assert.deepEqual(readMeta(run.id).timing.toolWaitAlerted, ["long-test"]);
                 process.kill(run.pid, 0);
                 await tick();
                 assert.equal(wakes(h, "tool-wait").length, 1, "one alert while the same call stays open");
@@ -723,41 +757,43 @@ describe("harness timing: tool wait", () => {
                 appendEvents(run.id, startCall("second-test", "npm run lint"));
                 await sleep(200);
                 await tick();
-                await waitFor(() => wakes(h, "tool-wait").length === 2);
+                await waitForToolWakes(h, run.id, 2);
                 const second = wakes(h, "tool-wait");
                 assert.equal(second.length, 2, "the next call alerts independently");
                 assert.match(second[1].message.content, /second-test/);
                 assert.match(second[1].message.content, /npm run lint/);
                 assert.match(second[1].message.content, new RegExp(run.id));
                 await reap(run);
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 
     it("alerts parallel calls independently and does not repeat either after reload", async () => {
         await withFakeClock(async () => {
-            const first = makeHarness();
+            const first = await makeHarness();
             const run = await spawnRun(first, { name: "parallel", deadline_minutes: 0, max_minutes: 0, tool_wait_minutes: 0.002, stuck_minutes: 0 });
             let second;
             try {
                 appendEvents(run.id, [...startCall("call-a", "build"), ...startCall("call-b", "test").slice(1)]);
                 await sleep(200);
                 await tick();
-                await waitFor(() => wakes(first, "tool-wait").length === 2);
+                await waitForToolWakes(first, run.id, 2);
                 assert.equal(wakes(first, "tool-wait").length, 2, "each parallel call gets its own alert");
+                await waitFor(() => timingWakeReceipt(run.id, "tool-wait:call-a") && timingWakeReceipt(run.id, "tool-wait:call-b"));
+                await tick();
                 assert.deepEqual(new Set(readMeta(run.id).timing.toolWaitAlerted), new Set(["call-a", "call-b"]));
                 assert.deepEqual(readMeta(run.id).timing.openCalls.map((call) => call.id), ["call-a", "call-b"]);
 
                 forgetProgressCacheForTests();
-                second = makeHarness();
+                second = await makeHarness();
                 await second.handlers.get("session_start")({}, second.ctx);
                 await tick();
                 assert.equal(wakes(second, "tool-wait").length, 0, "a reload does not repeat a handed-off wait alert");
                 assert.equal(readMeta(run.id).status, "running");
                 await reap(run);
             } finally {
-                second?.shutdown();
-                first.shutdown();
+                await second?.shutdown();
+                await first.shutdown();
             }
         });
     });
@@ -765,7 +801,7 @@ describe("harness timing: tool wait", () => {
     it("retries a failed send on the next tick instead of marking the call alerted", async () => {
         await withFakeClock(async () => {
             let fail = true;
-            const h = makeHarness({ failSend: () => fail });
+            const h = await makeHarness({ failSend: () => fail });
             try {
                 const run = await spawnRun(h, { deadline_minutes: 0, max_minutes: 0, tool_wait_minutes: 0.002, stuck_minutes: 0 });
                 appendEvents(run.id, startCall("retry-call", "slow test"));
@@ -775,30 +811,33 @@ describe("harness timing: tool wait", () => {
                 assert.equal(readMeta(run.id).timing.toolWaitAlerted, undefined, "a failed handoff leaves the marker unset");
                 fail = false;
                 await tick();
-                await waitFor(() => wakes(h, "tool-wait").length === 1);
+                await waitForToolWakes(h, run.id, 1);
                 assert.equal(wakes(h, "tool-wait").length, 1, "the existing urgent callback path retries");
+                await waitFor(() => timingWakeReceipt(run.id, "tool-wait:retry-call"));
+                await tick();
                 assert.deepEqual(readMeta(run.id).timing.toolWaitAlerted, ["retry-call"]);
                 await reap(run);
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 
     it("keeps callback:false quiet while still marking the call and showing the human notify", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const run = await spawnRun(h, { callback: false, deadline_minutes: 0, max_minutes: 0, tool_wait_minutes: 0.002, stuck_minutes: 0 });
                 appendEvents(run.id, startCall("quiet-call", "quiet test"));
                 await sleep(200);
                 await tick();
-                await waitFor(() => readMeta(run.id).timing.toolWaitAlerted?.includes("quiet-call"));
+                await waitFor(() => timingWakeReceipt(run.id, "tool-wait:quiet-call"));
+                await tick();
                 assert.equal(wakes(h, "tool-wait").length, 0, "callback:false suppresses the model message");
                 assert.match(h.notes.at(-1).msg, /tool wait/i, "the human notify remains");
                 assert.deepEqual(readMeta(run.id).timing.toolWaitAlerted, ["quiet-call"]);
                 await tick();
                 assert.equal(wakes(h, "tool-wait").length, 0, "the marked call does not retry");
                 await reap(run);
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 });
@@ -812,7 +851,7 @@ describe("harness timing: a reload whose bounded log read lost the running call 
 
     it("still treats the silent command as waiting, not stuck, and resumes detection once it ends", async () => {
         await withFakeClock(async () => {
-            const first = makeHarness();
+            const first = await makeHarness();
             const run = await spawnRun(first, { deadline_minutes: 0, max_minutes: 0, stuck_minutes: 0.002 });
             let second;
             try {
@@ -821,7 +860,7 @@ describe("harness timing: a reload whose bounded log read lost the running call 
                 assert.equal(readMeta(run.id).timing.inFlight?.id, "long-build", "the parent records the running call durably");
                 appendFileSync(join(runDir(run.id), "output.log"), LOST_WINDOW);
                 forgetProgressCacheForTests();
-                second = makeHarness();
+                second = await makeHarness();
                 await second.handlers.get("session_start")({}, second.ctx);
                 await sleep(200);
                 await tick();
@@ -836,16 +875,16 @@ describe("harness timing: a reload whose bounded log read lost the running call 
                 await waitFor(() => wakes(second, "stuck").length === 1);
                 assert.equal(wakes(second, "stuck").length, 1, "a full window of real silence after the call still wakes the parent");
             } finally {
-                second?.shutdown();
+                await second?.shutdown();
                 await reap(run);
-                first.shutdown();
+                await first.shutdown();
             }
         });
     });
 
     it("keeps the deadline hold for a running call whose start the rebuilt log window lost", async () => {
         await withFakeClock(async () => {
-            const first = makeHarness();
+            const first = await makeHarness();
             const run = await spawnRun(first, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0 });
             let second;
             try {
@@ -856,7 +895,7 @@ describe("harness timing: a reload whose bounded log read lost the running call 
                 rewindTiming(run.id, (timing) => ({ steerRequestedAt: timing.steerRequestedAt - 11 * MINUTE }));
                 appendFileSync(join(runDir(run.id), "output.log"), LOST_WINDOW);
                 forgetProgressCacheForTests();
-                second = makeHarness();
+                second = await makeHarness();
                 await second.handlers.get("session_start")({}, second.ctx);
                 await tick();
                 const meta = readMeta(run.id);
@@ -865,10 +904,36 @@ describe("harness timing: a reload whose bounded log read lost the running call 
                 const result = (await second.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, second.ctx)).content[0].text;
                 assert.match(result, /once the message reaches it/);
             } finally {
-                second?.shutdown();
+                await second?.shutdown();
                 await reap(run);
-                first.shutdown();
+                await first.shutdown();
             }
+        });
+    });
+});
+
+describe("managed timing notification ownership", () => {
+    it("enforces the child deadline while retaining an undelivered recipient wake", async () => {
+        await withFakeClock(async () => {
+            const h = await makeHarness({ manager: true });
+            let run;
+            try {
+                run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0 });
+                await untilSteerRequested(run.id);
+                await waitFor(() => existsSync(steerPath(run.id)));
+                const meta = readMeta(run.id);
+                assert.equal(meta.timing.pendingWakes.filter(wake => wake.kind === "deadline").length, 1);
+                assert.equal(meta.timing.deadlineWakeSentAt, undefined);
+                assert.equal(h.sent.length, 0, "runtime manager cannot address a recipient transcript");
+                await tick();
+                assert.equal(readMeta(run.id).timing.pendingWakes.length, 1, "repeated enforcement retains one intent");
+                const { receiptTimingWake, timingWakeReceipt } = await import("../timing-notifications.ts");
+                receiptTimingWake(run.id, "deadline", Date.now());
+                await tick();
+                assert.ok(readMeta(run.id).timing.deadlineWakeSentAt);
+                assert.equal(readMeta(run.id).timing.pendingWakes.length, 0);
+                assert.equal(timingWakeReceipt(run.id, "deadline"), undefined, "folded receipts do not accumulate");
+            } finally { if (run) await reap(run); await h.shutdown(); }
         });
     });
 });

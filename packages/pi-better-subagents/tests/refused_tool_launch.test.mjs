@@ -209,7 +209,7 @@ function loadExtension(policy) {
         on: () => {},
         sendMessage: () => {},
     };
-    mod.default(pi);
+    mod.default(pi, domainPort());
     return { tools, pi };
 }
 
@@ -251,7 +251,7 @@ async function waitForTerminal(id, { attempts = 200, delayMs = 25 } = {}) {
     return undefined;
 }
 
-let mod;
+let mod, domainPort;
 let workspace;
 let restorePath;
 
@@ -259,6 +259,7 @@ before(async () => {
     const sdkRoot = setupStubs();
     restorePath = pinPiBinaryOnPath(sdkRoot);
     mod = await import("../index.ts");
+    ({ managedDomainPort: domainPort } = await import("./managed-domain-port.mjs"));
     workspace = join(RUNTIME, "workspace");
     mkdirSync(workspace, { recursive: true });
 });

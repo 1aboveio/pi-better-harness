@@ -505,11 +505,13 @@ test("watch overflow and lost notifications reconcile external writes once and r
     await model.reconcile();
     assert.equal(model.metrics.metadataReads, reads);
     assert.equal(model.metrics.projections, projections);
-    const watchers = (model as unknown as { watchers: import("node:fs").FSWatcher[] }).watchers;
-    assert.ok(watchers.length > 0);
-    watchers[0]!.emit("error", new Error("injected kernel watcher overflow"));
+    const watchers = (model as unknown as { watchers: Map<string, import("node:fs").FSWatcher> }).watchers;
+    assert.ok(watchers.size > 0);
+    watchers.values().next().value!.emit("error", new Error("injected kernel watcher overflow"));
     assert.equal(model.snapshot().status, "degraded", "the production watcher error callback exposes unknown freshness");
     await model.reconcile();
+    // Reconciliation may replace the failed watcher; close the current map,
+    // not a snapshot of the pre-overflow handles. Recovery must use the poll.
     watchers.forEach(watcher => watcher.close());
     let cancelRecovery = () => {};
     const recovered = new Promise<void>((resolve, reject) => {
@@ -577,4 +579,55 @@ test("a paused real socket has bounded queued snapshots and receives explicit re
     await new Promise<void>(resolve => server.close(() => resolve()));
     await model.close(); rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
   }
+});
+
+test("pending recipient query retains old terminal obligations with scoped bounded pages", async () => {
+  const root = fixtureRoot("pending-recipient");
+  const runs = join(root, "runs"); mkdirSync(runs);
+  for (let i = 0; i < 205; i++) {
+    const id = `sa_owed_${i}`; mkdirSync(join(runs, id));
+    writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, sessionId: id, cwd: root,
+      callbackOrigin: { cwd: root, sessionId: i === 204 ? "foreign" : "parent" }, status: "completed",
+      startedAt: i, endedAt: 1, callback: true, completionCallbackPendingAt: 1,
+      ...(i === 203 ? { completionCallbackSentAt: 2 } : {}) }));
+  }
+  const model = new WorkReadModel(root, "pending-instance", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    assert.equal(model.snapshot({ cwd: root, sessionId: "parent", active: false, endedAfter: Date.now() - 30000 }).rows.length, 0);
+    const scope = { cwd: root, sessionId: "parent", pendingRecipient: true, limit: 200 };
+    const before = { ...model.metrics };
+    const first = model.snapshot(scope);
+    assert.equal(first.totalMatching, 203); assert.equal(first.rows.length, 200); assert.ok(first.nextCursor);
+    const second = model.snapshot({ ...scope, cursor: first.nextCursor });
+    assert.equal(second.rows.length, 3); assert.equal(second.nextCursor, undefined);
+    assert.equal(new Set([...first.rows, ...second.rows].map(row => row.meta.id)).size, 203);
+    assert.throws(() => model.snapshot({ pendingRecipient: true }), /exact conversation/);
+    for (let i = 0; i < 10; i++) model.snapshot(scope);
+    assert.equal(model.metrics.metadataReads, before.metadataReads);
+    assert.equal(model.metrics.projections, before.projections);
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("old handled terminal records re-enter pending scope for new failure journal attention", async () => {
+  const root = fixtureRoot("pending-failure");
+  const id = "sa_old_lost", directory = join(root, "runs", id); mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "meta.json"), JSON.stringify({ id, sessionId: id, cwd: root,
+    callbackOrigin: { cwd: root, sessionId: "parent" }, status: "lost", startedAt: 1, endedAt: 2,
+    lostCallbackSentAt: 3, completionCallbackSentAt: 3, callback: true }));
+  const model = new WorkReadModel(root, "failure-instance", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  const scope = { cwd: root, sessionId: "parent", pendingRecipient: true };
+  const record = { observedAt: 4, event: { id: "late-gap", operation: "child-log", kind: "incomplete", summary: "Late observation gap" } };
+  try {
+    await model.reconcile(); assert.equal(model.snapshot(scope).rows.length, 0);
+    writeFileSync(join(directory, "failures.jsonl"), JSON.stringify(record) + "\n");
+    await model.reconcile();
+    assert.equal(model.snapshot(scope).rows[0]?.meta.id, id);
+    const counters = { ...model.metrics };
+    for (let i = 0; i < 10; i++) assert.equal(model.snapshot(scope).rows.length, 1);
+    assert.equal(model.metrics.projections, counters.projections);
+    writeFileSync(join(directory, "failures.jsonl"), JSON.stringify(record) + "\n" + JSON.stringify({ observedAt: 5, event: { id: "receipt", operation: "attention-delivery", kind: "delivered", incidents: ["late-gap"] } }) + "\n");
+    await model.reconcile(); assert.equal(model.snapshot(scope).rows.length, 0);
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
