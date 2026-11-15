@@ -83,7 +83,7 @@ test("an exact-ID query returns rebuilding without blocking all reads on the ini
     const client = await f.client();
     await blocked;
     const [exact, other] = await Promise.all([
-      client.get({ id: "sa_initial_inventory", limit: 1 }),
+      client.request("runtime_get_snapshot", { scope: { id: "sa_initial_inventory", limit: 1 } }),
       client.get({ limit: 2 }),
     ]);
     assert.equal(exact.status, "rebuilding");
@@ -93,6 +93,40 @@ test("an exact-ID query returns rebuilding without blocking all reads on the ini
     f.worker.postMessage({ type: "release-inventory" });
     await ready(client);
     assert.equal((await client.get({ id: "sa_initial_inventory", limit: 1 })).status, "ready");
+  } finally { await f.close(); }
+});
+
+test("an exact-ID client waits for indexing without occupying the shared read queue", { timeout: 10000 }, async () => {
+  const f = await fixture({ timeoutMs: 500, workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
+  let release: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const blocked = new Promise<void>(resolve => {
+      f.worker.on("message", message => { if (message.type === "inventory-blocked") resolve(); });
+    });
+    const directory = join(f.root, "runs/sa_client_retry"); mkdirSync(directory);
+    writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_client_retry", sessionId: "retry", cwd: f.root,
+      status: "completed", startedAt: 1 }));
+    const client = await f.client(); await blocked;
+    release = setTimeout(() => f.worker.postMessage({ type: "release-inventory" }), 250);
+    const pending = client.get({ id: "sa_client_retry", limit: 1 });
+    assert.equal((await client.get({ limit: 2 })).status, "rebuilding");
+    const result = await pending;
+    assert.equal(result.status, "ready");
+    assert.equal(result.rows[0]!.meta.id, "sa_client_retry");
+    assert.equal(f.executor.metrics().executor.timeouts, 0);
+  } finally { if (release) clearTimeout(release); await f.close(); }
+});
+
+test("an exact-ID client stops retrying a stalled inventory within its retry budget", { timeout: 10000 }, async () => {
+  const f = await fixture({ timeoutMs: 500, workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
+  try {
+    const client = await f.client();
+    const began = performance.now();
+    assert.equal((await client.get({ id: "sa_pending", limit: 1 })).status, "rebuilding");
+    assert.ok(performance.now() - began < 5000);
+    assert.equal(f.executor.metrics().executor.timeouts, 0);
+    assert.equal(f.executor.metrics().executor.active, 0);
+    assert.equal(f.executor.metrics().executor.worker, "running");
   } finally { await f.close(); }
 });
 
