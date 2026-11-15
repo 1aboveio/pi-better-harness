@@ -11,7 +11,7 @@ import { connect } from "node:net";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { processMatchesStart } from "../src/daemon-owner.ts";
 
-for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", "spawn", "result", "bootstrap", "published", "lease", "tools"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: 60000 }, async () => {
+for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", "spawn", "result", "bootstrap", "published", "lease", "tools"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: scenario === "unavailable" ? 90000 : 60000 }, async () => {
   const restart = scenario === "park";
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, "launch-")), transport = realpathSync(mkdtempSync("/tmp/p761-"));
@@ -24,7 +24,6 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
   toolPolicy.subagentTools = { applyPatch: true, trusted: [{ name: "unused_tool", package: "npm:fixture" }] };
   const env = { ...process.env,
     ...(scenario === "tools" ? { LAUNCH_POLICY: JSON.stringify({ state: "disabled", permissions: toolPolicy.main, subagentPermissions: toolPolicy.subagents, subagentTools: toolPolicy.subagentTools }) } : {}), PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root,
-    ...(scenario === "unavailable" ? { TEST_DAEMON_IDLE_MS: "5000" } : {}),
     LAUNCH_BACKGROUND: scenario === "standalone" ? "0" : "1", LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: entered, LAUNCH_RELEASE: release,
     ...(scenario === "bootstrap" ? { CONTINUATION_BOOTSTRAP_GATE: join(cwd, "resume-release") } : {}),
     ...(["claim", "spawn", "result", "published", "lease"].includes(scenario) ? { CONTINUATION_CRASH_POINT: scenario, CONTINUATION_CRASH_MARKER: join(cwd, "crashed") } : {}) };
@@ -35,6 +34,7 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
   let sibling: ReturnType<typeof fork> | undefined;
   const attempts: string[] = [];
   let bootstrapProof: Record<string, unknown> | undefined;
+  let initialInstance: string | undefined;
   const metaFor = (id: string) => JSON.parse(readFileSync(join(root, "pi-better-subagents/runs", id, "meta.json"), "utf8"));
   const terminal = async (id: string) => {
     // Recovered children have no exit listener; the current health pass is 15 s.
@@ -53,6 +53,13 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
   try {
     await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
     writeFileSync(join(agent, "server-registration-v1.json"), JSON.stringify({ version: 1, agentDir: agent, serverDir: transport }));
+    if (scenario === "unavailable") {
+      // Exercise the fixed-artifact successor deterministically. A source fixture
+      // clock cannot control the runtime installed by the real SDK parent.
+      const probe = new WorkClient(connect(join(transport, "pi-server.sock")), agent);
+      try { initialInstance = (await probe.ready).instanceId; } finally { probe.close(); }
+      const stopped = once(daemon, "exit"); daemon.send("stop"); await stopped;
+    }
     parent = fork(new URL("./support/subagent-launch-sdk.mjs", import.meta.url), [], { execPath: process.execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
     parent.stderr!.on("data", data => { errors += data; });
     const [ready] = await Promise.race([once(parent, "message"), once(parent, "exit").then(() => { throw new Error(errors); })]);
@@ -95,7 +102,10 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
       let observedInstance: string;
       try {
         // Complete hello/retention registration before closing this observer.
-        observedInstance = (await observer.ready).instanceId;
+        const hello = await observer.ready;
+        observedInstance = hello.instanceId;
+        assert.notEqual(observedInstance, initialInstance, "SDK starts the fixed-artifact successor");
+        assert.equal(hello.build?.format, 1, "successor reports its installed artifact identity");
         const deadline = Date.now() + 10000;
         let state: any;
         do {
@@ -135,17 +145,31 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
         const detachedBy = Date.now() + 10000;
         do {
           lastStatus = await diagnostic.request("runtime_get_status");
+          assert.equal(lastStatus.instanceId, observedInstance);
+          assert.equal(lastStatus.lifecycle.runtimeIdleMs, 30000, "exercise the actual default managed-runtime idle policy");
           if (!lastStatus.livenessReasons.some((reason: any) => reason.kind === "connection")) break;
           assert.ok(Date.now() < detachedBy, `Runtime clients did not detach: ${JSON.stringify(lastStatus)}`); await delay(25);
         } while (true);
-        const idleDeadline = Date.now() + 15000;
+        assert.deepEqual(lastStatus.livenessReasons, [], "terminal unavailable work grants no runtime liveness");
+        // Measure the current successor's real 30-second idle + five-second
+        // shutdown contract. Never advance the preceding fixture daemon's clock.
+        const idleStarted = Date.now(), idleDeadline = idleStarted + 35000;
+        if (lastStatus.nextIdleDeadline !== null) assert.ok(lastStatus.nextIdleDeadline <= idleStarted + 30000);
         while (existsSync(join(transport, "pi-server.sock"))) {
-          const swept = once(daemon, "message"); daemon.send("advance-idle"); await swept;
-          if (!existsSync(join(transport, "pi-server.sock"))) break;
-          try { lastStatus = await diagnostic.request("runtime_get_status"); } catch { /* idle close may race the diagnostic read */ }
           assert.ok(Date.now() < idleDeadline, `Unavailable wait kept runtime management active: ${JSON.stringify(lastStatus)}`);
-          await delay(25);
+          await delay(50);
+          if (!existsSync(join(transport, "pi-server.sock"))) break;
+          try {
+            lastStatus = await diagnostic.request("runtime_get_status");
+            assert.equal(lastStatus.instanceId, observedInstance, "idle observation stays on the accepted successor");
+            assert.deepEqual(lastStatus.livenessReasons, []);
+          } catch (error) {
+            if (existsSync(join(transport, "pi-server.sock")) && !diagnostic.closed) throw error;
+            // The real shutdown can close the diagnostic before unlinking socket.
+          }
         }
+        console.log(JSON.stringify({ unavailableIdle: { instanceId: observedInstance, initialInstance,
+          runtimeIdleMs: 30000, shutdownBudgetMs: 5000, elapsedMs: Date.now() - idleStarted } }));
       } finally { diagnostic.close(); }
       assert.equal(existsSync(`${entered}.continued`), false);
       return;
