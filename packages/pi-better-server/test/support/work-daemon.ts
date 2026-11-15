@@ -1,3 +1,4 @@
+import { existsSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 
 const sqlite = createRequire(import.meta.url)("node:sqlite");
@@ -5,8 +6,28 @@ const OriginalDatabase = sqlite.DatabaseSync;
 const metrics = { opens: 0, active: 0, maximum: 0 };
 sqlite.DatabaseSync = class extends OriginalDatabase {
   private counted = true;
+  private crashAfterCommit = false;
   constructor(...args: any[]) {
     super(...args); metrics.opens++; metrics.active++; metrics.maximum = Math.max(metrics.maximum, metrics.active);
+  }
+  prepare(sql: string) {
+    const statement = super.prepare(sql);
+    const run = statement.run.bind(statement);
+    statement.run = (...args: any[]) => {
+      const result = run(...args);
+      if (process.env.CONTINUATION_CRASH_POINT === "claim" && /INSERT INTO resume_claims/.test(sql)) this.crashAfterCommit = true;
+      return result;
+    };
+    return statement;
+  }
+  exec(sql: string) {
+    const result = super.exec(sql);
+    const marker = process.env.CONTINUATION_CRASH_MARKER;
+    if (this.crashAfterCommit && /^COMMIT/i.test(sql.trim()) && marker && !existsSync(marker)) {
+      writeFileSync(marker, "claim committed");
+      process.kill(process.pid, "SIGKILL");
+    }
+    return result;
   }
   close() {
     super.close();
