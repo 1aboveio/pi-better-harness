@@ -83,3 +83,11 @@ Server typecheck and all 17 executor/lifecycle tests pass, including a deliberat
 Full Background suite: 564 passed, four skipped. The first full Subagents run exposed a duplicate fixture import and old fixtures that attempted packaged runtime installation instead of starting the real test daemon. Migrated those fixtures; UI assertions capture the visible frame before disconnect. The full rerun passes 1,405 tests with seven skips and zero failures, including the previously unloadable batch suite.
 
 macOS CI on c4738fb3 failed with a four-second read deadline during the 10,000-history scenario. Diagnostic refresh still joined full reconciliation even though the socket response itself no longer waited. Added a separate worker observation command that reads the current index without starting or awaiting inventory. Fresh lifecycle checks retain the existing reconcile command. All five executor tests pass, including an explicit no-new-inventory assertion. Cross-platform resource CI must revalidate this correction; the original macOS CI failure is not treated as resolved solely by local tests.
+
+## Cross-platform integration verification
+
+CI run [43738263075](https://github.com/1aboveio/pi-better-harness/actions/runs/43738263075) passed on b0e05b41: all Server shards, workspace checks, Pi compatibility, Linux/macOS resource scenarios, platform sandboxes and Windows verification. This validates the diagnostic-refresh correction against the previously failing macOS workload.
+
+A fresh local resource run completed all six scenarios with zero unchanged metadata reads and projections; raw evidence is in `shared-read-diagnostic-fixed-macos.json`. The harness now preserves the last phase and metrics in a partial report on failure. Startup recovery failure also has a regression proving mutation leases, the global port and exact daemon ownership are released before restart.
+
+This establishes the integrated Catalog/Background/cancellation baseline. Server-managed launch, continuation, precise delivery, pinned upgrades and aggregate guardian/mutation performance remain outstanding.

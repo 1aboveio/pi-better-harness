@@ -45,8 +45,11 @@ function distribution(values) {
 }
 const report = { platform: process.platform, arch: process.arch, node: process.version,
   sdk: sdkVersion, scope: 'Real Pi RPC processes with standalone Subagents, control RPC at 10 Hz, seeded read-only work records; no guardian in slice #753.', scenarios: [] };
+const output = process.env.PI_SHARED_READ_REPORT ?? join(tmpdir(), 'pi-shared-read-resources.json');
+const phase = (step, history, clients = 0) => { report.phase = { step, history, clients }; };
 try {
   for (const history of [4416, 10000]) {
+    phase('seed-history', history);
     const root = realpathSync(mkdtempSync('/tmp/p751-res-'));
     const agent = join(root, 'agent'), transport = join(root, 's'), runs = join(root, 'pi-better-subagents/runs');
     const durable = join(agent, 'subagents'), archives = join(durable, 'attempts');
@@ -67,23 +70,28 @@ try {
         pid: work.pid, spawnPid: process.pid, startedAt: Date.now(), sessionId: id, callback: false, name: `resource-work-${i}` }));
     }
     const server = track(fork(new URL('./measure-shared-reads/daemon.mjs', import.meta.url), [], { env, execArgv: [], stdio: ['ignore','ignore','inherit','ipc'] }));
+    phase('start-server', history);
     const ready = await waitMessage(server, m => m.type === 'ready');
     const control = new WorkClient(ready.socket, agent); await control.ready;
     const pis = [];
     const rebuildLatencies = [];
     const rebuildStarted = performance.now();
+    phase('initial-snapshot', history);
     const initial = control.get({ cwd: root, active: true });
     let indexed = await initial;
     while (indexed.status !== 'ready') {
+      phase('rebuild-status', history);
       assert.ok(performance.now() - rebuildStarted < 30000, `Rebuild did not recover: ${indexed.reason}`);
       const began = performance.now(); await control.request('runtime_get_status'); rebuildLatencies.push(performance.now() - began);
-      await delay(20); indexed = await control.get({ cwd: root, active: true });
+      await delay(20); phase('rebuild-snapshot', history); indexed = await control.get({ cwd: root, active: true });
     }
     const rebuildMs = performance.now() - rebuildStarted;
     assert.ok(rebuildLatencies.every(ms => ms < 250), 'status RPC must respond within 250 ms during index rebuild');
     assert.equal(indexed.activity.active, 2);
+    phase('history-count', history);
     assert.equal((await control.get({ cwd: root, active: false, limit: 1 })).totalMatching, history);
     for (const count of [1, 5, 10]) {
+      phase('start-pi-clients', history, count);
       while (pis.length < count) {
         const pi = track(fork(sdkCli, ['--mode','rpc','--offline','--no-session','--no-extensions',
           '--extension',join(workspace,'packages/pi-better-subagents/index.ts'),
@@ -104,9 +112,12 @@ try {
         });
         await pi.rpc(); pis.push(pi);
       }
+      phase('warmup', history, count);
       await delay(1200);
       await control.get({ cwd: root, active: true });
       const before = await control.request('runtime_get_metrics');
+      report.lastMetrics = before;
+      phase('measurement-window', history, count);
       const subjects = [...pis, server, work];
       const start = await Promise.all(subjects.map(sample));
       const began = performance.now(), latencies = [];
@@ -117,8 +128,10 @@ try {
       }
       const elapsedMs = performance.now() - began;
       const end = await Promise.all(subjects.map(sample));
+      phase('post-window-snapshot', history, count);
       await control.get({ cwd: root, active: true });
       const after = await control.request('runtime_get_metrics');
+      report.lastMetrics = after;
       assert.equal(after.metadataReads, before.metadataReads, 'unchanged history must not be reread for more Pi clients');
       assert.equal(after.projections, before.projections, 'unchanged work must not be reprojected for more Pi clients');
       assert.ok(after.inventories - before.inventories <= Math.ceil(elapsedMs / 1000) + 2,
@@ -140,7 +153,13 @@ try {
     await Promise.all(pis.map(pi => stop(pi))); control.close(); await stop(server, true); await stop(work);
     rmSync(root, { recursive: true, force: true });
   }
-  const output = process.env.PI_SHARED_READ_REPORT ?? join(tmpdir(), 'pi-shared-read-resources.json');
-  writeFileSync(output, JSON.stringify(report, null, 2) + '\n');
-  console.log(`Resource report: ${output}`);
-} finally { await Promise.all([...children].map(child => stop(child))); }
+  report.phase = { step: 'complete' };
+} catch (error) {
+  report.failure = { message: String(error).slice(0, 2048) };
+  throw error;
+} finally {
+  try {
+    writeFileSync(output, JSON.stringify(report, null, 2) + '\n');
+    console.log(`Resource report: ${output}`);
+  } finally { await Promise.all([...children].map(child => stop(child))); }
+}
