@@ -1,0 +1,401 @@
+{
+  "root": "/private/tmp/p751-full-3d9UD9",
+  "platform": "darwin",
+  "node": "v24.21.0",
+  "scope": "Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two HostedSessions; sampler overhead included",
+  "scenarios": [
+    {
+      "clients": 1,
+      "elapsedMs": 3089.7851250000003,
+      "resources": [
+        {
+          "identity": {
+            "pid": 74466,
+            "token": "eee4d613-0c58-4b93-a402-d8c4c09a545c",
+            "start": "1794767552000"
+          },
+          "generation": "1",
+          "at": 1794767561546,
+          "cpu": {
+            "user": 189340,
+            "system": 32593
+          },
+          "usage": {
+            "userCPUTime": 189341,
+            "systemCPUTime": 32597,
+            "maxRSS": 130688,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 8273,
+            "majorPageFault": 81,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 22,
+            "ipcReceived": 26,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 2,
+            "involuntaryContextSwitches": 2087
+          },
+          "rss": 133824512,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.526143,
+            "p95": 12.042239,
+            "p99": 12.050431
+          },
+          "role": "guardian",
+          "cpuMs": 7.317,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 74571,
+            "token": "b34fca12-b182-445e-9f71-ed2d7d5dc3bd",
+            "start": "1794767553000"
+          },
+          "generation": "1",
+          "at": 1794767561586,
+          "cpu": {
+            "user": 1854961,
+            "system": 340199
+          },
+          "usage": {
+            "userCPUTime": 1854964,
+            "systemCPUTime": 340206,
+            "maxRSS": 525168,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 33810,
+            "majorPageFault": 89,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 157,
+            "ipcReceived": 208,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 34,
+            "involuntaryContextSwitches": 5912
+          },
+          "rss": 537772032,
+          "connections": {
+            "coordinator": 1,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.345919,
+            "p95": 12.050431,
+            "p99": 14.327807
+          },
+          "role": "server",
+          "cpuMs": 43.868,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 75133,
+            "token": "c73ff3cf-c192-495a-aebc-7e43c4b7e035",
+            "start": "1794767554000"
+          },
+          "generation": "1",
+          "at": 1794767561451,
+          "cpu": {
+            "user": 1281960,
+            "system": 227069
+          },
+          "usage": {
+            "userCPUTime": 1281962,
+            "systemCPUTime": 227076,
+            "maxRSS": 398208,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 25953,
+            "majorPageFault": 88,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 241,
+            "ipcReceived": 242,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 161,
+            "involuntaryContextSwitches": 4515
+          },
+          "rss": 407764992,
+          "connections": {
+            "coordinator": 1,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.444223,
+            "p95": 12.042239,
+            "p99": 12.206079
+          },
+          "role": "pi",
+          "cpuMs": 14.353,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 76198,
+            "token": "2d80d39c-8aa2-4a38-b3ad-6c76eb2ce54b",
+            "start": "1794767556000"
+          },
+          "generation": "1",
+          "at": 1794767561540,
+          "cpu": {
+            "user": 794578,
+            "system": 101314
+          },
+          "usage": {
+            "userCPUTime": 794580,
+            "systemCPUTime": 101321,
+            "maxRSS": 257616,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 16237,
+            "majorPageFault": 87,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 1,
+            "ipcReceived": 3,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 14,
+            "involuntaryContextSwitches": 2804
+          },
+          "rss": 263749632,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.542527,
+            "p95": 12.042239,
+            "p99": 12.050431
+          },
+          "role": "worker",
+          "cpuMs": 7.723,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 76583,
+            "token": "937d7c30-2aee-439e-9548-02cdb2fa7092",
+            "start": "1794767556000"
+          },
+          "generation": "1",
+          "at": 1794767561594,
+          "cpu": {
+            "user": 77625,
+            "system": 21876
+          },
+          "usage": {
+            "userCPUTime": 77627,
+            "systemCPUTime": 21880,
+            "maxRSS": 82608,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5269,
+            "majorPageFault": 81,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 0,
+            "ipcReceived": 5,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 17,
+            "involuntaryContextSwitches": 1163
+          },
+          "rss": 84590592,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.362303,
+            "p95": 12.042239,
+            "p99": 12.238847
+          },
+          "role": "runner",
+          "cpuMs": 13.359,
+          "fsRead": 0,
+          "fsWrite": 0
+        },
+        {
+          "identity": {
+            "pid": 76658,
+            "token": "df752f28-3336-40a8-8374-01314e188a00",
+            "start": "1794767556000"
+          },
+          "generation": "1",
+          "at": 1794767561669,
+          "cpu": {
+            "user": 62417,
+            "system": 17911
+          },
+          "usage": {
+            "userCPUTime": 62419,
+            "systemCPUTime": 17914,
+            "maxRSS": 81040,
+            "sharedMemorySize": 0,
+            "unsharedDataSize": 0,
+            "unsharedStackSize": 0,
+            "minorPageFault": 5151,
+            "majorPageFault": 92,
+            "swappedOut": 0,
+            "fsRead": 0,
+            "fsWrite": 0,
+            "ipcSent": 1,
+            "ipcReceived": 1,
+            "signalsCount": 0,
+            "voluntaryContextSwitches": 4,
+            "involuntaryContextSwitches": 1165
+          },
+          "rss": 82984960,
+          "connections": {
+            "coordinator": 0,
+            "derived": 0,
+            "other": 0
+          },
+          "lagMs": {
+            "p50": 11.354111,
+            "p95": 12.050431,
+            "p99": 12.238847
+          },
+          "role": "command",
+          "cpuMs": 11.108,
+          "fsRead": 0,
+          "fsWrite": 0
+        }
+      ],
+      "connections": {
+        "coordinator": 3,
+        "derived": 1
+      },
+      "metrics": {
+        "inventories": 5,
+        "metadataReads": 2,
+        "projections": 3,
+        "coordinatorConnections": 1,
+        "indexConnections": 1,
+        "background": {
+          "runnerSnapshots": 1,
+          "activeQueries": 3,
+          "historyQueries": 0,
+          "scopes": 0,
+          "history": {
+            "inventories": 0,
+            "metadataReads": 0,
+            "projections": 0
+          }
+        },
+        "sqlite": {
+          "opens": 2,
+          "active": 2,
+          "maximum": 2
+        },
+        "cacheHits": 6,
+        "queryCount": 13,
+        "cacheBytes": 8180,
+        "cacheEntries": 2,
+        "queryDurationMs": [
+          0.3582079999996495,
+          0.048958000000311586,
+          0.09454199999981938,
+          0.10016600000017206,
+          0.06333299999960218,
+          0.21537499999976717,
+          0.11583400000017718,
+          0.06866600000012113,
+          0.1831250000000182,
+          0.11354099999971368,
+          0.2523750000000291,
+          0.1926659999999174,
+          0.07545899999968242
+        ],
+        "executor": {
+          "active": 0,
+          "queued": 0,
+          "clients": 2,
+          "completed": 15,
+          "singleflightHits": 0,
+          "rejected": 0,
+          "cancelled": 0,
+          "timeouts": 0,
+          "capacity": 64,
+          "waitMs": [
+            0.04762499999969805,
+            0.01849999999967622,
+            0.015499999999974534,
+            0.01954200000000128,
+            0.010000000000218279,
+            0.01883300000008603,
+            7.955791999999747,
+            0.015207999999802269,
+            0.016458000000056927,
+            0.007916000000022905,
+            0.018624999999701686,
+            0.004292000000077678,
+            0.014959000000089873,
+            0.01787499999954889,
+            0.00804100000004837
+          ],
+          "readMs": [
+            43.90591699999959,
+            0.7024999999998727,
+            0.19349999999985812,
+            0.09312499999987267,
+            0.1734999999998763,
+            340.5809999999997,
+            8.11933399999998,
+            0.219333000000006,
+            0.1308750000002874,
+            0.13783299999977316,
+            0.11770799999976589,
+            0.1836670000002414,
+            0.4237920000000486,
+            0.24808399999983521,
+            0.1325830000005226
+          ],
+          "eventLoopLagMs": {
+            "p50": 11.452415,
+            "p95": 12.050431,
+            "p99": 16.138239
+          },
+          "worker": "running",
+          "status": "ready"
+        },
+        "mutationSqlite": {
+          "active": 1,
+          "leases": 3
+        }
+      },
+      "totalCpuMs": 97.728,
+      "totalRss": 1510686720,
+      "rpcMs": {
+        "p50": 0.4210830000010901,
+        "p95": 0.5464999999994689,
+        "p99": 1.1268339999996897
+      }
+    }
+  ],
+  "failure": "AssertionError [ERR_ASSERTION]: Root coordinator budget exceeded: {\"coordinator\":3,\"derived\":1}",
+  "errors": "(node:74466) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n(node:75133) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n"
+}
