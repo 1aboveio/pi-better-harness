@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -157,6 +157,7 @@ async function settlementScheduler(script: string, runDir: string, timeoutMs?: n
 interface PlannedRun {
   runDir: string;
   script: string;
+  planPath: string;
 }
 
 /** The run a gate would check, or what it could not locate, so each gate decides how to report it. */
@@ -167,7 +168,7 @@ function locateRun(entries: Iterable<EntryLike>, owner: WorkflowOwner): RunLocat
   if (!script) return { missing: "scheduler", problem: `${owner.name} ships no scheduler` };
   const plan = boundPlanPath(entries, owner);
   if (!plan) return { missing: "plan", problem: `no task plan is bound for ${owner.name} yet` };
-  return { runDir: dirname(plan), script };
+  return { runDir: dirname(plan), script, planPath: plan };
 }
 
 function unchecked(warning: string): GateVerdict {
@@ -308,19 +309,84 @@ export function waitUntil(due: readonly SchedulerAction[]): number | undefined {
   return times.length > 0 ? Math.min(...times) : undefined;
 }
 
-export type OperationResumeSchedulerGate = { ok: true; waitUntil: number | undefined } | { ok: false; reason: string };
+export type OperationResumeSchedulerGate = { ok: true; waitUntil: number | undefined; isCurrent: () => boolean } | { ok: false; reason: string };
 
-/** Automatic worker admission cannot treat unavailable workflow evidence as permission. */
-export async function operationResumeSchedulerGate(
+const admissionChecks = new WeakMap<object, Map<string, Promise<OperationResumeSchedulerGate>>>();
+
+function admissionBinding(entries: Iterable<EntryLike>): string {
+  return JSON.stringify(Array.from(entries).filter((entry) => entry.type === "custom"
+    && (entry.customType === WORKFLOW_ENTRY || entry.customType === WORKFLOW_PLAN_ENTRY)));
+}
+
+/** Check scheduler inputs without walking the workers' workspaces. */
+function admissionInputs({ script, runDir }: PlannedRun): string {
+  const metadata = (path: string): string => {
+    try {
+      const stat = statSync(path, { bigint: true });
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+      throw error;
+    }
+  };
+  const inputs = [script, ...["task-plan.json", "issue-tree.json", "next-actions-seen.json"].map((name) => join(runDir, name))];
+  for (const name of ["reviews", "results"]) {
+    const dir = join(runDir, name);
+    inputs.push(dir);
+    try {
+      for (const file of readdirSync(dir).filter((file) => file.endsWith(".json")).sort()) inputs.push(join(dir, file));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return JSON.stringify(inputs.map((path) => [path, metadata(path)]));
+}
+
+/**
+ * Share pending evidence in one authority scope; a settled result is never cached.
+ * The caller owns the scope and supplies its session/execution revision and live branch reader.
+ */
+export function operationResumeSchedulerGate(
   entries: Iterable<EntryLike>,
   owner: WorkflowOwner,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; scope?: object; revision?: string; getEntries?: () => Iterable<EntryLike> } = {},
 ): Promise<OperationResumeSchedulerGate> {
-  const located = locateRun(entries, owner);
-  if ("missing" in located) return { ok: false, reason: `${located.problem}, so the run was not checked` };
-  const run = await runScheduler(located.script, located.runDir, options.timeoutMs);
-  if (!run.ok) return { ok: false, reason: `Workflow admission evidence unavailable: ${run.reason}` };
-  return { ok: true, waitUntil: waitUntil(run.due) };
+  const branch = Array.from(entries);
+  const located = locateRun(branch, owner);
+  if ("missing" in located) return Promise.resolve({ ok: false, reason: `${located.problem}, so the run was not checked` });
+  const scope = options.scope ?? owner;
+  let checks = admissionChecks.get(scope);
+  if (!checks) { checks = new Map(); admissionChecks.set(scope, checks); }
+  const binding = admissionBinding(branch);
+  const key = JSON.stringify([owner, located, binding, options.timeoutMs ?? SCHEDULER_TIMEOUT_MS, options.revision]);
+  const pending = checks.get(key);
+  if (pending) return pending;
+  const check = (async (): Promise<OperationResumeSchedulerGate> => {
+    try {
+      const inputs = admissionInputs(located);
+      const isCurrent = (): boolean => {
+        try {
+          const currentBranch = Array.from(options.getEntries?.() ?? (Array.isArray(entries) ? entries : branch));
+          const current = locateRun(currentBranch, owner);
+          return !("missing" in current) && current.script === located.script && current.runDir === located.runDir
+            && current.planPath === located.planPath
+            && admissionBinding(currentBranch) === binding
+            && admissionInputs(located) === inputs;
+        } catch { return false; }
+      };
+      const run = await runScheduler(located.script, located.runDir, options.timeoutMs);
+      if (!run.ok) return { ok: false, reason: `Workflow admission evidence unavailable: ${run.reason}` };
+      if (!isCurrent()) return { ok: false, reason: "Workflow admission inputs changed during the scheduler check" };
+      return { ok: true, waitUntil: waitUntil(run.due), isCurrent };
+    } catch (error) {
+      return { ok: false, reason: `Workflow admission evidence unavailable: ${String(error).slice(0, DETAIL_LIMIT)}` };
+    }
+  })().finally(() => {
+    checks.delete(key);
+    if (checks.size === 0) admissionChecks.delete(scope);
+  });
+  checks.set(key, check);
+  return check;
 }
 
 /** When the bound run next wants a continuation, or undefined when it is not only waiting. */
