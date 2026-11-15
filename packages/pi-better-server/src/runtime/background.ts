@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 // @ts-expect-error Generated canonical passive runner observation.
@@ -10,15 +10,18 @@ import { observeMetasForOrigin, listTaskRecords, belongsToOrigin, readMeta } fro
 /** Root-owned query connection; never opens a supervisor or mutates source facts. */
 export class BackgroundObservation {
   private db: any;
+  private identity?: string;
+  private knownCoordinator = false;
   private rows: any[] = [];
   private signature = "";
   private root: string;
   private directory: string;
   private enabled = false;
-  private legacy = new Map<string, { origin: { cwd: string; sessionId?: string }; rows: any[] }>();
+  private legacy = new Map<string, { origin: { cwd: string; sessionId?: string }; rows: any[]; references: number }>();
   status: "ready" | "degraded" = "ready";
   reason?: string;
   get connectionCount() { return this.db ? 1 : 0; }
+  get scopeCount() { return this.legacy.size; }
   readonly metrics = { runnerSnapshots: 0, activeQueries: 0, historyQueries: 0 };
   constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor")) {
     this.root = root; this.directory = directory;
@@ -27,8 +30,15 @@ export class BackgroundObservation {
     if (!this.enabled) return false;
     try {
       const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
-      if (existsSync(join(this.root, "operation-coordinator.sqlite"))) {
-        this.db ??= new DatabaseSync(join(this.root, "operation-coordinator.sqlite"), { readOnly: true });
+      const path = join(this.root, "operation-coordinator.sqlite");
+      let identity;
+      try { const info = statSync(path, { bigint: true }); identity = `${info.dev}:${info.ino}`; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (identity !== this.identity) { this.db?.close(); this.db = undefined; this.identity = identity; }
+      if (!identity && this.knownCoordinator) throw new Error("Coordinator source disappeared; retaining the previous observation");
+      if (identity) {
+        this.db ??= new DatabaseSync(path, { readOnly: true });
+        this.knownCoordinator = true;
         const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
         if (!["1", "2", "3", "4"].includes(version)) throw new Error("Unsupported coordinator schema");
       }
@@ -87,15 +97,31 @@ export class BackgroundObservation {
           dismissedAt: context.dismissedAt, exitCode: inspection?.result?.exitCode ?? null, logPaths: inspection?.logs ?? {} };
       }).filter(Boolean);
   }
-  read(scope: { cwd?: string; sessionId?: string; active?: boolean; backgroundHistory?: boolean; backgroundAll?: boolean }, index?: any) {
-    if (!this.enabled) { this.enabled = true; this.refresh(); }
+  private legacyScope(scope: { cwd?: string; sessionId?: string }) {
     if (!scope.cwd) throw new Error("Background activity requires an exact workspace");
     const key = JSON.stringify([scope.cwd, scope.sessionId]);
-    let legacy = this.legacy.get(key);
-    if (!legacy) {
+    let entry = this.legacy.get(key);
+    if (!entry) {
+      if (this.legacy.size >= 128) {
+        const oldest = [...this.legacy].find(([, value]) => value.references === 0);
+        if (!oldest) throw new Error("runtime-overloaded: Background scope capacity reached; retry later");
+        this.legacy.delete(oldest[0]);
+      }
       const origin = { cwd: scope.cwd, sessionId: scope.sessionId };
-      legacy = { origin, rows: observeMetasForOrigin(origin) }; this.legacy.set(key, legacy);
+      entry = { origin, rows: observeMetasForOrigin(origin), references: 0 };
     }
+    this.legacy.delete(key); this.legacy.set(key, entry);
+    return entry;
+  }
+  retain(scope: { cwd?: string; sessionId?: string }) {
+    const entry = this.legacyScope(scope);
+    entry.references++;
+    let released = false;
+    return () => { if (!released) { released = true; entry.references--; } };
+  }
+  read(scope: { cwd?: string; sessionId?: string; active?: boolean; backgroundHistory?: boolean; backgroundAll?: boolean }, index?: any) {
+    if (!this.enabled) { this.enabled = true; this.refresh(); }
+    const legacy = this.legacyScope(scope);
     const legacyRows = scope.backgroundHistory ? index.records.map((record: any) => record.meta).filter(Boolean) : legacy.rows;
     if (scope.backgroundHistory) this.metrics.historyQueries++;
     const rows = scope.backgroundAll && this.db ? this.project(this.db.prepare("SELECT * FROM operations WHERE owner_kind = 'parent-session' AND observer_kind = 'local-supervisor'").all(), true) : scope.backgroundHistory && this.db ? this.project(this.db.prepare(`SELECT * FROM operations

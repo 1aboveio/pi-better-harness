@@ -63,7 +63,7 @@ export class WorkQueries {
           this.close();
           this.event({ type: "resync_required", reason: String(error).slice(0, 512), instanceId: this.model.instanceId });
         }
-      });
+      }, scope);
       if (command.sinceSeq !== undefined && (command.instanceId !== snapshot.instanceId || command.sinceSeq !== snapshot.seq)) {
         return { ...snapshot, resyncRequired: true, resyncReason: command.instanceId !== snapshot.instanceId ? "instance-changed" : "replay-truncated" };
       }

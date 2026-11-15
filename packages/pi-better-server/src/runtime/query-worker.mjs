@@ -33,12 +33,13 @@ const encoded = new WeakMap();
 let cacheBytes = 0, cacheHits = 0, queryCount = 0;
 let revisionPending = false, revisionDirty = false;
 const durations = [];
-const metrics = () => ({ ...model.metrics, sqlite: { ...connections }, cacheHits, queryCount, cacheBytes,
+const metrics = () => ({ ...model.metrics, background: model.backgroundMetrics, sqlite: { ...connections }, cacheHits, queryCount, cacheBytes,
   cacheEntries: cache.size, queryDurationMs: [...durations] });
 const snapshot = model.snapshot.bind(model);
 model.snapshot = scope => {
   const key = JSON.stringify(scope ?? {});
-  const previous = cache.get(key);
+  const cacheable = !scope?.backgroundHistory;
+  const previous = cacheable ? cache.get(key) : undefined;
   if (previous) { cacheHits++; cache.delete(key); cache.set(key, previous); return previous.value; }
   const started = performance.now();
   const value = snapshot(scope);
@@ -47,7 +48,7 @@ model.snapshot = scope => {
   encoded.set(value, json);
   queryCount++; durations.push(performance.now() - started);
   if (durations.length > 128) durations.shift();
-  if (bytes <= 4 * 1024 * 1024) {
+  if (cacheable && bytes <= 4 * 1024 * 1024) {
     while (cache.size && (cache.size >= 32 || cacheBytes + bytes > 16 * 1024 * 1024)) {
       const oldest = cache.keys().next().value;
       cacheBytes -= cache.get(oldest).bytes; cache.delete(oldest);

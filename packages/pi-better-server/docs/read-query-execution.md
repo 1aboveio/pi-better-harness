@@ -34,6 +34,7 @@ No arbitrary SQL, launch or mutation operation is accepted by the executor.
 | Logical read deadline, including queue wait | 4 seconds, before the client's 5-second timeout |
 | Executor close wait | 1 second |
 | Cached scopes | 32, with at most 16 MiB of serialized snapshots |
+| Background observation scopes | 128; active subscriptions stay pinned, one-shot scopes evict by least recent use |
 | Individual snapshots / socket event allowance | 4 MiB |
 | Worker event producer | One unacknowledged event plus one replaceable latest event per connection |
 | Worker revision notifications | One unacknowledged notification plus one dirty bit |

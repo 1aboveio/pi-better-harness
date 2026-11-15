@@ -88,8 +88,12 @@ export class WorkReadModel {
     this.timer.unref();
   }
 
-  onChange(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
-  get backgroundMetrics() { return { ...this.background.metrics }; }
+  onChange(listener: () => void, scope?: WorkScope) {
+    const release = scope?.background ? this.background.retain(scope) : undefined;
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); release?.(); };
+  }
+  get backgroundMetrics() { return { ...this.background.metrics, scopes: this.background.scopeCount }; }
   async ensureId(id: string) {
     if (!safeId.test(id)) throw new Error("Invalid run ID");
     if (this.state === "rebuilding") await this.reconcile();
