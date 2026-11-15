@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Socket } from "node:net";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 
 const fixtureURL = new URL("../../pi-better-background-tasks/src/test-support/work-runtime.ts", import.meta.url).href;
@@ -42,10 +43,19 @@ test("fixture shutdown rejects a queued request and preserves degraded client st
   const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), root);
   try {
     await client.subscribe({ background: true, cwd: root, sessionId: "pending" });
+    const transport = client as WorkClient & { socket: Socket; pending: Map<string, unknown> };
+    // Keep this request in the real socket queue until shutdown, not racing a reply.
+    transport.socket.cork();
     const pending = client.get({ background: true, cwd: root, sessionId: "pending" });
-    const rejected = assert.rejects(pending, /disconnected|EPIPE|ECONNRESET/);
-    await stop();
-    await rejected;
+    await Promise.all([
+      assert.rejects(pending, /disconnected|EPIPE|ECONNRESET/),
+      (async () => {
+        await Promise.resolve();
+        assert.equal(transport.pending.size, 1, "the client must have registered the queued request");
+        assert.ok(transport.socket.writableLength > 0, "the request must still be queued in the actual socket");
+        await stop();
+      })(),
+    ]);
     assert.equal(client.snapshot!.status, "degraded");
   } finally { client.close(); await stop(); }
 });
