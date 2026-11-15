@@ -1,8 +1,9 @@
 /**
  * Extension-level lifecycle tests for the issue #63 production wiring.
  * The scoped UI, real-identity and retained orphaned/lost cases use actual SDK
- * foregrounds, the canonical daemon and managed workers. Legacy cases below still
- * exercise the old factory fixture and are not server-ownership qualification.
+ * foregrounds, the canonical daemon and managed workers. Kernel cases pair an
+ * explicit trusted managed-domain adapter with a separate native SDK recipient;
+ * they do not claim socket launch-admission or server-ownership qualification.
  *
  * The pure seams (reconcileRun / needsMonitoring / registry identity) are
  * covered by tests/health_reconcile.test.mjs and tests/registry_identity.test.mjs
@@ -45,7 +46,7 @@
  * // @covers subagent.result
  * // @level unit
  */
-import { describe, it, after, mock } from "node:test";
+import { describe, it, after, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { continuationFixture } from "./managed-continuation-fixture.mjs";
 import { createHash } from "node:crypto";
@@ -63,10 +64,15 @@ register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 // suite run must never see a developer's live one.
 const HERMETIC_TMPDIR = mkdtempSync(join(tmpdir(), "subagent-ext-health-"));
 process.env.TMPDIR = HERMETIC_TMPDIR;
+const { openStore } = await import("../shared-operation-coordinator/index.ts");
+openStore({ path: join(process.env.PI_CODING_AGENT_DIR, "operation-coordinator.sqlite") }).close();
 const { startWorkRuntimeFixture } = await import("./work-runtime-fixture.mjs");
 const stopWorkRuntime = await startWorkRuntimeFixture();
 after(stopWorkRuntime);
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
+const { sdkRecipient } = await import("./sdk-recipient-fixture.mjs");
+const recipients = [];
 const { default: betterSubagents, setIdentityProbeForTests, isHealthTickerActive } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, nextRunId, runDir, baseDir, recordTaskRuntimeProvenance, removeRunDirectory, taskRuntimeProvenancePath,
@@ -102,7 +108,7 @@ process.env.PATH = `${binDir}:${originalPath}`;
 const liveRuns = []; // { id, pid } — children to reap and dirs to remove
 const dirOnly = []; // ids with no child (metadata-only fixtures)
 
-function makeHarness(options = {}) {
+async function makeHarness(options = {}) {
     const tools = new Map();
     const handlers = new Map();
     const sent = [];
@@ -125,9 +131,23 @@ function makeHarness(options = {}) {
         model: undefined,
         sessionManager: { getSessionId: () => sessionId },
     };
-    betterSubagents(pi);
-    const shutdown = (event = {}) => handlers.get("session_shutdown")?.(event, ctx);
-    return { pi, tools, handlers, sent, notes, ctx, shutdown };
+    betterSubagents(pi, managedDomainPort());
+    await Promise.all(recipients.map(recipient => recipient.close()));
+    let recipient = await sdkRecipient({ cwd, sessionId, sent, notes, sendMessage: options.sendMessage });
+    recipients.push(recipient);
+    const start = handlers.get("session_start");
+    handlers.set("session_start", async (event, context) => {
+        await start?.(event, context);
+        const activeId = context.sessionManager?.getSessionId?.();
+        if (activeId && activeId !== sessionId) {
+            await recipient.close();
+            recipient = await sdkRecipient({ cwd: context.cwd, sessionId: activeId, sent, notes, sendMessage: options.sendMessage });
+            recipients.push(recipient);
+        }
+        await recipient.start();
+    });
+    const shutdown = async (event = {}) => { await recipient.close(); await handlers.get("session_shutdown")?.(event, ctx); };
+    return { pi, tools, handlers, sent, notes, ctx, shutdown, get recipient() { return recipient; } };
 }
 
 async function spawnRun({ tools, ctx }, overrides = {}) {
@@ -162,6 +182,7 @@ async function waitFor(fn, { timeoutMs = 5000, intervalMs = 20 } = {}) {
  * backstop for failures.
  */
 async function reapRun({ id, pid }) {
+    if (!readMeta(id)) return;
     killProcessTree(pid, "SIGKILL");
     await waitFor(() => {
         const m = readMeta(id);
@@ -187,7 +208,14 @@ async function withFakeClock(fn) {
     }
 }
 
-after(() => {
+afterEach(async () => {
+    await Promise.all(recipients.splice(0).map(recipient => recipient.close()));
+    for (const run of liveRuns.splice(0)) await reapRun(run);
+    for (const id of dirOnly.splice(0)) rmSync(runDir(id), { recursive: true, force: true });
+});
+
+after(async () => {
+    await Promise.all(recipients.map(recipient => recipient.close()));
     process.env.PATH = originalPath;
     for (const { id, pid } of liveRuns) {
         killProcessTree(pid, "SIGKILL");
@@ -212,9 +240,10 @@ describe("structured failure attention", () => {
     it("prioritizes failed tools over green progress and retries urgent handoff across reload", async () => {
         await withFakeClock(async () => {
             let failOnce = true;
-            const h = makeHarness({ sendMessage: (message, options, sent) => {
+            let failedAttempts = 0;
+            const h = await makeHarness({ sendMessage: (message, options, sent) => {
                 if (message.customType === "subagent-failure" && failOnce) {
-                    failOnce = false;
+                    failedAttempts++;
                     throw new Error("handoff failed");
                 }
                 sent.push({ message, options });
@@ -237,8 +266,8 @@ describe("structured failure attention", () => {
                 assert.ok(result.indexOf("Action required") < result.indexOf("still running") || result.indexOf("Action required") < result.indexOf("still working"));
                 assert.match(list, /incident/i);
                 assert.doesNotMatch(list, /assertion failed/);
-                const detail = await waitFor(() => {
-                    const rendered = renderRegisteredWorkDetail("subagents", id, 120);
+                const detail = await waitFor(async () => {
+                    const rendered = await h.recipient.detail(id);
                     return rendered.detail.transcript?.some((entry) => entry.type === "tool" && entry.isError) ? rendered : undefined;
                 });
                 assert.ok(detail, "shared detail receives the original tool error transcript");
@@ -246,16 +275,20 @@ describe("structured failure attention", () => {
                 assert.ok(detail.detail.transcript.some((entry) => entry.type === "tool" && entry.isError), "original error results stay in the transcript");
                 mock.timers.tick(HEALTH_TICK_MS);
                 await new Promise((resolve) => setImmediate(resolve));
+                await waitFor(() => failedAttempts > 0);
                 assert.equal(pendingFailureAttention(readRunFailures(id), Date.now())?.incidents.length, 1);
+                failOnce = false;
                 mock.timers.tick(HEALTH_TICK_MS);
                 await new Promise((resolve) => setImmediate(resolve));
+                await waitFor(() => h.sent.filter((x) => x.message.customType === "subagent-failure").length === 1);
                 assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 1);
                 assert.equal(pendingFailureAttention(readRunFailures(id), Date.now()), undefined);
                 await h.handlers.get("session_start")({}, h.ctx);
                 mock.timers.tick(HEALTH_TICK_MS);
+                await waitFor(() => h.sent.filter((x) => x.message.customType === "subagent-failure").length === 1);
                 assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 1);
                 await reapRun({ id, pid });
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 });
@@ -281,7 +314,7 @@ describe("#315 child tool failures and parent wakes", () => {
 
     it("benign and one-off child tool errors never wake the parent; a stuck operation escalates exactly once with only its own incident", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const { id, pid } = await spawnRun(h);
                 appendAgedFailures(id, [
@@ -314,6 +347,7 @@ describe("#315 child tool failures and parent wakes", () => {
                     mock.timers.tick(HEALTH_TICK_MS);
                     await new Promise((resolve) => setImmediate(resolve));
                 }
+                await waitFor(() => failureWakes(h).length > 0);
                 assert.equal(failureWakes(h).length, 1);
                 const wake = failureWakes(h)[0].message.content;
                 assert.match(wake, /Action required · .*1 failing.*\(3 occurrences\)/);
@@ -326,16 +360,16 @@ describe("#315 child tool failures and parent wakes", () => {
                 }
                 assert.equal(failureWakes(h).length, 1, "a stuck incident escalates once");
                 await reapRun({ id, pid });
-            } finally { h.shutdown(); }
+            } finally { await h.shutdown(); }
         });
     });
 
     it("unresolved failures are reported once in the completion callback, lifecycle kept separate, earlier deliveries not re-listed", async () => {
-        const h = makeHarness();
+        const h = await makeHarness();
         const id = nextRunId();
         dirOnly.push(id);
         try {
-            writeMeta({ id, status: "completed", pid: DEAD_PID, spawnPid: process.pid, cwd: h.ctx.cwd,
+            writeMeta({ id, status: "completed", pid: DEAD_PID, spawnPid: DEAD_PID, supervisionInterruptedAt: Date.now() - 1000, cwd: h.ctx.cwd,
                 callbackOrigin: { cwd: h.ctx.cwd, sessionId: "test-session" },
                 promptPreview: "terminal failures", startedAt: Date.now() - 1_000, endedAt: Date.now(), exitCode: 0,
                 logPath: join(runDir(id), "output.log"), sessionId: id, callback: true,
@@ -352,7 +386,7 @@ describe("#315 child tool failures and parent wakes", () => {
                 { id: "delivered:earlier", operation: "attention-delivery", kind: "delivered", incidents: ["watch:earlier"] },
                 { id: "exit:1", operation: "child-exit", kind: "failure", category: "exit", summary: "Child exited with code 1" }]);
             await h.handlers.get("session_start")({}, h.ctx);
-            const batcher = getCallbackBatcher(h.pi);
+            const batcher = h.recipient;
             assert.equal(await batcher.flush(), true);
             const batches = h.sent.filter((x) => x.message.customType === "background-completion-batch");
             assert.equal(batches.length, 1);
@@ -367,7 +401,7 @@ describe("#315 child tool failures and parent wakes", () => {
             await batcher.flush();
             assert.equal(h.sent.filter((x) => x.message.customType === "background-completion-batch").length, 1);
             assert.equal(failureWakes(h).length, 0);
-        } finally { h.shutdown(); }
+        } finally { await h.shutdown(); }
     });
 });
 
@@ -393,6 +427,7 @@ describe("#325 lost runs", () => {
                 appendFileSync(log, '{"type":"tool_execution_end","toolCallId":"broken"}\n');
                 if (!await waitFor(() => h.sent.some(x => x.message.customType === "subagent-failure"))) throw new Error(`canonical observation did not deliver late failure attention: ${JSON.stringify({ runtime: fixture.runtimeDiagnostics(), foreground: await h.inspect(), sent: h.sent, meta: readMeta(id), failures: readRunFailures(id) })}`);
                 await h.tools.get("subagent_result").execute("read-again", { id });
+                await waitFor(() => h.sent.some(x => x.message.customType === "subagent-failure"));
                 const wakes = h.sent.filter((x) => x.message.customType === "subagent-failure");
                 assert.equal(wakes.length, 1, "delivered once; the receipt prevents repeats");
                 assert.match(wakes[0].message.content, /Observation incomplete · .*malformed structured events/);
@@ -406,7 +441,7 @@ describe("#325 lost runs", () => {
 
 describe("#325 failed launches", () => {
     it("a spawn that fails leaves no run directory, control files, or provenance behind", async () => {
-        const h = makeHarness();
+        const h = await makeHarness();
         const runsRoot = join(baseDir(), "runs");
         const provenanceRoot = join(baseDir(), "task-runtime");
         const list = (dir) => { try { return readdirSync(dir).sort(); } catch { return []; } };
@@ -418,7 +453,7 @@ describe("#325 failed launches", () => {
             assert.deepEqual(list(runsRoot), before.runs);
             assert.deepEqual(list(provenanceRoot), before.provenance);
         } finally {
-            h.shutdown();
+            await h.shutdown();
         }
     });
     it("every run-removal path also removes the run's provenance record", () => {
@@ -433,9 +468,9 @@ describe("#325 failed launches", () => {
 });
 
 describe("navigator rows keep incident summaries out of the work rail", () => {
-    const providerRows = () => globalThis[Symbol.for("pi-better-harness.navigator.state")].providers.get("subagents").listRows(Date.now());
+
     it("keeps model/tool/tokens columns for both history-only and actionable failures", async () => {
-        const h = makeHarness();
+        const h = await makeHarness();
         try {
             await h.handlers.get("session_start")({}, h.ctx);
             const { id, pid } = await spawnRun(h, { model: "openai/gpt-test" });
@@ -445,27 +480,27 @@ describe("navigator rows keep incident summaries out of the work rail", () => {
                 { type: "tool_execution_end", toolCallId: callId, toolName: "bash", isError: true, result: { content: [{ type: "text", text: "1 failing" }] } },
             ];
             appendFileSync(log, fail("once").map((e) => JSON.stringify(e)).join("\n") + "\n");
-            let row = await waitFor(() => providerRows().find((x) => x.id === id));
+            let row = await waitFor(async () => (await h.recipient.rows()).find((x) => x.id === id));
             assert.ok(row, "the running run is listed");
             assert.doesNotMatch(row.primary, /No failures need action|unclassified|history/, "a quiet history line never replaces the columns");
             assert.match(row.primary, /gpt-test/, "the row shows its normal model column");
             assert.equal(row.secondary, undefined);
             assert.ok(!row.facts?.some((fact) => /No failures need action/.test(fact)));
-            const detail = renderRegisteredWorkDetail("subagents", id, 120).detail;
+            const detail = (await h.recipient.detail(id)).detail;
             assert.doesNotMatch(detail.subtitle ?? "", /No failures need action/, "nor the detail subtitle");
             // Repeated command failures need action, but navigator columns stay stable.
             appendFileSync(log, [...fail("twice"), ...fail("thrice")].map((e) => JSON.stringify(e)).join("\n") + "\n");
-            row = providerRows().find((x) => x.id === id);
+            row = (await h.recipient.rows()).find((x) => x.id === id);
             assert.match(row.primary, /gpt-test/);
             assert.doesNotMatch(row.primary, /Action required/);
             assert.equal(row.secondary, undefined);
             assert.ok(!row.facts?.some((fact) => /Action required|1 failing/.test(fact)));
-            const failedDetail = renderRegisteredWorkDetail("subagents", id, 120).detail;
+            const failedDetail = (await h.recipient.detail(id)).detail;
             assert.ok(!failedDetail.metadata.some((item) => item.label === "failure"));
             assert.doesNotMatch(failedDetail.subtitle ?? "", /Action required/);
             assert.doesNotMatch(failedDetail.transcriptDiagnostic ?? "", /Action required|unclassified|history/);
             await reapRun({ id, pid });
-        } finally { h.shutdown(); }
+        } finally { await h.shutdown(); }
     });
 });
 
@@ -495,7 +530,7 @@ describe("#332 failed sandboxed launches", () => {
 describe("#325 orphaned runs", () => {
     it("observation gaps found after the orphaned health callback are delivered promptly, not held for lost/completion", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             const id = nextRunId();
             dirOnly.push(id);
             const log = join(runDir(id), "output.log");
@@ -520,6 +555,7 @@ describe("#325 orphaned runs", () => {
                 appendFileSync(log, '{"type":"tool_execution_end","toolCallId":"broken"}\n');
                 mock.timers.tick(HEALTH_TICK_MS);
                 await new Promise((resolve) => setImmediate(resolve));
+                await waitFor(() => h.sent.some(x => x.message.customType === "subagent-failure"));
                 const wakes = h.sent.filter((x) => x.message.customType === "subagent-failure");
                 assert.equal(wakes.length, 1);
                 assert.match(wakes[0].message.content, /Observation incomplete · .*malformed structured events/);
@@ -529,7 +565,7 @@ describe("#325 orphaned runs", () => {
                 assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 1, "delivered once");
             } finally {
                 writeMeta({ ...readMeta(id), status: "lost", endedAt: Date.now(), lostCallbackSentAt: Date.now() });
-                h.shutdown();
+                await h.shutdown();
             }
         });
     });
@@ -537,7 +573,7 @@ describe("#325 orphaned runs", () => {
 
 describe("AC1 — subagent_spawn persists process identity into meta.json", () => {
     it("persists every captured identity field through the production spawn path (fake probe)", async () => {
-        const h = makeHarness();
+        const h = await makeHarness();
         setIdentityProbeForTests(fakeSpawnIdentityProbe());
         try {
             const { id, pid } = await spawnRun(h);
@@ -549,7 +585,7 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
             await reapRun({ id, pid });
         } finally {
             setIdentityProbeForTests(undefined);
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
@@ -588,8 +624,8 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
 
 describe("session_shutdown child ownership (#625)", () => {
     for (const reason of ["reload", "quit"]) {
-        it(`keeps current-session running subagents alive across a ${reason} and records the interruption`, async () => {
-            const h = makeHarness({ cwd: tmpdir(), sessionId: `interrupt-${reason}` });
+        it(`keeps managed subagents alive across a ${reason} without recording a foreground supervision interruption`, async () => {
+            const h = await makeHarness({ cwd: tmpdir(), sessionId: `interrupt-${reason}` });
             let id;
             let pid;
             try {
@@ -599,14 +635,9 @@ describe("session_shutdown child ownership (#625)", () => {
                 const meta = readMeta(id);
                 assert.equal(meta.status, "running", `${reason} must not kill current-session delegated work`);
                 assert.equal(meta.lifecycleClassification, undefined, "no terminal verdict is recorded");
-                assert.equal(typeof meta.supervisionInterruptedAt, "number", "the interruption is durable");
-                assert.equal(meta.supervisionInterruptedReason, reason);
+                assert.equal(meta.supervisionInterruptedAt, undefined, "foreground shutdown does not interrupt server-managed supervision");
                 assert.equal(realProcessProbe.pidExists(pid), true, `${reason} must leave the detached child running`);
-                const warnings = h.notes.filter((n) => n.level === "warning");
-                assert.equal(warnings.length, 1, "the human is warned that live work survived");
-                assert.match(warnings[0].msg, /still running/);
-                assert.ok(warnings[0].msg.includes(id), "the warning names the run");
-                assert.ok(/reload|session shutdown/.test(warnings[0].msg));
+                assert.equal(h.notes.filter(n => n.level === "warning").length, 0, "foreground shutdown does not report a managed worker as unsupervised");
                 await reapRun({ id, pid });
             } finally {
                 if (pid) killProcessTree(pid, "SIGKILL");
@@ -618,7 +649,7 @@ describe("session_shutdown child ownership (#625)", () => {
 
     it("does not touch same-parent runs from a different foreground session", async () => {
         const cwd = tmpdir();
-        const h = makeHarness({ cwd, sessionId: "session-b" });
+        const h = await makeHarness({ cwd, sessionId: "session-b" });
         let id;
         let pid;
         try {
@@ -640,7 +671,7 @@ describe("session_shutdown child ownership (#625)", () => {
 
     it("does not signal the foreground process when corrupt metadata points at itself", async () => {
         const cwd = tmpdir();
-        const h = makeHarness({ cwd, sessionId: "self-pid-guard" });
+        const h = await makeHarness({ cwd, sessionId: "self-pid-guard" });
         const id = nextRunId();
         try {
             writeMeta({
@@ -695,7 +726,7 @@ describe("interrupted supervision handoff (#625)", () => {
 
     it("finalizes interrupted work from its own log and keeps other verdicts unchanged", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness({ cwd: tmpdir(), sessionId: "interrupt-handoff" });
+            const h = await makeHarness({ cwd: tmpdir(), sessionId: "interrupt-handoff" });
             const recovered = seedInterruptedRun({ coherent: true });
             const unfinished = seedInterruptedRun({ coherent: false });
             const neverInterrupted = seedInterruptedRun({ coherent: true, interrupted: false });
@@ -750,7 +781,7 @@ describe("interrupted supervision handoff (#625)", () => {
     };
 
     it("a full restart recovers a dead parent's interrupted run and completes its own conversation once", async () => {
-        const h = makeHarness({ cwd: tmpdir(), sessionId: "resumed-conversation" });
+        const h = await makeHarness({ cwd: tmpdir(), sessionId: "resumed-conversation" });
         const id = seedRestartRun({ originSession: "resumed-conversation" });
         try {
             await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
@@ -760,7 +791,7 @@ describe("interrupted supervision handoff (#625)", () => {
             assert.equal(meta.exitCode, null, "no exit code is invented after the observer is gone");
             assert.equal(meta.supervisionInterruptedReason, "quit", "the interruption record is kept as history");
 
-            await getCallbackBatcher(h.pi).flush();
+            await h.recipient.flush();
             const completions = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
             assert.equal(completions.length, 1, "the resumed conversation gets exactly one completion");
             assert.match(completions[0].message.content, new RegExp(id));
@@ -771,7 +802,7 @@ describe("interrupted supervision handoff (#625)", () => {
     });
 
     it("an automatic continuation retains its callback until the captured parent branch returns", async () => {
-        const h = makeHarness({ cwd: tmpdir(), sessionId: "assignment-parent" });
+        const h = await makeHarness({ cwd: tmpdir(), sessionId: "assignment-parent" });
         const id = seedRestartRun({ originSession: "assignment-parent" });
         const meta = readMeta(id);
         writeMeta({ ...meta, operations: {
@@ -780,18 +811,19 @@ describe("interrupted supervision handoff (#625)", () => {
             resumeLaunchToken: "published-token",
             policy: { version: 1, sandbox: null, tools: [], clean: false, deadlineAt: null }, tools: [],
         } });
-        let branch = "other-branch";
-        h.ctx.sessionManager.getBranch = () => [{ id: branch }];
+        const branch = await h.recipient.captureBranch();
+        const current = readMeta(id);
+        writeMeta({ ...current, operations: { ...current.operations, branchId: branch } });
         const deliveries = () => h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
         try {
             await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
-            await getCallbackBatcher(h.pi).flush();
+            await h.recipient.flush();
             assert.equal(readMeta(id).status, "completed");
             assert.equal(deliveries().length, 0);
             assert.equal(readMeta(id).completionCallbackSentAt, undefined);
-            branch = "captured-branch";
+            await h.recipient.branch(branch);
             await h.handlers.get("session_start")({ reason: "resume" }, h.ctx);
-            await getCallbackBatcher(h.pi).flush();
+            await h.recipient.flush();
             assert.equal(deliveries().length, 1);
             assert.equal(readMeta(id).callbackOrigin.sessionId, "assignment-parent");
         } finally {
@@ -800,12 +832,12 @@ describe("interrupted supervision handoff (#625)", () => {
     });
 
     it("a restart in a different conversation records the truth but never consumes the dead parent's owed callback", async () => {
-        const h = makeHarness({ cwd: tmpdir(), sessionId: "different-conversation" });
+        const h = await makeHarness({ cwd: tmpdir(), sessionId: "different-conversation" });
         const id = seedRestartRun({ originSession: "resumed-conversation" });
         try {
             await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
             assert.equal(readMeta(id).status, "completed", "the on-disk result is recorded truthfully");
-            await getCallbackBatcher(h.pi).flush();
+            await h.recipient.flush();
             const meta = readMeta(id);
             assert.equal(meta.completionCallbackSentAt, undefined);
             assert.equal(h.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0,
@@ -823,11 +855,11 @@ describe("interrupted supervision handoff (#625)", () => {
         // The coordinator's counterexample: origin A dies with work in flight, an
         // unrelated B opens first, then A resumes. B must never receive A's
         // completion, and B must not consume A's obligation either.
-        const b = makeHarness({ cwd: tmpdir(), sessionId: "unrelated-B" });
+        const b = await makeHarness({ cwd: tmpdir(), sessionId: "unrelated-B" });
         const id = seedRestartRun({ originSession: "origin-A" });
         try {
             await b.handlers.get("session_start")({ reason: "startup" }, b.ctx);
-            await getCallbackBatcher(b.pi).flush();
+            await b.recipient.flush();
             const afterB = readMeta(id);
             assert.equal(afterB.status, "completed");
             assert.equal(afterB.completionCallbackSentAt, undefined);
@@ -835,10 +867,10 @@ describe("interrupted supervision handoff (#625)", () => {
             assert.equal(b.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0);
             await b.shutdown({ reason: "quit" });
 
-            const a = makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
+            const a = await makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
             try {
                 await a.handlers.get("session_start")({ reason: "startup" }, a.ctx);
-                await getCallbackBatcher(a.pi).flush();
+                await a.recipient.flush();
                 const delivered = () => a.sent.filter((entry) =>
                     entry.message.customType === "background-completion-batch" && String(entry.message.content).includes(id));
                 assert.equal(delivered().length, 1, "resumed origin A must recover its owed completion after B opened first");
@@ -847,7 +879,7 @@ describe("interrupted supervision handoff (#625)", () => {
 
                 // Returning twice is still once: the receipt is durable.
                 await a.handlers.get("session_start")({ reason: "startup" }, a.ctx);
-                await getCallbackBatcher(a.pi).flush();
+                await a.recipient.flush();
                 assert.equal(delivered().length, 1, "a second session_start must not re-deliver");
             } finally {
                 await a.shutdown({ reason: "quit" });
@@ -866,7 +898,7 @@ describe("interrupted supervision handoff (#625)", () => {
         // process.ppid here — with its own start token recorded.
         const parentToken = processStartToken(process.ppid);
         assert.equal(process.kill(process.ppid, 0), true, "the foreign parent is alive");
-        const h = makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
+        const h = await makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
         const id = seedRestartRun({ originSession: "origin-A" });
         writeMeta({
             ...readMeta(id), status: "completed", endedAt: Date.now(), exitCode: null,
@@ -875,7 +907,7 @@ describe("interrupted supervision handoff (#625)", () => {
         });
         try {
             await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
-            await getCallbackBatcher(h.pi).flush();
+            await h.recipient.flush();
             const meta = readMeta(id);
             assert.equal(h.sent.filter((entry) =>
                 entry.message.customType === "background-completion-batch" && String(entry.message.content).includes(id)).length, 0,
@@ -895,7 +927,7 @@ describe("interrupted supervision handoff (#625)", () => {
         // conversation — not by an unrelated one.
         const id = seedRestartRun({ originSession: "origin-A" });
         let failOnce = true;
-        const first = makeHarness({ cwd: tmpdir(), sessionId: "origin-A", sendMessage(message, options, sent) {
+        const first = await makeHarness({ cwd: tmpdir(), sessionId: "origin-A", sendMessage(message, options, sent) {
             if (message.customType === "background-completion-batch" && failOnce) {
                 failOnce = false;
                 throw new Error("simulated handoff failure");
@@ -904,7 +936,7 @@ describe("interrupted supervision handoff (#625)", () => {
         } });
         try {
             await first.handlers.get("session_start")({ reason: "startup" }, first.ctx);
-            assert.equal(await getCallbackBatcher(first.pi).flush(), false, "the failed handoff is not marked delivered");
+            assert.equal(await first.recipient.flush(), false, "the failed handoff is not marked delivered");
             const owed = readMeta(id);
             assert.equal(owed.completionCallbackSentAt, undefined);
             assert.equal(owed.completionCallbackSuppressedAt, undefined, "failure keeps the obligation recoverable");
@@ -913,10 +945,10 @@ describe("interrupted supervision handoff (#625)", () => {
         }
         assert.equal(first.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0);
 
-        const second = makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
+        const second = await makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
         try {
             await second.handlers.get("session_start")({ reason: "startup" }, second.ctx);
-            await getCallbackBatcher(second.pi).flush();
+            await second.recipient.flush();
             const delivered = second.sent.filter((entry) =>
                 entry.message.customType === "background-completion-batch" && String(entry.message.content).includes(id));
             assert.equal(delivered.length, 1, "the restarted conversation recovers the retried completion");
@@ -928,14 +960,14 @@ describe("interrupted supervision handoff (#625)", () => {
 
     it("a restart supervises a dead parent's live child and only recovers it once it has finished", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness({ cwd: tmpdir(), sessionId: "live-writer" });
+            const h = await makeHarness({ cwd: tmpdir(), sessionId: "live-writer" });
             let run;
             try {
                 run = await spawnRun(h);
                 // Same durable interruption record, but the child (writer) is alive:
                 // process evidence, not the log, decides.
                 writeMeta({
-                    ...readMeta(run.id), spawnPid: DEAD_PID, spawnPidStartTime: "dead-token",
+                    ...readMeta(run.id), management: undefined, spawnPid: DEAD_PID, spawnPidStartTime: "dead-token",
                     supervisionInterruptedAt: Date.now() - 3_000, supervisionInterruptedReason: "quit",
                 });
                 await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
@@ -966,7 +998,7 @@ describe("interrupted supervision handoff (#625)", () => {
     });
 
     it("a hard-killed parent without an interruption record is not silently promoted to completed", async () => {
-        const h = makeHarness({ cwd: tmpdir(), sessionId: "hard-crash" });
+        const h = await makeHarness({ cwd: tmpdir(), sessionId: "hard-crash" });
         const id = seedRestartRun({ interrupted: false, coherent: true });
         try {
             await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
@@ -992,7 +1024,7 @@ describe("AC9 — health ticker production lifecycle (fake clock)", () => {
 
     it("starts on session_start, persists scheduled transitions, and self-stops when idle", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const a = fixture();
                 const b = fixture();
@@ -1018,7 +1050,7 @@ describe("AC9 — health ticker production lifecycle (fake clock)", () => {
 
                 assert.equal(isHealthTickerActive(), false, "ticker self-stops after the last monitored run went terminal");
             } finally {
-                h.shutdown();
+                await h.shutdown();
             }
         });
     });
@@ -1027,7 +1059,7 @@ describe("AC9 — health ticker production lifecycle (fake clock)", () => {
 describe("abandoned records through session startup", () => {
     it("adopts dead-parent work silently, leaves live parents alone, and does not sweep on health ticks", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             const seeded = [];
             const seed = (spawnPid, status = "running") => {
                 const id = nextRunId();
@@ -1074,35 +1106,35 @@ describe("completion callback batching", () => {
     it("#409 holds time-separated real child exits while busy and batches them when settled, keeping callback:false silent", async () => {
         const previousWindow = process.env.PI_BETTER_CALLBACK_BATCH_MS;
         process.env.PI_BETTER_CALLBACK_BATCH_MS = "5000";
-        const h = makeHarness({ cwd: tmpdir(), sessionId: "completion-batch" });
+        const h = await makeHarness({ cwd: tmpdir(), sessionId: "completion-batch" });
         let idle = false;
         h.ctx.isIdle = () => idle;
         let runs = [];
         try {
             await h.handlers.get("session_start")({}, h.ctx);
-            await h.handlers.get("agent_start")({}, h.ctx);
+            await h.recipient.busy();
             const first = await spawnRun(h, { name: "first", callback: true });
             const second = await spawnRun(h, { name: "second", callback: true });
             const quiet = await spawnRun(h, { name: "quiet", callback: false });
             runs = [first, second, quiet];
 
-            const batcher = getCallbackBatcher(h.pi);
+            const batcher = h.recipient;
             killProcessTree(first.pid, "SIGKILL");
-            assert.equal(await waitFor(() => batcher.pendingCount() === 1), true);
+            assert.equal(await waitFor(async () => (await batcher.pendingCount()) === 1), true);
             assert.equal(await batcher.flush(), false, "first completion stays in the harness while busy");
             assert.equal(readMeta(first.id).completionCallbackSentAt, undefined);
             for (const run of [second, quiet]) killProcessTree(run.pid, "SIGKILL");
-            const terminal = await waitFor(() => {
+            const terminal = await waitFor(async () => {
                 const metas = runs.map((run) => readMeta(run.id));
                 return metas.every((meta) => meta && meta.status !== "running" && meta.status !== "orphaned")
-                    && batcher.pendingCount() === 2;
+                    && (await batcher.pendingCount()) === 2;
             });
             assert.equal(terminal, true, "two callback-enabled terminal runs enter the shared batch");
             assert.equal(await batcher.flush(), false, "foreground run still blocks both completions");
             assert.equal(h.sent.length, 0);
 
             idle = true;
-            await h.handlers.get("agent_settled")({}, h.ctx);
+            await h.recipient.settle();
             assert.equal(h.sent.length, 0, "settled handler only schedules delivery");
 
             assert.equal(await batcher.flush(), true);
@@ -1121,7 +1153,7 @@ describe("completion callback batching", () => {
             assert.equal(readMeta(quiet.id).completionCallbackPendingAt, undefined);
         } finally {
             for (const run of runs) rmSync(runDir(run.id), { recursive: true, force: true });
-            h.shutdown();
+            await h.shutdown();
             if (previousWindow === undefined) delete process.env.PI_BETTER_CALLBACK_BATCH_MS;
             else process.env.PI_BETTER_CALLBACK_BATCH_MS = previousWindow;
         }
@@ -1132,7 +1164,7 @@ describe("completion callback batching", () => {
     // @fails-without-fix subagent.completion-callback
     it("recovers durable pending callbacks after reload and retries a failed aggregate without early markers", async () => {
         let failNext = true;
-        const h = makeHarness({
+        const h = await makeHarness({
             cwd: tmpdir(),
             sessionId: "session-b",
             sendMessage(message, options, sent) {
@@ -1149,8 +1181,9 @@ describe("completion callback batching", () => {
         const base = {
             status: "completed",
             pid: DEAD_PID,
-            spawnPid: process.pid,
+            spawnPid: DEAD_PID,
             cwd: h.ctx.cwd,
+            supervisionInterruptedAt: now - 2000,
             promptPreview: "durable callback recovery",
             startedAt: now - 2_000,
             endedAt: now - 1_000,
@@ -1166,14 +1199,15 @@ describe("completion callback batching", () => {
             writeMeta({ ...base, id: ids[2], name: "foreign", logPath: join(runDir(ids[2]), "output.log"), callbackOrigin: { cwd: h.ctx.cwd, sessionId: "session-a" } });
 
             await h.handlers.get("session_start")({}, h.ctx);
-            const batcher = getCallbackBatcher(h.pi);
-            assert.equal(batcher.pendingCount(), 3, "reload recovers every unhandled pending record before ownership filtering");
+            const batcher = h.recipient;
+            await waitFor(async () => (await batcher.pendingCount()) === 2);
+            assert.equal(await batcher.pendingCount(), 2, "shared query recovers only the exact recipient obligations");
 
             assert.equal(await batcher.flush(), false);
             assert.equal(readMeta(ids[0]).completionCallbackSentAt, undefined);
             assert.equal(readMeta(ids[1]).completionCallbackSentAt, undefined);
             assert.equal(readMeta(ids[2]).completionCallbackSentAt, undefined);
-            assert.ok(readMeta(ids[2]).completionCallbackSuppressedAt > 0, "foreign record is durably suppressed");
+            assert.equal(readMeta(ids[2]).completionCallbackSuppressedAt, undefined, "foreign obligation remains available for its own recipient");
 
             assert.equal(await batcher.flush(), true);
             const messages = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
@@ -1184,12 +1218,12 @@ describe("completion callback batching", () => {
             assert.ok(readMeta(ids[0]).completionCallbackSentAt > 0);
             assert.ok(readMeta(ids[1]).completionCallbackSentAt > 0);
         } finally {
-            h.shutdown();
+            await h.shutdown();
         }
     });
     it("marks terminal incidents only after the completion batch succeeds", async () => {
         let failOnce = true;
-        const h = makeHarness({ sendMessage(message, options, sent) {
+        const h = await makeHarness({ sendMessage(message, options, sent) {
             if (message.customType === "background-completion-batch" && failOnce) {
                 failOnce = false;
                 throw new Error("simulated failure");
@@ -1199,7 +1233,7 @@ describe("completion callback batching", () => {
         const id = nextRunId();
         dirOnly.push(id);
         try {
-            writeMeta({ id, status: "completed", pid: DEAD_PID, spawnPid: process.pid, cwd: h.ctx.cwd,
+            writeMeta({ id, status: "completed", pid: DEAD_PID, spawnPid: DEAD_PID, supervisionInterruptedAt: Date.now() - 1000, cwd: h.ctx.cwd,
                 callbackOrigin: { cwd: h.ctx.cwd, sessionId: "test-session" },
                 promptPreview: "terminal failure", startedAt: Date.now() - 1_000, endedAt: Date.now(), exitCode: 0,
                 logPath: join(runDir(id), "output.log"), sessionId: id, callback: true,
@@ -1207,7 +1241,7 @@ describe("completion callback batching", () => {
             writeFileSync(join(runDir(id), "output.log"), JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
             observeFailures(failurePath(id), [{ id: "tool:failed", operation: "npm-test", kind: "failure", summary: "tests failed" }]);
             await h.handlers.get("session_start")({}, h.ctx);
-            const batcher = getCallbackBatcher(h.pi);
+            const batcher = h.recipient;
             assert.equal(await batcher.flush(), false);
             assert.equal(readMeta(id).completionCallbackSentAt, undefined);
             assert.deepEqual(pendingFailureAttention(readRunFailures(id), Date.now(), { terminal: true })?.incidents, ["tool:failed"]);
@@ -1215,18 +1249,18 @@ describe("completion callback batching", () => {
             assert.ok(readMeta(id).completionCallbackSentAt > 0);
             assert.equal(pendingFailureAttention(readRunFailures(id), Date.now(), { terminal: true }), undefined);
             await h.handlers.get("session_start")({}, h.ctx);
-            assert.equal(batcher.pendingCount(), 0);
+            assert.equal(await batcher.pendingCount(), 0);
             assert.equal(h.sent.filter((x) => x.message.customType === "background-completion-batch").length, 1);
             assert.match(h.sent.find((x) => x.message.customType === "background-completion-batch").message.content, /status=completed; action required/);
             assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 0);
-        } finally { h.shutdown(); }
+        } finally { await h.shutdown(); }
     });
 });
 
 describe("terminal exit evidence supersedes provisional health reconciliation", () => {
     it("a health tick's provisional lost is superseded by the child's real exit", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             setIdentityProbeForTests(fakeSpawnIdentityProbe());
             try {
                 const { id, pid } = await spawnRun(h);
@@ -1249,14 +1283,14 @@ describe("terminal exit evidence supersedes provisional health reconciliation", 
                 assert.ok(final, "coherent child exit must supersede the provisional lost write");
                 assert.notEqual(final.status, "lost", "provisional lost must not remain");
                 assert.ok("exitCode" in final, "the real exit code is recorded");
-                assert.equal(await getCallbackBatcher(h.pi).flush(), true);
+                assert.equal(await h.recipient.flush(), true);
                 assert.ok(
                     h.sent.some((s) => s.message.customType === "background-completion-batch" && s.message.content.includes(id)),
                     "the superseding completion remains present in the aggregate callback",
                 );
             } finally {
                 setIdentityProbeForTests(undefined);
-                h.shutdown();
+                await h.shutdown();
             }
         });
     });
@@ -1264,7 +1298,7 @@ describe("terminal exit evidence supersedes provisional health reconciliation", 
     it("a health tick's provisional orphaned is superseded by a real non-zero exit", async () => {
         writeFakePi(TRAP_FAIL_SCRIPT);
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             setIdentityProbeForTests(fakeSpawnIdentityProbe());
             try {
                 const { id, pid } = await spawnRun(h);
@@ -1290,7 +1324,7 @@ describe("terminal exit evidence supersedes provisional health reconciliation", 
                 assert.equal(final.exitCode, 3, "the real exit code wins");
             } finally {
                 setIdentityProbeForTests(undefined);
-                h.shutdown();
+                await h.shutdown();
                 assert.equal(isHealthTickerActive(), false, "session_shutdown stops the ticker");
                 writeFakePi(SLEEP_SCRIPT);
             }
@@ -1340,7 +1374,7 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
     }
 
     it("subagent_result returns non-final diagnostic plus best-current artifacts for orphaned metadata", async () => {
-        const h = makeHarness();
+        const h = await makeHarness();
         try {
             const artifact = "still-running-group-output";
             const meta = writeFixtureMeta({
@@ -1357,12 +1391,12 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
             assert.doesNotMatch(out, /Best-available artifacts/i, `orphaned is not the lost terminal path:\n${out}`);
             assert.doesNotMatch(out, /✓ completed/i, `must not pretend normal completion:\n${out}`);
         } finally {
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
     it("subagent_result returns terminal lost diagnostics plus available artifacts", async () => {
-        const h = makeHarness();
+        const h = await makeHarness();
         try {
             const artifact = "partial-progress-before-loss";
             const meta = writeFixtureMeta({ status: "lost", artifactLine: artifact });
@@ -1375,24 +1409,24 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
             assert.match(out, /[Bb]est-available/i, `must point at best-available artifacts:\n${out}`);
             assert.match(out, new RegExp(artifact), `must surface available log artifacts:\n${out}`);
         } finally {
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
     it("subagent_result does not throw solely because a run is orphaned or lost", async () => {
-        const h = makeHarness();
+        const h = await makeHarness();
         try {
             const orphaned = writeFixtureMeta({ status: "orphaned", artifactLine: "o" });
             const lost = writeFixtureMeta({ status: "lost", artifactLine: "l" });
             await assert.doesNotReject(() => h.tools.get("subagent_result").execute("tc", { id: orphaned.id }, undefined, undefined, h.ctx));
             await assert.doesNotReject(() => h.tools.get("subagent_result").execute("tc", { id: lost.id }, undefined, undefined, h.ctx));
         } finally {
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
     it("default subagent_list surfaces orphaned as a non-terminal listed status", async () => {
-        const h = makeHarness();
+        const h = await makeHarness();
         try {
             const orphaned = writeFixtureMeta({
                 status: "orphaned",
@@ -1423,7 +1457,7 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
                 `orphaned must not be listed under a terminal status:\n${out}`,
             );
         } finally {
-            h.shutdown();
+            await h.shutdown();
         }
     });
 });
@@ -1434,7 +1468,7 @@ describe("registered tools fail closed on unverifiable ownership (#312)", () => 
     }
 
     it("never reads a run without a verified session, and treats legacy no-origin runs as unowned", async () => {
-        const h = makeHarness();
+        const h = await makeHarness();
         try {
             const cwd = tmpdir();
             const legacy = nextRunId();
@@ -1467,7 +1501,7 @@ describe("registered tools fail closed on unverifiable ownership (#312)", () => 
             assert.doesNotMatch(listed, /LEGACY_EVIDENCE/);
             assert.doesNotMatch(listed, /OWN_SESSIONLESS_EVIDENCE/);
         } finally {
-            h.shutdown();
+            await h.shutdown();
         }
     });
 });
@@ -1481,9 +1515,9 @@ describe("registered tools fail closed on unverifiable ownership (#312)", () => 
  * // @level unit
  */
 describe("callback session isolation", () => {
-    it("suppresses completion follow-up after the foreground session changes", async () => {
+    it("retains completion for its original recipient after the foreground session changes", async () => {
         const cwd = tmpdir();
-        const h = makeHarness({ cwd, sessionId: "session-a" });
+        const h = await makeHarness({ cwd, sessionId: "session-a" });
         try {
             const { id, pid } = await spawnRun(h);
             const launched = readMeta(id);
@@ -1496,14 +1530,10 @@ describe("callback session isolation", () => {
             await h.handlers.get("session_start")({}, switchedCtx);
 
             killProcessTree(pid, "SIGKILL");
-            const suppressed = await waitFor(() => {
-                const meta = readMeta(id);
-                return meta?.completionCallbackSuppressedAt ? meta : undefined;
-            }, { timeoutMs: 3000 });
-
-            assert.ok(suppressed, "completion callback suppression marker is written");
-            assert.match(suppressed.completionCallbackSuppressedReason, /origin session session-a does not match active session session-b/);
-            await getCallbackBatcher(h.pi).flush();
+            await waitFor(() => readMeta(id)?.completionCallbackPendingAt);
+            assert.equal(readMeta(id).completionCallbackSentAt, undefined);
+            assert.equal(readMeta(id).completionCallbackSuppressedAt, undefined, "the original recipient retains its obligation");
+            await h.recipient.flush();
             assert.equal(
                 h.sent.some((s) => s.message.content.includes(id)),
                 false,
@@ -1511,14 +1541,14 @@ describe("callback session isolation", () => {
             );
             rmSync(runDir(id), { recursive: true, force: true });
         } finally {
-            h.shutdown();
+            await h.shutdown();
         }
     });
 
     it("bounds a lost health follow-up with many long incidents and keeps its explanation and counts", async () => {
         await withFakeClock(async () => {
             const cwd = tmpdir();
-            const h = makeHarness({ cwd, sessionId: "session-bounded" });
+            const h = await makeHarness({ cwd, sessionId: "session-bounded" });
             try {
                 const id = nextRunId();
                 dirOnly.push(id);
@@ -1540,6 +1570,7 @@ describe("callback session isolation", () => {
                     callback: true,
                 });
                 writeFileSync(join(runDir(id), "output.log"), "lost-with-incidents\n");
+                observeFailures(failurePath(id), [{ id: "supervision:lost", operation: "supervision:lost", kind: "incomplete", summary: "Child supervision lost; no related process remains" }], Date.now() - 120_000);
                 observeFailures(failurePath(id), Array.from({ length: 12 }, (_, i) => ({
                     id: `bounded-${i}`, operation: `bounded-op-${i}`, kind: "failure",
                     summary: `failure-${i} ${"界".repeat(150)}`,
@@ -1549,6 +1580,7 @@ describe("callback session isolation", () => {
                 mock.timers.tick(HEALTH_TICK_MS);
                 await new Promise((resolve) => setImmediate(resolve));
 
+                await waitFor(() => h.sent.some(s => s.message?.customType === "subagent-health" && s.message.content.includes(id)));
                 const health = h.sent.filter((s) => s.message?.customType === "subagent-health" && s.message.content.includes(id));
                 assert.equal(health.length, 1);
                 const content = health[0].message.content;
@@ -1561,15 +1593,15 @@ describe("callback session isolation", () => {
                 assert.equal(Number(counts[1]), 13, "12 tool incidents plus the supervision-lost observation");
                 assert.equal((content.match(/^Inspect: subagent_result/gm) ?? []).length, 1);
             } finally {
-                h.shutdown();
+                await h.shutdown();
             }
         });
     });
 
-    it("suppresses recovered lost health follow-up after the foreground session changes", async () => {
+    it("retains recovered lost health follow-up for its original recipient after the foreground session changes", async () => {
         await withFakeClock(async () => {
             const cwd = tmpdir();
-            const h = makeHarness({ cwd, sessionId: "session-b" });
+            const h = await makeHarness({ cwd, sessionId: "session-b" });
             try {
                 const id = nextRunId();
                 dirOnly.push(id);
@@ -1597,8 +1629,7 @@ describe("callback session isolation", () => {
 
                 const meta = readMeta(id);
                 assert.equal(meta.status, "lost");
-                assert.ok(meta.lostCallbackSuppressedAt > 0, "lost callback suppression marker is written");
-                assert.match(meta.lostCallbackSuppressedReason, /origin session session-a does not match active session session-b/);
+                assert.equal(meta.lostCallbackSuppressedAt, undefined, "foreign recipient cannot consume or suppress the owed callback");
                 assert.equal(
                     h.sent.some((s) => s.message?.customType === "subagent-health" && s.message.content.includes(id)),
                     false,
@@ -1611,7 +1642,7 @@ describe("callback session isolation", () => {
                 );
                 assert.equal(isHealthTickerActive(), false, "suppressed lost callback no longer keeps recovery armed");
             } finally {
-                h.shutdown();
+                await h.shutdown();
             }
         });
     });
@@ -1639,7 +1670,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
     it("orphaned transition sends one explicit followUp when callback:true", async () => {
         writeFakePi(TRAP_FAIL_SCRIPT);
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             setIdentityProbeForTests(fakeSpawnIdentityProbe());
             try {
                 const { id, pid } = await spawnRun(h);
@@ -1649,6 +1680,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 mock.timers.tick(HEALTH_TICK_MS);
 
                 assert.equal(readMeta(id).status, "orphaned");
+                await waitFor(() => healthMsgsFor(h.sent, id).length > 0);
                 const msgs = healthMsgsFor(h.sent, id);
                 assert.equal(msgs.length, 1, `exactly one health callback for ${id}; got ${msgs.length}`);
                 assert.equal(msgs[0].options.deliverAs, "followUp");
@@ -1661,6 +1693,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 assert.match(msgs[0].message.content, /wait/i);
                 assert.match(msgs[0].message.content, /stop/i);
                 assert.match(msgs[0].message.content, /retry/i);
+                await waitFor(() => readMeta(id).orphanedCallbackSentAt > 0);
                 assert.ok(readMeta(id).orphanedCallbackSentAt > 0, "durable orphaned callback marker");
                 assert.ok(
                     h.notes.some((n) => n.level === "warning" && n.msg.includes(id)),
@@ -1675,7 +1708,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 await reapRun({ id, pid });
             } finally {
                 setIdentityProbeForTests(undefined);
-                h.shutdown();
+                await h.shutdown();
                 writeFakePi(SLEEP_SCRIPT);
             }
         });
@@ -1683,7 +1716,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
 
     it("lost transition sends one explicit followUp when callback:true", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const id = nextRunId();
                 dirOnly.push(id);
@@ -1694,6 +1727,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                     pgid: DEAD_PID,
                     pidStartTime: "gone-token",
                     spawnPid: process.pid,
+                    callbackOrigin: { cwd: tmpdir(), sessionId: "test-session" },
                     cwd: tmpdir(),
                     promptPreview: "p",
                     startedAt: Date.now(),
@@ -1707,6 +1741,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 mock.timers.tick(HEALTH_TICK_MS);
 
                 assert.equal(readMeta(id).status, "lost");
+                await waitFor(() => healthMsgsFor(h.sent, id).length > 0);
                 const msgs = healthMsgsFor(h.sent, id);
                 assert.equal(msgs.length, 1, `exactly one lost health callback for ${id}; got ${msgs.length}`);
                 assert.equal(msgs[0].options.deliverAs, "followUp");
@@ -1715,6 +1750,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 assert.match(msgs[0].message.content, /no related process remains/i);
                 assert.match(msgs[0].message.content, /no coherent terminal/i);
                 assert.match(msgs[0].message.content, /subagent_result/);
+                await waitFor(() => readMeta(id).lostCallbackSentAt > 0);
                 assert.ok(readMeta(id).lostCallbackSentAt > 0, "durable lost callback marker");
 
                 // Reload / further ticks: marker survives, no second delivery.
@@ -1724,7 +1760,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 mock.timers.tick(HEALTH_TICK_MS);
                 assert.equal(healthMsgsFor(h.sent, id).length, 1, "dedupe survives reload + ticks");
             } finally {
-                h.shutdown();
+                await h.shutdown();
             }
         });
     });
@@ -1821,7 +1857,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
 
     it("pre-marked meta does not re-fire after reload (durable dedupe)", async () => {
         await withFakeClock(async () => {
-            const h = makeHarness();
+            const h = await makeHarness();
             try {
                 const id = nextRunId();
                 dirOnly.push(id);
@@ -1833,6 +1869,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                     pgid: DEAD_PID,
                     pidStartTime: "gone-token",
                     spawnPid: process.pid,
+                    callbackOrigin: { cwd: tmpdir(), sessionId: "test-session" },
                     cwd: tmpdir(),
                     promptPreview: "p",
                     startedAt: Date.now() - 60_000,
@@ -1849,12 +1886,13 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 // should fire ONLY the lost callback (orphaned already marked).
                 mock.timers.tick(HEALTH_TICK_MS);
                 assert.equal(readMeta(id).status, "lost");
+                await waitFor(() => healthMsgsFor(h.sent, id).length > 0);
                 const msgs = healthMsgsFor(h.sent, id);
                 assert.equal(msgs.length, 1, "only the new lost transition fires for this run");
                 assert.match(msgs[0].message.content, /status lost|is lost/i);
                 assert.doesNotMatch(msgs[0].message.content, /may still be alive/i);
             } finally {
-                h.shutdown();
+                await h.shutdown();
             }
         });
     });
@@ -1960,29 +1998,12 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
     it("failed callback handoff is not permanently suppressed; reload delivers one later success", async () => {
         await withFakeClock(async () => {
             let failNext = true;
-            const tools = new Map();
-            const handlers = new Map();
-            const sent = [];
-            const notes = [];
-            const pi = {
-                registerTool: (def) => tools.set(def.name, def),
-                on: (event, fn) => handlers.set(event, fn),
-                sendMessage: (message, options) => {
-                    if (failNext) {
-                        failNext = false;
-                        throw new Error("simulated host delivery failure");
-                    }
-                    sent.push({ message, options });
-                },
-            };
-            const ctx = {
-                cwd: tmpdir(),
-                hasUI: false,
-                ui: { notify: (msg, level) => notes.push({ msg, level }), setWidget: () => {} },
-                model: undefined,
-            };
-            betterSubagents(pi);
-            const shutdown = () => handlers.get("session_shutdown")?.({}, ctx);
+            const h = await makeHarness({ sendMessage(message, options, sent) {
+                if (failNext) { failNext = false; throw new Error("simulated host delivery failure"); }
+                sent.push({ message, options });
+            } });
+            const { tools, handlers, sent, notes, pi, ctx } = h;
+            const shutdown = () => h.shutdown();
             try {
                 const id = nextRunId();
                 dirOnly.push(id);
@@ -1993,6 +2014,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                     pgid: DEAD_PID,
                     pidStartTime: "gone-token",
                     spawnPid: process.pid,
+                    callbackOrigin: { cwd: tmpdir(), sessionId: "test-session" },
                     cwd: tmpdir(),
                     promptPreview: "p",
                     startedAt: Date.now() - 120_000,
@@ -2007,18 +2029,20 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 await handlers.get("session_start")({}, ctx);
                 mock.timers.tick(HEALTH_TICK_MS);
 
+                await waitFor(() => !failNext);
                 assert.equal(healthMsgsFor(sent, id).length, 0, "failed handoff must not count as delivered");
                 assert.equal(
                     readMeta(id).lostCallbackSentAt,
                     undefined,
                     "marker must NOT be written before successful handoff",
                 );
-                assert.equal(isHealthTickerActive(), true, "failed handoff keeps recovery armed");
+                assert.equal(isHealthTickerActive(), false, "recipient delivery does not keep runtime supervision alive");
 
                 // Simulate /reload after the host recovered: next handoff succeeds once.
                 await handlers.get("session_start")({}, ctx);
                 mock.timers.tick(HEALTH_TICK_MS);
 
+                await waitFor(() => healthMsgsFor(sent, id).length > 0);
                 const msgs = healthMsgsFor(sent, id);
                 assert.equal(msgs.length, 1, `exactly one successful recovery callback; got ${msgs.length}`);
                 assert.equal(msgs[0].options.deliverAs, "followUp");
@@ -2031,7 +2055,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 mock.timers.tick(HEALTH_TICK_MS);
                 assert.equal(healthMsgsFor(sent, id).length, 1, "no second delivery after success");
             } finally {
-                shutdown();
+                await shutdown();
             }
         });
     });
