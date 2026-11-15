@@ -23,14 +23,24 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { removeOwnedFixture } from "../../../scripts/test-support/remove-owned-fixture.mjs";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { requestWorkDetail } from "../work-observation.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(__dirname);
 const RUNTIME = mkdtempSync(join(tmpdir(), "nav-close-ext-"));
 process.env.TMPDIR = RUNTIME;
+const AGENT_DIR = join(RUNTIME, "agent");
+process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
+const DURABLE_DIR = join(RUNTIME, "durable");
+process.env.PI_SUBAGENT_DURABLE_DIR = DURABLE_DIR;
+const navigators = [];
+const sleepers = [];
+let stopRuntime;
 
 const STUBS_DIR = mkdtempSync(join(RUNTIME, "stubs-"));
 const CHECKOUT_NODE_MODULES = join(REPO_ROOT, "node_modules");
@@ -147,6 +157,7 @@ function assertCheckoutNodeModulesUntouched() {
 
 function spawnSleeper() {
     const proc = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    sleepers.push(proc);
     proc.unref();
     return proc.pid;
 }
@@ -165,6 +176,7 @@ async function waitFor(pred, timeoutMs = 3000) {
  * the empty-editor main-window subagent navigation path.
  */
 function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
+    const seededIds = [];
     const handlers = {};
     const tools = new Map();
     const commands = new Map();
@@ -217,9 +229,12 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
     mod.default(pi);
     assert.equal(typeof handlers.session_start, "function", "extension must register session_start");
 
-    return {
+    const navigator = {
         async start() {
+            stopRuntime ??= await startWorkRuntimeFixture();
             await handlers.session_start({}, ctx);
+            // These assertions inspect real asynchronous observations, not placeholders.
+            await waitFor(() => seededIds.every(id => requestWorkDetail(id)?.detail));
             assert.ok(ui.factory, "session_start must install the navigator editor factory");
             editor = ui.factory("tui", "theme", "kb");
             assert.equal(typeof editor.handleInput, "function");
@@ -266,9 +281,12 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
                 id,
                 ...overrides,
             });
+            seededIds.push(id);
             return id;
         },
     };
+    navigators.push(navigator);
+    return navigator;
 }
 
 function renderWidgetValue(value, width = 120) {
@@ -304,11 +322,29 @@ describe("registered extension path: main-window navigator actions", () => {
         assertCheckoutNodeModulesUntouched();
     });
 
-    after(() => {
+    afterEach(async () => {
+        for (const child of sleepers) {
+            if (child.exitCode !== null || child.signalCode !== null) continue;
+            child.kill("SIGTERM");
+            assert.equal(await waitFor(() => child.exitCode !== null || child.signalCode !== null), true, "owned fixture child must exit before data removal");
+        }
+        for (const navigator of navigators) await navigator.shutdown();
+        // Cases own independent records, including deliberately unverified parks.
+        for (const id of diskIds) {
+            const directory = registry.runDir(id);
+            if (existsSync(directory)) removeOwnedFixture(directory);
+        }
+        if (existsSync(DURABLE_DIR)) removeOwnedFixture(DURABLE_DIR);
+    });
+
+    after(async () => {
+        assert.ok(sleepers.every(child => child.exitCode !== null || child.signalCode !== null), "fixture children must be gone before removal");
+        for (const navigator of navigators) await navigator.shutdown();
+        await stopRuntime?.();
         for (const id of diskIds) {
             try { rmSync(registry.runDir(id), { recursive: true, force: true }); } catch { /* best-effort */ }
         }
-        try { rmSync(RUNTIME, { recursive: true, force: true }); } catch { /* best-effort */ }
+        removeOwnedFixture(RUNTIME);
     });
 
     // @covers navigator.incident-presentation
@@ -424,10 +460,12 @@ describe("registered extension path: main-window navigator actions", () => {
             assert.equal(failureView(id, RUNTIME, true).actionable, true, "navigator cannot dispose incidents");
             registry.writeMeta({ ...registry.readMeta(id), status: "lost", lostAt: now });
             refreshBackgroundWorkNavigator(nav.ctx);
+            await waitFor(() => renderRegisteredWorkDetail("subagents", id, 120).detail.status === "waiting");
             const lostRail = renderWidgetValue(nav.lastWidget("background-work-list"));
             assert.match(lostRail, /quiet-failure\s+waiting/);
             assert.doesNotMatch(lostRail, /Action required|ORIGINAL_CHILD_ERROR|model error|MODEL_FAILURE/);
             rmSync(logPath);
+            await waitFor(() => /Log unreadable/.test(renderRegisteredWorkDetail("subagents", id, 120).detail.transcriptDiagnostic ?? ""));
             const unreadable = renderRegisteredWorkDetail("subagents", id, 120).detail;
             assert.equal(unreadable.status, "waiting");
             assert.match(unreadable.transcriptDiagnostic, /Log unreadable/);

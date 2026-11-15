@@ -13,7 +13,7 @@ export interface DaemonOwnerIdentity {
 type Owner = DaemonOwnerIdentity;
 
 export function currentOwnerIdentity(token = randomUUID()): DaemonOwnerIdentity {
-  const { boot, start } = linuxIdentity(process.pid);
+  const { boot, start } = processIdentity(process.pid);
   return { pid: process.pid, token, ...(boot ? { boot } : {}), ...(start ? { start } : {}) };
 }
 
@@ -27,7 +27,7 @@ export function sameOwner(left: DaemonOwnerIdentity, right: DaemonOwnerIdentity)
 }
 
 export function ownerIdentityVerified(owner: DaemonOwnerIdentity): boolean {
-  const observed = linuxIdentity(owner.pid);
+  const observed = processIdentity(owner.pid);
   return typeof owner.start === "string" && observed.start === owner.start
     && (process.platform !== "linux" || typeof owner.boot === "string" && owner.boot === observed.boot)
     && alive(owner);
@@ -46,7 +46,7 @@ export function processMatchesStart(pid: number, start: unknown): boolean {
       return observed.length > 0 && observed === start.trim();
     } catch { return false; }
   }
-  const identity = linuxIdentity(pid);
+  const identity = processIdentity(pid);
   return identity.start !== undefined && identity.start === start && alive({ pid, token: "observation", start: identity.start });
 }
 
@@ -89,7 +89,7 @@ function validateOwner(previous: Owner, name: string, lock: string): void {
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 
-function linuxIdentity(pid: number): Pick<Owner, "boot" | "start"> & { state?: string } {
+function processIdentity(pid: number): Pick<Owner, "boot" | "start"> & { state?: string } {
   if (process.platform === "darwin") {
     try {
       const start = execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" }, timeout: 1000 }).trim();
@@ -106,7 +106,7 @@ function linuxIdentity(pid: number): Pick<Owner, "boot" | "start"> & { state?: s
 }
 
 function alive(owner: Owner): boolean {
-  const identity = linuxIdentity(owner.pid);
+  const identity = processIdentity(owner.pid);
   if (owner.boot && identity.boot && owner.boot !== identity.boot) return false;
   if (owner.start && identity.start && owner.start !== identity.start) return false;
   // A kernel-confirmed exited process cannot own a socket even before its parent reaps it.
