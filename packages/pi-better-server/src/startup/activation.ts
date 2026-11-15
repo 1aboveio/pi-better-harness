@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { DaemonClient } from "../client.ts";
 import { claimDaemonOwner, inspectDaemonOwner, ownerIsAlive, validateDaemonOwnerIdentity, type DaemonOwnerIdentity } from "../daemon-owner.ts";
-import { socketPathFor } from "../paths.ts";
+import { socketPathFor } from "../runtime/socket.ts";
 import type { Readiness } from "./ensure.ts";
 import type { ActivationResult, IdleSessionsLease, ServerBuild, StagedRuntime, UpgradeRequest } from "./managed-types.ts";
 import { homedir } from "node:os";

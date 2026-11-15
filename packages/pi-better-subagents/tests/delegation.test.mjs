@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -6,6 +6,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { register } from "node:module";
 import { getSharedCapacityGate, _resetSharedCapacityGateForTests } from "../capacity.mjs";
+import { inspectDaemonOwner } from "../../pi-better-server/src/daemon-owner.ts";
+import { removeOwnedFixture, stopOwnedRuntime } from "../../../scripts/test-support/remove-owned-fixture.mjs";
+
+const agentDir = mkdtempSync(join(tmpdir(), "delegation-runtime-"));
+process.env.PI_CODING_AGENT_DIR = agentDir;
+const foregrounds = [];
+
+after(async () => {
+    const serverDir = join(agentDir, "server");
+    const owner = inspectDaemonOwner(serverDir);
+    for (const foreground of foregrounds) {
+        await foreground.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "shutdown" }, foreground.context());
+    }
+    await stopOwnedRuntime(serverDir, owner.status === "live" ? owner.owner : undefined);
+    removeOwnedFixture(agentDir);
+});
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
@@ -15,6 +31,7 @@ const { normalizeDelegationMode, delegationPrompt, DELEGATION_MODE_REQUEST } = a
 const { resolveRunTiming, TIMING_ENV } = await import("../timing.ts");
 
 function harness(options = {}) {
+    let startedContext;
     const handlers = new Map();
     const commands = new Map();
     const tools = new Map();
@@ -26,9 +43,16 @@ function harness(options = {}) {
         appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
         registerTool(tool) { tools.set(tool.name, tool); },
         registerCommand(name, command) { commands.set(name, command); },
-        on(name, handler) { handlers.set(name, handler); },
+        on(name, handler) {
+            handlers.set(name, name === "session_start" ? (event, ctx) => {
+                startedContext = ctx;
+                return handler(event, ctx);
+            } : handler);
+        },
     });
     const ctx = { ui: { notify(message, level) { notifications.push({ message, level }); } }, sessionManager: { getBranch: () => entries } };
+    // Retain the actual SDK start context; never synthesize shutdown authority.
+    foregrounds.push({ handlers, context: () => startedContext ?? ctx });
     const mode = () => { const request = {}; events.emit(DELEGATION_MODE_REQUEST, request); return request.mode; };
     // pi renders the base followed by every published section, in publication
     // order; the handler returns nothing, so the prompt is assembled here.
