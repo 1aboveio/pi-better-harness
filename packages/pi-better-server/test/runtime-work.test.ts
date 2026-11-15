@@ -425,6 +425,71 @@ test("10000 durable records use bounded indexed history pages; a single archive 
   } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("concurrent coordinator writes cannot starve an initial inventory or hide later assignment changes", { timeout: 10000 }, async () => {
+  const root = fixtureRoot("coordinator-churn");
+  const run = join(root, "runs/sa_churn"); mkdirSync(run, { recursive: true });
+  writeFileSync(join(run, "meta.json"), JSON.stringify({ id: "sa_churn", sessionId: "worker", cwd: root,
+    status: "completed", startedAt: 1, operations: { conversationId: "worker", workspace: root } }));
+  const { openStore } = await import(new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href);
+  const path = join(root, "operation-coordinator.sqlite");
+  const writer = openStore({ path });
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+  const external = new DatabaseSync(path);
+  external.exec("CREATE TABLE diagnostic_churn(value INTEGER); INSERT INTO diagnostic_churn VALUES(0)");
+  const model = new WorkReadModel(root, "churn-instance", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  const reader = (model as any).reader;
+  const read = reader.read.bind(reader);
+  reader.read = (owner: any) => {
+    const observation = read(owner);
+    external.exec("UPDATE diagnostic_churn SET value = value + 1");
+    return observation;
+  };
+  try {
+    await model.reconcile();
+    assert.equal(model.snapshot().status, "ready", "an unrelated commit during every projection must not discard the whole inventory");
+    assert.equal(model.snapshot().rows[0]!.assignment.state, "completed");
+    const owner = { kind: "worker-conversation" as const, sessionId: "worker", workspace: root };
+    writer.registerOperation({ operationId: "churn-op", taskId: "churn-task", launchToken: "churn-token", owner,
+      observer: { kind: "background-tasks", version: "1" }, supervision: { hostId: "churn-host", runnerId: "churn-runner" }, authorityRef: "scope" });
+    writer.registerWait({ waitId: "churn-wait", owner, dependencies: [{ operationId: "churn-op" }],
+      origin: { attemptId: "sa_churn" }, continuationNote: "Interpret evidence." });
+    await model.reconcile();
+    assert.equal(model.snapshot().status, "ready");
+    assert.equal(model.snapshot().rows[0]!.assignment.state, "waiting", "a later coordinator snapshot must observe the new wait");
+  } finally { await model.close(); external.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("source churn retries reuse completed historical parsing without publishing an inconsistent snapshot", async () => {
+  const root = fixtureRoot("source-churn");
+  const metas = ["history", "changing"].map(name => ({ id: `sa_${name}`, sessionId: name, cwd: root,
+    status: "completed", startedAt: 1, operations: { conversationId: name, workspace: root } }));
+  for (const meta of metas) {
+    mkdirSync(join(root, "runs", meta.id), { recursive: true });
+    writeFileSync(join(root, "runs", meta.id, "meta.json"), JSON.stringify(meta));
+  }
+  const { openStore } = await import(new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href);
+  const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
+  const model = new WorkReadModel(root, "source-churn", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  const reader = (model as any).reader;
+  const read = reader.read.bind(reader);
+  let changed = false;
+  reader.read = (owner: any) => {
+    if (!changed) {
+      changed = true;
+      assert.equal(model.snapshot().rows.length, 0);
+      writeFileSync(join(root, "runs/sa_changing/meta.json"), JSON.stringify({ ...metas[1], name: "latest" }));
+    }
+    return read(owner);
+  };
+  try {
+    await model.reconcile();
+    assert.equal(model.snapshot().status, "ready");
+    assert.equal(model.snapshot({ id: "sa_changing" }).rows[0]!.meta.name, "latest");
+    assert.equal(model.metrics.metadataReads, 3, "unchanged historical metadata survives an abandoned scan");
+    assert.equal(model.metrics.projections, 3, "only the changed family needs projection again");
+  } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("watch overflow and lost notifications reconcile external writes once and retain stale degraded rows", { timeout: 10000 }, async () => {
   const root = fixtureRoot("inventory");
   const runs = join(root, "runs"); mkdirSync(runs);

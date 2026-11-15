@@ -34,6 +34,10 @@ export class WorkQueryExecutor {
   private failure?: Error;
   private termination?: Promise<number>;
   private exited = false;
+  private closed = false;
+  private workerGeneration = 0;
+  private recoveryAttempts: number[] = [];
+  private recoveryTimer?: ReturnType<typeof setTimeout>;
   private workerMetrics: WorkerMetrics = {};
   private lastObservation: Omit<ReturnType<WorkReadModel["observation"]>, "observedAt"> & { observedAt: number | null } = {
     status: "rebuilding", reason: "Initial source inventory is rebuilding.", observedAt: null, reasons: [],
@@ -47,22 +51,63 @@ export class WorkQueryExecutor {
   private timeouts = 0;
   private durations: number[] = [];
   private options: QueryExecutorOptions;
+  private agentDir: string;
   readonly instanceId: string;
 
   constructor(agentDir: string, instanceId: string, options: QueryExecutorOptions = {}) {
-    this.options = options; this.instanceId = instanceId;
+    this.options = options; this.instanceId = instanceId; this.agentDir = agentDir;
     this.lag.enable();
-    this.worker = new Worker(options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url), {
-      execArgv: [], workerData: { agentDir, instanceId, modelOptions: options.modelOptions },
+    this.worker = this.startWorker();
+  }
+
+  private startWorker() {
+    const instanceId = this.workerGeneration ? `${this.instanceId}:reads:${this.workerGeneration}` : this.instanceId;
+    const worker = new Worker(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url), {
+      execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: this.options.modelOptions },
     });
-    this.worker.on("message", message => this.receive(message));
-    this.worker.on("error", error => this.fail(new Error(`runtime-unhealthy: read worker failed: ${String(error)}`)));
-    this.worker.on("exit", code => {
+    worker.on("message", message => { if (worker === this.worker) this.receive(message); });
+    worker.on("error", error => { if (worker === this.worker) this.fail(new Error(`runtime-unhealthy: read worker failed: ${String(error)}`)); });
+    worker.on("exit", code => {
+      if (worker !== this.worker) return;
       this.exited = true;
       const sqlite = this.workerMetrics.sqlite;
       if (sqlite) this.workerMetrics = { ...this.workerMetrics, sqlite: { ...sqlite, active: 0 } };
-      this.fail(new Error(`runtime-unhealthy: read worker exited (${code}); restart the runtime to rebuild reads`));
+      this.fail(new Error(`runtime-unhealthy: read worker exited (${code}); rebuilding reads after recovery`));
+      this.scheduleRecovery();
     });
+    return worker;
+  }
+
+  private scheduleRecovery() {
+    if (this.closed || !this.exited || this.recoveryTimer || !this.streams.size) return;
+    const now = Date.now();
+    this.recoveryAttempts = this.recoveryAttempts.filter(attempt => now - attempt < 60_000);
+    if (this.recoveryAttempts.length >= 2) {
+      if (!this.failure?.message.includes("recovery budget exhausted")) {
+        this.failure = new Error(`${this.failure?.message}; automatic read recovery budget exhausted`);
+      }
+      return;
+    }
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      if (this.closed || !this.streams.size) return;
+      this.recoveryAttempts.push(Date.now());
+      this.workerGeneration++;
+      this.exited = false; this.failure = undefined; this.termination = undefined;
+      this.workerMetrics = {}; this.workerConnections.clear(); this.revision++;
+      this.lastObservation = { status: "rebuilding", reason: "Read worker is recovering its source inventory.", observedAt: null, reasons: [] };
+      this.lag.reset(); this.lag.enable();
+      try { this.worker = this.startWorker(); }
+      catch (error) {
+        this.exited = true; this.lag.disable();
+        this.failure = new Error(`runtime-unhealthy: read worker restart failed: ${String(error)}`);
+        this.scheduleRecovery();
+        return;
+      }
+      for (const connection of this.streams.keys()) this.event(connection, JSON.stringify({ type: "event",
+        event: { type: "resync_required", reason: "read-worker-recovered", instanceId: this.instanceId } }) + "\n");
+    }, 500);
+    this.recoveryTimer.unref();
   }
 
   connect(socket: ReadStream) {
@@ -77,6 +122,7 @@ export class WorkQueryExecutor {
     const close = () => this.detach(connection);
     this.streams.set(connection, { socket, paused: false, generation: 0, drain, close });
     socket.on("drain", drain); socket.once("close", close);
+    if (this.failure) this.scheduleRecovery();
     return { handle: (command: Record<string, unknown>) => this.request(connection, command), close };
   }
 
@@ -96,13 +142,14 @@ export class WorkQueryExecutor {
       capacity: this.options.capacity ?? 64, waitMs: [...this.waits], readMs: [...this.durations],
       eventLoopLagMs: { p50: this.lag.percentile(50) / 1e6, p95: this.lag.percentile(95) / 1e6, p99: this.lag.percentile(99) / 1e6 },
       worker: this.exited ? "stopped" : this.failure ? "stopping" : "running",
+      restarts: this.workerGeneration, recoveryPending: !!this.recoveryTimer,
       status: this.failure ? "degraded" : "ready" } };
   }
 
   private request(connection: number, input: Record<string, unknown>): Promise<EncodedRead> {
     if (connection !== 0 && !this.streams.has(connection)) return Promise.reject(new Error("runtime-unavailable: client disconnected"));
     if (input.type === "runtime_get_metrics") return Promise.resolve({ json: JSON.stringify(this.metrics()) });
-    if (this.failure) return Promise.reject(this.failure);
+    if (this.failure) { this.scheduleRecovery(); return Promise.reject(this.failure); }
     if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_liveness"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
     if (input.sinceSeq !== undefined && !Number.isSafeInteger(input.sinceSeq)) return Promise.reject(new Error("Invalid replay sequence"));
     if (input.instanceId !== undefined && (typeof input.instanceId !== "string" || input.instanceId.length > 256)) return Promise.reject(new Error("Invalid runtime instance"));
@@ -218,6 +265,8 @@ export class WorkQueryExecutor {
   }
 
   async close() {
+    this.closed = true;
+    if (this.recoveryTimer) { clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined; }
     this.fail(new Error("runtime-unavailable: query executor closed"));
     for (const connection of this.streams.keys()) this.detach(connection);
     let timeout: ReturnType<typeof setTimeout> | undefined;
