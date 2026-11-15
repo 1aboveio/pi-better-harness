@@ -1,4 +1,3 @@
-import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -59,7 +58,7 @@ test("subagents contributes the standalone settings opener with shared session a
         setConfigPathForTests(undefined);
     });
     mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
-    const stopRuntime = await startWorkRuntimeFixture();
+    const stopRuntime = async () => {};
     let events;
     const registrations = [];
     const commands = new Map();

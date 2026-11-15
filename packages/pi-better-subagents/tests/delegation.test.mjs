@@ -25,6 +25,7 @@ after(async () => {
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: extension, subagentsArgumentCompletions } = await import("../index.ts");
 const { setConfigForTests, setConfigPathForTests, loadConfig, writeSubagentSettings, normalizeConcurrencyCap } = await import("../config.ts");
 const { normalizeDelegationMode, delegationPrompt, DELEGATION_MODE_REQUEST } = await import("../delegation.ts");
@@ -49,7 +50,7 @@ function harness(options = {}) {
                 return handler(event, ctx);
             } : handler);
         },
-    });
+    }, managedDomainPort());
     const ctx = { ui: { notify(message, level) { notifications.push({ message, level }); } }, sessionManager: { getBranch: () => entries } };
     // Retain the actual SDK start context; never synthesize shutdown authority.
     foregrounds.push({ handlers, context: () => startedContext ?? ctx });

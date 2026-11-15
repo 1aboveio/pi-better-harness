@@ -12,6 +12,7 @@ const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = join(root, 'agent');
 process.env.TMPDIR = root;
 register(new URL('./pi_host_stub_hooks.mjs', import.meta.url));
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: extension } = await import('../index.ts');
 const { setConfigForTests } = await import('../config.ts');
 const { baseDir, readMeta, listMetas, runDir, writeMeta } = await import('../registry.ts');
@@ -48,7 +49,7 @@ function fixture(name) {
     modelRegistry: { getAvailable: () => [{ provider: 'test', id: 'model', reasoning: true }], find: () => undefined },
     isIdle: () => true, ui: { notify() {}, setWidget() {} },
     sessionManager: { getSessionId: () => name, getBranch: () => [] } };
-  extension(host);
+  extension(host, managedDomainPort());
   const execute = (tool, params) => tools.get(tool).execute('check', params, undefined, undefined, ctx);
   return { execute, workspace, shutdown: () => handlers.get('session_shutdown')?.({}, ctx) };
 }

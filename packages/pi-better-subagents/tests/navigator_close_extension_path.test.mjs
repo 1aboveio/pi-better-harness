@@ -175,7 +175,7 @@ async function waitFor(pred, timeoutMs = 3000) {
  * Boot the real extension factory, fire session_start on a TUI ctx, and drive
  * the empty-editor main-window subagent navigation path.
  */
-function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
+function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId = "navigator-recipient" }) {
     const seededIds = [];
     const handlers = {};
     const tools = new Map();
@@ -278,6 +278,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
             const id = trackDisk(overrides.id ?? `sa_t47_ext_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
             writeMeta({
                 ...metaBase,
+                callbackOrigin: { cwd: ctx.cwd, sessionId },
                 id,
                 ...overrides,
             });
@@ -348,7 +349,7 @@ describe("registered extension path: main-window navigator actions", () => {
     });
 
     // @covers navigator.incident-presentation
-    it("real startup reconciliation does not send session A's held-record warning to unrelated B", async () => {
+    it("foreground startup does not supervise or consume another session's held-record warning", async () => {
         const workspace = join(RUNTIME, "startup-workspace");
         mkdirSync(workspace, { recursive: true });
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase, sessionId: "startup-B" });
@@ -361,10 +362,12 @@ describe("registered extension path: main-window navigator actions", () => {
         host.start(nav.ctx);
         try {
             await nav.start();
-            assert.equal(await waitFor(() => nav.notices.some((n) => n.message.includes("/subagents history"))), true);
-            assert.equal(registry.readParkRecord(id).phase, "held", "global reconciliation still runs");
-            assert.ok(!nav.notices.some((n) => n.message.includes(`Subagent ${id}:`)));
-            assert.ok(nav.notices.some((n) => n.message.includes("/subagents history")));
+            assert.equal(registry.readParkRecord(id).phase, "resuming", "foreground observation does not perform server reconciliation");
+            assert.ok(!nav.notices.some(n => n.message.includes(`Subagent ${id}:`)));
+            const { reconcileParkedWaits } = await import("../worker-waits.ts");
+            await reconcileParkedWaits(host.service, { resume: async () => "held", notifyWhen: () => false });
+            assert.equal(registry.readParkRecord(id).phase, "held", "explicit supervisor domain reconciliation repairs the missing writer");
+            assert.ok(!nav.notices.some(n => n.message.includes(`Subagent ${id}:`)), "foreign attention never becomes a recipient wake");
             assert.equal(registry.readParkRecord(id).ownerSessionId, "startup-A");
         } finally { await nav.shutdown(); host.close(); registry.dismissRun(id); rmSync(registry.runDir(id), { recursive: true, force: true }); }
     });

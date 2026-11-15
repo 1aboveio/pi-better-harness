@@ -1,4 +1,3 @@
-import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 /**
  * SPEC-03/04/06/07: current launchability, effective capabilities, the Pi
  * argument schema, and per-job clarification. Schema checks go through Pi's

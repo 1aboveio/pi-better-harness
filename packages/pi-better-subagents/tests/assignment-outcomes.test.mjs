@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, mock, after } from "node:test";
 import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
-import { stopWorkObservation } from "../work-observation.ts";
+import { workObservation, stopWorkObservation } from "../work-observation.ts";
 import { register } from "node:module";
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
@@ -12,7 +12,7 @@ register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 const { default: extension } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { finalizeRun } = await import("../finalization.ts");
-const { writeMeta, readMeta, runDir, logPathFor, removeRunDirectory } = await import("../registry.ts");
+const { listMetasForOrigin, writeMeta, readMeta, runDir, logPathFor, removeRunDirectory } = await import("../registry.ts");
 const { registerAssignmentAttempt, coordinatorPath, readOutcome } = await import("../assignment-outcomes.ts");
 const { commitAssignmentTerminal, outcomeTranscriptReceipt } = await import("../assignment-outcomes.ts");
 const { assignmentFor } = await import("../assignment-projection.mjs");
@@ -22,6 +22,20 @@ const { retainObservation, pendingObservations } = await import("../outage-obser
 const { reconcileParkedWaits } = await import("../worker-waits.ts");
 const stopRuntime = await startWorkRuntimeFixture();
 after(async () => { stopWorkObservation(); await stopRuntime(); });
+
+// Domain receipt/admission tests use a fake ExtensionAPI but a real shared read
+// service. Native transcript and automatic SDK handoff are qualified separately
+// in Server runtime-assignment-sdk and runtime-assignment-slow-socket tests.
+async function observeFixture(sessionId = "parent", settleMs = 75) {
+    const expected = listMetasForOrigin({ cwd: process.cwd(), sessionId }).filter(meta => meta.assignment && readOutcome(meta) && !readOutcome(meta).deliveryReceipt && !readOutcome(meta).disposition).map(meta => meta.id);
+    const deadline = Date.now() + 3000;
+    while (workObservation()?.status !== "ready" || !expected.every(id => workObservation().rows.some(row => row.meta.id === id))) {
+        if (Date.now() > deadline) throw new Error("Shared recipient observation did not arrive");
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    // Standalone admission has a bounded 50ms absent-provider response window.
+    await new Promise(resolve => setTimeout(resolve, settleMs));
+}
 
 function host(sessionId = "parent", options = {}) {
     const tools = new Map(), handlers = new Map(), entries = options.entries ?? [], sent = [];
@@ -35,7 +49,7 @@ function host(sessionId = "parent", options = {}) {
     const ctx = { cwd: process.cwd(), isIdle: () => true, hasUI: false,
         ui: { notify() {}, setWidget() {} }, sessionManager: { getSessionId: () => sessionId, getBranch: () => entries } };
     extension(pi);
-    return { pi, ctx, entries, sent, tools, handlers, async start() { await handlers.get("session_start")?.({}, ctx); await new Promise((resolve) => setImmediate(resolve)); }, async close() { await handlers.get("session_shutdown")?.({ reason: "reload" }, ctx); } };
+    return { pi, ctx, entries, sent, tools, handlers, async start({ settleMs = 75 } = {}) { await handlers.get("session_start")?.({}, ctx); await observeFixture(sessionId, settleMs); }, async close() { await handlers.get("session_shutdown")?.({ reason: "reload" }, ctx); } };
 }
 
 function failedAssignment(id, branchId = null) {
@@ -85,14 +99,14 @@ test("ended outcomes retry admission without input for two assignments in one co
         h.ctx.isIdle = () => false;
         await h.handlers.get("agent_start")({}, h.ctx);
         mock.timers.tick(1000);
-        await new Promise((resolve) => setImmediate(resolve));
+        await observeFixture();
         assert.equal(first.store.listOutbox().find((e) => e.eventId === readOutcome(first.meta).eventId).attempts, 0);
         assert.equal(h.sent.length, 0);
         const firstDeferral = readMeta(first.meta.id).outcomeDeliveryDeferredReason;
         options.allowed = true; // No workflow event, human input or result poll.
         h.ctx.isIdle = () => true;
         await h.handlers.get("agent_settled")({}, h.ctx);
-        await new Promise((resolve) => setImmediate(resolve));
+        await observeFixture();
         await getCallbackBatcher(h.pi).flush();
         assert.ok(readOutcome(first.meta).deliveryReceipt);
         // The first callback triggers a parent interpretation turn.
@@ -110,11 +124,11 @@ test("ended outcomes retry admission without input for two assignments in one co
         assert.equal(second.meta.sessionId, first.meta.sessionId);
         options.allowed = false;
         mock.timers.tick(1000);
-        await new Promise((resolve) => setImmediate(resolve));
+        await observeFixture();
         const secondDeferral = readMeta(second.meta.id).outcomeDeliveryDeferredReason;
         options.allowed = true;
         mock.timers.tick(1000);
-        await new Promise((resolve) => setImmediate(resolve));
+        await observeFixture();
         assert.equal(readMeta(second.meta.id).outcomeDeliveryDeferredReason, undefined, "retry obtains fresh admission");
         await getCallbackBatcher(h.pi).flush();
         assert.ok(readOutcome(second.meta).deliveryReceipt, "ended follow-up must retry even with no running children or lifecycle event");
@@ -134,7 +148,7 @@ test("ended outcomes retry admission without input for two assignments in one co
         try {
             await replay.start();
             mock.timers.tick(2000);
-            await new Promise((resolve) => setImmediate(resolve));
+            await observeFixture();
             await getCallbackBatcher(replay.pi).flush();
             assert.equal(replay.sent.length, 0, "reload and duplicate reconciliation do not deliver again");
         } finally { await replay.close(); }
@@ -202,11 +216,11 @@ test("admission returning after parent teardown cannot claim a retained outcome"
     let request;
     h.pi.events.on("pi-better-goal:operation-resume-admission", (value) => { request = value; });
     try {
-        await h.start();
+        await h.start({ settleMs: 0 });
         assert.ok(request);
         await h.close();
         request.reply({ allowed: true, revision: 1, isCurrent: () => true });
-        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise(resolve => setImmediate(resolve));
         await getCallbackBatcher(h.pi).flush();
         const event = store.listOutbox().find((e) => e.eventId === readOutcome(meta).eventId);
         assert.equal(event.attempts, 0);
@@ -429,7 +443,7 @@ test("registered stop commits and delivers cancellation without asserting proces
         writeMeta({ id, assignment: binding, status: "running", pid: child.pid, pgid: child.pid, spawnPid: process.pid, cwd: process.cwd(), sessionId: "stopped-worker", promptPreview: "stop fixture", startedAt: Date.now(), logPath: logPathFor(id), callback: true, callbackOrigin: { cwd: process.cwd(), sessionId: "parent" } });
         await h.start();
         await h.tools.get("subagent_stop").execute("stop", { id }, undefined, undefined, h.ctx);
-        await new Promise((resolve) => setImmediate(resolve));
+        await observeFixture();
         await getCallbackBatcher(h.pi).flush();
         assert.equal(readOutcome(readMeta(id)).outcome, "cancelled");
         assert.equal(readOutcome(readMeta(id)).processUncertain, true);
@@ -444,7 +458,7 @@ test("standalone parent receives outcomes without Harness or Goal", async () => 
     const { store, meta } = failedAssignment("no-goal-outcome");
     const h = host("parent", { noGoal: true });
     try {
-        await h.start(); await new Promise((resolve) => setTimeout(resolve, 75));
+        await h.start();
         await getCallbackBatcher(h.pi).flush();
         assert.equal(h.sent.length, 1);
         assert.ok(readOutcome(meta).deliveryReceipt);
