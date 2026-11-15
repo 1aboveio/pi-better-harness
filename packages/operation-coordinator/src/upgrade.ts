@@ -11,6 +11,8 @@ export function setUpgradeFence(ctx: StoreContext, epoch: string | null) {
             WHERE json_extract(b.owner_json, '$.kind')=NEW.owner_kind
               AND json_extract(b.owner_json, '$.sessionId')=NEW.owner_session_id
               AND json_extract(b.owner_json, '$.workspace')=NEW.owner_workspace
+              AND json_extract(b.owner_json, '$.branchId') IS NEW.owner_branch_id
+              AND json_extract(b.owner_json, '$.goalId') IS NEW.owner_goal_id
               AND NOT EXISTS (SELECT 1 FROM assignment_outcomes o WHERE o.assignment_id=b.assignment_id)))
           BEGIN SELECT RAISE(ABORT, 'runtime-draining: new execution deferred for upgrade'); END`);
         if (epoch === null) ctx.db.prepare("DELETE FROM coordinator_state WHERE key='runtime-upgrade-fence-v1'").run();

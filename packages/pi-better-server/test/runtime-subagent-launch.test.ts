@@ -70,6 +70,11 @@ for (const journalOnly of [false, true]) test(`registered SDK launch survives pa
     } finally { db.close(); }
     const rejected = once(parent, "message"); parent.send({ key: "over-owner-capacity", params });
     assert.match((await rejected)[0].error, /Max concurrent subagents/);
+    const admission = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
+    try {
+      assert.equal(admission.prepare("SELECT state FROM subagent_launch_intents WHERE request_key='over-owner-capacity'").get()?.state,
+        "returned", "a refused launch without an attempt cannot leave a permanent upgrade obligation");
+    } finally { admission.close(); }
     sibling = fork(new URL("./support/subagent-launch-sdk.mjs", import.meta.url), [], { execPath: process.execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
     sibling.stderr!.on("data", data => { errors += data; });
     await Promise.race([once(sibling, "message"), once(sibling, "exit").then(() => { throw new Error(errors); })]);
@@ -139,8 +144,14 @@ for (const journalOnly of [false, true]) test(`registered SDK launch survives pa
     try {
       const binding = metaFor(first.details.runId).assignment;
       assert.ok(binding, "real launch retains assignment authority");
-      assert.ok(outcomes.prepare("SELECT 1 FROM assignment_outcomes WHERE assignment_id=?").get(binding.assignmentId),
-        "server publishes a terminal outcome while the original recipient is absent");
+      const publication = outcomes.prepare("SELECT 1 FROM assignment_outcomes WHERE assignment_id=?");
+      const deadline = Date.now() + 2000;
+      // The metadata file is visible before the following SQLite transaction
+      // commits. Observe that distinct durable publication explicitly.
+      while (!publication.get(binding.assignmentId)) {
+        assert.ok(Date.now() < deadline, "server publishes a terminal outcome while the original recipient is absent");
+        await delay(25);
+      }
     } finally { outcomes.close(); }
     const prior = metaFor(independent.details.runId);
     const followup = await launch({ prompt: "Continue in the saved worker conversation", session_id: independent.details.sessionId, callback: false }, "saved-followup", sibling);

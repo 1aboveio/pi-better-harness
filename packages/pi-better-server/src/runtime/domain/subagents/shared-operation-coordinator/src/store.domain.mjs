@@ -8,6 +8,7 @@
  * synchronous and transactional; a refusal throws `StoreError` with a typed code
  * and leaves no partial record.
  */
+import { setUpgradeFence } from "./upgrade.domain.mjs";
 import { StoreError } from "./errors.domain.mjs";
 import { SubagentLaunchJournal } from "./subagent-launch.domain.mjs";
 import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.domain.mjs";
@@ -78,6 +79,7 @@ export function openStore(options) {
             closed = true;
             db.close();
         },
+        setUpgradeFence(epoch) { alive(); setUpgradeFence(ctx, epoch); },
         registerOperation(input) {
             alive();
             return writeOperation(ctx, input);

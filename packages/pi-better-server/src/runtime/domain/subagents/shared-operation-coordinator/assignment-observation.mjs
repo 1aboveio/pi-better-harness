@@ -107,6 +107,32 @@ export function createAssignmentReader(path) {
                 return undefined;
             }
         },
+        upgradeObligations() {
+            try {
+                this.revision();
+            }
+            catch (error) {
+                if (error.code === "ENOENT")
+                    return [];
+                throw error;
+            }
+            const version = db.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value;
+            if (!["1", "2", "3", "4"].includes(version))
+                throw new Error("Unsupported coordinator schema during upgrade");
+            const obligations = db.prepare("SELECT operation_id, task_id, observer_kind FROM operations WHERE phase='running' AND terminal_revision=0").all()
+                .map(row => ({ kind: "unsettled-operation", id: row.task_id, operationId: row.operation_id, observer: row.observer_kind }));
+            const reasons = db.prepare("SELECT claim_id AS id, state FROM resume_claims WHERE state IN ('claimed', 'published')").all()
+                .map(row => ({ kind: "resume-claim", id: row.id, state: row.state }));
+            for (const row of db.prepare("SELECT wait_id, generation, phase FROM waits WHERE owner_kind='worker-conversation' AND phase NOT IN ('consumed', 'cancelled') AND dispatch_disarmed=0").all()) {
+                reasons.push({ kind: "worker-wait", id: row.wait_id, generation: row.generation, phase: row.phase });
+            }
+            if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='subagent_launch_intents'").get()) {
+                for (const row of db.prepare("SELECT owner, request_key, attempts FROM subagent_launch_intents WHERE state='accepted'").all()) {
+                    reasons.push({ kind: "launch-intent", id: row.request_key, owner: row.owner, attempts: JSON.parse(row.attempts).map(attempt => attempt.id) });
+                }
+            }
+            return [...obligations, ...reasons];
+        },
         close() { db?.close(); db = undefined; statements.clear(); identity = undefined; },
     };
 }

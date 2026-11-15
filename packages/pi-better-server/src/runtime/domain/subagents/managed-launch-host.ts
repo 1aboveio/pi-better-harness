@@ -161,21 +161,29 @@ export class ManagedSubagentHost {
                 if (intent.result) return JSON.parse(intent.result);
                 return this.recoveredResult(intent);
             }
-            this.current = { ...record, authority: command.authority, ownerKey, grantDigest: launchDigest(record) };
-            await this.initialize();
-            this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...record.permissions });
-            const ctx = this.session.extensionRunner.createContext();
-            const branch = [...record.settings, ...(record.owner.goalId ? [{ type: "custom", customType: "pi-better-goal", data: { kind: "set", goal: { goalId: record.owner.goalId } } }] : []), { id: record.owner.branchId }];
-            const model = record.model?.split("/");
-            const context = { ...ctx, cwd: record.owner.workspace, hasUI: false, isProjectTrusted: () => record.projectTrusted,
-                model: model ? ctx.modelRegistry.find(model[0], model.slice(1).join("/")) : undefined,
-                sessionManager: { getSessionId: () => record.owner.sessionId, getBranch: () => branch, getLeafId: () => record.owner.branchId,
-                    getSessionFile: () => undefined, getEntries: () => branch } };
-            const tool = this.session.extensionRunner.getToolDefinition(record.tool);
-            if (!tool) throw new Error("Fixed subagent adapter unavailable");
-            const response = await tool.execute(record.key, record.params, undefined, undefined, context);
-            this.journal.finish(ownerKey, record.key, this.epoch, response);
-            return response;
+            try {
+                this.current = { ...record, authority: command.authority, ownerKey, grantDigest: launchDigest(record) };
+                await this.initialize();
+                this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...record.permissions });
+                const ctx = this.session.extensionRunner.createContext();
+                const branch = [...record.settings, ...(record.owner.goalId ? [{ type: "custom", customType: "pi-better-goal", data: { kind: "set", goal: { goalId: record.owner.goalId } } }] : []), { id: record.owner.branchId }];
+                const model = record.model?.split("/");
+                const context = { ...ctx, cwd: record.owner.workspace, hasUI: false, isProjectTrusted: () => record.projectTrusted,
+                    model: model ? ctx.modelRegistry.find(model[0], model.slice(1).join("/")) : undefined,
+                    sessionManager: { getSessionId: () => record.owner.sessionId, getBranch: () => branch, getLeafId: () => record.owner.branchId,
+                        getSessionFile: () => undefined, getEntries: () => branch } };
+                const tool = this.session.extensionRunner.getToolDefinition(record.tool);
+                if (!tool) throw new Error("Fixed subagent adapter unavailable");
+                const response = await tool.execute(record.key, record.params, undefined, undefined, context);
+                this.journal.finish(ownerKey, record.key, this.epoch, response);
+                return response;
+            } catch (error) {
+                const pending = this.journal.read(ownerKey, record.key);
+                if (pending?.state === "accepted" && JSON.parse(pending.attempts).length === 0) {
+                    this.journal.finish(ownerKey, record.key, this.epoch, this.recoveredResult(pending));
+                }
+                throw error;
+            }
         }).finally(() => { this.pending--; });
         this.tail = result;
         return result;
