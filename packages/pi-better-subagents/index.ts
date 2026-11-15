@@ -676,8 +676,11 @@ async function tryEnqueueAssignmentOutcome(pi: ExtensionAPI, meta: RunMeta): Pro
  * path never takes a live pi's terminal callback (#625, DEV-226 criterion 5).
  */
 function recoverAssignmentOutcomes(pi: ExtensionAPI): void {
-    for (const meta of activeCallbackOrigin ? listMetasForOrigin(activeCallbackOrigin) : []) if (meta.assignment) {
-        try { if (commitAssignmentTerminal(meta)) void enqueueAssignmentOutcome(pi, meta); } catch { /* keep unverified; no legacy handoff */ }
+    for (const meta of activeCallbackOrigin ? listMetasForOrigin(activeCallbackOrigin) : []) {
+        replayTimingWakes(pi, meta);
+        if (meta.assignment) {
+            try { if (commitAssignmentTerminal(meta)) void enqueueAssignmentOutcome(pi, meta); } catch { /* keep unverified; no legacy handoff */ }
+        }
     }
 }
 
@@ -4436,6 +4439,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             if (sessionTornDown || observation?.status !== "ready") return;
             for (const row of observation.rows) {
                 replayTimingWakes(pi, row.meta);
+                if (!row.meta.assignment && row.meta.completionCallbackPendingAt !== undefined) enqueueCompletionCallback(pi, row.meta.id);
                 if (row.meta.status === "orphaned" || row.meta.status === "lost") deliverHealthCallback(pi, row.meta, row.meta.status, Date.now());
                 if (["running", "orphaned", "lost"].includes(row.meta.status)) deliverFailureAttention(pi, row.meta, Date.now());
             }
