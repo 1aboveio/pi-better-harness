@@ -93,6 +93,8 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
     if (scenario === "unavailable") {
       const observer = new WorkClient(join(transport, "pi-server.sock"), agent);
       try {
+        // Complete hello/retention registration before closing this observer.
+        await observer.ready;
         const deadline = Date.now() + 10000;
         let state: any;
         do {
@@ -142,6 +144,8 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
       await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
       const observer = new WorkClient(join(transport, "pi-server.sock"), agent);
       try {
+        // Complete hello/retention registration before closing this observer.
+        await observer.ready;
         const readyBy = Date.now() + 10000;
         while (!(await observer.request("runtime_get_status")).subagentManagement?.continuationReady) {
           assert.ok(Date.now() < readyBy, `Runtime bridge did not recover: ${errors}`); await delay(25);
