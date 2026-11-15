@@ -4,6 +4,7 @@ import { closeSync, lstatSync, mkdtempSync, openSync, readFileSync, rmSync, syml
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from "./index.ts";
 
@@ -96,4 +97,39 @@ test("independent Pi and Harness processes update settings without losing siblin
       goal: { saved: true }, callbacks: { saved: true }, sandbox: { saved: true }, subagents: { saved: true },
     },
   });
+});
+
+test("a Harness writer waits for a briefly delayed settings lock holder and preserves its update", async t => {
+  const f = fixture(t);
+  writeFileSync(f.path, '{"theme":"dark"}');
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `
+    import lockfile from 'proper-lockfile';
+    import {readFileSync, writeFileSync} from 'node:fs';
+    const path = ${JSON.stringify(f.path)};
+    const release = lockfile.lockSync(path, {realpath:false});
+    process.send('locked');
+    setTimeout(() => {
+      const settings = JSON.parse(readFileSync(path, 'utf8'));
+      settings.theme = 'light';
+      writeFileSync(path, JSON.stringify(settings));
+      release();
+      process.disconnect();
+    }, 350);
+  `], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  let stderr = "";
+  child.stderr!.on("data", data => { stderr += data; });
+  const exited = once(child, "close");
+  try {
+    await Promise.race([
+      once(child, "message"),
+      exited.then(() => { throw new Error(stderr || "lock holder exited before ready"); }),
+    ]);
+    updateHarnessSetting("goal", () => ({ saved: true }), f.seams);
+    assert.deepEqual(JSON.parse(readFileSync(f.path, "utf8")), {
+      theme: "light", piBetterHarness: { goal: { saved: true } },
+    });
+  } finally {
+    const [code] = await exited;
+    assert.equal(code, 0, stderr);
+  }
 });
