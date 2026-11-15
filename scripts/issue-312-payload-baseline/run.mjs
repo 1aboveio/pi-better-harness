@@ -106,6 +106,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
     const bgLogs = await import("../../packages/pi-better-background-tasks/src/logs.ts");
     const bgFailures = await import("../../packages/pi-better-background-tasks/src/failures.ts");
     const { registerTools } = await import("../../packages/pi-better-background-tasks/src/tools.ts");
+    const { closeBackgroundObservation } = await import("../../packages/pi-better-background-tasks/src/work-observation.ts");
     const { stopWorkObservation } = await import("../../packages/pi-better-subagents/work-observation.ts");
     const { createCallbackBatcher } = await import("../../packages/callback-batcher/index.ts");
 
@@ -631,7 +632,10 @@ export async function collectBaseline({ phase = "before" } = {}) {
     } finally {
         // Reviewed755 fixture lifetime, using this source's real SDK boundary.
         try { await shutdownBackground?.({ type: "session_shutdown" }, ctx); }
-        finally { stopWorkObservation(); }
+        finally {
+            try { closeBackgroundObservation(backgroundApi); }
+            finally { stopWorkObservation(); }
+        }
     }
 }
 
