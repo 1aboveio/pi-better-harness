@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { inspectDaemonOwner, ownerIsAlive } from "../src/daemon-owner.ts";
+import { inspectDaemonOwner, ownerIsAlive, processMatchesStart } from "../src/daemon-owner.ts";
 import { startDaemon } from "../src/server.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
@@ -46,6 +46,8 @@ test("real SQLite runner obligations exclude terminal history, unread waits and 
   mkdirSync(corrupt.dir, { recursive: true }); writeFileSync(corrupt.launch, "{");
   await model.reconcile();
   assert.deepEqual(model.livenessReasons().map(reason => reason.id), [taskId]);
+  const claim = supervisor.snapshot(taskId)!.claim!;
+  assert.equal(processMatchesStart(claim.pid, "Thu Jan  1 00:00:00 1970"), false, "a live PID with a different start identity cannot retain the runtime");
   writeFileSync(join(root, "finish"), "done");
   await waitFor("runner terminal record", () => supervisor.snapshot(taskId!)?.terminal);
   await model.reconcile();

@@ -100,6 +100,7 @@ async function main(): Promise<void> {
     const token = owner.status === "live" ? owner.owner.token : undefined;
     const { maintainGuardian } = await import("./runtime/guardian.ts");
     const stopRecovery = owner.status === "live" ? maintainGuardian(daemon.serverDir, owner.owner) : () => undefined;
+    if (process.connected) process.send?.({ type: "runtime-ready", token }, () => undefined);
     void daemon.closed.then(() => {
       if (shutdownBudget) clearTimeout(shutdownBudget);
       stopRecovery();

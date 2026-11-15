@@ -79,6 +79,9 @@ test("ordinary CLI ensure cannot restart A after same-SDK B adopts and fails", {
   writeFileSync(join(env.serverDir, "sessions.json"), "broken index forces failure after adoption");
   const failed = await run(env, b.entrypoint, [], { PI_SERVER_ACTIVATION_ID: "upgrade-B" }).result;
   assert.equal(failed.code, 1, failed.stderr);
+  assert.match(failed.stderr, /failed before readiness/);
+  assert.equal(JSON.parse(readFileSync(join(env.serverDir, "guardian-restarts.json"), "utf8")).length, 1,
+    "a reported startup failure is persisted once, not retried until the caller's timeout can mask it");
   assert.equal(readActivationJournal(env.serverDir)?.phase, "adopted");
   assert.equal(inspectDaemonOwner(env.serverDir).status, "missing");
   writeFileSync(join(env.serverDir, "sessions.json"), JSON.stringify({ version: 1, sessions: [] }));
