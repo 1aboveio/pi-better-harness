@@ -41,6 +41,7 @@ import {
     type BackgroundWorkRow,
 } from "./shared-navigator.ts";
 import { spawnDetached, killProcessTree, type SpawnResult } from "./spawn.ts";
+import { abortUncommittedLaunch } from "./launch-abort.ts";
 import { parseRun, parseRunForLifecycle, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { selectSessionByName } from "./session-selection.ts";
@@ -92,7 +93,6 @@ import {
     sessionsDir,
     runDir,
     recordTaskRuntimeProvenance,
-    discardFailedLaunch,
     recordLaunchAttempt,
     clearLaunchAttempt,
     logPathFor,
@@ -3353,9 +3353,10 @@ export default function (pi: ExtensionAPI) {
             // must not keep running unsupervised; its log goes with the
             // attempt, because a record without metadata can never be read.
             if (!committed) {
-                lease?.release();
-                if (spawned) killProcessTree(spawned.pid, "SIGKILL");
-                discardFailedLaunch(id, { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch });
+                await abortUncommittedLaunch(id, {
+                    child: spawned, lease,
+                    artifacts: { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch },
+                });
             }
             throw error;
         }

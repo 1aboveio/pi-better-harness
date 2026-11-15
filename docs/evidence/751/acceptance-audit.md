@@ -91,3 +91,9 @@ CI run [43738263075](https://github.com/1aboveio/pi-better-harness/actions/runs/
 A fresh local resource run completed all six scenarios with zero unchanged metadata reads and projections; raw evidence is in `shared-read-diagnostic-fixed-macos.json`. The harness now preserves the last phase and metrics in a partial report on failure. Startup recovery failure also has a regression proving mutation leases, the global port and exact daemon ownership are released before restart.
 
 This establishes the integrated Catalog/Background/cancellation baseline. Server-managed launch, continuation, precise delivery, pinned upgrades and aggregate guardian/mutation performance remain outstanding.
+
+## Failed-launch writer fence
+
+Inspection of the launch path found cleanup releasing a continuation writer lease immediately after sending SIGKILL. It now waits for the child close event before releasing the lease or removing attempt evidence. A real-process regression proves another continuation is refused during that window and admitted after close. Subagents typecheck and 55 launch, continuation, cleanup-race and batch tests pass. The first targeted command omitted the package isolation preload and is not acceptance evidence; the recorded passing rerun uses `--import ./tests/isolate-registry.mjs`.
+
+This corrects a pre-existing writer-safety gap; it does not implement server-managed launch.
