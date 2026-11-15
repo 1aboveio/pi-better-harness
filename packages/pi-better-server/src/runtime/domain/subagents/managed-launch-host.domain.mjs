@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import extension from "./index.domain.mjs";
 import { catalogSnapshotFromWire } from "./catalog-store.domain.mjs";
-import { LaunchJournal, launchDigest } from "./managed-launch-journal.mjs";
+import { openLaunchJournal, launchDigest } from "./managed-launch-journal.mjs";
 import { nextRunId, processStartToken, listMetas, writeMeta, listActiveMetasForParent, effectiveStatus, readMeta } from "./registry.domain.mjs";
 import { assertSubagentHandoff } from "./managed-launch-ownership.domain.mjs";
 import { createOwnerCapacityGates } from "./capacity.mjs";
@@ -22,6 +22,7 @@ export class ManagedSubagentHost {
     initializing;
     tail = Promise.resolve();
     journal;
+    closeJournal;
     epoch;
     pending = 0;
     path;
@@ -32,7 +33,7 @@ export class ManagedSubagentHost {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
             inFlight: this.pending, unresolvedAttempts: this.journal.unresolvedAttempts().length };
     }
-    constructor(root, instance, catalog) {
+    constructor(root, instance, catalog, sharedStore) {
         this.root = root;
         this.instance = instance;
         this.catalog = catalog;
@@ -40,13 +41,15 @@ export class ManagedSubagentHost {
         this.path = join(root, "operation-coordinator.sqlite");
         const active = listMetas({ includeArchived: false });
         assertSubagentHandoff(active, root);
-        this.journal = new LaunchJournal(this.path);
+        const opened = openLaunchJournal(this.path, sharedStore);
+        this.journal = opened.journal;
+        this.closeJournal = opened.close;
         for (const meta of active) {
             if (meta.management?.root !== root || !processExists(meta.pid))
                 continue;
             const attempt = this.journal.attempt(meta.id), lease = readConversationLease(meta.sessionId);
             if (!attempt || attempt.sessionId !== meta.sessionId || !lease || lease.token !== attempt.lease || lease.attemptId !== meta.id) {
-                this.journal.close();
+                this.closeJournal();
                 throw new Error(`writer-authority-unknown: ${meta.id}`);
             }
         }
@@ -173,9 +176,19 @@ export class ManagedSubagentHost {
     }
     async close() {
         await this.tail.catch(() => undefined);
-        if (this.session)
-            await this.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-        this.session?.dispose();
-        this.journal.close();
+        const session = this.session;
+        this.session = undefined;
+        try {
+            if (session)
+                await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+        }
+        finally {
+            try {
+                session?.dispose();
+            }
+            finally {
+                this.closeJournal();
+            }
+        }
     }
 }

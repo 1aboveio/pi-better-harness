@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { acquireMutationStore } from "./mutation-store.ts";
 
 export function hasSubagentManagement(root: string): boolean {
   const path = join(root, "operation-coordinator.sqlite");
@@ -16,12 +17,18 @@ export async function createSubagentLaunch(root: string, instance: string, catal
   if (Number(process.versions.node.split(".")[0]) < 24) throw new Error("Managed subagents require Node 24 or newer");
   const path = "./domain/subagents/managed-launch-host.domain.mjs";
   const { ManagedSubagentHost } = await import(path);
-  const host = new ManagedSubagentHost(root, instance, catalog);
+  const lease = acquireMutationStore(root);
+  let host: any;
   try {
+    host = new ManagedSubagentHost(root, instance, catalog, lease.store);
     await host.recover();
+    const close = host.close.bind(host);
+    host.close = async () => {
+      try { await close(); } finally { lease.release(); }
+    };
     return host;
   } catch (error) {
-    await host.close();
+    try { await host?.close(); } finally { lease.release(); }
     throw error;
   }
 }

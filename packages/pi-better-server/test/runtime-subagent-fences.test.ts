@@ -10,11 +10,11 @@ test("real SQLite launch journal retains exact retry identity and bootstrap fenc
   const root = mkdtempSync(join(base, "fences-"));
   process.env.PI_SUBAGENT_DURABLE_DIR = join(root, "durable");
   const domain = "../src/runtime/domain/subagents/";
-  const { LaunchJournal, launchDigest } = await import(domain + "managed-launch-journal.mjs");
+  const { openLaunchJournal, launchDigest } = await import(domain + "managed-launch-journal.mjs");
   const { verifyManagedBootstrap } = await import(domain + "managed-launch-bootstrap.mjs");
   const { acquireConversationLease } = await import(domain + "continuation.ts");
   const { nextRunId } = await import(domain + "registry.ts");
-  const path = join(root, "coordinator.sqlite"), journal = new LaunchJournal(path);
+  const path = join(root, "coordinator.sqlite"), opened = openLaunchJournal(path), journal = opened.journal;
   const epoch = journal.epoch("first-server"), id = nextRunId();
   const lease = acquireConversationLease({ sessionId: id, attemptId: id });
   const preflightPath = join(root, "preflight.json"), policyPath = join(root, "policy.json");
@@ -48,14 +48,14 @@ test("real SQLite launch journal retains exact retry identity and bootstrap fenc
     const replay = journal.accept("owner", "request", "digest", successor);
     assert.equal(JSON.parse(replay.attempts)[0].token, attempt.token);
     assert.equal(JSON.parse(replay.attempts).length, 1);
-  } finally { lease.release(); journal.close(); }
+  } finally { lease.release(); opened.close(); }
 });
 
 test("SQLite launch-intent writer SIGKILL retains one attempt, recipe and token across replacement", async () => {
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, "crash-intent-"));
   const module = "../src/runtime/domain/subagents/managed-launch-journal.mjs";
-  const { LaunchJournal } = await import(module);
+  const { openLaunchJournal } = await import(module);
   const path = join(root, "coordinator.sqlite");
   const recipe = { version: 1, attemptId: "sa_crash_1", sessionId: "sa_crash_1", cwd: root,
     sessionDir: join(root, "sessions"), tools: "read", clean: false, allowNested: false, sandbox: false, approve: false, gitCloneWorkspace: false };
@@ -65,7 +65,7 @@ test("SQLite launch-intent writer SIGKILL retains one attempt, recipe and token 
   const [publication] = await published;
   const [code, signal] = await exited;
   assert.equal(code, null); assert.equal(signal, "SIGKILL");
-  const recovered = new LaunchJournal(path);
+  const { journal: recovered, close } = openLaunchJournal(path);
   try {
     const epoch = recovered.epoch("replacement-server");
     assert.equal(epoch, publication.epoch + 1);
@@ -77,5 +77,5 @@ test("SQLite launch-intent writer SIGKILL retains one attempt, recipe and token 
     assert.deepEqual(attempts[0].capacityOwner, { pid: 123, start: "original-capacity-domain" });
     assert.throws(() => recovered.prepare("original-recipient", "one-launch", epoch, { id: "sa_duplicate_1" }), /not admitted/);
     assert.equal(recovered.unresolvedAttempts().length, 1);
-  } finally { recovered.close(); }
+  } finally { close(); }
 });

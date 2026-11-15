@@ -13,7 +13,11 @@ Server and Subagents typechecks pass. The real SDK launch test passes with pinne
 ## Review findings still requiring implementation
 
 - Recovery examines metadata records but misses journal-only attempts when a crash occurs after prepare/spawn/bootstrap and before metadata publication. Such attempts need reconciliation of their exact token, writer and lease; permanent outcome_unknown and permanent capacity occupancy do not satisfy the design.
-- The launch journal opens another persistent coordinator connection, exceeding the shared mutation/read connection budget. Move its operations into the shared coordinator store and include them in metrics.
+- The launch journal now uses the coordinator mutation store. Tests prove the launch service shares the root connection, closing it preserves another service’s lease, stale journal access fails after final close, and constructor failure releases the lease before retry. Full runtime connection accounting remains part of the final resource acceptance.
 - Failed host recovery needed cleanup. The fixed adapter now closes the host on failure, and SDK initialization errors are surfaced. Additional fault tests must prove cleanup of partial initialization and retry behavior.
 
 The broader crash-point, permission-intersection, legacy-owner and packaging matrices remain to be verified before #761 can close. #762–#765 and the final #782/epic budgets remain outstanding.
+
+## Shared launch journal validation
+
+Moved durable launch operations into the canonical coordinator StoreContext and regenerated standalone/runtime copies. Coordinator and Server typechecks pass. Ten focused server tests pass, including the real SDK launch/restart case; the additional injected epoch-failure test passes and proves factory cleanup and retry. Host shutdown now releases journal resources even when SDK shutdown throws. Server-level retry after failed initialization and journal-only crash recovery remain outstanding.

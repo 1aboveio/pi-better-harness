@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 const domain = "../src/runtime/domain/subagents/";
-const { LaunchJournal } = await import(domain + "managed-launch-journal.mjs");
+const { openLaunchJournal } = await import(domain + "managed-launch-journal.mjs");
 const { openStore } = await import(domain + "shared-operation-coordinator/index.domain.mjs");
 
 function location(t: TestContext) {
@@ -19,7 +19,7 @@ for (const order of ["journal-first", "coordinator-first"]) {
   test(`cold ${order} initializes a shared owned SQLite store that accepts an assignment`, (t) => {
     const { root, path } = location(t);
     if (order === "coordinator-first") openStore({ path }).close();
-    const journal = new LaunchJournal(path);
+    const { journal, close } = openLaunchJournal(path);
     try {
       const epoch = journal.epoch("storage-server");
       journal.accept("storage-owner", "storage-request", "request-digest", epoch);
@@ -34,7 +34,7 @@ for (const order of ["journal-first", "coordinator-first"]) {
         assert.equal(db.prepare("SELECT count(*) AS n FROM assignment_attempts WHERE attempt_id=?").get("sa_storage_1")?.n, 1);
         assert.equal(journal.read("storage-owner", "storage-request").state, "accepted");
       } finally { db.close(); }
-    } finally { journal.close(); }
+    } finally { close(); }
   });
 }
 
@@ -48,7 +48,7 @@ for (const pollution of ["foreign-table", "old-journal-only"]) {
     const tables = () => db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name);
     const before = tables();
     try {
-      assert.throws(() => new LaunchJournal(path), /no schema_version.*not written by the operation coordinator/);
+      assert.throws(() => openLaunchJournal(path), /no schema_version.*not written by the operation coordinator/);
       assert.deepEqual(tables(), before);
       const table = pollution === "foreign-table" ? "foreign_data" : "subagent_launch_intents";
       assert.equal(db.prepare(`SELECT value FROM ${table}`).get()?.value, pollution === "foreign-table" ? "retain-me" : "retain-intent");
@@ -63,7 +63,7 @@ test("launch journal refuses a future coordinator version before creating launch
   const db = new DatabaseSync(path);
   try {
     db.prepare("UPDATE schema_meta SET value='999' WHERE key='schema_version'").run();
-    assert.throws(() => new LaunchJournal(path), /schema version 999/);
+    assert.throws(() => openLaunchJournal(path), /schema version 999/);
     assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE name IN ('subagent_launch_intents', 'subagent_management')").all(), []);
     assert.equal(db.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value, "999");
   } finally { db.close(); }

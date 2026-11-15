@@ -8,6 +8,7 @@
  * and leaves no partial record.
  */
 import { StoreError } from "./errors.ts";
+import { SubagentLaunchJournal } from "./subagent-launch.ts";
 import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.ts";
 import type { TaskCancellationIntent, TaskCancellationRequest } from "./task-cancellation.ts";
@@ -120,6 +121,7 @@ import {
 } from "./types.ts";
 
 export interface Store {
+    subagentLaunchJournal(): SubagentLaunchJournal;
     resultScopeManaged(scope: string): boolean;
     handoffResultScope(input: Parameters<typeof handoffResultScope>[1]): ReturnType<typeof handoffResultScope>;
     resultSupervision(operationId: string): ReturnType<typeof resultSupervision>;
@@ -336,6 +338,7 @@ export function openStore(options: StoreOptions): Store {
     };
 
     const store: Store = {
+        subagentLaunchJournal() { alive(); return new SubagentLaunchJournal(ctx, alive); },
         resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },

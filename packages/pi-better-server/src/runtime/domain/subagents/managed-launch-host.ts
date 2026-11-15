@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "./index.ts";
 import { catalogSnapshotFromWire } from "./catalog-store.ts";
-import { LaunchJournal, launchDigest } from "./managed-launch-journal.mjs";
+import { openLaunchJournal, launchDigest } from "./managed-launch-journal.mjs";
 import { nextRunId, processStartToken, listMetas, writeMeta, listActiveMetasForParent, effectiveStatus, readMeta } from "./registry.ts";
 import { assertSubagentHandoff } from "./managed-launch-ownership.ts";
 import { createOwnerCapacityGates } from "./capacity.mjs";
@@ -19,7 +19,8 @@ export class ManagedSubagentHost {
     private session: any;
     private initializing?: Promise<void>;
     private tail: Promise<unknown> = Promise.resolve();
-    private journal: LaunchJournal;
+    private journal: ReturnType<typeof openLaunchJournal>["journal"];
+    private closeJournal: () => void;
     private epoch: number;
     private pending = 0;
     private path: string;
@@ -31,17 +32,19 @@ export class ManagedSubagentHost {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
             inFlight: this.pending, unresolvedAttempts: this.journal.unresolvedAttempts().length };
     }
-    constructor(private root: string, private instance: string, private catalog: any) {
+    constructor(private root: string, private instance: string, private catalog: any, sharedStore?: unknown) {
         this.current = { pid: process.pid, start: processStartToken(process.pid), owner: { workspace: root, sessionId: "runtime-recovery" } };
         this.path = join(root, "operation-coordinator.sqlite");
         const active = listMetas({ includeArchived: false });
         assertSubagentHandoff(active, root);
-        this.journal = new LaunchJournal(this.path);
+        const opened = openLaunchJournal(this.path, sharedStore);
+        this.journal = opened.journal;
+        this.closeJournal = opened.close;
         for (const meta of active) {
             if (meta.management?.root !== root || !processExists(meta.pid)) continue;
             const attempt = this.journal.attempt(meta.id), lease = readConversationLease(meta.sessionId);
             if (!attempt || attempt.sessionId !== meta.sessionId || !lease || lease.token !== attempt.lease || lease.attemptId !== meta.id) {
-                this.journal.close(); throw new Error(`writer-authority-unknown: ${meta.id}`);
+                this.closeJournal(); throw new Error(`writer-authority-unknown: ${meta.id}`);
             }
         }
         this.epoch = this.journal.epoch(instance);
@@ -152,7 +155,12 @@ export class ManagedSubagentHost {
     }
     async close() {
         await this.tail.catch(() => undefined);
-        if (this.session) await this.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-        this.session?.dispose(); this.journal.close();
+        const session = this.session;
+        this.session = undefined;
+        try {
+            if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+        } finally {
+            try { session?.dispose(); } finally { this.closeJournal(); }
+        }
     }
 }

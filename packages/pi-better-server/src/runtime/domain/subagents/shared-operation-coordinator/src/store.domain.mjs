@@ -9,6 +9,7 @@
  * and leaves no partial record.
  */
 import { StoreError } from "./errors.domain.mjs";
+import { SubagentLaunchJournal } from "./subagent-launch.domain.mjs";
 import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.domain.mjs";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.domain.mjs";
 import { repairFailedResume } from "./recovery.domain.mjs";
@@ -45,6 +46,7 @@ export function openStore(options) {
         }
     };
     const store = {
+        subagentLaunchJournal() { alive(); return new SubagentLaunchJournal(ctx, alive); },
         resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
