@@ -995,11 +995,12 @@ function createOverlayComponent(
   const overlayState: OverlayState = { rows: initialRows, selected: 0 };
   let logTailRows: number = DEFAULT_LOG_TAIL_ROWS;
   const expandedSections = new Set<string>();
+  const initializedSections = new Set<string>();
   let detailId: string = initialDetailId;
   const initialRow = initialRows.find((row) => row.navigatorId === detailId);
   prepareDetail(detailId,{logTailLines:logTailRows});
   let detail: BackgroundWorkDetail | null = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? (initialRow ? fallbackDetail(initialRow) : null);
-  applyDefaultExpandedSections(detail, expandedSections);
+  applyDefaultExpandedSections(detail, expandedSections, initializedSections);
   {
     const idx = overlayState.rows.findIndex((row) => row.navigatorId === detailId);
     if (idx >= 0) overlayState.selected = idx;
@@ -1035,6 +1036,7 @@ function createOverlayComponent(
   const detailScheduler = createRenderScheduler(() => {
     if (closed) return;
     detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+    applyDefaultExpandedSections(detail, expandedSections, initializedSections);
     requestRender();
     startDetailTimer();
   });
@@ -1086,9 +1088,10 @@ function createOverlayComponent(
     clearCloseArm();
     detailId = row.navigatorId;
     expandedSections.clear();
+    initializedSections.clear();
     prepareDetail(detailId,{logTailLines:logTailRows});
     detail = detailFor(row.navigatorId, Date.now(), { logTailLines: logTailRows }) ?? fallbackDetail(row);
-    applyDefaultExpandedSections(detail, expandedSections);
+    applyDefaultExpandedSections(detail, expandedSections, initializedSections);
     startDetailTimer();
     requestRender();
   }
@@ -1259,6 +1262,7 @@ function createOverlayComponent(
         const key = data === "m" || data === "M" ? "m" : "ctrl+s";
         if (!row || !provider?.handleDetailInput?.(row.id, key)) return;
         detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+        applyDefaultExpandedSections(detail, expandedSections, initializedSections);
         refreshMainListWidget();
         requestRender();
       }
@@ -1266,6 +1270,7 @@ function createOverlayComponent(
         logTailRows = cycleLogTailRows(logTailRows);
         prepareDetail(detailId,{logTailLines:logTailRows});
         if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+        applyDefaultExpandedSections(detail, expandedSections, initializedSections);
         requestRender();
       }
       else if (deps.matchKey(data, "escape")) {
@@ -1275,10 +1280,9 @@ function createOverlayComponent(
     /** Observation arrival updates this row without resetting selection or folded sections. */
     refreshDetail() {
       if (closed) return;
-      const wasLoading = detail?.status === "rebuilding";
       prepareDetail(detailId,{logTailLines:logTailRows});
       detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
-      if (wasLoading) applyDefaultExpandedSections(detail, expandedSections);
+      applyDefaultExpandedSections(detail, expandedSections, initializedSections);
       startDetailTimer();
       requestRender();
     },
@@ -1512,8 +1516,12 @@ function firstToggleableSectionId(detail: BackgroundWorkDetail | null | undefine
   return detail && isFoldableEvidence(detail) ? EVIDENCE_SECTION_ID : undefined;
 }
 
-function applyDefaultExpandedSections(detail: BackgroundWorkDetail | null, expandedSections: Set<string>): void {
+function applyDefaultExpandedSections(detail: BackgroundWorkDetail | null, expandedSections: Set<string>, initializedSections: Set<string>): void {
   for (const section of detail?.foldedSections ?? []) {
+    if (initializedSections.has(section.id)) continue;
+    // Details can arrive after a running row's fallback. Initialize each section
+    // on first arrival, then preserve the user's choice across observations.
+    initializedSections.add(section.id);
     if (section.expandedByDefault) expandedSections.add(section.id);
   }
 }
