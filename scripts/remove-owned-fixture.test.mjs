@@ -2,7 +2,24 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { removeOwnedFixture } from "./test-support/remove-owned-fixture.mjs";
+import { removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
+import { claimDaemonOwner, inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+
+test("owned runtime cleanup refuses a replacement identity before signalling it", async () => {
+  const parent = new URL("../.work/753-ci/", import.meta.url);
+  mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(new URL("owner-cleanup-", parent));
+  const release = claimDaemonOwner(root);
+  try {
+    const owner = inspectDaemonOwner(root);
+    assert.equal(owner.status, "live");
+    await assert.rejects(stopOwnedRuntime(root, { ...owner.owner, token: "another-fixture-owner" }), /must not stop a replacement runtime/);
+    assert.deepEqual(inspectDaemonOwner(root), owner);
+  } finally {
+    release();
+    removeOwnedFixture(root);
+  }
+});
 
 test("owned fixture cleanup removes a sealed runtime without unsealing symlink targets", { skip: process.platform === "win32" ? "POSIX directory permissions" : false }, () => {
   const parent = new URL("../.work/753-ci/", import.meta.url);

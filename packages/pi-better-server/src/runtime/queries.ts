@@ -8,13 +8,14 @@ export function workScope(input: unknown): WorkScope {
   if (value.sessionId && !value.cwd) throw new Error("Session scope requires cwd");
   if (value.limit !== undefined && (!Number.isSafeInteger(value.limit) || Number(value.limit) < 1 || Number(value.limit) > 200)) throw new Error("Runtime limit must be from 1 to 200");
   if (value.active !== undefined && typeof value.active !== "boolean") throw new Error("Invalid active scope");
+  if (value.endedAfter !== undefined && (typeof value.endedAfter !== "number" || !Number.isFinite(value.endedAfter))) throw new Error("Invalid history deadline");
   if (value.detail !== undefined && (typeof value.detail !== "boolean" || (value.detail && !value.id))) throw new Error("Detail requires an exact run ID");
   if (value.statuses !== undefined && (!Array.isArray(value.statuses) || value.statuses.length > 9 || value.statuses.some(s => !["running", "waiting", "completed", "failed", "cancelled", "killed", "exited", "orphaned", "lost"].includes(String(s))))) throw new Error("Invalid assignment status filter");
   if (value.background !== undefined && typeof value.background !== "boolean") throw new Error("Invalid background scope");
   if (value.backgroundHistory !== undefined && typeof value.backgroundHistory !== "boolean") throw new Error("Invalid background history scope");
   if (value.backgroundAll !== undefined && (typeof value.backgroundAll !== "boolean" || value.backgroundAll && !value.backgroundHistory)) throw new Error("All backgrounds requires an explicit history query");
   return { backgroundAll: value.backgroundAll as boolean | undefined, backgroundHistory: value.backgroundHistory as boolean | undefined, background: value.background as boolean | undefined, cwd: value.cwd as string | undefined, sessionId: value.sessionId as string | undefined, id: value.id as string | undefined,
-    cursor: value.cursor as string | undefined, limit: value.limit as number | undefined, active: value.active as boolean | undefined, detail: value.detail as boolean | undefined, statuses: value.statuses as string[] | undefined };
+    cursor: value.cursor as string | undefined, limit: value.limit as number | undefined, active: value.active as boolean | undefined, endedAfter: value.endedAfter as number | undefined, detail: value.detail as boolean | undefined, statuses: value.statuses as string[] | undefined };
 }
 
 /** Snapshot capture and observer installation execute at one synchronous serial point. */
@@ -26,6 +27,8 @@ export class WorkQueries {
   private maxQueuedBytes: number;
   constructor(model: WorkReadModel, socket: Socket, maxQueuedBytes = 4 * 1024 * 1024) {
     this.model = model; this.socket = socket; this.maxQueuedBytes = maxQueuedBytes;
+    // A failed peer owns no usable subscription; terminate its queued writes too.
+    socket.on("error", () => { this.close(); socket.destroy(); });
     socket.once("close", () => this.close());
     socket.on("drain", () => {
       if (!this.paused) return;
