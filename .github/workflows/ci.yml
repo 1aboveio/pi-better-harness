@@ -525,7 +525,9 @@ jobs:
   macos-sandbox:
     name: macos-sandbox
     runs-on: macos-latest
-    timeout-minutes: 10
+    # Sequential native lifecycle, cancellation and confinement journeys exceed
+    # ten minutes on hosted macOS; individual behavioral deadlines stay intact.
+    timeout-minutes: 20
     env:
       # Turns "no backend, so skip" into a hard failure on the lane whose whole
       # job is that backend. A silently skipped confinement suite is a green run
