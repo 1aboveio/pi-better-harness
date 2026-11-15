@@ -60,4 +60,4 @@ Two real Pi SDK Catalog acceptance tests also pass: multiple processes/projects/
 
 At Background branch head `6aa1c4f0`, all 11 real-process supervision tests passed. Fixed repeated handoffs accepting conflicting destination/capability fields in `4ea2d4ac`; identical retries remain idempotent. All 118 coordinator tests and coordinator typecheck pass. All 11 real-process supervision tests pass again after the fix.
 
-The Catalog and Background branches are now combined locally. Server, Background and Subagents typechecks pass; combined runtime tests are pending. No claim is made that Subagent launch (#761), worker continuation (#762), result receipt (#763), upgrades (#764), or final aggregate budgets (#765/#782) are complete.
+The Catalog and Background branches are now combined locally. Server, Background and Subagents typechecks pass; all 19 combined runtime tests pass with zero skips (Catalog, cancellation and Background supervision). No claim is made that Subagent launch (#761), worker continuation (#762), result receipt (#763), upgrades (#764), or final aggregate budgets (#765/#782) are complete.
