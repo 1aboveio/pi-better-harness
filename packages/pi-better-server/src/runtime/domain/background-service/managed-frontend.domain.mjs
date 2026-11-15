@@ -86,7 +86,7 @@ export function createManagedBackgroundFrontend(pi) {
             if (!active(origin))
                 return;
             const result = await request('__background_stop', { id });
-            await reconcile();
+            await host.reconcileNow();
             return result;
         },
         dismissDurableTask(origin, id) {
@@ -107,7 +107,7 @@ export function createManagedBackgroundFrontend(pi) {
                             throw new Error('Native Background context unavailable');
                         ctx = context;
                         const result = await requestBackgroundTool(pi, context, id, definition.name, params, definition.parameters, signal);
-                        await reconcile().catch(() => undefined);
+                        await host.reconcileNow().catch(() => undefined);
                         return result;
                     } });
             const value = Reflect.get(target, key);

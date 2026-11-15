@@ -73,7 +73,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
             return logs.get(key);
         },
         async stopDurableTask(origin: any, id: string) { if (!active(origin))
-            return; const result = await request('__background_stop', { id }); await reconcile(); return result; },
+            return; const result = await request('__background_stop', { id }); await host.reconcileNow(); return result; },
         dismissDurableTask(origin: any, id: string) { if (!active(origin))
             return false; void request('__background_dismiss', { id }).then(() => reconcile()).catch(() => undefined); return false; },
     };
@@ -87,7 +87,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
                             throw new Error('Native Background context unavailable');
                         ctx = context;
                         const result = await requestBackgroundTool(pi, context, id, definition.name, params, definition.parameters, signal);
-                        await reconcile().catch(() => undefined);
+                        await host.reconcileNow().catch(() => undefined);
                         return result;
                     } });
             const value = Reflect.get(target, key);

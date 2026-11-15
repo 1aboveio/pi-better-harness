@@ -32,6 +32,29 @@ describe('managed native UI boundary', () => {
         expect(fixture.request).not.toHaveBeenCalled();
         frontend.host.close();
     });
+    it.each(['tool', 'stop'])('awaits the required follow-up observation before %s resolves', async (kind) => {
+      let releaseOld!: (value: any) => void, releaseFresh!: (value: any) => void;
+      let polls = 0, registered: any;
+      fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => {
+        if (tool !== '__background_poll') return { content: [{ type: 'text', text: 'accepted' }] };
+        polls++;
+        return new Promise(resolve => { if (polls === 1) releaseOld = resolve; else releaseFresh = resolve; });
+      });
+      const frontend = createManagedBackgroundFrontend({ registerTool(tool: any) { registered = tool; } } as any);
+      const ctx = context(); frontend.host.start(ctx);
+      frontend.proxy.registerTool({ name: 'bg_task_spawn', parameters: {}, execute() {} } as any);
+      let resolved = false;
+      const completed = (kind === 'tool' ? registered.execute('call', {}, undefined, undefined, ctx)
+        : frontend.host.stopDurableTask({ cwd: '/workspace', sessionId: 'native' }, 'durable')).then(() => { resolved = true; });
+      await Promise.resolve(); await Promise.resolve();
+      releaseOld({ tasks: [], legacyRows: [], deliveries: [] });
+      await vi.waitFor(() => expect(polls).toBe(2));
+      expect(resolved).toBe(false);
+      releaseFresh({ tasks: [{ id: 'durable', active: true }], legacyRows: [], deliveries: [] });
+      await completed;
+      expect(frontend.host.ownsDurableTask('durable')).toBe(true);
+      frontend.host.close();
+    });
     it.each([false,true])('acknowledges exact native structured transcript proof without appending again (urgent=%s)', async (urgent) => {
         let acknowledged=false;
         fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => tool === '__background_poll' ? { tasks: [], legacyRows: [], deliveries: acknowledged?[]:[{ token: 'new-lease', receiptId: 'receipt', notification: {urgent,event:{customType:'background-task-failure'}, taskId: 'task', origin: { cwd: '/workspace', sessionId: 'native' }, status: 'succeeded' } }] } : (acknowledged=true,{ receipted: true }));
