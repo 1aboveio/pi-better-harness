@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { defaultSandboxPermissions } from "../../pi-better-sandbox/permissions.ts";
-import { DaemonClient } from "../src/client.ts";
+import { connect } from "node:net";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { processMatchesStart } from "../src/daemon-owner.ts";
 
@@ -92,9 +92,10 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
     writeFileSync(release, "release");
     if (scenario === "unavailable") {
       const observer = new WorkClient(join(transport, "pi-server.sock"), agent);
+      let observedInstance: string;
       try {
         // Complete hello/retention registration before closing this observer.
-        await observer.ready;
+        observedInstance = (await observer.ready).instanceId;
         const deadline = Date.now() + 10000;
         let state: any;
         do {
@@ -109,17 +110,31 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
       const completedDependencies = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
       try { assert.equal(completedDependencies.prepare("SELECT count(*) AS n FROM operations WHERE terminal_revision=0").get()?.n, 0, "all accepted dependencies have durable terminal facts before testing idle shutdown"); }
       finally { completedDependencies.close(); }
-      // A hello-only diagnostic connection grants no runtime-client liveness.
-      // The production sweep still checks actual writers/runners and busy work.
-      const diagnostic = !existsSync(join(transport, "pi-server.sock")) ? undefined : await DaemonClient.connect(join(transport, "pi-server.sock")).catch(error => {
-        if (!existsSync(join(transport, "pi-server.sock"))) return undefined;
-        throw error;
-      });
+      // Use the SDK-free runtime handshake, including exact-root/capability
+      // validation. A supplied socket does not register runtime-client retention.
+      // Hosted-session SDK negotiation is a different protocol and can reject
+      // this workspace's SDK against an independently installed fixed runtime.
+      const diagnostic = !existsSync(join(transport, "pi-server.sock")) ? undefined : await (async () => {
+        const probe = new WorkClient(connect(join(transport, "pi-server.sock")), agent);
+        let hello;
+        try {
+          hello = await probe.ready;
+        } catch (error) {
+          probe.close();
+          if (!existsSync(join(transport, "pi-server.sock"))) return undefined;
+          throw error;
+        }
+        if (hello.instanceId !== observedInstance) {
+          probe.close();
+          assert.fail("diagnostic must observe the same accepted daemon instance");
+        }
+        return probe;
+      })();
       let lastStatus: any;
       if (diagnostic) try {
         const detachedBy = Date.now() + 10000;
         do {
-          lastStatus = (await diagnostic.call({ type: "runtime_get_status" })).data;
+          lastStatus = await diagnostic.request("runtime_get_status");
           if (!lastStatus.livenessReasons.some((reason: any) => reason.kind === "connection")) break;
           assert.ok(Date.now() < detachedBy, `Runtime clients did not detach: ${JSON.stringify(lastStatus)}`); await delay(25);
         } while (true);
@@ -127,7 +142,7 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
         while (existsSync(join(transport, "pi-server.sock"))) {
           const swept = once(daemon, "message"); daemon.send("advance-idle"); await swept;
           if (!existsSync(join(transport, "pi-server.sock"))) break;
-          try { lastStatus = (await diagnostic.call({ type: "runtime_get_status" })).data; } catch { /* idle close may race the diagnostic read */ }
+          try { lastStatus = await diagnostic.request("runtime_get_status"); } catch { /* idle close may race the diagnostic read */ }
           assert.ok(Date.now() < idleDeadline, `Unavailable wait kept runtime management active: ${JSON.stringify(lastStatus)}`);
           await delay(25);
         }

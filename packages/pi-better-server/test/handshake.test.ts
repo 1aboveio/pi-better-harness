@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { connect } from "node:net";
+import { WorkClient } from "../src/runtime/work-client.mjs";
 import { afterEach, describe, it } from "node:test";
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { DaemonClient, HandshakeError, PROTOCOL_VERSION, startDaemon } from "../src/index.ts";
@@ -57,6 +59,27 @@ describe("hello handshake", () => {
       assert.ok(error.message.includes(`client runs pi ${other}`) && error.message.includes(`daemon runs pi ${PI_VERSION}`), error.message);
       return true;
     });
+  });
+
+  it("uses the exact-root runtime diagnostic handshake without SDK negotiation or retention", async () => {
+    const d = await daemon();
+    const agentDir = process.env.PI_CODING_AGENT_DIR!;
+    const other = `${Number(piMajor) + 1}.0.0`;
+    await assert.rejects(DaemonClient.connect(d.socketPath, { hello: { piVersion: other } }), /Pi version mismatch/);
+    const probe = new WorkClient(connect(d.socketPath), agentDir);
+    cleanups.push(() => probe.close());
+    const hello = await probe.ready;
+    const status = await probe.request("runtime_get_status");
+    assert.equal(hello.piVersion, PI_VERSION);
+    assert.equal(status.instanceId, hello.instanceId);
+    assert.equal(status.agentDir, agentDir);
+    assert.ok(!status.livenessReasons.some((reason: any) => reason.kind === "connection"), "diagnostic socket does not register retained work");
+    const foreign = new WorkClient(connect(d.socketPath), `${agentDir}-foreign`);
+    cleanups.push(() => foreign.close());
+    await assert.rejects(foreign.ready, /canonical agent root differs/);
+    const unsupported = new WorkClient(connect(d.socketPath), agentDir, ["unknown-diagnostic-capability"]);
+    cleanups.push(() => unsupported.close());
+    await assert.rejects(unsupported.ready, /required runtime capability is unavailable/);
   });
 
   it("rejects a malformed hello and leaves the daemon serving other clients", async () => {
