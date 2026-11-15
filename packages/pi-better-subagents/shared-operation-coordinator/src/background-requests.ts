@@ -20,7 +20,11 @@ const pendingPredicate = "key GLOB 'background-request-v1:*' AND CASE WHEN json_
 export const BACKGROUND_PENDING_QUERY = `SELECT value FROM coordinator_state INDEXED BY background_requests_pending WHERE ${pendingPredicate} ORDER BY key LIMIT ?`;
 function storageKey(owner: string, key: string) { return prefix + createHash('sha256').update(JSON.stringify([owner, key])).digest('hex'); }
 export class BackgroundRequests {
-    constructor(private context: StoreContext, private alive: () => void) {
+    private context: StoreContext;
+    private alive: () => void;
+    constructor(context: StoreContext, alive: () => void) {
+        this.context = context;
+        this.alive = alive;
         alive();
         context.db.exec(`CREATE INDEX IF NOT EXISTS background_requests_pending ON coordinator_state(key) WHERE ${pendingPredicate}`);
     }
