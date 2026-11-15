@@ -17,7 +17,7 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
   let session: any, host: any;
   try {
     await resourceLoader.reload();
-    const manager = SessionManager.create(cwd, agentDir + '/sessions');
+    let manager = SessionManager.create(cwd, agentDir + '/sessions');
     ({ session } = await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader, sessionManager: manager, noTools: 'all' }));
     if (hosted) {
       const { HostedSession } = await import('../src/hosted-session.ts');
@@ -26,6 +26,7 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
       await host.bindUi();
     } else await session.bindExtensions({ mode: 'print' });
     manager.appendCustomEntry('fixture', {});
+    manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Saved recipient fixture' }], api: 'openai-completions', provider: 'test', model: 'fixture', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: Date.now() });
     const id = hosted ? 'sa_hosted_outcome_1' : 'sa_sdk_outcome_1';
     const recipient = { kind: 'parent-session' as const, sessionId: manager.getSessionId(), workspace: cwd, branchId: null, goalId: null };
     const binding = { version: 1 as const, assignmentId: id, owner: { ...recipient, kind: 'worker-conversation' as const, sessionId: id }, recipient };
@@ -33,10 +34,24 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
     mkdirSync(runDir(id), { recursive: true }); writeFileSync(logPathFor(id), 'retained result\n');
     const meta: any = { id, sessionId: id, status: 'failed', pid: 0, spawnPid: process.pid, cwd, startedAt: Date.now(), endedAt: Date.now(), exitCode: 1, promptPreview: 'fixture', logPath: logPathFor(id), assignment: binding, callbackOrigin: { sessionId: manager.getSessionId(), cwd }, callback: false };
     writeMeta(meta); commitAssignmentTerminal(meta);
-    const tool = session.extensionRunner.getToolDefinition('subagent_result');
-    const ctx = session.extensionRunner.createContext();
+    let tool = session.extensionRunner.getToolDefinition('subagent_result');
+    let ctx = session.extensionRunner.createContext();
     const result = await tool.execute('read', { id }, undefined, undefined, ctx);
     assert.equal(result.isError, undefined);
+    assert.ok(readOutcome(meta)?.inspectedAt);
+    const sessionFile = manager.getSessionFile()!;
+    await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    if (host) await host.dispose({ abort: false }); else session.dispose();
+    manager = SessionManager.open(sessionFile);
+    ({ session } = await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader, sessionManager: manager, noTools: 'all' }));
+    if (hosted) {
+      const { HostedSession } = await import('../src/hosted-session.ts');
+      const { EventLog } = await import('../src/event-log.ts');
+      host = new HostedSession(session, new EventLog(agentDir + '/reconnected-events.jsonl'), () => {});
+      await host.bindUi();
+    } else await session.bindExtensions({ mode: 'print' });
+    tool = session.extensionRunner.getToolDefinition('subagent_result');
+    ctx = session.extensionRunner.createContext();
     const params = { id, outcome_revision: 1, disposition: 'consumed', note: 'Read result' };
     await tool.execute('consume', params, undefined, undefined, ctx);
     const consumed = readOutcome(meta);
