@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { defaultSandboxPermissions } from "../../pi-better-sandbox/permissions.ts";
 import { connect } from "node:net";
 import { WorkClient } from "../src/runtime/work-client.mjs";
-import { processMatchesStart } from "../src/daemon-owner.ts";
+import { inspectDaemonOwner, ownerIdentityVerified, ownerIsAlive, processMatchesStart, type DaemonOwnerIdentity } from "../src/daemon-owner.ts";
 
 for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", "spawn", "result", "bootstrap", "published", "lease", "tools"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: scenario === "unavailable" ? 90000 : 60000 }, async () => {
   const restart = scenario === "park";
@@ -35,6 +35,13 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
   const attempts: string[] = [];
   let bootstrapProof: Record<string, unknown> | undefined;
   let initialInstance: string | undefined;
+  const runtimeOwners: DaemonOwnerIdentity[] = [];
+  const awaitRuntimeExit = async (deadline: number) => {
+    while (runtimeOwners.some(owner => ownerIsAlive(owner))) {
+      assert.ok(Date.now() < deadline, `Exact runtime owners did not exit within idle shutdown budget: ${JSON.stringify(runtimeOwners)}`);
+      await delay(25);
+    }
+  };
   const metaFor = (id: string) => JSON.parse(readFileSync(join(root, "pi-better-subagents/runs", id, "meta.json"), "utf8"));
   const terminal = async (id: string) => {
     // Recovered children have no exit listener; the current health pass is 15 s.
@@ -106,6 +113,16 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
         observedInstance = hello.instanceId;
         assert.notEqual(observedInstance, initialInstance, "SDK starts the fixed-artifact successor");
         assert.equal(hello.build?.format, 1, "successor reports its installed artifact identity");
+        // The fixed Pi CLI starts a guardian before its serving child. Both
+        // exact owners must exist by protocol readiness, not arrive later.
+        for (const lock of ["daemon-owner", "guardian-owner"]) {
+          const inspection = inspectDaemonOwner(transport, lock);
+          assert.equal(inspection.status, "live", `successor ${lock} identity must be captured while live`);
+          if (inspection.status !== "live") throw new Error("Missing exact runtime owner");
+          assert.ok(ownerIdentityVerified(inspection.owner));
+          if (lock === "daemon-owner") assert.equal(inspection.owner.token, observedInstance);
+          runtimeOwners.push(inspection.owner);
+        }
         const deadline = Date.now() + 10000;
         let state: any;
         do {
@@ -168,9 +185,14 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
             // The real shutdown can close the diagnostic before unlinking socket.
           }
         }
+        // Socket close is the start of shutdown; the fixed CLI can still write
+        // its clean-stop checkpoint and release leases before actually exiting.
+        await awaitRuntimeExit(idleDeadline);
         console.log(JSON.stringify({ unavailableIdle: { instanceId: observedInstance, initialInstance,
-          runtimeIdleMs: 30000, shutdownBudgetMs: 5000, elapsedMs: Date.now() - idleStarted } }));
+          runtimeIdleMs: 30000, shutdownBudgetMs: 5000, elapsedMs: Date.now() - idleStarted,
+          exitedOwners: runtimeOwners } }));
       } finally { diagnostic.close(); }
+      else await awaitRuntimeExit(Date.now() + 5000);
       assert.equal(existsSync(`${entered}.continued`), false);
       return;
     }
@@ -256,7 +278,19 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
         }
       }
     }
-    // Runtime artifacts remain owned evidence until every worker has been verified exited.
+    // On a failed assertion, clean up only captured, still-matching fixture
+    // owners. A successful idle proof has already observed all of them exit.
+    for (const owner of [...runtimeOwners].reverse()) if (ownerIsAlive(owner)) {
+      assert.ok(ownerIdentityVerified(owner), "refuse to signal an unverified fixture runtime owner");
+      try { process.kill(owner.pid, "SIGTERM"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      const cleanupDeadline = Date.now() + 5000;
+      while (ownerIsAlive(owner)) {
+        assert.ok(Date.now() < cleanupDeadline, "fixture runtime did not stop; preserve its evidence directory");
+        await delay(25);
+      }
+    }
+    // No owner may still write a checkpoint into the transport being removed.
     rmSync(transport, { recursive: true, force: true });
   }
 });
