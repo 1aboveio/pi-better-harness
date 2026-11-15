@@ -3124,7 +3124,7 @@ export default function (pi, managed) {
                     ...(taskRuntime.policy.permissions ? { permissions: taskRuntime.policy.permissions } : {}),
                     ...(taskRuntime.policy.denyWrite ? { denyWrite: [...taskRuntime.policy.denyWrite] } : {}),
                 } : null;
-                assertAssignmentPermissionScope(captured, { sandbox: currentSandbox, mandatoryPermissions: permissionPlan.enforced });
+                assertAssignmentPermissionScope(captured, { sandbox: currentSandbox, mandatoryPermissions: permissionPlan.enforced }, Boolean(managed));
             }
             // Freeze the ordinary recipe before the durable external-launch intent.
             const recipe = buildLaunchRecipe({
@@ -3343,7 +3343,7 @@ export default function (pi, managed) {
      * (must be held).
      */
     async function launchParkedResume(input) {
-        const ctx = uiCtx;
+        const ctx = managed?.continuationContext?.() ?? uiCtx;
         if (!ctx || sessionTornDown) {
             throw new PreSpawnResumeError("No active foreground session can resume the parked assignment.");
         }
@@ -3400,7 +3400,7 @@ export default function (pi, managed) {
                     // Getter, not a captured value: the foreground context can be
                     // replaced during the asynchronous preparation.
                     service: () => workerOperations.service,
-                    context: () => uiCtx,
+                    context: () => managed?.continuationContext?.() ?? uiCtx,
                     park: input.park,
                     claim: input.claim,
                     owner,
@@ -3469,7 +3469,8 @@ export default function (pi, managed) {
             pi,
             service: () => workerOperations.service,
             rpc: workerOperations.rpc,
-            context: () => uiCtx,
+            context: () => managed?.continuationContext?.() ?? uiCtx,
+            ...(managed?.dispatchContinuation ? { dispatch: managed.dispatchContinuation } : {}),
             capacity: resumeCapacity(),
             launch: launchParkedResume,
             stopAttempt: stopPublishedAttempt,
@@ -3499,11 +3500,16 @@ export default function (pi, managed) {
         }
         catch { /* a host that refuses the adapter leaves parking unavailable */ }
         try {
-            await reconcileParkedWaits(service, {
+            const reconciliation = reconcileParkedWaits(service, {
                 resume: (park) => orchestration.resume(park),
                 notifyWhen: (meta) => Boolean(activeCallbackOrigin && belongsToOrigin(meta, activeCallbackOrigin)),
                 notify: notifyOwnedWait,
             });
+            if (managed) {
+                void reconciliation.catch(() => undefined);
+                return;
+            }
+            await reconciliation;
             const historical = historicalWaits(activeCallbackOrigin);
             if (historical.length && activeCallbackOrigin && !attentionDismissed(activeCallbackOrigin.cwd, attentionRevision(historical))) {
                 uiCtx?.ui?.notify?.(`${historical.length} historical subagent waits remain. Inspect or cancel with /subagents history; dismiss this notice with /subagents history dismiss.`, "warning");

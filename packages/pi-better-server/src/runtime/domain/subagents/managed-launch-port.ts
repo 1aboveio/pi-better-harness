@@ -6,6 +6,8 @@ import type { RunMeta } from "./registry.ts";
 export interface ManagedLaunchPort {
     readonly owner: { pid: number; start?: string };
     readonly identity: { root: string; instance: string; epoch: number };
+    continuationContext?(): import("@earendil-works/pi-coding-agent").ExtensionContext | undefined;
+    dispatchContinuation?(park: import("./worker-waits.ts").ParkedWait, run: () => Promise<"resumed" | "held" | "skipped">): Promise<"resumed" | "held" | "skipped">;
     supervised(): RunMeta[];
     owns(meta: Partial<RunMeta>): boolean;
     assertCurrent(): void;

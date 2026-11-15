@@ -547,6 +547,7 @@ export function captureWorkerPolicy(input: {
 export function assertAssignmentPermissionScope(
     captured: { sandbox: unknown; mandatoryPermissions?: boolean } | undefined,
     current: { sandbox: unknown; mandatoryPermissions: boolean },
+    allowNarrowing = false,
 ): void {
     if (!captured) throw new PreSpawnResumeError("Captured assignment permissions are missing");
     const requiresAuthority = captured.mandatoryPermissions === true
@@ -565,6 +566,16 @@ export function assertAssignmentPermissionScope(
     const newSandbox = current.sandbox as WorkerSandboxAuthority | null;
     if (oldSandbox?.denyWrite?.some((path) => !newSandbox?.denyWrite?.includes(path))) {
         throw new PreSpawnResumeError("Current permissions would remove captured assignment protected paths");
+    }
+    if (allowNarrowing && oldSandbox && newSandbox && oldSandbox.root === newSandbox.root && oldSandbox.permissions && newSandbox.permissions) {
+        const old = oldSandbox.permissions, next = newSandbox.permissions;
+        const access = ["off", "read", "write", "read-write"];
+        const files = (["projectFiles", "outsideProject", "storedCredentials"] as const).every(key =>
+            access.includes(next[key]) && access.indexOf(next[key]) <= access.indexOf(old[key]));
+        const commands = (!next.commands || old.commands) && (!next.network || old.network)
+            && (next.shell === false || old.shell !== false);
+        const oldCap = old.commandTimeoutSeconds ?? Infinity, nextCap = next.commandTimeoutSeconds ?? Infinity;
+        if (files && commands && nextCap <= oldCap) return;
     }
     const authority = (sandbox: WorkerSandboxAuthority | null) => sandbox ? { root: sandbox.root, permissions: sandbox.permissions } : null;
     if (JSON.stringify(normalize(authority(oldSandbox))) !== JSON.stringify(normalize(authority(newSandbox)))) {
@@ -1705,6 +1716,8 @@ export interface ResumeOrchestrationOptions {
     context(park: ParkedWait): ExtensionContext | undefined;
     /** Server adapters select the original owner capacity domain for each assignment. */
     capacity: ResumeCapacity | ((park: ParkedWait) => ResumeCapacity);
+    /** Serialize the full admission and launch inside the fixed runtime owner scope. */
+    dispatch?(park: ParkedWait, run: () => Promise<"resumed" | "held" | "skipped">): Promise<"resumed" | "held" | "skipped">;
     /** Launch one continuation through the existing admission path. */
     launch(input: ResumeLaunchInput): Promise<void>;
     /** Follow a cancelled generation to the attempt it already published. */
@@ -1918,7 +1931,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
         return "held";
     };
 
-    const resume = async (park: ParkedWait): Promise<"resumed" | "held" | "skipped"> => {
+    const resumeInScope = async (park: ParkedWait): Promise<"resumed" | "held" | "skipped"> => {
         const key = `${park.waitId}:${park.generation}`;
         if (inFlight.has(key)) return "skipped";
         inFlight.add(key);
@@ -2104,6 +2117,10 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
             inFlight.delete(key);
         }
     };
+
+    const resume = (park: ParkedWait) => options.dispatch
+        ? options.dispatch(park, () => resumeInScope(park))
+        : resumeInScope(park);
 
     const adapter: WorkerContinuationAdapter = {
         version: 1,

@@ -240,7 +240,7 @@ export function captureWorkerPolicy(input) {
     };
 }
 /** Refuse permission loss or widening when reconstructing a captured assignment. */
-export function assertAssignmentPermissionScope(captured, current) {
+export function assertAssignmentPermissionScope(captured, current, allowNarrowing = false) {
     if (!captured)
         throw new PreSpawnResumeError("Captured assignment permissions are missing");
     const requiresAuthority = captured.mandatoryPermissions === true
@@ -259,6 +259,16 @@ export function assertAssignmentPermissionScope(captured, current) {
     const newSandbox = current.sandbox;
     if (oldSandbox?.denyWrite?.some((path) => !newSandbox?.denyWrite?.includes(path))) {
         throw new PreSpawnResumeError("Current permissions would remove captured assignment protected paths");
+    }
+    if (allowNarrowing && oldSandbox && newSandbox && oldSandbox.root === newSandbox.root && oldSandbox.permissions && newSandbox.permissions) {
+        const old = oldSandbox.permissions, next = newSandbox.permissions;
+        const access = ["off", "read", "write", "read-write"];
+        const files = ["projectFiles", "outsideProject", "storedCredentials"].every(key => access.includes(next[key]) && access.indexOf(next[key]) <= access.indexOf(old[key]));
+        const commands = (!next.commands || old.commands) && (!next.network || old.network)
+            && (next.shell === false || old.shell !== false);
+        const oldCap = old.commandTimeoutSeconds ?? Infinity, nextCap = next.commandTimeoutSeconds ?? Infinity;
+        if (files && commands && nextCap <= oldCap)
+            return;
     }
     const authority = (sandbox) => sandbox ? { root: sandbox.root, permissions: sandbox.permissions } : null;
     if (JSON.stringify(normalize(authority(oldSandbox))) !== JSON.stringify(normalize(authority(newSandbox)))) {
@@ -1364,7 +1374,7 @@ export function createResumeOrchestration(options) {
         catch { /* ignore UI failures */ }
         return "held";
     };
-    const resume = async (park) => {
+    const resumeInScope = async (park) => {
         const key = `${park.waitId}:${park.generation}`;
         if (inFlight.has(key))
             return "skipped";
@@ -1566,6 +1576,9 @@ export function createResumeOrchestration(options) {
             inFlight.delete(key);
         }
     };
+    const resume = (park) => options.dispatch
+        ? options.dispatch(park, () => resumeInScope(park))
+        : resumeInScope(park);
     const adapter = {
         version: 1,
         id: `subagents-continuation:${randomUUID()}`,

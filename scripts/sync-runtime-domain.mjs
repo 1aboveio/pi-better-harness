@@ -13,9 +13,9 @@ function copyLaunchDomain(source, destination) {
   mkdirSync(destination, { recursive: true });
   for (const entry of readdirSync(source, { withFileTypes: true })) {
     const from = join(source, entry.name), to = join(destination, entry.name);
-    if (destination.includes("background-service") && /\.test\./.test(entry.name)) continue;
+    if ((destination.includes("background-service") || destination.includes("sandbox-policy")) && /\.test\./.test(entry.name)) continue;
     if (entry.isDirectory()) {
-      if (["roles", "shared-operation-coordinator", "src", "supervisor"].includes(entry.name)) copyLaunchDomain(from, to);
+      if (["roles", "shared-operation-coordinator", "src", "supervisor", "shared-ssh-core", "generated"].includes(entry.name)) copyLaunchDomain(from, to);
       continue;
     }
     if (!/\.(ts|mjs|md)$/.test(entry.name) && !["config.json", "package.json"].includes(entry.name)) continue;
@@ -45,6 +45,7 @@ function copyLaunchDomain(source, destination) {
 }
 copyLaunchDomain(join(root, "packages/pi-better-subagents"), subagents);
 copyLaunchDomain(join(root, "packages/pi-better-background-tasks/src"), join(target, "background-service"));
+copyLaunchDomain(join(root, "packages/pi-better-sandbox"), join(target, "sandbox-policy"));
 const catalog = join(target, "catalog");
 mkdirSync(catalog, { recursive: true });
 cpSync(join(root, "packages/pi-better-subagents/roles"), join(catalog, "roles"), { recursive: true });
