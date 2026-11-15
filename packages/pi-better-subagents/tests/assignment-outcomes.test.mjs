@@ -159,6 +159,35 @@ test("ended outcomes retry admission without input for two assignments in one co
     }
 });
 
+test("authorized terminal inspection overrides an older completed shared projection", async () => {
+    const fixture = endedAssignment("stale-shared-terminal", "stale-shared-conversation");
+    const { subagentResultTool } = await import("../tools.ts");
+    const { inspectOutcome } = await import("../assignment-outcomes.ts");
+    const Type = new Proxy({}, { get: () => value => value });
+    const stale = { state: "completed", reason: "old process-only observation", revision: "old", processStatus: "completed", evidence: [] };
+    const snapshot = { instanceId: "older-shared-snapshot", seq: 1 };
+    let inspections = 0;
+    const session = {
+        activeOrigin: { cwd: process.cwd(), sessionId: "parent" },
+        observeAssignment: async () => ({ assignment: stale, snapshot }),
+        inspectOutcome: meta => { inspections++; return inspectOutcome(meta, { recipient: meta.assignment.recipient }); },
+    };
+    try {
+        const result = await subagentResultTool(Type, session).execute("stale", { id: fixture.meta.id });
+        assert.equal(result.details.outcome.outcome.outcome, "failed");
+        assert.equal(result.details.assignment.state, "failed");
+        assert.match(result.details.assignment.reason, /continue unfinished work/);
+        assert.notEqual(result.details.assignment.revision, stale.revision);
+        assert.equal(result.details.snapshot, snapshot, "the original shared snapshot provenance remains explicit");
+        assert.equal(inspections, 1, "uses the existing authorized inspection, without another source read");
+        const body = result.content.map(part => part.text).join("\n");
+        assert.match(body, /Assignment failed/);
+        const forbidden = subagentResultTool(Type, { ...session, inspectOutcome: meta => inspectOutcome(meta,
+            { recipient: { ...meta.assignment.recipient, sessionId: "foreign" } }) });
+        await assert.rejects(() => forbidden.execute("foreign", { id: fixture.meta.id }), /different parent/);
+    } finally { fixture.store.close(); }
+});
+
 test("exit zero with an unfinished final answer does not establish assignment success", () => {
     const id = "unfinished-exit-zero";
     const binding = { version: 1, assignmentId: id,

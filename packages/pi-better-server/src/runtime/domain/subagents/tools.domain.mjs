@@ -15,7 +15,7 @@
  * far as `execute` is concerned).
  */
 import { createHash } from "node:crypto";
-import { assignmentFor, createAssignmentProjector, withAssignmentObservations } from "./assignment-projection.mjs";
+import { assignmentFor, projectAssignment, createAssignmentProjector, withAssignmentObservations } from "./assignment-projection.mjs";
 import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus } from "./registry.domain.mjs";
 import { buildSubagentResultPayload } from "./finalization.domain.mjs";
 import { stopRun } from "./stop.domain.mjs";
@@ -466,14 +466,21 @@ export function subagentResultTool(Type, baseSession = {}) {
                 return subagentResultText(access.payload);
             const meta = access.meta;
             const observed = await session.observeAssignment?.(meta.id);
-            return withAssignmentObservations(observed ? [{ meta, assignment: observed.assignment }] : [], () => {
-                const outcome = meta.assignment ? baseSession.inspectOutcome?.(meta, params, ctx) : undefined;
+            const outcome = meta.assignment ? baseSession.inspectOutcome?.(meta, params, ctx) : undefined;
+            // Exact inspection has already checked recipient and read authority.
+            // Its immutable terminal record supersedes an older shared projection
+            // without adding another read or changing the snapshot provenance.
+            const inspected = outcome;
+            const assignment = inspected?.outcome ? projectAssignment(meta, effectiveStatus(meta), {
+                verified: true, waits: inspected.dependencies ?? [], ...{ outcome: inspected.outcome },
+            }) : observed?.assignment;
+            return withAssignmentObservations(assignment ? [{ meta, assignment }] : [], () => {
                 const resultText = (body) => {
                     const evidence = outcome;
                     const operations = evidence?.dependencies?.flatMap((wait) => wait.dependencies.map((dependency) => dependency.operationId)).slice(0, 5) ?? [];
                     const header = evidence?.outcome ? `Outcome r${evidence.outcome.revision}: ${evidence.outcome.outcome}. ${evidence.outcome.reason.slice(0, 256)}${operations.length ? `\nEvidence operations: ${operations.join(", ")}` : ""}\n` : "";
                     const result = subagentResultText(header + body);
-                    return { ...result, details: { ...result.details, outcome, outcomeSupport: meta.outcomeSupport, assignment: observed?.assignment ?? assignmentFor(meta, effectiveStatus(meta)), snapshot: observed?.snapshot, ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
+                    return { ...result, details: { ...result.details, outcome, outcomeSupport: meta.outcomeSupport, assignment: assignment ?? assignmentFor(meta, effectiveStatus(meta)), snapshot: observed?.snapshot, ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
                 };
                 if (params.operation_id && outcome) {
                     const evidence = outcome;
