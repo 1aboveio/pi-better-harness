@@ -43,3 +43,9 @@ Merged Catalog head `1dc4583f` with current main in local commit `30c7a8ae`. Res
 A further 97 Catalog schema, discovery, inheritance, lifecycle, saved-settings, skill-edit and UI tests pass with no skips. These do not replace the unfinished real-Pi and security acceptance matrix identified in PR #775.
 
 Next security audit target: Catalog host registrations currently persist only PID and admission checks use `kill(pid, 0)`. Inspect exact process-start qualification before treating host identity acceptance as complete.
+
+## Catalog process identity fix
+
+Catalog host grants now capture the existing Subagent process-start token and admission verifies it on bind and every subsequent authorization. Missing or mismatched evidence is refused even if the PID exists. The shared server comparator pins the ps locale and normalizes spacing to match the established Subagent representation.
+
+Server and Subagents typechecks pass. The new Catalog admission regression, real Catalog daemon test, owner tests and cancellation tests pass together: 15 passed, one Linux-only test skipped on macOS. This closes the inspected PID-reuse gap; it does not complete the remaining Catalog acceptance matrix.

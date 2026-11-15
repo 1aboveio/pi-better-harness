@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { processMatchesStart } from "../daemon-owner.ts";
 
 /** Private fixed-host registrations, not client-supplied trust decisions. */
 export class CatalogAdmission {
@@ -25,7 +26,7 @@ export class CatalogAdmission {
       || typeof record.projectTrusted !== "boolean" || !Number.isSafeInteger(record.pid) || record.pid <= 0
       || typeof record.sessionId !== "string" || !record.sessionId || typeof record.branchId !== "string" || !record.branchId
       || typeof record.overlayDigest !== "string" || !/^[a-f0-9]{64}$/.test(record.overlayDigest)) throw new Error("catalog-authority-refused");
-    process.kill(record.pid, 0);
+    if (!processMatchesStart(record.pid, record.pidStartTime)) throw new Error("catalog-host-identity-refused");
     return record;
   }
   bind(authority: unknown, socket: object) {

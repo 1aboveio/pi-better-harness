@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { processStartToken } from "./registry.ts";
 import { WorkClient } from "./shared-work-client.mjs";
 import type { AgentSessionOverrides } from "./agent-session-settings.ts";
 
@@ -48,7 +49,9 @@ export function createCatalogHostAdapter() {
         const client = new WorkClient(socketPath, agentDir, ["runtime-catalog-v1"]);
         try {
             const hello = await client.ready;
-            writeFileSync(staging, JSON.stringify({ version: 1, id, generation, serverInstance: hello.instanceId, pid: process.pid, secretHash: hash(secret), ...scope }), { mode: 0o600, flag: "wx" });
+            const pidStartTime = processStartToken(process.pid);
+            if (!pidStartTime) throw new Error("catalog-host-identity-unavailable");
+            writeFileSync(staging, JSON.stringify({ version: 1, id, generation, serverInstance: hello.instanceId, pid: process.pid, pidStartTime, secretHash: hash(secret), ...scope }), { mode: 0o600, flag: "wx" });
             renameSync(staging, path);
             await client.request("runtime_bind_catalog_host", { authority });
             if (epoch !== admittedEpoch || !current) throw new Error("catalog-host-revoked");
