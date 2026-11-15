@@ -2,9 +2,11 @@
  * Real-kernel proof that locally launched background tasks honor the foreground
  * sandbox policy.
  *
- * Every case here drives the actual extension through its registered tools,
+ * Every case here drives the canonical mechanical runtime through its registered tools,
  * spawns real processes, and checks the real filesystem. Nothing about the
  * sandbox mechanism, the task runtime, or the process layer is stubbed; the only
+ * These are manager-domain kernel tests; native frontend acceptance lives in
+ * server/test/runtime-background-frontend.test.ts. The
  * stand-in is the publishing half of the `pi.events` policy contract, which
  * belongs to `pi-better-sandbox`.
  *
@@ -31,10 +33,11 @@ beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
 afterAll(async () => { await stopRuntime(); });
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import backgroundTasksExtension from "./index.js";
+import { registerTools } from "./tools.js";
 import { baseDir, metaPathFor, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
-import { resumeRunningTask, stopTask } from "./runtime.js";
+import { createBackgroundTaskRuntime, resumeRunningTask, stopTask } from "./runtime.js";
 import {
+  observeForegroundSandboxPolicy,
   FOREGROUND_SANDBOX_POLICY_CHANNEL,
   FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
 } from "./sandbox.js";
@@ -187,7 +190,10 @@ function createHarness(options: { announceBeforeLoad?: Record<string, unknown> }
     sendMessage() {},
   } as unknown as ExtensionAPI;
 
-  backgroundTasksExtension(pi);
+  // Explicit manager-domain fixture: no native frontend owns this runtime.
+  const runtime = createBackgroundTaskRuntime();
+  observeForegroundSandboxPolicy(pi);
+  registerTools(pi, runtime, () => undefined, { resumeLocal: false });
 
   return {
     pi,
