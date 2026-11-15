@@ -979,9 +979,9 @@ function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, i
         requestRender();
         startDetailTimer();
     });
-    function refreshRows() {
+    function refreshRows(rows = listRows()) {
         const selectedId = state().mainListSelectedId ?? overlayState.rows[overlayState.selected]?.navigatorId;
-        overlayState.rows = listRows();
+        overlayState.rows = rows;
         const nextIdx = selectedId ? overlayState.rows.findIndex((row) => row.navigatorId === selectedId) : -1;
         overlayState.selected = nextIdx >= 0 ? nextIdx : Math.min(overlayState.selected, Math.max(0, overlayState.rows.length - 1));
     }
@@ -1105,7 +1105,8 @@ function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, i
     return {
         render(width) {
             closeIfEditorReplaced();
-            refreshRows();
+            // The main-list refresh owns provider I/O; streaming paints reuse its snapshot.
+            refreshRows(state().mainListRows ?? []);
             const rail = buildMainListLayout(overlayState.rows, width, deps.truncate, fg, {
                 selectedId: selectedRow()?.navigatorId,
                 focused: true,
