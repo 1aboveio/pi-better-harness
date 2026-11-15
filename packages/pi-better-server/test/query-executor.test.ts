@@ -208,3 +208,21 @@ test("diagnostic liveness does not wait behind SQLite while fresh idle checks st
     await fresh;
   } finally { await f.close(); }
 });
+
+test("diagnostic refresh reads the current index without initiating another inventory", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const client = await f.client();
+    await ready(client);
+    await f.executor.livenessReasons();
+    const before = f.executor.metrics();
+    f.executor.observeLiveness();
+    const deadline = Date.now() + 2000;
+    while (f.executor.metrics().executor.completed === before.executor.completed) {
+      assert.ok(Date.now() < deadline, "diagnostic observation should finish");
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(f.executor.metrics().inventories, before.inventories,
+      "diagnostic polling must not initiate expensive fresh inventories");
+  } finally { await f.close(); }
+});
