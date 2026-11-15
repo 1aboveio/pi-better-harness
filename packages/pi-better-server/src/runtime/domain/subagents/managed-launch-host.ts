@@ -285,11 +285,13 @@ export class ManagedSubagentHost {
         await this.tail.catch(() => undefined);
         const session = this.session;
         this.session = undefined;
+        const workerHost = this.workerHost;
+        this.workerHost = undefined;
         try {
             if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
         } finally {
-            try { session?.dispose(); } finally {
-                try { this.workerHost?.close(); } finally { this.closeJournal(); }
+            try { workerHost?.close(); } finally {
+                try { session?.dispose(); } finally { this.closeJournal(); }
             }
         }
     }

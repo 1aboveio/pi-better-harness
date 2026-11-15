@@ -89,3 +89,28 @@ test("unavailable continuation authority backs off without retaining active work
     assert.equal(host.busy, false);
   } finally { await host.close(); }
 });
+
+test("managed SDK shutdown publishes worker unavailability before disposing extension context", async () => {
+  const env = makeEnv();
+  const { createSubagentLaunch } = await import("../src/runtime/subagent-launch.ts");
+  const host = await createSubagentLaunch(env.agentDir, "sdk-close-order", {});
+  await host.initialize();
+  let disposed = false;
+  let unavailable = false;
+  let publishedWhileLive = false;
+  const session = host.session;
+  const dispose = session.dispose.bind(session);
+  session.dispose = () => { disposed = true; return dispose(); };
+  host.api.events.on("pi-better-background-tasks:observed-waits-service", (value: any) => {
+    if (value?.available !== false) return;
+    unavailable = true;
+    publishedWhileLive = !disposed;
+    host.api.getAllTools();
+  });
+  try { await host.close(); }
+  finally { await host.close(); }
+  assert.equal(unavailable, true);
+  assert.equal(publishedWhileLive, true, "service subscribers still own a live SDK context during shutdown");
+  assert.equal(disposed, true);
+  assert.deepEqual(mutationStoreMetrics(env.agentDir), { active: 0, leases: 0 });
+});
