@@ -61,3 +61,7 @@ Two real Pi SDK Catalog acceptance tests also pass: multiple processes/projects/
 At Background branch head `6aa1c4f0`, all 11 real-process supervision tests passed. Fixed repeated handoffs accepting conflicting destination/capability fields in `4ea2d4ac`; identical retries remain idempotent. All 118 coordinator tests and coordinator typecheck pass. All 11 real-process supervision tests pass again after the fix.
 
 The Catalog and Background branches are now combined locally. Server, Background and Subagents typechecks pass; all 19 combined runtime tests pass with zero skips (Catalog, cancellation and Background supervision). No claim is made that Subagent launch (#761), worker continuation (#762), result receipt (#763), upgrades (#764), or final aggregate budgets (#765/#782) are complete.
+
+## Shared mutation connection
+
+Cancellation and Background result supervision previously each opened a coordinator connection. They now acquire leases on one main-thread connection per canonical root, separate from the query worker's read connection. Closing either service releases only its lease; final release closes the store. Canonical alias sharing, root isolation and reopen behavior are covered by a new test. Server typecheck and all 19 targeted mutation/cancellation/supervision tests pass. Aggregate connection/CPU budgets still require the full resource acceptance run.

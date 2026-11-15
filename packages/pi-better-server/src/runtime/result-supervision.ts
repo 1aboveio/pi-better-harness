@@ -1,8 +1,7 @@
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-// @ts-expect-error Generated canonical coordinator.
-import { openStore } from "./domain/coordinator/index.mjs";
+import { acquireMutationStore } from "./mutation-store.ts";
 // @ts-expect-error Generated canonical supervisor.
 import { createLocalSupervisor } from "./domain/background/supervisor/supervisor.mjs";
 // @ts-expect-error Generated canonical terminal evidence rules.
@@ -20,6 +19,7 @@ export function hasResultSupervision(root: string): boolean {
 /** Mechanical observation only. Never launches, stops, claims resumes or consumes results. */
 export class RuntimeResultSupervision {
   private store: any;
+  private releaseStore: () => void;
   private timer: NodeJS.Timeout;
   readonly hostId: string;
   readonly epoch: string;
@@ -27,7 +27,9 @@ export class RuntimeResultSupervision {
   constructor(root: string, epoch: string) {
     this.epoch = epoch;
     this.hostId = `server:${epoch}`;
-    this.store = openStore({ path: join(root, "operation-coordinator.sqlite") });
+    const lease = acquireMutationStore(root);
+    this.store = lease.store;
+    this.releaseStore = lease.release;
     this.reconcile();
     this.timer = setInterval(() => this.reconcile(), 250);
     this.timer.unref();
@@ -57,5 +59,5 @@ export class RuntimeResultSupervision {
       }
     } catch (error) { this.reason = String(error); }
   }
-  close() { clearInterval(this.timer); this.store.close(); }
+  close() { clearInterval(this.timer); this.releaseStore(); }
 }
