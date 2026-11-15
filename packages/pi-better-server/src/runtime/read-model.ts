@@ -104,7 +104,7 @@ export class WorkReadModel {
     // Join the bounded repair passes before treating that freshly written ID as absent.
     for (let attempt = 0; attempt < 3; attempt++) {
       await this.reconcile();
-      if (this.db.prepare("SELECT id FROM rows WHERE id = ?").get(id) || !this.dirty) break;
+      if (this.db.prepare("SELECT id FROM rows WHERE id = ?").get(id) || !this.dirty && !this.pending) break;
       await yieldTurn();
     }
   }
