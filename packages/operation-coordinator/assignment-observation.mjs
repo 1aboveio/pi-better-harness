@@ -76,6 +76,7 @@ export function createAssignmentReader(path) {
         conversationRevisions() {
             try {
                 this.revision();
+                if (!["1", "2", "3", "4"].includes(db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value)) return undefined;
                 const hashes = new Map();
                 const add = (sessionId, workspace, value) => {
                     const key = JSON.stringify([sessionId, workspace]);

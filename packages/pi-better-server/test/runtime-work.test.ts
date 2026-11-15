@@ -406,6 +406,17 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     await model.reconcile();
     assert.equal(model.snapshot({ id: "sa_history_9997" }).rows[0]!.assignment.state, "failed");
     assert.equal(model.metrics.projections - beforeOutcome, 1, "outcome-only changes invalidate their own conversation");
+    const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+    const external = new DatabaseSync(join(root, "operation-coordinator.sqlite"));
+    try {
+      external.exec("UPDATE schema_meta SET value = 'unsupported' WHERE key = 'schema_version'");
+      await model.reconcile();
+      assert.equal(model.snapshot().status, "degraded", "a schema-only change invalidates previously verified observations");
+      assert.equal(model.snapshot({ id: "sa_history_9997" }).rows[0]!.assignment.verified, false);
+      external.exec("UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'");
+      await model.reconcile();
+      assert.equal(model.snapshot().status, "ready", "compatible coordinator state recovers without restarting the read model");
+    } finally { external.close(); }
   } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
