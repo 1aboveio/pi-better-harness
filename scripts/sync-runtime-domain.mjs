@@ -9,7 +9,7 @@ mkdirSync(target, { recursive: true });
 const catalog = join(target, "catalog");
 mkdirSync(catalog, { recursive: true });
 cpSync(join(root, "packages/pi-better-subagents/roles"), join(catalog, "roles"), { recursive: true });
-for (const name of ["catalog-store", "catalog-schema", "catalog-preferences", "catalog-skill-edits", "agent-session-settings", "thinking"]) {
+for (const name of ["catalog-store", "catalog-schema", "catalog-preferences", "catalog-skill-edits", "catalog-overlay", "agent-session-settings", "thinking"]) {
   const source = readFileSync(join(root, "packages/pi-better-subagents", `${name}.ts`), "utf8");
   writeFileSync(join(catalog, `${name}.mjs`), `// Generated from packages/pi-better-subagents/${name}.ts. Do not edit directly.\n` + ts.transpileModule(source.replaceAll(/(from\s+["'][^"']+)\.ts(["'])/g, "$1.mjs$2"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },

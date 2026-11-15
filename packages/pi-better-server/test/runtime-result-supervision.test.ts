@@ -239,7 +239,7 @@ test("two actual HostedSessions share server supervision without a discovery hos
   }
 });
 
-test("a live or unknown original holder refuses result handoff without changing the execution owner", { timeout: 30000 }, async () => {
+test("scope handoff refuses live, unknown and untransferred dead legacy holders", { timeout: 30000 }, async () => {
   const { createObservedWaitHost } = await import(new URL("../../pi-better-background-tasks/src/observed-waits.ts", import.meta.url).href);
   mkdirSync(resolve(".work/760"), { recursive: true });
   const root = mkdtempSync(resolve(".work/760/holder-"));
@@ -276,6 +276,26 @@ test("a live or unknown original holder refuses result handoff without changing 
       assert.equal(store.getOperation(op.operationId)?.supervision.hostId, `${original.child.pid}:legacy`);
       assert.equal(store.resultSupervision(op.operationId), null);
       assert.equal(store.getOperation(op.operationId)?.terminalRevision, 0);
+      // Restore the exact host identity, then kill only the frontend. Its
+      // independent runner remains active, with no server result grant.
+      store.recordSupervision({ operationId: op.operationId, owner: op.owner,
+        expectedHostId: `${original.child.pid}:legacy`, supervision: op.supervision });
+      const exited = once(original.child, "exit"); original.child.kill("SIGKILL"); await exited;
+      await assert.rejects(host.launchParent({ kind: "process", params: { shell: false, callback: false,
+        argv: [process.execPath, "-e", "process.exit(0)"] }, ctx }), /untransferred legacy operation/);
+      assert.equal(store.resultScopeManaged(scope), false, "refusal must leave legacy discovery enabled");
+      assert.equal(store.resultSupervision(op.operationId), null);
+      assert.equal(store.listOperations({ phase: "running" }).length, 1, "no replacement task was admitted");
+
+      // Explicit adoption uses A's own captured authority, never the rejected
+      // new task's authority. Its terminal evidence can then advance its wait.
+      const wait = await host.superviseParentWait(ctx, [taskId], "adopt the exact legacy dependency");
+      assert.ok(store.resultSupervision(op.operationId));
+      await createLocalSupervisor({ directory: join(root, "supervisor") }).stop(taskId);
+      const deadline = Date.now() + 5000;
+      while (store.getOperation(op.operationId)?.terminalRevision === 0 && Date.now() < deadline) await delay(25);
+      assert.equal(store.getOperation(op.operationId)?.terminalRevision, 1);
+      assert.equal(host.waitViewForParent(ctx, wait.waitId, wait.generation)?.phase, "ready");
     } finally { store.close(); }
   } finally {
     host.close();

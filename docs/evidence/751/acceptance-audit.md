@@ -97,3 +97,13 @@ This establishes the integrated Catalog/Background/cancellation baseline. Server
 Inspection of the launch path found cleanup releasing a continuation writer lease immediately after sending SIGKILL. It now waits for the child close event before releasing the lease or removing attempt evidence. A real-process regression proves another continuation is refused during that window and admitted after close. Subagents typecheck and 55 launch, continuation, cleanup-race and batch tests pass. The first targeted command omitted the package isolation preload and is not acceptance evidence; the recorded passing rerun uses `--import ./tests/isolate-registry.mjs`.
 
 This corrects a pre-existing writer-safety gap; it does not implement server-managed launch.
+
+## Integration review and legacy admission fence
+
+Standards review found no confirmed documented-standard violations. It noted duplicated overlay hashing and bounded filesystem observation code as maintainability concerns. Host and server now consume one generated canonical overlay digest; the bounded stat loops remain unchanged.
+
+Spec review found a concrete #760 partial-handoff defect: marking an entire scope managed for a new task could strand an older dead-host task without a result grant. Admission now refuses untransferred legacy tasks. Scope handoff checks durable operations inside its transaction, including operations with no sidecar yet. A database trigger prevents older store implementations from registering legacy work into a managed scope; unknown legacy scopes conservatively conflict with any managed scope in the root. Known other scopes remain independent, and compatible hosts retain grant-before-runner admission.
+
+Review also found the schema-v3 migration skipped that trigger. The first migration open now installs it; a dedicated regression proves enforcement without a second open. Two SQLite connections exercise registration between snapshot and handoff, and registration after handoff. A real frontend is SIGKILLed while its runner stays alive: unrelated launch is refused without fencing discovery, explicit adoption retains the original task authority, and terminal import advances its wait exactly once.
+
+Validation after these fixes: coordinator 121 passed; Background 564 passed/four skipped; 13 real Catalog/supervision tests passed; Server, Background, Subagents and coordinator typechecks passed. The scope fence persists for older clients as intended. Cross-platform raw reports from successful CI b0e05b41 are retained separately; they predate this admission-fence change.

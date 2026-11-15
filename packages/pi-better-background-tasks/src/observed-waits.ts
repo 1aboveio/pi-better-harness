@@ -2002,7 +2002,7 @@ export class ObservedWaitHost {
     return imported;
   }
 
-  private assertResultAdmission(captured: TaskSandboxProvenance): void {
+  private assertResultAdmission(captured: TaskSandboxProvenance, transferring: ReadonlySet<string> = new Set()): void {
     const discovery = this.requireStore().readDiscoveryClaim(this.discoveryScope);
     if (discovery && discovery.hostId !== this.hostId && this.discoveryHolderState(discovery.hostId) !== "dead") {
       throw new Error("permission-unavailable: live or unknown original discovery holder prevents scope handoff");
@@ -2018,6 +2018,11 @@ export class ObservedWaitHost {
       if (this.supervisionAuthority(operation) === "foreign") {
         throw new Error("permission-unavailable: a live or unknown legacy operation holder prevents scope handoff");
       }
+      // A dead holder is not itself a grant. Fencing discovery for a different
+      // task would strand this runner: the server only imports explicit grants.
+      if (!transferring.has(operation.operationId)) {
+        throw new Error("permission-unavailable: an untransferred legacy operation prevents scope handoff; explicitly supervise its wait first");
+      }
     }
   }
 
@@ -2030,6 +2035,7 @@ export class ObservedWaitHost {
         throw new Error("permission-unavailable: live or unknown original discovery holder prevents scope handoff");
       }
       const transfers = [];
+      const transferring = new Set(operations.map(operation => operation.operationId));
       for (const operation of operations) {
         if (this.requireStore().resultSupervision(operation.operationId)) continue;
         if (this.supervisionAuthority(operation) === "foreign" || this.localCancels.has(operation.taskId)) {
@@ -2037,7 +2043,7 @@ export class ObservedWaitHost {
         }
         const context = this.launchContext(operation.taskId);
         if (!context?.sandbox || !context.supervisionPolicy || !operation.authorityRef) throw new Error("permission-unavailable: captured Background authority is unavailable");
-        this.assertResultAdmission(context.sandbox);
+        this.assertResultAdmission(context.sandbox, transferring);
         const current = currentForegroundSandboxPolicy(this.pi);
         if (context.sandbox.policySource !== "no-publisher" && !current) throw new Error("permission-unavailable: expected current Background permission source is unavailable");
         transfers.push({ operationId: operation.operationId,
@@ -4214,7 +4220,7 @@ export class ObservedWaitHost {
   }
 
   private supervision(): SupervisionIdentity {
-    return { hostId: this.hostId, runnerId: null, processStartToken: null,
+    return { hostId: this.hostId, runnerId: null, processStartToken: null, resultScope: this.discoveryScope,
       ...(this.options.serverOwnedResults ? { resultAdapter: 1 as const } : {}) };
   }
 

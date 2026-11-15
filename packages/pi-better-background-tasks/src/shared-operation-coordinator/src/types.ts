@@ -83,6 +83,8 @@ export interface ObserverIdentity {
  * (a replacement host takes over on reload) while launch identity is not.
  */
 export interface SupervisionIdentity {
+    /** Durable discovery scope, recorded before sidecar creation or runner start. */
+    resultScope?: string;
     /** The host uses grant-before-runner result admission and performs no global discovery. */
     resultAdapter?: 1;
     /** Host that owns supervision, e.g. the Pi process id plus a start token. */

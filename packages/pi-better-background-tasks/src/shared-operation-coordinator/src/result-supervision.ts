@@ -80,6 +80,16 @@ export function handoffResultScope(ctx: StoreContext, input: {
             throw new Error("supervision-conflict: discovery owner changed during handoff");
         }
         const grants = handoffResultSupervisions(ctx, input.grants);
+        // Registration precedes sidecar creation. Check durable records inside
+        // this transaction, including old records whose scope is unknown.
+        const stranded = getRow(ctx, `SELECT operation_id FROM operations o
+            WHERE phase = 'running' AND observer_kind = 'local-supervisor'
+            AND COALESCE(json_extract(supervision_json, '$.resultAdapter'), 0) != 1
+            AND (json_extract(supervision_json, '$.resultScope') IS NULL
+                OR json_extract(supervision_json, '$.resultScope') = ?)
+            AND NOT EXISTS (SELECT 1 FROM coordinator_state s WHERE s.key = ? || o.operation_id)
+            LIMIT 1`, input.scope, PREFIX);
+        if (stranded) throw new Error("permission-unavailable: untransferred legacy operation prevents scope handoff");
         run(ctx, "DELETE FROM discovery_claims WHERE scope = ?", input.scope);
         run(ctx, "INSERT OR IGNORE INTO coordinator_state (key, value) VALUES (?, 'managed')", "result-scope-v1:" + input.scope);
         return grants;

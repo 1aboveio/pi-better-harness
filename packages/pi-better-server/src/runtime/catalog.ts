@@ -4,7 +4,7 @@ import { withAgentSessionSettings, saveAgentSessionDefaults } from "./domain/cat
 import { saveSkillExposure } from "./domain/catalog/catalog-skill-edits.mjs";
 import { parseDefinition } from "./domain/catalog/catalog-schema.mjs";
 import { CatalogAdmission } from "./catalog-admission.ts";
-import { createHash } from "node:crypto";
+import { overlayDigest } from "./domain/catalog/catalog-overlay.mjs";
 import { watch, type FSWatcher } from "node:fs";
 import { dirname } from "node:path";
 
@@ -78,7 +78,7 @@ export class SharedCatalog {
         const overlay = validateOverlay(command.overlay);
         if (registration?.authority && command.overlay !== undefined) {
           const grant = this.admission.verify(registration.authority);
-          const digest = createHash("sha256").update(JSON.stringify(Object.fromEntries(Object.keys(overlay).sort().map(id => [id, Object.fromEntries(Object.entries(overlay[id]!).sort(([a], [b]) => a.localeCompare(b)))])))).digest("hex");
+          const digest = overlayDigest(overlay);
           if (digest !== grant.overlayDigest) throw new Error("catalog-overlay-refused");
         }
         const view = withAgentSessionSettings(snapshot, overlay);

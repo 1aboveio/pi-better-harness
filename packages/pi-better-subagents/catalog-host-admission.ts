@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { processStartToken } from "./registry.ts";
 import { WorkClient } from "./shared-work-client.mjs";
 import type { AgentSessionOverrides } from "./agent-session-settings.ts";
+import { overlayDigest } from "./catalog-overlay.ts";
+export { overlayDigest } from "./catalog-overlay.ts";
 
 type HostContext = { cwd: string; isProjectTrusted(): boolean; sessionManager?: { getSessionId?(): string; getLeafId?(): string | null } };
 export function createCatalogHostAdapter() {
@@ -64,7 +66,4 @@ export function createCatalogHostAdapter() {
 }
 export const { noteCatalogHostContext, closeCatalogHost, catalogHostAuthority } = createCatalogHostAdapter();
 
-export function overlayDigest(value: AgentSessionOverrides = {}) {
-    return hash(JSON.stringify(Object.fromEntries(Object.keys(value).sort().map(id => [id, Object.fromEntries(Object.entries(value[id]!).sort(([a], [b]) => a.localeCompare(b)))]))));
-}
 function hash(value: string) { return createHash("sha256").update(value).digest("hex"); }

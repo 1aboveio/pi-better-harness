@@ -1,9 +1,63 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { cleanupHarnesses, createHarness, registerOperation, workerOwner } from "./support.ts";
+import { openStore } from "../index.ts";
+import { DatabaseSync } from "node:sqlite";
 
 afterEach(cleanupHarnesses);
 const transfer = (operationId: string) => ({ operationId, expectedHostId: "host-1", directory: "/supervisor", hostId: "server:epoch-1", epoch: "epoch-1" });
+
+test("the first open of a v3 database installs the result admission fence", () => {
+    const harness = createHarness();
+    registerOperation(harness.store);
+    harness.closeStore();
+    const old = new DatabaseSync(harness.path);
+    old.exec("DROP TRIGGER result_scope_admission_v1; DROP TABLE assignment_repairs; UPDATE schema_meta SET value = '3' WHERE key = 'schema_version'");
+    old.close();
+    const migrated = openStore({ path: harness.path });
+    try {
+        migrated.handoffResultScope({ scope: "scope-760", expectedDiscovery: null, grants: [transfer("op-build-1")] });
+        assert.throws(() => migrated.registerOperation({ operationId: "legacy", taskId: "legacy-task", launchToken: "legacy-token",
+            owner: workerOwner, observer: { kind: "local-supervisor", version: "1" }, supervision: { hostId: "old-client" } }),
+        /legacy launch into managed result scope/);
+    } finally { migrated.close(); }
+});
+
+test("scope transfer atomically refuses a legacy registration after the admission snapshot", () => {
+    const harness = createHarness();
+    const peer = openStore({ path: harness.path });
+    try {
+        registerOperation(harness.store);
+        assert.equal(harness.store.listOperations({ phase: "running" }).length, 1);
+        peer.registerOperation({ operationId: "legacy-race", taskId: "legacy-task", launchToken: "legacy-token",
+            owner: workerOwner, observer: { kind: "local-supervisor", version: "1" },
+            supervision: { hostId: "dead-host", resultScope: "scope-760" } });
+        assert.throws(() => harness.store.handoffResultScope({ scope: "scope-760", expectedDiscovery: null,
+            grants: [transfer("op-build-1")] }), /untransferred legacy operation/);
+        assert.equal(harness.store.resultScopeManaged("scope-760"), false);
+        assert.equal(harness.store.resultSupervision("op-build-1"), null, "partial grants roll back with the fence");
+        assert.equal(harness.store.getOperation("op-build-1")?.supervision?.hostId, "host-1");
+    } finally { peer.close(); harness.closeStore(); }
+});
+
+test("database admission fence rejects old writers after scope transfer but preserves other known scopes", () => {
+    const harness = createHarness();
+    const peer = openStore({ path: harness.path });
+    try {
+        registerOperation(harness.store);
+        harness.store.handoffResultScope({ scope: "scope-760", expectedDiscovery: null, grants: [transfer("op-build-1")] });
+        const legacy = (id: string, resultScope?: string, resultAdapter?: 1) => peer.registerOperation({
+            operationId: id, taskId: `task-${id}`, launchToken: `token-${id}`, owner: workerOwner,
+            observer: { kind: "local-supervisor", version: "1" }, supervision: { hostId: "legacy-host", resultScope, resultAdapter },
+        });
+        assert.throws(() => legacy("unknown"), /legacy launch into managed result scope/);
+        assert.throws(() => legacy("same", "scope-760"), /legacy launch into managed result scope/);
+        assert.equal(legacy("other", "another-scope").created, true);
+        assert.equal(legacy("compatible", "scope-760", 1).created, true, "compatible hosts grant before runner start");
+        assert.equal(harness.store.getOperation("unknown"), null);
+        assert.equal(harness.store.getOperation("same"), null);
+    } finally { peer.close(); harness.closeStore(); }
+});
 
 test("a failed dependency handoff rolls back every owner change and grant", () => {
     const { store } = createHarness();
