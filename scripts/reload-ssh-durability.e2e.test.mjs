@@ -376,6 +376,7 @@ test("a real /reload keeps pending callback receipts, the incident journal, and 
   await delay(400);
   assert.equal(host.completions(pendingId).length, 1, "receipts survive a second reload");
   assert.deepEqual(host.errors, []);
+  await host.session._extensionRunner.emit({ type: "session_shutdown" });
   host.session.dispose();
 });
 
@@ -446,6 +447,7 @@ test("local and direct-SSH processes that exit after /reload deliver their compl
   t.after(async () => {
     try { await cleanupExitChildren(host, project, children); }
     finally {
+      await host.session._extensionRunner.emit({ type: "session_shutdown" });
       host.session.dispose();
       process.env.PATH = originalPath;
     }
@@ -516,6 +518,7 @@ for (const mode of ["release", "partial-spawn", "stop", "failed-reload"]) {
     t.after(async () => {
       try { await cleanupExitChildren(host, project, children); }
       finally {
+        await host.session._extensionRunner.emit({ type: "session_shutdown" });
         host.session.dispose();
         process.env.PATH = originalPath;
       }
@@ -686,6 +689,7 @@ async function sshScenario(transport) {
     assert.equal(host.completions(watchId).length, 1, "the watch receipt survives another reload");
     assert.deepEqual(host.errors, []);
   } finally {
+    await host.session._extensionRunner.emit({ type: "session_shutdown" });
     host.session.dispose();
     transport.cleanup();
     process.env.PATH = originalPath;

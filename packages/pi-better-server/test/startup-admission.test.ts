@@ -14,6 +14,7 @@ import { DaemonClient } from "../src/client.ts";
 import type { StagedRuntime } from "../src/startup/managed-types.ts";
 import { digest, stable } from "../scripts/private-runtime/format.ts";
 import { llmCalls, makeEnv, waitFor, type Env } from "./helpers.ts";
+import { stageDependencies } from "./support/staged-dependencies.ts";
 
 const packageDir = fileURLToPath(new URL("../", import.meta.url));
 function staged(env: Env, seed: string): StagedRuntime {
@@ -27,7 +28,7 @@ function staged(env: Env, seed: string): StagedRuntime {
   cpSync(join(packageDir, "scripts/private-runtime/format.ts"), join(root, "scripts/private-runtime/format.ts"));
   writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module" }));
   writeFileSync(join(root, "managed-build.json"), JSON.stringify(build));
-  symlinkSync(fileURLToPath(new URL("../../../node_modules", import.meta.url)), join(root, "node_modules"));
+  stageDependencies(root);
   mkdirSync(join(root, "node/bin"), { recursive: true });
   symlinkSync(process.execPath, join(root, "node/bin/node"));
   const runtime = { format: 1 as const, root, installRoot, build, node: join(root, "node/bin/node"), entrypoint: join(root, "src/cli.ts"), manifestPath: join(root, "runtime.json") };
@@ -78,6 +79,9 @@ test("ordinary CLI ensure cannot restart A after same-SDK B adopts and fails", {
   writeFileSync(join(env.serverDir, "sessions.json"), "broken index forces failure after adoption");
   const failed = await run(env, b.entrypoint, [], { PI_SERVER_ACTIVATION_ID: "upgrade-B" }).result;
   assert.equal(failed.code, 1, failed.stderr);
+  assert.match(failed.stderr, /failed before readiness/);
+  assert.equal(JSON.parse(readFileSync(join(env.serverDir, "guardian-restarts.json"), "utf8")).length, 1,
+    "a reported startup failure is persisted once, not retried until the caller's timeout can mask it");
   assert.equal(readActivationJournal(env.serverDir)?.phase, "adopted");
   assert.equal(inspectDaemonOwner(env.serverDir).status, "missing");
   writeFileSync(join(env.serverDir, "sessions.json"), JSON.stringify({ version: 1, sessions: [] }));
