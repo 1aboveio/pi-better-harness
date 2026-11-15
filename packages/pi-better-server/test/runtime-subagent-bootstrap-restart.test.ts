@@ -22,7 +22,8 @@ test(`replacement ${phase} refuses unavailable authority without replaying an ac
     NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""}${phase === "before-bootstrap" ? ` --import=${new URL("./support/subagent-bootstrap-barrier.mjs", import.meta.url).href}` : ""}` };
   let errors = "";
   const start = async (url: URL) => {
-    const child = fork(url, [], { execArgv: ["--import", "tsx"], env, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+    const child = fork(url, [], { execPath: url.pathname.endsWith("work-daemon.ts") ? process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath : process.execPath,
+      execArgv: ["--import", "tsx"], env, stdio: ["ignore", "ignore", "pipe", "ipc"] });
     child.stderr!.on("data", bytes => { errors += bytes; });
     await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(errors); })]);
     return child;

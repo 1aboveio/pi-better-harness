@@ -37,6 +37,7 @@ for (const name of ["pi-better-subagents", "pi-better-background-tasks", "operat
 NODE
 # Install the consumer's declared runtime closure, not just the host's transitives.
 # Its host-provided peers must keep resolving to the requested Pi above.
+(cd "$PREFIX/packages/pi-better-server" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
 (cd "$PREFIX/packages/pi-better-subagents" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
 (cd "$PREFIX/packages/pi-better-background-tasks" && npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-audit --no-fund)
 

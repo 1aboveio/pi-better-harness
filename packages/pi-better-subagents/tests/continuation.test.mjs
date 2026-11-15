@@ -49,6 +49,7 @@ import { once } from "node:events";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { continuationFixture } from "./managed-continuation-fixture.mjs";
+import { splitNativeFraming } from "../../pi-better-server/test/support/native-message-framing.mjs";
 
 // Hermetic registry + child artifacts: everything this file writes lives under
 // one per-run temp directory, never a checked-in path or the machine registry.
@@ -181,7 +182,7 @@ function childRecord(pid) {
 }
 
 function sessionMessages(path) {
-    return readFileSync(path, "utf-8")
+    const messages = readFileSync(path, "utf-8")
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line))
@@ -191,6 +192,7 @@ function sessionMessages(path) {
             text: typeof entry.message.content === "string" ? entry.message.content
                 : (entry.message.content ?? []).map((block) => block.text ?? "").join(""),
         }));
+    return splitNativeFraming(messages).conversation;
 }
 
 function sessionHeader(path) {

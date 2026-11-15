@@ -39,7 +39,7 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
   try {
     await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
     writeFileSync(join(agent, "server-registration-v1.json"), JSON.stringify({ version: 1, agentDir: agent, serverDir: transport }));
-    parent = fork(new URL("./support/subagent-launch-sdk.mjs", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    parent = fork(new URL("./support/subagent-launch-sdk.mjs", import.meta.url), [], { execPath: process.execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
     parent.stderr!.on("data", data => { errors += data; });
     const [ready] = await Promise.race([once(parent, "message"), once(parent, "exit").then(() => { throw new Error(errors); })]);
     const launch = async (params: object, key = "same-launch", child = parent!, goalComplete = false) => {
@@ -65,7 +65,7 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
     } finally { db.close(); }
     const rejected = once(parent, "message"); parent.send({ key: "over-owner-capacity", params });
     assert.match((await rejected)[0].error, /Max concurrent subagents/);
-    sibling = fork(new URL("./support/subagent-launch-sdk.mjs", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    sibling = fork(new URL("./support/subagent-launch-sdk.mjs", import.meta.url), [], { execPath: process.execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
     sibling.stderr!.on("data", data => { errors += data; });
     await Promise.race([once(sibling, "message"), once(sibling, "exit").then(() => { throw new Error(errors); })]);
     const independent = await launch({ ...params, role: undefined }, "independent-owner", sibling);

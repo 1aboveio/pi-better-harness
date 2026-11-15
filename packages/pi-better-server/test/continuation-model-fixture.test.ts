@@ -4,6 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { continuationModels, startContinuationModel } from "./support/subagent-offline-model.ts";
+const framingModule = "./support/native-message-framing.mjs";
+const { splitNativeFraming } = await import(framingModule);
 
 test("continuation offline transport produces the original four native messages through the actual SDK", async () => {
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
@@ -23,8 +25,10 @@ test("continuation offline transport produces the original four native messages 
     const saved = manager.getSessionFile()!;
     await session.prompt("FIX IT");
     assert.equal(manager.getSessionFile(), saved);
-    const messages = readFileSync(saved, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(entry => entry.type === "message")
+    const native = readFileSync(saved, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(entry => entry.type === "message")
       .map(entry => ({ role: entry.message.role, text: typeof entry.message.content === "string" ? entry.message.content : entry.message.content.map((part: any) => part.text ?? "").join("") }));
+    const { framing, conversation: messages } = splitNativeFraming(native);
+    assert.deepEqual(framing, framing.length ? [{ role: "system", text: "" }] : []);
     assert.deepEqual(messages, [
       { role: "user", text: "INITIAL TASK" }, { role: "assistant", text: "INITIAL ANSWER" },
       { role: "user", text: "FIX IT" }, { role: "assistant", text: "FOLLOWUP:FIX IT" },
