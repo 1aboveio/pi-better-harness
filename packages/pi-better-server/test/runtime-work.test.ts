@@ -57,7 +57,10 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     const before = await first.request("runtime_get_metrics");
     const actualConnections = async () => {
       const reply = once(child, "message"); child.send("metrics");
-      return (await reply)[0].sqlite;
+      const main = (await reply)[0].sqlite;
+      const worker = (await first.request("runtime_get_metrics")).sqlite;
+      return { opens: main.opens + worker.opens, active: main.active + worker.active,
+        maximum: main.maximum + worker.maximum };
     };
     const sqliteBefore = await actualConnections();
     assert.equal(sqliteBefore.active, 2, "one actual index and one actual coordinator connection are retained by the daemon");
@@ -72,7 +75,14 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
         assert.equal(snapshot.scopeRevision, first.snapshot!.scopeRevision);
         assert.equal(snapshot.rows.length, 50);
       }
+      const cold = await first.request("runtime_get_metrics");
+      const scope = { cwd: root, sessionId: "parent", limit: count + 100 };
+      const overlapping = await Promise.all(clients.map(client => client.get(scope)));
+      assert.ok(overlapping.every(snapshot => snapshot.scopeRevision === overlapping[0]!.scopeRevision));
       const after = await first.request("runtime_get_metrics");
+      assert.equal(after.queryCount - cold.queryCount, 1, `${count} clients execute one underlying cold scope query`);
+      await Promise.all(clients.map(client => client.get(scope)));
+      assert.equal((await first.request("runtime_get_metrics")).queryCount, after.queryCount, "warm reads use the bounded shared cache");
       assert.equal(after.projections, before.projections);
       assert.equal(after.metadataReads, before.metadataReads);
       assert.equal(after.coordinatorConnections, 1);

@@ -1,5 +1,5 @@
 import type { Socket } from "node:net";
-import { WorkReadModel, type WorkScope } from "./read-model.ts";
+import type { WorkReadModel, WorkScope } from "./read-model.ts";
 
 export function workScope(input: unknown): WorkScope {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("A runtime scope object is required");
@@ -10,7 +10,7 @@ export function workScope(input: unknown): WorkScope {
   if (value.active !== undefined && typeof value.active !== "boolean") throw new Error("Invalid active scope");
   if (value.endedAfter !== undefined && (typeof value.endedAfter !== "number" || !Number.isFinite(value.endedAfter))) throw new Error("Invalid history deadline");
   if (value.detail !== undefined && (typeof value.detail !== "boolean" || (value.detail && !value.id))) throw new Error("Detail requires an exact run ID");
-  if (value.statuses !== undefined && (!Array.isArray(value.statuses) || value.statuses.length > 9 || value.statuses.some(s => !["running", "waiting", "completed", "failed", "cancelled", "killed", "exited", "orphaned", "lost"].includes(String(s))))) throw new Error("Invalid assignment status filter");
+  if (value.statuses !== undefined && (!Array.isArray(value.statuses) || value.statuses.length > 9 || value.statuses.some(s => typeof s !== "string" || !["running", "waiting", "completed", "failed", "cancelled", "killed", "exited", "orphaned", "lost"].includes(s)))) throw new Error("Invalid assignment status filter");
   return { cwd: value.cwd as string | undefined, sessionId: value.sessionId as string | undefined, id: value.id as string | undefined,
     cursor: value.cursor as string | undefined, limit: value.limit as number | undefined, active: value.active as boolean | undefined, endedAfter: value.endedAfter as number | undefined, detail: value.detail as boolean | undefined, statuses: value.statuses as string[] | undefined };
 }
@@ -47,7 +47,7 @@ export class WorkQueries {
     if (command.type === "runtime_get_metrics") return { ...this.model.metrics };
     const scope = workScope(command.scope);
     const snapshot = this.model.snapshot(scope);
-    if (Buffer.byteLength(JSON.stringify(snapshot)) > 4 * 1024 * 1024) throw new Error("state-degraded: snapshot exceeds 4 MiB; narrow the scope or limit");
+    if (Buffer.byteLength(JSON.stringify(snapshot)) > 4 * 1024 * 1024 - 1024) throw new Error("state-degraded: snapshot exceeds the 4 MiB frame allowance; narrow the scope or limit");
     if (command.type === "runtime_subscribe") {
       this.close();
       this.dispose = this.model.onChange(() => {

@@ -17,8 +17,7 @@ import type { IdleSessionsLease, UpgradeRequest } from "./startup/managed-types.
 import { HostedSession } from "./hosted-session.ts";
 import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts";
 import { runtimeRoot } from "./runtime/root.ts";
-import { WorkReadModel } from "./runtime/read-model.ts";
-import { WorkQueries } from "./runtime/queries.ts";
+import { WorkQueryExecutor } from "./runtime/query-executor.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
   /** Defaults to `~/.pi/agent/server` (or `$PI_SERVER_DIR`). */
@@ -86,11 +85,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     cleanupStartup = () => registry.shutdown();
     await registry.resumeAll();
     const nativeHost = new NativeClientHost(registry);
-    let workModel: WorkReadModel | undefined;
+    let workModel: WorkQueryExecutor | undefined;
     const work = () => {
       if (!workModel) {
-        workModel = new WorkReadModel(realpathSync(getAgentDir()), instanceId!);
-        void workModel.reconcile();
+        workModel = new WorkQueryExecutor(realpathSync(getAgentDir()), instanceId!);
       }
       return workModel;
     };
@@ -128,7 +126,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       };
       const control = new ConnectionControl(send);
       let greeted = false;
-      let workQueries: WorkQueries | undefined;
+      let workQueries: ReturnType<WorkQueryExecutor["connect"]> | undefined;
       let runtimeInFlight = 0;
 
       const dispatch = async (line: string): Promise<void> => {
@@ -170,20 +168,23 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (type === "runtime_get_status") {
             if (!greeted) throw new Error("runtime_get_status requires hello");
             return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
-              capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount } });
+              capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, ...(workModel ? { readModel: workModel.metrics() } : {}) } });
           }
           if (type === "runtime_upgrade_status") return reply({ data: readActivationJournal(serverDir) ?? null });
           if (["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_metrics"].includes(type)) {
             if (!greeted) throw new Error(`${type} requires hello`);
+            if (id && id.length > 128) throw new Error("Runtime request ID exceeds 128 characters");
             if (runtimeInFlight >= 32) throw new Error("runtime-unhealthy: too many in-flight queries; resync and retry");
             if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
             runtimeInFlight++;
             try {
-              workQueries ??= new WorkQueries(work(), socket);
-              if (type === "runtime_get_snapshot" && command.scope && typeof command.scope === "object" && typeof (command.scope as { id?: unknown }).id === "string") {
-                await work().ensureId((command.scope as { id: string }).id);
-              }
-              return reply({ data: workQueries.handle(command) });
+              workQueries ??= work().connect(socket);
+              const data = await workQueries.handle(command);
+              if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+              // Snapshot JSON is encoded in the worker; only the small envelope runs here.
+              const envelope = JSON.stringify({ id, type: "response", command: type, success: true });
+              if (!socket.destroyed) socket.write(envelope.slice(0, -1) + ',"data":' + data.json + "}\n");
+              return;
             } finally {
               runtimeInFlight--;
             }
