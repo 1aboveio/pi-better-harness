@@ -48,7 +48,6 @@ test("subagents contributes the standalone settings opener with shared session a
     t.after(async () => {
         const { closeCatalogHost } = await import("../catalog-host-admission.ts");
         closeCatalogHost();
-        await stopCatalogRuntime();
         if (previousTimingEnv.toolWait === undefined) delete process.env[TIMING_ENV.toolWait];
         else process.env[TIMING_ENV.toolWait] = previousTimingEnv.toolWait;
         if (previousTimingEnv.stuck === undefined) delete process.env[TIMING_ENV.stuck];
@@ -58,7 +57,6 @@ test("subagents contributes the standalone settings opener with shared session a
         setConfigPathForTests(undefined);
     });
     mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
-    const stopRuntime = async () => {};
     let events;
     const registrations = [];
     const commands = new Map();
@@ -85,7 +83,7 @@ test("subagents contributes the standalone settings opener with shared session a
     await resourceLoader.reload();
     const { session } = await createAgentSession({ cwd: root, agentDir: process.env.PI_CODING_AGENT_DIR, settingsManager, resourceLoader, sessionManager, noTools: "all" });
     await session.bindExtensions({ mode: "print" });
-    t.after(async () => { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); await stopRuntime(); rmSync(root, { recursive: true, force: true }); });
+    t.after(async () => { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); await stopCatalogRuntime(); rmSync(root, { recursive: true, force: true }); });
     const packageLinks = registrations.filter(item => item.command);
     assert.equal(packageLinks.length, 2);
     const contribution = packageLinks[0];
