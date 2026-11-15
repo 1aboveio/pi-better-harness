@@ -195,6 +195,13 @@ function callbackSuppressionReason(meta, active = activeCallbackOrigin) {
         if (origin.sessionId && origin.sessionId !== active.sessionId) {
             return `origin session ${origin.sessionId} does not match active session ${active.sessionId ?? "unknown"}`;
         }
+        const recipient = meta.assignment?.recipient;
+        if (recipient && (recipient.sessionId !== active.sessionId || recipient.workspace !== active.cwd)) {
+            return `origin session ${recipient.sessionId} does not match the active recipient scope`;
+        }
+        if (recipient?.branchId && (!uiCtx || !branchContains(uiCtx, recipient.branchId))) {
+            return `origin branch ${recipient.branchId} is not active`;
+        }
         if (meta.operations?.resumeLaunchToken && meta.operations.branchId
             && (!uiCtx || !branchContains(uiCtx, meta.operations.branchId))) {
             return `origin branch ${meta.operations.branchId} is not active`;
@@ -572,6 +579,8 @@ function deliverFailureAttention(pi, meta, now) {
     });
 }
 function markHealthCallbackSuppressed(meta, status, reason, now) {
+    if (isConversationIdentityReason(reason))
+        return;
     if (status === "orphaned") {
         if (meta.orphanedCallbackSuppressedAt !== undefined)
             return;
@@ -735,8 +744,8 @@ let healthPi;
  * A marker means successful handoff only: written after sendMessage returns, or
  * after intentionally suppressing the model path under callback:false. A failed
  * or crashed delivery leaves the marker unset so reload/recovery can retry.
- * `callback:false` suppresses the model message only — human ui.notify is
- * handled by the caller. Uses the same non-interrupting followUp mechanics as
+ * `callback:false` suppresses the model message only; the scoped frontend UI
+ * is notified before recording quiet delivery. Uses the same followUp mechanics as
  * completion, with distinct ATTENTION wording from buildHealthCallbackDelivery.
  */
 function deliverHealthCallback(pi, meta, status, now) {
@@ -746,14 +755,30 @@ function deliverHealthCallback(pi, meta, status, now) {
         return;
     if (isHealthCallbackHandled(meta, status))
         return;
+    if (callbackSuppressionReason(meta))
+        return;
     const callback = meta.callback !== false;
     const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
     const failureState = collectRunFailures(meta.id, meta.cwd, status === "lost");
     const attention = pendingFailureAttention(failureState, now, { terminal: status === "lost" });
     const delivery = buildHealthCallbackDelivery({ id: meta.id, label, status, callback });
     if (!delivery) {
-        // callback:false — model follow-up suppressed; mark handled so recovery
-        // does not spin forever. Human notify remains the caller's job.
+        const current = readMeta(meta.id);
+        if (!current || current.status !== status || isHealthCallbackHandled(current, status) || callbackSuppressionReason(current))
+            return;
+        meta = current;
+        if (uiCtx?.hasUI) {
+            const notice = status === "orphaned"
+                ? `Subagent ${label} lost supervision - related processes may still be alive (orphaned).`
+                : `Subagent ${label} is lost - no related process remains and no terminal result was observed.`;
+            try {
+                uiCtx.ui.notify(notice, "warning");
+            }
+            catch {
+                return;
+            }
+        }
+        // The marker acknowledges quiet delivery, never a model turn.
         if (status === "orphaned")
             meta.orphanedCallbackSentAt = now;
         else
