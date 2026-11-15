@@ -187,6 +187,14 @@ test("busy daemon keeps both views usable, then sends restarting events and resu
   const pending = await activate(env, after, "upgrade");
   assert.equal(pending.status, "deferred");
   assert.equal(pending.operationId, "upgrade");
+  const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
+  const foreground = openStore({ path: join(env.agentDir, "operation-coordinator.sqlite") });
+  try {
+    assert.throws(() => foreground.registerOperation({ operationId: "new-during-upgrade", taskId: "new-task",
+      launchToken: "new-launch", owner: { kind: "parent-session", sessionId, workspace: env.cwd },
+      observer: { kind: "local-supervisor", version: "1" } }), /runtime-draining/);
+  } finally { foreground.close(); }
+
   assert.equal(hasActivationReservations(readActivationJournal(env.serverDir)!), true, "a deferred caller leaves its request reserved");
   assert.equal((await b.call({ type: "list_sessions" })).data.sessions.length, 1);
   assert.equal((await b.call({ type: "runtime_upgrade_status" })).data.phase, "prepared");

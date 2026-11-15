@@ -99,9 +99,9 @@ parentPort.on("message", async message => {
   if (message.type !== "query") return;
   try {
     const command = message.command;
-    if (command.type === "runtime_get_liveness") {
+    if (["runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(command.type)) {
       await model.reconcile();
-      const observation = model.observation(model.livenessReasons());
+      const observation = model.observation(command.type === "runtime_get_upgrade_obligations" ? model.upgradeObligations() : model.livenessReasons());
       parentPort.postMessage({ type: "reply", id: message.id, json: JSON.stringify(observation.reasons), metrics: metrics(), observation });
       return;
     }

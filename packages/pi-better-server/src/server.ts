@@ -22,7 +22,7 @@ import { runtimeRoot } from "./runtime/root.ts";
 import { RuntimeCancellation, hasPendingCancellation } from "./runtime/cancellation.ts";
 import { RuntimeResultSupervision, hasResultSupervision } from "./runtime/result-supervision.ts";
 import { SharedCatalog } from "./runtime/catalog.ts";
-import { mutationStoreMetrics } from "./runtime/mutation-store.ts";
+import { acquireMutationStore, mutationStoreMetrics } from "./runtime/mutation-store.ts";
 import { WorkQueryExecutor } from "./runtime/query-executor.ts";
 import { createSubagentLaunch, hasSubagentManagement } from "./runtime/subagent-launch.ts";
 
@@ -156,7 +156,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       && typeof sessionMaintenance.withIdleSessions === "function" && "publishRuntimeEvent" in HostedSession.prototype);
     let pendingUpgrade: UpgradeRequest | undefined;
     const reconnectControllers = new Map<ConnectionControl, boolean>();
+    const setUpgradeFence = (epoch: string | null) => {
+      const lease = acquireMutationStore(realpathSync(getAgentDir()));
+      try { lease.store.setUpgradeFence(epoch); } finally { lease.release(); }
+    };
+    // Startup ownership has proved the preceding manager exited.
+    setUpgradeFence(null);
     let upgradeCommitted = false;
+    let upgradeBlockers: unknown[] = [];
     const companions = new CompanionManager({
       socketPath,
       ...options.companion,
@@ -207,6 +214,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         let releaseSessionOperation: (() => void) | undefined;
         if (draining) {
           send(failure(id, type || "unknown", "Daemon is shutting down; reconnect to start it again"));
+          return;
+        }
+        if (pendingUpgrade && type === "runtime_launch_subagent") {
+          send(failure(id, type, "runtime-draining: new execution is deferred while a fixed-build upgrade is pending"));
           return;
         }
         inFlight++;
@@ -312,7 +323,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             guardianBinding = { socket, identity: guardian.owner };
             return reply({ data: { server: current.owner, guardian: guardian.owner } });
           }
-          if (type === "runtime_upgrade_status") return reply({ data: readActivationJournal(serverDir) ?? null });
+          if (type === "runtime_upgrade_status") {
+            const journal = readActivationJournal(serverDir);
+            return reply({ data: journal ? { ...journal, blockers: upgradeBlockers } : null });
+          }
           if (["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_metrics"].includes(type)) {
             if (!greeted) throw new Error(`${type} requires hello`);
             if (id && id.length > 128) throw new Error("Runtime request ID exceeds 128 characters");
@@ -344,9 +358,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               || journal.previousOwner?.token !== instanceId || journal.phase !== "prepared") throw new Error("Upgrade request does not match this daemon's activation journal");
             if (!compatibleUpgrade(build, runtime.build)) throw new Error("Unsafe SDK downgrade or incompatible protocol");
             if (pendingUpgrade && pendingUpgrade.operationId !== command.operationId) throw new Error("activation-conflict: another upgrade is pending");
+            setUpgradeFence(instanceId!);
             pendingUpgrade = { runtime, operationId: command.operationId, serverDir, agentDir: command.agentDir as string };
             setImmediate(() => { void daemon.sweepIdle().catch(error => log(`upgrade maintenance failed: ${String(error)}`)); });
-            return reply({ data: { status: "deferred", operationId: command.operationId, reason: "Waiting for idle sessions" } });
+            return reply({ data: { status: "deferred", operationId: command.operationId, reason: "Waiting for accepted runtime work and idle sessions" } });
           }
           if (NATIVE_HOST_COMMANDS.has(type)) return reply({ data: await nativeHost.handle(command) });
           if ((sessionMaintenance?.busy || nativeHost.busy) && !["list_sessions", "client_snapshot", "subscribe", "acquire_control", "release_control", "extension_ui_response"].includes(type)) {
@@ -506,9 +521,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (pendingUpgrade && sessionMaintenance) {
             const request = pendingUpgrade;
             const journal = readActivationJournal(serverDir);
-            if (!journal || journal.operationId !== request.operationId || !hasActivationReservations(journal)) pendingUpgrade = undefined;
+            if (!journal || journal.operationId !== request.operationId || !hasActivationReservations(journal)) { setUpgradeFence(null); pendingUpgrade = undefined; upgradeBlockers = []; }
             else {
               try {
+                upgradeBlockers = [];
                 // Observe background completion before taking the idle fence. A slow or
                 // failed provider must leave admitted work and dialog answers usable.
                 const live = registry.list().filter(item => item.live).map(item => registry.get(item.sessionId)!);
@@ -520,6 +536,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                   const legacyController = () => live.some(hosted => hosted.controllerIs(controller =>
                     !(controller instanceof ConnectionControl) || reconnectControllers.get(controller) !== true));
                   if (legacyController()) throw new Error("Waiting for legacy controllers to detach");
+                  // HostedSession idleness does not cover detached accepted work.
+                  // Unknown observation fails closed for an irreversible activation.
+                  upgradeBlockers = await work().upgradeObligations();
+                  if (upgradeBlockers.length) throw new Error(`Waiting for runtime work: ${JSON.stringify(upgradeBlockers)}`);
+                  if (inFlight > 0 || cancellations?.busy) throw new Error("Waiting for in-flight runtime admission");
                   commitActivationStop(request, lease, () => { draining = true; upgradeCommitted = true; });
                   for (const hosted of live) {
                     (hosted as HostedSession & { publishRuntimeEvent(event: unknown): void }).publishRuntimeEvent({
@@ -527,7 +548,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                     });
                   }
                 });
-              } catch (error) { log(`upgrade waiting: ${String(error)}`); }
+              } catch (error) {
+                if (!upgradeBlockers.length) upgradeBlockers = [{ kind: "upgrade-unavailable", reason: String(error) }];
+                log(`upgrade waiting: ${String(error)}`);
+              }
               // Pending upgrades take priority over expiry and release their idle fence on busy passes.
               return;
             }

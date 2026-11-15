@@ -107,6 +107,13 @@ export class WorkReadModel {
       ...this.background.livenessReasons(options),
     ];
   }
+  upgradeObligations() {
+    if (this.state !== "ready") throw new Error(`Runtime observation ${this.state}: ${this.reason}`);
+    return [...this.livenessReasons(), ...this.reader.upgradeObligations(),
+      ...[...this.projected.values()].filter(row => ["running", "orphaned"].includes(row.meta.status)
+        && !processMatchesStart(row.meta.pid, row.meta.pidStartTime))
+        .map(row => ({ kind: "unresolved-writer", id: row.meta.id }))];
+  }
   async ensureId(id: string) {
     if (!safeId.test(id)) throw new Error("Invalid run ID");
     if (this.state === "rebuilding") await this.reconcile();
