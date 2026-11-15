@@ -537,12 +537,13 @@ fi
             await stopOwnedRuntime(serverDir, owner.status === "live" ? owner.owner : undefined);
             await stopRuntime();
         };
+        const { managedDomainPort } = await import("./managed-domain-port.mjs");
         extension.default({
             registerTool(def) { tools[def.name] = def; },
             registerCommand() {},
             on(event, handler) { if (event === "session_shutdown") shutdownHandlers.push(handler); },
             sendMessage() {},
-        });
+        }, managedDomainPort());
     });
 
     function ctx() {
