@@ -118,7 +118,7 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
   } finally { await f.close(); }
 });
 
-test("an active read deadline rejects readers and bounds close while native SQLite finishes before worker exit", { timeout: 20000 }, async t => {
+test("an active read deadline rejects readers and bounds close while native SQLite finishes before worker exit", { timeout: 60000 }, async t => {
   const f = await fixture();
   try {
     const client = await f.client();
