@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { sourceProvenance } from './source-provenance.mjs';
 import { measureEventPublication } from './event-publication/measure.mjs';
-import { fork, execFileSync } from 'node:child_process';
+import { fork } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -52,7 +53,7 @@ function distribution(values) {
   const percentile = p => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
   return { samples: sorted.length, p50: percentile(.5), p95: percentile(.95), p99: percentile(.99), max: sorted.at(-1) };
 }
-const report = { source: { head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim(), dirty: execFileSync('git', ['status', '--porcelain'], { cwd: workspace, encoding: 'utf8' }).trim() }, machine: { cpu: cpus()[0]?.model, logicalCpus: cpus().length, memoryBytes: totalmem(), osRelease: release() }, platform: process.platform, arch: process.arch, node: process.version,
+const report = { source: sourceProvenance(workspace), machine: { cpu: cpus()[0]?.model, logicalCpus: cpus().length, memoryBytes: totalmem(), osRelease: release() }, platform: process.platform, arch: process.arch, node: process.version,
   sdk: sdkVersion, scope: 'Real Pi RPC processes with standalone Subagents, control RPC at 10 Hz, seeded read-only work records; no guardian in slice #753.', scenarios: [] };
 const output = process.env.PI_SHARED_READ_REPORT ?? join(tmpdir(), 'pi-shared-read-resources.json');
 const phase = (step, history, clients = 0) => { report.phase = { step, history, clients }; };
