@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { defaultSandboxPermissions } from "../../pi-better-sandbox/permissions.ts";
+import { DaemonClient } from "../src/client.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { processMatchesStart } from "../src/daemon-owner.ts";
 
@@ -102,8 +103,33 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
         assert.match(state.continuationUnavailable[0].reason, /permission/i);
         assert.equal(state.inFlight, 0);
       } finally { observer.close(); }
-      const idleDeadline = Date.now() + 15000;
-      while (existsSync(join(transport, "pi-server.sock"))) { assert.ok(Date.now() < idleDeadline, "Unavailable wait kept runtime management active"); await delay(25); }
+      await terminal(first.details.runId);
+      const completedDependencies = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
+      try { assert.equal(completedDependencies.prepare("SELECT count(*) AS n FROM operations WHERE terminal_revision=0").get()?.n, 0, "all accepted dependencies have durable terminal facts before testing idle shutdown"); }
+      finally { completedDependencies.close(); }
+      // A hello-only diagnostic connection grants no runtime-client liveness.
+      // The production sweep still checks actual writers/runners and busy work.
+      const diagnostic = !existsSync(join(transport, "pi-server.sock")) ? undefined : await DaemonClient.connect(join(transport, "pi-server.sock")).catch(error => {
+        if (!existsSync(join(transport, "pi-server.sock"))) return undefined;
+        throw error;
+      });
+      let lastStatus: any;
+      if (diagnostic) try {
+        const detachedBy = Date.now() + 10000;
+        do {
+          lastStatus = (await diagnostic.call({ type: "runtime_get_status" })).data;
+          if (!lastStatus.livenessReasons.some((reason: any) => reason.kind === "connection")) break;
+          assert.ok(Date.now() < detachedBy, `Runtime clients did not detach: ${JSON.stringify(lastStatus)}`); await delay(25);
+        } while (true);
+        const idleDeadline = Date.now() + 15000;
+        while (existsSync(join(transport, "pi-server.sock"))) {
+          const swept = once(daemon, "message"); daemon.send("advance-idle"); await swept;
+          if (!existsSync(join(transport, "pi-server.sock"))) break;
+          try { lastStatus = (await diagnostic.call({ type: "runtime_get_status" })).data; } catch { /* idle close may race the diagnostic read */ }
+          assert.ok(Date.now() < idleDeadline, `Unavailable wait kept runtime management active: ${JSON.stringify(lastStatus)}`);
+          await delay(25);
+        }
+      } finally { diagnostic.close(); }
       assert.equal(existsSync(`${entered}.continued`), false);
       return;
     }

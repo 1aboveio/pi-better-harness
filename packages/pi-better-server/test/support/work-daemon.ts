@@ -58,11 +58,16 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
 };
 const { startDaemon } = await import("../../src/server.ts");
 
-const daemon = await startDaemon({ serverDir: process.env.PI_SERVER_DIR, sessionIdleMs: 0, daemonIdleMs: Number(process.env.TEST_DAEMON_IDLE_MS ?? 0),
+let idleClockOffset = 0;
+const daemon = await startDaemon({ now: () => Date.now() + idleClockOffset, serverDir: process.env.PI_SERVER_DIR, sessionIdleMs: 0, daemonIdleMs: Number(process.env.TEST_DAEMON_IDLE_MS ?? 0),
   ...(process.env.TEST_DAEMON_IDLE_MS ? { runtimeIdleMs: Number(process.env.TEST_DAEMON_IDLE_MS), startupGraceMs: 0 } : {}) });
 process.send?.({ ready: daemon.socketPath });
 process.on("message", async command => {
-  if (command === "metrics") {
+  if (command === "advance-idle" && process.env.TEST_DAEMON_IDLE_MS) {
+    idleClockOffset += Number(process.env.TEST_DAEMON_IDLE_MS) + 1;
+    void daemon.sweepIdle().then(() => process.send?.({ idleSweep: true }));
+  }
+  else if (command === "metrics") {
     const domain = "../../src/runtime/domain/subagents/index.domain.mjs";
     const { isHealthTickerActive } = await import(domain);
     process.send?.({ sqlite: metrics, subagentHealthActive: isHealthTickerActive() });
