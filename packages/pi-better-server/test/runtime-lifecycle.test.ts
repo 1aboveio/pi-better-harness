@@ -325,6 +325,13 @@ test("SIGKILL of server recovers under the same guardian and persists restart ac
   const exited = once(child, "exit");
   t.after(async () => { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGTERM"); await exited; } });
   const original = await waitFor("first server", () => { const owner = inspectDaemonOwner(env.serverDir); return owner.status === "live" ? owner.owner : undefined; });
+  // Ownership is acquired before socket readiness. Crash a ready service, not
+  // a still-booting child whose startup failure follows a different contract.
+  await waitFor("first server protocol readiness", async () => {
+    const client = new WorkClient(join(env.serverDir, "pi-server.sock"), env.agentDir);
+    try { await client.ready; await client.request("runtime_get_status"); return true; }
+    catch { return false; } finally { client.close(); }
+  });
   process.kill(original.pid, "SIGKILL");
   const replacement = await waitFor("replacement server", () => { const owner = inspectDaemonOwner(env.serverDir); return owner.status === "live" && owner.owner.token !== original.token ? owner.owner : undefined; });
   assert.notEqual(replacement.pid, original.pid);

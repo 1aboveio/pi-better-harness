@@ -17,34 +17,28 @@
  *    interrupted) is finalized from the child's own coherent log by the
  *    reloaded session instead of being reported `lost`.
  *
- * `pi` on PATH is a fake Node CLI entrypoint that the native child wrapper
- * imports, just like the installed Pi CLI. It streams the same NDJSON events a real
- * `pi -p --mode json` child writes and waits for a release marker, so no model
- * request or installed Pi CLI is involved. The offline provider answers
- * callback-triggered turns.
+ * The fixed managed runtime uses an explicitly configured offline provider for
+ * actual SDK workers. Native foreground reload never becomes their supervisor.
  *
  * // @covers subagent.run-finalization
  * // @covers subagent.completion-callback
  * // @level integration
  */
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
 import { inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
-import { removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 // Stay outside the preload's exit-swept directory so failed cleanup can retain fixtures.
-const fixtureRoot = process.env.PI_SCRIPTS_TEST_MACHINE_TMPDIR ?? realpathSync(tmpdir());
-const fixtures = realpathSync(mkdtempSync(join(fixtureRoot, "pi-reload-subagent-")));
+const fixtures = realpathSync(mkdtempSync("/tmp/p625-"));
 const dir = (name) => { const path = join(fixtures, name); mkdirSync(path, { recursive: true }); return path; };
 const tmp = dir("tmp");
 const agentDir = dir("agent");
 const serverDir = join(agentDir, "server");
 let runtimeOwner;
-const fakeBin = dir("fake-bin");
 const release = join(fixtures, "child-release");
 
 // Everything the extensions persist lives under TMPDIR; set it before any product
@@ -54,24 +48,13 @@ process.env.TMP = tmp;
 process.env.TEMP = tmp;
 process.env.PI_CODING_AGENT_DIR = agentDir;
 
-// Run the real CLI and injected child extension with an offline tool-calling model.
-const FAKE_CHILD = [
-  `#!${process.execPath}`,
-  `const sdk = require(${JSON.stringify(join(repoRoot, "node_modules/@earendil-works/pi-coding-agent/package.json"))});`,
-  `const cli = require.resolve(${JSON.stringify(join(repoRoot, "node_modules/@earendil-works/pi-coding-agent"))} + '/dist/cli.js');`,
-  `process.env.PI_744_REPORT_RELEASE = ${JSON.stringify(release)};`,
-  `process.argv = [process.execPath, cli, ...process.argv.slice(2, -1), '--extension', ${JSON.stringify(join(repoRoot, "scripts/fixtures/assignment-report-model.ts"))}, process.argv.at(-1)];`,
-  "import(require('node:url').pathToFileURL(cli).href);",
-  "",
-].join("\n");
-writeFileSync(join(fakeBin, "pi"), FAKE_CHILD);
-// A workspace-local TMPDIR may otherwise inherit the repository's ESM mode.
-writeFileSync(join(fakeBin, "package.json"), JSON.stringify({ type: "commonjs" }));
-chmodSync(join(fakeBin, "pi"), 0o755);
+// The fixed worker loads only the provider captured by normal launch settings.
+process.env.PI_744_REPORT_RELEASE = release;
+writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: {
+  providerExtensions: { "reload-subagent": join(repoRoot, "scripts/fixtures/assignment-report-model.ts") },
+} } }));
 
-const originalPath = process.env.PATH ?? "";
 after(async () => {
-  process.env.PATH = originalPath;
   await stopOwnedRuntime(serverDir, runtimeOwner);
   removeOwnedFixture(fixtures);
 });
@@ -163,6 +146,7 @@ async function openSession(project) {
     releaseParent: () => releaseParent?.(),
     sessionId: session.sessionManager.getSessionId(),
     start: async () => {
+      runtimeOwner ??= await prepareOwnedRuntime(agentDir);
       await session.bindExtensions({ onError: (error) => errors.push(error) });
       const owner = inspectDaemonOwner(serverDir);
       assert.equal(owner.status, "live", "fixture runtime must have a verified owner");
@@ -184,14 +168,13 @@ for (const verified of [true, false]) {
 test(verified ? "a real /reload keeps a live subagent child running and delivers its completion once"
   : "a real /reload delivers unfinished exit-zero work once without a success decision", async () => {
   rmSync(release, { force: true });
-  process.env.PATH = `${fakeBin}:${originalPath}`;
   process.env.PI_BETTER_CALLBACK_BATCH_MS = "50";
   const answer = verified ? "reload-survives answer" : "Assessment unfinished";
   const project = dir(verified ? "live-project" : "unfinished-project");
   const host = await openSession(project);
   try {
     await host.start();
-    const spawned = await host.call("subagent_spawn", { prompt: verified ? "reload survives" : "reload unfinished", tools: "read,write", clean: true, sandbox: false, cwd: project });
+    const spawned = await host.call("subagent_spawn", { prompt: verified ? "reload survives" : "reload unfinished", model: "reload-subagent/offline", tools: "read,write", clean: false, sandbox: false, cwd: project });
     const id = spawned.match(/id=(\S+)/)?.[1];
     const pid = Number(spawned.match(/\(pid (\d+)\)/)?.[1]);
     assert.ok(id && pid);
@@ -202,16 +185,17 @@ test(verified ? "a real /reload keeps a live subagent child running and delivers
     });
     if (verified) await waitFor("the child's durable report before reload", () => registry.readMeta(id).assignmentReport);
     assert.equal(registry.readMeta(id).status, "running");
+    const management = registry.readMeta(id).management;
 
     await host.session.reload();
 
-    // The reload did not kill the child, and the record survives with a durable
-    // interruption marker instead of a `killed` verdict.
+    // Native foreground reload leaves the server-owned writer and supervision intact.
     assert.equal(childAlive(pid), true, "the detached child must survive the reload");
     const reloaded = registry.readMeta(id);
     assert.equal(reloaded.status, "running", "reload must not close in-flight delegated work");
-    assert.equal(typeof reloaded.supervisionInterruptedAt, "number", "the interruption is recorded durably");
-    assert.equal(reloaded.supervisionInterruptedReason, "reload");
+    assert.equal(reloaded.supervisionInterruptedAt, undefined, "foreground reload does not interrupt server supervision");
+    assert.deepEqual(reloaded.management, management);
+    assert.equal(reloaded.pid, pid);
     assert.match(await host.call("subagent_result", { id }), /still running|running/i);
 
     // The child finishes after the reload: one truthful terminal record and one
@@ -257,62 +241,52 @@ test(verified ? "a real /reload keeps a live subagent child running and delivers
     try { writeFileSync(release, ""); } catch { /* ignore */ }
     await host.session._extensionRunner.emit({ type: "session_shutdown" });
     host.session.dispose();
-    process.env.PATH = originalPath;
   }
 });
 }
 
-test("a real /reload finalizes interrupted work from the child's own log, not as lost", async () => {
-  process.env.PATH = `${fakeBin}:${originalPath}`;
+test("a real /reload finalizes server-interrupted work from the child's own log, not as lost", async () => {
   process.env.PI_BETTER_CALLBACK_BATCH_MS = "50";
+  rmSync(release, { force: true });
   const project = dir("adopted-project");
   const host = await openSession(project);
-  // PID above the platform maximum: guaranteed dead, never a live group.
-  const deadPid = 4_194_304;
-  const seededId = "sa_reload_adopted_1";
+  let id;
   try {
-    mkdirSync(registry.runDir(seededId), { recursive: true });
-    writeFileSync(registry.logPathFor(seededId), [
-      { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered-after-reload answer" }] } },
-      { type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "recovered-after-reload answer" }] }] },
-    ].map((event) => JSON.stringify(event)).join("\n") + "\n");
-    // A run whose owning instance is gone: it was recorded as interrupted while
-    // its child was still alive, and the child has since exited.
-    registry.writeMeta({
-      id: seededId, name: seededId, status: "running", pid: deadPid, pgid: deadPid,
-      spawnPid: process.pid, cwd: project, promptPreview: "recovered after reload",
-      startedAt: Date.now() - 5_000, logPath: registry.logPathFor(seededId), sessionId: `${seededId}-child`,
-      callbackOrigin: { cwd: project, sessionId: host.sessionId },
-      supervisionInterruptedAt: Date.now() - 2_000, supervisionInterruptedReason: "reload",
-    });
-
     await host.start();
+    const spawned = await host.call("subagent_spawn", { prompt: "reload survives", model: "reload-subagent/offline",
+      tools: "read,write", clean: false, sandbox: false, cwd: project });
+    id = spawned.match(/id=(\S+)/)?.[1]; assert.ok(id);
+    await waitFor("the worker's retained report", () => registry.readMeta(id)?.assignmentReport);
+    const live = registry.readMeta(id);
+    assert.equal(live.status, "running");
+    assert.ok(childAlive(live.pid));
+    await stopOwnedRuntime(serverDir, runtimeOwner);
+    runtimeOwner = undefined;
+    writeFileSync(release, "");
+    await waitFor("detached child exit", () => !childAlive(live.pid));
+    const { ensureRuntime } = await import("../packages/pi-better-subagents/runtime-client/src/runtime/client.mjs");
+    await ensureRuntime({ agentDir });
+    runtimeOwner = inspectDaemonOwner(serverDir).owner;
     await host.session.reload();
-
-    // session_start recovers the interrupted record from its coherent log instead
-    // of leaving it for health reconciliation to call `lost`.
-    await waitFor("the recovered terminal record", () => {
-      const meta = registry.readMeta(seededId);
-      return meta?.status === "completed" ? meta : undefined;
+    const done = await waitFor("the recovered terminal record", () => {
+      const meta = registry.readMeta(id); return meta?.status === "completed" ? meta : undefined;
     });
-    const done = registry.readMeta(seededId);
     assert.equal(done.lifecycleClassification, "complete");
     assert.equal(done.exitCode, null, "no exit code is invented after the observer is gone");
-    await waitFor("the recovered completion", () => host.completions(seededId).length > 0);
-    assert.equal(host.completions(seededId).length, 1);
-    assert.match(await host.call("subagent_result", { id: seededId }), /recovered-after-reload answer/);
-    assert.ok(existsSync(registry.logPathFor(seededId)));
+    assert.equal(done.pid, live.pid, "recovery retains the original worker identity");
+    await waitFor("the recovered completion", () => host.completions(id).length > 0);
+    assert.equal(host.completions(id).length, 1);
+    assert.match(await host.call("subagent_result", { id }), /reload-survives answer/);
+    assert.ok(existsSync(registry.logPathFor(id)));
     assert.deepEqual(host.errors, []);
   } finally {
+    writeFileSync(release, "");
     await host.session._extensionRunner.emit({ type: "session_shutdown" });
     host.session.dispose();
-    rmSync(registry.runDir(seededId), { recursive: true, force: true });
-    process.env.PATH = originalPath;
   }
 });
 
 test("ordinary child reports incomplete then completes a real saved-conversation follow-up without Background", async () => {
-  process.env.PATH = `${fakeBin}:${originalPath}`;
   process.env.PI_BETTER_CALLBACK_BATCH_MS = "50";
   writeFileSync(release, "");
   const project = dir("report-followup");
@@ -322,7 +296,7 @@ test("ordinary child reports incomplete then completes a real saved-conversation
     await host.start();
     busy = host.session.prompt("hold-parent");
     await waitFor("parent busy", () => host.session.isStreaming);
-    const spawned = await host.call("subagent_spawn", { prompt: "first incomplete", tools: "read,write", clean: true, sandbox: false, cwd: project });
+    const spawned = await host.call("subagent_spawn", { prompt: "first incomplete", model: "reload-subagent/offline", tools: "read,write", clean: false, sandbox: false, cwd: project });
     const id = spawned.match(/id=(\S+)/)[1];
     await waitFor("incomplete child exit", () => registry.readMeta(id)?.status !== "running");
     const first = registry.readMeta(id);
@@ -364,6 +338,5 @@ test("ordinary child reports incomplete then completes a real saved-conversation
     if (busy) await busy;
     await host.session._extensionRunner.emit({ type: "session_shutdown" });
     host.session.dispose();
-    process.env.PATH = originalPath;
   }
 });
