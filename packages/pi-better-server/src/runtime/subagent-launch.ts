@@ -20,7 +20,10 @@ export async function createSubagentLaunch(root: string, instance: string, catal
   const lease = acquireMutationStore(root);
   let host: any;
   try {
-    host = new ManagedSubagentHost(root, instance, catalog, lease.store);
+    const servicePath = "./domain/background-service/observed-waits.domain.mjs";
+    const { createObservedWaitHost } = await import(servicePath);
+    host = new ManagedSubagentHost(root, instance, catalog, lease.store, (pi: any) =>
+      createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, "operation-coordinator.sqlite"), serverOwnedResults: true }));
     await host.recover();
     const close = host.close.bind(host);
     host.close = async () => {

@@ -1,0 +1,61 @@
+// Generated fixed launch domain from packages/pi-better-background-tasks/src/logs.test.ts. Do not edit directly.
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { readLog, retainLogTail } from "./logs.domain.mjs";
+const directories = [];
+afterEach(() => {
+    for (const directory of directories.splice(0))
+        rmSync(directory, { recursive: true, force: true });
+});
+function logPath() {
+    const directory = mkdtempSync(join(tmpdir(), "pi-bg-log-"));
+    directories.push(directory);
+    return join(directory, "output.log");
+}
+describe("background task log display", () => {
+    it("collapses carriage-return progress and retains terminal errors", () => {
+        const path = logPath();
+        writeFileSync(path, "10%\r20%\r99%\rRead from remote host: Operation timed out\nclient_loop: Broken pipe\n");
+        const log = readLog(path, 10);
+        expect(log.text).toBe("Read from remote host: Operation timed out\nclient_loop: Broken pipe");
+    });
+    it("tails a huge log without returning the discarded head", () => {
+        const path = logPath();
+        writeFileSync(path, `${"progress\r".repeat(100_000)}final failure\n`);
+        const log = readLog(path, 10);
+        expect(log.text).toBe("final failure");
+        expect(log.truncated).toBe(true);
+    });
+});
+describe("background task log retention", () => {
+    it("compacts in place and marks discarded output", () => {
+        const path = logPath();
+        writeFileSync(path, `${"discarded\n".repeat(12_000)}final diagnostic\n`);
+        const before = statSync(path);
+        const writer = openSync(path, "a");
+        try {
+            const result = retainLogTail(path, 64 * 1024);
+            expect(result?.discardedBytes).toBeGreaterThan(0);
+            expect(statSync(path)).toMatchObject({ ino: before.ino, dev: before.dev });
+            expect(statSync(path).size).toBeLessThan(64 * 1024);
+            writeSync(writer, "output after compaction\n");
+            expect(readFileSync(path, "utf8")).toContain("output after compaction\n");
+            const log = readLog(path, 10);
+            expect(log.text).toContain("log retention discarded");
+            expect(log.text).toContain("final diagnostic");
+        }
+        finally {
+            closeSync(writer);
+        }
+    });
+});
+describe("background task log read errors", () => {
+    it("preserves reader errors instead of looking empty", () => {
+        const missing = logPath() + "-missing";
+        const log = readLog(missing, 10);
+        expect(log.text).toBe("");
+        expect(log.error).toBeTruthy();
+    });
+});

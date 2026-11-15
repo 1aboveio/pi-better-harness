@@ -4318,7 +4318,7 @@ export default function (pi, managed) {
         // process, and parked generations from a previous session are reconciled
         // against the durable coordinator before anything resumes.
         if (managed)
-            void workerOperations.start();
+            await startWorkerOperations();
     });
     pi.on("session_before_switch", () => {
         closeCatalogHost();

@@ -1369,15 +1369,17 @@ export function createResumeOrchestration(options) {
         if (inFlight.has(key))
             return "skipped";
         inFlight.add(key);
+        let capacity;
         let reserved = false;
         try {
+            capacity = typeof options.capacity === "function" ? options.capacity(park) : options.capacity;
             // The durable wait is the authority for readiness (checked below). A
             // record that is in flight or already held must never start another
             // automatic attempt: `resuming` has a published attempt, and `held`
             // waits for its owner's interpretation.
             if (park.record.phase === "resuming" || park.record.phase === "held")
                 return "skipped";
-            const ctx = options.context();
+            const ctx = options.context(park);
             if (!ctx)
                 return "skipped";
             const current = ownerBindingFromContext(ctx);
@@ -1404,11 +1406,11 @@ export function createResumeOrchestration(options) {
             // Capacity FIRST: a saturated pool leaves the generation ready and the
             // delivery pending, so a queued resume never becomes "held" and no
             // unresumable claim is published.
-            if (!options.capacity.tryReserve())
+            if (!capacity.tryReserve())
                 return "skipped";
             reserved = true;
-            if (!options.capacity.recheck()) {
-                options.capacity.release();
+            if (!capacity.recheck()) {
+                capacity.release();
                 reserved = false;
                 return "skipped";
             }
@@ -1452,7 +1454,7 @@ export function createResumeOrchestration(options) {
                 generation: park.generation,
             });
             if (snapshot.phase !== "ready") {
-                options.capacity.release();
+                capacity.release();
                 reserved = false;
                 if (snapshot.phase === "waiting" || snapshot.phase === "parking" || snapshot.phase === "resuming") {
                     if (snapshot.phase !== park.phase)
@@ -1464,7 +1466,7 @@ export function createResumeOrchestration(options) {
             }
             if (snapshot.claim) {
                 // Another supervisor holds or published this generation.
-                options.capacity.release();
+                capacity.release();
                 reserved = false;
                 return "skipped";
             }
@@ -1482,7 +1484,7 @@ export function createResumeOrchestration(options) {
             const assignedRunId = `sa_${now().toString(36)}_${randomUUID().replace(/-/g, "").slice(0, 8)}`;
             const launchToken = `slt_${randomUUID()}`;
             if (!claimId || !claimToken) {
-                options.capacity.release();
+                capacity.release();
                 reserved = false;
                 return hold(park, "the Background host returned no usable resume claim");
             }
@@ -1498,7 +1500,7 @@ export function createResumeOrchestration(options) {
                 });
             }
             catch (error) {
-                options.capacity.release();
+                capacity.release();
                 reserved = false;
                 try {
                     await options.rpc.call("release-resume", {
@@ -1550,7 +1552,7 @@ export function createResumeOrchestration(options) {
                     commitAssignmentTerminal({ ...park.meta, status: "lost", failureReason: `Published launch could not be proved: ${reason}` }, true);
                 return "held";
             }
-            options.capacity.commit();
+            capacity.commit();
             reserved = false;
             void options.rpc.call("release-run", { runId: park.runId, reason: "resumed into a new attempt" }).catch(() => { });
             return "resumed";
@@ -1560,7 +1562,7 @@ export function createResumeOrchestration(options) {
         }
         finally {
             if (reserved)
-                options.capacity.release();
+                capacity?.release();
             inFlight.delete(key);
         }
     };

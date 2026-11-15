@@ -4422,7 +4422,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         // Supervised worker operations (ADR 0020): the bridge host is bound to this
         // process, and parked generations from a previous session are reconciled
         // against the durable coordinator before anything resumes.
-        if (managed) void workerOperations.start();
+        if (managed) await startWorkerOperations();
     });
 
     pi.on("session_before_switch", () => {

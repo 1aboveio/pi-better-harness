@@ -23,6 +23,7 @@ export class ManagedSubagentHost {
     private closeJournal: () => void;
     private epoch: number;
     private pending = 0;
+    private workerHost?: { start(ctx?: unknown): void; close(): void; service: { continuationReady: boolean } };
     private path: string;
     private capacityFor = createOwnerCapacityGates(({ pid, start }: { pid: number; start: string }) =>
         listActiveMetasForParent(pid).filter(meta => meta.spawnPidStartTime === start && effectiveStatus(meta) === "running").length
@@ -30,9 +31,9 @@ export class ManagedSubagentHost {
     get busy() { return this.pending > 0; }
     status() {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
-            inFlight: this.pending, unresolvedAttempts: this.journal.unresolvedAttempts().length };
+            inFlight: this.pending, continuationReady: this.workerHost?.service.continuationReady ?? false, unresolvedAttempts: this.journal.unresolvedAttempts().length };
     }
-    constructor(private root: string, private instance: string, private catalog: any, sharedStore?: unknown) {
+    constructor(private root: string, private instance: string, private catalog: any, sharedStore?: unknown, private createWorkerHost?: (pi: ExtensionAPI) => NonNullable<ManagedSubagentHost["workerHost"]>) {
         this.current = { pid: process.pid, start: processStartToken(process.pid), owner: { workspace: root, sessionId: "runtime-recovery" } };
         this.path = join(root, "operation-coordinator.sqlite");
         const active = listMetas({ includeArchived: false });
@@ -112,7 +113,12 @@ export class ManagedSubagentHost {
             const settingsManager = SettingsManager.inMemory({});
             const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: this.root, settingsManager,
                 noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
-                extensionFactories: [(pi: ExtensionAPI) => { this.api = pi; extension(pi, port); }] });
+                extensionFactories: [(pi: ExtensionAPI) => {
+                    this.api = pi;
+                    this.workerHost = this.createWorkerHost?.(pi);
+                    if (this.workerHost) pi.on("session_start", (_event, ctx) => this.workerHost!.start(ctx));
+                    extension(pi, port);
+                }] });
             await resourceLoader.reload();
             const created = await createAgentSession({ cwd, agentDir: this.root, settingsManager, resourceLoader,
                 sessionManager: SessionManager.inMemory(cwd), noTools: "all" });
@@ -160,7 +166,9 @@ export class ManagedSubagentHost {
         try {
             if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
         } finally {
-            try { session?.dispose(); } finally { this.closeJournal(); }
+            try { session?.dispose(); } finally {
+                try { this.workerHost?.close(); } finally { this.closeJournal(); }
+            }
         }
     }
 }

@@ -14,6 +14,9 @@ test("managed launch shares the mutation connection and releases only its lease"
   try {
     host = await createSubagentLaunch(env.agentDir, "shared-launch", {});
     assert.deepEqual(mutationStoreMetrics(env.agentDir), { active: 1, leases: 2 });
+    await host.initialize();
+    assert.equal(host.status().continuationReady, true, "managed SDK registers the fixed continuation adapter");
+    assert.deepEqual(mutationStoreMetrics(env.agentDir), { active: 1, leases: 2 });
     const journal = first.store.subagentLaunchJournal();
     assert.equal(host.status().runtimeEpoch, journal.epoch("shared-launch"));
     await host.close();
