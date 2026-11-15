@@ -15,8 +15,11 @@ import { recoverLaunchMetadata } from "./managed-launch-recovery.domain.mjs";
 import { assertSubagentHandoff } from "./managed-launch-ownership.domain.mjs";
 import { createOwnerCapacityGates } from "./capacity.mjs";
 import { readConversationLease, releaseUnspawnedConversationLease } from "./continuation.domain.mjs";
-import { collectRunFailures } from "./failures.domain.mjs";
+import { Worker } from "node:worker_threads";
 import { processExists } from "./spawn.domain.mjs";
+// Revocation only: the journal remains the authority. A new same-process
+// manager revokes a previous worker before advancing the journal epoch.
+const failureFoldRevocations = new Map();
 /** One fixed SDK adapter per runtime, not a client-selected module or transcript writer. */
 export class ManagedSubagentHost {
     root;
@@ -24,6 +27,10 @@ export class ManagedSubagentHost {
     catalog;
     createWorkerHost;
     readPermissions;
+    foldRevocation = new Int32Array(new SharedArrayBuffer(4));
+    failureWorker;
+    failureWorkerError;
+    failureResponse;
     current;
     api;
     session;
@@ -39,10 +46,10 @@ export class ManagedSubagentHost {
     path;
     capacityFor = createOwnerCapacityGates(({ pid, start }) => listActiveMetasForParent(pid).filter(meta => meta.spawnPidStartTime === start && effectiveStatus(meta) === "running").length
         + this.journal.unresolvedAttempts().filter((attempt) => attempt.capacityOwner?.pid === pid && attempt.capacityOwner?.start === start && !readMeta(attempt.id)).length);
-    get busy() { return this.pending > 0; }
+    get busy() { return this.pending > 0 || Boolean(this.failureResponse); }
     status() {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
-            inFlight: this.pending, continuationReady: this.workerHost?.service.continuationReady ?? false, continuationUnavailable: [...this.continuationFailures].map(([key, value]) => ({ key, ...value })), unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt) => !readMeta(attempt.id)).length };
+            inFlight: this.pending, failureFold: { worker: Boolean(this.failureWorker), inFlight: Boolean(this.failureResponse) }, continuationReady: this.workerHost?.service.continuationReady ?? false, continuationUnavailable: [...this.continuationFailures].map(([key, value]) => ({ key, ...value })), unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt) => !readMeta(attempt.id)).length };
     }
     constructor(root, instance, catalog, sharedStore, createWorkerHost, readPermissions) {
         this.root = root;
@@ -72,7 +79,11 @@ export class ManagedSubagentHost {
                     throw new Error(`writer-authority-unknown: ${meta.id}`);
                 }
             }
+            const priorFold = failureFoldRevocations.get(root);
+            if (priorFold)
+                Atomics.store(priorFold, 0, 1);
             this.epoch = this.journal.epoch(instance);
+            failureFoldRevocations.set(root, this.foldRevocation);
             // An unpublished reservation cannot have dispatched task code. Release
             // only a proven-dead manager's claim before SDK reconciliation sees it.
             for (const claim of sharedStore?.listResumeClaims() ?? []) {
@@ -131,6 +142,9 @@ export class ManagedSubagentHost {
             }
         }
         catch (error) {
+            Atomics.store(this.foldRevocation, 0, 1);
+            if (failureFoldRevocations.get(root) === this.foldRevocation)
+                failureFoldRevocations.delete(root);
             this.closeJournal();
             throw error;
         }
@@ -334,24 +348,52 @@ export class ManagedSubagentHost {
         this.tail = result;
         return result;
     }
-    /** Changed-log hints are untrusted observations; recheck exact root ownership. */
+    /** One root mechanical worker; no coordinator connection or query mutations. */
     foldTerminalFailures(ids) {
-        const result = this.tail.catch(() => undefined).then(() => {
+        const result = this.tail.catch(() => undefined).then(async () => {
             this.journal.current(this.epoch);
-            for (const id of new Set(ids)) {
-                if (!/^[A-Za-z0-9_-]+$/.test(id))
-                    continue;
-                const meta = readMeta(id);
-                if (!meta || meta.management?.root !== this.root || meta.status === "running")
-                    continue;
-                collectRunFailures(id, meta.cwd, meta.status !== "orphaned");
+            if (Atomics.load(this.foldRevocation, 0))
+                throw new Error("failure-fold-owner-revoked");
+            if (this.failureWorkerError)
+                throw this.failureWorkerError;
+            if (ids.length > 128)
+                throw new Error("failure-fold-batch-overflow");
+            if (!this.failureWorker) {
+                const worker = this.failureWorker = new Worker(new URL("./managed-failure-worker.mjs", import.meta.url), {
+                    execArgv: [], workerData: { root: this.root, epoch: this.epoch, revocation: this.foldRevocation.buffer },
+                });
+                const fail = (error) => {
+                    this.failureWorkerError = error;
+                    this.failureResponse?.reject(error);
+                    this.failureResponse = undefined;
+                };
+                worker.on("message", message => {
+                    const response = this.failureResponse;
+                    this.failureResponse = undefined;
+                    if (message.error)
+                        response?.reject(new Error(message.error));
+                    else
+                        response?.resolve();
+                });
+                worker.on("error", fail);
+                worker.on("exit", code => fail(new Error(`failure-fold-worker-exited: ${code}`)));
+                worker.unref();
             }
+            await new Promise((resolve, reject) => {
+                this.failureResponse = { resolve, reject };
+                this.failureWorker.postMessage({ ids });
+            });
         });
         this.tail = result;
         return result;
     }
     async close() {
+        Atomics.store(this.foldRevocation, 0, 1);
         await this.tail.catch(() => undefined);
+        await this.failureWorker?.terminate();
+        this.failureWorker = undefined;
+        if (failureFoldRevocations.get(this.root) === this.foldRevocation)
+            failureFoldRevocations.delete(this.root);
         const session = this.session;
         this.session = undefined;
         const workerHost = this.workerHost;

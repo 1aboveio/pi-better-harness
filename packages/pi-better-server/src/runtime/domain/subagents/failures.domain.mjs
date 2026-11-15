@@ -174,7 +174,8 @@ function exactRuleLeftovers(path, prior) {
         .filter((x) => x.category === "tool" && x.status === "unresolved" && leftover(x.id)).map((x) => x.id));
 }
 /** Scan complete source records, independent of the finite progress/transcript tail. */
-export function collectRunFailures(id, cwd, terminal = false) {
+export function collectRunFailures(id, cwd, terminal = false, assertCurrent = () => { }) {
+    assertCurrent();
     const path = failurePath(id);
     let fd;
     try {
@@ -251,6 +252,7 @@ export function collectRunFailures(id, cwd, terminal = false) {
         let oversized = false;
         const buffer = Buffer.alloc(CHUNK);
         while (position < size) {
+            assertCurrent();
             const count = readSync(fd, buffer, 0, Math.min(CHUNK, size - position), position);
             if (!count)
                 break;
@@ -278,10 +280,12 @@ export function collectRunFailures(id, cwd, terminal = false) {
                                     (row.type === "message_end" && (!row.message || typeof row.message.role !== "string")) ||
                                     (row.type === "auto_retry_end" && typeof row.success !== "boolean"))
                                     throw new Error("invalid structured event");
+                                assertCurrent();
                                 fold(id, scan, row, start, cwd);
                             }
                         }
                         catch {
+                            assertCurrent();
                             observeFailures(path, [{ id: `malformed:${start}`, operation: "child-log", kind: "incomplete", summary: "Child log contains malformed structured events; observations may be incomplete" }]);
                         }
                     }
@@ -303,6 +307,7 @@ export function collectRunFailures(id, cwd, terminal = false) {
                 fragments.push(Buffer.from(rest));
             position += count;
         }
+        assertCurrent();
         scan.offset = start;
         if (scan.gap)
             settleMetadataGap(id, scan);
@@ -318,6 +323,7 @@ export function collectRunFailures(id, cwd, terminal = false) {
             observeFailures(path, [{ id: `partial:${start}`, operation: "child-log", kind: "incomplete", summary: "Child log ends with a partial event; observations may be incomplete" }]);
     }
     catch {
+        assertCurrent();
         observeFailures(path, [{ id: "log-read-error", operation: "child-log", kind: "incomplete", summary: "Child log could not be fully scanned; observations may be incomplete" }]);
     }
     finally {

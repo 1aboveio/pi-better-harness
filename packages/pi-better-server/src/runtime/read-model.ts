@@ -35,7 +35,7 @@ const safeId = /^[A-Za-z0-9_-]+$/;
 
 /** Reconstructable query state. It never authorizes execution or writes source records. */
 export class WorkReadModel {
-  onTerminalLogsChanged?: (ids: string[]) => void;
+  onTerminalLogsChanged?: () => void;
   private background: BackgroundObservation;
   private db: any;
   private reader: ReturnType<typeof createAssignmentReader>;
@@ -82,7 +82,9 @@ export class WorkReadModel {
       CREATE INDEX work_active ON rows(active, started DESC, id DESC);
       CREATE INDEX work_terminal ON rows(active, ended, started DESC, id DESC);
       CREATE INDEX work_recipient_pending ON rows(origin_cwd, origin_session, recipient_pending, started DESC, id DESC);
-      CREATE INDEX work_state ON rows(state, started DESC, id DESC);`);
+      CREATE INDEX work_state ON rows(state, started DESC, id DESC);
+      CREATE TABLE terminal_log_folds (id TEXT PRIMARY KEY, revision TEXT NOT NULL, pending INTEGER NOT NULL);
+      CREATE INDEX pending_terminal_log_folds ON terminal_log_folds(pending, id);`);
     this.runs = join(options.baseDir ?? join(realpathSync(tmpdir()), "pi-better-subagents"), "runs");
     this.archives = join(options.durableDir ?? process.env.PI_SUBAGENT_DURABLE_DIR ?? join(agentDir, "subagents"), "attempts");
     this.markers = join(this.archives, "../session-state");
@@ -316,11 +318,13 @@ export class WorkReadModel {
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");
       let semanticChange = false;
       try {
-        for (const id of this.projected.keys()) if (!metas.has(id)) { remove.run(id); semanticChange = true; }
+        for (const id of this.projected.keys()) if (!metas.has(id)) { remove.run(id); this.db.prepare("DELETE FROM terminal_log_folds WHERE id=?").run(id); semanticChange = true; }
+        for (const id of terminalLogChanges) this.db.prepare("INSERT INTO terminal_log_folds VALUES (?, ?, 1) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, pending=1").run(id, hash([logs.get(id), metas.get(id)?.status]));
         for (const row of rows) {
           if (this.projected.get(row.meta.id)?.sourceRevision === row.sourceRevision) continue;
           semanticChange = true;
           const m = row.meta;
+          if (m.management?.root !== this.agentDir || m.status === "running") this.db.prepare("DELETE FROM terminal_log_folds WHERE id=?").run(m.id);
           insert.run(m.id, m.cwd, m.callbackOrigin?.cwd ?? m.cwd, m.callbackOrigin?.sessionId ?? null,
             m.startedAt, row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, m.endedAt ?? m.lostAt ?? null, row.recipientPending ? 1 : 0, JSON.stringify(row));
         }
@@ -329,7 +333,7 @@ export class WorkReadModel {
       this.files = next; this.logs = logs; this.failureJournals = failureJournals; this.processes = processes; this.healthRevision = healthConfig.revision; this.coordinator = coordinator; this.inventory++;
       this.coordinatorConversations = coordinatorConversations;
       this.projected = new Map(rows.map(row => [row.meta.id, row]));
-      if (terminalLogChanges.length) this.onTerminalLogsChanged?.(terminalLogChanges);
+      if (terminalLogChanges.length) this.onTerminalLogsChanged?.();
       const previousState = this.state;
       const previousReason = this.reason;
       this.state = rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
@@ -339,6 +343,15 @@ export class WorkReadModel {
       if (this.closed) return;
       this.state = "degraded"; this.reason = String(error).slice(0, 512); this.publish();
     }
+  }
+
+  /** Derived pending index: no unbounded JavaScript backlog and no dropped IDs. */
+  terminalLogChanges(): Array<{id: string; revision: string}> {
+    return this.db.prepare("SELECT id, revision FROM terminal_log_folds WHERE pending=1 ORDER BY id LIMIT 128").all();
+  }
+  acknowledgeTerminalLogs(batch: Array<{id: string; revision: string}>) {
+    const acknowledge = this.db.prepare("UPDATE terminal_log_folds SET pending=0 WHERE id=? AND revision=?");
+    for (const entry of batch) acknowledge.run(entry.id, entry.revision);
   }
 
   snapshot(scope: WorkScope = {}): WorkSnapshot {
