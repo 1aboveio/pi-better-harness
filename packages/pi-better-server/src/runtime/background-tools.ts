@@ -1,6 +1,6 @@
-import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { effectiveBackgroundPolicy } from './background-policy.ts';
 import { Check } from 'typebox/value';
+import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -54,6 +54,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
             });
             await yieldTurn();
         }
+    // Seed only bounded legacy candidates, yielding between canonical manager
+    // batches. Readers never scan sidecar history or mutate this obligation index.
+    while (!lease.store.seedPendingParentCallbacks({ limit: 256 }).done) await yieldTurn();
         const settingsManager = SettingsManager.inMemory({});
         const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager, noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
             extensionFactories: [(api: any) => {
@@ -154,6 +157,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
                 if (record.tool === '__background_poll') {
                     if (!observe)
                         throw new Error('Shared Background observation unavailable');
+                    // Recovery is indexed and bounded independently of display readiness.
+                    service.noteParentContext(ctx);
+                    await service.reconcileNow();
                     const snapshot = await observe({ background: true, cwd: record.owner.workspace, sessionId: record.owner.sessionId });
                     if (snapshot.status !== 'ready')
                         throw new Error(snapshot.reason ?? 'Shared Background observation unverified');
@@ -162,19 +168,17 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     if (projection?.revision !== revision) {
                         metrics.scopeRefreshes++;
                         metrics.reconciles++;
-                        service.noteParentContext(ctx);
                         const legacy = snapshot.rows.filter((row: any) => !row.meta.durable).map((row: any) => row.meta);
                         const recovery=new Map([...legacy,...registry.listPendingCallbackMetasForOrigin({cwd:record.owner.workspace,sessionId:record.owner.sessionId})].map((meta:any)=>[meta.id,meta]));
                         for (const meta of recovery.values())
                             if (meta.status === 'running' || meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)
                                 runtime.resumeRunningTask(pi, meta, () => ({ cwd: record.owner.workspace, sessionId: record.owner.sessionId }));
-                        await service.reconcileNow();
                         projection = { revision, tasks: snapshot.rows.filter((row: any) => row.meta.durable).map((row: any) => row.meta), legacyRows: legacy.filter((meta: any) => !meta.dismissedAt).map((meta: any) => navigator.rowFromMeta(meta, Date.now())) };
                         if (projections.size >= 128 && !projections.has(key))
                             projections.delete(projections.keys().next().value!);
                         projections.set(key, projection);
                     }
-                    return { ...projection, deliveries: [...deliveries.values()].filter(item => ownerKey(item.scope.owner) === key).map(({ token, notification, receiptId }) => ({ token, notification, receiptId })) };
+                    return { ...projection, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: [...deliveries.values()].filter(item => ownerKey(item.scope.owner) === key).map(({ token, notification, receiptId }) => ({ token, notification, receiptId })) };
                 }
                 const origin = { cwd: record.owner.workspace, sessionId: record.owner.sessionId };
                 if (record.tool === '__background_detail' || record.tool === '__background_action') {
@@ -229,6 +233,15 @@ export async function createBackgroundTools(root: string, instance: string, drai
                         journal.finish(key, record.key, { content: [{ type: 'text', text: String(error) }], isError: true, details: { status: 'outcome_unknown', operations: journal.read(key, record.key)?.operations ?? [] } });
                     throw error;
                 }
+                // An exact canonical tool reply can establish ownership before
+                // the shared display snapshot catches up. It grants no execution
+                // authority; cancellation still revalidates the current request.
+                const inspectedId = typeof record.params.id === 'string' ? record.params.id : result.details?.id;
+                const inspected = typeof inspectedId === 'string' ? service.readDurableTask(origin, inspectedId) : undefined;
+                if (inspected) result = { ...result, details: { ...result.details, backgroundOwnership: {
+                    id: inspected.id, operationId: inspected.operationId,
+                    owner: { kind: 'parent-session', sessionId: record.owner.sessionId, workspace: record.owner.workspace },
+                } } };
                 if (mutation)
                     journal.finish(key, record.key, result);
                 return result;

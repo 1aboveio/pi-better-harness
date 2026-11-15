@@ -585,15 +585,40 @@ describe("supervision authority", () => {
     cleanups.push(() => host.close());
     host.start();
     const activeStore = (host as unknown as { store: ReturnType<typeof openStore> }).store;
-    const original = activeStore.listOperations.bind(activeStore);
-    const terminalScans: Array<{ ownerScope?: { sessionId: string }; phase?: string }> = [];
-    activeStore.listOperations = (filter = {}) => {
-      if (filter.phase === "terminal") terminalScans.push(filter);
-      return original(filter);
+    const original = activeStore.listPendingParentCallbacks.bind(activeStore);
+    const pendingReads: Array<{ sessionId: string; workspace: string; limit?: number }> = [];
+    activeStore.listPendingParentCallbacks = (scope, page = {}) => {
+      pendingReads.push({ ...scope, limit: page.limit });
+      return original(scope, page);
     };
     host.start(createCtx(root, "current-session"));
-    expect(terminalScans.length).toBeGreaterThanOrEqual(2);
-    expect(terminalScans.every((filter) => filter.ownerScope?.sessionId === "current-session")).toBe(true);
+    expect(pendingReads.length).toBeGreaterThanOrEqual(2);
+    expect(pendingReads.every(scope => scope.sessionId === "current-session" && scope.workspace === root && scope.limit === 256)).toBe(true);
+  });
+
+  it("recovers first and tail callback pages without claim-scan starvation or unbounded retries", async () => {
+    const root = workspace("paged-callback-recovery"), directory = join(root, "supervisor");
+    const store = openStore({ path: join(root, "operations.sqlite") });
+    cleanups.push(() => store.close());
+    mkdirSync(join(directory, "observed"), { recursive: true });
+    const delivered: string[] = [];
+    for (let index = 0; index < 600; index++) {
+      const id = `bgs_${index.toString(16).padStart(20, "0")}`, operationId = `operation-${String(index).padStart(4, "0")}`;
+      const branchId = index < 5 || index >= 595 ? "current" : "other-branch";
+      const owner = { kind: "parent-session" as const, sessionId: "paged-owner", workspace: root, branchId };
+      store.registerOperation({ operationId, taskId: id, launchToken: operationId, owner, observer: { kind: "local-supervisor", version: "1" } });
+      store.recordTerminalOutcome({ operationId, owner, eventId: operationId, outcome: "succeeded", evidence: [{ kind: "summary", ref: id, summary: "done" }] });
+      writeFileSync(join(directory, "observed", `${id}.json`), JSON.stringify({ kind: "process", cwd: root, callback: true, branchId, parentOrigin: { cwd: root, sessionId: owner.sessionId } }));
+    }
+    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store, supervisorDirectory: directory, pollMs: 0, serverOwnedResults: true,
+      notifyParent(notification, delivery) { delivered.push(notification.taskId); delivery.delivered(); } });
+    cleanups.push(() => host.close());
+    const ctx = createCtx(root, "paged-owner", "current"); host.start(ctx);
+    for (let page = 0; page < 10; page++) { host.noteParentContext(ctx); await host.reconcileNow(); }
+    expect(delivered).toHaveLength(10);
+    expect(new Set(delivered).size).toBe(10);
+    expect((host as unknown as { pendingTerminalCallbacks: Set<string> }).pendingTerminalCallbacks.size).toBeLessThanOrEqual(256);
+    expect(store.listPendingParentCallbacks({ sessionId: "paged-owner", workspace: root }, { limit: 256 })).toHaveLength(256);
   });
 
   it("does not rewrite supervision while overlapping live hosts reconcile unchanged operations", async () => {

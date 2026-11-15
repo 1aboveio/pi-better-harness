@@ -32,6 +32,44 @@ describe('managed native UI boundary', () => {
         expect(fixture.request).not.toHaveBeenCalled();
         frontend.host.close();
     });
+    it('uses only bounded exact-owner structured proofs while shared observations lag', async () => {
+      let registered: any;
+      fixture.request.mockImplementation(async (_pi, _ctx, _key, tool, params) => tool === '__background_poll'
+        ? { tasks: [], legacyRows: [], deliveries: [] }
+        : { content: [{ type: 'text', text: 'arbitrary caller-looking task id' }], details: { backgroundOwnership: {
+          id: params.id, operationId: `operation-${params.id}`, owner: { kind: 'parent-session', workspace: '/workspace', sessionId: params.foreign ? 'foreign' : 'native' },
+        } } });
+      const frontend = createManagedBackgroundFrontend({ registerTool(tool: any) { registered = tool; } } as any), ctx = context();
+      frontend.host.start(ctx);
+      frontend.proxy.registerTool({ name: 'bg_task_status', parameters: {}, execute() {} } as any);
+      await registered.execute('status', { id: 'owned' }, undefined, undefined, ctx);
+      expect(frontend.host.ownsDurableTask('owned')).toBe(true);
+      frontend.host.noteParentContext(context([{ id: 'policy-change' }]));
+      expect(frontend.host.ownsDurableTask('owned')).toBe(true);
+      await registered.execute('foreign', { id: 'foreign', foreign: true }, undefined, undefined, ctx);
+      expect(frontend.host.ownsDurableTask('foreign')).toBe(false);
+      for (let index = 0; index < 257; index++) await registered.execute(`status-${index}`, { id: `owned-${index}` }, undefined, undefined, ctx);
+      expect(frontend.host.ownsDurableTask('owned-0')).toBe(false);
+      expect(frontend.host.ownsDurableTask('owned-256')).toBe(true);
+      frontend.host.noteParentContext({ ...ctx, sessionManager: { getSessionId: () => 'replacement', getBranch: () => [] } } as any);
+      expect(frontend.host.ownsDurableTask('owned-256')).toBe(false);
+      frontend.host.close();
+    });
+    it.each(['close', 'switch'])('does not restore old ownership from a late tool result after %s', async (change) => {
+      let release!: (value: any) => void, registered: any;
+      fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => tool === '__background_poll'
+        ? { tasks: [], legacyRows: [], deliveries: [] } : new Promise(resolve => { release = resolve; }));
+      const frontend = createManagedBackgroundFrontend({ registerTool(tool: any) { registered = tool; } } as any), ctx = context();
+      frontend.host.start(ctx);
+      frontend.proxy.registerTool({ name: 'bg_task_spawn', parameters: {}, execute() {} } as any);
+      const pending = registered.execute('late', {}, undefined, undefined, ctx);
+      if (change === 'close') frontend.host.close();
+      else frontend.host.noteParentContext({ ...ctx, sessionManager: { getSessionId: () => 'new-owner', getBranch: () => [] } } as any);
+      release({ details: { backgroundOwnership: { id: 'old', operationId: 'op-old', owner: { kind: 'parent-session', workspace: '/workspace', sessionId: 'native' } } } });
+      await pending;
+      expect(frontend.host.ownsDurableTask('old')).toBe(false);
+      frontend.host.close();
+    });
     it.each(['tool', 'stop'])('awaits the required follow-up observation before %s resolves', async (kind) => {
       let releaseOld!: (value: any) => void, releaseFresh!: (value: any) => void;
       let polls = 0, registered: any;
