@@ -97,8 +97,7 @@ test("an exact-ID query returns rebuilding without blocking all reads on the ini
 });
 
 test("an exact-ID client waits for indexing without occupying the shared read queue", { timeout: 10000 }, async () => {
-  const f = await fixture({ timeoutMs: 500, workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
-  let release: ReturnType<typeof setTimeout> | undefined;
+  const f = await fixture({ workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
   try {
     const blocked = new Promise<void>(resolve => {
       f.worker.on("message", message => { if (message.type === "inventory-blocked") resolve(); });
@@ -107,14 +106,16 @@ test("an exact-ID client waits for indexing without occupying the shared read qu
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_client_retry", sessionId: "retry", cwd: f.root,
       status: "completed", startedAt: 1 }));
     const client = await f.client(); await blocked;
-    release = setTimeout(() => f.worker.postMessage({ type: "release-inventory" }), 250);
-    const pending = client.get({ id: "sa_client_retry", limit: 1 });
+    let completed = false;
+    const pending = client.get({ id: "sa_client_retry", limit: 1 }).then(value => { completed = true; return value; });
     assert.equal((await client.get({ limit: 2 })).status, "rebuilding");
+    assert.equal(completed, false, "the unrelated read completes while the exact ID is still awaiting inventory");
+    f.worker.postMessage({ type: "release-inventory" });
     const result = await pending;
     assert.equal(result.status, "ready");
     assert.equal(result.rows[0]!.meta.id, "sa_client_retry");
     assert.equal(f.executor.metrics().executor.timeouts, 0);
-  } finally { if (release) clearTimeout(release); await f.close(); }
+  } finally { await f.close(); }
 });
 
 test("an exact-ID client stops retrying a stalled inventory within its retry budget", { timeout: 10000 }, async () => {
