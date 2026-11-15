@@ -35,3 +35,11 @@ node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-bet
 ```
 
 Evidence includes simultaneous owner contention, dead-owner reclamation, malformed identity refusal, exact receipt recovery through another authorized connection, SIGKILL at five cancellation boundaries, and the real Pi SDK loading the Background extension and invoking socket cancellation. The Linux-only skip is not local proof of Linux owner handling.
+
+## Catalog integration checkpoint
+
+Merged Catalog head `1dc4583f` with current main in local commit `30c7a8ae`. Resolved conflicts by retaining both advertised capabilities, both independent command dispatch paths and both domain-generation inputs. Server and Subagents typechecks pass. All seven real cancellation tests and the real Catalog daemon test pass together on this integration. The Catalog test must currently run from `packages/pi-better-server`; invoking it at repository root incorrectly resolves its fixture parent outside the worktree.
+
+A further 97 Catalog schema, discovery, inheritance, lifecycle, saved-settings, skill-edit and UI tests pass with no skips. These do not replace the unfinished real-Pi and security acceptance matrix identified in PR #775.
+
+Next security audit target: Catalog host registrations currently persist only PID and admission checks use `kill(pid, 0)`. Inspect exact process-start qualification before treating host identity acceptance as complete.
