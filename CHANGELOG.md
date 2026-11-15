@@ -4,6 +4,64 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.47.0] - 2026-11-16
+
+### Added
+
+- Bundle shared runtime observations for Subagents and Background Tasks, including revisioned history reads, current-scope activity and owner-checked task cancellation. (#771, #772, #773, #774)
+
+### Fixed
+
+- Bundle Goal 0.14.1 so overlapping workflow admission requests share one pending scheduler check instead of launching one process per candidate. State changes invalidate admission evidence; later requests obtain a fresh check. (#785, #786)
+- Include bounded Navigator refreshes and settings writes that tolerate brief contention between independent processes.
+- Bundle Background Tasks 0.16.0, Subagents 0.33.0 and Sandbox 0.14.2.
+
+## [pi-better-goal@0.14.1] - 2026-11-16
+
+### Fixed
+
+- Coalesce equivalent pending workflow admission checks within one Pi owner/session/execution scope. Release the pending check on success, failure or timeout, and reject changed run inputs or lifecycle state before execution. (#785, #786)
+- Consume shared assignment observations while preserving standalone Goal behavior and tolerate brief settings-write contention.
+
+## [pi-better-background-tasks@0.16.0] - 2026-11-16
+
+### Added
+
+- Read scoped activity and history through the shared runtime and deliver owner-checked task cancellation through recorded intents. Preserve local supervisor ownership for hosted sessions. (#772, #774)
+
+### Fixed
+
+- Bound output-tail reads and preserve shared Navigator refresh and settings-write behavior.
+
+## [pi-better-subagents@0.33.0] - 2026-11-16
+
+### Added
+
+- Read current-scope activity, details and revisioned history through the shared runtime, with owner-checked task cancellation and recovery of observation clients. (#771, #772, #774)
+
+### Fixed
+
+- Bound archived-history refresh work and share assignment projection within Navigator refreshes.
+- Preserve evidence-backed assignment reporting and retained outcome reconciliation.
+
+## [pi-better-sandbox@0.14.2] - 2026-11-16
+
+### Fixed
+
+- Tolerate brief settings-write contention between independent processes while retaining lock ownership checks.
+
+## [pi-better-server@0.3.0] - 2026-11-16
+
+### Added
+
+- Serve shared Subagent and Background activity, detail and revisioned history observations through bounded query workers. (#771, #772)
+- Retain authorized work and clients across idle checks, exit with the guardian when unneeded, and recover from read-worker failures within bounded shutdown time. (#773)
+- Process owner-checked, idempotent task-cancellation intents with crash recovery. (#774)
+
+### Fixed
+
+- Isolate read queries from the main server event loop and bound queued work. (#782)
+
 ## [pi-better-harness@0.46.1] - 2026-11-15
 
 ### Fixed
