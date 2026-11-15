@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.46.1] - 2026-11-15
+
+### Fixed
+
+- Preserve optional answer-file links and source provenance when saving workflow decisions through the Todo tool and atomic plan writer. Legacy decisions, revision checks, profiling and completion guards are unchanged. (#780)
+- Keep Navigator detail paints free of provider I/O, retaining refreshed detail state between paints. (#781)
+
 ## [pi-better-harness@0.46.0] - 2026-11-15
 
 ### Added

@@ -22,18 +22,22 @@ import { register } from "node:module";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
 const tempDir = mkdtempSync(join(tmpdir(), "cached-factory-combined-"));
 process.env.TMPDIR = tempDir;
+const stopRuntime = await startWorkRuntimeFixture();
 
 const { default: betterSubagents } = await import("../index.ts");
 const { default: backgroundTasksExtension } = await import("../../pi-better-background-tasks/src/index.ts");
 const { setConfigPathForTests, setConfigForTests } = await import("../config.ts");
 const { logPathFor, runDir, writeMeta } = await import("../registry.ts");
 
-after(() => {
+after(async () => {
+    await stopRuntime();
     setConfigPathForTests(undefined);
     setConfigForTests(undefined);
     rmSync(tempDir, { recursive: true, force: true });
@@ -180,7 +184,11 @@ test("a headless child sharing cached Subagents and Background Tasks factories c
         // A launch by the parent installs its main-list widget through the same
         // factory-owned navigator the child left alone.
         assert.equal(typeof parentSession.widget.installed, "function", "the parent's main-list widget is installed for its live row");
-        const rail = parentSession.widget.installed({ requestRender() {} }, parentSession.ui.theme).render(160).join("\n");
+        let rail = "";
+        for (let attempt = 0; attempt < 100 && !rail.includes("parent-still-running"); attempt++) {
+            rail = parentSession.widget.installed({ requestRender() {} }, parentSession.ui.theme).render(160).join("\n");
+            if (!rail.includes("parent-still-running")) await delay(20);
+        }
         assert.match(rail, /parent-still-running/);
         assert.match(rail, /← work navigator/);
 

@@ -10,18 +10,22 @@ import { register } from "node:module";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { requestWorkDetail } from "../work-observation.ts";
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
 const tempDir = mkdtempSync(join(tmpdir(), "subagent-shared-tail-"));
 process.env.TMPDIR = tempDir;
+const stopRuntime = await startWorkRuntimeFixture();
 
 const { default: betterSubagents } = await import("../index.ts");
 const { disposeBackgroundWorkNavigator } = await import("../shared-navigator.ts");
 const { setConfigPathForTests, setConfigForTests } = await import("../config.ts");
 const { logPathFor, runDir, writeMeta } = await import("../registry.ts");
 
-after(() => rmSync(tempDir, { recursive: true, force: true }));
+after(async () => { await stopRuntime(); rmSync(tempDir, { recursive: true, force: true }); });
 
 test("subagent details render a structured Pi-style transcript", async () => {
     const id = `sa_shared_tail_${Date.now()}`;
@@ -91,6 +95,8 @@ test("subagent details render a structured Pi-style transcript", async () => {
     betterSubagents(pi);
     try {
         await handlers.get("session_start")({}, ctx);
+        for (let attempt = 0; attempt < 100 && !requestWorkDetail(id)?.detail; attempt++) await delay(20);
+        assert.ok(requestWorkDetail(id)?.detail, "shared detail must be observed before opening the transcript");
         const renderMainList = (width = 120) => mainListWidget({ requestRender() {} }, ui.theme).render(width).join("\n");
         let mainList = renderMainList();
         assert.match(mainList, /·\s+main\s+test high · 109\.3k tok\s+idle/);
@@ -142,6 +148,7 @@ test("subagent details render a structured Pi-style transcript", async () => {
     } finally {
         setConfigPathForTests(undefined);
         setConfigForTests(undefined);
+        await handlers.get("session_shutdown")?.({}, ctx);
         disposeBackgroundWorkNavigator(ctx);
     }
 });

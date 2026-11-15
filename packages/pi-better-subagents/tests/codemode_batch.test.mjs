@@ -2,10 +2,12 @@
 // @level integration
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { startWorkRuntimeFixture } from './work-runtime-fixture.mjs';
+import { removeOwnedFixture } from '../../../scripts/test-support/remove-owned-fixture.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'pi-codemode-batch-'));
 const agentDir = join(root, 'agent');
@@ -51,7 +53,11 @@ async function codemode(t, deny = false, observed) {
         modelsStorePath: join(agentDir, 'models-store.json') });
     const { session } = await sdk.createAgentSession({ cwd: root, agentDir, resourceLoader: loader,
         settingsManager, modelRuntime, sessionManager: sdk.SessionManager.inMemory(root), noTools: 'builtin' });
-    t.after(() => session.dispose());
+    t.after(async () => {
+        await session.abort();
+        await session._extensionRunner.emit({ type: 'session_shutdown', reason: 'shutdown' });
+        session.dispose();
+    });
     await session.bindExtensions({});
     session.setActiveToolsByName(['codemode', 'subagent_spawn_batch']);
     const tool = session.agent.state.tools.find((candidate) => candidate.name === 'codemode');
@@ -73,12 +79,14 @@ async function script(tool, code) {
 const spawn = (args) => `const receipt = await tools.subagent_spawn_batch(${JSON.stringify(args)}); text(receipt);`;
 
 test('native Pi codemode batch receipts', { skip: !supported && 'native codemode requires Pi >=0.99' }, async (t) => {
-    t.after(() => {
+    const stopRuntime = await startWorkRuntimeFixture();
+    t.after(async () => {
+        await stopRuntime();
         config?.setConfigForTests(undefined);
         for (const [key, value] of Object.entries(oldEnv)) {
             if (value === undefined) delete process.env[key]; else process.env[key] = value;
         }
-        rmSync(root, { recursive: true, force: true });
+        removeOwnedFixture(root);
     });
     registry = await import('../registry.ts');
     config = await import('../config.ts');

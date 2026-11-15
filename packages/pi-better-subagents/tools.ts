@@ -14,6 +14,7 @@
  * far as `execute` is concerned).
  */
 
+import { createHash } from "node:crypto";
 import { assignmentFor, createAssignmentProjector, withAssignmentObservations } from "./assignment-projection.mjs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus, type RunCallbackOrigin, type RunMeta, type RunStatus } from "./registry.ts";
@@ -338,14 +339,18 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 const snapshot = await session.observeList({ ...(options.all ? {} : { cwd }),
                     ...(options.statuses ? { statuses: [...options.statuses] } : {}), limit: Math.max(1, options.limit),
                     ...(p.cursor && !statusCursor ? { cursor: p.cursor } : {}) });
-                const status = `work-status:${snapshot.scopeRevision}`;
-                if (statusCursor === snapshot.scopeRevision && snapshot.status === "ready") return text(`Subagents unchanged. statusCursor=${status}`);
+                const incidents = new Map<string, ReturnType<typeof listIncidentCount>>(snapshot.rows.map((row: any) =>
+                    [row.meta.id, listIncidentCount(row.meta.id, row.meta.cwd, !["running", "orphaned"].includes(row.meta.status))]));
+                const revision = createHash("sha256").update(JSON.stringify([snapshot.scopeRevision,
+                    [...incidents].map(([id, incident]) => [id, incident.revision])])).digest("hex");
+                const status = `work-status:${revision}`;
+                if (statusCursor === revision && snapshot.status === "ready") return text(`Subagents unchanged. statusCursor=${status}`);
                 const budget = budgetFor("list", p.maxBytes);
                 const header = [...options.warnings, `Subagents: ${snapshot.totalMatching} matching${snapshot.status === "ready" ? "" : `; ${snapshot.status}: ${snapshot.reason ?? "source verification pending"}`}.`].join("\n");
                 const lines = [header];
                 let last: any;
                 for (const row of options.limit === 0 ? [] : snapshot.rows) {
-                    const incident = listIncidentCount(row.meta.id, row.meta.cwd, !["running", "orphaned"].includes(row.meta.status));
+                    const incident = incidents.get(row.meta.id)!;
                     const line = formatSubagentListRow(row.meta, { assignment: row.assignment, status: row.assignment.state,
                         processStatus: row.assignment.processStatus, now, compact: true,
                         health: row.health ? observeRunHealth({ ...row.health, status: row.assignment.processStatus === "exited" ? row.meta.status : row.assignment.processStatus, now, startedAt: row.meta.startedAt }) : undefined,

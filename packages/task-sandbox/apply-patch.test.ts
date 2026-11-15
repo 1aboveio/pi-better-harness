@@ -3,9 +3,8 @@
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { applyHunks, applyPatch, createApplyPatchToolDefinition, parsePatch, type PatchFileOperations } from "./apply-patch.ts";
 import { createTaskFileOperations } from "./files.ts";
@@ -217,7 +216,7 @@ test("Project files = Write: edits apply, deletes and moves are refused outside 
 
 test("Outside project = Write: delete in temp is allowed, delete elsewhere in home is refused", { skip: !kernel || process.platform === "win32" }, async () => {
     // A home outside every temp root, or temp's own disposability would prove nothing.
-    const f = kernelFixture({ outsideProject: "write" }, fileURLToPath(new URL(".", import.meta.url)));
+    const f = kernelFixture({ outsideProject: "write" }, homedir());
     const temporary = realpathSync(mkdtempSync(join(tmpdir(), "apply-patch-temp-")));
     try {
         mkdirSync(join(f.home, "projects", "other"), { recursive: true });
@@ -261,7 +260,7 @@ test("Project files = Read refuses every patch write", { skip: !kernel }, async 
 });
 
 test("validation refuses case-variant paths to protected entries before any write (#354)", { skip: !kernel }, async (t) => {
-    const f = kernelFixture({ outsideProject: "write" }, fileURLToPath(new URL(".", import.meta.url)));
+    const f = kernelFixture({ outsideProject: "write" }, homedir());
     try {
         if (!existsSync(f.base.toUpperCase()) || !existsSync(f.base.toLowerCase())) {
             t.skip("the fixture volume is case-sensitive");

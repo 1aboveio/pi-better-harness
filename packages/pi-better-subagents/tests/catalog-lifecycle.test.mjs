@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectDaemonOwner } from "../../pi-better-server/src/daemon-owner.ts";
 import { removeOwnedFixture, stopOwnedRuntime } from "../../../scripts/test-support/remove-owned-fixture.mjs";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "catalog-lifecycle-"));
 const runtimeTmp = join(root, "tmp");
@@ -521,6 +522,7 @@ fi
         process.env.PATH = `${binDir}:${process.env.PATH}`;
         process.env.PI_SUBAGENTS_TEST_REGISTRY = baseDir();
         process.env.PI_CODING_AGENT_DIR = fx.userRoot;
+        const stopRuntime = await startWorkRuntimeFixture();
         writeAgent(fx.userRoot, "agent.payments", "role.developer", "Look at payments.");
         const extension = await import(`../index.ts?catalog-lifecycle=${Date.now()}`);
         tools = {};
@@ -533,6 +535,7 @@ fi
                 await handler({ type: "session_shutdown", reason: "shutdown" }, lastContext);
             }
             await stopOwnedRuntime(serverDir, owner.status === "live" ? owner.owner : undefined);
+            await stopRuntime();
         };
         extension.default({
             registerTool(def) { tools[def.name] = def; },
