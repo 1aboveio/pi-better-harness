@@ -32,12 +32,13 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
 import { inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
-import { removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 // `npm run test:live-ssh` sets PI_LIVE_SSH_REQUIRED so a missing host fails instead of skipping.
 const liveHost = process.env.PI_LIVE_SSH_HOST;
@@ -47,7 +48,7 @@ if (process.env.PI_LIVE_SSH_REQUIRED === "1" && !liveHost) {
 
 const repoRoot = resolve(import.meta.dirname, "..");
 // Stay outside the preload's exit-swept directory so failed cleanup can retain markers.
-const fixtureRoot = process.env.PI_SCRIPTS_TEST_MACHINE_TMPDIR ?? realpathSync(tmpdir());
+const fixtureRoot = realpathSync("/tmp");
 const fixtures = realpathSync(mkdtempSync(join(fixtureRoot, "pi-reload-ssh-")));
 const dir = (name) => { const path = join(fixtures, name); mkdirSync(path, { recursive: true }); return path; };
 const tmp = dir("tmp");
@@ -65,8 +66,10 @@ process.env.TEMP = tmp;
 process.env.PI_CODING_AGENT_DIR = agentDir;
 process.env.PI_BG_OBSERVED_WAITS_DEBUG = "1";
 
+const systemSsh = execFileSync("which", ["ssh"], { encoding: "utf8" }).trim();
 writeFileSync(join(fakeBin, "ssh"), [
   "#!/bin/sh",
+  `case "$*" in *fake-remote.test*) ;; *) exec '${systemSsh.replaceAll("'", "'\\''")}' "$@" ;; esac`,
   `printf '%s\\n' "$*" >> '${sshLog}'`,
   'while [ $# -gt 0 ]; do if [ "$1" = "--" ]; then shift; break; fi; shift; done',
   "shift # target",
@@ -77,6 +80,9 @@ chmodSync(join(fakeBin, "ssh"), 0o755);
 
 const originalPath = process.env.PATH ?? "";
 const originalWindow = process.env.PI_BETTER_CALLBACK_BATCH_MS;
+// The fixed server inherits transport configuration only at startup. The shim
+// handles the explicit fixture host and delegates real hosts to system SSH.
+process.env.PATH = `${fakeBin}:${originalPath}`;
 const originalObservedDebug = process.env.PI_BG_OBSERVED_WAITS_DEBUG;
 let retainFixtures = false;
 after(async () => {
@@ -178,6 +184,7 @@ async function openSession(project) {
     errors,
     sessionId: session.sessionManager.getSessionId(),
     start: async () => {
+      runtimeOwner ??= await prepareOwnedRuntime(agentDir);
       await session.bindExtensions({ onError: (error) => errors.push(error) });
       const owner = inspectDaemonOwner(serverDir);
       assert.equal(owner.status, "live", "fixture runtime must have a verified owner");
@@ -188,7 +195,7 @@ async function openSession(project) {
     async call(name, params) {
       const tool = session.agent.state.tools.find((candidate) => candidate.name === name);
       assert.ok(tool, `${name} is registered`);
-      const result = await tool.execute(`call-${name}-${Date.now()}`, params, new AbortController().signal);
+      const result = await tool.execute(randomUUID(), params, new AbortController().signal);
       return result.content.map((part) => part.text ?? "").join("\n");
     },
     completions: (id) => sent.filter((m) => m.customType === "background-completion-batch" && String(m.content).includes(id)),
@@ -210,15 +217,25 @@ function readJson(path) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; }
 }
 
+function supervisorDirectory(id) {
+  const store = openStore({ path: join(agentDir, "operation-coordinator.sqlite") });
+  try {
+    const operation = store.listOperations({ taskId: id })[0];
+    const grant = operation && store.resultSupervision(operation.operationId);
+    assert.ok(grant?.directory, `${id} must retain its captured supervisor directory`);
+    return grant.directory;
+  } finally { store.close(); }
+}
+
 function supervisorCommand(id) {
   if (!String(id).startsWith("bgs_")) return undefined;
-  const command = readJson(supervisorPaths(defaultSupervisorDirectory(), id).command);
+  const command = readJson(supervisorPaths(supervisorDirectory(id), id).command);
   return command && typeof command.pid === "number" ? { pid: command.pid, pgid: command.pgid } : undefined;
 }
 
 function supervisorTerminal(id) {
   if (!String(id).startsWith("bgs_")) return undefined;
-  const paths = supervisorPaths(defaultSupervisorDirectory(), id);
+  const paths = supervisorPaths(supervisorDirectory(id), id);
   return readJson(paths.result) ?? readJson(paths.lost);
 }
 
@@ -247,7 +264,7 @@ async function taskTerminal(host, id) {
 async function dumpDurableCallbackDiagnostics(host, id, project) {
   if (!String(id).startsWith("bgs_")) return;
   try {
-    const paths = supervisorPaths(defaultSupervisorDirectory(), id);
+    const paths = supervisorPaths(supervisorDirectory(id), id);
     let operation;
     let outbox = [];
     let waits = [];
@@ -269,8 +286,8 @@ async function dumpDurableCallbackDiagnostics(host, id, project) {
     }
     console.error("[reload-durable-diagnostics]", JSON.stringify({
       id,
-      sidecar: readJson(join(defaultSupervisorDirectory(), "observed", `${id}.json`)),
-      host: readJson(join(defaultSupervisorDirectory(), "observed", "host.json")),
+      sidecar: readJson(join(supervisorDirectory(id), "observed", `${id}.json`)),
+      host: readJson(join(supervisorDirectory(id), "observed", "host.json")),
       result: readJson(paths.result),
       lost: readJson(paths.lost),
       command: readJson(paths.command),
