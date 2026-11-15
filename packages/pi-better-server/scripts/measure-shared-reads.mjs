@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { fork } from 'node:child_process';
+import { measureEventPublication } from './event-publication/measure.mjs';
+import { fork, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -51,7 +52,7 @@ function distribution(values) {
   const percentile = p => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
   return { samples: sorted.length, p50: percentile(.5), p95: percentile(.95), p99: percentile(.99), max: sorted.at(-1) };
 }
-const report = { machine: { cpu: cpus()[0]?.model, logicalCpus: cpus().length, memoryBytes: totalmem(), osRelease: release() }, platform: process.platform, arch: process.arch, node: process.version,
+const report = { source: { head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim(), dirty: execFileSync('git', ['status', '--porcelain'], { cwd: workspace, encoding: 'utf8' }).trim() }, machine: { cpu: cpus()[0]?.model, logicalCpus: cpus().length, memoryBytes: totalmem(), osRelease: release() }, platform: process.platform, arch: process.arch, node: process.version,
   sdk: sdkVersion, scope: 'Real Pi RPC processes with standalone Subagents, control RPC at 10 Hz, seeded read-only work records; no guardian in slice #753.', scenarios: [] };
 const output = process.env.PI_SHARED_READ_REPORT ?? join(tmpdir(), 'pi-shared-read-resources.json');
 const phase = (step, history, clients = 0) => { report.phase = { step, history, clients }; };
@@ -173,7 +174,14 @@ try {
         rpcMs: distribution(latencies), inventoryDelta: after.inventories-before.inventories,
         metadataReadDelta: after.metadataReads-before.metadataReads, projectionDelta: after.projections-before.projections,
         sqlite: after.sqlite, rebuild: { ms: rebuildMs, controlRpcMs: distribution(rebuildLatencies) } };
-      report.scenarios.push(entry); console.log(JSON.stringify(entry));
+      report.scenarios.push(entry);
+      phase('event-publication', history, count);
+      entry.eventPublication = await measureEventPublication({ socketPath: ready.socket, agentDir: agent,
+        scope: { cwd: root, sessionId, active: true }, metaPath: join(runs, 'sa_resource_active_0', 'meta.json'),
+        taskId: 'sa_resource_active_0', subscribers: count });
+      assert.ok(entry.eventPublication.ms.max <= 1000, `Committed changes must reach healthy subscribers within 1s: ${JSON.stringify(entry.eventPublication.ms)}`);
+      assert.ok(entry.eventPublication.ms.p50 >= 0, 'Event visibility must follow the source commit');
+      console.log(JSON.stringify(entry));
     }
     await Promise.all(pis.map(pi => stop(pi))); control.close(); await stop(server, true); await stop(work);
     rmSync(root, { recursive: true, force: true });
