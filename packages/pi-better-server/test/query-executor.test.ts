@@ -241,3 +241,54 @@ test('Subagents and Background share one coordinator read connection in the quer
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
   } finally { await f.close(); }
 });
+
+
+test("real runner timeout and canonical result supervision progress during stalled SQLite reads", { timeout: 20000 }, async t => {
+  const { acquireMutationStore } = await import("../src/runtime/mutation-store.ts");
+  const { RuntimeResultSupervision } = await import("../src/runtime/result-supervision.ts");
+  const { createLocalSupervisor } = await import("../../pi-better-background-tasks/src/supervisor/index.ts");
+  const { supervisorTaskIdForToken } = await import("../../pi-better-background-tasks/src/supervisor/store.ts");
+  const f = await fixture();
+  const lease = acquireMutationStore(f.root);
+  const directory = join(f.root, "supervisor");
+  const supervisor = createLocalSupervisor({ directory });
+  const token = "slow-read-deadline", taskId = supervisorTaskIdForToken(token), operationId = "slow-read-operation";
+  const owner = { kind: "parent-session", sessionId: "exact-recipient", workspace: f.root };
+  let host: InstanceType<typeof RuntimeResultSupervision> | undefined;
+  try {
+    const client = await f.client(); await ready(client);
+    lease.store.registerOperation({ operationId, taskId, launchToken: token, owner,
+      observer: { kind: "local-supervisor", version: "1" }, supervision: { hostId: "accepted-host" }, authorityRef: "explicit-test-command" });
+    lease.store.handoffResultSupervision({ operationId, expectedHostId: "accepted-host", directory,
+      hostId: "server:slow-read-epoch", epoch: "slow-read-epoch",
+      capability: { adapter: "background-results-v1", captured: { authorized: true }, current: { authorized: true } } });
+    lease.store.registerWait({ waitId: "slow-read-wait", owner, dependencies: [{ operationId }], continuationNote: "Inspect timeout evidence" });
+    host = new RuntimeResultSupervision(f.root, "slow-read-epoch");
+    const busy = await f.stall(12000000);
+    let readFinished = false;
+    void busy.finished.then(() => { readFinished = true; });
+    const began = performance.now();
+    await supervisor.start({ token, operationId, cwd: f.root, timeoutSeconds: 0.2,
+      argv: [process.execPath, "-e", "setInterval(()=>{},1000)"] });
+    const sockets: number[] = [];
+    while (lease.store.getOperation(operationId).terminalRevision === 0) {
+      assert.ok(performance.now() - began < 2000, "runner deadline must reach canonical terminal state within two seconds despite slow reads");
+      const started = performance.now(); await client.request("ping"); sockets.push(performance.now() - started);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    const publicationMs = performance.now() - began;
+    assert.equal(readFinished, false, "supervision must complete while the real SQLite query is still blocked");
+    const operation = lease.store.getOperation(operationId);
+    assert.equal(operation.terminalOutcome, "failed");
+    assert.equal(operation.terminalRevision, 1);
+    assert.equal(lease.store.listOutbox({ recipient: owner }).length, 1);
+    assert.equal(lease.store.listOutbox({ recipient: { ...owner, sessionId: "foreign" } }).length, 0);
+    sockets.sort((a,b)=>a-b);
+    assert.ok(sockets.at(-1)! < 250, "socket control response remains within the documented rebuild budget");
+    t.diagnostic(JSON.stringify({ sqliteMs: await busy.finished, publicationMs,
+      socketMs: { p50: sockets[Math.floor(sockets.length*.5)], p95: sockets[Math.floor(sockets.length*.95)], p99: sockets.at(-1) } }));
+  } finally {
+    await supervisor.stop(taskId).catch(() => undefined);
+    host?.close(); lease.release(); await f.close();
+  }
+});

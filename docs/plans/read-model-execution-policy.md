@@ -8,7 +8,7 @@ The main thread handles bounded protocol parsing, connection admission, cached e
 
 Diagnostic status returns the last observed liveness reasons with `observedAt` and an explicit observation state. The worker pushes observations with revision and fresh-liveness replies; status reads the cached observation without scheduling or awaiting worker work. These reasons may be stale. Idle admission separately awaits a fresh liveness query before deciding whether to drain. Neither a snapshot nor diagnostic status grants mutation authority.
 
-The main-thread work target is at most 10 ms per ordinary dispatch. This is a review threshold, not a measured maximum across every operation. The real-process harness enforces a 250 ms control-status response budget while rebuilding history. Catalog file operations and canonical mutation transactions still execute on the main thread; their worst-case latency and supervision deadlines require further measurement. They are not covered by the read-worker isolation claim.
+The main-thread work target is at most 10 ms per ordinary dispatch. This is a review threshold, not a measured maximum across every operation. The real-process harness enforces a 250 ms control-status response budget while rebuilding history. Catalog file operations and canonical mutation transactions still execute on the main thread; their worst-case latency remains workload-dependent. They are not covered by the read-worker isolation claim.
 
 ## Bounds and ordering
 
@@ -32,4 +32,6 @@ The accepted normal-operation limits remain coordinator <=2 and derived index <=
 
 The macOS measurements under `docs/evidence/751` cover 1/5/10 real Pi clients at 4,416 and 10,000 history records. Unchanged metadata reads and projections remain flat. After separating diagnostic status from fresh liveness queries, measured rebuild status latency fell from approximately 979/1562 ms to 0.27/0.26 ms. This is local evidence, not a universal latency guarantee.
 
-The harness excludes guardian and mutation workloads. Final acceptance still needs Linux evidence on the final head, combined Pi/server/guardian/execution CPU/RSS/I/O, source-rebuild and failure cases, and measured supervision latency under concurrent mutation and slow reads.
+The separate full-runtime harness includes guardian, mutation services, native frontends, HostedSessions and actual worker/runner/command processes. Source-stamped reports are retained under `docs/evidence/751`; final clean-head Linux/macOS repetition remains required.
+
+`query-executor.test.ts` also starts a real detached command with a 200 ms deadline while a native SQLite recursive query stalls the read worker. The production result-supervision timer must publish the exact terminal outcome and pending recipient event before that query finishes, within two seconds of launch; control sockets must remain below 250 ms. The local macOS run measured 1,421 ms in SQLite, 518 ms to canonical terminal publication, and socket p50/p95/p99 of 0.112/0.164/0.176 ms. This measures the combined runner deadline and main-thread publication path, not an isolated timer callback. Platform results remain necessary; these numbers are not universal latency guarantees.
