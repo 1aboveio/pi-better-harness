@@ -277,14 +277,15 @@ export class WorkReadModel {
       const index = scope.backgroundHistory ? this.background.historyIndex(scope) : undefined;
       const tasks = this.background.read(scope, index);
       const status = this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
+      const active = (index ? this.background.read({ ...scope, backgroundHistory: false, active: true }) : tasks).filter(task => task.durable ? task.active : task.status === "running").length;
       this.metrics.coordinatorConnections = 1 + this.background.connectionCount;
-      return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, tasks, status, index?.page]), seq: this.revision,
+      return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, tasks, status, index?.page, active]), seq: this.revision,
         observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
         status, reason: this.background.reason ?? (index ? this.background.historyReason : undefined),
         rows: tasks.map(meta => ({ meta, assignment: null, sourceRevision: hash(meta) })), totalMatching: index?.page.total ?? tasks.length,
         ...(index?.page.nextCursor ? { nextCursor: index.page.nextCursor } : {}),
         ...(index ? { backgroundIndex: index } : {}),
-        activity: { active: (index ? this.background.read({ ...scope, backgroundHistory: false, active: true }) : tasks).filter(task => task.durable ? task.active : task.status === "running").length }, nextDeadline: null };
+        activity: { active }, nextDeadline: null };
     }
     const clauses: string[] = [], args: any[] = [];
     if (scope.id) { clauses.push("id = ?"); args.push(scope.id); }

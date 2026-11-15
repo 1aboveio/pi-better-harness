@@ -127,6 +127,12 @@ test("Background history applies bounded pages, status filters and stable cursor
     const next = await read(first.nextCursor);
     assert.equal(next.rows.length, 3);
     assert.ok(next.rows.every((row: any) => !first.rows.some((previous: any) => previous.meta.id === row.meta.id)));
+    writer.registerOperation({ operationId: "new-active", taskId: "bgs_ffffffffffffffffffff", launchToken: "new-active", owner,
+      observer: { kind: "local-supervisor", version: "1" } });
+    const active = await read();
+    assert.equal(active.totalMatching, 1200);
+    assert.equal(active.activity.active, 1);
+    assert.notEqual(active.scopeRevision, first.scopeRevision, "independent activity participates in a filtered history revision");
     const before = (await client.handle({ type: "runtime_get_metrics" })).json;
     assert.ok(JSON.parse(before).sqlite.active <= 3, "history reuses the worker's derived index and two coordinator readers");
   } finally {
@@ -138,7 +144,7 @@ test("Background indexed pages merge legacy rows and fence cursors and off-page 
   const root = mkdtempSync("/tmp/p754-mixed-");
   const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
   const executor = new WorkQueryExecutor(root, "mixed-instance", { modelOptions: { baseDir: join(root, "subagents"), durableDir: join(root, "archives"), intervalMs: 50 } });
-  const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0, write: () => true });
+  const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0, write: (_line: string): boolean => true });
   const client = executor.connect(socket as unknown as Socket);
   const scope = { background: true, backgroundHistory: true, cwd: root, sessionId: "parent", limit: 2, statuses: ["succeeded"] };
   const origin = { cwd: root, sessionId: "parent" };
