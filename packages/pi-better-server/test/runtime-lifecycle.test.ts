@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { inspectDaemonOwner, ownerIsAlive, processMatchesStart } from "../src/daemon-owner.ts";
 import { startDaemon } from "../src/server.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { OwnershipStore } from "../src/core/ownership.ts";
 import { ownershipPathFor } from "../src/paths.ts";
@@ -23,10 +24,13 @@ test("real SQLite runner obligations exclude terminal history, unread waits and 
   const supervisor = createLocalSupervisor({ directory });
   const model = new WorkReadModel(root, "runner-instance", { supervisorDirectory: directory,
     baseDir: join(root, "subagents"), durableDir: join(root, "archives") });
+  const executor = new WorkQueryExecutor(root, "runner-executor", { modelOptions: {
+    supervisorDirectory: directory, baseDir: join(root, "subagents"), durableDir: join(root, "archives"),
+  } });
   let taskId: string | undefined;
   t.after(async () => {
     if (taskId && !supervisor.snapshot(taskId)?.terminal) await supervisor.stop(taskId);
-    await model.close(); store.close(); rmSync(root, { recursive: true, force: true });
+    await executor.close(); await model.close(); store.close(); rmSync(root, { recursive: true, force: true });
   });
   const started = await supervisor.start({ token: "755-real-runner", kind: "process", cwd: root,
     argv: [process.execPath, "-e", "const fs=require('fs'); const t=setInterval(()=>{if(fs.existsSync('finish')){clearInterval(t)}},20)"] });
@@ -46,12 +50,14 @@ test("real SQLite runner obligations exclude terminal history, unread waits and 
   mkdirSync(corrupt.dir, { recursive: true }); writeFileSync(corrupt.launch, "{");
   await model.reconcile();
   assert.deepEqual(model.livenessReasons().map(reason => reason.id), [taskId]);
+  assert.deepEqual((await executor.livenessReasons()).map(reason => reason.id), [taskId], "worker executor preserves valid runner retention alongside corrupt records");
   const claim = supervisor.snapshot(taskId)!.claim!;
   assert.equal(processMatchesStart(claim.pid, "Thu Jan  1 00:00:00 1970"), false, "a live PID with a different start identity cannot retain the runtime");
   writeFileSync(join(root, "finish"), "done");
   await waitFor("runner terminal record", () => supervisor.snapshot(taskId!)?.terminal);
   await model.reconcile();
   assert.deepEqual(model.livenessReasons(), []);
+  assert.deepEqual(await executor.livenessReasons(), [], "terminal runner and unread waits do not retain the runtime");
   assert.equal(store.listWaits({ owner })[0]!.phase, "waiting", "idle observation does not consume unread waits");
   assert.equal(store.getOperation("live-operation")!.terminalRevision, 0, "idle observation does not become terminal authority");
   assert.equal(model.backgroundMetrics.historyQueries, 0);

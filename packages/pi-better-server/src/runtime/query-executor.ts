@@ -16,7 +16,7 @@ interface WorkerMetrics { sqlite?: { opens: number; active: number; maximum: num
 export interface QueryExecutorOptions {
   capacity?: number; timeoutMs?: number; maxConnections?: number;
   workerUrl?: URL;
-  modelOptions?: { baseDir?: string; durableDir?: string; intervalMs?: number };
+  modelOptions?: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number };
 }
 
 /** One root, one read worker, one admitted operation at a time. No mutation RPC. */
