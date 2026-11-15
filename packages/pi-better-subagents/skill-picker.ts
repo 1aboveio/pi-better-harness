@@ -33,7 +33,7 @@ export interface SkillPickerOptions {
     selected: readonly string[];
     requestRender: () => void;
     /** Caller applies the draft. A failed apply keeps the picker and checked items. */
-    apply(paths: string[]): SkillPickerApplyResult;
+    apply(paths: string[]): SkillPickerApplyResult | Promise<SkillPickerApplyResult>;
     finish(): void;
     cancel(): void;
     getHeight?: () => number;
@@ -142,12 +142,16 @@ export function createSkillPicker(options: SkillPickerOptions): Tui.Component & 
     }
 
     function apply(): void {
-        const result = options.apply([...checked.values()]);
+        const finish = (result: SkillPickerApplyResult) => {
         if (result.ok) {
             options.finish();
             return;
         }
         report(result.message ?? "Skills were not applied.", true);
+        };
+        const result = options.apply([...checked.values()]);
+        if (result instanceof Promise) void result.then(finish, error => report(String(error), true));
+        else finish(result);
     }
 
     function startAdd(): void {

@@ -20,6 +20,7 @@ import { HostedSession } from "./hosted-session.ts";
 import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts";
 import { runtimeRoot } from "./runtime/root.ts";
 import { RuntimeCancellation, hasPendingCancellation } from "./runtime/cancellation.ts";
+import { SharedCatalog } from "./runtime/catalog.ts";
 import { WorkQueryExecutor } from "./runtime/query-executor.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
@@ -90,6 +91,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     admitDaemonStartup({ canonicalServerDir: serverDir, agentDir: getAgentDir(), build, intent: startupIntentFromEnv(process.env) });
     let cancellations: RuntimeCancellation | undefined;
     if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
+    const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
     let workModel: WorkQueryExecutor | undefined;
     const work = () => {
       if (!workModel) {
@@ -141,6 +143,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       };
       const control = new ConnectionControl(send);
       let greeted = false;
+      const catalogCommand = catalog.connection();
+      let catalogSubscription: { close(): void } | undefined;
       let workQueries: ReturnType<WorkQueryExecutor["connect"]> | undefined;
       let runtimeInFlight = 0;
 
@@ -201,6 +205,25 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               cancellations ??= new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
               return reply({ data: await cancellations.handle(command) });
             } finally { runtimeInFlight--; }
+          }
+          if (type === "runtime_bind_catalog_host") {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            catalog.admission.bind(command.authority, socket);
+            return reply({ data: { bound: true } });
+          }
+          if (type === "runtime_subscribe_catalog") {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            catalogSubscription?.close();
+            const subscription = catalog.observe(() => catalogCommand({ type: "runtime_get_catalog", overlay: command.overlay }), snapshot => {
+              if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+              send({ type: "event", event: { type: "runtime_catalog_snapshot", snapshot } } as unknown as ServerMessage);
+            });
+            catalogSubscription = subscription;
+            return reply({ data: subscription.snapshot });
+          }
+          if (["runtime_register_catalog", "runtime_get_catalog", "runtime_get_catalog_scope", "runtime_edit_catalog"].includes(type)) {
+            if (!greeted) throw new Error(`${type} requires hello`);
+            return reply({ data: catalogCommand(command) });
           }
           if (type === "runtime_register_client") {
             if (!greeted) throw new Error("runtime_register_client requires hello");
@@ -363,6 +386,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       socket.on("data", (chunk: string) => decoder.push(chunk));
       socket.on("error", () => undefined);
       socket.on("close", () => {
+        catalogSubscription?.close();
+        catalog.admission.close(socket);
         workQueries?.close();
         sockets.delete(socket);
         runtimeClients.delete(socket);

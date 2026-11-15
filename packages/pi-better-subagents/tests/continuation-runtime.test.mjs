@@ -8,6 +8,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = mkdtempSync(join(tmpdir(), 'continuation-runtime-'));
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+process.env.PI_CODING_AGENT_DIR = join(root, 'agent');
 process.env.TMPDIR = root;
 register(new URL('./pi_host_stub_hooks.mjs', import.meta.url));
 const { default: extension } = await import('../index.ts');
@@ -33,6 +35,8 @@ process.stdout.write(JSON.stringify({type:'agent_end',messages:[{role:'assistant
 `);
 chmodSync(executable, 0o755);
 const oldPath = process.env.PATH; process.env.PATH = `${bin}:${oldPath ?? ''}`;
+const { startWorkRuntimeFixture } = await import('./work-runtime-fixture.mjs');
+const stopRuntime = await startWorkRuntimeFixture();
 
 function fixture(name) {
   const workspace = join(root, name); mkdirSync(workspace);
@@ -40,6 +44,8 @@ function fixture(name) {
   const host = { events: new EventEmitter(), registerTool: x => tools.set(x.name, x),
     registerCommand() {}, appendEntry() {}, on: (n, fn) => handlers.set(n, fn), sendMessage() {} };
   const ctx = { cwd: workspace, model: { provider: 'test', id: 'model' }, hasUI: false,
+    isProjectTrusted: () => true,
+    modelRegistry: { getAvailable: () => [{ provider: 'test', id: 'model', reasoning: true }], find: () => undefined },
     isIdle: () => true, ui: { notify() {}, setWidget() {} },
     sessionManager: { getSessionId: () => name, getBranch: () => [] } };
   extension(host);
@@ -79,18 +85,29 @@ try {
   await test('continued recipes preserve role, agent and alias identity across attempts', async () => {
     const f = fixture('identity-owner');
     try {
+      const roles = join(f.workspace, '.pi/agents/roles'), agents = join(f.workspace, '.pi/agents/agents');
+      mkdirSync(roles, { recursive: true }); mkdirSync(agents);
+      const role = effort => `---\nschema: pi-agent/v1\nkind: role\nid: role.developer\nname: Developer\ndefaults:\n  model: test/model\n  effort: ${effort}\n---\nFrozen ${effort} instructions.\n`;
+      writeFileSync(join(roles, 'developer.md'), role('low'));
+      writeFileSync(join(agents, 'payments.md'), '---\nschema: pi-agent/v1\nkind: agent\nid: agent.payments\nname: Payments\nroleId: role.developer\ninstructions:\n  mode: add\n---\nOwned agent instructions.\n');
       const first = idOf(await f.execute('subagent_spawn', { prompt: 'initial', cwd: f.workspace,
-        model: 'test/model', tools: 'read', clean: true, sandbox: false, callback: false }));
+        agent: 'agent.payments', alias: 'checkout', tools: 'read', clean: true, sandbox: false, callback: false }));
       const meta = await terminal(first); assert.equal(meta.status, 'completed');
-      // Seed a catalog-shaped recorded recipe without calling a model/catalog service.
-      const identity = { agent: 'agent.payments', role: 'developer', alias: 'checkout' };
-      writeMeta({ ...meta, recipe: { ...meta.recipe, ...identity } });
+      assert.equal(meta.effort, 'low');
+      const identity = { agent: 'agent.payments', alias: 'checkout' };
       const previous = JSON.stringify(readMeta(first));
+      writeFileSync(join(roles, 'developer.md'), role('high'));
+      const fresh = await terminal(idOf(await f.execute('subagent_spawn', { prompt: 'new definition', cwd: f.workspace,
+        agent: 'agent.payments', tools: 'read', clean: true, sandbox: false, callback: false })));
+      assert.equal(fresh.effort, 'high');
+      assert.notEqual(fresh.catalog.snapshotDigest, meta.catalog.snapshotDigest);
       let prior = first;
       for (const prompt of ['first feedback', 'second feedback']) {
         const next = idOf(await f.execute('subagent_spawn', { session_id: readMeta(prior).sessionId, prompt }));
         const continued = await terminal(next); assert.equal(continued.status, 'completed');
         for (const [key, value] of Object.entries(identity)) assert.equal(continued.recipe[key], value);
+        assert.equal(continued.model, 'test/model'); assert.equal(continued.effort, 'low');
+        assert.equal(continued.recipe.tools, 'read'); assert.equal(continued.recipe.allowNested, false);
         assert.equal(continued.sessionId, meta.sessionId);
         prior = next;
       }
@@ -120,6 +137,8 @@ try {
     } finally { f.shutdown(); }
   });
 } finally {
+  await stopRuntime();
+  if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
   process.env.PATH = oldPath;
   rmSync(root, { recursive: true, force: true });
 }

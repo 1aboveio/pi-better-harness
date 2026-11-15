@@ -198,7 +198,7 @@ import {
     createLaunchEnricher,
     blankCatalogSelector,
     hasCatalogSelector,
-    loadLaunchSnapshot,
+    loadSharedLaunchSnapshot,
     noteCatalogHost,
     prepareCatalogJob,
     catalogDefaultNote,
@@ -240,6 +240,7 @@ import {
 } from "./worker-waits.ts";
 import { defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
 import { restrictContextFilesToWorktree } from "./shared-worktree-context.ts";
+import { noteCatalogHostContext, closeCatalogHost } from "./catalog-host-admission.ts";
 
 const SUBAGENT_MODE_ACTIONS: readonly AutocompleteItem[] = [
     { value: "history", label: "history", description: "Inspect or cancel waits from other sessions" },
@@ -2546,6 +2547,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     function catalogHostFrom(ctx: ExtensionContext): CatalogHost {
+        noteCatalogHostContext(ctx, () => agentSessionSettings.snapshot());
         if (typeof ctx.sessionManager?.getBranch === "function") agentSessionSettings.restore(ctx);
         catalogModelRegistry = ctx.modelRegistry;
         const cfg = loadConfig();
@@ -2588,7 +2590,7 @@ export default function (pi: ExtensionAPI) {
         if (!jobs.some((job) => hasCatalogSelector(job))) {
             return { status: "ready", jobs: jobs as SpawnParams[] };
         }
-        const snapshot = loadLaunchSnapshot(host);
+        const snapshot = await loadSharedLaunchSnapshot(host);
         const clarified = await clarifyCatalogRequest(jobs, { hasUI: host.hasUI === true, select: host.select });
         if (clarified.status === "clarification-needed") return clarified;
         const prepared: SpawnParams[] = [];
@@ -3871,7 +3873,7 @@ export default function (pi: ExtensionAPI) {
             if (needsCatalog) {
                 catalogHost = catalogHostFrom(ctx);
                 noteCatalogHost(catalogHost);
-                catalogSnapshot = loadLaunchSnapshot(catalogHost);
+                catalogSnapshot = await loadSharedLaunchSnapshot(catalogHost);
                 const clarified = await clarifyCatalogRequest(
                     p.jobs.map((job) => mergeJobOptions(p.shared, job) as CatalogJobFields),
                     { hasUI: catalogHost.hasUI === true, select: catalogHost.select },
@@ -4379,6 +4381,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("session_before_switch", () => {
+        closeCatalogHost();
         agentSessionSettings.clear();
         catalogModelRegistry = undefined;
         activeCallbackOrigin = undefined;
@@ -4392,6 +4395,7 @@ export default function (pi: ExtensionAPI) {
 
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (event, ctx) => {
+        closeCatalogHost();
         stopWorkObservation();
         pendingNavigatorDismissals.clear();
         if (outcomeTicker) clearInterval(outcomeTicker);
