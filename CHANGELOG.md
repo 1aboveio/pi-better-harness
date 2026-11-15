@@ -25,7 +25,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Fixed
 
 - Return an explicit rebuilding result for an ID awaiting indexing without blocking the shared read queue.
-- Retry a newly written ID in the client for a bounded interval so result tools tolerate indexing races without delaying other readers.
+- Retry a newly written ID in the client for a bounded interval, including when unrelated assignment sources are unverified, so result tools tolerate indexing races without delaying other readers.
 - Restart failed read workers at most twice per minute while clients remain connected; resynchronize existing subscriptions under a fresh observation epoch and cancel pending recovery on shutdown.
 - Yield inventory work by elapsed time, retain unpublished retry caches after concurrent metadata changes, and pin a read-only coordinator snapshot so unrelated writes cannot discard the initial inventory.
 - Avoid periodic rescan requests while an inventory is already running.

@@ -118,6 +118,37 @@ test("an exact-ID client waits for indexing without occupying the shared read qu
   } finally { await f.close(); }
 });
 
+test("an exact-ID client retries indexing even when another assignment makes the inventory degraded", { timeout: 10000 }, async () => {
+  const f = await fixture({ workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
+  const blocked = () => new Promise<void>(resolve => {
+    const listener = (message: any) => { if (message.type === "inventory-blocked") { f.worker.off("message", listener); resolve(); } };
+    f.worker.on("message", listener);
+  });
+  try {
+    const initial = blocked();
+    const directory = join(f.root, "runs/sa_unverified"); mkdirSync(directory);
+    writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_unverified", sessionId: "unverified", cwd: f.root,
+      status: "completed", startedAt: 1, operations: { conversationId: "unverified", workspace: f.root } }));
+    const client = await f.client(); await initial;
+    const degraded = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { stop(); reject(new Error("unverified fixture did not become degraded")); }, 5000);
+      const stop = client.onChange(value => { if (value.status === "degraded" && value.rows.length) { clearTimeout(timer); stop(); resolve(); } });
+    });
+    await client.subscribe({}); f.worker.postMessage({ type: "release-inventory" }); await degraded;
+    const held = blocked(); f.worker.postMessage({ type: "block-inventory" }); await held;
+    const next = join(f.root, "runs/sa_degraded_retry"); mkdirSync(next);
+    writeFileSync(join(next, "meta.json"), JSON.stringify({ id: "sa_degraded_retry", sessionId: "new", cwd: f.root,
+      status: "lost", startedAt: 2 }));
+    const pending = client.get({ id: "sa_degraded_retry", limit: 1 });
+    assert.equal((await client.get({ limit: 2 })).status, "degraded");
+    f.worker.postMessage({ type: "release-inventory" });
+    const value = await pending;
+    assert.equal(value.rows[0]?.meta.id, "sa_degraded_retry");
+    assert.equal(value.rows[0]?.assignment.verified, true);
+    assert.equal(f.executor.metrics().executor.timeouts, 0);
+  } finally { await f.close(); }
+});
+
 test("an exact-ID client stops retrying a stalled inventory within its retry budget", { timeout: 10000 }, async () => {
   const f = await fixture({ timeoutMs: 500, workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
   try {

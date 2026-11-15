@@ -110,7 +110,7 @@ parentPort.on("message", async message => {
     const state = session(message.connection);
     state.generation = message.generation; state.pending = undefined;
     let value = state.queries.handle(command);
-    if (!indexed && value.status === "ready") value = { ...value, status: "rebuilding", reason: "The requested run is being indexed; retry after reconciliation." };
+    if (!indexed && !value.rows.length) value = { ...value, status: "rebuilding", reason: "The requested run is being indexed; retry after reconciliation." };
     parentPort.postMessage({ type: "reply", id: message.id, json: encoded.get(value) ?? JSON.stringify(value), metrics: metrics() });
   } catch (error) {
     parentPort.postMessage({ type: "reply", id: message.id, error: String(error).slice(0, 512), metrics: metrics() });
