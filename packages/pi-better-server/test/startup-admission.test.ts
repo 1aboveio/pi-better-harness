@@ -84,11 +84,13 @@ test("ordinary CLI ensure cannot restart A after same-SDK B adopts and fails", {
   for (const phase of ["adopted", "recovery-required"] as const) {
     save(env, { ...readActivationJournal(env.serverDir)!, phase });
     const before = readFileSync(join(env.serverDir, "activation.json"));
+    const logPath = join(env.serverDir, "daemon.log");
+    const beforeLog = existsSync(logPath) ? readFileSync(logPath) : undefined;
     const result = await run(env, a.entrypoint, ["ensure", "--timeout-ms", "2500"], { PI_SERVER_ACTIVATION_ID: "upgrade-B" }).result;
     assert.equal(result.code, 1, `must refuse ${phase}; ${result.stdout} ${result.stderr}`);
     assert.match(result.stderr, /Startup admission/);
     assert.equal(inspectDaemonOwner(env.serverDir).status, "missing");
-    assert.equal(existsSync(join(env.serverDir, "daemon.log")), false, "ensure must refuse before spawning A");
+    assert.deepEqual(existsSync(logPath) ? readFileSync(logPath) : undefined, beforeLog, "ensure must refuse before spawning A or appending any startup output");
     assert.deepEqual(readFileSync(join(env.serverDir, "activation.json")), before);
   }
 });
