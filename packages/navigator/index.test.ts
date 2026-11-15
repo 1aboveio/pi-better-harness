@@ -303,6 +303,55 @@ describe("shared background work navigator", () => {
     }
   });
 
+  it("keeps detail-overlay paints free of provider reads while observing external changes", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+    let calls = 0;
+    let status = "running";
+    let notify: (() => void) | undefined;
+    let component: any;
+    const rowProvider = provider("overlay-io", "Overlay", 10, 100, () => undefined);
+    const unregister = registerBackgroundWorkProvider({
+      ...rowProvider,
+      listRows(now) {
+        calls++;
+        return rowProvider.listRows(now).map(row => ({ ...row, status, primary: status }));
+      },
+      onVisibleChanged(fn) { notify = fn; return () => { notify = undefined; }; },
+    });
+    const ui = { editor: undefined as any, setStatus() {}, setWidget() {},
+      getEditorComponent() { return this.editor; }, setEditorComponent(value: any) { this.editor = value; },
+      custom(create: any) {
+        return new Promise(resolve => { component = create({ requestRender() {} }, {}, {}, resolve); });
+      } };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, { createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: key => key === "left", matchKey: (value, key) => value === key, truncate: value => value });
+      const editor = ui.editor({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("enter");
+      assert.ok(component, "the real detail overlay must open");
+      const expected = component.render(100);
+      const warmCalls = calls;
+      for (let frame = 0; frame < 60; frame++) assert.deepEqual(component.render(100), expected);
+      assert.equal(calls, warmCalls, "unrelated overlay paints must not invoke providers");
+      status = "failed";
+      t.mock.timers.tick(1000);
+      assert.ok(calls > warmCalls, "external changes must be polled independently of paints");
+      assert.match(component.render(100).join("\n"), /failed/);
+      status = "completed";
+      notify?.();
+      assert.match(component.render(100).join("\n"), /completed/);
+      disposeBackgroundWorkNavigator(ctx);
+      const disposedCalls = calls;
+      t.mock.timers.tick(60_000);
+      assert.equal(calls, disposedCalls, "disposal must stop the refresh loop");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
   it("refreshes the main list without painting volatile-only provider changes", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     let notifyVisibleChanged: (() => void) | undefined;
