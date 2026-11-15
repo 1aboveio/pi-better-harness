@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { processMatchesStart } from "../src/daemon-owner.ts";
 
-for (const scenario of ["parent", "park", "claim", "spawn", "result"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: 60000 }, async () => {
+for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", "spawn", "result", "bootstrap", "published"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: 60000 }, async () => {
   const restart = scenario === "park";
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, "launch-")), transport = realpathSync(mkdtempSync("/tmp/p761-"));
@@ -19,8 +19,10 @@ for (const scenario of ["parent", "park", "claim", "spawn", "result"]) test(`man
   writeFileSync(join(agent, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: { providerExtensions: { openai: new URL("./support/subagent-park-model.ts", import.meta.url).pathname }, defaultTools: "read", maxConcurrent: 1 } } }));
   writeFileSync(join(agent, "agents/roles/fixture.md"), "---\nschema: pi-agent/v1\nkind: role\nid: role.fixture\nname: Fixture\ndefaults:\n  model: openai/gpt-4.1\n---\nFrozen launch instructions.\n");
   const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root,
-    LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: entered, LAUNCH_RELEASE: release,
-    ...(["claim", "spawn", "result"].includes(scenario) ? { CONTINUATION_CRASH_POINT: scenario, CONTINUATION_CRASH_MARKER: join(cwd, "crashed") } : {}) };
+    ...(scenario === "unavailable" ? { TEST_DAEMON_IDLE_MS: "5000" } : {}),
+    LAUNCH_BACKGROUND: scenario === "standalone" ? "0" : "1", LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: entered, LAUNCH_RELEASE: release,
+    ...(scenario === "bootstrap" ? { CONTINUATION_BOOTSTRAP_GATE: join(cwd, "resume-release") } : {}),
+    ...(["claim", "spawn", "result", "published"].includes(scenario) ? { CONTINUATION_CRASH_POINT: scenario, CONTINUATION_CRASH_MARKER: join(cwd, "crashed") } : {}) };
   const execPath = process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath;
   let daemon = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
   let errors = ""; daemon.stderr!.on("data", data => { errors += data; });
@@ -51,10 +53,12 @@ for (const scenario of ["parent", "park", "claim", "spawn", "result"]) test(`man
     const [ready] = await Promise.race([once(parent, "message"), once(parent, "exit").then(() => { throw new Error(errors); })]);
     const launch = async (params: object, key = "same-launch", child = parent!, goalComplete = false) => {
       const reply = once(child, "message"); child.send({ key, params, goalComplete }); const [message] = await reply;
+      if (scenario === "standalone") { assert.match(String(message.error ?? JSON.stringify(message.result)), /did not authorize.*Background/); return { denied: true }; }
       assert.equal(message.error, undefined, `${message.stack ?? message.error}\n${errors}`); return message.result;
     };
     const params = { prompt: "Execute fixture", role: "fixture", model: "openai/gpt-4.1", callback: false, tools: "read,bg_task_spawn,bg_task_status,bg_task_log,wait_for_operations,acknowledge_operation_result", skills: [] };
     const first = await launch(params);
+    if (scenario === "standalone") { assert.equal(first.denied, true); return; }
     assert.equal(first.details.launched, true);
     attempts.push(first.details.runId);
     const exited = once(parent, "exit"); parent.send({ stop: true }); await exited; parent = undefined;
@@ -70,9 +74,48 @@ for (const scenario of ["parent", "park", "claim", "spawn", "result"]) test(`man
       daemon.stderr!.on("data", data => { errors += data; });
       await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
     }
+    if (scenario === "unavailable") {
+      const settings = JSON.parse(readFileSync(join(agent, "settings.json"), "utf8"));
+      settings.piBetterHarness.sandboxPermissions = { version: 999 };
+      writeFileSync(join(agent, "settings.json"), JSON.stringify(settings));
+    }
     writeFileSync(release, "release");
-    if (["claim", "spawn", "result"].includes(scenario)) {
-      await Promise.race([once(daemon, "exit"), delay(15000).then(() => { throw new Error("Claim crash was not reached"); })]);
+    if (scenario === "unavailable") {
+      const observer = new WorkClient(join(transport, "pi-server.sock"), agent);
+      try {
+        const deadline = Date.now() + 10000;
+        let state: any;
+        do {
+          state = (await observer.request("runtime_get_status")).subagentManagement;
+          if (state?.continuationUnavailable?.length) break;
+          assert.ok(Date.now() < deadline, "Unavailable permission source was not reported"); await delay(25);
+        } while (true);
+        assert.match(state.continuationUnavailable[0].reason, /permission/i);
+        assert.equal(state.inFlight, 0);
+      } finally { observer.close(); }
+      const idleDeadline = Date.now() + 15000;
+      while (existsSync(join(transport, "pi-server.sock"))) { assert.ok(Date.now() < idleDeadline, "Unavailable wait kept runtime management active"); await delay(25); }
+      assert.equal(existsSync(`${entered}.continued`), false);
+      return;
+    }
+    if (scenario === "bootstrap") {
+      const deadline = Date.now() + 15000;
+      while (!existsSync(join(cwd, "resume-release.entered"))) { assert.ok(Date.now() < deadline, "Resumed bootstrap not reached"); await delay(25); }
+      const death = once(daemon, "exit"); daemon.kill("SIGKILL"); await death;
+      daemon = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+      daemon.stderr!.on("data", data => { errors += data; });
+      await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
+      const observer = new WorkClient(join(transport, "pi-server.sock"), agent);
+      try {
+        const readyBy = Date.now() + 10000;
+        while (!(await observer.request("runtime_get_status")).subagentManagement?.continuationReady) {
+          assert.ok(Date.now() < readyBy, `Runtime bridge did not recover: ${errors}`); await delay(25);
+        }
+      } finally { observer.close(); }
+      writeFileSync(join(cwd, "resume-release"), "resume");
+    }
+    if (["claim", "spawn", "result", "published"].includes(scenario)) {
+      await Promise.race([once(daemon, "exit"), delay(15000, undefined, { ref: false }).then(() => { throw new Error("Claim crash was not reached"); })]);
       daemon = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
       daemon.stderr!.on("data", data => { errors += data; });
       await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
@@ -86,10 +129,13 @@ for (const scenario of ["parent", "park", "claim", "spawn", "result"]) test(`man
     attempts.push(park.resumedBy);
     const resumed = await terminal(park.resumedBy);
     assert.equal(resumed.status, "completed");
+    if (scenario === "bootstrap") assert.equal(resumed.pid, JSON.parse(readFileSync(join(cwd, "resume-release.entered"), "utf8")).pid, "the exact bootstrapped writer reconnects");
     assert.equal(resumed.sessionId, metaFor(first.details.runId).sessionId);
     assert.equal(resumed.spawnPid, metaFor(first.details.runId).spawnPid);
     const db = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
     try {
+      const outcome = db.prepare("SELECT record_json FROM assignment_outcomes WHERE assignment_id=?").get(first.details.runId) as any;
+      assert.equal(JSON.parse(outcome.record_json).outcome, "succeeded", "final outcome is durable without a foreground recipient");
       const resumedIntents = db.prepare("SELECT attempts FROM subagent_launch_intents WHERE request_key LIKE 'continuation:%'").all() as any[];
       assert.ok(resumedIntents.length >= 1 && resumedIntents.length <= (scenario === "spawn" ? 2 : 1));
       for (const intent of resumedIntents) assert.equal(JSON.parse(intent.attempts).length, 1, "one token per admitted attempt, including bounded safe repair");

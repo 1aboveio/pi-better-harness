@@ -1,4 +1,4 @@
-import { writeFileSync, existsSync } from "node:fs";
+import { writeFileSync, existsSync, watch } from "node:fs";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 /** External model substitute; the production SDK and worker bootstrap remain real. */
@@ -48,7 +48,14 @@ export default function offline(pi: ExtensionAPI) {
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
         stream.push({ type: "start", partial: response }); stream.push({ type: "done", reason, message: response }); stream.end();
       };
-      queueMicrotask(finish);
+      const resumed = context.messages.some((m: any) => m.role === "toolResult" && m.toolName === "wait_for_operations");
+      const bootstrapGate = process.env.CONTINUATION_BOOTSTRAP_GATE;
+      if (resumed && turn === 1 && bootstrapGate && !existsSync(bootstrapGate)) {
+        writeFileSync(`${bootstrapGate}.entered`, JSON.stringify({ pid: process.pid }));
+        const watcher = watch(process.env.LAUNCH_WORKSPACE!, () => {
+          if (existsSync(bootstrapGate)) { watcher.close(); finish(); }
+        });
+      } else queueMicrotask(finish);
       return stream;
     },
   });

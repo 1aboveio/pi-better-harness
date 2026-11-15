@@ -26,6 +26,7 @@
  * host reads as an unavailable capability instead of a broken import.
  */
 import { randomUUID } from "node:crypto";
+import { managedWorkerBridge } from "./managed-worker-bridge.domain.mjs";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { OPERATIONS_ATTEMPT_ID_ENV, OPERATIONS_CHILD_ID_ENV, OPERATIONS_CONVERSATION_ID_ENV, OPERATIONS_ENABLED_ENV, OPERATIONS_ENDPOINT_ENV, OPERATIONS_RUN_ID_ENV, OPERATIONS_TOKEN_ENV, OPERATIONS_WRITER_LEASE_ID_ENV, WAIT_OPERATIONS_TOOL, createToolDescriptor, extractResultTaskIds, normalizeWaitForOperationsResult, normalizeToolDescriptors, OperationBridgeError, } from "./operation-bridge-types.domain.mjs";
@@ -457,6 +458,7 @@ function scopeOf(registration) {
  * sees the tasks that conversation launched earlier).
  */
 export function createWorkerOperationsHost(options) {
+    const durable = options.managedRoot ? managedWorkerBridge(options.managedRoot) : undefined;
     const created = {};
     const hosting = {};
     const starting = {};
@@ -471,6 +473,7 @@ export function createWorkerOperationsHost(options) {
         if (!hosting.promise) {
             const factory = options.hostFactory ?? createOperationBridgeHost;
             hosting.promise = factory({
+                ...(durable ? { socketPath: durable.socketPath } : {}),
                 ...(options.logger ? { logger: options.logger } : {}),
                 ...(options.now ? { now: options.now } : {}),
             }).then((host) => { created.host = host; return host; })
@@ -490,6 +493,8 @@ export function createWorkerOperationsHost(options) {
             await ensureHost();
             capability.service = service;
             capability.available = true;
+            for (const registration of durable?.restore() ?? [])
+                await register(registration);
             return true;
         })();
         return starting.promise;
@@ -763,6 +768,7 @@ export function createWorkerOperationsHost(options) {
             };
         }
         const handle = host.registerRun({
+            ...(registration.token ? { token: registration.token } : {}),
             runId: registration.runId,
             conversationId: registration.conversationId,
             workspace: registration.workspace,
@@ -772,6 +778,7 @@ export function createWorkerOperationsHost(options) {
             ownership: (taskId) => ownsTask(taskId),
             handlers,
         });
+        durable?.save(registration, handle.token);
         return {
             runId: registration.runId,
             conversationId: registration.conversationId,
@@ -785,6 +792,7 @@ export function createWorkerOperationsHost(options) {
         };
     };
     const release = (runId, reason) => {
+        durable?.remove(runId);
         runs.delete(runId);
         try {
             created.host?.unregisterRun(runId);
@@ -1486,7 +1494,7 @@ export function createResumeOrchestration(options) {
                 waitId: park.waitId,
                 generation: park.generation,
                 expectedCancelEpoch,
-                lease: { ownerId: `subagents:${process.pid}`, pid: process.pid, processStartToken: processStartToken(process.pid) ? Buffer.from(processStartToken(process.pid)).toString("base64url") : undefined },
+                lease: { ownerId: options.leaseOwnerId ?? `subagents:${process.pid}`, pid: process.pid, processStartToken: processStartToken(process.pid) ? Buffer.from(processStartToken(process.pid)).toString("base64url") : undefined },
                 reservedCheckpointId: park.record.checkpoint?.entryId ?? park.waitId,
             });
             const claimId = String(claim.claimId ?? "");

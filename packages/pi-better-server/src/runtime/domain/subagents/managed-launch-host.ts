@@ -2,12 +2,13 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { verifyParkCheckpoint } from "./park-checkpoint.ts";
 import { intersectContinuationPermissions } from "./continuation-authority.ts";
 import extension from "./index.ts";
 import { bindRuntimeOutcomeStore } from "./assignment-outcomes.ts";
 import { catalogSnapshotFromWire } from "./catalog-store.ts";
 import { openLaunchJournal, launchDigest } from "./managed-launch-journal.mjs";
-import { nextRunId, processStartToken, listMetas, writeMeta, listActiveMetasForParent, effectiveStatus, readMeta } from "./registry.ts";
+import { nextRunId, processStartToken, listMetas, writeMeta, listActiveMetasForParent, effectiveStatus, readMeta, readParkRecord, updateParkRecord } from "./registry.ts";
 import { recoverLaunchMetadata } from "./managed-launch-recovery.ts";
 import { assertSubagentHandoff } from "./managed-launch-ownership.ts";
 import { createOwnerCapacityGates } from "./capacity.mjs";
@@ -58,11 +59,29 @@ export class ManagedSubagentHost {
             this.epoch = this.journal.epoch(instance);
             // An unpublished reservation cannot have dispatched task code. Release
             // only a proven-dead manager's claim before SDK reconciliation sees it.
-            for (const claim of (sharedStore as any)?.listResumeClaims({ state: "claimed" }) ?? []) {
-                if (claim.state !== "claimed" || !claim.lease?.ownerId?.startsWith("subagents:")) continue;
+            for (const claim of (sharedStore as any)?.listResumeClaims() ?? []) {
+                if (!["claimed", "published"].includes(claim.state) || !/^(managed-)?subagents:/.test(claim.lease?.ownerId ?? "")) continue;
                 const pid = claim.lease.pid;
                 if (!pid) continue;
                 if (processExists(pid) && (!claim.lease.processStartToken || Buffer.from(processStartToken(pid) ?? "").toString("base64url") === claim.lease.processStartToken || !processStartToken(pid))) continue;
+                if (claim.state === "published") {
+                    // This fixed adapter journals before spawning. Its exact old
+                    // manager is dead and its epoch fenced; absence of a journal
+                    // intent proves this publication never dispatched a child.
+                    if (!claim.attemptId || this.journal.attempt(claim.attemptId) || readMeta(claim.attemptId)) continue;
+                    const wait = (sharedStore as any).getWait({ waitId: claim.waitId, generation: claim.generation });
+                    const prior = wait?.park?.attemptId ? readMeta(wait.park.attemptId) : undefined;
+                    const park = prior ? readParkRecord(prior.id) : undefined;
+                    if (!prior || prior.management?.root !== root || claim.lease.ownerId !== `managed-subagents:${prior.management.instance}` || !park?.checkpoint) continue;
+                    if (readConversationLease(prior.sessionId)) continue;
+                    verifyParkCheckpoint({ ...park.checkpoint, version: 1, waitId: claim.waitId, generation: claim.generation });
+                    const result = (sharedStore as any).repairFailedResume({ waitId: claim.waitId, generation: claim.generation,
+                        claimId: claim.claimId, claimToken: claim.claimToken, attemptId: claim.attemptId, launchToken: claim.launchToken,
+                        proof: { writerPidGone: true, writerLeaseReleased: true }, checkpointId: wait.park.checkpointId,
+                        expectedCancelEpoch: wait.cancelEpoch, reason: "Exact managed publication never reached pre-spawn journal" });
+                    updateParkRecord(prior.id, { phase: result.phase, resumeExitReconciledClaimId: claim.claimId });
+                    continue;
+                }
                 (sharedStore as any).releaseResumeClaim({ waitId: claim.waitId, generation: claim.generation,
                     claimId: claim.claimId, claimToken: claim.claimToken, outcome: "ready",
                     reason: "Recovered unpublished reservation after exact manager exit" });
@@ -113,6 +132,7 @@ export class ManagedSubagentHost {
         return this.initializing ??= (async () => {
             const host = this;
             const port: ManagedLaunchPort = {
+                backgroundTools: () => host.current.background?.available === true ? host.current.background.tools : [],
                 get owner() { return { pid: host.current.pid, start: host.current.start }; },
                 get identity() { return { root: host.root, instance: host.instance, epoch: host.epoch }; },
                 continuationContext: () => host.executionContext(host.current),
@@ -144,7 +164,7 @@ export class ManagedSubagentHost {
                     const policyDigest = input.policyPath ? launchDigest(JSON.parse(readFileSync(input.policyPath, "utf8"))) : undefined;
                     const attempt = host.journal.prepare(host.current.ownerKey, host.current.key, host.epoch, { ...input, preflightDigest, policyDigest,
                         capacityOwner: { pid: host.current.pid, start: host.current.start },
-                        launchAuthority: host.current.launchAuthority ?? { owner: host.current.owner, pid: host.current.pid, start: host.current.start, settings: host.current.settings, model: host.current.model, projectTrusted: host.current.projectTrusted, permissions: host.current.permissions } });
+                        launchAuthority: host.current.launchAuthority ?? { owner: host.current.owner, pid: host.current.pid, start: host.current.start, settings: host.current.settings, model: host.current.model, projectTrusted: host.current.projectTrusted, background: host.current.background, permissions: host.current.permissions } });
                     return { PI_MANAGED_SUBAGENT: JSON.stringify({ path: host.path, owner: host.current.ownerKey,
                         key: host.current.key, epoch: host.epoch, id: input.id, token: attempt.token }) };
                 },

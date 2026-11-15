@@ -14,5 +14,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
-  "exclude": ["src/runtime/domain/subagents"]
+  "exclude": ["src/runtime/domain/subagents", "src/runtime/domain/background-service", "src/runtime/domain/sandbox-policy"]
 }

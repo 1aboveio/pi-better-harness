@@ -18,6 +18,7 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
       if (process.env.CONTINUATION_CRASH_POINT === "claim" && /INSERT INTO resume_claims/.test(sql)) this.crashAfterCommit = true;
       if (process.env.CONTINUATION_CRASH_POINT === "spawn" && /UPDATE subagent_launch_intents SET attempts/.test(sql)
           && JSON.parse(String(args[0])).some((attempt: any) => attempt.state === "spawned" && attempt.recoveryMeta?.resumedFrom)) this.crashAfterCommit = true;
+      if (process.env.CONTINUATION_CRASH_POINT === "published" && /UPDATE resume_claims[\s\S]*state = 'published'/.test(sql)) this.crashAfterCommit = true;
       if (process.env.CONTINUATION_CRASH_POINT === "result" && /INSERT INTO assignment_outcomes/.test(sql)) this.crashAfterCommit = true;
       return result;
     };
@@ -39,7 +40,8 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
 };
 const { startDaemon } = await import("../../src/server.ts");
 
-const daemon = await startDaemon({ serverDir: process.env.PI_SERVER_DIR, sessionIdleMs: 0, daemonIdleMs: 0 });
+const daemon = await startDaemon({ serverDir: process.env.PI_SERVER_DIR, sessionIdleMs: 0, daemonIdleMs: Number(process.env.TEST_DAEMON_IDLE_MS ?? 0),
+  ...(process.env.TEST_DAEMON_IDLE_MS ? { runtimeIdleMs: Number(process.env.TEST_DAEMON_IDLE_MS), startupGraceMs: 0 } : {}) });
 process.send?.({ ready: daemon.socketPath });
 process.on("message", async command => {
   if (command === "metrics") {
