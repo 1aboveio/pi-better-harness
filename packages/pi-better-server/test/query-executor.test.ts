@@ -143,6 +143,8 @@ test("an active read deadline rejects readers and bounds close while native SQLi
     assert.ok(closeMs < 1500, "native SQLite cannot retain executor shutdown beyond its close budget");
     await exit;
     assert.equal((f.executor.metrics().sqlite as { active: number }).active, 0, "worker exit releases its actual database connections");
+    assert.equal(f.executor.metrics().coordinatorConnections, 0);
+    assert.equal(f.executor.metrics().indexConnections, 0);
     t.diagnostic(JSON.stringify({ rejectedMs, closeMs, workerExitMs: performance.now() - began,
       limitation: "Native SQLite completion delays worker/process exit; the guardian owns the process hard-stop budget." }));
   } finally { await f.close(); }

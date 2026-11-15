@@ -54,7 +54,11 @@ export class WorkReadModel {
   private revision = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
   private reason: string | undefined = "Initial source inventory is rebuilding.";
-  readonly metrics = { inventories: 0, metadataReads: 0, projections: 0, coordinatorConnections: 0, indexConnections: 1 };
+  private counters = { inventories: 0, metadataReads: 0, projections: 0 };
+  get metrics() {
+    return { ...this.counters, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
+      indexConnections: this.closed ? 0 : 1 };
+  }
   readonly runs: string;
   readonly archives: string;
   readonly markers: string;
@@ -152,7 +156,7 @@ export class WorkReadModel {
   }
 
   private async scan() {
-    this.metrics.inventories++;
+    this.counters.inventories++;
     if (this.background.refresh()) this.publish();
     try {
       const next = new Map<string, { signature: string; meta: any }>();
@@ -181,7 +185,7 @@ export class WorkReadModel {
               const signature = `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
               let entry = this.files.get(path);
               if (entry?.signature !== signature) {
-                this.metrics.metadataReads++;
+                this.counters.metadataReads++;
                 const raw = await readFile(path, "utf8");
                 if (directory === this.markers) {
                   const marker = parseArchivedSessionState(raw, id);
@@ -251,7 +255,7 @@ export class WorkReadModel {
       for (const meta of attempts) {
         let row = this.projected.get(meta.id);
         if (!row || !row.assignment.verified || healthConfig.revision !== this.healthRevision || affected.has(family(meta))) {
-          this.metrics.projections++;
+          this.counters.projections++;
           const assignment = project(meta, processes.get(meta.id) ?? meta.status);
           const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRun(meta.id, { logPath: join(this.runs, meta.id, "output.log") }) : undefined;
           const display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.toolCalls.at(-1) ?? "" };
@@ -319,7 +323,6 @@ export class WorkReadModel {
       const tasks = this.background.read(scope, index);
       const status = this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
       const active = (index ? this.background.read({ ...scope, backgroundHistory: false, active: true }) : tasks).filter(task => task.durable ? task.active : task.status === "running").length;
-      this.metrics.coordinatorConnections = Number(Boolean(this.reader.connection(false))) + this.background.connectionCount;
       return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, tasks, status, index?.page, active]), seq: this.revision,
         observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
         status, reason: this.background.reason ?? (index ? this.background.historyReason : undefined),

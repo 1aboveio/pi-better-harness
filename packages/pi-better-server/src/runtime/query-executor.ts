@@ -60,7 +60,8 @@ export class WorkQueryExecutor {
     this.worker.on("exit", code => {
       this.exited = true;
       const sqlite = this.workerMetrics.sqlite;
-      if (sqlite) this.workerMetrics = { ...this.workerMetrics, sqlite: { ...sqlite, active: 0 } };
+      this.workerMetrics = { ...this.workerMetrics, coordinatorConnections: 0, indexConnections: 0,
+        ...(sqlite ? { sqlite: { ...sqlite, active: 0 } } : {}) };
       this.fail(new Error(`runtime-unhealthy: read worker exited (${code}); restart the runtime to rebuild reads`));
     });
   }
