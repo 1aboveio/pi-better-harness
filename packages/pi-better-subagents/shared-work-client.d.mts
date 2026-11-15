@@ -4,6 +4,7 @@ export class WorkClient {
     closed: boolean;
     request(type: string, params?: object): Promise<any>;
     snapshot?: any;
+    readonly closed: boolean;
     onChange(listener: (...args: any[]) => void): () => void;
     onCatalog(listener: (...args: any[]) => void): () => void;
     subscribe(scope: object): Promise<any>;

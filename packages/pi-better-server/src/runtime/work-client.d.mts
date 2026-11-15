@@ -1,5 +1,6 @@
 import type { WorkScope, WorkSnapshot } from "./read-model.ts";
 export class WorkClient {
+  readonly closed: boolean;
   constructor(socketPath: string, agentDir: string, requiredCapabilities?: string[]);
   snapshot?: WorkSnapshot;
   ready: Promise<any>;

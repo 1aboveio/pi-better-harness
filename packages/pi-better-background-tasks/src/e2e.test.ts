@@ -2,7 +2,12 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { startWorkRuntime } from "./test-support/work-runtime.js";
+
+let stopRuntime: () => Promise<void>;
+beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
+afterAll(async () => { await stopRuntime(); });
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
 import { recordFailure } from "./failures.js";
@@ -830,13 +835,12 @@ describe("extension e2e", () => {
       });
       id = extractTaskId(launch);
       const provider = harness.goalProviders[0] as {
-        getActivity(ctx: unknown): { items: Array<{ id: string; active: boolean; status: string }> };
+        getActivity(ctx: unknown): Promise<{ items: Array<{ id: string; active: boolean; status: string }> }>;
       };
-      const snapshot = provider.getActivity(harness.ctx);
-      const item = snapshot.items.find((entry) => entry.id === id);
-      expect(item).toMatchObject({ id, active: true, status: "running" });
+      await expect.poll(async () => (await provider.getActivity(harness.ctx)).items.find((entry) => entry.id === id))
+        .toMatchObject({ id, active: true, status: "running" });
 
-      const foreign = provider.getActivity({
+      const foreign = await provider.getActivity({
         cwd,
         sessionManager: { getSessionId: () => "goal-other" },
       });
