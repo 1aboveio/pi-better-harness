@@ -199,6 +199,7 @@ const LogParams = Type.Object({
 });
 
 const ActionParams = Type.Object({
+  request_id: Type.Optional(Type.String({ description: "Stable cancellation request identity for action:stop. Reuse after disconnect." })),
   action: Type.Union([
     Type.Literal("spawn"),
     Type.Literal("watch"),
@@ -226,6 +227,7 @@ const ActionParams = Type.Object({
 });
 
 const StatusActionParams = Type.Object({
+  request_id: Type.Optional(Type.String({ description: "Stable cancellation request identity for action:stop. Reuse after disconnect." })),
   action: Type.Union([Type.Literal("list"), Type.Literal("status"), Type.Literal("log"), Type.Literal("stop"), Type.Literal("clear")]),
   id: Type.Optional(Type.String()),
   status: Type.Optional(Type.Array(Type.String())),
@@ -435,10 +437,10 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     name: "bg_task_stop",
     label: "BG Stop",
     description: "Cancel a watcher or terminate a background task. Only a task owned by the current session stops; a foreign-session or unverifiable task is refused unless all:true. For a tmux-backed SSH task, stop kills its remote tmux session before marking it cancelled. Direct SSH stop only tears down the local client and may leave the remote process running.",
-    parameters: IdParams,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    parameters: Type.Object({ ...IdParams.properties, request_id: Type.Optional(Type.String({ description: "Stable cancellation request identity. Reuse this value after a disconnect." })) }),
+    async execute(toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      const durable = await durableStopText(pi, params.id, ctx);
+      const durable = await durableStopText(pi, params.id, ctx, params.request_id ?? toolCallId);
       if (durable !== undefined) {
         refreshNavigator(ctx);
         return text(durable);
@@ -458,9 +460,9 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
     },
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return actionText(pi, params, ctx, activeSession, getActiveSession, signal, runtime, refreshNavigator);
+      return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, signal, runtime, refreshNavigator);
     },
   });
 
@@ -472,9 +474,9 @@ export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRunt
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
     },
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return actionText(pi, params, ctx, activeSession, getActiveSession, undefined, runtime, refreshNavigator);
+      return actionText(pi, { ...params, request_id: params.request_id ?? toolCallId }, ctx, activeSession, getActiveSession, undefined, runtime, refreshNavigator);
     },
   });
 
@@ -702,7 +704,7 @@ async function runAction(
     }
     case "stop": {
       if (!params.id) return "Invalid parameters: stop requires id.";
-      const durable = await durableStopText(pi, String(params.id), ctx);
+      const durable = await durableStopText(pi, String(params.id), ctx, typeof params.request_id === "string" ? params.request_id : undefined);
       if (durable !== undefined) return withNavigatorRefresh(ctx, durable);
       return withNavigatorRefresh(ctx, await formatStop(pi, String(params.id), ctx, getActiveSession, statusOptions(params, callbackOrigin), runtime));
     }
@@ -846,11 +848,12 @@ function durableLogText(
   }
 }
 
-async function durableStopText(pi: ExtensionAPI, id: string, ctx: ExtensionContext): Promise<string | undefined> {
+async function durableStopText(pi: ExtensionAPI, id: string, ctx: ExtensionContext, requestId?: string): Promise<string | undefined> {
   const host = getObservedWaitHost(pi);
   if (!host?.available || !host.isDurableTask(id)) return undefined;
   try {
-    return host.formatStatus(await host.stopForParent(ctx, id));
+    const status = host.formatStatus(await host.stopForParent(ctx, id, requestId));
+    return requestId ? `Cancellation request: ${requestId}\n${status}` : status;
   } catch (error) {
     return readableError(error);
   }

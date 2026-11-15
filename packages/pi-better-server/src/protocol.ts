@@ -123,11 +123,14 @@ export type ControlCommand =
   | ({ id?: string; type: "extension_ui_response"; sessionId: string; requestId: string } & DialogAnswer);
 
 export type ClientCommand = HelloCommand | DaemonCommand | ControlCommand | SessionCommand
+  | { id?: string; type: "runtime_cancellation_status" }
+  | { id?: string; type: "runtime_cancel_task" | "runtime_query_cancellation"; credential: string }
   | ({ id?: string; type: "runtime_upgrade" } & UpgradeRequest)
   | { id?: string; type: "runtime_upgrade_status" }
   | { id?: string; type: "client_reload"; sessionId: string };
 
 export type DaemonResponse =
+  | { id?: string; type: "response"; command: "runtime_cancellation_status" | "runtime_cancel_task" | "runtime_query_cancellation"; success: true; data: unknown }
   | { id?: string; type: "response"; command: "hello"; success: true; data: HelloData }
   | { id?: string; type: "response"; command: "list_sessions"; success: true; data: { sessions: SessionSummary[] } }
   | { id?: string; type: "response"; command: "create_session"; success: true; sessionId: string; data: SessionSummary }

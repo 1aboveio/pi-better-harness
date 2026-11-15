@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import ts from "typescript";
@@ -8,15 +8,26 @@ const target = join(root, "packages/pi-better-server/src/runtime/domain");
 mkdirSync(target, { recursive: true });
 const background = join(target, "background");
 mkdirSync(join(background, "supervisor"), { recursive: true });
-for (const name of ["conditions.ts", "registry.ts", "types.ts", "supervisor/store.ts", "supervisor/types.ts"]) {
+for (const name of ["conditions.ts", "registry.ts", "types.ts", "process.ts", "process-identity.ts", "supervisor/store.ts", "supervisor/types.ts", "supervisor/supervisor.ts", "supervisor/identity.ts", "supervisor/invocation.ts"]) {
   const source = readFileSync(join(root, "packages/pi-better-background-tasks/src", name), "utf8");
   writeFileSync(join(background, name.replace(/\.ts$/, ".mjs")), ts.transpileModule(source.replaceAll(/(from\s+["'][^"']+)\.(ts|js)(["'])/g, "$1.mjs$3"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText);
+}
+mkdirSync(join(target, "coordinator/src"), { recursive: true });
+for (const name of ["index.ts", ...readdirSync(join(root, "packages/operation-coordinator/src")).filter(name => name.endsWith(".ts")).map(name => `src/${name}`)]) {
+  const source = readFileSync(join(root, "packages/operation-coordinator", name), "utf8");
+  writeFileSync(join(target, "coordinator", name.replace(/\.ts$/, ".mjs")), "// Generated canonical coordinator. Do not edit directly.\n" + ts.transpileModule(source.replaceAll(/(from\s+["'][^"']+)\.ts(["'])/g, "$1.mjs$2"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
   }).outputText);
 }
 // Carry only the canonical passive snapshot, not supervisor management methods.
 const supervisor = ts.createSourceFile("supervisor.ts", readFileSync(join(root, "packages/pi-better-background-tasks/src/supervisor/supervisor.ts"), "utf8"), ts.ScriptTarget.Latest, true);
 const snapshotPrinter = ts.createPrinter();
+const observed = ts.createSourceFile("observed-waits.ts", readFileSync(join(root, "packages/pi-better-background-tasks/src/observed-waits.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+writeFileSync(join(background, "terminal-publication.mjs"), "// Generated canonical terminal publication. Do not edit directly.\n" + ts.transpileModule(
+  'import { existsSync, statSync } from "node:fs";\n' + observed.statements.filter(s => ts.isFunctionDeclaration(s) && ["terminalOutcome", "evidenceFor", "supervisorTerminalPublication"].includes(s.name?.text)).map(s => snapshotPrinter.printNode(ts.EmitHint.Unspecified, s, observed)).join("\n"),
+  { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText);
 const summary = supervisor.statements.find(s => ts.isFunctionDeclaration(s) && s.name?.text === "launchSummary");
 const klass = supervisor.statements.find(s => ts.isClassDeclaration(s) && s.members.some(m => m.name?.getText(supervisor) === "snapshot"));
 const snapshotMethod = klass.members.find(m => m.name?.getText(supervisor) === "snapshot");

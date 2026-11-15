@@ -8,6 +8,8 @@
  * and leaves no partial record.
  */
 import { StoreError } from "./errors.ts";
+import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.ts";
+import type { TaskCancellationIntent, TaskCancellationRequest } from "./task-cancellation.ts";
 import { repairFailedResume, type RepairResumeInput } from "./recovery.ts";
 import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.ts";
 import type { AssignmentOutcomeInput, AssignmentOutcomeRecord } from "./assignment-outcomes.ts";
@@ -116,6 +118,18 @@ import {
 } from "./types.ts";
 
 export interface Store {
+    unknownTaskCancellation(input: TaskCancellationRequest): TaskCancellationIntent;
+    taskCancellationManaged(operationId: string): boolean;
+    pendingTaskCancellations(): ReturnType<typeof pendingTaskCancellations>;
+    finishTaskCancellationIntent(input: Parameters<typeof finishTaskCancellationIntent>[1]): TaskCancellationIntent;
+    cancellationRuntimeEpoch(instanceId?: string): number;
+    acceptAuthorizedTaskCancellation(input: { credential: string; runtimeEpoch: number }): TaskCancellationIntent;
+    admitTaskCancellation(input: Parameters<typeof admitTaskCancellation>[1]): void;
+    authorizedTaskCancellation(credential: string): ReturnType<typeof authorizedTaskCancellation>;
+    finishTaskCancellation(input: Parameters<typeof finishTaskCancellation>[1]): TaskCancellationIntent;
+    acceptTaskCancellation(input: TaskCancellationRequest): TaskCancellationIntent;
+    getTaskCancellation(input: { owner: OwnerIdentity; idempotencyKey: string }): TaskCancellationIntent | null;
+    recordTaskStopRequested(input: TaskCancellationRequest): TaskCancellationIntent;
     registerAssignment(input: Parameters<typeof registerAssignment>[1]): void;
     receiptAssignmentOutcome(input: Parameters<typeof receiptAssignmentOutcome>[1]): AssignmentOutcomeRecord;
     recordAssignmentOutcome(input: AssignmentOutcomeInput): AssignmentOutcomeRecord;
@@ -311,6 +325,15 @@ export function openStore(options: StoreOptions): Store {
     };
 
     const store: Store = {
+        unknownTaskCancellation(input) { alive(); return unknownTaskCancellation(ctx, input); },
+        taskCancellationManaged(operationId) { alive(); return taskCancellationManaged(ctx, operationId); },
+        pendingTaskCancellations() { alive(); return pendingTaskCancellations(ctx); },
+        finishTaskCancellationIntent(input) { alive(); return finishTaskCancellationIntent(ctx, input); },
+        cancellationRuntimeEpoch(instanceId) { alive(); return cancellationRuntimeEpoch(ctx, instanceId); },
+        acceptAuthorizedTaskCancellation(input) { alive(); return acceptAuthorizedTaskCancellation(ctx, input); },
+        admitTaskCancellation(input) { alive(); admitTaskCancellation(ctx, input); },
+        authorizedTaskCancellation(credential) { alive(); return authorizedTaskCancellation(ctx, credential); },
+        finishTaskCancellation(input) { alive(); return finishTaskCancellation(ctx, input); },
         registerAssignment(input) { alive(); registerAssignment(ctx, input); },
         receiptAssignmentOutcome(input) { alive(); return receiptAssignmentOutcome(ctx, input); },
         recordAssignmentOutcome(input) { alive(); return recordAssignmentOutcome(ctx, input); },
@@ -379,6 +402,18 @@ export function openStore(options: StoreOptions): Store {
         registerWait(input) {
             alive();
             return writeWait(ctx, input);
+        },
+        acceptTaskCancellation(input) {
+            alive();
+            return acceptTaskCancellation(ctx, input);
+        },
+        getTaskCancellation(input) {
+            alive();
+            return getTaskCancellation(ctx, input);
+        },
+        recordTaskStopRequested(input) {
+            alive();
+            return recordTaskStopRequested(ctx, input);
         },
         transitionWaitPhase(input) {
             alive();

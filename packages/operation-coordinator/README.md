@@ -63,6 +63,50 @@ generation (`stale-generation`).
 
 ## Lifecycle contract
 
+### Server Cancellation (#759)
+
+`acceptTaskCancellation` stores the fixed `cancel_task` request in the existing
+coordinator database. An immediate transaction checks the operation's full owner,
+launch token, terminal revision and supervision host before accepting the intent.
+The owner and idempotency key identify the receipt. Identical retries return that
+receipt before checking current operation state; changed content raises
+`request-conflict`. `getTaskCancellation` reads the same receipt after reconnect.
+
+The additive `task_cancellation_requests` table implements the persisted-intent
+requirement from ADR 0023 without creating another operation or terminal authority.
+`recordTaskStopRequested` records the host's durable stop-file publication after
+acceptance. Neither state proves process exit, publishes a terminal outcome,
+changes waits or releases evidence and writer fences.
+
+The registered Background stop tool obtains authority from `ObservedWaitHost`'s
+actual tool context. The host refuses foreign ownership and a live legacy or
+unknown supervisor, drains local cancellation admission, and records a hashed,
+exact-request credential before handing cancellation to the server. Subsequent
+local stop calls refuse that managed task. Launch and wait supervision stay with
+their existing hosts. An owner string or socket access grants no authority.
+
+`acceptAuthorizedTaskCancellation` verifies the current management epoch, the
+task cancellation epoch and an opaque semantic revision in the same transaction
+as journal acceptance. Health timestamps do not change that revision. Accepted
+requests are looked up before epoch checks, so reconnecting clients recover the
+original receipt rather than submitting an old envelope in a new epoch.
+
+The fixed server adapter calls the canonical supervisor's stop implementation.
+Before a file or process action, the journal is durable. Recovery verifies the
+original launch token. An existing durable stop file is observed rather than
+replayed, because its process action may already have happened. Unverifiable
+identity records `outcome_unknown`, retaining existing fences. Terminal evidence
+uses the host's shared publication contract and commits with the request receipt
+through the existing coordinator terminal transaction. No callback receipt or
+wait interpretation is manufactured.
+
+The wire commands are `runtime_cancellation_status`, `runtime_cancel_task` and
+`runtime_query_cancellation`; they require hello and accept only the fixed
+credential-bearing schema. The tool displays its request identity and accepts
+`request_id` for reconnect retries. A timeout before submission is `not_accepted`;
+a lost response after submission is `outcome_unknown`. A durable accepted request
+without a result remains `accepted`, and must be queried with the same key.
+
 **Launch.** `registerOperation` records the launch intent and unique execution
 token before a runner starts. Re-registering the same launch is idempotent; a
 changed task id, launch token, owner or observer is refused, so a store cannot be

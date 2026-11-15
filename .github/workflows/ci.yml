@@ -77,6 +77,10 @@ jobs:
           WORKER_SDK_ONLY: "1"
         run: node --import tsx --test packages/pi-better-subagents/tests/worker-waits-kernel.test.mjs
 
+      - name: Real SDK cancellation and exact-token crash recovery
+        working-directory: packages/pi-better-server
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts
+
   windows-verify:
     name: windows-verify
     runs-on: windows-latest
@@ -517,6 +521,10 @@ jobs:
 
       - name: Prove runtime lifecycle with real processes and sockets
         run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 packages/pi-better-server/test/runtime-lifecycle.test.ts packages/pi-better-server/test/daemon-owner.test.ts
+
+      - name: Prove cancellation authority and crash recovery with real processes
+        working-directory: packages/pi-better-server
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts
 
       - name: Run macOS compatibility golden paths
         timeout-minutes: 5

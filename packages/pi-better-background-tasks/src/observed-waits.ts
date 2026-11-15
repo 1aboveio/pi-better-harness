@@ -49,6 +49,7 @@ import {
 } from "./sandbox.js";
 import {
   openStore,
+  cancellationCredential,
   type AcknowledgeDisposition,
   type EvidenceKind,
   type OperationEvidenceRecord,
@@ -835,6 +836,20 @@ function mapEvidence(
   }));
 }
 
+/** Shared terminal publication contract for the host and fixed server cancel adapter. */
+export function supervisorTerminalPublication(operation: OperationRecord, inspection: SupervisorInspection, refs = evidenceFor(inspection)) {
+  const status = inspection.status;
+  const outcome = terminalOutcome(status);
+  return {
+    operationId: operation.operationId,
+    eventId: `${operation.taskId}:${inspection.result?.endedAt ?? inspection.lost?.recordedAt ?? inspection.observedAt}:${status}`,
+    outcome, owner: operation.owner,
+    evidence: refs.map(ref => ({ kind: ref.kind, ref: ref.ref, ...(ref.summary ? { summary: ref.summary } : {}), detailLost: ref.detailLost })),
+    ...(outcome === "lost" ? { detailLost: true } : {}),
+    reason: inspection.result ? `supervisor ${status} exit=${inspection.result.exitCode ?? "null"}` : "supervisor lost: no terminal evidence",
+  };
+}
+
 export class ObservedWaitHost {
   readonly service: BackgroundOperationService;
   private store?: Store;
@@ -880,6 +895,7 @@ export class ObservedWaitHost {
   private continuation?: ContinuationAdapter;
   private continuationError?: string;
   private readonly launches = new Map<string, LaunchContext>();
+  private readonly localCancels = new Set<string>();
   private readonly rpcRuns = new Map<string, RpcRunBinding>();
   private readonly waitOwners = new Map<string, OwnerIdentity>();
   private readonly stagedCheckpoints = new Map<string, { evidence: JsonRecord; toolCallId: string; checkpointRecorded: boolean }>();
@@ -1470,9 +1486,66 @@ export class ObservedWaitHost {
     return this.log(taskId, this.ownerFor(ctx), options);
   }
 
-  async stopForParent(ctx: ExtensionContext, taskId: string): Promise<StatusView> {
+  async stopForParent(ctx: ExtensionContext, taskId: string, requestId?: string): Promise<StatusView> {
     this.noteParentContext(ctx);
+    if (requestId) {
+      try { return await this.stopThroughRuntime(ctx, taskId, requestId); }
+      catch (error) {
+        if (/not_accepted|accepted:|outcome_unknown/.test(String(error))) throw error;
+        throw new Error(`not_accepted: ${String(error)}`);
+      }
+    }
     return this.stop(taskId, this.ownerFor(ctx));
+  }
+
+  /** Called from an actual admitted parent tool context, not a wire owner claim. */
+  authorizeCancellationForParent(ctx: ExtensionContext, taskId: string, requestId: string): string {
+    if (this.localCancels.has(taskId)) throw new Error("not_accepted: old cancellation admission is still draining");
+    const operation = this.ownedOperation(taskId, this.ownerFor(ctx));
+    if (this.supervisionAuthority(operation) === "foreign") throw new Error("permission-unavailable: live legacy or unknown supervisor prevents cancellation handoff");
+    const proof = cancellationCredential();
+    const previous = this.requireStore().getTaskCancellation({ owner: operation.owner, idempotencyKey: requestId });
+    if (previous && previous.operationId !== operation.operationId) throw new Error("not_accepted: request-conflict: cancellation key belongs to another task");
+    this.requireStore().admitTaskCancellation({ credentialHash: proof.hash, directory: this.directory, request: previous ?? {
+      owner: operation.owner, idempotencyKey: requestId, operationId: operation.operationId,
+      expectedLaunchToken: operation.launchToken, expectedTerminalRevision: operation.terminalRevision,
+      expectedHostId: operation.supervision?.hostId ?? "unavailable", reason: "explicit stop",
+    } });
+    return proof.credential;
+  }
+
+  private async stopThroughRuntime(ctx: ExtensionContext, taskId: string, requestId: string): Promise<StatusView> {
+    this.ownedOperation(taskId, this.ownerFor(ctx));
+    const root = realpathSync(dirname(this.storePath));
+    const registrationPath = join(root, "server-registration-v1.json");
+    if (!existsSync(registrationPath)) {
+      const installer = "../runtime-client/src/runtime/client.mjs";
+      await (await import(installer)).ensureRuntime({ agentDir: root });
+    }
+    const registration = JSON.parse(readFileSync(registrationPath, "utf8"));
+    if (registration.agentDir !== root || registration.version !== 1) throw new Error("not_accepted: invalid canonical runtime registration");
+    const module = "./shared-work-client.mjs";
+    const { WorkClient } = await import(module);
+    const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-cancellation-v1"]);
+    let submitted = false;
+    try {
+      await client.ready;
+      await client.request("runtime_cancellation_status");
+      const credential = this.authorizeCancellationForParent(ctx, taskId, requestId);
+      const previous = await client.request("runtime_query_cancellation", { credential });
+      let receipt = previous;
+      if (previous.state === "not_accepted") {
+        submitted = true;
+        receipt = await client.request("runtime_cancel_task", { credential });
+      }
+      if (receipt.state === "outcome_unknown" || !receipt.result) throw new Error(`${receipt.state}: cancellation ${requestId}; query the same request before retrying`);
+      return this.statusForParent(ctx, taskId);
+    } catch (error) {
+      const message = String(error);
+      if (/not_accepted|accepted:|outcome_unknown/.test(message)) throw error;
+      if (!submitted) throw new Error(`not_accepted: cancellation ${requestId}: ${message}`);
+      throw new Error(`outcome_unknown: cancellation ${requestId}; reconnect and query the same request before retrying: ${message}`);
+    } finally { client.close(); }
   }
 
   // ---- read-only projections for list, navigator and Goal -----------------
@@ -1794,14 +1867,19 @@ export class ObservedWaitHost {
   private async stop(taskId: string, owner: OwnerIdentity): Promise<StatusView> {
     const store = this.requireStore();
     const operation = this.ownedOperation(taskId, owner);
-    const result = await this.supervisor.stop(taskId);
-    const inspection = result?.inspection ?? this.supervisor.inspect(taskId);
-    this.reconcileInspection(operation, inspection);
-    const current = store.getOperation(operation.operationId) ?? operation;
-    if (current.terminalRevision === 0 && inspection?.terminal) {
-      this.recordTerminal(current, inspection);
-    }
-    return this.status(taskId, owner);
+    if (store.taskCancellationManaged(operation.operationId)) throw new Error("not_accepted: cancellation admission transferred to server; use the registered stop tool with the original request_id");
+    if (this.localCancels.has(taskId)) throw new Error("not_accepted: old cancellation is already in flight");
+    this.localCancels.add(taskId);
+    try {
+      const result = await this.supervisor.stop(taskId, { token: operation.launchToken });
+      const inspection = result?.inspection ?? this.supervisor.inspect(taskId);
+      this.reconcileInspection(operation, inspection);
+      const current = store.getOperation(operation.operationId) ?? operation;
+      if (current.terminalRevision === 0 && inspection?.terminal) {
+        this.recordTerminal(current, inspection);
+      }
+      return this.status(taskId, owner);
+    } finally { this.localCancels.delete(taskId); }
   }
 
   formatStatus(view: StatusView): string {
@@ -3003,26 +3081,10 @@ export class ObservedWaitHost {
     const store = this.requireStore();
     const status = inspection.status;
     const outcome = terminalOutcome(status);
-    const eventId = `${operation.taskId}:${inspection.result?.endedAt ?? inspection.lost?.recordedAt ?? inspection.observedAt}:${status}`;
     const refs = evidenceFor(inspection);
     let recorded;
     try {
-      recorded = store.recordTerminalOutcome({
-        operationId: operation.operationId,
-        eventId,
-        outcome,
-        owner: operation.owner,
-        evidence: refs.map((ref) => ({
-          kind: ref.kind,
-          ref: ref.ref,
-          ...(ref.summary ? { summary: ref.summary } : {}),
-          detailLost: ref.detailLost,
-        })),
-        ...(outcome === "lost" ? { detailLost: true } : {}),
-        reason: inspection.result
-          ? `supervisor ${status} exit=${inspection.result.exitCode ?? "null"}`
-          : "supervisor lost: no terminal evidence",
-      });
+      recorded = store.recordTerminalOutcome(supervisorTerminalPublication(operation, inspection, refs));
     } catch (error) {
       // A timer and a tool call can observe the same terminal record. The store
       // keeps the first revision; a replay is never a second execution.
