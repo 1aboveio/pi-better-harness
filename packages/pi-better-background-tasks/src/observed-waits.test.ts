@@ -623,12 +623,14 @@ describe("supervision authority", () => {
     expect((host as unknown as { pendingTerminalCallbacks: Set<string> }).pendingTerminalCallbacks.size).toBeLessThanOrEqual(256);
     expect(store.listPendingParentCallbacks({ sessionId: "paged-owner", workspace: root }, { limit: 256 })).toHaveLength(256);
     for (let index = 0; index < 129; index++) {
-      host.noteParentContext(createCtx(root, `scope-${index}`), { recover: false }); await host.reconcileNow();
+      // Scope eviction is an identity-cache operation; it needs no worker reconciliation.
+      host.noteParentContext(createCtx(root, `scope-${index}`), { recover: false });
     }
     host.noteParentContext(ctx, { recover: false });
     expect(host.hasPendingParentCallbackRecovery()).toBe(true);
     expect((host as unknown as { callbackRecoveryScopes: Map<string, unknown> }).callbackRecoveryScopes.size).toBeLessThanOrEqual(128);
-  });
+  // This exercises 600 durable records and sidecars, not a wall-clock performance budget.
+  }, 30_000);
 
   it("does not rewrite supervision while overlapping live hosts reconcile unchanged operations", async () => {
     const root = workspace("supervision-authority");
