@@ -742,8 +742,8 @@ let healthPi;
  *
  * Markers live on RunMeta so reloads and repeated health ticks never re-fire.
  * A marker means successful handoff only: written after sendMessage returns, or
- * after intentionally suppressing the model path under callback:false. A failed
- * or crashed delivery leaves the marker unset so reload/recovery can retry.
+ * after a UI warning under callback:false. An unavailable UI, failed or crashed
+ * delivery leaves the marker unset so reload/recovery can retry.
  * `callback:false` suppresses the model message only; the scoped frontend UI
  * is notified before recording quiet delivery. Uses the same followUp mechanics as
  * completion, with distinct ATTENTION wording from buildHealthCallbackDelivery.
@@ -767,16 +767,16 @@ function deliverHealthCallback(pi, meta, status, now) {
         if (!current || current.status !== status || isHealthCallbackHandled(current, status) || callbackSuppressionReason(current))
             return;
         meta = current;
-        if (uiCtx?.hasUI) {
-            const notice = status === "orphaned"
-                ? `Subagent ${label} lost supervision - related processes may still be alive (orphaned).`
-                : `Subagent ${label} is lost - no related process remains and no terminal result was observed.`;
-            try {
-                uiCtx.ui.notify(notice, "warning");
-            }
-            catch {
-                return;
-            }
+        if (!uiCtx?.hasUI)
+            return;
+        const notice = status === "orphaned"
+            ? `Subagent ${label} lost supervision - related processes may still be alive (orphaned).`
+            : `Subagent ${label} is lost - no related process remains and no terminal result was observed.`;
+        try {
+            uiCtx.ui.notify(notice, "warning");
+        }
+        catch {
+            return;
         }
         // The marker acknowledges quiet delivery, never a model turn.
         if (status === "orphaned")

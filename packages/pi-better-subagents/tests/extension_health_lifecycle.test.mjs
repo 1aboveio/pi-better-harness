@@ -1770,6 +1770,12 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 assert.equal(readMeta(id).lostCallbackSentAt, undefined, "a different saved branch cannot consume the recipient's notification");
                 assert.equal(branch.notes.filter(note => note.msg.includes(id)).length, 0);
                 await branch.shutdown(); stage("other-branch-stopped");
+                h = fixture.makeHarness({ sessionFile }); await h.ready;
+                if (!await waitFor(async () => (await h.inspect()).observation?.status === "ready")) throw new Error("rightful headless recipient did not obtain a ready canonical observation");
+                assert.equal(readMeta(id).lostCallbackSentAt, undefined, "the rightful headless session cannot consume a human notification");
+                assert.equal(h.delivered.length, 0, "a headless reconnect cannot replace the human warning with a model turn");
+                assert.equal(readFileSync(sessionFile, "utf8"), transcript, "headless observation does not change the saved transcript");
+                await h.shutdown(); stage("headless-recipient-stopped");
                 h = fixture.makeHarness({ ui: true, sessionFile, failHealthNotify: true }); await h.ready; stage("failing-ui-ready");
                 if (!await waitFor(async () => (await h.inspect()).uiFailures > 0)) throw new Error("actual SDK UI failure was not exercised");
                 assert.equal(readMeta(id).lostCallbackSentAt, undefined, "failed UI handoff cannot consume the health receipt");
@@ -1787,8 +1793,8 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                     "human notify still fires under callback:false",
                 );
                 assert.equal(h.notes.filter(note => note.level === "warning" && note.msg.includes(id) && /lost/i.test(note.msg)).length, 1, "canonical refreshes deliver one human warning");
-                // Marker still set after intentional callback:false suppression so
-                // recovery does not keep retrying the suppressed model path.
+                // A successful human warning acknowledges quiet delivery, so
+                // recovery does not repeat the warning or wake the model.
                 assert.ok(readMeta(id).lostCallbackSentAt > 0, "marker still written for dedupe");
                 assert.equal(h.delivered.length, 0, "UI-only health does not enqueue any model message");
                 assert.equal(readFileSync(sessionFile, "utf8"), transcript, "human notification does not append to the saved recipient transcript");
