@@ -1,5 +1,6 @@
 /**
- * End-to-end batch spawn test using a fake `pi` binary.
+ * Legacy batch fixtures use a fake `pi` binary; the concurrent batch/single
+ * capacity witness below uses real registered SDK actors and managed workers.
  *
  * This exercises the real index.ts spawn path without a model: a fake `pi`
  * executable is placed on PATH, the extension is loaded with a stubbed
@@ -34,6 +35,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { describe, it, before, beforeEach, after } from "node:test";
 import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { continuationFixture } from "./managed-continuation-fixture.mjs";
 import assert from "node:assert/strict";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -618,24 +620,35 @@ describe("subagent_spawn_batch end-to-end", () => {
         });
     }
 
-    it("reject-mode batch + concurrent single-spawn never exceeds maxConcurrent", async () => {
+    it("reject-mode batch + concurrent single-spawn never exceeds maxConcurrent", async (t) => {
         // Class counterexample: maxConcurrent free slots = 2. A two-job reject
         // batch and a concurrent single spawn race. Without shared reservation,
         // batch launches job 1, yields, single takes a slot, batch launches job 2
         // → 3 new runs (plus the 2 pre-filled = 5 > 4). With reservation, either
         // the batch takes both free slots or the single takes one and the batch
         // is rejected wholesale — never oversubscribe.
-        const { tools } = loadExtension(mod);
-        const ctx = makeCtx();
-
+        const root = join(RUNTIME, "managed-race"); mkdirSync(root, { recursive: true });
+        const artifacts = join(root, "children"); mkdirSync(artifacts);
+        const prior = Object.fromEntries(["PI_CODING_AGENT_DIR", "PI_SUBAGENT_DURABLE_DIR", "PI_CONTINUATION_SLEEP_MS"].map(key => [key, process.env[key]]));
+        process.env.PI_CONTINUATION_SLEEP_MS = "30000";
+        const fixture = await continuationFixture({ root, artifacts, workspace: RUNTIME });
+        writeFileSync(join(root, "agent/settings.json"), JSON.stringify({ piBetterHarness: { subagents: { defaultTools: "read,bash", maxConcurrent: 4 } } }));
+        const h = fixture.makeHarness(); await h.ready;
+        const tools = Object.fromEntries(h.tools), ctx = h.ctx;
+        let owner;
+        t.after(async () => {
+            for (const meta of registry.listMetas().filter(meta => meta.spawnPid === owner && ["running", "orphaned"].includes(meta.status))) {
+                await tools.subagent_stop.execute("cleanup", { id: meta.id });
+            }
+            await h.shutdown(); await fixture.close();
+            for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+        });
         for (let i = 0; i < 2; i++) {
-            writeRunningMeta(registry, `prefill-${i}`);
+            const result = await tools.subagent_spawn.execute(`prefill-${i}`, { prompt: `prefill-${i}`, clean: true, sandbox: false, tools: "read,bash" });
+            owner = registry.readMeta(result.details.runId).spawnPid;
         }
-        const before = countOwnedRunning(
-            registry.listMetas,
-            registry.effectiveStatus,
-            registry.ownedByThisParent,
-        );
+        const ownedRunning = () => registry.listMetas().filter(meta => meta.spawnPid === owner && registry.effectiveStatus(meta) === "running").length;
+        const before = ownedRunning();
         assert.equal(before, 2);
 
         const batchP = tools.subagent_spawn_batch.execute(
@@ -670,11 +683,7 @@ describe("subagent_spawn_batch end-to-end", () => {
             singleP,
         ]);
 
-        const after = countOwnedRunning(
-            registry.listMetas,
-            registry.effectiveStatus,
-            registry.ownedByThisParent,
-        );
+        const after = ownedRunning();
         assert.ok(
             after <= 4,
             `owned running must not exceed maxConcurrent=4; got ${after} ` +
