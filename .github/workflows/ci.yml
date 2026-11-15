@@ -16,7 +16,7 @@ jobs:
   shared-read-resources:
     name: shared-read-resources (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +28,18 @@ jobs:
           node-version: 24.14.1
           cache: npm
       - run: npm ci
+      - name: Export pinned private runtime Node
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "PI_TEST_PRIVATE_RUNTIME_NODE=" + process.execPath + "\n")'
+      - name: Measure the complete managed runtime
+        env:
+          PI_FULL_RUNTIME_REPORT: ${{ runner.temp }}/full-runtime-resources.json
+        run: node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs
+      - name: Qualify packed standalone domains and cached offline restart
+        working-directory: packages/pi-better-server
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-standalone.test.ts
+      - name: Prove real socket recipient backpressure recovery
+        working-directory: packages/pi-better-server
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-assignment-slow-socket.test.ts
       - name: Measure real Pi and Server shared reads
         env:
           PI_SHARED_READ_REPORT: ${{ runner.temp }}/shared-read-resources.json
@@ -37,7 +49,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: shared-read-resources-${{ matrix.os }}
-          path: ${{ runner.temp }}/shared-read-resources.json
+          path: |
+            ${{ runner.temp }}/shared-read-resources.json
+            ${{ runner.temp }}/full-runtime-resources.json
+            .work/standalone-*/measurements.json
+            .work/standalone-*/packaged-domain.log
           if-no-files-found: warn
 
   node24-sandbox:

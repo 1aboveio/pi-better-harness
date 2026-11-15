@@ -12,5 +12,13 @@ Integration review added exact branch/Goal matching to upgrade dependency admiss
 
 - The full-stack resource harness found three coordinator connections against the maximum of two. Sharing the query worker's reader removed one duplicate; a foreground `ObservedWaitHost` still owns a persistent connection and requires proper server mutation/admission migration. The failing report is retained without relaxing the budget.
 - Legacy Subagents fixtures still combine mechanical manager and foreground recipient behavior. Their migration has exposed and fixed a real timing-notification loss, but the full Subagents suite has not passed.
-- Further continuation crash/bridge/capability fixes are being validated on the continuation branch before integration.
+- Continuation crash/bridge/capability fixes are integrated and the 17-test combined continuation group passes. Review identified an additional post-lease/pre-journal crash window and tool-policy intersection gap; both require correction and real fault coverage before acceptance.
 - Final combined macOS/Linux resource matrices, packaging/upgrade checks, independent review and the requirement-by-requirement epic audit remain required.
+
+## Integrated recipient and installed-domain checks
+
+At `96729d1b`, seven shared-observation/backpressure tests and four real SDK/HostedSession assignment/timing delivery tests pass. The pending-recipient index retains exact-scope terminal obligations older than the normal display cutoff, pages bounded results, and avoids repeated filesystem projection. An actual paused Unix socket fills the production output queue, reconnects after replay truncation, and repairs the exact outcome without a second model turn.
+
+The standalone package test now imports and initializes the fixed managed SDK/domain from the installed artifact, with no repository imports. This exposed shutdown ordering that disposed the SDK before Background announced unavailability. Commit `96729d1b` closes the service first. The installed-domain qualification and cached offline restart both pass (2 tests; 76.7 seconds; local evidence `.work/standalone-dEYLTi`). All workspace typechecks pass after recipient integration.
+
+The Linux/macOS resource CI lane now includes the full process tree measurement, standalone installed-domain/offline qualification, and real socket backpressure recovery. CI results at the final integrated head remain required; configuration alone is not platform evidence.
