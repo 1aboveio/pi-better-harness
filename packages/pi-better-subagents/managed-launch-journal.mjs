@@ -1,7 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
-export const launchDigest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const ordered = value => value === null || typeof value !== "object" ? value
+    : Array.isArray(value) ? value.map(ordered)
+    : Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])]));
+export const launchDigest = value => createHash("sha256").update(JSON.stringify(ordered(value))).digest("hex");
 
 /** Durable external-launch intent; no bridge credentials or provider auth. */
 export class LaunchJournal {

@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fork } from "node:child_process";
+import { once } from "node:events";
 
 test("real SQLite launch journal retains exact retry identity and bootstrap fences epoch, lease and frozen policy", async () => {
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
@@ -47,4 +49,33 @@ test("real SQLite launch journal retains exact retry identity and bootstrap fenc
     assert.equal(JSON.parse(replay.attempts)[0].token, attempt.token);
     assert.equal(JSON.parse(replay.attempts).length, 1);
   } finally { lease.release(); journal.close(); }
+});
+
+test("SQLite launch-intent writer SIGKILL retains one attempt, recipe and token across replacement", async () => {
+  const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
+  const root = mkdtempSync(join(base, "crash-intent-"));
+  const module = "../src/runtime/domain/subagents/managed-launch-journal.mjs";
+  const { LaunchJournal } = await import(module);
+  const path = join(root, "coordinator.sqlite");
+  const recipe = { version: 1, attemptId: "sa_crash_1", sessionId: "sa_crash_1", cwd: root,
+    sessionDir: join(root, "sessions"), tools: "read", clean: false, allowNested: false, sandbox: false, approve: false, gitCloneWorkspace: false };
+  const child = fork(new URL("./support/subagent-intent-crash.mjs", import.meta.url), [], { execArgv: [], stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  const exited = once(child, "exit"), published = once(child, "message");
+  child.send({ path, input: { id: recipe.attemptId, sessionId: recipe.sessionId, recipe, capacityOwner: { pid: 123, start: "original-capacity-domain" } } });
+  const [publication] = await published;
+  const [code, signal] = await exited;
+  assert.equal(code, null); assert.equal(signal, "SIGKILL");
+  const recovered = new LaunchJournal(path);
+  try {
+    const epoch = recovered.epoch("replacement-server");
+    assert.equal(epoch, publication.epoch + 1);
+    const replay = recovered.accept("original-recipient", "one-launch", "same-request", epoch);
+    assert.equal(replay.prior, true);
+    const attempts = JSON.parse(replay.attempts);
+    assert.equal(attempts.length, 1); assert.equal(attempts[0].id, publication.id); assert.equal(attempts[0].token, publication.token);
+    assert.deepEqual(attempts[0].recipe, recipe);
+    assert.deepEqual(attempts[0].capacityOwner, { pid: 123, start: "original-capacity-domain" });
+    assert.throws(() => recovered.prepare("original-recipient", "one-launch", epoch, { id: "sa_duplicate_1" }), /not admitted/);
+    assert.equal(recovered.unresolvedAttempts().length, 1);
+  } finally { recovered.close(); }
 });

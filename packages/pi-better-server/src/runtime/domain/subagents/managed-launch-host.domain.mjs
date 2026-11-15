@@ -28,6 +28,10 @@ export class ManagedSubagentHost {
     capacityFor = createOwnerCapacityGates(({ pid, start }) => listActiveMetasForParent(pid).filter(meta => meta.spawnPidStartTime === start && effectiveStatus(meta) === "running").length
         + this.journal.unresolvedAttempts().filter((attempt) => attempt.capacityOwner?.pid === pid && attempt.capacityOwner?.start === start && !readMeta(attempt.id)).length);
     get busy() { return this.pending > 0; }
+    status() {
+        return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
+            inFlight: this.pending, unresolvedAttempts: this.journal.unresolvedAttempts().length };
+    }
     constructor(root, instance, catalog) {
         this.root = root;
         this.instance = instance;
@@ -104,6 +108,7 @@ export class ManagedSubagentHost {
                     return catalogSnapshotFromWire(command({ type: "runtime_get_catalog", overlay: configuration.getSessionSettings?.() ?? configuration.sessionSettings }));
                 },
                 beforeSpawn: input => {
+                    assertSubagentHandoff(listMetas({ includeArchived: false }), host.root);
                     const fresh = host.grant(host.current.authority);
                     if (launchDigest(fresh) !== host.current.grantDigest)
                         throw new Error("launch-authority-changed");

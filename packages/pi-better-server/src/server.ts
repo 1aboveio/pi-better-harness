@@ -195,6 +195,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             if (!greeted) throw new Error("runtime_get_status requires hello");
             return reply({ data: { agentDir: realpathSync(getAgentDir()), serverDir, instanceId, build, nodeVersion: process.versions.node,
               capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, lifecycle: config,
+              subagentManagement: launches?.status() ?? null,
               guardianBinding: guardianBinding?.identity ?? null,
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
                 ...registry.list().filter(session => session.live).map(session => ({ kind: "hosted-session", id: session.sessionId })),
@@ -220,11 +221,16 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           }
           if (type === "runtime_launch_subagent") {
             if (!greeted) throw new Error("not_accepted: launch requires hello");
-            launchInitialization ??= createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog);
-            launches = await launchInitialization;
-            const data = await launches.handle(command);
-            await work().reconcile();
-            return reply({ data });
+            if (runtimeInFlight >= 32) throw new Error("not_accepted: too many in-flight runtime requests");
+            if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
+            runtimeInFlight++;
+            try {
+              launchInitialization ??= createSubagentLaunch(realpathSync(getAgentDir()), instanceId!, catalog);
+              launches = await launchInitialization;
+              const data = await launches.handle(command);
+              await work().reconcile();
+              return reply({ data });
+            } finally { runtimeInFlight--; }
           }
           if (type === "runtime_subscribe_catalog") {
             if (!greeted) throw new Error(`${type} requires hello`);
@@ -412,7 +418,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
     cleanupStartup = async () => {
       await cancellations?.close();
-      await launches?.close();
+      await (await launchInitialization?.catch(() => undefined))?.close();
       await workModel?.close();
       for (const socket of sockets) socket.destroy();
       server.close();
@@ -522,7 +528,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           for (const socket of sockets) socket.destroy();
           await closed;
           await cancellations?.close();
-          await launches?.close();
+          await (await launchInitialization?.catch(() => undefined))?.close();
           await workModel?.close();
           await registry.shutdown();
           await Promise.allSettled([...dispatches]);

@@ -27,7 +27,7 @@ import { workObservation, workObservationFailure, startWorkObservation, stopWork
 import { withAssignmentObservations } from "./assignment-projection.mjs";
 import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { disposeBackgroundWorkNavigator, ensureBackgroundWorkNavigator, isNavigatorUiAvailable, refreshBackgroundWorkNavigator, registerBackgroundWorkProvider, renderRegisteredWorkDetail, } from "./shared-navigator.domain.mjs";
 import { spawnDetached, killProcessTree } from "./spawn.domain.mjs";
 import { parseRun, parseRunForLifecycle, resetParseRunCursor } from "./parse.domain.mjs";
@@ -1219,6 +1219,8 @@ function reconcileAbandonedRuns(now = Date.now()) {
     let adopted = 0;
     try {
         for (const summary of listMetas()) {
+            if (summary.management && !ownedByThisParent(summary))
+                continue;
             if (ownedByThisParent(summary))
                 continue;
             if (summary.status !== "running" && summary.status !== "orphaned")
@@ -1904,6 +1906,8 @@ function finalizeInterruptedRunFromLog(pi, meta, now) {
  * else belongs to a live pi and is never adjudicated here.
  */
 function ownsInterruptedSupervision(summary) {
+    if (summary.management)
+        return Boolean(managementPort?.owns(summary));
     if (summary.supervisionInterruptedAt === undefined)
         return false;
     return ownedByThisParent(summary) || isAbandonedByParent(summary, realProcessProbe);
@@ -2528,6 +2532,7 @@ export default function (pi, managed) {
                 await workerOperations.start();
                 return definition.execute(key, params, signal, onUpdate, ctx);
             } } : { ...definition, async execute(key, params, _signal, _onUpdate, ctx) {
+                catalogHostFrom(ctx);
                 const { submitManagedLaunch } = await import("./managed-launch-client.domain.mjs");
                 return await submitManagedLaunch(pi, ctx, key, definition.name, params);
             } });
@@ -4365,7 +4370,7 @@ export default function (pi, managed) {
         }
         catch { /* best effort */ }
         resumeOrchestration = undefined;
-        void workerOperations.close().catch(() => { });
+        await workerOperations.close().catch(() => { });
         // Children keep running; their finalizers (if this instance still holds
         // one) must not reach for a ctx that Pi invalidates once the session is
         // replaced.

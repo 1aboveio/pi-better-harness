@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 
 test("management handoff refuses live legacy managers and unknown writers, and isolates other roots", async () => {
   const domain = "../src/runtime/domain/subagents/";
@@ -22,6 +23,31 @@ test("management handoff refuses live legacy managers and unknown writers, and i
   assertSubagentHandoff([meta], "/root", probe);
   starts.set(10, undefined);
   assert.throws(() => assertSubagentHandoff([meta], "/root", probe), /legacy-manager-live-or-unknown/);
+});
+
+test("launch permission resolution keeps the captured child profile below the manager's main profile", async () => {
+  const domain = "../src/runtime/domain/subagents/";
+  const { resolveSubagentPermissions, currentSandboxPermissions } = await import(domain + "permission-policy.domain.mjs");
+  const { assertAssignmentPermissionScope } = await import(domain + "worker-waits.domain.mjs");
+  const events = new EventEmitter();
+  const full = { enabled: true, projectFiles: "read-write", outsideProject: "read-write", storedCredentials: "read-write", commands: true, network: true };
+  const child = { enabled: true, projectFiles: "read", outsideProject: "off", storedCredentials: "off", commands: false, network: false };
+  let policy: any = { state: "enabled", permissions: full, subagentPermissions: child };
+  events.on("pi-better-sandbox:policy-request", () => events.emit("pi-better-sandbox:policy", policy));
+  const api = { events };
+  const captured = currentSandboxPermissions(api);
+  const launch = resolveSubagentPermissions(api, undefined);
+  assert.equal(launch.sandboxEnabled, true); assert.equal(launch.enforced, true);
+  assert.equal(launch.permissions.commands, false); assert.equal(launch.permissions.network, false);
+  assert.equal(launch.permissions.outsideProject, "off");
+  assert.throws(() => resolveSubagentPermissions(api, false), /cannot bypass/);
+  policy = { state: "enabled", permissions: { ...full, commands: false }, subagentPermissions: child };
+  assert.throws(() => resolveSubagentPermissions(api, true), /Main sandbox profile disables commands/);
+  policy = { state: "inactive" };
+  assert.equal(resolveSubagentPermissions(api, undefined).enforced, false);
+  assert.throws(() => assertAssignmentPermissionScope({ sandbox: { root: "/workspace", permissions: captured.subagentPermissions }, mandatoryPermissions: true },
+    { sandbox: null, mandatoryPermissions: false }), /authority is unavailable/);
+  assert.equal(captured.subagentPermissions.network, false, "later host policy publications cannot rewrite captured authority");
 });
 
 test("capacity remains independent per original owner/start and shares reservations within one owner", async () => {

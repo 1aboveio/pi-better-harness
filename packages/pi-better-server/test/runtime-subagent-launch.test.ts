@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fork } from "node:child_process";
+import { fork, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -23,6 +23,7 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
   let parent: ReturnType<typeof fork> | undefined;
   let sibling: ReturnType<typeof fork> | undefined;
   const attempts: string[] = [];
+  let bootstrapProof: Record<string, unknown> | undefined;
   const metaFor = (id: string) => JSON.parse(readFileSync(join(root, "pi-better-subagents/runs", id, "meta.json"), "utf8"));
   const terminal = async (id: string) => {
     const directory = join(root, "pi-better-subagents/runs", id), watcher = watch(directory);
@@ -59,6 +60,8 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
       const rows = db.prepare("SELECT * FROM subagent_launch_intents").all() as any[];
       assert.equal(rows.length, 1); const attempts = JSON.parse(rows[0].attempts); assert.equal(attempts.length, 1);
       assert.equal(attempts[0].id, first.details.runId); assert.equal(attempts[0].token.length, 64);
+      bootstrapProof = { path: join(agent, "operation-coordinator.sqlite"), owner: rows[0].owner,
+        key: rows[0].request_key, epoch: rows[0].epoch, id: attempts[0].id, token: attempts[0].token };
     } finally { db.close(); }
     const rejected = once(parent, "message"); parent.send({ key: "over-owner-capacity", params });
     assert.match((await rejected)[0].error, /Max concurrent subagents/);
@@ -71,6 +74,11 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
     assert.notEqual(metaFor(first.details.runId).spawnPid, metaFor(independent.details.runId).spawnPid);
     assert.equal(metaFor(first.details.runId).cwd, cwd);
     await waitFile(entered);
+    const duplicateBootstrap = () => spawnSync(execPath, [new URL("../src/runtime/domain/subagents/managed-worker.mjs", import.meta.url).pathname], {
+      env: { ...env, PI_MANAGED_SUBAGENT: JSON.stringify(bootstrapProof) }, encoding: "utf8",
+    });
+    const duplicate = duplicateBootstrap();
+    assert.equal(duplicate.status, 1); assert.match(duplicate.stderr, /already has a writer/);
     const exited = once(parent, "exit"); parent.send({ stop: true }); await exited; parent = undefined;
     const worker = JSON.parse(readFileSync(entered, "utf8")); process.kill(worker.pid, 0);
     assert.equal(metaFor(first.details.runId).supervisionInterruptedAt, undefined, "frontend shutdown leaves server supervision intact");
@@ -79,6 +87,9 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
       const snapshot = await observer.get({ cwd, sessionId: ready.sessionId });
       assert.ok(snapshot.rows.some((row: any) => row.meta.id === first.details.runId), "original session scope reconnects without a writer");
       assert.equal(snapshot.rows.some((row: any) => row.meta.id === independent.details.runId), false);
+      const runtime = await observer.request("runtime_get_status");
+      assert.equal(runtime.subagentManagement.owner, "server");
+      assert.equal(runtime.subagentManagement.instanceId, runtime.instanceId);
     } finally { observer.close(); }
     const beforeRestart = JSON.stringify(metaFor(first.details.runId).recipe);
     const daemonExit = once(daemon, "exit"); daemon.send("stop"); await daemonExit;
@@ -88,6 +99,7 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
     const recovered = await launch({ ...params, role: undefined }, "independent-owner", sibling);
     assert.equal(recovered.details.runId, independent.details.runId);
     assert.equal(JSON.stringify(metaFor(first.details.runId).recipe), beforeRestart, "runtime replacement retains the frozen execution recipe");
+    const stale = duplicateBootstrap(); assert.equal(stale.status, 1); assert.match(stale.stderr, /epoch\/token is no longer admitted/);
     const journal = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
     try {
       const records = journal.prepare("SELECT attempts FROM subagent_launch_intents").all() as any[];
@@ -98,6 +110,17 @@ test("registered SDK launch freezes shared catalog, retries one intent, and surv
       const meta = await terminal(id);
       assert.equal(meta.status, "completed", `${id}: ${meta.lifecycleClassification}\n${errors}`);
     }
+    const prior = metaFor(independent.details.runId);
+    const followup = await launch({ prompt: "Continue in the saved worker conversation", session_id: independent.details.sessionId, callback: false }, "saved-followup", sibling);
+    attempts.push(followup.details.runId);
+    assert.equal(followup.details.sessionId, prior.sessionId);
+    assert.equal(followup.details.rootRunId, prior.rootRunId);
+    const continued = await terminal(followup.details.runId);
+    assert.equal(continued.resumedFrom, prior.id);
+    assert.equal(continued.recipe.tools, prior.recipe.tools);
+    assert.equal(continued.recipe.model, prior.recipe.model);
+    assert.equal(continued.cwd, prior.cwd);
+    assert.equal(continued.status, "completed");
   } finally {
     writeFileSync(release, "release");
     if (parent?.exitCode === null) { const exit = once(parent, "exit"); parent.send({ stop: true }); await exit; }

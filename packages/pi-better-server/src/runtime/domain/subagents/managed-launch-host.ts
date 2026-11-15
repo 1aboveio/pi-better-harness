@@ -27,6 +27,10 @@ export class ManagedSubagentHost {
         listActiveMetasForParent(pid).filter(meta => meta.spawnPidStartTime === start && effectiveStatus(meta) === "running").length
         + this.journal.unresolvedAttempts().filter((attempt: any) => attempt.capacityOwner?.pid === pid && attempt.capacityOwner?.start === start && !readMeta(attempt.id)).length);
     get busy() { return this.pending > 0; }
+    status() {
+        return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
+            inFlight: this.pending, unresolvedAttempts: this.journal.unresolvedAttempts().length };
+    }
     constructor(private root: string, private instance: string, private catalog: any) {
         this.current = { pid: process.pid, start: processStartToken(process.pid), owner: { workspace: root, sessionId: "runtime-recovery" } };
         this.path = join(root, "operation-coordinator.sqlite");
@@ -89,6 +93,7 @@ export class ManagedSubagentHost {
                     return catalogSnapshotFromWire(command({ type: "runtime_get_catalog", overlay: configuration.getSessionSettings?.() ?? configuration.sessionSettings }));
                 },
                 beforeSpawn: input => {
+                    assertSubagentHandoff(listMetas({ includeArchived: false }), host.root);
                     const fresh = host.grant(host.current.authority);
                     if (launchDigest(fresh) !== host.current.grantDigest) throw new Error("launch-authority-changed");
                     const preflightDigest = launchDigest(JSON.parse(readFileSync(input.preflightPath, "utf8")));

@@ -28,7 +28,7 @@ import { workObservation, workObservationFailure, startWorkObservation, stopWork
 import { withAssignmentObservations } from "./assignment-projection.mjs";
 import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
     disposeBackgroundWorkNavigator,
     ensureBackgroundWorkNavigator,
@@ -1324,6 +1324,7 @@ function reconcileAbandonedRuns(now: number = Date.now()): number {
     let adopted = 0;
     try {
         for (const summary of listMetas()) {
+            if (summary.management && !ownedByThisParent(summary)) continue;
             if (ownedByThisParent(summary)) continue;
             if (summary.status !== "running" && summary.status !== "orphaned") continue;
             if (!isAbandonedByParent(summary, realProcessProbe)) continue;
@@ -1978,7 +1979,8 @@ function finalizeInterruptedRunFromLog(
  * so its recorded interruption is the only thing that can recover it. Anything
  * else belongs to a live pi and is never adjudicated here.
  */
-function ownsInterruptedSupervision(summary: Pick<RunMeta, "spawnPid" | "spawnPidStartTime" | "supervisionInterruptedAt">): boolean {
+function ownsInterruptedSupervision(summary: Pick<RunMeta, "spawnPid" | "spawnPidStartTime" | "supervisionInterruptedAt" | "management">): boolean {
+    if (summary.management) return Boolean(managementPort?.owns(summary));
     if (summary.supervisionInterruptedAt === undefined) return false;
     return ownedByThisParent(summary) || isAbandonedByParent(summary, realProcessProbe);
 }
@@ -2595,6 +2597,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             await workerOperations.start();
             return definition.execute(key, params, signal, onUpdate, ctx);
         } } : { ...definition, async execute(key, params, _signal, _onUpdate, ctx) {
+            catalogHostFrom(ctx);
             const { submitManagedLaunch } = await import("./managed-launch-client.ts");
             return await submitManagedLaunch(pi, ctx, key, definition.name, params) as never;
         } });
@@ -4483,7 +4486,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         // to a replaced session's handlers. Durable wait records are untouched.
         try { resumeOrchestration?.stop(); } catch { /* best effort */ }
         resumeOrchestration = undefined;
-        void workerOperations.close().catch(() => {});
+        await workerOperations.close().catch(() => {});
         // Children keep running; their finalizers (if this instance still holds
         // one) must not reach for a ctx that Pi invalidates once the session is
         // replaced.
