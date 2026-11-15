@@ -21,12 +21,18 @@ let metadataReads = 0;
 let connections = 0;
 const repeats = 3;
 
-function measurePaints(records, rows, readRows) {
+function measurePaints(records, rows, readRows, overlay = false) {
     let factory;
+    let overlayComponent;
     let providerCalls = 0;
     const ui = { editor: undefined, setStatus() {},
         setWidget(_key, value) { if (typeof value === "function") factory = value; },
-        getEditorComponent() { return this.editor; }, setEditorComponent(value) { this.editor = value; } };
+        getEditorComponent() { return this.editor; }, setEditorComponent(value) { this.editor = value; },
+        custom(create) {
+            return new Promise(resolve => {
+                overlayComponent = create({ requestRender() {} }, {}, {}, resolve);
+            });
+        } };
     const ctx = { mode: "tui", hasUI: true, ui };
     const unregister = registerBackgroundWorkProvider({ id: "paint-stress", label: "Subagents", priority: 10,
         visibleCount: () => rows,
@@ -36,8 +42,15 @@ function measurePaints(records, rows, readRows) {
         }, detail: () => null, close: () => ({ action: "missing" }) });
     try {
         ensureBackgroundWorkNavigator(ctx, { createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
-            isOpenTrigger: () => false, matchKey: () => false, truncate: (value, width) => value.slice(0, width) });
-        const component = factory({ requestRender() {} }, {});
+            isOpenTrigger: key => key === "left", matchKey: (value, key) => value === key,
+            truncate: (value, width) => value.slice(0, width) });
+        if (overlay) {
+            const editor = ui.editor({}, {}, {});
+            editor.handleInput("left");
+            editor.handleInput("enter");
+            assert.ok(overlayComponent, "the real detail overlay must open");
+        }
+        const component = overlay ? overlayComponent : factory({ requestRender() {} }, {});
         const expected = component.render(100);
         assert.ok(expected.some(line => line.includes("sa_stress_0")), "the real work rail must render fixture rows");
         assert.ok(providerCalls > 0 && connections > 0, "the probe must exercise real assignment and SQLite reads");
@@ -48,7 +61,7 @@ function measurePaints(records, rows, readRows) {
         const paints = 60;
         for (let i = 0; i < paints; i++) assert.deepEqual(component.render(100), expected);
         const usage = process.cpuUsage(cpu);
-        const result = { consumer: "navigator-paints", records, rows, paints, providerCalls,
+        const result = { consumer: overlay ? "navigator-overlay-paints" : "navigator-paints", records, rows, paints, providerCalls,
             metadataReads, metadataReadBudget: 0, connections, connectionBudget: 0,
             cpuMs: (usage.user + usage.system) / 1000, wallMs: performance.now() - start };
         report.results.push(result);
@@ -133,6 +146,7 @@ try {
                 if (rows === 1) assert.ok(metadataReads >= records, "the probe must observe the initial lineage scan");
             }
             measurePaints(records, rows, consumers[0].run);
+            measurePaints(records, rows, consumers[0].run, true);
         }
     }
 } catch (error) {
