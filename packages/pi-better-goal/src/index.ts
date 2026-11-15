@@ -318,6 +318,7 @@ export default function (pi: ExtensionAPI): void {
   let currentCtx: ExtensionContext | undefined;
   let executionGeneration = 0;
   let operationAdmissionRevision = 0;
+  const operationAdmissionScope = {};
   let agentGeneration = -1;
   let turnGeneration = 0;
   let escapeAbortSuppression: { session: number; turn: number; execution: number } | undefined;
@@ -856,7 +857,11 @@ export default function (pi: ExtensionAPI): void {
     if (goal && currentContinuationState(ctx, goal.goalId)?.blocked) { held("Goal continuation requires human resume"); return; }
     if (goal && !boundCommandReady(goal, ctx)) { held("Bound workflow is not ready"); return; }
     const workflow = getWorkflow(ctx);
-    void (workflow ? operationResumeSchedulerGate(ctx.sessionManager.getBranch(), workflow) : Promise.resolve({ ok: true as const, waitUntil: undefined })).then((gate) => {
+    void (workflow ? operationResumeSchedulerGate(ctx.sessionManager.getBranch(), workflow, {
+      scope: operationAdmissionScope,
+      revision: JSON.stringify([request.owner.sessionId, request.owner.workspace, request.owner.branchId, goal?.goalId, revision, preferencesRevision]),
+      getEntries: () => ctx.sessionManager.getBranch(),
+    }) : Promise.resolve({ ok: true as const, waitUntil: undefined, isCurrent: () => true })).then((gate) => {
       if (ctx !== currentCtx || revision !== executionGeneration || preferencesRevision !== operationAdmissionRevision || !operationOwnerMatches(currentCtx, request.owner!)) {
         held("Parent execution changed during resume admission"); return;
       }
@@ -867,6 +872,9 @@ export default function (pi: ExtensionAPI): void {
         held("Goal became held during resume admission"); return;
       }
       if (!gate.ok) { held(gate.reason); return; }
+      if (JSON.stringify(getWorkflow(ctx)) !== JSON.stringify(workflow) || !gate.isCurrent()) {
+        held("Bound workflow changed during resume admission"); return;
+      }
       if (gate.waitUntil && gate.waitUntil > Date.now()) { held("Workflow scheduler is waiting"); return; }
       // An in-process capability lets the dispatcher validate this admission
       // after its last await and immediately before releasing execution.
@@ -876,6 +884,7 @@ export default function (pi: ExtensionAPI): void {
         const active = getGoal(ctx);
         if ((request.owner!.goalId ?? null) !== (active?.goalId ?? null)) return false;
         if (JSON.stringify(getWorkflow(ctx)) !== JSON.stringify(workflow)) return false;
+        if (!gate.isCurrent()) return false;
         return !active || (preferences.autoContinue && isPokeable(active)
           && !currentContinuationState(ctx, active.goalId)?.blocked && boundCommandReady(active, ctx));
       };
