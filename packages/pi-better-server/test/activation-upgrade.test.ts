@@ -246,12 +246,16 @@ function reservations(env: Env) {
 // Gates expose the preflight and shutdown awaits without replacing server/SDK code.
 function installGates(env: Env) {
   writeFileSync(join(env.agentDir, "extensions", "activation-gates.ts"), `
-    import { existsSync, writeFileSync } from "node:fs";
+    import { existsSync, writeFileSync, renameSync } from "node:fs";
     import { join } from "node:path";
     const dir = process.env.PI_FAKE_GATE_DIR;
     const path = name => join(dir, name);
     async function hold(name) {
-      writeFileSync(path(name + ".started"), String(process.pid));
+      // Publish the complete PID before the parent's existence probe can pass.
+      const marker = path(name + ".started");
+      const next = marker + "." + process.pid + ".next";
+      writeFileSync(next, String(process.pid));
+      renameSync(next, marker);
       while (!existsSync(path(name + ".release"))) await new Promise(resolve => setTimeout(resolve, 15));
       writeFileSync(path(name + ".finished"), String(process.pid));
     }

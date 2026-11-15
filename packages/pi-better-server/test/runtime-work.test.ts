@@ -396,8 +396,8 @@ test("watch overflow and lost notifications reconcile external writes once and r
     watchers.forEach(watcher => watcher.close());
     let cancelRecovery = () => {};
     const recovered = new Promise<void>((resolve, reject) => {
+      // Backported from reviewed754 f845: the observer owns its bounded wait.
       // With every watcher closed, only the unref'ed production poll remains.
-      // This owned observation has a deadline; an idle runtime itself must not keep Node alive.
       const deadline = setTimeout(() => { off(); reject(new Error("lost-notification observation did not recover")); }, 10000);
       const off = model.onChange(() => {
         if (model.snapshot().rows[0]?.assignment.state === "failed") { clearTimeout(deadline); off(); resolve(); }
