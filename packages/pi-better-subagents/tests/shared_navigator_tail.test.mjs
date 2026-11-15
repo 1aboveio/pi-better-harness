@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
-import { requestWorkDetail } from "../work-observation.ts";
+import { requestWorkDetail, workObservation } from "../work-observation.ts";
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
@@ -95,8 +95,9 @@ test("subagent details render a structured Pi-style transcript", async () => {
     betterSubagents(pi);
     try {
         await handlers.get("session_start")({}, ctx);
-        for (let attempt = 0; attempt < 100 && !requestWorkDetail(id)?.detail; attempt++) await delay(20);
+        for (let attempt = 0; attempt < 250 && (!requestWorkDetail(id)?.detail || workObservation()?.status !== "ready" || !workObservation()?.rows.some(row => row.meta.id === id)); attempt++) await delay(20);
         assert.ok(requestWorkDetail(id)?.detail, "shared detail must be observed before opening the transcript");
+        assert.equal(workObservation()?.status, "ready", "main-list snapshot must finish separately from the detail request");
         const renderMainList = (width = 120) => mainListWidget({ requestRender() {} }, ui.theme).render(width).join("\n");
         let mainList = renderMainList();
         assert.match(mainList, /·\s+main\s+test high · 109\.3k tok\s+idle/);
