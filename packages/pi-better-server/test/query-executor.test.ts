@@ -246,8 +246,8 @@ test('Subagents and Background share one coordinator read connection in the quer
 test("real runner timeout and canonical result supervision progress during stalled SQLite reads", { timeout: 20000 }, async t => {
   const { acquireMutationStore } = await import("../src/runtime/mutation-store.ts");
   const { RuntimeResultSupervision } = await import("../src/runtime/result-supervision.ts");
-  const { createLocalSupervisor } = await import("../../pi-better-background-tasks/src/supervisor/index.ts");
-  const { supervisorTaskIdForToken } = await import("../../pi-better-background-tasks/src/supervisor/store.ts");
+  const { createLocalSupervisor } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
+  const { supervisorTaskIdForToken } = await import(new URL("../../pi-better-background-tasks/src/supervisor/store.ts", import.meta.url).href);
   const f = await fixture();
   const lease = acquireMutationStore(f.root);
   const directory = join(f.root, "supervisor");
