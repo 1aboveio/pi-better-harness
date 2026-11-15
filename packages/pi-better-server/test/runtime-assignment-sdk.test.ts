@@ -4,16 +4,19 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 
-const { startWorkRuntimeFixture } = await import('../../pi-better-subagents/tests/work-runtime-fixture.mjs');
+// Load the standalone package at its runtime boundary. Its source is checked
+// under that package's compiler settings, not the Server's strip-only settings.
+const subagents = '../../pi-better-subagents/';
+const { startWorkRuntimeFixture } = await import(subagents + 'tests/work-runtime-fixture.mjs');
 const stop = await startWorkRuntimeFixture();
 after(stop);
 
 for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'local SDK'} reads and consumes the exact retained assignment`, { timeout: 30000 }, async () => {
-  const { default: extension } = await import('../../pi-better-subagents/index.ts');
-  const { registerAssignmentAttempt, commitAssignmentTerminal, readOutcome } = await import('../../pi-better-subagents/assignment-outcomes.ts');
-  const { writeMeta, runDir, logPathFor } = await import('../../pi-better-subagents/registry.ts');
+  const { default: extension } = await import(subagents + 'index.ts');
+  const { registerAssignmentAttempt, commitAssignmentTerminal, readOutcome } = await import(subagents + 'assignment-outcomes.ts');
+  const { writeMeta, runDir, logPathFor } = await import(subagents + 'registry.ts');
   const cwd = process.cwd(), agentDir = process.env.PI_CODING_AGENT_DIR!;
-  let api: any, turns = 0;
+  let turns = 0;
   const settingsManager = SettingsManager.inMemory({ defaultProvider: 'delivery-fixture', defaultModel: 'model' });
   const provider = (pi: any) => pi.registerProvider('delivery-fixture', {
     baseUrl: 'https://example.invalid', apiKey: 'offline', api: 'openai-completions',
@@ -28,7 +31,7 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
       return stream;
     },
   });
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true, extensionFactories: [pi => { api = pi; extension(pi); }, provider] });
+  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true, extensionFactories: [extension, provider] });
   let session: any, host: any;
   try {
     await resourceLoader.reload();
@@ -50,10 +53,8 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
     mkdirSync(runDir(id), { recursive: true }); writeFileSync(logPathFor(id), 'retained result\n');
     const meta: any = { id, sessionId: id, status: 'failed', pid: 0, spawnPid: process.pid, cwd, startedAt: Date.now(), endedAt: Date.now(), exitCode: 1, promptPreview: 'fixture', logPath: logPathFor(id), assignment: binding, callbackOrigin: { sessionId: manager.getSessionId(), cwd }, callback: true };
     writeMeta(meta); commitAssignmentTerminal(meta);
-    const { getCallbackBatcher } = await import('../../pi-better-subagents/shared-callback-batcher.ts');
-    api.events.emit('pi-better-workflow:changed', {});
-    await new Promise(resolve => setTimeout(resolve, 100));
-    await getCallbackBatcher(api).flush();
+    // Let the actual foreground observation/timer and callback batcher discover
+    // and deliver the durable outcome; no synthetic workflow event or flush.
     const deadline = Date.now() + 5000;
     while (!readOutcome(meta)?.deliveryReceipt && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
     assert.ok(readOutcome(meta)?.deliveryReceipt, JSON.stringify(readOutcome(meta)));
@@ -78,6 +79,7 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
     await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
     if (host) await host.dispose({ abort: false }); else session.dispose();
     manager = SessionManager.open(sessionFile);
+    await resourceLoader.reload();
     ({ session } = await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader, sessionManager: manager, noTools: 'all' }));
     if (hosted) {
       const { HostedSession } = await import('../src/hosted-session.ts');
