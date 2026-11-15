@@ -82,6 +82,8 @@ async function collect(candidate, current) {
                         owed.push(...page.rows);
                         owedCursor = page.nextCursor;
                     } while (owedCursor);
+                    if (current !== generation || candidate !== client)
+                        return;
                     const allRows = [...new Map([...rows, ...history.rows, ...owed].map(row => [row.meta.id, row])).values()];
                     snapshot = { ...first, rows: allRows, nextCursor: undefined,
                         totalMatching: first.totalMatching + history.totalMatching, activity: { active: rows.length } };
@@ -93,7 +95,12 @@ async function collect(candidate, current) {
                         return;
                     if (attempt === 1 || candidate.closed) {
                         degraded(error);
-                        return;
+                        if (candidate.closed)
+                            return;
+                        // A notification received during these page reads is
+                        // still owed a coherent collection. Drain only that
+                        // demand through the outer loop; do not start a poller.
+                        break;
                     }
                 }
             }

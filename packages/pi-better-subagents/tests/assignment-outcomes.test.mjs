@@ -30,7 +30,7 @@ async function observeFixture(sessionId = "parent", settleMs = 75) {
     const expected = listMetasForOrigin({ cwd: process.cwd(), sessionId }).filter(meta => meta.assignment && readOutcome(meta) && !readOutcome(meta).deliveryReceipt && !readOutcome(meta).disposition).map(meta => meta.id);
     const deadline = Date.now() + 3000;
     while (workObservation()?.status !== "ready" || !expected.every(id => workObservation().rows.some(row => row.meta.id === id))) {
-        if (Date.now() > deadline) throw new Error("Shared recipient observation did not arrive");
+        if (Date.now() > deadline) throw new Error(`Shared recipient observation did not arrive: ${JSON.stringify({ expected, snapshot: workObservation(), runtime: stopRuntime.diagnostics() })}`);
         await new Promise(resolve => setTimeout(resolve, 10));
     }
     // Standalone admission has a bounded 50ms absent-provider response window.
