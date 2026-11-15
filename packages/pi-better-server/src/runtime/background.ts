@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 // @ts-expect-error Generated canonical passive runner observation.
 import { snapshot } from "./domain/background/snapshot.mjs";
 // @ts-expect-error Generated canonical registry queries.
-import { observeMetasForOrigin, listTaskRecords, belongsToOrigin, readMeta } from "./domain/background/registry.mjs";
+import { observeMetasForOrigin, belongsToOrigin, readMeta } from "./domain/background/registry.mjs";
+import { BackgroundHistory } from "./background-history.ts";
+import type { WorkScope } from "./read-model.ts";
 
 /** Root-owned query connection; never opens a supervisor or mutates source facts. */
 export class BackgroundObservation {
@@ -17,14 +19,19 @@ export class BackgroundObservation {
   private root: string;
   private directory: string;
   private enabled = false;
+  private history?: BackgroundHistory;
   private legacy = new Map<string, { origin: { cwd: string; sessionId?: string }; rows: any[]; references: number }>();
   status: "ready" | "degraded" = "ready";
   reason?: string;
   get connectionCount() { return this.db ? 1 : 0; }
   get scopeCount() { return this.legacy.size; }
   readonly metrics = { runnerSnapshots: 0, activeQueries: 0, historyQueries: 0 };
-  constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor")) {
+  constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor"), indexDb?: any, changed = () => {}) {
     this.root = root; this.directory = directory;
+    if (indexDb) this.history = new BackgroundHistory(indexDb, directory, () => {
+      if (this.status === "degraded") throw new Error(this.reason);
+      return this.db;
+    }, operations => this.project(operations), changed);
   }
   refresh(): boolean {
     if (!this.enabled) return false;
@@ -34,7 +41,7 @@ export class BackgroundObservation {
       let identity;
       try { const info = statSync(path, { bigint: true }); identity = `${info.dev}:${info.ino}`; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      if (identity !== this.identity) { this.db?.close(); this.db = undefined; this.identity = identity; }
+      if (identity !== this.identity) { this.history?.invalidate(); this.db?.close(); this.db = undefined; this.identity = identity; }
       if (!identity && this.knownCoordinator) throw new Error("Coordinator source disappeared; retaining the previous observation");
       if (identity) {
         this.db ??= new DatabaseSync(path, { readOnly: true });
@@ -60,6 +67,7 @@ export class BackgroundObservation {
       }
       const signature = JSON.stringify([rows, [...this.legacy.values()].flatMap(entry => entry.rows).sort((a, b) => a.id.localeCompare(b.id))]);
       const changed = signature !== this.signature || this.status !== "ready";
+      if (changed) this.history?.invalidate();
       this.rows = rows; this.signature = signature; this.status = "ready"; this.reason = undefined;
       return changed;
     } catch (error) {
@@ -119,21 +127,27 @@ export class BackgroundObservation {
     let released = false;
     return () => { if (!released) { released = true; entry.references--; } };
   }
-  read(scope: { cwd?: string; sessionId?: string; active?: boolean; backgroundHistory?: boolean; backgroundAll?: boolean }, index?: any) {
+  read(scope: WorkScope, index?: any): any[] {
     if (!this.enabled) { this.enabled = true; this.refresh(); }
     const legacy = this.legacyScope(scope);
-    const legacyRows = scope.backgroundHistory ? index.records.map((record: any) => record.meta).filter(Boolean) : legacy.rows;
-    if (scope.backgroundHistory) this.metrics.historyQueries++;
-    const rows = scope.backgroundAll && this.db ? this.project(this.db.prepare("SELECT * FROM operations WHERE owner_kind = 'parent-session' AND observer_kind = 'local-supervisor'").all(), true) : scope.backgroundHistory && this.db ? this.project(this.db.prepare(`SELECT * FROM operations
-      WHERE owner_kind = 'parent-session' AND observer_kind = 'local-supervisor' AND owner_workspace = ? AND owner_session_id = ?`).all(scope.cwd, scope.sessionId), true) : this.rows;
+    if (scope.backgroundHistory) { this.metrics.historyQueries++; return index.records.map((record: any) => record.meta); }
+    const legacyRows = legacy.rows;
+    const rows = this.rows;
     return [...rows.filter(row => row.owner.kind === "parent-session" && row.dismissedAt === undefined
       && (scope.backgroundAll || row.owner.workspace === scope.cwd && row.owner.sessionId === scope.sessionId) && (!scope.active || row.active)),
-      ...legacyRows.filter((row: any) => (scope.backgroundAll || row.callbackOrigin && belongsToOrigin(row, legacy.origin)) && (!scope.active || row.status === "running"))];
+      ...legacyRows.filter((row: any) => (scope.backgroundAll || row.callbackOrigin && belongsToOrigin(row, legacy.origin)
+        && (scope.sessionId || row.spawnPid === scope.processId)) && (!scope.active || row.status === "running"))];
   }
-  close() { this.db?.close(); }
-  historyIndex(scope: { cwd?: string; sessionId?: string; backgroundAll?: boolean }) {
-    const index = listTaskRecords();
-    return { ...index, records: index.records.filter((record: any) => scope.backgroundAll || !record.meta
-      || !record.meta.callbackOrigin || belongsToOrigin(record.meta, scope)) };
+  close(): Promise<void> {
+    if (this.history) return this.history.close().then(() => { this.db?.close(); });
+    this.db?.close(); return Promise.resolve();
+  }
+  get historyStatus() { return this.history?.status ?? "degraded"; }
+  get historyReason() { return this.history?.reason; }
+  get historyMetrics() { return this.history?.metrics; }
+  historyIndex(scope: WorkScope) {
+    this.read({ ...scope, backgroundHistory: false });
+    if (!this.history) throw new Error("Background history requires the shared root index");
+    return this.history.read(scope);
   }
 }

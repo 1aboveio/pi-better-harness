@@ -8,8 +8,8 @@ ADR 0023. It does not change coordinator authority or execution admission.
 One server lazily starts one read worker thread for its canonical agent root.
 The worker owns the derived index, retained coordinator reader, source inventory,
 projections, detail parsing, snapshot JSON encoding and subscription capture.
-Normal operation retains one derived-index connection and at most one coordinator
-connection. Both are counted by actual database constructor/close instrumentation
+Normal operation retains one derived-index connection and at most two coordinator
+connections: the assignment reader and the passive Background reader. They are counted by actual database constructor/close instrumentation
 inside the worker; test budgets add any main-thread connections separately.
 
 A coordinator revision change performs one read-only source pass to fingerprint
@@ -23,6 +23,22 @@ envelopes, pre-encoded snapshot writes, admission, deadlines and event delivery.
 It does not run read-model SQLite, filesystem inventory, log parsing or projections.
 The existing 1 MiB request and 32 in-flight requests per connection remain in force.
 No arbitrary SQL, launch or mutation operation is accepted by the executor.
+
+Background activity uses only active coordinator rows, active legacy origin indexes
+and the known recent terminal identities. Goal and HostedSession reads never build
+the completed-task history index. Explicit Background lists build that index in
+yielding batches in the same derived database and report `rebuilding` until it is
+ready. Ownership (including the launching PID for sessionless origins), status,
+stable ordering and keyset pagination are applied before metadata leaves the worker.
+List output retains its byte budget and includes incident changes outside the page
+in revision cursors; incident counts shown in a page describe that page.
+
+History discovery uses coordinator revisions and shared filesystem notifications.
+Visible page metadata is signature-checked before a ready response. Legacy writers
+still require a shared signature inventory, at most once per 30 seconds after
+an explicit history request activates the index; changed sources trigger a repair sooner. That
+compatibility repair is O(H), reads JSON only for changed records and yields between
+batches. It is not a constant-cost history algorithm or part of activity checks.
 
 ## Bounds
 

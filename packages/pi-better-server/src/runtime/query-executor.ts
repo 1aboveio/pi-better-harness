@@ -96,7 +96,7 @@ export class WorkQueryExecutor {
     if (command.type !== "runtime_unsubscribe") {
       const scope = workScope(input.scope);
       if (scope.cwd) scope.cwd = resolve(scope.cwd);
-      scope.limit ??= 50;
+      scope.limit ??= scope.backgroundHistory ? 10 : 50;
       scope.detail ||= undefined;
       scope.statuses = scope.statuses?.length ? [...new Set(scope.statuses)].sort() : undefined;
       command.scope = scope;

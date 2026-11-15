@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 
 const clients = new WeakMap<object, Promise<any>>();
 const generations = new WeakMap<object, number>();
@@ -13,21 +14,30 @@ export function onBackgroundObservation(pi: ExtensionAPI, notify: () => void): (
 }
 
 /** A query connection grants no supervisor, transcript writer or retention authority. */
-export function backgroundObservation(pi: ExtensionAPI, ctx: ExtensionContext, history = false, all = false): Promise<any> {
-  const scope = { background: true, cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId() };
+export function backgroundObservation(pi: ExtensionAPI, ctx: ExtensionContext, history = false, all = false, page?: { limit?: number; statuses?: string[]; cursor?: string }): Promise<any> {
+  const scope = { background: true, cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId(), processId: process.pid };
   const generation = generations.get(pi) ?? 0;
   const read = async (retry: boolean): Promise<any> => {
     if ((generations.get(pi) ?? 0) !== generation) throw new Error("runtime-unavailable: client closed");
     const connection = observationClient(pi, scope);
     const client = await connection;
     if ((generations.get(pi) ?? 0) !== generation) throw new Error("runtime-unavailable: client closed");
-    try { return await client.get({ ...scope, backgroundHistory: history, backgroundAll: all }); }
+    try {
+      const deadline = Date.now() + 20000;
+      for (;;) {
+        checkGeneration();
+        const snapshot = await client.get({ ...scope, backgroundHistory: history, backgroundAll: all, ...page });
+        if (!history || snapshot.status !== "rebuilding" || Date.now() >= deadline) return snapshot;
+        await delay(20);
+      }
+    }
     catch (error) {
       if (!retry || !client.closed || (generations.get(pi) ?? 0) !== generation) throw error;
       if (clients.get(pi) === connection) clients.delete(pi);
       return read(false);
     }
   };
+  const checkGeneration = () => { if ((generations.get(pi) ?? 0) !== generation) throw new Error("runtime-unavailable: client closed"); };
   return read(true);
 }
 

@@ -16,7 +16,7 @@ import { extractChildEventFactsFromLog, healthThresholdsForConfig } from "./doma
 import { BackgroundObservation } from "./background.ts";
 import { readHealthConfig } from "./health-config.ts";
 
-export interface WorkScope { backgroundAll?: boolean; background?: boolean; backgroundHistory?: boolean; cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; endedAfter?: number; detail?: boolean; limit?: number; cursor?: string }
+export interface WorkScope { processId?: number; backgroundAll?: boolean; background?: boolean; backgroundHistory?: boolean; cwd?: string; sessionId?: string; id?: string; statuses?: string[]; active?: boolean; endedAfter?: number; detail?: boolean; limit?: number; cursor?: string }
 export interface WorkSnapshot {
   instanceId: string; runtimeEpoch: string; scopeRevision: string; seq: number;
   observedRevisionVector: { inventory: number; coordinator: string; healthConfig: string };
@@ -62,9 +62,9 @@ export class WorkReadModel {
 
   constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number } = {}) {
     this.agentDir = agentDir; this.instanceId = instanceId;
-    this.background = new BackgroundObservation(agentDir, options.supervisorDirectory);
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
+    this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish());
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
       started REAL, state TEXT, active INTEGER, ended REAL, payload TEXT);
       CREATE INDEX work_folder ON rows(cwd, started DESC, id DESC);
@@ -93,14 +93,20 @@ export class WorkReadModel {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); release?.(); };
   }
-  get backgroundMetrics() { return { ...this.background.metrics, scopes: this.background.scopeCount }; }
+  get backgroundMetrics() { return { ...this.background.metrics, scopes: this.background.scopeCount, history: this.background.historyMetrics }; }
   async ensureId(id: string) {
     if (!safeId.test(id)) throw new Error("Invalid run ID");
     if (this.state === "rebuilding") await this.reconcile();
     if (this.db.prepare("SELECT id FROM rows WHERE id = ?").get(id)) return;
     try { await stat(join(this.runs, id, "meta.json")); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-    await this.reconcile();
+    // An exact-ID read may race the writer's atomic replacement during inventory.
+    // Join the bounded repair passes before treating that freshly written ID as absent.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.reconcile();
+      if (this.db.prepare("SELECT id FROM rows WHERE id = ?").get(id) || !this.dirty) break;
+      await yieldTurn();
+    }
   }
   invalidate(reason: string) {
     this.state = "degraded"; this.reason = reason;
@@ -270,13 +276,15 @@ export class WorkReadModel {
       if (scope.backgroundHistory && this.background.refresh()) this.publish();
       const index = scope.backgroundHistory ? this.background.historyIndex(scope) : undefined;
       const tasks = this.background.read(scope, index);
+      const status = this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
       this.metrics.coordinatorConnections = 1 + this.background.connectionCount;
-      return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, tasks, this.background.status]), seq: this.revision,
+      return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, tasks, status, index?.page]), seq: this.revision,
         observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
-        status: this.background.status, reason: this.background.reason,
-        rows: tasks.map(meta => ({ meta, assignment: null, sourceRevision: hash(meta) })), totalMatching: tasks.length,
+        status, reason: this.background.reason ?? (index ? this.background.historyReason : undefined),
+        rows: tasks.map(meta => ({ meta, assignment: null, sourceRevision: hash(meta) })), totalMatching: index?.page.total ?? tasks.length,
+        ...(index?.page.nextCursor ? { nextCursor: index.page.nextCursor } : {}),
         ...(index ? { backgroundIndex: index } : {}),
-        activity: { active: tasks.filter(task => task.durable ? task.active : task.status === "running").length }, nextDeadline: null };
+        activity: { active: (index ? this.background.read({ ...scope, backgroundHistory: false, active: true }) : tasks).filter(task => task.durable ? task.active : task.status === "running").length }, nextDeadline: null };
     }
     const clauses: string[] = [], args: any[] = [];
     if (scope.id) { clauses.push("id = ?"); args.push(scope.id); }
@@ -330,6 +338,6 @@ export class WorkReadModel {
   async close() {
     this.closed = true; if (this.timer) clearInterval(this.timer);
     for (const watcher of this.watchers) watcher.close();
-    await this.pending; this.listeners.clear(); this.background.close(); this.reader.close(); this.db.close();
+    await this.pending; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
   }
 }
