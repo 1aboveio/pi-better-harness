@@ -12,6 +12,8 @@ Issue: #762, parent #751. This branch integrates #761 recovery at 8c7ec00f. Exte
 - Unavailable permission sources expose diagnostics and bounded exponential backoff. A 32-admissions/second root budget prevents eviction from defeating per-key backoff; diagnostics retain at most 128 generations. The real unavailable-source fixture verifies no dispatch and idle closure of runtime management after foreground detachment.
 - `runtime-subagent-bootstrap-restart.test.ts` verifies stale unbootstrapped epochs cannot execute, while already bootstrapped workers resume the exact original writer and token. Transport paths are canonical and waits/cleanup are bounded.
 
+- Changed logs for managed terminal/interrupted records flow from the existing shared inventory to manager supervision in batches of at most 128 IDs, with one outstanding batch. The manager rereads metadata/root ownership and folds canonical failure observations; the query worker remains read-only. A real daemon/native SDK regression verifies a 60-second-old lost record with an already handled health callback: a malformed event appended while disconnected becomes durable owed attention, and reconnect delivers exactly that new incident once. Foreign-root records remain untouched.
+
 ## Validation and integration boundaries
 
 Dependencies were installed independently with `npm ci`; no original checkout dependency aliases are used. Canonical source packages own typechecking of generated Background/Sandbox source mirrors, matching the existing generated Subagents arrangement.

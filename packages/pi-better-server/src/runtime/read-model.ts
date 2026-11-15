@@ -35,6 +35,7 @@ const safeId = /^[A-Za-z0-9_-]+$/;
 
 /** Reconstructable query state. It never authorizes execution or writes source records. */
 export class WorkReadModel {
+  onTerminalLogsChanged?: (ids: string[]) => void;
   private background: BackgroundObservation;
   private db: any;
   private reader: ReturnType<typeof createAssignmentReader>;
@@ -218,6 +219,7 @@ export class WorkReadModel {
       const failureJournals = new Map<string, string>();
       const processes = new Map<string, string>();
       const logFamilies = new Set<string>();
+      const terminalLogChanges: string[] = [];
       for (const [path, entry] of next) {
         if (!path.startsWith(this.runs + sep)) continue;
         let signature = this.logs.get(entry.meta.id);
@@ -228,6 +230,8 @@ export class WorkReadModel {
           } catch (error) { signature = (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unverified"; }
         }
         logs.set(entry.meta.id, signature);
+        if ((signature !== this.logs.get(entry.meta.id) || this.files.get(path)?.meta.status !== entry.meta.status) && entry.meta.status !== "running"
+            && entry.meta.management?.root === this.agentDir) terminalLogChanges.push(entry.meta.id);
         if (signature !== this.logs.get(entry.meta.id)) logFamilies.add(JSON.stringify([entry.meta.sessionId, entry.meta.cwd]));
         const failureSignature = (await Promise.all(["failures.jsonl", "failures.jsonl.observed"].map(async name => {
           try { const info = await stat(join(this.runs, entry.meta.id, name), { bigint: true }); return `${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`; }
@@ -325,6 +329,7 @@ export class WorkReadModel {
       this.files = next; this.logs = logs; this.failureJournals = failureJournals; this.processes = processes; this.healthRevision = healthConfig.revision; this.coordinator = coordinator; this.inventory++;
       this.coordinatorConversations = coordinatorConversations;
       this.projected = new Map(rows.map(row => [row.meta.id, row]));
+      if (terminalLogChanges.length) this.onTerminalLogsChanged?.(terminalLogChanges);
       const previousState = this.state;
       const previousReason = this.reason;
       this.state = rows.some(row => !row.assignment.verified) ? "degraded" : "ready";

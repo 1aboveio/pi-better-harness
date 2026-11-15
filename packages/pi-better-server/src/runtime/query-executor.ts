@@ -17,6 +17,7 @@ interface WorkerMetrics { inventories?: number; coordinatorConnections?: number;
 export interface QueryExecutorOptions {
   capacity?: number; timeoutMs?: number; maxConnections?: number;
   workerUrl?: URL;
+  onTerminalLogsChanged?: (ids: string[]) => Promise<void>;
   modelOptions?: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number };
 }
 
@@ -154,6 +155,14 @@ export class WorkQueryExecutor {
     if (this.failure) return;
     if (message.metrics) this.workerMetrics = message.metrics;
     if (message.observation) this.lastObservation = message.observation;
+    if (message.type === "terminal-logs") {
+      const ids = Array.isArray(message.ids) ? message.ids.filter((id: unknown): id is string => typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id)).slice(0, 128) : [];
+      void Promise.resolve().then(() => this.options.onTerminalLogsChanged?.(ids)).then(
+        () => { if (!this.failure) this.worker.postMessage({ type: "terminal-logs-consumed" }); },
+        error => this.fail(new Error(`runtime-unhealthy: terminal failure supervision failed: ${String(error)}`)),
+      );
+      return;
+    }
     if (message.type === "revision") { this.revision++; this.worker.postMessage({ type: "revision-consumed" }); return; }
     if (message.type === "event") {
       if (this.streams.get(message.connection)?.generation === message.generation) this.event(message.connection, message.line);

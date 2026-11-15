@@ -14,6 +14,7 @@ import { recoverLaunchMetadata } from "./managed-launch-recovery.ts";
 import { assertSubagentHandoff } from "./managed-launch-ownership.ts";
 import { createOwnerCapacityGates } from "./capacity.mjs";
 import { readConversationLease, releaseUnspawnedConversationLease } from "./continuation.ts";
+import { collectRunFailures } from "./failures.ts";
 import { processExists } from "./spawn.ts";
 import type { ManagedLaunchPort } from "./managed-launch-port.ts";
 
@@ -281,6 +282,20 @@ export class ManagedSubagentHost {
                 throw error;
             }
         }).finally(() => { this.pending--; });
+        this.tail = result;
+        return result;
+    }
+    /** Changed-log hints are untrusted observations; recheck exact root ownership. */
+    foldTerminalFailures(ids: readonly string[]): Promise<void> {
+        const result = this.tail.catch(() => undefined).then(() => {
+            this.journal.current(this.epoch);
+            for (const id of new Set(ids)) {
+                if (!/^[A-Za-z0-9_-]+$/.test(id)) continue;
+                const meta = readMeta(id);
+                if (!meta || meta.management?.root !== this.root || meta.status === "running") continue;
+                collectRunFailures(id, meta.cwd, meta.status !== "orphaned");
+            }
+        });
         this.tail = result;
         return result;
     }

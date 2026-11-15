@@ -27,6 +27,18 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
 const { WorkReadModel } = await import("./read-model.ts");
 const { WorkQueries } = await import("./queries.ts");
 const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);
+// Reuse the shared inventory hints; only the manager may fold canonical failures.
+// Coalesce by ID and send at most one bounded batch until the manager acknowledges it.
+const terminalLogs = new Set();
+let terminalLogsPending = false;
+const sendTerminalLogs = () => {
+  if (terminalLogsPending || !terminalLogs.size) return;
+  const ids = [...terminalLogs].slice(0, 128);
+  for (const id of ids) terminalLogs.delete(id);
+  terminalLogsPending = true;
+  parentPort.postMessage({ type: "terminal-logs", ids });
+};
+model.onTerminalLogsChanged = ids => { for (const id of ids) terminalLogs.add(id); sendTerminalLogs(); };
 const sessions = new Map();
 const cache = new Map();
 const encoded = new WeakMap();
@@ -85,6 +97,7 @@ function session(id) {
 }
 
 parentPort.on("message", async message => {
+  if (message.type === "terminal-logs-consumed") { terminalLogsPending = false; sendTerminalLogs(); return; }
   if (message.type === "revision-consumed") {
     revisionPending = false;
     if (revisionDirty) { revisionDirty = false; revision(); }

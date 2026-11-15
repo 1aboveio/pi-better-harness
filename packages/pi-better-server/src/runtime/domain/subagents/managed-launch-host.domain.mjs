@@ -15,6 +15,7 @@ import { recoverLaunchMetadata } from "./managed-launch-recovery.domain.mjs";
 import { assertSubagentHandoff } from "./managed-launch-ownership.domain.mjs";
 import { createOwnerCapacityGates } from "./capacity.mjs";
 import { readConversationLease, releaseUnspawnedConversationLease } from "./continuation.domain.mjs";
+import { collectRunFailures } from "./failures.domain.mjs";
 import { processExists } from "./spawn.domain.mjs";
 /** One fixed SDK adapter per runtime, not a client-selected module or transcript writer. */
 export class ManagedSubagentHost {
@@ -330,6 +331,22 @@ export class ManagedSubagentHost {
                 throw error;
             }
         }).finally(() => { this.pending--; });
+        this.tail = result;
+        return result;
+    }
+    /** Changed-log hints are untrusted observations; recheck exact root ownership. */
+    foldTerminalFailures(ids) {
+        const result = this.tail.catch(() => undefined).then(() => {
+            this.journal.current(this.epoch);
+            for (const id of new Set(ids)) {
+                if (!/^[A-Za-z0-9_-]+$/.test(id))
+                    continue;
+                const meta = readMeta(id);
+                if (!meta || meta.management?.root !== this.root || meta.status === "running")
+                    continue;
+                collectRunFailures(id, meta.cwd, meta.status !== "orphaned");
+            }
+        });
         this.tail = result;
         return result;
     }
