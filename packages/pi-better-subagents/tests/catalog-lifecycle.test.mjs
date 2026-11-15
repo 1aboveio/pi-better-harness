@@ -490,7 +490,7 @@ Edited instructions.
 
 describe("registered catalog spawn", { concurrency: false }, () => {
     let tools;
-    let lastContext;
+    let lastContext, catalogHost;
     const fx = fixture();
 
     before(async () => {
@@ -523,6 +523,7 @@ fi
         process.env.PI_SUBAGENTS_TEST_REGISTRY = baseDir();
         process.env.PI_CODING_AGENT_DIR = fx.userRoot;
         const stopRuntime = await startWorkRuntimeFixture();
+        catalogHost = await import("../catalog-host-admission.ts");
         writeAgent(fx.userRoot, "agent.payments", "role.developer", "Look at payments.");
         const extension = await import(`../index.ts?catalog-lifecycle=${Date.now()}`);
         tools = {};
@@ -535,6 +536,7 @@ fi
                 await handler({ type: "session_shutdown", reason: "shutdown" }, lastContext);
             }
             await stopOwnedRuntime(serverDir, owner.status === "live" ? owner.owner : undefined);
+            catalogHost.closeCatalogHost();
             await stopRuntime();
         };
         const { managedDomainPort } = await import("./managed-domain-port.mjs");
@@ -547,7 +549,7 @@ fi
     });
 
     function ctx() {
-        return lastContext = {
+        lastContext = {
             cwd: fx.cwd,
             hasUI: false,
             mode: "tui",
@@ -560,6 +562,8 @@ fi
             isProjectTrusted: () => true,
             ui: { setWidget() {}, notify() {}, select: async () => undefined },
         };
+        catalogHost.noteCatalogHostContext(lastContext, () => ({}));
+        return lastContext;
     }
 
     function textOf(result) {
