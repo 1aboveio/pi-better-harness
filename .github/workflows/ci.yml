@@ -569,10 +569,17 @@ jobs:
   # Keep the existing required check name. A lane may report skipped only when the
   # selector said its area did not change; any other skip, failure or cancellation
   # fails this check.
+  #
+  # shared-read-resources is deliberately not part of this gate. It measures
+  # publication latency across 50 real Pi subscribers on a shared runner, where
+  # one stalled notification round fails a bound whose median sits four times
+  # inside it. It still runs and still reports; the one-second publication
+  # contract stays enforced by runtime-event-publication.test.ts and
+  # query-executor.test.ts inside server-tests, which this gate does require.
   ci:
     name: ci
     if: always()
-    needs: [changes, workspace-ci, server-tests, shared-read-resources]
+    needs: [changes, workspace-ci, server-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -583,7 +590,6 @@ jobs:
           SERVER_AREA: ${{ needs.changes.outputs.server }}
           WORKSPACE_RESULT: ${{ needs.workspace-ci.result }}
           SERVER_RESULT: ${{ needs.server-tests.result }}
-          RESOURCES_RESULT: ${{ needs.shared-read-resources.result }}
         run: |
           set -uo pipefail
           fail=0
@@ -609,7 +615,6 @@ jobs:
           fi
           check workspace-ci "$WORKSPACE_RESULT" "$WORKSPACE_AREA"
           check server-tests "$SERVER_RESULT" "$SERVER_AREA"
-          check shared-read-resources "$RESOURCES_RESULT" "$SERVER_AREA"
           exit "$fail"
 
   # Five focused macOS lanes behind one required name. Running the same suites
