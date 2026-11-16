@@ -117,17 +117,49 @@ for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query
     const page = await first.get(scope);
     const before = f.executor.metrics() as any;
     let events = 0;
-    const stops = clients.map(client => client.onChange(() => events++));
+    let phase = "metadata-update";
+    const frameSummary = (value: any) => {
+      const cursor = value.nextCursor ?? value.rows?.[0]?.cursor;
+      let publicationScope;
+      if (cursor) {
+        try {
+          const [key, instanceId, tokenRevision] = JSON.parse(Buffer.from(cursor, "base64url").toString());
+          publicationScope = { key, instanceId, tokenRevision };
+        } catch (error) { publicationScope = { decodeError: String(error) }; }
+      }
+      return { status: value.status, reason: value.reason, seq: value.seq, scopeRevision: value.scopeRevision,
+        instanceId: value.instanceId, publicationScope, observedRevisionVector: value.observedRevisionVector,
+        resyncRequired: value.resyncRequired, resyncReason: value.resyncReason,
+        totalMatching: value.totalMatching, activity: value.activity, nextDeadline: value.nextDeadline,
+        rows: value.rows?.map((row: any) => ({ id: row.meta.id, cwd: row.meta.cwd, name: row.meta.name,
+          origin: row.meta.callbackOrigin, state: row.assignment.state, sourceRevision: row.sourceRevision })) };
+    };
+    const frames: Array<{ subscriber: number; phase: string; snapshot: ReturnType<typeof frameSummary> }> = [];
+    const stops = clients.map((client, subscriber) => client.onChange(value => {
+      events++;
+      if (frames.length < 32) frames.push({ subscriber, phase, snapshot: frameSummary(value) });
+    }));
     write("sa_a", join(f.root, "a"), "unrelated"); await f.executor.livenessReasons();
+    phase = "log-append";
     appendFileSync(join(f.root, "runs/sa_a/output.log"), '{"type":"agent_end"}\n'); await f.executor.livenessReasons();
+    phase = "workspace-move";
     write("sa_a", join(f.root, "c"), "moved"); await f.executor.livenessReasons();
+    phase = "terminal-update";
     const meta = join(f.root, "runs/sa_a/meta.json");
     writeFileSync(meta, JSON.stringify({ id: "sa_a", cwd: join(f.root, "c"), status: "failed", startedAt: 1 }));
     await f.executor.livenessReasons();
+    phase = "deletion";
     rmSync(join(f.root, "runs/sa_a"), { recursive: true }); await f.executor.livenessReasons();
+    phase = "final-scoped-read";
     for (const client of clients) await client.get(scope);
     const unchanged = f.executor.metrics() as any;
-    assert.equal(events, 0, "unrelated content sends no scoped frames");
+    try { assert.equal(events, 0, "unrelated content sends no scoped frames"); }
+    catch (error) {
+      console.error(`Scoped publication failure: ${JSON.stringify({ scope, clients: count, events,
+        omittedFrames: events - frames.length, baseline: frameSummary(page), frames,
+        final: clients.map(client => frameSummary(client.snapshot)), before, after: unchanged })}`);
+      throw error;
+    }
     assert.equal(unchanged.queryCount, before.queryCount, "unrelated content retains the cached page");
     assert.equal(unchanged.serializationCount, before.serializationCount);
     const next = await first.get({ ...scope, cursor: page.nextCursor });
@@ -263,6 +295,7 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
   const f = await fixture({ watchdogMs: 800,
     workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
   try {
+    await f.bootstrapped;
     const a = await f.client(), b = await f.client();
     const began = performance.now();
     for (let i = 0; i < 6; i++) {
@@ -501,7 +534,7 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
     const after = await b.request("runtime_get_metrics");
     assert.equal(after.queryCount, before, "the worker cache avoids repeated SQLite for a warmed scope");
     assert.ok(after.cacheHits > 0);
-    assert.equal(after.sqlite.active, 1, "only the derived index exists when no coordinator source is present");
+    assert.equal(after.sqlite.active, 1, "the query index owns the attached checkpoint store when no coordinator source is present");
   } finally { await f.close(); }
 });
 
@@ -624,7 +657,7 @@ test('Subagents and Background share one coordinator read connection in the quer
     await f.executor.livenessReasons();
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
-    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator and one derived connection with the durable inbox attached, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator and one derived connection with inbox and checkpoints attached, regardless of domain');
     assert.equal((f.executor.metrics().sqlite as any).opens, 2, 'both inbox attachments reuse the existing derived handle without another constructor open');
     assert.equal((f.executor.metrics().sqlite as any).maximum, 2, 'Background attachment cannot temporarily exceed the existing handle budget');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
@@ -777,6 +810,50 @@ for (const outcome of ["success", "failure"]) test(`old fold ${outcome} cannot a
 });
 
 
+for (const rootRecreated of [false, true]) test(`a raw directory observed before metadata still publishes the original atomic writer commit (${rootRecreated ? "recreated root" : "existing root"})`, { timeout: 15000 }, async () => {
+  const f = await fixture();
+  const { measureEventPublication } = await import(new URL("../scripts/event-publication/measure.mjs", import.meta.url).href);
+  try {
+    const client = await f.client(); await ready(client);
+    const id = "sa_metadata_gap", directory = join(f.root, "runs", id), metaPath = join(directory, "meta.json");
+    const scope = { cwd: f.root, sessionId: "parent", limit: 10 };
+    await client.subscribe(scope);
+    if (rootRecreated) {
+      mkdirSync(directory);
+      writeFileSync(metaPath, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1,
+        callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "before-root" }));
+      const wait = async (condition: () => boolean) => {
+        const until = Date.now() + 1000;
+        while (!condition()) {
+          assert.ok(Date.now() < until, "root gap publication missing");
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      };
+      await wait(() => client.snapshot?.rows[0]?.meta.name === "before-root");
+      renameSync(join(f.root, "runs"), join(f.root, "retired-runs"));
+      await wait(() => client.snapshot?.status === "degraded");
+      assert.equal(client.snapshot?.rows[0]?.meta.name, "before-root");
+    }
+    const before = f.executor.metrics().inventories ?? 0;
+    mkdirSync(directory, { recursive: true });
+    const until = Date.now() + 1000;
+    do {
+      // Query capture refreshes metrics, never requests inventory repair.
+      await client.get(scope);
+      assert.ok(Date.now() < until, "raw directory creation hint was not processed");
+      if ((f.executor.metrics().inventories ?? 0) > before && client.snapshot?.rows.length === 0) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    } while (true);
+    writeFileSync(metaPath, JSON.stringify({ id, sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1,
+      endedAt: Date.now(), callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "original" }));
+    const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id,
+      subscribers: 1, commits: 1, phase: rootRecreated ? "metadata-after-root-recreation" : "metadata-after-directory-hint", diagnostics: () => f.executor.metrics() });
+    assert.ok(report.ms.max <= 1000, JSON.stringify(report));
+    await client.get(scope);
+    assert.equal(f.executor.metrics().sourceWatchers, 2);
+  } finally { await f.close(); }
+});
+
 test("directory entry watchers publish repeated atomic commits without the inventory fallback", { timeout: 15000 }, async () => {
   const f = await fixture(); // fallback interval is 60 seconds, longer than this test
   const { measureEventPublication } = await import(new URL("../scripts/event-publication/measure.mjs", import.meta.url).href);
@@ -789,7 +866,8 @@ test("directory entry watchers publish repeated atomic commits without the inven
     const client = await f.client(); await ready(client);
     const scope = { cwd: f.root, sessionId: "parent", limit: 10 };
     for (const subscribers of [1, 5, 10]) {
-      const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers, commits: 5 });
+      const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers, commits: 5,
+        phase: "initial-directory", diagnostics: () => f.executor.metrics() });
       assert.ok(report.ms.max <= 1000, JSON.stringify(report));
       assert.equal(f.executor.metrics().sourceWatchers, 2, "one root and one raw directory, independent of clients/files");
     }
@@ -801,7 +879,8 @@ test("directory entry watchers publish repeated atomic commits without the inven
     while (client.snapshot?.rows[0]?.meta.name !== "replaced-directory") {
       assert.ok(Date.now() < until, "directory replacement was not published"); await new Promise(resolve => setTimeout(resolve, 10));
     }
-    const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5 });
+    const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5,
+      phase: "replaced-directory", diagnostics: () => f.executor.metrics() });
     assert.ok(report.ms.max <= 1000, JSON.stringify(report));
     // The entire source root can also move while its pathname is immediately
     // recreated. Identity checks must rebind both root and child watchers.
@@ -812,7 +891,8 @@ test("directory entry watchers publish repeated atomic commits without the inven
     while (client.snapshot?.rows[0]?.meta.name !== "replaced-root") {
       assert.ok(Date.now() < rootBy, "root replacement was not published"); await new Promise(resolve => setTimeout(resolve, 10));
     }
-    const rootReport = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5 });
+    const rootReport = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5,
+      phase: "replaced-root", diagnostics: () => f.executor.metrics() });
     assert.ok(rootReport.ms.max <= 1000, JSON.stringify(rootReport));
     assert.equal(f.executor.metrics().sourceWatchers, 2);
     rmSync(directory, { recursive: true });
@@ -865,7 +945,12 @@ for (const source of ["runs", "attempts", "session-state"]) test(`source ${sourc
       const value = { ...meta, name: "after-rearm" };
       writeFileSync(path + ".tmp", JSON.stringify(source === "runs" ? value : { version: 1, meta: value }));
       renameSync(path + ".tmp", path);
-      await wait(() => client.snapshot?.rows[0]?.meta.name === "after-rearm", `replacement root watcher was not rearmed: ${JSON.stringify({ source, oldInode, newInode, before })}`);
+      try {
+        await wait(() => client.snapshot?.rows[0]?.meta.name === "after-rearm", `replacement root watcher was not rearmed: ${JSON.stringify({ source, oldInode, newInode, before })}`);
+      } catch (error) {
+        t.diagnostic(JSON.stringify({ source, snapshot: client.snapshot, metrics: f.executor.metrics() }));
+        throw error;
+      }
     }
     t.diagnostic(JSON.stringify({ source, oldInode, newInode, before, after: f.executor.metrics() }));
   } finally { await f.close(); }
@@ -895,6 +980,6 @@ test("root recreation after an observed absence publishes without inventory fall
     assert.equal(client.snapshot?.rows.length, 1, "unavailable roots retain verified rows");
     mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ ...meta, name: "recreated" }));
-    await waitForEvent(() => client.snapshot?.rows[0]?.meta.name === "recreated");
+    await waitForEvent(() => client.snapshot?.status === "ready" && client.snapshot.rows[0]?.meta.name === "recreated");
   } finally { await f.close(); }
 });

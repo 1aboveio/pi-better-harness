@@ -280,7 +280,7 @@ export class ManagedSubagentHost {
                     const command = host.catalog.connection();
                     command({ type: "runtime_register_catalog", cwd: host.current.owner.workspace,
                         sessionId: host.current.owner.sessionId, authority: host.current.catalogAuthority });
-                    return catalogSnapshotFromWire(command({ type: "runtime_get_catalog", overlay: configuration.getSessionSettings?.() ?? configuration.sessionSettings }));
+                    return catalogSnapshotFromWire(command({ type: "runtime_get_catalog", fresh: true, overlay: configuration.getSessionSettings?.() ?? configuration.sessionSettings }));
                 },
                 beforeSpawn: input => {
                     assertSubagentHandoff(listMetas({ includeArchived: false }), host.root);

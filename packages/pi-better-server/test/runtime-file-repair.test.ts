@@ -41,6 +41,7 @@ test("late compact archives cannot replace live recipient markers or reset its c
     await model.reconcile();
     const first = model.snapshot(scope);
     assert.equal(model.snapshot({ ...scope, pendingRecipient: true }).rows[0]!.meta.id, id);
+    // Completed archives omit the volatile completion markers by design.
     const compact: Record<string, unknown> = { ...meta };
     delete compact.completionCallbackPendingAt;
     delete compact.callbackOrigin;
@@ -56,6 +57,7 @@ test("late compact archives cannot replace live recipient markers or reset its c
     model.fileHint(join(f.runs, id), "meta.json"); await settleHints(model);
     assert.equal(model.snapshot({ ...scope, pendingRecipient: true }).rows.length, 0);
     assert.throws(() => model.snapshot({ ...scope, cursor: first.nextCursor }), /resync_required/);
+    // Losing volatile storage still exposes the verified archive for history.
     rmSync(join(f.runs, id), { recursive: true });
     model.fileHint(f.runs, id); await settleHints(model);
     assert.equal(model.snapshot({ id }).rows[0]!.meta.id, id);
@@ -107,6 +109,223 @@ for (const successor of ["parent", "another-session"]) test(`late archive preser
     if (saved === undefined) delete process.env.PI_SUBAGENT_DURABLE_DIR; else process.env.PI_SUBAGENT_DURABLE_DIR = saved;
     rmSync(f.root, { recursive: true, force: true });
   }
+});
+
+test("metadata appearing after the first watch attempt is rebound before its projection publishes", async () => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, "late-directory-bind", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile(); await settleHints(model);
+    const directory = join(f.runs, "sa_late_bind"), path = join(directory, "meta.json");
+    const bind = (model as any).watchDirectory.bind(model);
+    let created = false;
+    (model as any).watchDirectory = (candidate: string) => {
+      bind(candidate);
+      if (candidate === directory && !created) {
+        assert.equal((model as any).watchers.has(directory), false, "first bind sees the missing directory");
+        created = true;
+        f.put("sa_late_bind", { name: "committed-after-bind", status: "completed", endedAt: 2 });
+      }
+    };
+    let published = false;
+    const off = model.onChange(() => {
+      if (model.snapshot({ id: "sa_late_bind" }).rows.length) {
+        published = true;
+        assert.equal((model as any).watchers.has(directory), true, "a ready row must not outlive a failed initial bind");
+      }
+    });
+    // Match an in-flight entity turn: real directory notifications queue behind it.
+    const pending = (model as any).scan([path]);
+    (model as any).pending = pending;
+    await pending;
+    (model as any).pending = undefined;
+    off();
+    assert.equal(published, true);
+    await model.reconcile(false); await settleHints(model);
+    assert.equal(model.snapshot({ id: "sa_late_bind" }).rows[0]!.meta.name, "committed-after-bind");
+  } finally { (model as any).pending = undefined; await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("nullable and over-budget replacements retain verified rows until deletion is verified under an available root", async () => {
+  const f = fixture(); f.put("sa_invalid", { name: "verified" }); f.put("sa_sibling", { name: "before" });
+  const model = new WorkReadModel(f.agent, "invalid-root-union", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile(); await settleHints(model);
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    (model as any).watchers.clear();
+    for (const [index, value] of ["null", "[]", "42", JSON.stringify("invalid"), "x".repeat(1024 * 1024 + 1)].entries()) {
+      writeFileSync(join(f.runs, "sa_invalid/meta.json"), value);
+      f.put("sa_sibling", { name: `after-${index}` });
+      model.fileHint(join(f.runs, "sa_invalid"), "meta.json");
+      model.fileHint(join(f.runs, "sa_sibling"), "meta.json");
+      await settleHints(model);
+      assert.equal(model.snapshot({ id: "sa_invalid" }).rows[0]!.meta.name, "verified");
+      assert.equal(model.snapshot({ id: "sa_sibling" }).rows[0]!.meta.name, `after-${index}`);
+      assert.equal(model.observation().status, "degraded");
+    }
+    renameSync(f.runs, f.runs + "-away");
+    await model.reconcile();
+    assert.equal(model.snapshot().rows.length, 2, "whole-root absence cannot verify individual deletion");
+    assert.equal(model.observation().status, "degraded");
+    mkdirSync(f.runs);
+    await model.reconcile();
+    assert.equal(model.snapshot().rows.length, 0, "available empty root verifies the known paths are gone");
+    assert.equal(model.observation().status, "ready");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("compact display cursors do not discard independent detail text and tool history", async () => {
+  const f = fixture(); f.put("sa_detail", { status: "completed", endedAt: 2 });
+  const log = join(f.runs, "sa_detail/output.log");
+  writeFileSync(log, [
+    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "complete answer" }], usage: { cost: { total: 0.01 } } } },
+    { type: "tool_execution_start", toolCallId: "first", toolName: "bash" },
+    { type: "tool_execution_start", toolCallId: "second", toolName: "read" },
+  ].map(event => JSON.stringify(event) + "\n").join(""));
+  const model = new WorkReadModel(f.agent, "detail-cursor-union", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    assert.equal((model as any).parseStates.get(log).finalText, "");
+    const detail = model.snapshot({ id: "sa_detail", detail: true }).rows[0] as any;
+    assert.equal(detail.detail.parsed.finalText, "complete answer");
+    assert.deepEqual(detail.detail.parsed.toolCalls, ["bash", "read"]);
+    assert.equal((model as any).parseStates.get(log).toolCalls.length, 1);
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("idle timer repair stays bounded as unchanged task history grows", async t => {
+  const f = fixture();
+  for (let i = 0; i < 512; i++) f.put(`sa_idle_${i}`, { status: "completed", endedAt: 2 });
+  const model = new WorkReadModel(f.agent, "idle-history", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 50 });
+  try {
+    await model.reconcile(); await settleHints(model);
+    const before = model.metrics;
+    const deadline = Date.now() + 3000;
+    while (model.metrics.sourceWork.repair.batches - before.sourceWork.repair.batches < 3) {
+      assert.ok(Date.now() < deadline, "idle timer must keep advancing repair");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    await settleHints(model);
+    const after = model.metrics;
+    const batches = after.sourceWork.repair.batches - before.sourceWork.repair.batches;
+    const paths = after.sourceWork.repair.paths - before.sourceWork.repair.paths;
+    const stats = after.sourceWork.repair.stats - before.sourceWork.repair.stats;
+    assert.ok(paths <= batches * 128, `idle repair examined ${paths} paths in ${batches} batches`);
+    assert.ok(stats <= paths * 5, `idle repair performed ${stats} stats for ${paths} paths`);
+    assert.equal(after.metadataReads, before.metadataReads, "unchanged history must not be reread");
+    assert.equal(after.sourceWork.entity.batches, before.sourceWork.entity.batches);
+    t.diagnostic(JSON.stringify({ batches, paths, stats }));
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("display cursors retain usage and the latest tool without historical response payloads", async () => {
+  const f = fixture(); f.put("sa_display", { status: "completed", endedAt: 2 });
+  const log = join(f.runs, "sa_display/output.log");
+  const event = (value: any) => JSON.stringify(value) + "\n";
+  writeFileSync(log, event({ type: "message_end", message: { role: "assistant", content: "x".repeat(100000), usage: { cost: { total: 0.01 } } } })
+    + Array.from({ length: 100 }, (_, i) => event({ type: "tool_execution_start", toolCallId: String(i), toolName: i % 2 ? "read" : "bash" })).join(""));
+  const model = new WorkReadModel(f.agent, "compact-display", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    const state = (model as any).parseStates.get(log);
+    assert.equal(state.finalText.length, 0);
+    assert.equal(state.lastActivity.length, 0);
+    assert.equal(state.toolCalls.length, 1);
+    assert.equal(state.openToolCalls.size, 0);
+    appendFileSync(log, event({ type: "message_end", message: { role: "assistant", usage: { cost: { total: 0.02 } } } }));
+    model.fileHint(join(f.runs, "sa_display"), "output.log"); await settleHints(model);
+    const row = model.snapshot().rows[0] as any;
+    assert.match(row.display.spend, /0\.03/);
+    assert.equal(row.display.tool, "read");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a malformed task does not block verified siblings in the same repair batch", async () => {
+  const f = fixture(); f.put("sa_bad"); f.put("sa_good", { status: "completed", endedAt: 2 });
+  writeFileSync(join(f.runs, "sa_bad/meta.json"), "broken");
+  const model = new WorkReadModel(f.agent, "bad-sibling", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    assert.equal(model.snapshot({ id: "sa_good" }).rows.length, 1);
+    assert.equal(model.snapshot({ id: "sa_bad" }).rows.length, 0);
+    assert.equal(model.observation().status, "degraded");
+    f.put("sa_bad", { status: "completed", endedAt: 2 });
+    model.fileHint(join(f.runs, "sa_bad"), "meta.json"); await settleHints(model);
+    assert.equal(model.snapshot().rows.length, 2);
+    assert.equal(model.observation().status, "ready");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a later archive never overrides its live raw task, and raw deletion reveals the archive", async () => {
+  const f = fixture();
+  const meta = f.put("sa_duplicate", { status: "completed", endedAt: 2, name: "raw", completionCallbackPendingAt: 2 });
+  const durable = join(f.root, "durable");
+  const model = new WorkReadModel(f.agent, "source-precedence", { baseDir: f.base, durableDir: durable, intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    mkdirSync(model.archives, { recursive: true });
+    const archived = { ...meta, name: "archive", recipe: { version: 1, sessionId: meta.sessionId, sessionDir: join(durable, "sessions"), cwd: f.root } };
+    writeFileSync(join(model.archives, "sa_duplicate.json"), JSON.stringify({ version: 1, meta: archived }));
+    model.fileHint(model.archives, "sa_duplicate.json"); await settleHints(model);
+    assert.equal(model.snapshot().rows[0]!.meta.name, "raw");
+    f.put("sa_duplicate", { ...meta, name: "raw-new" });
+    model.fileHint(join(f.runs, "sa_duplicate"), "meta.json"); await settleHints(model);
+    assert.equal(model.snapshot().rows[0]!.meta.name, "raw-new");
+    rmSync(join(f.runs, "sa_duplicate"), { recursive: true });
+    model.fileHint(f.runs, "sa_duplicate"); await settleHints(model);
+    assert.equal(model.snapshot().rows[0]!.meta.name, "archive");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("an exact task hint retries after the coordinator changes during observation", async () => {
+  const f = fixture(); f.put("sa_race", { name: "before" });
+  const model = new WorkReadModel(f.agent, "coordinator-race", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    (model as any).watchers.clear();
+    const reader = (model as any).reader;
+    const beginSnapshot = reader.beginSnapshot.bind(reader);
+    let races = 0;
+    reader.beginSnapshot = () => {
+      const snapshot = beginSnapshot();
+      return races++ === 0 ? { ...snapshot, revision: "changed-during-read" } : snapshot;
+    };
+    f.put("sa_race", { name: "after" });
+    model.fileHint(join(f.runs, "sa_race"), "meta.json"); await settleHints(model);
+    assert.ok(races >= 2, "the failed validation must trigger another entity observation");
+    assert.equal(model.snapshot().rows[0]!.meta.name, "after");
+    assert.equal(model.observation().status, "ready");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a malformed replacement discards unpublished staging without blocking its sibling", async () => {
+  const f = fixture(); f.put("sa_racy", { name: "old" }); f.put("sa_sibling", { name: "old" });
+  const model = new WorkReadModel(f.agent, "staged-malformed", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile(); await settleHints(model);
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    (model as any).watchers.clear();
+    const paths = ["sa_racy", "sa_sibling"].map(id => join(f.runs, id, "meta.json"));
+    f.put("sa_racy", { name: "unpublished" }); f.put("sa_sibling", { name: "new" });
+    const reader = (model as any).reader, beginSnapshot = reader.beginSnapshot.bind(reader), revision = reader.revision.bind(reader);
+    reader.beginSnapshot = () => {
+      const snapshot = beginSnapshot();
+      reader.revision = () => {
+        writeFileSync(paths[0]!, "broken");
+        reader.revision = revision;
+        reader.beginSnapshot = beginSnapshot;
+        return revision();
+      };
+      return snapshot;
+    };
+    await (model as any).scan(paths);
+    assert.equal(model.snapshot({ id: "sa_racy" }).rows[0]!.meta.name, "old");
+    for (let n = 0; n < 3; n++) await (model as any).scan(paths);
+    assert.equal(model.snapshot({ id: "sa_racy" }).rows[0]!.meta.name, "old");
+    assert.equal(model.snapshot({ id: "sa_sibling" }).rows[0]!.meta.name, "new");
+    assert.equal(model.observation().status, "degraded");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test("precise hints coalesce; bounded repair resumes despite hot writes and repairs missing sources", async t => {

@@ -59,6 +59,13 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
 const { startDaemon } = await import("../../src/server.ts");
 const { createRpcEvidence } = await import('./rpc-evidence.ts');
 const evidence = createRpcEvidence();
+const { CatalogSources } = await import("../../src/runtime/catalog-sources.ts");
+let catalogMetrics: InstanceType<typeof CatalogSources>["metrics"] | undefined;
+const loadCatalog = CatalogSources.prototype.load;
+CatalogSources.prototype.load = function (...args) {
+  catalogMetrics = this.metrics;
+  return loadCatalog.apply(this, args);
+};
 
 const daemon = await startDaemon({ serverDir: process.env.PI_SERVER_DIR, sessionIdleMs: 0, daemonIdleMs: 0, rpcEvidence: evidence });
 process.send?.({ ready: daemon.socketPath });
@@ -70,7 +77,7 @@ process.on("message", async command => {
   if (command === "metrics") {
     const domain = "../../src/runtime/domain/subagents/index.domain.mjs";
     const { isHealthTickerActive } = await import(domain);
-    process.send?.({ sqlite: metrics, subagentHealthActive: isHealthTickerActive() });
+    process.send?.({ sqlite: metrics, subagentHealthActive: isHealthTickerActive(), catalog: catalogMetrics });
   }
   else void daemon.stop().then(() => process.exit(0));
 });
