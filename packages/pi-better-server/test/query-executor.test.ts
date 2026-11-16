@@ -101,7 +101,10 @@ test("identical Work identities do not share visible results across admitted roo
   } finally { await left.close(); await right.close(); }
 });
 
-for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query and encoding work`, { timeout: 15000 }, async () => {
+for (const { count, readOnEvent } of [
+  ...[1, 5, 10].map(count => ({ count, readOnEvent: false })),
+  { count: 10, readOnEvent: true },
+]) test(readOnEvent ? "10 socket clients share publication with concurrent event-triggered reads" : `${count} socket clients share scoped query and encoding work`, { timeout: 15000 }, async () => {
   const f = await fixture();
   const scope = { cwd: join(f.root, "b"), limit: 1 };
   const write = (id: string, cwd: string, name: string) => {
@@ -165,16 +168,32 @@ for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query
     const next = await first.get({ ...scope, cursor: page.nextCursor });
     assert.equal(next.rows.length, 1);
     const baseline = f.executor.metrics() as any;
+    const eventReads: Array<Promise<any>> = [];
     const received = clients.map(client => new Promise<void>(resolve => {
-      const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) { stop(); resolve(); } });
+      const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) {
+        if (readOnEvent) eventReads.push(client.get(scope));
+        stop(); resolve();
+      } });
     }));
+    phase = "in-scope-update";
     write("sa_b2", scope.cwd, "changed"); await f.executor.livenessReasons(); await Promise.all(received);
+    const overlapping = await Promise.all(eventReads);
+    if (readOnEvent) {
+      assert.equal(overlapping.length, count);
+      for (const value of overlapping) assert.equal(value.rows[0]?.meta.name, "changed");
+    }
     await first.get(scope);
     const changed = f.executor.metrics() as any;
-    assert.equal(changed.queryCount - baseline.queryCount, 1);
-    assert.equal(changed.serializationCount - baseline.serializationCount, 1);
-    assert.equal(changed.eventEncoding.serializations - baseline.eventEncoding.serializations, 1);
-    assert.equal(changed.eventEncoding.frames - baseline.eventEncoding.frames, count);
+    try {
+      assert.equal(changed.queryCount - baseline.queryCount, 1);
+      assert.equal(changed.serializationCount - baseline.serializationCount, 1);
+      assert.equal(changed.eventEncoding.serializations - baseline.eventEncoding.serializations, 1);
+      assert.equal(changed.eventEncoding.frames - baseline.eventEncoding.frames, count);
+    } catch (error) {
+      console.error(`Shared query failure: ${JSON.stringify({ scope, clients: count, baseline, changed,
+        frames, final: clients.map(client => frameSummary(client.snapshot)) })}`);
+      throw error;
+    }
     assert.ok(changed.eventEncoding.bytes > baseline.eventEncoding.bytes);
     stops.forEach(stop => stop());
   } finally { await f.close(); }
