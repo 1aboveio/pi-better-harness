@@ -516,9 +516,19 @@ export function canonicalToolSchema(name) {
             properties: {
                 status: { type: "string", enum: ["complete", "incomplete"] },
                 reason: { type: "string", minLength: 1, maxLength: 2048 },
+                remaining_work: { type: "array", minItems: 1, maxItems: 8, items: { type: "string", minLength: 1, maxLength: 1024 }, description: "For incomplete work, list the concrete steps still required." },
+                blocker: { type: "object", additionalProperties: false, required: ["kind", "reason"], properties: {
+                        kind: { type: "string", enum: ["permission", "external-input"] },
+                        reason: { type: "string", minLength: 1, maxLength: 1024 },
+                    }, description: "Use only for an actual permission or external-input blocker that prevents further local work." },
                 evidence: { type: "array", minItems: 1, maxItems: 4, items: {
                         type: "object", additionalProperties: false, required: ["path", "explanation"],
-                        properties: { path: { type: "string", minLength: 1, maxLength: 1024 }, explanation: { type: "string", minLength: 1, maxLength: 1024 } },
+                        properties: {
+                            path: { type: "string", minLength: 1, maxLength: 1024, description: "An existing workspace file. Foreign paths and credential files are refused." },
+                            explanation: { type: "string", minLength: 1, maxLength: 1024 },
+                            offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER, description: "Zero-based byte offset, inclusive. Requires max_bytes." },
+                            max_bytes: { type: "integer", minimum: 1, maximum: 65536, description: "Retain at most this many bytes from offset (default zero), ending at EOF if earlier. Required for files larger than 65536 bytes." },
+                        },
                     } },
             },
         };
@@ -537,7 +547,7 @@ const TOOL_LABELS = {
     acknowledge_operation_result: "Acknowledge Operation Result",
 };
 const TOOL_DESCRIPTIONS = {
-    report_assignment_result: "Record your complete or incomplete assignment judgment with retained workspace artifact evidence before your final answer. Does not terminalize the assignment, interpret waits or record parent acceptance. Report once; identical retries are allowed, conflicting reports are refused.",
+    report_assignment_result: "Record your complete or incomplete assignment judgment with retained workspace file evidence before your final answer. Each retained file or explicit byte excerpt is limited to 65536 bytes; use offset and max_bytes for larger source files. A refused report may be corrected and retried. Once retained, only identical retries are allowed. Reporting does not terminalize the assignment, interpret waits or record parent acceptance.",
     bg_task_spawn: "Start one long-running background operation through the trusted parent supervisor. Returns immediately. The operation is owned by the parent, not by this worker process.",
     bg_task_watch: "Start one background command watch through the trusted parent supervisor. Returns immediately. The operation is owned by the parent, not by this worker process.",
     bg_task_status: "Inspect one operation owned by this worker conversation. Only task ids accepted by the parent ownership check are readable.",
@@ -546,6 +556,7 @@ const TOOL_DESCRIPTIONS = {
     acknowledge_operation_result: "Interpret the exact terminal evidence of a registered wait and mark that wait generation consumed. The disposition does not complete the assignment by itself.",
 };
 const TOOL_GUIDELINES = {
+    report_assignment_result: ["Continue available local work until the assignment is complete or a concrete blocker prevents progress. For incomplete work, provide remaining_work and any actual permission or external-input blocker. If evidence is refused, correct the path or excerpt range and retry before returning."],
     bg_task_spawn: ["Use bg_task_spawn for established long commands; do not emulate background execution with polling, sleep loops, nohup or shell detachment."],
     bg_task_watch: ["Use bg_task_watch for repeated observation. Do not run a foreground poll loop."],
     wait_for_operations: ["Call wait_for_operations only when no independent work remains. A final answer that says you are waiting is not a park request."],
