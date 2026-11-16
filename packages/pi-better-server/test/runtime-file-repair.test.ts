@@ -22,6 +22,13 @@ function fixture() {
   return { root, agent, base, runs, put };
 }
 
+async function settleHints(model: WorkReadModel) {
+  // A completed turn can schedule another turn before its waiter resumes.
+  let pending: Promise<void> | undefined;
+  while ((pending = (model as any).pending)) await pending;
+  assert.equal(model.metrics.scheduling.queued, 0, "hint obligations must be drained");
+}
+
 test("precise hints coalesce; bounded repair resumes despite hot writes and repairs missing sources", async t => {
   const f = fixture();
   for (let i = 0; i < 160; i++) f.put(`sa_${i}`);
@@ -30,12 +37,18 @@ test("precise hints coalesce; bounded repair resumes despite hot writes and repa
   try {
     await model.reconcile(); disconnect();
     const before = model.metrics;
+    const unrelatedScope = model.snapshot({ id: "sa_1" }).scopeRevision;
+    let unrelatedPublications = 0;
+    const off = model.onChange(() => { unrelatedPublications++; }, { id: "sa_1" });
     f.put("sa_0", { name: "atomic" });
     for (let n = 0; n < 20; n++) model.fileHint(join(f.runs, "sa_0"), "meta.json");
-    await (model as any).pending;
+    await settleHints(model);
     assert.equal(model.snapshot({ id: "sa_0" }).rows[0]!.meta.name, "atomic");
     assert.equal(model.metrics.scheduling.repairEntries, before.scheduling.repairEntries);
     assert.ok(model.metrics.scheduling.entityBatches - before.scheduling.entityBatches <= 2);
+    assert.equal(model.snapshot({ id: "sa_1" }).scopeRevision, unrelatedScope);
+    assert.equal(unrelatedPublications, 0);
+    off();
     const ignored = model.metrics.inventories;
     model.fileHint(f.runs, ".writer.lock"); model.fileHint(join(f.runs, "sa_0"), "output.log.lock");
     assert.equal(model.metrics.inventories, ignored);
@@ -43,7 +56,7 @@ test("precise hints coalesce; bounded repair resumes despite hot writes and repa
     const progress = model.metrics.scheduling.repairEntries;
     for (let n = 0; n < 20; n++) {
       appendFileSync(join(f.runs, "sa_0", "output.log"), JSON.stringify({ type: "agent_settled", at: n }) + "\n");
-      model.fileHint(join(f.runs, "sa_0"), "output.log"); await (model as any).pending;
+      model.fileHint(join(f.runs, "sa_0"), "output.log"); await settleHints(model);
       (model as any).repairOwed = true; await model.reconcile(false); disconnect();
       if (model.snapshot({ id: "sa_missed" }).rows.length) break;
     }
@@ -65,11 +78,113 @@ test("precise hints coalesce; bounded repair resumes despite hot writes and repa
     assert.equal(model.snapshot({ id: "sa_replacement" }).rows.length, 1);
     assert.equal(model.snapshot({ id: "sa_0" }).rows.length, 0);
     for (let n = 0; n < 320; n++) model.fileHint(f.runs, `sa_overflow_${n}`);
-    await (model as any).pending; await (model as any).repairWrite;
+    await (model as any).repairWrite; await settleHints(model);
     assert.ok(model.metrics.scheduling.overflows > 0);
     assert.ok(model.metrics.scheduling.queued <= 256);
     assert.deepEqual(JSON.parse(readFileSync(join(f.agent, "runtime-read-repair/subagents.json"), "utf8")).roots, [model.runs, model.archives, model.markers]);
     t.diagnostic(JSON.stringify(model.metrics));
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+for (const source of ["metadata", "archive", "marker"] as const) test(`repair verifies missed deletion of never-imported invalid ${source}, retaining errors while its root is missing`, async () => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, `failed-${source}`, { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  const directory = source === "metadata" ? model.runs : source === "archive" ? model.archives : model.markers;
+  const path = source === "metadata" ? join(directory, "sa_bad", "meta.json") : join(directory, "sa_bad.json");
+  const dropHints = () => { for (const watcher of (model as any).watchers.values()) watcher.close(); (model as any).watchers.clear(); };
+  const writeBroken = () => {
+    mkdirSync(source === "metadata" ? join(directory, "sa_bad") : directory, { recursive: true });
+    writeFileSync(path, "broken");
+  };
+  try {
+    await model.reconcile(); assert.equal(model.observation().status, "ready"); dropHints();
+    writeBroken(); await model.reconcile();
+    assert.equal(model.observation().status, "degraded");
+    assert.equal(model.snapshot().rows.length, 0, "failed first observation must not publish a record");
+    dropHints();
+    rmSync(source === "metadata" ? join(directory, "sa_bad") : path, { recursive: true });
+    await model.reconcile(); await model.reconcile();
+    assert.equal(model.observation().status, "ready", "repair must verify deletion without a delivered hint");
+
+    writeBroken(); await model.reconcile(); dropHints();
+    renameSync(directory, directory + "-away");
+    await model.reconcile(); await model.reconcile();
+    assert.equal(model.observation().status, "degraded", "unavailable root cannot verify deletion");
+    assert.match(model.observation().reason!, /Source directory unavailable/);
+    rmSync(directory + "-away", { recursive: true }); mkdirSync(directory);
+    await model.reconcile();
+    assert.equal(model.observation().status, "ready", "available empty root verifies the failed path is gone");
+
+    writeBroken(); await model.reconcile(); dropHints();
+    rmSync(source === "metadata" ? join(directory, "sa_bad") : path, { recursive: true });
+    const repairs = model.metrics.scheduling.repairEntries;
+    model.fileHint(source === "metadata" ? join(directory, "sa_bad") : directory, source === "metadata" ? "meta.json" : "sa_bad.json");
+    await settleHints(model);
+    assert.equal(model.observation().status, "ready", "exact deletion hint must still clear the error");
+    assert.equal(model.metrics.scheduling.repairEntries, repairs, "exact deletion hint needs no inventory");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("exact deletion hints settle a follow-up turn scheduled when the first turn completes", async () => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, "follow-up-hint", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    for (const id of ["sa_first", "sa_second"]) {
+      f.put(id); writeFileSync(join(f.runs, id, "meta.json"), "broken");
+    }
+    await model.reconcile();
+    assert.equal(model.observation().status, "degraded");
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    (model as any).watchers.clear();
+    for (const id of ["sa_first", "sa_second"]) rmSync(join(f.runs, id), { recursive: true });
+    const repairs = model.metrics.scheduling.repairEntries;
+    model.fileHint(join(f.runs, "sa_first"), "meta.json");
+    const firstTurn: Promise<void> = (model as any).pending;
+    const followUp = firstTurn.then(() => {
+      assert.equal(model.observation().status, "degraded", "the second failed path still owes its hint");
+      model.fileHint(join(f.runs, "sa_second"), "meta.json");
+    });
+    await Promise.all([settleHints(model), followUp]);
+    assert.equal(model.observation().status, "ready");
+    assert.equal(model.metrics.scheduling.repairEntries, repairs, "follow-up exact hint needs no inventory");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("failed-source deletion repair keeps its 128-path budget and does not clear unverified errors early", async () => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, "failed-batches", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  const dropHints = () => { for (const watcher of (model as any).watchers.values()) watcher.close(); (model as any).watchers.clear(); };
+  try {
+    await model.reconcile(); dropHints();
+    for (let i = 0; i < 130; i++) {
+      mkdirSync(join(f.runs, `sa_bad_${i}`));
+      writeFileSync(join(f.runs, `sa_bad_${i}`, "meta.json"), "broken");
+    }
+    await model.reconcile(); assert.equal(model.observation().status, "degraded"); dropHints();
+    for (let i = 0; i < 130; i++) rmSync(join(f.runs, `sa_bad_${i}`), { recursive: true });
+    const before = model.metrics.scheduling.repairEntries;
+    (model as any).repairOwed = true;
+    await model.reconcile(false);
+    assert.equal(model.metrics.scheduling.repairEntries - before, 128);
+    assert.equal(model.observation().status, "degraded", "remaining failed paths still owe verified observations");
+    await model.reconcile(false);
+    assert.equal(model.metrics.scheduling.repairEntries - before, 130);
+    assert.equal(model.observation().status, "ready");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("initial repair retains health configuration degradation until valid settings recover", async () => {
+  const f = fixture(); f.put("sa_health_import");
+  writeFileSync(join(f.agent, "settings.json"), "invalid json");
+  const model = new WorkReadModel(f.agent, "health-import", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    assert.equal(model.observation().status, "degraded");
+    assert.match(model.observation().reason!, /Health configuration unavailable/);
+    writeFileSync(join(f.agent, "settings.json"), "{}");
+    await model.reconcile();
+    assert.equal(model.observation().status, "ready");
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 

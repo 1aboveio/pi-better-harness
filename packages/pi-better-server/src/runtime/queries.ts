@@ -1,6 +1,15 @@
 import type { Socket } from "node:net";
 import type { WorkReadModel, WorkScope } from "./read-model.ts";
 
+const eventEncodings = new WeakMap<object, string>();
+const snapshotEncodings = new WeakMap<object, string>();
+export function snapshotJSON(snapshot: object): string {
+  let json = snapshotEncodings.get(snapshot);
+  if (json === undefined) { json = JSON.stringify(snapshot); snapshotEncodings.set(snapshot, json); }
+  return json;
+}
+export const queryEncodingMetrics = { serializations: 0, frames: 0, bytes: 0 };
+
 export function workScope(input: unknown): WorkScope {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("A runtime scope object is required");
   const value = input as Record<string, unknown>;
@@ -42,20 +51,27 @@ export class WorkQueries {
   private event(event: unknown) {
     if (this.socket.destroyed || this.paused) return;
     if (this.socket.writableLength > this.maxQueuedBytes) { this.paused = true; return; }
-    const line = JSON.stringify({ type: "event", event }) + "\n";
+    const snapshot = (event as any)?.type === "runtime_snapshot" ? (event as any).snapshot : undefined;
+    let line = snapshot && eventEncodings.get(snapshot);
+    if (!line) {
+      line = snapshot ? '{"type":"event","event":{"type":"runtime_snapshot","snapshot":' + snapshotJSON(snapshot) + '}}\n'
+        : JSON.stringify({ type: "event", event }) + "\n";
+      if (snapshot) { eventEncodings.set(snapshot, line); queryEncodingMetrics.serializations++; }
+    }
     if (Buffer.byteLength(line) > 4 * 1024 * 1024) {
       this.close();
       this.socket.write(JSON.stringify({ type: "event", event: { type: "resync_required", reason: "snapshot-too-large: narrow the scope or limit" } }) + "\n");
       return;
     }
     this.socket.write(line);
+    queryEncodingMetrics.frames++; queryEncodingMetrics.bytes += Buffer.byteLength(line);
   }
   handle(command: Record<string, unknown>) {
     if (command.type === "runtime_unsubscribe") { this.close(); return { unsubscribed: true }; }
     if (command.type === "runtime_get_metrics") return { ...this.model.metrics };
     const scope = workScope(command.scope);
     const snapshot = this.model.snapshot(scope);
-    if (Buffer.byteLength(JSON.stringify(snapshot)) > 4 * 1024 * 1024 - 1024) throw new Error("state-degraded: snapshot exceeds the 4 MiB frame allowance; narrow the scope or limit");
+    if (Buffer.byteLength(snapshotJSON(snapshot)) > 4 * 1024 * 1024 - 1024) throw new Error("state-degraded: snapshot exceeds the 4 MiB frame allowance; narrow the scope or limit");
     if (command.type === "runtime_subscribe") {
       this.close();
       this.dispose = this.model.onChange(() => {
