@@ -14,6 +14,8 @@ export function ensureAssignmentChanges(ctx: StoreContext): void {
             CREATE INDEX IF NOT EXISTS waits_assignment_observation ON waits
                 (owner_kind,owner_session_id,owner_workspace,json_extract(origin_json,'$.assignmentRef'),created_at DESC,generation DESC);
             CREATE INDEX IF NOT EXISTS resume_claims_wait_observation ON resume_claims(wait_id,generation,attempt_id);
+            CREATE TABLE IF NOT EXISTS background_input_versions (
+                operation_id TEXT PRIMARY KEY, revision INTEGER NOT NULL);
             CREATE TRIGGER IF NOT EXISTS assignment_changes_retention AFTER INSERT ON assignment_changes
             BEGIN DELETE FROM assignment_changes WHERE seq <= NEW.seq - 4096; END;`);
         const sources = [
@@ -27,6 +29,21 @@ export function ensureAssignmentChanges(ctx: StoreContext): void {
         for (const { table, select } of sources) for (const action of ["INSERT", "UPDATE", "DELETE"]) {
             const records = action === "UPDATE" ? ["OLD", "NEW"] : [action === "DELETE" ? "OLD" : "NEW"];
             ctx.db.exec(`CREATE TRIGGER IF NOT EXISTS assignment_change_${table}_${action.toLowerCase()} AFTER ${action} ON ${table} BEGIN ${records.map(r => `INSERT INTO assignment_changes(entity,entity_id,assignment_id,session_id,workspace) ${select(r)};`).join(" ")} END;`);
+        }
+        // These are observation inputs, not execution or delivery authority. Old
+        // cooperative SQL writers inherit the same atomic invalidation triggers.
+        const backgroundSources = [
+            { table: "operations", select: (r: string) => `SELECT ${r}.operation_id WHERE ${r}.observer_kind='local-supervisor'` },
+            { table: "waits", select: (r: string) => `SELECT d.operation_id FROM wait_dependencies d JOIN operations o ON o.operation_id=d.operation_id WHERE d.wait_id=${r}.wait_id AND d.generation=${r}.generation AND o.observer_kind='local-supervisor'` },
+            { table: "wait_dependencies", select: (r: string) => `SELECT ${r}.operation_id WHERE EXISTS(SELECT 1 FROM operations o WHERE o.operation_id=${r}.operation_id AND o.observer_kind='local-supervisor')` },
+        ];
+        for (const { table, select } of backgroundSources) for (const action of ["INSERT", "UPDATE", "DELETE"]) {
+            const records = action === "UPDATE" ? ["OLD", "NEW"] : [action === "DELETE" ? "OLD" : "NEW"];
+            ctx.db.exec(`CREATE TRIGGER IF NOT EXISTS background_input_${table}_${action.toLowerCase()}
+                ${action === "DELETE" ? "BEFORE" : "AFTER"} ${action} ON ${table} BEGIN
+                ${records.map(r => `INSERT INTO background_input_versions(operation_id,revision) ${select(r)}
+                    ON CONFLICT(operation_id) DO UPDATE SET revision=revision+1;`).join(" ")}
+                END;`);
         }
     });
 }

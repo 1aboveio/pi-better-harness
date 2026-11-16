@@ -22,7 +22,8 @@ export class BackgroundObservation {
   private identity?: string;
   private knownCoordinator = false;
   private rows: any[] = [];
-  private terminalProjections = new Map<string, { version: string; row: any }>();
+  private terminalProjections = new Map<string, { version: string; row: any; dependencyVersion?: number }>();
+  private hasInputVersions = false;
   private signature = "";
   private root: string;
   private directory: string;
@@ -59,7 +60,7 @@ export class BackgroundObservation {
       } catch (error) { this.status = "degraded"; this.reason = String(error); return []; }
     });
   }
-  readonly metrics = { runnerSnapshots: 0, activeQueries: 0, historyQueries: 0 };
+  readonly metrics = { runnerSnapshots: 0, activeQueries: 0, historyQueries: 0, inputStats: 0, dependencyQueries: 0, projectionHits: 0 };
   private directoryFor(op: any): string {
     if (!op.supervision_host_id?.startsWith("server:")) return this.directory;
     const row = this.db.prepare("SELECT value FROM coordinator_state WHERE key = ?").get(`result-supervision-v1:${op.operation_id}`);
@@ -92,6 +93,7 @@ export class BackgroundObservation {
         this.knownCoordinator = true;
         const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
         if (!["1", "2", "3", "4"].includes(version)) throw new Error("Unsupported coordinator schema");
+        this.hasInputVersions = Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_input_versions'").get());
       }
       this.metrics.activeQueries++;
       const revision = Number(this.db?.prepare("SELECT value FROM coordinator_state WHERE key = 'change_revision'").get()?.value ?? 0);
@@ -137,18 +139,33 @@ export class BackgroundObservation {
     }
   }
   private project(operations: any[], useCache = true) {
-      const revision = this.db?.prepare("SELECT value FROM coordinator_state WHERE key = 'change_revision'").get()?.value;
-      const directories = new Map<string, string>();
       return operations.map((op: any) => {
         const directory = this.directoryFor(op);
-        if (!directories.has(directory)) {
-          let identity = "missing";
-          try { const info = statSync(join(directory, "observed"), { bigint: true }); identity = `${info.dev}:${info.ino}:${info.mtimeNs}:${info.ctimeNs}`; }
+        const cached = this.terminalProjections.get(op.operation_id);
+        const dependencyVersion = this.hasInputVersions
+          ? Number(this.db.prepare("SELECT revision FROM background_input_versions WHERE operation_id=?").get(op.operation_id)?.revision ?? 0)
+          : undefined;
+        const paths = [join(directory, "observed", `${op.task_id}.json`),
+          ...["launch.json", "claim.json", "command.json", "result.json", "lost.json", "stop.json", "cleanup.json"]
+            .map(name => join(directory, "tasks", op.task_id, name))];
+        const identities = paths.map(path => {
+          this.metrics.inputStats++;
+          try { const info = statSync(path, { bigint: true }); return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`; }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-          directories.set(directory, identity);
+          return "missing";
+        });
+        let waits = cached?.row.waits;
+        if (dependencyVersion === undefined || !cached || cached.dependencyVersion !== dependencyVersion) {
+          this.metrics.dependencyQueries++;
+          waits = this.db.prepare(`SELECT w.wait_id, w.generation, w.phase FROM waits w JOIN wait_dependencies d
+            ON w.wait_id = d.wait_id AND w.generation = d.generation WHERE d.operation_id = ?
+            AND w.owner_kind = ? AND w.owner_session_id = ? AND w.owner_workspace = ?
+            AND w.phase NOT IN ('consumed', 'cancelled') AND w.dispatch_disarmed = 0
+            ORDER BY w.wait_id, w.generation`).all(op.operation_id, op.owner_kind, op.owner_session_id, op.owner_workspace)
+            .map((w: any) => ({ waitId: w.wait_id, generation: w.generation, phase: w.phase }));
         }
-        const version = JSON.stringify([op, revision, directories.get(directory)]), cached = this.terminalProjections.get(op.operation_id);
-        if (useCache && op.terminal_revision > 0 && cached?.version === version) return cached.row;
+        const version = JSON.stringify([op, directory, identities, waits]);
+        if (useCache && cached?.version === version) { cached.dependencyVersion = dependencyVersion; this.metrics.projectionHits++; return cached.row; }
         this.metrics.runnerSnapshots++;
         const inspection = snapshot(directory, op.task_id);
         let context: any = {};
@@ -156,11 +173,6 @@ export class BackgroundObservation {
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         const terminal = inspection?.terminal === true || op.terminal_revision > 0;
         const status = inspection?.terminal ? inspection.status : op.terminal_revision > 0 ? op.terminal_outcome : inspection?.status ?? "running";
-        const waits = this.db.prepare(`SELECT w.wait_id, w.generation, w.phase FROM waits w JOIN wait_dependencies d
-          ON w.wait_id = d.wait_id AND w.generation = d.generation WHERE d.operation_id = ?
-          AND w.owner_kind = ? AND w.owner_session_id = ? AND w.owner_workspace = ?
-          AND w.phase NOT IN ('consumed', 'cancelled') AND w.dispatch_disarmed = 0`).all(op.operation_id, op.owner_kind, op.owner_session_id, op.owner_workspace)
-          .map((w: any) => ({ waitId: w.wait_id, generation: w.generation, phase: w.phase }));
         const row = { durable: true, id: op.task_id, operationId: op.operation_id, kind: context.kind ?? inspection?.kind ?? "process",
           status, active: !terminal, terminal, attention: terminal && status !== "succeeded", waits,
           owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace },
@@ -168,9 +180,9 @@ export class BackgroundObservation {
           endedAt: inspection?.result?.endedAt ?? op.terminal_at ?? undefined,
           cwd: inspection?.launch.cwd ?? op.owner_workspace, name: context.name, command: context.command, argv: context.argv,
           dismissedAt: context.dismissedAt, exitCode: inspection?.result?.exitCode ?? null, logPaths: inspection?.logs ?? {} };
-        if (op.terminal_revision > 0) {
+        if (useCache) {
           this.terminalProjections.delete(op.operation_id);
-          this.terminalProjections.set(op.operation_id, { version, row });
+          this.terminalProjections.set(op.operation_id, { version, row, dependencyVersion });
           if (this.terminalProjections.size > 4096) this.terminalProjections.delete(this.terminalProjections.keys().next().value!);
         }
         return row;
