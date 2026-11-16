@@ -366,7 +366,13 @@ export class WorkReadModel {
         const next = await this.repair.next();
         if (next.done) {
           this.repair = undefined; this.repairOwed = false;
-          if (!this.imported) { this.imported = true; this.state = this.sourceErrors.size || [...this.projected.values()].some(row => !row.assignment.verified) ? "degraded" : "ready"; this.reason = this.sourceErrors.values().next().value ?? (this.state === "ready" ? undefined : "Some assignment sources could not be verified."); this.publish(); }
+          if (!this.imported) {
+            this.imported = true;
+            const degraded = this.state === "degraded" || this.sourceErrors.size || [...this.projected.values()].some(row => !row.assignment.verified);
+            this.state = degraded ? "degraded" : "ready";
+            this.reason = this.state === "ready" ? undefined : this.sourceErrors.values().next().value ?? this.reason ?? "Some assignment sources could not be verified.";
+            this.publish();
+          }
         }
         else { this.scheduling.repairBatches++; this.scheduling.repairEntries += next.value.length; await this.measuredScan("repair", next.value); }
         await yieldTurn();
@@ -663,17 +669,17 @@ export class WorkReadModel {
       const previousState = this.state;
       const previousReason = this.reason;
       for (const path of paths) this.sourceErrors.delete(path);
-      this.state = healthConfig.reason || this.sourceErrors.size ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
-      this.reason = healthConfig.reason ?? this.sourceErrors.values().next().value ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
+      this.state = this.sourceErrors.size || healthConfig.reason ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
+      this.reason = this.sourceErrors.values().next().value ?? healthConfig.reason ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
       if ((this.imported || paths.length === 128) && (semanticChange || previousState !== this.state || previousReason !== this.reason)) {
         this.changedRows = previousState === this.state && previousReason === this.reason ? changedRows : [];
         this.publish();
       }
     } catch (error) {
       if (this.closed) return;
-      if (this.dirty) for (const path of paths) if (!this.hints.has(path)) this.hints.set(path, Date.now());
-      for (const path of paths) this.sourceErrors.set(path, String(error).slice(0, 512));
       const reason = String(error).slice(0, 512);
+      if (this.dirty) for (const path of paths) if (!this.hints.has(path)) this.hints.set(path, Date.now());
+      for (const path of paths) this.sourceErrors.set(path, reason);
       const changed = this.state !== "degraded" || this.reason !== reason;
       this.state = "degraded"; this.reason = reason;
       if (changed) this.publish();

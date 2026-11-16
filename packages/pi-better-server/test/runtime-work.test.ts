@@ -580,7 +580,7 @@ test("a paused real socket has bounded queued snapshots and receives explicit re
   await once(server, "connection");
   try {
     queries.handle({ type: "runtime_subscribe", scope: {} });
-    for (let i = 0; i < 1000; i++) model.invalidate("watcher overflow");
+    for (let i = 0; i < 1000; i++) model.invalidate(`watcher overflow ${i}`);
     assert.ok(accepted.writableLength <= 103000, `queued bytes exceeded one snapshot plus the queue allowance: ${accepted.writableLength}`);
     const resynced = new Promise<void>((resolve, reject) => {
       let buffer = "";
