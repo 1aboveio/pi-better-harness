@@ -21,6 +21,11 @@ export async function createBackgroundTools(root: string, instance: string, drai
     const recoveryVersions = new Map<string, string>();
     const scopes = new Map<string, any>(), deliveries = new Map<string, any>();
     const ownerKey = (owner: any) => JSON.stringify([owner.workspace, owner.sessionId]);
+    const forgetView = (view: string) => { projections.delete(view); recoveryVersions.delete(view); };
+    const forgetOwner = (key: string) => {
+        for (const view of new Set([...projections.keys(), ...recoveryVersions.keys()]))
+            if (JSON.parse(view)[0] === key) forgetView(view);
+    };
     const effectivePolicy = (record: any) => effectiveBackgroundPolicy(record.policy, permissions.readPermissionSettings({ agentDir: () => root }).background, record.owner.workspace);
     const assertAdmission = () => {
         if (!current)
@@ -116,12 +121,14 @@ export async function createBackgroundTools(root: string, instance: string, drai
             pending++;
             const request = tail.catch(() => undefined).then(async () => {
                 const record = authority.readBackgroundAuthority(root, instance, command.authority), key = ownerKey(record.owner);
+                // A warmed branch view must not overwrite another foreground's progress.
+                const viewKey = JSON.stringify([key, authority.backgroundDigest(record.branchIds)]);
                 const policy = effectivePolicy(record);
                 current = { record, authority: command.authority, ownerKey: key, digest: authority.backgroundDigest(record), policy, policyDigest: authority.backgroundDigest(policy ?? null) };
                 if (scopes.size >= 128 && !scopes.has(key)) {
                     const oldest = [...scopes.keys()].find(candidate => ![...deliveries.values()].some(item => ownerKey(item.scope.owner) === candidate));
                     if (oldest) {
-                        scopes.delete(oldest); recoveryVersions.delete(oldest);
+                        scopes.delete(oldest); forgetOwner(oldest);
                     }
                     else
                         throw new Error('runtime-overloaded: Background scope capacity');
@@ -137,8 +144,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                 for (const [token, item] of deliveries)
                     if (Date.now() - item.createdAt > 30000) {
                         item.delivery.defer('Native delivery lease expired');
-                        projections.delete(ownerKey(item.scope.owner));
-                        recoveryVersions.delete(ownerKey(item.scope.owner));
+                        forgetOwner(ownerKey(item.scope.owner));
                         deliveries.delete(token);
                     }
                 if (record.tool === '__background_receipt') {
@@ -151,11 +157,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
                         item.delivery.delivered();
                     else {
                         item.delivery.defer(String(record.params.reason ?? 'Native handoff deferred'));
-                        projections.delete(key);
                     }
                     deliveries.delete(record.params.token);
-                    projections.delete(key);
-                    recoveryVersions.delete(key);
+                    forgetOwner(key);
                     return { receipted: record.params.delivered === true };
                 }
                 if (record.tool === '__background_poll') {
@@ -163,17 +167,18 @@ export async function createBackgroundTools(root: string, instance: string, drai
                         throw new Error('Shared Background observation unavailable');
                     // Recovery is indexed and bounded independently of display readiness.
                     const recoveryVersion = authority.backgroundDigest([lease.store.getChangeRevision(), record.branchIds]);
-                    if (recoveryVersions.get(key) !== recoveryVersion || service.hasPendingParentCallbackRecovery()) {
+                    if (recoveryVersions.get(viewKey) !== recoveryVersion || service.hasPendingParentCallbackRecovery()) {
                         metrics.reconciles++;
                         service.noteParentContext(ctx);
                         await service.reconcileNow();
-                        recoveryVersions.set(key, recoveryVersion);
+                        if (!recoveryVersions.has(viewKey) && recoveryVersions.size >= 128) forgetView(recoveryVersions.keys().next().value!);
+                        recoveryVersions.set(viewKey, recoveryVersion);
                     }
                     const snapshot = await observe({ background: true, cwd: record.owner.workspace, sessionId: record.owner.sessionId });
                     if (snapshot.status !== 'ready')
                         throw new Error(snapshot.reason ?? 'Shared Background observation unverified');
                     const revision = authority.backgroundDigest([snapshot.scopeRevision, record.branchIds]);
-                    let projection = projections.get(key);
+                    let projection = projections.get(viewKey);
                     if (projection?.revision !== revision) {
                         metrics.scopeRefreshes++;
                         const legacy = snapshot.rows.filter((row: any) => !row.meta.durable).map((row: any) => row.meta);
@@ -182,9 +187,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
                             if (meta.status === 'running' || meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)
                                 runtime.resumeRunningTask(pi, meta, () => ({ cwd: record.owner.workspace, sessionId: record.owner.sessionId }));
                         projection = { revision, tasks: snapshot.rows.filter((row: any) => row.meta.durable).map((row: any) => row.meta), legacyRows: legacy.filter((meta: any) => !meta.dismissedAt).map((meta: any) => navigator.rowFromMeta(meta, Date.now())) };
-                        if (projections.size >= 128 && !projections.has(key))
-                            projections.delete(projections.keys().next().value!);
-                        projections.set(key, projection);
+                        if (projections.size >= 128 && !projections.has(viewKey))
+                            forgetView(projections.keys().next().value!);
+                        projections.set(viewKey, projection);
                     }
                     return { ...projection, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: [...deliveries.values()].filter(item => ownerKey(item.scope.owner) === key).map(({ token, notification, receiptId }) => ({ token, notification, receiptId })) };
                 }

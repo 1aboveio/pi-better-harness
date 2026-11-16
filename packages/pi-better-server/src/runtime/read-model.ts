@@ -101,7 +101,7 @@ export class WorkReadModel {
   private state: WorkSnapshot["status"] = "rebuilding";
   private reason: string | undefined = "Initial source inventory is rebuilding.";
   private counters = { inventories: 0, metadataReads: 0, projections: 0, assignmentProjections: 0, logProjections: 0, healthProjections: 0, failureProjections: 0, healthRecomputations: 0, healthConfigInvalidations: 0 };
-  private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, unverified: 0, initial: 0 };
+  private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, healthDeadline: 0, unverified: 0, initial: 0 };
   get metrics() {
     return { ...this.counters, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
       indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size };
@@ -446,8 +446,10 @@ export class WorkReadModel {
         const assignmentChanged = !row || !row.assignment.verified || affected.has(meta.id) || processes.get(meta.id) !== baseline.processes.get(meta.id);
         const logChanged = !row || logs.get(meta.id) !== baseline.logs.get(meta.id);
         const failureChanged = !row || failureJournals.get(meta.id) !== baseline.failureJournals.get(meta.id);
-        if (row && !assignmentChanged && !logChanged && !failureChanged && (healthConfig.revision !== baseline.healthRevision || healthDeadlineExpired(row, now))) {
+        const deadlineChanged = row && healthDeadlineExpired(row, now);
+        if (row && !assignmentChanged && !logChanged && !failureChanged && (healthConfig.revision !== baseline.healthRevision || deadlineChanged)) {
           if (healthConfig.revision !== baseline.healthRevision) this.invalidations.healthConfig++;
+          if (deadlineChanged) this.invalidations.healthDeadline++;
           this.counters.healthRecomputations++;
           const health = healthWithThresholds(row.health, healthConfig.config, meta);
           row = { ...row, health, sourceRevision: hash([meta, row.assignment.revision, row.display, health, row.recipientPending, row.failurePending, failureJournals.get(meta.id)]) };
@@ -460,6 +462,7 @@ export class WorkReadModel {
             if (logChanged) this.invalidations.log++;
             if (failureChanged) this.invalidations.failureAttention++;
             if (healthConfig.revision !== baseline.healthRevision) this.invalidations.healthConfig++;
+            if (deadlineChanged) this.invalidations.healthDeadline++;
           }
           this.counters.projections++;
           if (assignmentChanged) this.counters.assignmentProjections++;
@@ -472,7 +475,7 @@ export class WorkReadModel {
             display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.toolCalls.at(-1) ?? "" };
             health = logs.has(meta.id) ? extractChildEventFactsFromLog(meta.id, { logPath, states: this.healthStates }) : undefined;
           });
-          if (logChanged || assignmentChanged || healthConfig.revision !== baseline.healthRevision || (row && healthDeadlineExpired(row, now))) {
+          if (logChanged || assignmentChanged || deadlineChanged || healthConfig.revision !== baseline.healthRevision) {
             this.counters.healthRecomputations++;
             health = healthWithThresholds(health, healthConfig.config, meta);
           }
