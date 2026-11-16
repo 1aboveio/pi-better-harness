@@ -212,6 +212,12 @@ export class WorkReadModel {
       batch.push(path);
       if (batch.length === 128) { yield batch; batch = []; }
     }
+    // Failed first reads have no verified file entry, but still owe repair.
+    for (const path of this.sourceErrors.keys()) {
+      if (this.files.has(path)) continue;
+      batch.push(path);
+      if (batch.length === 128) { yield batch; batch = []; }
+    }
     for (const directory of [this.markers, this.archives, this.runs]) {
       let handle;
       try {

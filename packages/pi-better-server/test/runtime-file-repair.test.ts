@@ -79,6 +79,68 @@ test("precise hints coalesce; bounded repair resumes despite hot writes and repa
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
+for (const source of ["metadata", "archive", "marker"] as const) test(`repair verifies missed deletion of never-imported invalid ${source}, retaining errors while its root is missing`, async () => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, `failed-${source}`, { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  const directory = source === "metadata" ? model.runs : source === "archive" ? model.archives : model.markers;
+  const path = source === "metadata" ? join(directory, "sa_bad", "meta.json") : join(directory, "sa_bad.json");
+  const dropHints = () => { for (const watcher of (model as any).watchers.values()) watcher.close(); (model as any).watchers.clear(); };
+  const writeBroken = () => {
+    mkdirSync(source === "metadata" ? join(directory, "sa_bad") : directory, { recursive: true });
+    writeFileSync(path, "broken");
+  };
+  try {
+    await model.reconcile(); assert.equal(model.observation().status, "ready"); dropHints();
+    writeBroken(); await model.reconcile();
+    assert.equal(model.observation().status, "degraded");
+    assert.equal(model.snapshot().rows.length, 0, "failed first observation must not publish a record");
+    dropHints();
+    rmSync(source === "metadata" ? join(directory, "sa_bad") : path, { recursive: true });
+    await model.reconcile(); await model.reconcile();
+    assert.equal(model.observation().status, "ready", "repair must verify deletion without a delivered hint");
+
+    writeBroken(); await model.reconcile(); dropHints();
+    renameSync(directory, directory + "-away");
+    await model.reconcile(); await model.reconcile();
+    assert.equal(model.observation().status, "degraded", "unavailable root cannot verify deletion");
+    assert.match(model.observation().reason!, /Source directory unavailable/);
+    rmSync(directory + "-away", { recursive: true }); mkdirSync(directory);
+    await model.reconcile();
+    assert.equal(model.observation().status, "ready", "available empty root verifies the failed path is gone");
+
+    writeBroken(); await model.reconcile(); dropHints();
+    rmSync(source === "metadata" ? join(directory, "sa_bad") : path, { recursive: true });
+    const repairs = model.metrics.scheduling.repairEntries;
+    model.fileHint(source === "metadata" ? join(directory, "sa_bad") : directory, source === "metadata" ? "meta.json" : "sa_bad.json");
+    await (model as any).pending;
+    assert.equal(model.observation().status, "ready", "exact deletion hint must still clear the error");
+    assert.equal(model.metrics.scheduling.repairEntries, repairs, "exact deletion hint needs no inventory");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("failed-source deletion repair keeps its 128-path budget and does not clear unverified errors early", async () => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, "failed-batches", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  const dropHints = () => { for (const watcher of (model as any).watchers.values()) watcher.close(); (model as any).watchers.clear(); };
+  try {
+    await model.reconcile(); dropHints();
+    for (let i = 0; i < 130; i++) {
+      mkdirSync(join(f.runs, `sa_bad_${i}`));
+      writeFileSync(join(f.runs, `sa_bad_${i}`, "meta.json"), "broken");
+    }
+    await model.reconcile(); assert.equal(model.observation().status, "degraded"); dropHints();
+    for (let i = 0; i < 130; i++) rmSync(join(f.runs, `sa_bad_${i}`), { recursive: true });
+    const before = model.metrics.scheduling.repairEntries;
+    (model as any).repairOwed = true;
+    await model.reconcile(false);
+    assert.equal(model.metrics.scheduling.repairEntries - before, 128);
+    assert.equal(model.observation().status, "degraded", "remaining failed paths still owe verified observations");
+    await model.reconcile(false);
+    assert.equal(model.metrics.scheduling.repairEntries - before, 130);
+    assert.equal(model.observation().status, "ready");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("initial repair retains health configuration degradation until valid settings recover", async () => {
   const f = fixture(); f.put("sa_health_import");
   writeFileSync(join(f.agent, "settings.json"), "invalid json");
