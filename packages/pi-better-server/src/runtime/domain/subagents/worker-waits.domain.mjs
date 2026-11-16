@@ -35,7 +35,7 @@ import { captureParkCheckpoint, verifyParkCheckpoint } from "./park-checkpoint.d
 import { findSavedConversation, readConversationLease } from "./continuation.domain.mjs";
 import { commitAssignmentTerminal, readOutcome, coordinatorPath } from "./assignment-outcomes.domain.mjs";
 import { openStore } from "./shared-operation-coordinator/index.domain.mjs";
-import { recordAssignmentReport } from "./assignment-report.domain.mjs";
+import { recordAssignmentReport, recordAssignmentReportRejection } from "./assignment-report.domain.mjs";
 import { currentSandboxPermissions } from "./permission-policy.domain.mjs";
 import { effectiveStatus, isPendingPark, listParkRecordCandidates, listMetas, listPendingParkedRuns, readMeta, readParkRecord, processStartToken, updateParkRecord, writeParkRecord, writeMeta, } from "./registry.domain.mjs";
 import { processExists } from "./spawn.domain.mjs";
@@ -561,8 +561,9 @@ export function createWorkerOperationsHost(options) {
             }
         };
         const handlers = {};
+        let onToolRejected;
         if (registration.capabilities.reportAssignment && registration.assignment) {
-            handlers.report_assignment_result = async (params, context) => recordAssignmentReport(registration.runId, params, () => {
+            const assertReportAuthority = (context) => {
                 const live = host.getRun(registration.runId);
                 const meta = readMeta(registration.runId);
                 if (!live || live.revoked || live.tokenGeneration !== context.tokenGeneration || context.signal.aborted
@@ -593,7 +594,22 @@ export function createWorkerOperationsHost(options) {
                     }
                 }
                 return meta;
-            }, currentSandboxPermissions(options.pi));
+            };
+            handlers.report_assignment_result = async (params, context) => {
+                let permissions;
+                try {
+                    permissions = currentSandboxPermissions(options.pi);
+                }
+                catch (error) {
+                    recordAssignmentReportRejection(reasonOf(error), () => assertReportAuthority(context));
+                    throw error;
+                }
+                return recordAssignmentReport(registration.runId, params, () => assertReportAuthority(context), permissions);
+            };
+            onToolRejected = (error, context) => {
+                if (context.tool === "report_assignment_result")
+                    recordAssignmentReportRejection(error.message, () => assertReportAuthority(context));
+            };
         }
         const execute = (tool, params) => rpc.call("execute-tool", {
             runId: registration.runId,
@@ -777,6 +793,7 @@ export function createWorkerOperationsHost(options) {
             tools: normalizeToolDescriptors(registration.schemas, registration.capabilities),
             ownership: (taskId) => ownsTask(taskId),
             handlers,
+            onToolRejected,
         });
         durable?.save(registration, handle.token);
         return {
