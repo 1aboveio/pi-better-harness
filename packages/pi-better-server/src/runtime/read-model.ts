@@ -352,14 +352,19 @@ export class WorkReadModel {
   }
 
   /** Ordinary coordinator commits use the reverse scope index, not the source inventory. */
-  private refreshAssignments() {
-    if (!this.imported || this.staged) return;
+  private refreshAssignments(baselineOnly = false) {
+    if ((!this.imported && !baselineOnly) || this.staged) return;
     let release: (() => void) | undefined;
     try {
       const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
       const changes = this.reader.changes();
       if (changes.has("*")) {
         const key = `${this.reader.changeMetrics.generation}:${changes.get("*")}`;
+        if (baselineOnly) {
+          this.assignmentBaseline = { key, seq: changes.get("*")! };
+          this.coordinator = snapshot.revision;
+          return;
+        }
         if (this.assignmentBaseline?.key === key) return;
         this.imported = false; this.repairOwed = true;
         if (!this.sourceErrors.size) { this.state = "rebuilding"; this.reason = "Assignment source baseline is rebuilding."; }
@@ -434,6 +439,8 @@ export class WorkReadModel {
       if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
       do {
         this.dirty = false;
+        // Background progress is independent of whether Subagent repair finds files.
+        if (this.background.refresh()) this.publish(true);
         this.refreshAssignments();
         if (this.hints.size) {
           const entries = [...this.hints].slice(0, 32);
@@ -453,7 +460,7 @@ export class WorkReadModel {
           this.repair = undefined; this.repairOwed = false;
           // An empty metadata inventory still needs a journal baseline before
           // later exact hints can be treated as incremental updates.
-          if (!this.imported && !this.assignmentBaseline && !this.files.size && !this.sourceErrors.size) await this.measuredScan("repair", []);
+          if (!this.imported && !this.assignmentBaseline && !this.files.size && !this.sourceErrors.size) this.refreshAssignments(true);
           if (this.assignmentBaseline && !this.sourceErrors.size && ![...this.projected.values()].some(row => !row.assignment.verified)) this.reader.acknowledgeChanges(new Map([["*", this.assignmentBaseline.seq]]), true);
           if (!this.imported) {
             this.imported = true;
@@ -488,7 +495,6 @@ export class WorkReadModel {
     this.assignmentFault = undefined;
     const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
-    if (this.background.refresh()) this.publish(true);
     let releaseCoordinator: (() => void) | undefined;
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
       healthRevision: this.healthRevision, coordinator: this.coordinator };
