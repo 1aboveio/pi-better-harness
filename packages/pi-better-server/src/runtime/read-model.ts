@@ -37,7 +37,13 @@ const safeId = /^[A-Za-z0-9_-]+$/;
 
 function healthWithThresholds(health: any, config: any, meta: any) {
   if (!health) return undefined;
-  const thresholds = healthThresholdsForConfig(config);
+  const value = { ...health, thresholds: healthThresholdsForConfig(config) };
+  return { ...value, nextDeadline: nextHealthDeadline(value, meta) };
+}
+
+function nextHealthDeadline(health: any, meta: any, now = Date.now()): number | null {
+  if (!health) return null;
+  const { thresholds } = health;
   const facts = health.facts;
   const tool = facts.activeTools.at(-1);
   const toolStart = tool?.startedAt ?? facts.lastToolAt ?? facts.lastMeaningfulAt;
@@ -51,9 +57,11 @@ function healthWithThresholds(health: any, config: any, meta: any) {
       deadlines.push(anchor + thresholds.quietMs, anchor + thresholds.staleMs);
     }
   }
-  const future = deadlines.filter(deadline => deadline > Date.now());
-  return { ...health, thresholds, nextDeadline: future.length ? Math.min(...future) : null };
+  const future = deadlines.filter(deadline => deadline > now);
+  return future.length ? Math.min(...future) : null;
 }
+
+const healthDeadlineExpired = (row: { health?: any }, now: number) => typeof row.health?.nextDeadline === "number" && row.health.nextDeadline <= now;
 
 /** Reconstructable query state. It never authorizes execution or writes source records. */
 export class WorkReadModel {
@@ -176,7 +184,7 @@ export class WorkReadModel {
       ...[...this.projected.values()].filter(row => row.meta.status === "running"
         && processMatchesStart(row.meta.pid, row.meta.pidStartTime))
         .map(row => ({ kind: "worker", id: row.meta.id, owner: row.meta.callbackOrigin,
-          lastProgressAt: row.meta.startedAt, nextDeadline: row.health?.nextDeadline ?? null, recovery: "observe-existing-worker" })),
+          lastProgressAt: row.meta.startedAt, nextDeadline: nextHealthDeadline(row.health, row.meta), recovery: "observe-existing-worker" })),
       ...this.background.livenessReasons(options),
     ];
   }
@@ -392,7 +400,9 @@ export class WorkReadModel {
       const healthConfig = await readHealthConfig(this.agentDir, next.size > 0);
       if (healthConfig.revision !== baseline.healthRevision) this.counters.healthConfigInvalidations++;
       const changed = next.size !== baseline.files.size || [...next].some(([path, entry]) => baseline.files.get(path)?.signature !== entry.signature);
-      if (!this.staged && !changed && !logFamilies.size && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && !healthConfig.reason && this.state === "ready") return;
+      const now = Date.now();
+      const deadlineExpired = [...baseline.projected.values()].some(row => healthDeadlineExpired(row, now));
+      if (!this.staged && !changed && !logFamilies.size && !deadlineExpired && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && !healthConfig.reason && this.state === "ready") return;
       const metas = new Map<string, any>();
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
       for (const [path, entry] of next) {
@@ -436,8 +446,8 @@ export class WorkReadModel {
         const assignmentChanged = !row || !row.assignment.verified || affected.has(meta.id) || processes.get(meta.id) !== baseline.processes.get(meta.id);
         const logChanged = !row || logs.get(meta.id) !== baseline.logs.get(meta.id);
         const failureChanged = !row || failureJournals.get(meta.id) !== baseline.failureJournals.get(meta.id);
-        if (row && !assignmentChanged && !logChanged && !failureChanged && healthConfig.revision !== baseline.healthRevision) {
-          this.invalidations.healthConfig++;
+        if (row && !assignmentChanged && !logChanged && !failureChanged && (healthConfig.revision !== baseline.healthRevision || healthDeadlineExpired(row, now))) {
+          if (healthConfig.revision !== baseline.healthRevision) this.invalidations.healthConfig++;
           this.counters.healthRecomputations++;
           const health = healthWithThresholds(row.health, healthConfig.config, meta);
           row = { ...row, health, sourceRevision: hash([meta, row.assignment.revision, row.display, health, row.recipientPending, row.failurePending, failureJournals.get(meta.id)]) };
@@ -462,7 +472,7 @@ export class WorkReadModel {
             display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.toolCalls.at(-1) ?? "" };
             health = logs.has(meta.id) ? extractChildEventFactsFromLog(meta.id, { logPath, states: this.healthStates }) : undefined;
           });
-          if (logChanged || assignmentChanged || healthConfig.revision !== baseline.healthRevision) {
+          if (logChanged || assignmentChanged || healthConfig.revision !== baseline.healthRevision || (row && healthDeadlineExpired(row, now))) {
             this.counters.healthRecomputations++;
             health = healthWithThresholds(health, healthConfig.config, meta);
           }
@@ -609,12 +619,18 @@ export class WorkReadModel {
     const limit = Math.max(1, Math.min(200, Number.isSafeInteger(scope.limit) ? scope.limit! : 50));
     const records = this.db.prepare(`SELECT payload, started, id FROM rows ${clauses.length ? "WHERE " + clauses.join(" AND ") : ""} ORDER BY started DESC, id DESC LIMIT ?`).all(...args, limit + 1);
     const page = records.slice(0, limit), last = page.at(-1);
-    const deadlines = page.map((record: any) => JSON.parse(record.payload).health?.nextDeadline).filter((deadline: any) => typeof deadline === "number" && deadline > Date.now());
+    const now = Date.now();
+    const rows = page.map((record: any) => {
+      const row = JSON.parse(record.payload);
+      if (row.health) row.health.nextDeadline = nextHealthDeadline(row.health, row.meta, now);
+      return row;
+    });
+    const deadlines = rows.map((row: any) => row.health?.nextDeadline).filter((deadline: any) => typeof deadline === "number");
     return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([key, entry.token, entry.revision]), seq: this.revision,
       observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, status: this.state, reason: this.reason,
       totalMatching,
-      rows: page.map((record: any) => {
-        const row = JSON.parse(record.payload);
+      rows: page.map((record: any, index: number) => {
+        const row = rows[index];
         if (scope.detail && scope.id) {
           let cached = this.details.get(row.meta.id);
           if (!cached || cached.revision !== row.sourceRevision) {

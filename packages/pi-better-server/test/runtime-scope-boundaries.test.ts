@@ -8,6 +8,37 @@ import type { Socket } from "node:net";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
 
+test("A health deadlines advance without invalidating B subscription or cursor", async t => {
+  const root = mkdtempSync(join(tmpdir(), "scope-deadlines-"));
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  const a = join(root, "a"), b = join(root, "b");
+  writeFileSync(join(root, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: { healthQuietMs: 1000, healthStaleMs: 5000 } } }));
+  for (const [id, cwd, status] of [["sa_a", a, "running"], ["sa_b1", b, "completed"], ["sa_b2", b, "completed"]]) {
+    const dir = join(root, "runs", id!); mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "meta.json"), JSON.stringify({ id, cwd, status, pid: process.pid, spawnPid: process.pid, startedAt: 1000 }));
+    writeFileSync(join(dir, "output.log"), "{}\n");
+  }
+  const model = new WorkReadModel(root, "deadline-scopes", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    const scope = { cwd: b, limit: 1 }, page = model.snapshot(scope), before = model.metrics;
+    let changes = 0;
+    model.onChange(() => changes++, scope);
+    assert.equal(model.snapshot({ cwd: a }).nextDeadline, 2000);
+    for (const [time, expected] of [[2000, 6000], [6000, null]] as const) {
+      now = time; await model.reconcile();
+      assert.equal(model.snapshot({ cwd: a }).nextDeadline, expected);
+      assert.equal(changes, 0);
+      assert.equal(model.snapshot(scope).scopeRevision, page.scopeRevision);
+      assert.equal(model.snapshot({ ...scope, cursor: page.nextCursor }).rows.length, 1);
+    }
+    assert.equal(model.metrics.logProjections, before.logProjections);
+    assert.equal(model.metrics.assignmentProjections, before.assignmentProjections);
+    assert.equal(model.metrics.healthRecomputations - before.healthRecomputations, 2);
+  } finally { await model.close(); t.mock.restoreAll(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("content revisions route old and new scopes while unrelated cursors survive", async () => {
   const root = mkdtempSync(join(tmpdir(), "scope-revisions-"));
   const a = join(root, "a"), b = join(root, "b"), c = join(root, "c");
