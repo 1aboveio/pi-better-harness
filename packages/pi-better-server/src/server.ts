@@ -485,7 +485,15 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             await nativeHost.reload(sessionId);
             return reply({ sessionId });
           }
-          if (type === "client_snapshot") return reply({ sessionId, data: await hosted.clientSnapshot() });
+          if (type === "client_snapshot") {
+            if (socket.destroyed) return;
+            const data = await new Promise<unknown>((resolve, reject) => {
+              const closed = () => reject(new Error('Read caller disconnected'));
+              socket.once('close', closed);
+              void hosted.clientSnapshot().then(resolve, reject).finally(() => socket.off('close', closed));
+            });
+            return reply({ sessionId, data });
+          }
           if (type === "clear_queue") return reply({ sessionId, data: hosted.session.clearQueue() });
           if (type === "abort_compaction") {
             hosted.session.abortCompaction();
