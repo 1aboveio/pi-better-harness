@@ -2,7 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import { createRenderScheduler, type RenderScheduler } from "./shared-render-scheduler.ts";
-import { setNavigatorPanel } from "./shared-navigator-panels.ts";
+import { setNavigatorPanel, type NavigatorPanelLayout } from "./shared-navigator-panels.ts";
 
 export default function navigatorExtension(): void {
   // Internal shared package. Pi may scan its symlink in the extension directory
@@ -328,7 +328,7 @@ function refreshMainListWidget(): void {
   }
   if (!s.mainListWidgetInstalled) {
     try {
-      setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, (tui: { requestRender?(): void }, theme: unknown) => createMainListWidget(tui, theme, deps), { placement: "aboveEditor" });
+      setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, (tui: { requestRender?(): void }, theme: unknown, layout) => createMainListWidget(tui, theme, deps, layout), { placement: "aboveEditor" });
       s.mainListWidgetInstalled = true;
     } catch { /* ignore */ }
   }
@@ -406,7 +406,7 @@ function createPointerNavigation(targetAt: (event: WidgetMouseEvent) => string |
   };
 }
 
-function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, deps: HostDeps): MainListWidget {
+function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, deps: HostDeps, panelLayout: NavigatorPanelLayout): MainListWidget {
   const requestRender = () => tui.requestRender?.();
   state().mainListRequestRender = requestRender;
   // navigatorId per rendered line, so a pointer row resolves by structure, never by row text.
@@ -439,8 +439,23 @@ function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, d
       if (hint) { layout.lines.push(deps.truncate(`   ${hint}`, renderWidth(width))); layout.owners.push(undefined); }
       lineWidth = renderWidth(width);
       // The leading gap line belongs to the widget too, so its slot stays ownerless.
+      let rawLines = ["", ...layout.lines];
       lineOwners = [undefined, ...layout.owners];
-      const lines = ["", ...layout.lines].map((line, index) =>
+      const budget = Math.max(0, Math.floor(panelLayout.availableRows()));
+      if (rawLines.length > budget) {
+        const selected = state().mainListFocused ? lineOwners.indexOf(state().mainListSelectedId) : -1;
+        const count = Math.max(0, budget - 1);
+        const start = selected >= 0 ? Math.max(0, Math.min(selected - Math.floor(count / 2), rawLines.length - count)) : 2;
+        rawLines = rawLines.slice(start, start + count);
+        lineOwners = lineOwners.slice(start, start + count);
+        const visible = new Set(lineOwners.filter(Boolean));
+        if (budget > 0) {
+          const hidden = rows.length - visible.size;
+          rawLines.push(deps.truncate(hidden ? `   +${hidden} tasks` : `   ${rows.length} tasks`, renderWidth(width)));
+          lineOwners.push(undefined);
+        }
+      }
+      const lines = rawLines.map((line, index) =>
         pointer.hovered && lineOwners[index] === pointer.hovered ? highlightPointerTarget(theme, line, lineWidth) : line);
       state().lastMainListLines = lines;
       return lines;
