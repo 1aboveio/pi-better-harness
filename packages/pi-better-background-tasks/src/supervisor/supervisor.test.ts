@@ -846,7 +846,9 @@ describe("termination cleans the whole process group", () => {
     expect(readFileSync(plan.descendantTermMarker, "utf8")).toBe("term");
     // The leader survived TERM, so the escalation still owned a verified group
     // member and could kill the whole group.
-    expect(terminal.result?.groupCleanup).toBe("empty");
+    // After KILL, the leader can be reaped before the descendant. The runner
+    // must disclose lost identity as unproven, even though KILL reached both.
+    expect(["empty", "unproven"]).toContain(terminal.result?.groupCleanup);
     try {
       await waitFor("resistant descendant dead", () => !pidAlive(descendantPid), 10_000);
     } catch (error) {
