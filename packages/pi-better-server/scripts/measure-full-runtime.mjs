@@ -17,6 +17,7 @@ import { workloadSettings, seedWorkload, reconcileWorkload, workloadTransport, w
 import { checkStartupAdmission, startupIntentFromEnv } from '../src/startup/admission.ts';
 import { readOwnBuild } from '../src/startup/artifact.ts';
 import { summarizeCohorts } from './measure-full-runtime/aggregate-samples.mjs';
+import { runMutationSequence } from './measure-full-runtime/mutation-sequence.mjs';
 const incremental = workloadSettings();
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'p751-full-'))), agent = join(root, 'agent'), cwd = join(root, 'workspace'), samples = join(root, 'samples');
 const { directory: transport, socketPath } = workloadTransport(root);
@@ -45,6 +46,7 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
     './measure-full-runtime/probe.mjs', './measure-full-runtime/recovery-trace.mjs', './measure-full-runtime/recovery-trace-loader.mjs',
     './measure-full-runtime/incremental-workload.mjs', './event-publication/writer.mjs', './event-publication/commit.mjs',
     './measure-full-runtime/aggregate-samples.mjs',
+    './measure-full-runtime/mutation-sequence.mjs',
     '../test/support/subagent-offline-model.ts',
   ].map(path => ({ path, sha256: createHash('sha256').update(readFileSync(new URL(path, import.meta.url))).digest('hex') })))).digest('hex'),
   diagnosticBudget: { samplerIntervalMs: 250, controlIntervalMs: 100 },
@@ -180,41 +182,36 @@ try {
     writeFileSync(manifestPath, JSON.stringify(workload));
     const writer = start(new URL('./event-publication/writer.mjs', import.meta.url), [manifestPath, '--incremental-workload']);
     await message(writer, value => value.ready);
-    report.mutations = [];
-    for (const mutation of [{ kind: 'theme', theme: 'dark' }, { kind: 'same-settings' },
-      { kind: 'append', id: workload.tasks[0].id, cents: 2, text: `appended ${workload.tasks[0].id}` }]) {
-      const before = await work.request('runtime_get_metrics');
-      const id = ++seq, pending = message(writer, value => value.id === id);
-      writer.send({ id, mutation });
-      const receipt = await pending; assert.equal(receipt.error, undefined, receipt.error);
-      if (receipt.result.expected) Object.assign(workload.tasks[0], receipt.result.expected);
-      await until('external mutation observed by actual source inventory', async () => {
-        await work.get({ cwd, active: false, limit: 1 });
-        const metrics = await work.request('runtime_get_metrics');
-        if (metrics.inventories <= before.inventories) return false;
-        if (mutation.kind !== 'append') return true;
-        try { const snapshot = await work.get({ id: mutation.id });
-          const coverage = snapshot.rows[0]?.display?.coverage;
-          return snapshot.status === 'ready' && coverage?.complete && coverage.offset === receipt.result.afterBytes;
-        } catch (error) { if (!/resync|state-degraded/.test(String(error))) throw error; return false; }
-      });
-      const after = await work.request('runtime_get_metrics');
-      assert.equal(inspectDaemonOwner(transport).owner?.token, owner.token, 'Mutation must retain the exact management instance');
-      const delta = workloadCounterDelta(before, after);
-      if (mutation.kind !== 'append') {
-        assert.equal(delta.logs.bytes, 0, 'Settings-only changes must not read task logs');
-        assert.equal(delta.projections.logProjections, 0);
-      } else {
-        assert.equal(delta.projections.logProjections, 1, 'Only the appended fixture log may be projected');
-        assert.equal(delta.logs.displayFolded, 1); assert.equal(delta.logs.healthFolded, 1);
-        assert.ok(delta.logs.bytes >= receipt.result.appendedBytes && delta.logs.bytes <= receipt.result.appendedBytes + 256,
-          'Single append reads only new bytes plus the existing identity probe budget');
-      }
-      const final = await reconcileWorkload(work, cwd, workload);
-      report.mutations.push({ mutation, receipt: receipt.result, before, after, delta, final });
-      writeFileSync(manifestPath, JSON.stringify(workload));
-      writeFileSync(output, JSON.stringify(report, null, 2));
-    }
+    await runMutationSequence({ manifest: workload, client: work, evidenceScope: 'runtime',
+      // The real WorkClient exposes no eviction/restart command. Absent fixture
+      // lifecycle hooks remain missing-capability, never a manufactured RPC.
+      recovery: {},
+      write: async mutation => {
+        const id = ++seq, pending = message(writer, value => value.id === id);
+        writer.send({ id, mutation });
+        const receipt = await pending; assert.equal(receipt.error, undefined, receipt.error); return receipt.result;
+      },
+      observe: async (mutation, receipt, before, client) => {
+        await until('external mutation observed by actual source inventory', async () => {
+          await client.get({ cwd, active: false, limit: 1 });
+          const metrics = await client.request('runtime_get_metrics');
+          if (metrics.inventories <= before.inventories) return false;
+          if (['theme', 'same-settings'].includes(mutation.kind)) return true;
+          try {
+            const snapshot = await client.get({ id: mutation.id }), row = snapshot.rows[0];
+            if (snapshot.status !== 'ready') return false;
+            if (mutation.kind === 'delete-log') return Boolean(row?.health?.rawLog?.error);
+            return row?.display?.coverage?.complete && row.display.coverage.offset === receipt.afterBytes;
+          } catch (error) { if (!/resync|state-degraded/.test(String(error))) throw error; return false; }
+        });
+        assert.equal(inspectDaemonOwner(transport).owner?.token, owner.token, 'Mutation must retain the exact management instance');
+      },
+      onState: state => {
+        report.mutations = state;
+        writeFileSync(manifestPath, JSON.stringify(workload));
+        writeFileSync(output, JSON.stringify(report, null, 2));
+      },
+    });
   }
   writeFileSync(join(cwd,'finish'),'done');
   const receipt=`background-terminal:${remoteLaunch.operationId}`;

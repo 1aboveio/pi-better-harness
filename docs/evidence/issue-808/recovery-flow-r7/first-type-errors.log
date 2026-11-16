@@ -1,0 +1,15 @@
+
+> pi-better-server@0.5.0 typecheck
+> tsc --noEmit
+
+test/workload-recovery-sequence.test.ts(48,94): error TS2322: Type '{ evict: { scope: string; run: () => Promise<{ action: string; scope: string; }>; }; restart: { scope: string; run: () => Promise<{ action: string; scope: string; client: { request: (type: string) => Promise<{ ...; }>; get: (scope: any) => Promise<...>; }; }>; }; } | { ...; }' is not assignable to type 'Record<string, { scope: string; run: () => Promise<any>; }> | undefined'.
+  Type '{ evict?: undefined; restart?: undefined; }' is not assignable to type 'Record<string, { scope: string; run: () => Promise<any>; }>'.
+    Property 'evict' is incompatible with index signature.
+      Type 'undefined' is not assignable to type '{ scope: string; run: () => Promise<any>; }'.
+npm error Lifecycle script `typecheck` failed with error:
+npm error code 2
+npm error path /Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server
+npm error workspace pi-better-server@0.5.0
+npm error location /Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server
+npm error command failed
+npm error command sh -c tsc --noEmit

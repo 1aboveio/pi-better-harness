@@ -53,9 +53,21 @@ export function seedWorkload({ root, agent, cwd, settings }) {
       content: [{ type: 'text', text: finalText }], usage: { input: 3, output: 7, cost: { total: 0.01 } } } };
     const bytes = JSON.stringify(event) + '\n';
     writeFileSync(join(directory, 'output.log'), bytes);
-    tasks.push({ id, finalText, costUSD: 0.01, input: 3, output: 7, bytes: Buffer.byteLength(bytes) });
+    tasks.push({ id, finalText, costUSD: 0.01, input: 3, output: 7, bytes: Buffer.byteLength(bytes), logState: 'present' });
   }
   return { agent, cwd, runs, durable, tasks, history: settings.history, seededLogBytes: tasks.reduce((sum, task) => sum + task.bytes, 0) };
+}
+
+export function mutationExpectation(task, command) {
+  if (['theme', 'same-settings'].includes(command.kind)) return undefined;
+  assert.ok(task && task.id === command.id, 'Expected result requires exact task identity');
+  if (['append', 'replace-log'].includes(command.kind)) return {
+    logState: 'present', finalText: command.text,
+    costUSD: ((command.kind === 'append' ? Math.round(task.costUSD * 100) : 0) + command.cents) / 100,
+    input: (command.kind === 'append' ? task.input : 0) + 11, output: (command.kind === 'append' ? task.output : 0) + 13,
+  };
+  assert.ok(['truncate-log', 'delete-log'].includes(command.kind), 'Unknown result mutation');
+  return { logState: command.kind === 'delete-log' ? 'missing' : 'empty', finalText: '', costUSD: 0, input: 0, output: 0 };
 }
 
 /** Used by the existing external writer; receipts describe actual source bytes, not runtime work. */
@@ -86,12 +98,11 @@ export function mutateWorkload(manifest, command) {
     appended = Buffer.from(JSON.stringify(event) + '\n');
     if (command.kind === 'append') appendFileSync(path, appended);
     else { const staged = `${path}.${process.pid}.mutation.tmp`; writeFileSync(staged, appended, { flag: 'wx' }); renameSync(staged, path); }
-    expected = { finalText: command.text, costUSD: ((command.kind === 'append' ? Math.round(task.costUSD * 100) : 0) + command.cents) / 100,
-      input: (command.kind === 'append' ? task.input : 0) + 11, output: (command.kind === 'append' ? task.output : 0) + 13 };
+    expected = mutationExpectation(task, command);
   } else {
     if (command.kind === 'truncate-log') truncateSync(path, 0);
     else unlinkSync(path);
-    expected = { finalText: '', costUSD: 0, input: 0, output: 0 };
+    expected = mutationExpectation(task, command);
   }
   const after = command.kind === 'delete-log' ? null : readFileSync(path);
   const digest = bytes => bytes === null ? null : createHash('sha256').update(bytes).digest('hex');
@@ -120,6 +131,27 @@ export function workloadCounterDelta(before, after) {
   };
 }
 
+export function reconcileTask(task, row, cwd) {
+  assert.equal(row.meta.id, task.id);
+  assert.equal(row.meta.cwd, cwd);
+  assert.equal(row.meta.sessionId, '808-group');
+  assert.equal(row.meta.status, 'completed');
+  const unavailable = task.logState === 'missing';
+  if (unavailable) {
+    assert.ok(row.detail.parsed.diagnostics?.some(message => /ENOENT|Log unreadable/.test(message)), 'Deleted log must report unavailable evidence');
+    assert.notEqual(row.display?.coverage?.complete, true, 'Missing source cannot claim complete log coverage');
+  } else {
+    assert.ok(!row.detail.parsed.diagnostics?.some(message => /Log unreadable|Incomplete usage|catch-up pending|Log truncated/.test(message)), 'Present source must be fully reconciled');
+  }
+  assert.equal(row.detail.parsed.finalText, task.finalText);
+  assert.equal(row.detail.parsed.usage.costUSD, task.costUSD);
+  assert.equal(row.detail.parsed.usage.input, task.input);
+  assert.equal(row.detail.parsed.usage.output, task.output);
+  return { id: task.id, finalText: row.detail.parsed.finalText, costUSD: unavailable ? null : row.detail.parsed.usage.costUSD,
+    ...(task.logState === 'missing' || task.logState === 'empty' ? { sourceCompleteness: unavailable ? 'unavailable' : 'empty', diagnostics: row.detail.parsed.diagnostics } : {}),
+    input: unavailable ? null : row.detail.parsed.usage.input, output: unavailable ? null : row.detail.parsed.usage.output };
+}
+
 export async function reconcileWorkload(work, cwd, manifest) {
   const snapshot = await work.get({ cwd, active: false, limit: 1 });
   assert.equal(snapshot.status, 'ready', snapshot.reason);
@@ -130,17 +162,7 @@ export async function reconcileWorkload(work, cwd, manifest) {
     const detail = await work.get({ id: task.id, detail: true });
     assert.equal(detail.status, 'ready', detail.reason);
     assert.equal(detail.rows.length, 1, `Missing exact task ${task.id}`);
-    const row = detail.rows[0];
-    assert.equal(row.meta.id, task.id);
-    assert.equal(row.meta.cwd, cwd);
-    assert.equal(row.meta.sessionId, '808-group');
-    assert.equal(row.meta.status, 'completed');
-    assert.equal(row.detail.parsed.finalText, task.finalText);
-    assert.equal(row.detail.parsed.usage.costUSD, task.costUSD);
-    assert.equal(row.detail.parsed.usage.input, task.input);
-    assert.equal(row.detail.parsed.usage.output, task.output);
-    results.push({ id: task.id, finalText: row.detail.parsed.finalText, costUSD: row.detail.parsed.usage.costUSD,
-      input: row.detail.parsed.usage.input, output: row.detail.parsed.usage.output });
+    results.push(reconcileTask(task, detail.rows[0], cwd));
   }
   const history = new Set();
   const cursors = new Set();

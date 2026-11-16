@@ -1,0 +1,23 @@
+✔ existing external file writer returns source-byte receipts and preserves its legacy metadata path (138.254625ms)
+✔ 48 workload logs preserve real usage through append, checkpoint restore and source faults (40.632834ms)
+✔ 96 workload logs preserve real usage through append, checkpoint restore and source faults (78.36075ms)
+✔ 192 workload logs preserve real usage through append, checkpoint restore and source faults (164.266042ms)
+✔ settings mutations and exact task identity retain separate actual ordinary/repair counters (1368.878167ms)
+✔ component reconciliation checks real projected identities, complete history pages and final usage (301.366875ms)
+✔ component source changes preserve unrelated scope revisions and historical cursors (281.309083ms)
+✔ plan selects exact fixture identities and independent faults after capability-gated recovery (24.591292ms)
+✔ component file/projection sequence with recovery controls=false preserves honest final-source rejection (2140.791083ms)
+ℹ {"observation":"component-only deleted source rejection","step":"delete-log","projectedComplete":true,"diagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-sequence-NBzaZE/pi-better-subagents/runs/sa_808_group_0/output.log'"],"state":"failed","error":"AssertionError [ERR_ASSERTION]: Missing source cannot claim complete log coverage"}
+✔ component file/projection sequence with recovery controls=true preserves honest final-source rejection (891.954459ms)
+ℹ {"observation":"component-only deleted source rejection","step":"delete-log","projectedComplete":true,"diagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-sequence-FdlGdV/pi-better-subagents/runs/sa_808_group_0/output.log'"],"state":"failed","error":"AssertionError [ERR_ASSERTION]: Missing source cannot claim complete log coverage"}
+✔ recovery receipt cannot claim eviction unless actual parser caches were emptied (186.734541ms)
+✔ failed writer stops once and preserves original failure separately from reporting failure (24.954583ms)
+✔ real missing-file parser diagnostics reconcile as unavailable, never a complete zero bill (25.1245ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3464.362083

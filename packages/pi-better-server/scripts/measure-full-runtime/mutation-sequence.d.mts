@@ -1,0 +1,3 @@
+import type { WorkloadManifest } from './incremental-workload.mjs';
+export function mutationSequence(manifest: WorkloadManifest): { key: string; capability?: string; requires?: string; command?: { kind: string; id?: string; cents?: number; text?: string; theme?: string } }[];
+export function runMutationSequence(options: { manifest: WorkloadManifest; client: any; write: (command: any) => Promise<any>; observe: (command: any, receipt: any, before: any, client: any) => Promise<void>; recovery?: Partial<Record<'evict' | 'restart', { scope: string; run: () => Promise<any> }>>; evidenceScope: 'component' | 'runtime'; onState?: (state: any) => void | Promise<void> }): Promise<any>;

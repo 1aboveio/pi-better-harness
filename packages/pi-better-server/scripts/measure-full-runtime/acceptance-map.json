@@ -20,8 +20,9 @@
       "ac": 2,
       "command": "node --import tsx --test packages/pi-better-server/test/runtime-health-config.test.ts packages/pi-better-server/test/runtime-incremental-log.test.ts packages/pi-better-server/test/runtime-log-checkpoints.test.ts packages/pi-better-server/test/runtime-log-checkpoint-folds.test.ts",
       "nativeMutationCommand": "PI_INCREMENTAL_WORKLOAD=1 PI_INCREMENTAL_MUTATIONS=1 node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs",
-      "implemented": "Existing external writer extended for theme/same-settings/append/replacement/truncation/deletion; primary opt-in theme/rewrite/append sequence with actual-byte receipts, counter deltas and final reconciliation. Component parser/checkpoint tests cover 48/96/192 records and real final usage.",
-      "missing": ["actual authorized native mutation run", "parser eviction/restart orchestration in full process workload", "actual native bytes/folds/projections for every 48/96/larger group"]
+      "recoveryComponentCommand": "node --import tsx --test packages/pi-better-server/test/workload-recovery-sequence.test.ts",
+      "implemented": "Existing writer/client sequence now declares replacement/truncation/deletion and checkpoint eviction/restart with dependent appends/final reconciliation. Fixture-owned recovery hooks are scope-gated; missing hooks are missing-capability, dependent steps notRun. Real component cache eviction/derived-reader reopen preserves exact usage and restored checkpoints; primary runtime has no supported eviction/restart RPC and supplies no hook.",
+      "missing": ["actual authorized native mutation run", "legitimate native fixture-owned eviction/restart lifecycle capability (not a fabricated RPC)", "current deleted-empty-log projection can still claim complete:true; reconciler rejects it and leaves deletion failed", "actual native bytes/folds/projections for every48/96/larger group"]
     },
     {
       "ac": 3,
@@ -32,7 +33,7 @@
     {
       "ac": 4,
       "command": "node --import tsx --test packages/pi-better-server/test/runtime-file-repair.test.ts packages/pi-better-server/test/runtime-snapshot-progress.test.ts packages/pi-better-server/test/runtime-assignment-crashes.test.ts",
-      "implemented": "Existing parent fault checkpoints plus real coordinator replacement and external-writer bounded snapshot progress; adapted metadata publication races; file replacement/truncation/deletion mutation commands and parser reset component checks",
+      "implemented": "Existing parent fault checkpoints plus real coordinator replacement/concurrent writer witnesses; declared replacement/truncation/deletion now wired into existing workload sequence. Missing log evidence is unavailable with null cumulative usage, never a complete zero bill. Actual component projection's false completeness is rejected, not repaired or waived.",
       "missing": ["continuous commits during initial build/repair in full workload", "dropped hints/replacement/truncation/deletion/journal gaps/out-of-order completion/crash qualification", "watermark/completeness/progress assertions across real processes"]
     },
     {
