@@ -10,7 +10,7 @@ import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 
-async function fixture(options: { capacity?: number; timeoutMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
+async function fixture(options: { capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
   mkdirSync(join(root, "runs"));
   const transport = mkdtempSync("/tmp/query-socket-");
@@ -73,6 +73,102 @@ async function ready(client: WorkClient) {
     const stop = client.onChange(snapshot => { if (snapshot.status === "ready") { clearTimeout(timeout); stop(); resolve(); } });
   });
 }
+
+test("slow caller cancellation preserves other clients and ignores late replies", { timeout: 10000 }, async t => {
+  const f = await fixture({ timeoutMs: 700, watchdogMs: 2000,
+    workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
+  try {
+    const a = await f.client(), b = await f.client(); await ready(b);
+    const epoch = b.snapshot!.instanceId;
+    const blocked = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "query-blocked") resolve(); }));
+    const began = performance.now();
+    const slow = assert.rejects(a.request("runtime_get_snapshot", { scope: { id: "sa_slow" } }), /runtime-timeout: caller/);
+    await blocked;
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const queued = b.request("runtime_get_snapshot", { scope: { limit: 2 } });
+    const controlStart = performance.now();
+    assert.equal((await b.request("ping")).ok, true);
+    assert.deepEqual(await a.request("runtime_unsubscribe"), { unsubscribed: true });
+    const controlMs = performance.now() - controlStart;
+    await slow;
+    const timeoutMs = performance.now() - began;
+    assert.equal((await queued).status, "ready", "cancellation frees execution without waiting for the slow source");
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+    assert.equal(b.snapshot!.instanceId, epoch);
+    f.worker.postMessage({ type: "release-query" });
+    const fresh = await b.get({ limit: 3 });
+    assert.equal(fresh.status, "ready");
+    assert.equal(f.executor.metrics().executor.worker, "running");
+    assert.equal(f.executor.metrics().executor.active, 0);
+    assert.ok(controlMs < 500);
+    t.diagnostic(JSON.stringify({ timeoutMs, controlMs, rebuilding: fresh.status, restart: f.executor.metrics().executor.restarts,
+      queueMs: f.executor.metrics().executor.waitMs, executionMs: f.executor.metrics().executor.readMs }));
+  } finally { await f.close(); }
+});
+
+test("shared callers have separate deadlines and queue timeouts retain bounded admission", { timeout: 10000 }, async () => {
+  const f = await fixture({ timeoutMs: 800, watchdogMs: 2500, capacity: 2,
+    workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
+  try {
+    const a = await f.client(), b = await f.client(), c = await f.client(); await ready(a);
+    const first = assert.rejects(a.request("runtime_get_snapshot", { scope: { id: "sa_slow" } }), /runtime-timeout/);
+    const queued = assert.rejects(c.request("runtime_get_snapshot", { scope: { limit: 2 } }), /runtime-overloaded: queued/);
+    await new Promise(resolve => setTimeout(resolve, 450));
+    const survivor = b.request("runtime_get_snapshot", { scope: { id: "sa_slow" } });
+    await assert.rejects(c.get({ limit: 3 }), /queue is full/);
+    await Promise.all([first, queued]);
+    assert.equal(f.executor.metrics().executor.queued, 0);
+    f.worker.postMessage({ type: "release-query" });
+    assert.equal((await survivor).status, "ready");
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+    assert.equal(f.executor.metrics().executor.singleflightHits, 1);
+    assert.equal(f.executor.metrics().executor.queueTimeouts, 1);
+    assert.equal(f.executor.metrics().executor.callerTimeouts, 1);
+  } finally { await f.close(); }
+});
+
+test("watchdog recovers a genuinely wedged worker while socket control stays responsive", { timeout: 10000 }, async t => {
+  const f = await fixture({ timeoutMs: 400, watchdogMs: 1200,
+    workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
+  try {
+    const a = await f.client(), b = await f.client(); await ready(a); await ready(b);
+    const epoch = b.snapshot!.instanceId;
+    const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
+    f.worker.postMessage({ type: "wedge" }); await wedged;
+    const began = performance.now();
+    await assert.rejects(a.get({ limit: 1 }), /deadline exceeded/);
+    const control = performance.now(); assert.equal((await b.request("ping")).ok, true);
+    const controlMs = performance.now() - control;
+    const until = Date.now() + 5000;
+    while (b.snapshot?.instanceId === epoch || b.snapshot?.status !== "ready") {
+      assert.ok(Date.now() < until, "wedged worker did not recover within budget");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(f.executor.metrics().executor.restarts, 1);
+    assert.ok(controlMs < 500);
+    t.diagnostic(JSON.stringify({ restartMs: performance.now() - began, controlMs, metrics: f.executor.metrics() }));
+  } finally { await f.close(); }
+});
+
+test("responsive rebuilding outlives the watchdog without claiming source readiness", { timeout: 10000 }, async t => {
+  const f = await fixture({ watchdogMs: 800,
+    workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
+  try {
+    const a = await f.client(), b = await f.client();
+    const began = performance.now();
+    for (let i = 0; i < 6; i++) {
+      assert.equal((await a.get({ limit: 1 })).status, "rebuilding");
+      assert.equal((await b.request("ping")).ok, true);
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+    assert.equal(f.executor.metrics().executor.timeouts, 0);
+    assert.equal(f.executor.observation().status, "rebuilding");
+    t.diagnostic(JSON.stringify({ rebuildingMs: performance.now() - began, metrics: f.executor.metrics() }));
+    f.worker.postMessage({ type: "release-inventory" });
+    await ready(b);
+  } finally { await f.close(); }
+});
 
 test("an exact-ID query returns rebuilding without blocking all reads on the initial inventory", { timeout: 10000 }, async () => {
   const f = await fixture({ timeoutMs: 500, workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
@@ -286,8 +382,8 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
   } finally { await f.close(); }
 });
 
-test("an active read deadline rejects readers and bounds close while native SQLite finishes before worker exit", { timeout: 60000 }, async t => {
-  const f = await fixture();
+test("the worker watchdog rejects readers and bounds close while native SQLite finishes before worker exit", { timeout: 60000 }, async t => {
+  const f = await fixture({ watchdogMs: 3000 });
   try {
     const client = await f.client();
     await ready(client);
