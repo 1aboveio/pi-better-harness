@@ -10,7 +10,7 @@ export function aggregateCohort(previous, current, { required, generation, sampl
     if (!Array.isArray(samples) || !samples.length) { issues.push(`${label}:missing-samples`); return; }
     if (samples.some(sample => !validIdentity(sample))) issues.push(`${label}:invalid-identity`);
     const keys = samples.map(id);
-    if (new Set(keys).size !== keys.length) issues.push(`${label}:duplicate-process`);
+    if (new Set(keys).size !== keys.length || new Set(samples.map(sample => sample?.identity?.pid)).size !== keys.length) issues.push(`${label}:duplicate-process`);
     if (JSON.stringify(keys.slice().sort()) !== JSON.stringify(required.map(id).sort())) issues.push(`${label}:process-coverage`);
     if (samples.some(sample => sample?.generation !== generation)) issues.push(`${label}:generation`);
     if (samples.some(sample => !Number.isSafeInteger(sample?.at) || sample.at < 0)
@@ -19,6 +19,7 @@ export function aggregateCohort(previous, current, { required, generation, sampl
       || !nonnegative(sample?.cpu?.user) || !nonnegative(sample?.cpu?.system) || !nonnegative(sample?.rss))) issues.push(`${label}:invalid-counter`);
   };
   if (!Array.isArray(required) || !required.length || required.some(sample => !validIdentity(sample)) || new Set(required.map(id)).size !== required.length
+    || new Set(required.map(sample => sample.identity.pid)).size !== required.length
     || typeof generation !== 'string' || !generation.length) {
     return { qualified: false, issues: ['invalid-required-cohort'], cpuPercent: null, rssBytes: null, at: null };
   }

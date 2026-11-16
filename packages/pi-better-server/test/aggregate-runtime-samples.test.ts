@@ -76,7 +76,8 @@ test('gaps are retained after subsequent aligned samples and deltas never bridge
 });
 
 test('malformed or absent sample/cohort identity input is rejected, not filled with zero', () => {
-  for (const required of [[], [{ identity: { pid: 0, start: '' } }], [options.required[0]!, options.required[0]!]]) {
+  for (const required of [[], [{ identity: { pid: 0, start: '' } }], [options.required[0]!, options.required[0]!],
+    [options.required[0]!, { identity: { pid: identities[0]!.pid, start: 'impossible-concurrent-incarnation' } }]]) {
     assert.equal(summarizeCohorts(frames(), { ...options, required }, { startedAt: 0, endedAt: 500 }).qualified, false);
   }
   for (const current of [[], [null], undefined] as any[]) {
