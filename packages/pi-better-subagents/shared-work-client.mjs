@@ -69,11 +69,9 @@ export class WorkClient {
         if (this.snapshot?.instanceId && this.snapshot.instanceId !== snapshot.instanceId) {
             this.degrade("instance-changed: resync required");
             snapshot = { ...snapshot, resyncRequired: true, resyncReason: "instance-changed" };
-        } else if (this.snapshot?.seq !== undefined && snapshot.seq > this.snapshot.seq + 1) {
-            this.degrade("sequence-gap: replacing with a full authoritative snapshot");
-            snapshot = { ...snapshot, resyncRequired: true, resyncReason: "sequence-gap" };
         }
-        // Every event contains a complete bounded snapshot; gaps do not require inferred deltas.
+        // seq is global, so unrelated scopes legitimately skip values. Each
+        // event is complete; only explicit resync or instance changes fence it.
         this.snapshot = Object.freeze(snapshot); this.notify();
     }
     scheduleRecovery(delay = 0) {
