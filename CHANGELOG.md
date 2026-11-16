@@ -4,6 +4,59 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.49.0] - 2026-11-16
+
+### Added
+
+- Bundle the completed unified runtime: authorized Subagent execution and continuation, server-owned Background supervision, exact-session result delivery, and safe fixed-build upgrades. (#751, #794)
+- Bundle Subagents 0.35.0, Background Tasks 0.18.0, and Goal 0.14.3 with the embedded Server 0.5.0 runtime.
+
+### Fixed
+
+- Keep shared observations current through atomic file replacement, worker recovery, rapid task completion, and native session reloads.
+- Preserve zero-I/O Navigator rendering and bounded shared reads across multiple Pi clients and large task histories.
+
+## [pi-better-server@0.5.0] - 2026-11-16
+
+### Added
+
+- Own authorized Subagent launch, parked-worker continuation, Background supervision, durable result delivery, and upgrade admission in one fixed runtime per canonical Pi root. (#751, #794)
+- Retain exact writer and recipient identities across crashes, parent disconnects, retries, and runtime upgrades; exit with the guardian when no authorized work or clients remain.
+
+### Fixed
+
+- Isolate slow reads and large failure-log folding from control and supervision work, with bounded queues, recovery, and shared coordinator connections.
+- Recover indexed pending callbacks without history scans, preserve scoped runner terminals, and observe repeated atomic file and directory replacements.
+
+## [pi-better-subagents@0.35.0] - 2026-11-16
+
+### Added
+
+- Delegate mechanical launch and continuation to the fixed runtime while the native session retains transcript and Navigator ownership. (#751, #794)
+- Continue already-authorized work without a foreground session and deliver results only to the original session, branch, and Goal.
+
+### Fixed
+
+- Publish canonical outcomes after worker loss and prefer verified terminal evidence over stale result projections.
+- Preserve pending observation notifications during pagination recovery, fence late responses after shutdown, and apply Navigator folding defaults when asynchronous detail arrives.
+
+## [pi-better-background-tasks@0.18.0] - 2026-11-16
+
+### Added
+
+- Use one server-owned supervisor and indexed callback recovery across ordinary local clients and hosted sessions. (#751, #794)
+
+### Fixed
+
+- Retain rapid completions and old owed callbacks across reloads, with bounded exact-recipient recovery and durable receipts.
+- Fence ownership proofs when native sessions change and preserve requester identity for explicitly authorized cross-session cancellation.
+
+## [pi-better-goal@0.14.3] - 2026-11-16
+
+### Fixed
+
+- Carry shared assignment-observation and coordinator updates used by the unified runtime while preserving standalone Goal behavior. (#751, #794)
+
 ## [pi-better-harness@0.48.0] - 2026-11-16
 
 ### Added
