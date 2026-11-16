@@ -103,16 +103,13 @@ test("one-shot Background origins have a fixed retained-scope budget", () => {
 test("Background history applies bounded pages, status filters and stable cursors in the worker", { timeout: 30000 }, async () => {
   const root = mkdtempSync("/tmp/p754-pages-");
   const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
-  const executor = new WorkQueryExecutor(root, "page-instance", {
-    modelOptions: { baseDir: join(root, "subagents"), durableDir: join(root, "archives"), intervalMs: 50 },
-  });
-  const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0, write: () => true });
-  const client = executor.connect(socket as unknown as Socket);
+  let executor: WorkQueryExecutor | undefined;
+  let client: ReturnType<WorkQueryExecutor["connect"]> | undefined;
   const scope = { background: true, backgroundHistory: true, cwd: root, sessionId: "parent", limit: 3, statuses: ["succeeded"] };
   const read = async (cursor?: string) => {
     const deadline = Date.now() + 20000;
     for (;;) {
-      const page = JSON.parse((await client.handle({ type: "runtime_get_snapshot", scope: { ...scope, cursor } })).json);
+      const page = JSON.parse((await client!.handle({ type: "runtime_get_snapshot", scope: { ...scope, cursor } })).json);
       if (page.status !== "rebuilding") return page;
       assert.ok(Date.now() < deadline, "history index did not recover");
       await delay(20);
@@ -127,6 +124,13 @@ test("Background history applies bounded pages, status filters and stable cursor
       writer.recordTerminalOutcome({ operationId, eventId: operationId, owner, outcome: "succeeded",
         evidence: [{ kind: "terminal-record", ref: operationId }] });
     }
+    // Synchronous fixture writes must finish before the parent must service
+    // worker heartbeats; this test measures indexed reads, not fixture setup.
+    executor = new WorkQueryExecutor(root, "page-instance", {
+      modelOptions: { baseDir: join(root, "subagents"), durableDir: join(root, "archives"), intervalMs: 50 },
+    });
+    const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0, write: () => true });
+    client = executor.connect(socket as unknown as Socket);
     const first = await read();
     assert.equal(first.rows.length, 3);
     assert.equal(first.totalMatching, 1200);
@@ -141,10 +145,11 @@ test("Background history applies bounded pages, status filters and stable cursor
     assert.equal(active.totalMatching, 1200);
     assert.equal(active.activity.active, 1);
     assert.notEqual(active.scopeRevision, first.scopeRevision, "independent activity participates in a filtered history revision");
-    const before = (await client.handle({ type: "runtime_get_metrics" })).json;
-    assert.ok(JSON.parse(before).sqlite.active <= 3, "history reuses the worker's derived index and two coordinator readers");
+    const metrics = JSON.parse((await client.handle({ type: "runtime_get_metrics" })).json);
+    assert.equal(metrics.sqlite.active, 2, "history shares one derived index and one coordinator reader");
+    assert.equal(metrics.executor.restarts, 0, "indexed history does not restart the read worker");
   } finally {
-    client.close(); await executor.close(); writer.close(); rmSync(root, { recursive: true, force: true });
+    client?.close(); await executor?.close(); writer.close(); rmSync(root, { recursive: true, force: true });
   }
 });
 
