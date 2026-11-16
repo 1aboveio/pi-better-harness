@@ -302,7 +302,8 @@ test("ordinary child reports incomplete then completes a real saved-conversation
     const first = registry.readMeta(id);
     assert.equal(first.status, "completed", readFileSync(registry.logPathFor(id), "utf8").slice(-8192));
     assert.ok(first.assignmentReport, "the actual injected child tool persists the incomplete report");
-    assert.equal(readOutcome(first).outcome, "failed");
+    const firstOutcome = await waitFor("the incomplete child's retained outcome", () => readOutcome(first));
+    assert.equal(firstOutcome.outcome, "failed");
     assert.equal(host.completions(id).length, 0, "busy parent has not received an effective handoff");
     host.releaseParent();
     await busy;
@@ -318,7 +319,8 @@ test("ordinary child reports incomplete then completes a real saved-conversation
     assert.equal(next.resumedFrom, first.id);
     assert.notEqual(next.assignment.assignmentId, first.assignment.assignmentId);
     assert.notEqual(next.assignmentReport.digest, first.assignmentReport.digest);
-    const outcome = readOutcome(next);
+    // Terminal metadata is published before the coordinator outcome is committed.
+    const outcome = await waitFor("the follow-up's retained outcome", () => readOutcome(next));
     assert.equal(outcome.outcome, "succeeded");
     assert.equal(readOutcome(first).outcome, "failed", "later work cannot rewrite the first outcome");
     const store = openStore({ path: coordinatorPath() });

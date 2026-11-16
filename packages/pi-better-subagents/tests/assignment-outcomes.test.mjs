@@ -244,11 +244,23 @@ test("admission returning after parent teardown cannot claim a retained outcome"
     const h = host("parent", { noGoal: true });
     let request;
     h.pi.events.on("pi-better-goal:operation-resume-admission", (value) => { request = value; });
+    const setTimeout = globalThis.setTimeout;
+    const expirations = [];
+    // Hold only admission's 50ms timer; shared observation startup uses real time.
+    // Otherwise slow CI can exercise admission-before-teardown instead of this race.
+    const clock = mock.method(globalThis, "setTimeout", (callback, ms, ...args) => {
+        if (ms !== 50) return setTimeout(callback, ms, ...args);
+        expirations.push(() => callback(...args));
+        return setTimeout(() => {}, 0);
+    });
     try {
-        await h.start({ settleMs: 0 });
+        await h.start({ settleMs: 100 });
         assert.ok(request);
+        assert.ok(expirations.length);
+        assert.equal(store.listOutbox().find((e) => e.eventId === readOutcome(meta).eventId).attempts, 0, "admission must still be pending before teardown");
         await h.close();
         request.reply({ allowed: true, revision: 1, isCurrent: () => true });
+        for (const expire of expirations) expire();
         await new Promise(resolve => setImmediate(resolve));
         await getCallbackBatcher(h.pi).flush();
         const event = store.listOutbox().find((e) => e.eventId === readOutcome(meta).eventId);
@@ -256,7 +268,7 @@ test("admission returning after parent teardown cannot claim a retained outcome"
         assert.equal(event.state, "pending");
         assert.equal(readOutcome(meta).deliveryReceipt, null);
         assert.equal(h.sent.length, 0);
-    } finally { await h.close(); store.close(); }
+    } finally { clock.mock.restore(); await h.close(); store.close(); }
 });
 
 test("verified missing wait history retains failure without claiming writer termination", async () => {
