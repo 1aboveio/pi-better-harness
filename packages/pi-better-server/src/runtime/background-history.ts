@@ -46,6 +46,12 @@ export class BackgroundHistory {
   private applyingLegacy: string[] = [];
   private legacyOwed = true;
   status: "ready" | "rebuilding" | "degraded" = "rebuilding";
+  get queryStatus() {
+    // A delivered hint is an outstanding observation obligation even before
+    // its scheduled refresh starts; page-local checks cannot verify off-page rows.
+    return this.status === "ready" && (this.dirty.size || this.dirtyLegacy.size || this.legacyOwed || !this.imported)
+      ? "rebuilding" : this.status;
+  }
   reason?: string;
   readonly metrics = { inventories: 0, metadataReads: 0, projections: 0, operationReads: 0, operationQueries: 0, dependencyQueries: 0, inputStats: 0, incrementalBatches: 0 };
 
