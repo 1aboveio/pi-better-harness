@@ -299,7 +299,6 @@ test("the original before-root setup observes disk and worker roots without requ
     });
     f.worker.postMessage({ type: "diagnostic-source-state", id: "initial-setup", scope });
     const state = await capture;
-    t.diagnostic(JSON.stringify({ firstReady, source: state }).slice(0, 32768));
     assert.ok(state, "initial source observation was acknowledged");
     assert.equal(state.configured.agentDir, f.root);
     assert.equal(state.configured.modelOptions.baseDir, f.root);
@@ -308,14 +307,13 @@ test("the original before-root setup observes disk and worker roots without requ
     assert.ok(state.rawEntries.some((entry: any) => entry.meta?.id === id && entry.meta.name === "before-root"));
     while (client.snapshot?.rows[0]?.meta.name !== "before-root") {
       if (Date.now() >= until) {
-        const observed = await new Promise<any>(resolve => {
-          const timer = setTimeout(() => { stop(); resolve(undefined); }, 1000);
-          const stop = client.onChange(snapshot => {
-            if (snapshot.rows[0]?.meta.name === "before-root") { clearTimeout(timer); stop(); resolve(snapshot); }
-          });
-          f.worker.postMessage({ type: "diagnostic-source-hint", id });
+        const terminal = await new Promise<any>(resolve => {
+          const timer = setTimeout(() => { f.worker.off("message", listener); resolve(undefined); }, 500);
+          const listener = (message: any) => { if (message.type === "diagnostic-source-state" && message.id === "initial-terminal") { clearTimeout(timer); f.worker.off("message", listener); resolve(message.state); } };
+          f.worker.on("message", listener);
+          f.worker.postMessage({ type: "diagnostic-source-state", id: "initial-terminal", scope });
         });
-        t.diagnostic(JSON.stringify({ afterOriginalFailure: true, controlledExactHint: observed }).slice(0, 32768));
+        t.diagnostic(JSON.stringify({ afterOriginalFailure: true, firstReady, setup: state, terminal }).slice(0, 32768));
       }
       assert.ok(Date.now() < until, "root gap publication missing");
       await new Promise(resolve => setTimeout(resolve, 10));

@@ -4,6 +4,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSyn
 import { join, resolve } from "node:path";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+import { sourceEventTrace } from "./support/source-event-trace.mjs";
 
 const fixturePath = "../../pi-better-subagents/tests/work-runtime-fixture.mjs";
 const { startWorkRuntimeFixture } = await import(fixturePath);
@@ -28,6 +29,39 @@ async function settleHints(model: WorkReadModel) {
   while ((pending = (model as any).pending)) await pending;
   assert.equal(model.metrics.scheduling.queued, 0, "hint obligations must be drained");
 }
+
+test("retired and current raw callbacks cross only their owned source boundaries", async t => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, "callback-ownership", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile(); await settleHints(model);
+    const trace = sourceEventTrace(model);
+    const retired = (model as any).watchers.get(f.runs);
+    renameSync(f.runs, f.runs + "-retired");
+    f.put("sa_callback", { name: "actual-input", status: "completed", endedAt: 2 });
+    (model as any).watchDirectory(f.runs);
+    const current = (model as any).watchers.get(f.runs);
+    assert.notEqual(current, retired);
+    const before = model.metrics.inventories;
+    const began = trace().total;
+    retired.emit("change", "rename", "sa_callback");
+    const rejected = trace().records.filter((entry: any) => entry.sequence > began);
+    assert.ok(rejected.some((entry: any) => entry.stage === "raw-callback" && entry.owned === false));
+    assert.equal(rejected.some((entry: any) => entry.stage === "hint-entry" || entry.stage === "queue-admit"), false);
+    assert.equal(model.metrics.inventories, before);
+    current.emit("change", "rename", "sa_callback");
+    const admitted = trace().records;
+    assert.equal(model.metrics.scheduling.repairEntries, 0, "callback admission starts with exact entity work");
+    await settleHints(model);
+    const accepted = trace();
+    for (const stage of ["raw-callback", "hint-entry", "queue-admit", "queue-take", "scan-start"])
+      assert.ok(admitted.some((entry: any) => entry.stage === stage), `missing boundary ${stage}`);
+    for (const stage of ["publish", "scan-end"])
+      assert.ok(accepted.records.some((entry: any) => entry.stage === stage), `missing boundary ${stage}`);
+    assert.equal(model.snapshot().rows[0]?.meta.name, "actual-input");
+    t.diagnostic(JSON.stringify({ rejected, admitted, accepted }));
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
 
 test("an exact hint imports a present source after missed notifications without another inventory walk", async t => {
   const f = fixture();

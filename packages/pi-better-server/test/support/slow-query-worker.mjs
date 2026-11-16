@@ -1,14 +1,20 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 import { statSync, readdirSync, readFileSync } from "node:fs";
+import { sourceEventTrace } from "./source-event-trace.mjs";
 
 await import("../../src/runtime/query-worker.mjs");
 const { WorkReadModel } = await import("../../src/runtime/read-model.ts");
 let latestModel;
+const traces = new WeakMap();
 const scan = WorkReadModel.prototype.scan;
 WorkReadModel.prototype.scan = function (...args) { latestModel = this; return scan.apply(this, args); };
 const contentRevision = WorkReadModel.prototype.contentRevision;
-WorkReadModel.prototype.contentRevision = function (...args) { latestModel = this; return contentRevision.apply(this, args); };
+WorkReadModel.prototype.contentRevision = function (...args) {
+  latestModel = this;
+  if (!traces.has(this)) traces.set(this, sourceEventTrace(this));
+  return contentRevision.apply(this, args);
+};
 const hints = [];
 const fileHint = WorkReadModel.prototype.fileHint;
 WorkReadModel.prototype.fileHint = function (...args) {
@@ -25,6 +31,7 @@ parentPort.on("message", message => {
     const model = latestModel;
     parentPort.postMessage({ type: "diagnostic-source-state", id: message.id, state: model && {
       configured: workerData, imported: model.imported,
+      eventOwnership: traces.get(model)?.(),
       roots: { agentDir: model.agentDir, runs: model.runs, archives: model.archives, markers: model.markers },
       watchers: [...model.watchers.keys()], rootIdentities: [...model.rootWatchIdentities],
       actualRoots: [model.runs, model.archives, model.markers].map(path => {
