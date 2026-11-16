@@ -88,9 +88,19 @@ test('standalone native Background tools use server ownership, replay once and s
         parent.kill('SIGKILL');await once(parent,'exit');writeFileSync(legacyRelease,'go');
         const legacyPath=join(root,'pi-better-background-tasks','tasks',legacyId,'meta.json');
         const legacyDeadline=Date.now()+10000;
-        while(JSON.parse(readFileSync(legacyPath,'utf8')).status==='running'){assert.ok(Date.now()<legacyDeadline,errors);await delay(50);}
+        let legacyMeta: any;
+        for (;;) {
+          try { legacyMeta = JSON.parse(readFileSync(legacyPath, 'utf8')); }
+          catch (error) {
+            if (!(error instanceof SyntaxError)) throw error;
+            legacyMeta = undefined; // Legacy metadata is rewritten in place.
+          }
+          if (legacyMeta && legacyMeta.status !== 'running') break;
+          assert.ok(Date.now() < legacyDeadline, `Legacy metadata did not become terminal: ${errors}`);
+          await delay(50);
+        }
         daemon.kill('SIGKILL');await once(daemon,'exit');
-        const legacyMeta=JSON.parse(readFileSync(legacyPath,'utf8'));legacyMeta.endedAt=Date.now()-86400000;
+        legacyMeta.endedAt=Date.now()-86400000;
         delete legacyMeta.callbackSentAt;delete legacyMeta.callbackSuppressedAt;
         writeFileSync(legacyPath,JSON.stringify(legacyMeta));
         daemon=start(new URL('./support/work-daemon.ts',import.meta.url));await wait(daemon);
