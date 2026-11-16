@@ -356,6 +356,8 @@ export class WorkReadModel {
       if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
       do {
         this.dirty = false;
+        // Background progress is independent of whether Subagent repair finds files.
+        if (this.background.refresh()) this.publish(true);
         if (this.hints.size) {
           const entries = [...this.hints].slice(0, 32);
           for (const [path, queued] of entries) { this.hints.delete(path); this.scheduling.maxQueueAgeMs = Math.max(this.scheduling.maxQueueAgeMs, Date.now() - queued); }
@@ -404,7 +406,6 @@ export class WorkReadModel {
   private async scan(paths: string[]) {
     const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
-    if (this.background.refresh()) this.publish(true);
     let releaseCoordinator: (() => void) | undefined;
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
       healthRevision: this.healthRevision, coordinator: this.coordinator, coordinatorConversations: this.coordinatorConversations };
