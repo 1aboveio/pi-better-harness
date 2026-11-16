@@ -51,7 +51,10 @@ model.snapshot = scope => {
   const key = JSON.stringify(scope ?? {});
   const cacheable = !scope?.backgroundHistory;
   const previous = cacheable ? cache.get(key) : undefined;
-  if (previous) { cacheHits++; cache.delete(key); cache.set(key, previous); return previous.value; }
+  if (previous && (previous.value.nextDeadline === null || previous.value.nextDeadline > Date.now())) {
+    cacheHits++; cache.delete(key); cache.set(key, previous); return previous.value;
+  }
+  if (previous) { cacheBytes -= previous.bytes; cache.delete(key); }
   const started = performance.now();
   const value = snapshot(scope);
   const json = JSON.stringify(value);
