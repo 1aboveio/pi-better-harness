@@ -23,7 +23,9 @@ import {
     LIFECYCLE_RECORD_PREFIX_BYTES,
     LIFECYCLE_SCAN_CHUNK_BYTES,
 } from "../parse.ts";
-import { logPathFor, readMeta, runDir, writeMeta } from "../registry.ts";
+import { logPathFor, onMetaChanged, readMeta, runDir, writeMeta } from "../registry.ts";
+import { inspectOutcome, readOutcome, receiptOutcome, registerAssignmentAttempt } from "../assignment-outcomes.ts";
+import { recordAssignmentReport } from "../assignment-report.ts";
 import { failurePath } from "../failures.ts";
 
 function writeLargeNewlineFreeRecord(id, { type, toolCallId, toolName, payloadBytes, appendNewline = true }) {
@@ -219,6 +221,46 @@ describe("classifyChildExit", () => {
 });
 
 describe("finalizeRun integration", () => {
+    it("terminal metadata precedes the retained outcome for distinct assignments in one conversation", () => {
+        const conversation = `publication-${process.pid}-${Date.now()}`;
+        const owner = { kind: "worker-conversation", sessionId: conversation, workspace: process.cwd(), branchId: null, goalId: null };
+        const recipient = { ...owner, kind: "parent-session", sessionId: "publication-parent" };
+        const ids = [`sa_publication_first_${process.pid}`, `sa_publication_next_${process.pid}`];
+        const publicationGaps = [];
+        const stop = onMetaChanged(() => {
+            for (const id of ids) {
+                const meta = readMeta(id);
+                if (meta?.status === "completed") publicationGaps.push({ id, outcome: readOutcome(meta) });
+            }
+        });
+        try {
+            for (const [index, id] of ids.entries()) {
+                const assignment = { version: 1, assignmentId: `${conversation}-${index}`, owner, recipient };
+                registerAssignmentAttempt(assignment, id);
+                writeRunLog(id, [{ type: "message_end", message: { role: "assistant", content: "Retained answer" } }, { type: "agent_end", messages: [] }]);
+                seedRunningMeta(id, { assignment, sessionId: conversation, ...(index ? { resumedFrom: ids[0] } : {}) });
+                recordAssignmentReport(id, { status: index ? "complete" : "incomplete", reason: index ? "Follow-up complete" : "More work needed",
+                    evidence: [{ path: "package.json", explanation: "Retained fixture evidence" }] }, () => readMeta(id));
+                assert.equal(readOutcome(readMeta(id)), null);
+                finalizeRun(id, 0);
+                const meta = readMeta(id), outcome = readOutcome(meta);
+                assert.equal(meta.sessionId, conversation);
+                assert.equal(outcome.assignmentId, assignment.assignmentId);
+                assert.equal(outcome.outcome, index ? "succeeded" : "failed");
+                assert.ok(publicationGaps.some(gap => gap.id === id && gap.outcome === null), "completed metadata must not manufacture a retained outcome");
+                receiptOutcome(meta, `publication-entry-${index}`);
+                inspectOutcome(meta, { recipient });
+                inspectOutcome(meta, { recipient, revision: outcome.revision, disposition: index ? "consumed" : "dismissed", note: "Inspected this exact retained outcome" });
+            }
+            assert.equal(readMeta(ids[1]).resumedFrom, ids[0]);
+            assert.equal(readOutcome(readMeta(ids[0])).outcome, "failed");
+            assert.equal(readOutcome(readMeta(ids[0])).disposition.kind, "dismissed");
+            assert.equal(readOutcome(readMeta(ids[1])).disposition.kind, "consumed");
+        } finally {
+            stop();
+            for (const id of ids) rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
     // @covers subagent.run-finalization
     // @level integration
     // @fails-without-fix subagent.run-finalization

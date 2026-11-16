@@ -7,6 +7,10 @@ and degraded status that survives unrelated updates. The direct model case
 closes actual watchers to drop hints, injects a watcher error, replaces source
 directory identity, removes/restores the source root, and overflows the queue.
 It continuously appends a hot log between repair batches and checks progress.
+Failed first observations of metadata, archives and markers remain eligible for
+repair after a missed deletion hint. Tests retain degradation while the source
+root is unavailable, clear it after verified absence under an available root,
+and check the 128-path budget across 130 never-imported failed sources.
 
 The existing `runtime-event-publication.test.ts` measures external atomic
 metadata commits through real socket subscriptions for 1, 5, and 10 clients.
