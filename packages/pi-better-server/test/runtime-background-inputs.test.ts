@@ -55,7 +55,7 @@ test("one Background task input changes only its projection and dependent wait q
     assert.equal(observation.metrics.runnerSnapshots, before.runnerSnapshots + 1);
     assert.equal(observation.read(scope).find(row => row.id === ids[0]).name, "changed");
     const dependencies = observation.metrics.dependencyQueries;
-    const wait = store.registerWait({ waitId: "exact-wait", owner, dependencies: [{ operationId: ids[0]! }], continuationNote: "Read result" });
+    const { wait } = store.registerWait({ waitId: "exact-wait", owner, dependencies: [{ operationId: ids[0]! }], continuationNote: "Read result" });
     observation.refresh();
     assert.equal(observation.metrics.runnerSnapshots, before.runnerSnapshots + 2);
     assert.equal(observation.metrics.dependencyQueries, dependencies + 1);
@@ -76,6 +76,22 @@ test("one Background task input changes only its projection and dependent wait q
     assert.equal(observation.status, "ready");
     assert.equal(observation.read(scope).find(row => row.id === ids[0]).name, "recovered");
   } finally { await observation.close(); store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("unchanged Background repair positions do not write the shared derived handle", async () => {
+  const root = mkdtempSync(join(tmpdir(), "background-idle-writes-"));
+  const store = openStore({ path: join(root, "operation-coordinator.sqlite") });
+  const model = new WorkReadModel(root, "idle-repair", { baseDir: root, durableDir: join(root, "archive"), intervalMs: 60000 });
+  const observation = (model as any).background;
+  try {
+    observation.read({ background: true, cwd: root, sessionId: "parent" });
+    observation.refresh();
+    const db = (model as any).db;
+    db.exec("CREATE TEMP TRIGGER reject_idle_repair BEFORE INSERT ON background_inbox.background_file_repair BEGIN SELECT RAISE(ABORT,'unchanged repair attempted a write'); END");
+    const before = db.prepare("SELECT total_changes() AS n").get().n;
+    for (let i = 0; i < 3; i++) assert.equal(observation.refresh(), false);
+    assert.equal(db.prepare("SELECT total_changes() AS n").get().n, before);
+  } finally { await model.close(); store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("recent Background terminals expire through deadline work without a caller refresh", async t => {

@@ -2,7 +2,7 @@ import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
 import { opendir, readFile, stat, writeFile, mkdir, rename } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { dirname, relative, join, resolve, sep } from "node:path";
 import { realpathSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -82,11 +82,12 @@ export class WorkReadModel {
     files: WorkReadModel["files"]; projected: WorkReadModel["projected"];
     logs: Map<string, string>; failureJournals: Map<string, string>; processes: Map<string, string>; healthRevision: string;
     coordinator: string;
+    assignmentChanges?: Map<string, string>; assignmentGeneration: string;
   };
   private healthRevision = "";
   private details = new Map<string, { revision: string; value: any }>();
   private watchers = new Map<string, FSWatcher>();
-  private rootParents = new Map<string, FSWatcher>();
+  private rootParents = new Map<string, { path: string; identity: string; watcher: FSWatcher }>();
   private rootWatchIdentities = new Map<string, string>();
   private listeners = new Set<() => void>();
   private timer?: ReturnType<typeof setInterval>;
@@ -118,7 +119,7 @@ export class WorkReadModel {
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, healthDeadline: 0, unverified: 0, initial: 0 };
   get metrics() {
     return { ...this.counters, assignments: this.reader.changeMetrics, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
-      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size, rootParentWatchers: this.rootParents.size };
+      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size, sourceParentWatchers: this.rootParents.size, rootParentWatchers: this.rootParents.size };
   }
   readonly runs: string;
   readonly archives: string;
@@ -152,40 +153,46 @@ export class WorkReadModel {
     // Watch directory entries, not file inodes. Node's Linux recursive watcher
     // can retain a replaced file's old inode after atomic rename and miss later
     // commits. Flat archives need one watcher; raw runs use one per directory.
-    this.watchRootParents();
-    for (const path of [this.runs, this.archives, this.markers]) this.watchDirectory(path);
+    for (const path of [this.runs, this.archives, this.markers]) { this.watchRootParent(path); this.watchDirectory(path); }
     this.timer = setInterval(() => { this.repairOwed = true; if (!this.pending) void this.reconcile(false); }, options.intervalMs ?? 1000);
     this.timer.unref();
-  }
-
-  private watchRootParents() {
-    const roots = [this.runs, this.archives, this.markers];
-    for (const parent of new Set(roots.map(dirname))) {
-      if (this.closed || this.rootParents.has(parent)) continue;
-      try {
-        // An inode watcher cannot see its pathname recreated after removal.
-        // Keep the parent watched even while the source root is absent.
-        const watcher = watch(parent, (_event, filename) => {
-          if (filename && !roots.some(root => dirname(root) === parent && basename(root) === String(filename))) return;
-          void this.reconcile();
-        });
-        watcher.on("error", () => {
-          if (this.rootParents.get(parent) !== watcher) return;
-          watcher.close(); this.rootParents.delete(parent);
-          this.invalidate("Root parent watcher failed; reconciling source inventory.");
-        });
-        this.rootParents.set(parent, watcher);
-      } catch { /* Missing parents are discovered by the compatibility inventory. */ }
-    }
   }
 
   private unwatchDirectory(path: string) {
     this.watchers.get(path)?.close(); this.watchers.delete(path);
   }
+  private watchRootParent(root: string) {
+    if (this.closed) return;
+    // A watch follows an inode, not the source pathname. Keep an independent
+    // parent entry watch so recreation after an observed ENOENT remains visible.
+    for (let parent = dirname(root); ; parent = dirname(parent)) {
+      const previous = this.rootParents.get(root);
+      try {
+        const info = statSync(parent, { bigint: true });
+        const identity = `${info.dev}:${info.ino}`;
+        if (previous?.path === parent && previous.identity === identity) return;
+        const entry = relative(parent, root).split(sep)[0];
+        const watcher = watch(parent, (_event, filename) => {
+          if (this.rootParents.get(root)?.watcher !== watcher) return;
+          if (!filename || String(filename) === entry || String(filename) === relative(dirname(parent), parent)) void this.reconcile();
+        });
+        watcher.on("error", () => {
+          if (this.rootParents.get(root)?.watcher !== watcher) return;
+          watcher.close(); this.rootParents.delete(root);
+          this.invalidate("Source parent watcher failed; reconciling source inventory.");
+        });
+        previous?.watcher.close();
+        this.rootParents.set(root, { path: parent, identity, watcher });
+        return;
+      } catch { /* Missing source ancestors are watched from their nearest existing parent. */ }
+      if (dirname(parent) === parent) return;
+    }
+  }
   private watchDirectory(path: string) {
     if (this.closed || this.watchers.has(path)) return;
     try {
       const watcher = watch(path, (_event, filename) => {
+        if (this.watchers.get(path) !== watcher) return;
         if (path === this.runs) {
           // A raw directory may itself have been removed/replaced. Reattach
           // from the shared inventory, never retain its preceding inode.
@@ -249,6 +256,7 @@ export class WorkReadModel {
       if (batch.length === 128) { yield batch; batch = []; }
     }
     for (const directory of [this.markers, this.archives, this.runs]) {
+      this.watchRootParent(directory);
       let handle;
       try {
         const info = await stat(directory, { bigint: true });
@@ -261,7 +269,9 @@ export class WorkReadModel {
         handle = await opendir(directory);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        this.unwatchDirectory(directory); continue;
+        this.unwatchDirectory(directory); this.rootWatchIdentities.delete(directory);
+        if (directory === this.runs) for (const path of this.watchers.keys()) if (path.startsWith(this.runs + sep)) this.unwatchDirectory(path);
+        continue;
       }
       for await (const entry of handle) {
         if (directory === this.runs ? safeId.test(entry.name) : /^[A-Za-z0-9_-]+\.json$/.test(entry.name)) {
@@ -464,7 +474,6 @@ export class WorkReadModel {
     const release = this.budget.enter("repair");
     if (!release) return Promise.resolve();
     this.pending = (async () => {
-      this.watchRootParents();
       if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
       do {
         this.dirty = false;
@@ -649,6 +658,9 @@ export class WorkReadModel {
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
       for (const [path, entry] of next) {
         if (path.startsWith(this.markers + sep)) continue;
+        // Compact archives omit volatile delivery markers. A verified live
+        // record wins independently of which source was discovered last.
+        if (path.startsWith(this.archives + sep) && next.has(join(this.runs, entry.meta.id, "meta.json"))) continue;
         const marker = markers.get(entry.meta.sessionId);
         if (path.startsWith(this.archives + sep) && marker && marker.attemptId !== entry.meta.id && marker.startedAt >= entry.meta.startedAt) continue;
         metas.set(entry.meta.id, entry.meta);
@@ -685,13 +697,19 @@ export class WorkReadModel {
           } else invalidateAttempt(entry.meta);
         }
       }
+      const assignmentGeneration = this.reader.changeMetrics.generation;
+      // An unpublished retry may reuse a verified projection only at the same
+      // durable source generation and per-scope position. Receipt stays pending.
+      const changedScope = (scope: string) => assignmentChanges?.has(scope)
+        && (!this.staged || this.staged.assignmentGeneration !== assignmentGeneration
+          || this.staged.assignmentChanges?.get(scope) !== assignmentChanges.get(scope));
       for (const meta of attempts) {
         if (!(meta.assignment || meta.operations || meta.park)) continue;
-        const session = meta.assignment?.owner.sessionId ?? meta.operations?.conversationId ?? meta.sessionId;
-        const workspace = meta.assignment?.owner.workspace ?? meta.operations?.workspace ?? meta.cwd;
-        if ((assignmentChanges?.has("*") && paths.some(path => next.get(path)?.meta.id === meta.id))
-            || assignmentChanges?.has(JSON.stringify([session, workspace, meta.assignment?.assignmentId ?? null]))
-            || assignmentChanges?.has(JSON.stringify([session, workspace, null]))
+        const session = meta.assignment?.owner?.sessionId ?? meta.operations?.conversationId ?? meta.sessionId;
+        const workspace = meta.assignment?.owner?.workspace ?? meta.operations?.workspace ?? meta.cwd;
+        if ((changedScope("*") && paths.some(path => next.get(path)?.meta.id === meta.id))
+            || changedScope(JSON.stringify([session, workspace, meta.assignment?.assignmentId ?? null]))
+            || changedScope(JSON.stringify([session, workspace, null]))
             || (!assignmentChanges && paths.some(path => next.get(path)?.meta.id === meta.id))) invalidateAttempt(meta);
       }
       const project = createAssignmentProjector({ attempts, observe: (owner: any) => this.reader.read(owner) });
@@ -756,7 +774,8 @@ export class WorkReadModel {
       // Subsequent commits remain beyond the durable received position.
       // Retry caches are never queryable. Validate all unpublished families again before committing them.
       this.staged = { files: next, projected: new Map(rows.map(row => [row.meta.id, row])), logs, failureJournals, processes,
-        healthRevision: healthConfig.revision, coordinator };
+        healthRevision: healthConfig.revision, coordinator, assignmentChanges: assignmentChanges && new Map(assignmentChanges),
+        assignmentGeneration };
       const uncommitted = new Set(affected);
       for (const [path, entry] of [...this.files, ...next]) {
         if (this.files.get(path)?.signature !== next.get(path)?.signature) uncommitted.add(entry.meta.id);
@@ -799,8 +818,8 @@ export class WorkReadModel {
           insert.run(m.id, m.cwd, m.callbackOrigin?.cwd ?? m.cwd, m.callbackOrigin?.sessionId ?? null,
             m.startedAt, row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, m.endedAt ?? m.lostAt ?? null, row.recipientPending ? 1 : 0, JSON.stringify(row));
           this.db.prepare("DELETE FROM assignment_members WHERE id=?").run(m.id);
-          const session = m.assignment?.owner.sessionId ?? m.operations?.conversationId ?? m.sessionId;
-          const workspace = m.assignment?.owner.workspace ?? m.operations?.workspace ?? m.cwd;
+          const session = m.assignment?.owner?.sessionId ?? m.operations?.conversationId ?? m.sessionId;
+          const workspace = m.assignment?.owner?.workspace ?? m.operations?.workspace ?? m.cwd;
           for (const assignmentId of new Set([m.assignment?.assignmentId ?? null, null])) this.db.prepare("INSERT INTO assignment_members VALUES(?,?)").run(JSON.stringify([session, workspace, assignmentId]), m.id);
         }
         this.db.exec("COMMIT");
@@ -924,9 +943,9 @@ export class WorkReadModel {
   async close() {
     this.closed = true; if (this.timer) clearInterval(this.timer);
     for (const watcher of this.watchers.values()) watcher.close();
-    this.watchers.clear(); this.rootWatchIdentities.clear();
-    for (const watcher of this.rootParents.values()) watcher.close();
+    for (const { watcher } of this.rootParents.values()) watcher.close();
     this.rootParents.clear();
+    this.watchers.clear(); this.rootWatchIdentities.clear();
     await this.pending; await this.repairWrite; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
     await this.repair?.return(undefined);
   }

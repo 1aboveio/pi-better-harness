@@ -29,12 +29,18 @@ test("a redundant terminal publication during verification preserves the first v
   // and the unchanged source-signature guard, without a scheduling sleep.
   (model as any).watchers.forEach((watcher: any) => watcher.close());
   const reader = (model as any).reader;
-  const revision = reader.revision.bind(reader);
+  const changes = reader.changes.bind(reader);
   let calls = 0;
+  let sourceStats = (model as any).sourceStats;
   let publication = meta;
-  reader.revision = () => {
-    if (++calls === 2) archiveCompletedAttempt(publication as never);
-    return revision();
+  reader.changes = () => {
+    // Assignment-only refresh also reads the journal, but precedes inventory.
+    // Publish only after this scan has actually observed the archive signature.
+    if (calls === 0 && (model as any).sourceStats > sourceStats) {
+      calls++;
+      archiveCompletedAttempt(publication as never);
+    }
+    return changes();
   };
   const socket = new Socket();
   const queries = new WorkQueries(model, socket);
@@ -42,7 +48,7 @@ test("a redundant terminal publication during verification preserves the first v
   const off = model.onChange(() => observations.push(queries.handle({ type: "runtime_get_scope", scope: { id: meta.id } }) as WorkSnapshot));
   try {
     await model.reconcile();
-    assert.ok(calls >= 2, "the real publication must run within source verification");
+    assert.equal(calls, 1, "the real publication must run within source verification");
     assert.ok(observations.length > 0);
     assert.deepEqual(observations.map(snapshot => snapshot.status), ["ready"], "no transient unverified first assignment may be published for unchanged terminal metadata");
     assert.equal(observations[0]!.rows[0]!.meta.id, meta.id);
@@ -55,6 +61,7 @@ test("a redundant terminal publication during verification preserves the first v
     archiveCompletedAttempt({ ...meta, endedAt: 3 } as never);
     publication = { ...meta, endedAt: 4 };
     calls = 0;
+    sourceStats = (model as any).sourceStats;
     observations.length = 0;
     await model.reconcile();
     assert.equal(observations[0]!.status, "degraded");
