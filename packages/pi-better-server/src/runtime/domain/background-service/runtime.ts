@@ -110,7 +110,8 @@ export type FirstCheckWaitEnd = "timeout" | "aborted" | "suspended";
 export type FirstCheckOutcome = FirstWatchCheck | { pending: FirstCheckWaitEnd; waitedMs: number } | undefined;
 
 /** Each cached extension factory owns its scheduling and suspension state. */
-export function createBackgroundTaskRuntime(attention = createFailureAttention(), deliverCompletion?: (origin: BackgroundTaskCallbackOrigin | undefined, event: Parameters<ReturnType<typeof getCallbackBatcher>["enqueue"]>[0]) => void, admission?: { assert(): void; prepared?(id: string): void }) {
+export function createBackgroundTaskRuntime(attention = createFailureAttention(), deliverCompletion?: (origin: BackgroundTaskCallbackOrigin | undefined, event: Parameters<ReturnType<typeof getCallbackBatcher>["enqueue"]>[0]) => void, admission?: { assert(): void; prepared?(id: string): void },
+  sourceWork: <T>(kind: string, id: string, work: () => T) => T = (_kind, _id, work) => work()) {
 const { resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention } = attention;
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const remoteSessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -517,7 +518,7 @@ function scheduleRemoteSessionPoll(
 ): void {
   clearRemoteSessionTimer(id);
   if (scheduledWorkSuspended) return;
-  const timer = setTimeout(() => void pollRemoteSession(pi, id, getActiveSession), delayMs);
+  const timer = setTimeout(() => void sourceWork("remote-poll", id, () => pollRemoteSession(pi, id, getActiveSession)), delayMs);
   timer.unref();
   remoteSessionTimers.set(id, timer);
 }
@@ -814,7 +815,7 @@ function scheduleHandoff(
   };
   const arm = () => {
     if (scheduledWorkSuspended) return;
-    const timer = setTimeout(check, delayMs);
+    const timer = setTimeout(() => sourceWork("handoff", id, check), delayMs);
     timer.unref();
     handoffTimers.set(id, timer);
   };
@@ -957,7 +958,7 @@ function scheduleWatch(
 ): void {
   clearWatchTimer(id);
   if (scheduledWorkSuspended) return;
-  const timer = setTimeout(() => void pollWatch(pi, id, getActiveSession, runOnce), delayMs);
+  const timer = setTimeout(() => void sourceWork("watch", id, () => pollWatch(pi, id, getActiveSession, runOnce)), delayMs);
   timer.unref();
   watcherTimers.set(id, timer);
 }
@@ -1260,7 +1261,7 @@ function scheduleProcessTimeout(
   clearProcessTimeout(id);
   if (scheduledWorkSuspended) return;
   const delay = Math.max(0, deadlineAt - Date.now());
-  const timer = setTimeout(() => void timeoutProcess(pi, id, getActiveSession), delay);
+  const timer = setTimeout(() => void sourceWork("process-deadline", id, () => timeoutProcess(pi, id, getActiveSession)), delay);
   timer.unref();
   processTimeoutTimers.set(id, timer);
 }
@@ -1459,7 +1460,7 @@ function launchArgvOf(commandSpec: CommandSpec, launchSpec: CommandSpec): string
 function scheduleLogRetention(pi: ExtensionAPI, id: string, getActiveSession?: ActiveSessionProvider): void {
   stopLogRetention(id);
   if (scheduledWorkSuspended) return;
-  const timer = setInterval(() => {
+  const timer = setInterval(() => sourceWork("log-retention", id, () => {
     const meta = readMeta(id);
     if (!meta || meta.status !== "running") {
       stopLogRetention(id);
@@ -1467,7 +1468,7 @@ function scheduleLogRetention(pi: ExtensionAPI, id: string, getActiveSession?: A
     }
     if (meta.kind === "process") enforceLogRetention(meta);
     if (observeTaskStallAttention(meta)) scheduleFailureAttention(pi, id, getActiveSession);
-  }, LOG_RETENTION_CHECK_MS);
+  }), LOG_RETENTION_CHECK_MS);
   timer.unref();
   logRetentionTimers.set(id, timer);
 }

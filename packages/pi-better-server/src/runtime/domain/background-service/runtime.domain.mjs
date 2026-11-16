@@ -23,7 +23,7 @@ export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;
 /** How to fix a false alarm: some tools write progress or warnings to stderr on success. */
 export const BLIND_CHECK_HINT = "If the stderr is expected (progress or warnings), redirect it (2>/dev/null) or set blind_checks:0.";
 /** Each cached extension factory owns its scheduling and suspension state. */
-export function createBackgroundTaskRuntime(attention = createFailureAttention(), deliverCompletion, admission) {
+export function createBackgroundTaskRuntime(attention = createFailureAttention(), deliverCompletion, admission, sourceWork = (_kind, _id, work) => work()) {
     const { resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention } = attention;
     const watcherTimers = new Map();
     const remoteSessionTimers = new Map();
@@ -432,7 +432,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         clearRemoteSessionTimer(id);
         if (scheduledWorkSuspended)
             return;
-        const timer = setTimeout(() => void pollRemoteSession(pi, id, getActiveSession), delayMs);
+        const timer = setTimeout(() => void sourceWork("remote-poll", id, () => pollRemoteSession(pi, id, getActiveSession)), delayMs);
         timer.unref();
         remoteSessionTimers.set(id, timer);
     }
@@ -714,7 +714,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         const arm = () => {
             if (scheduledWorkSuspended)
                 return;
-            const timer = setTimeout(check, delayMs);
+            const timer = setTimeout(() => sourceWork("handoff", id, check), delayMs);
             timer.unref();
             handoffTimers.set(id, timer);
         };
@@ -847,7 +847,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         clearWatchTimer(id);
         if (scheduledWorkSuspended)
             return;
-        const timer = setTimeout(() => void pollWatch(pi, id, getActiveSession, runOnce), delayMs);
+        const timer = setTimeout(() => void sourceWork("watch", id, () => pollWatch(pi, id, getActiveSession, runOnce)), delayMs);
         timer.unref();
         watcherTimers.set(id, timer);
     }
@@ -1135,7 +1135,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         if (scheduledWorkSuspended)
             return;
         const delay = Math.max(0, deadlineAt - Date.now());
-        const timer = setTimeout(() => void timeoutProcess(pi, id, getActiveSession), delay);
+        const timer = setTimeout(() => void sourceWork("process-deadline", id, () => timeoutProcess(pi, id, getActiveSession)), delay);
         timer.unref();
         processTimeoutTimers.set(id, timer);
     }
@@ -1329,7 +1329,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         stopLogRetention(id);
         if (scheduledWorkSuspended)
             return;
-        const timer = setInterval(() => {
+        const timer = setInterval(() => sourceWork("log-retention", id, () => {
             const meta = readMeta(id);
             if (!meta || meta.status !== "running") {
                 stopLogRetention(id);
@@ -1339,7 +1339,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
                 enforceLogRetention(meta);
             if (observeTaskStallAttention(meta))
                 scheduleFailureAttention(pi, id, getActiveSession);
-        }, LOG_RETENTION_CHECK_MS);
+        }), LOG_RETENTION_CHECK_MS);
         timer.unref();
         logRetentionTimers.set(id, timer);
     }

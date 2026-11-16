@@ -48,7 +48,8 @@ export async function createSubagentLaunch(root: string, instance: string, catal
           return ()=>{if(JSON.stringify(resolve())!==expected)throw new Error('permission-unavailable: Background policy changed before worker dispatch');};
         }
       });
-      const runtime = createBackgroundTaskRuntime();
+      const runtime = createBackgroundTaskRuntime(undefined, undefined, undefined,
+        (kind: string, _id: string, work: () => unknown) => lease.budget.source(`legacy-${kind}`, work));
       registerTools(pi, runtime, () => undefined);
       const close = service.close.bind(service);
       service.close = () => { try { close(); } finally { runtime.suspendScheduledWork(); } };
