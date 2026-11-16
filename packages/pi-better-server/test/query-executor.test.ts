@@ -2,13 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Socket } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync, openSync, closeSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+const { commitMetadata } = await import(String("../scripts/event-publication/commit.mjs"));
 
 async function fixture(options: { capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
@@ -176,7 +177,8 @@ for (const { count, readOnEvent } of [
       } });
     }));
     phase = "in-scope-update";
-    write("sa_b2", scope.cwd, "changed"); await f.executor.livenessReasons(); await Promise.all(received);
+    await commitMetadata(join(f.root, "runs/sa_b2/meta.json"), "changed");
+    await f.executor.livenessReasons(); await Promise.all(received);
     const overlapping = await Promise.all(eventReads);
     if (readOnEvent) {
       assert.equal(overlapping.length, count);
@@ -197,6 +199,56 @@ for (const { count, readOnEvent } of [
     assert.ok(changed.eventEncoding.bytes > baseline.eventEncoding.bytes);
     stops.forEach(stop => stop());
   } finally { await f.close(); }
+});
+
+test("10 socket clients share each truthful partial-write and recovery epoch", { timeout: 15000 }, async () => {
+  const f = await fixture();
+  const scope = { cwd: join(f.root, "b"), limit: 1 };
+  const directory = join(f.root, "runs/sa_partial_b"), path = join(directory, "meta.json");
+  const meta = { id: "sa_partial_b", cwd: scope.cwd, name: "verified", status: "completed", startedAt: 1 };
+  let held: number | undefined;
+  try {
+    const first = await f.client(); await ready(first);
+    mkdirSync(directory); writeFileSync(path, JSON.stringify(meta));
+    await f.executor.livenessReasons();
+    const clients = [first, ...await Promise.all(Array.from({ length: 9 }, () => f.client()))];
+    for (const client of clients) await client.subscribe(scope);
+    const initial = await first.get(scope), baseline = f.executor.metrics() as any;
+    const awaiting = (status: string) => Promise.all(clients.map(client => new Promise<void>(resolve => {
+      const stop = client.onChange(value => { if (value.status === status) { stop(); resolve(); } });
+    })));
+    const assertSharedEpoch = (before: any, after: any) => {
+      assert.equal(after.queryCount - before.queryCount, 1);
+      assert.equal(after.serializationCount - before.serializationCount, 1);
+      assert.equal(after.eventEncoding.serializations - before.eventEncoding.serializations, 1);
+      assert.equal(after.eventEncoding.frames - before.eventEncoding.frames, clients.length);
+    };
+    const degradedFrames = awaiting("degraded");
+    held = openSync(path, "w"); writeSync(held, '{"id":');
+    await f.executor.livenessReasons(); await degradedFrames;
+    const degraded = await Promise.all(clients.map(client => client.get(scope)));
+    for (const value of degraded) {
+      assert.equal(value.status, "degraded");
+      assert.match(value.reason!, /SyntaxError/);
+      assert.deepEqual(value.rows[0]!.meta, initial.rows[0]!.meta, "partial metadata is never published");
+      assert.equal(value.rows[0]!.sourceRevision, initial.rows[0]!.sourceRevision);
+      assert.equal(value.scopeRevision, degraded[0]!.scopeRevision);
+    }
+    const afterFailure = f.executor.metrics() as any;
+    assertSharedEpoch(baseline, afterFailure);
+    const readyFrames = awaiting("ready");
+    writeSync(held, JSON.stringify({ ...meta, name: "changed" }), 0, "utf8");
+    closeSync(held); held = undefined;
+    await f.executor.livenessReasons(); await readyFrames;
+    const recovered = await Promise.all(clients.map(client => client.get(scope)));
+    for (const value of recovered) {
+      assert.equal(value.status, "ready");
+      assert.equal(value.rows[0]!.meta.name, "changed");
+      assert.notEqual(value.scopeRevision, degraded[0]!.scopeRevision);
+      assert.equal(value.scopeRevision, recovered[0]!.scopeRevision);
+    }
+    assertSharedEpoch(afterFailure, f.executor.metrics());
+  } finally { if (held !== undefined) closeSync(held); await f.close(); }
 });
 
 test("stalled diagnostic completion rejects when its worker exits", { timeout: 10000 }, async () => {
