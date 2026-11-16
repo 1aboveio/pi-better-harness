@@ -564,7 +564,7 @@ test("watch overflow and lost notifications reconcile external writes once and r
   } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("a paused real socket has bounded queued snapshots and receives explicit resync after draining", { timeout: 10000 }, async () => {
+test("a paused real socket has bounded queued snapshots and receives explicit resync after draining", { timeout: 10000 }, async t => {
   const root = fixtureRoot("slow");
   const transport = mkdtempSync("/tmp/p753-");
   const runs = join(root, "runs", "sa_slow"); mkdirSync(runs, { recursive: true });
@@ -578,11 +578,15 @@ test("a paused real socket has bounded queued snapshots and receives explicit re
   server.listen(path); await once(server, "listening");
   const client = connect(path); client.pause();
   await once(server, "connection");
+  let cancelResync = () => {};
   try {
     queries.handle({ type: "runtime_subscribe", scope: {} });
-    for (let i = 0; i < 1000; i++) model.invalidate("watcher overflow");
+    // Identical invalidations are coalesced; backpressure needs real content changes.
+    for (let i = 0; i < 1000; i++) model.invalidate(`watcher overflow ${i}`);
     assert.ok(accepted.writableLength <= 103000, `queued bytes exceeded one snapshot plus the queue allowance: ${accepted.writableLength}`);
     const resynced = new Promise<void>((resolve, reject) => {
+      cancelResync = () => reject(t.signal.reason);
+      t.signal.addEventListener("abort", cancelResync, { once: true });
       let buffer = "";
       client.setEncoding("utf8");
       client.on("data", chunk => {
@@ -595,6 +599,7 @@ test("a paused real socket has bounded queued snapshots and receives explicit re
     });
     client.resume(); await resynced;
   } finally {
+    t.signal.removeEventListener("abort", cancelResync);
     client.destroy(); accepted.destroy(); queries.close();
     await new Promise<void>(resolve => server.close(() => resolve()));
     await model.close(); rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
