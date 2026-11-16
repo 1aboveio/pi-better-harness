@@ -956,7 +956,7 @@ export class ObservedWaitHost {
         const owner = this.ownerFor(input.ctx);
         const prepared = this.prepareLaunch(input.kind, input.params, "bg_task_spawn", owner, undefined);
         if (this.options.serverOwnedResults) {
-            this.assertResultAdmission(prepared.provenance);
+            this.assertManagedResultAdmission(prepared.provenance);
             const client = await this.resultSupervisionClient();
             client.close();
         }
@@ -994,7 +994,7 @@ export class ObservedWaitHost {
         this.writeLaunchContext(taskId, launchContext);
         this.launches.set(taskId, launchContext);
         if (this.options.serverOwnedResults)
-            await this.handoffResults([store.getOperation(operationId)]);
+            await this.handoffResults([store.getOperation(operationId)], true);
         const started = await this.startSupervisor({
             token, taskId, kind: input.kind, params: input.params, prepared, operationId,
         });
@@ -1634,6 +1634,11 @@ export class ObservedWaitHost {
             throw new Error("Terminal runner evidence is awaiting authoritative server import; supervision is unavailable.");
         return imported;
     }
+    assertManagedResultAdmission(captured) {
+        if (captured.policySource !== "no-publisher" && !currentForegroundSandboxPolicy(this.pi)) {
+            throw new Error("permission-unavailable: expected current Background permission source is unavailable");
+        }
+    }
     assertResultAdmission(captured, transferring = new Set()) {
         const discovery = this.requireStore().readDiscoveryClaim(this.discoveryScope);
         if (discovery && discovery.hostId !== this.hostId && this.discoveryHolderState(discovery.hostId) !== "dead") {
@@ -1659,12 +1664,12 @@ export class ObservedWaitHost {
             }
         }
     }
-    async handoffResults(operations) {
+    async handoffResults(operations, newManaged = false) {
         const client = await this.resultSupervisionClient();
         try {
             const manager = await client.request("runtime_result_supervision");
             const discovery = this.requireStore().readDiscoveryClaim(this.discoveryScope);
-            if (discovery && discovery.hostId !== this.hostId && this.discoveryHolderState(discovery.hostId) !== "dead") {
+            if (!newManaged && discovery && discovery.hostId !== this.hostId && this.discoveryHolderState(discovery.hostId) !== "dead") {
                 throw new Error("permission-unavailable: live or unknown original discovery holder prevents scope handoff");
             }
             const transfers = [];
@@ -1678,7 +1683,10 @@ export class ObservedWaitHost {
                 const context = this.launchContext(operation.taskId);
                 if (!context?.sandbox || !context.supervisionPolicy || !operation.authorityRef)
                     throw new Error("permission-unavailable: captured Background authority is unavailable");
-                this.assertResultAdmission(context.sandbox, transferring);
+                if (newManaged)
+                    this.assertManagedResultAdmission(context.sandbox);
+                else
+                    this.assertResultAdmission(context.sandbox, transferring);
                 const current = currentForegroundSandboxPolicy(this.pi);
                 if (context.sandbox.policySource !== "no-publisher" && !current)
                     throw new Error("permission-unavailable: expected current Background permission source is unavailable");
@@ -1690,10 +1698,16 @@ export class ObservedWaitHost {
             for (const transfer of transfers)
                 this.resultHandoffs.add(transfer.operationId);
             try {
-                this.requireStore().handoffResultScope({ scope: this.discoveryScope,
-                    expectedDiscovery: discovery ? { hostId: discovery.hostId, token: discovery.token } : null, grants: transfers });
-                this.discoveryToken = undefined;
-                this.discoveryRole = "follower";
+                if (newManaged) {
+                    // New work grants only its own results; legacy discovery remains live.
+                    this.requireStore().handoffResultSupervisions(transfers);
+                }
+                else {
+                    this.requireStore().handoffResultScope({ scope: this.discoveryScope,
+                        expectedDiscovery: discovery ? { hostId: discovery.hostId, token: discovery.token } : null, grants: transfers });
+                    this.discoveryToken = undefined;
+                    this.discoveryRole = "follower";
+                }
             }
             catch (error) {
                 // The transaction rolled back; only these uncommitted local fences may reopen.
@@ -1749,7 +1763,7 @@ export class ObservedWaitHost {
         const assertWorkerPolicy = this.options.prepareWorkerPolicy?.(run);
         const prepared = this.prepareLaunch(input.kind, input.params, input.kind === "watch" ? "bg_task_watch" : "bg_task_spawn", owner, input.policy, run.workspace);
         if (this.options.serverOwnedResults)
-            this.assertResultAdmission(prepared.provenance);
+            this.assertManagedResultAdmission(prepared.provenance);
         const operationId = `op_${randomUUID()}`;
         const token = `launch_${randomUUID()}`;
         const taskId = supervisorTaskIdForToken(token);
@@ -1779,7 +1793,7 @@ export class ObservedWaitHost {
         this.writeLaunchContext(taskId, launchContext);
         this.launches.set(taskId, launchContext);
         if (this.options.serverOwnedResults)
-            await this.handoffResults([store.getOperation(operationId)]);
+            await this.handoffResults([store.getOperation(operationId)], true);
         const started = await this.startSupervisor({
             token, taskId, kind: input.kind, params: input.params, prepared, operationId, assertDispatch: assertWorkerPolicy,
         });

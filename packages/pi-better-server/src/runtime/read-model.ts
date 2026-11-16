@@ -2,7 +2,7 @@ import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
 import { opendir, readFile, stat, writeFile, mkdir, rename } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { realpathSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -86,6 +86,7 @@ export class WorkReadModel {
   private healthRevision = "";
   private details = new Map<string, { revision: string; value: any }>();
   private watchers = new Map<string, FSWatcher>();
+  private rootParents = new Map<string, FSWatcher>();
   private rootWatchIdentities = new Map<string, string>();
   private listeners = new Set<() => void>();
   private timer?: ReturnType<typeof setInterval>;
@@ -117,7 +118,7 @@ export class WorkReadModel {
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, healthDeadline: 0, unverified: 0, initial: 0 };
   get metrics() {
     return { ...this.counters, assignments: this.reader.changeMetrics, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
-      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size };
+      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size, rootParentWatchers: this.rootParents.size };
   }
   readonly runs: string;
   readonly archives: string;
@@ -151,9 +152,31 @@ export class WorkReadModel {
     // Watch directory entries, not file inodes. Node's Linux recursive watcher
     // can retain a replaced file's old inode after atomic rename and miss later
     // commits. Flat archives need one watcher; raw runs use one per directory.
+    this.watchRootParents();
     for (const path of [this.runs, this.archives, this.markers]) this.watchDirectory(path);
     this.timer = setInterval(() => { this.repairOwed = true; if (!this.pending) void this.reconcile(false); }, options.intervalMs ?? 1000);
     this.timer.unref();
+  }
+
+  private watchRootParents() {
+    const roots = [this.runs, this.archives, this.markers];
+    for (const parent of new Set(roots.map(dirname))) {
+      if (this.closed || this.rootParents.has(parent)) continue;
+      try {
+        // An inode watcher cannot see its pathname recreated after removal.
+        // Keep the parent watched even while the source root is absent.
+        const watcher = watch(parent, (_event, filename) => {
+          if (filename && !roots.some(root => dirname(root) === parent && basename(root) === String(filename))) return;
+          void this.reconcile();
+        });
+        watcher.on("error", () => {
+          if (this.rootParents.get(parent) !== watcher) return;
+          watcher.close(); this.rootParents.delete(parent);
+          this.invalidate("Root parent watcher failed; reconciling source inventory.");
+        });
+        this.rootParents.set(parent, watcher);
+      } catch { /* Missing parents are discovered by the compatibility inventory. */ }
+    }
   }
 
   private unwatchDirectory(path: string) {
@@ -441,6 +464,7 @@ export class WorkReadModel {
     const release = this.budget.enter("repair");
     if (!release) return Promise.resolve();
     this.pending = (async () => {
+      this.watchRootParents();
       if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
       do {
         this.dirty = false;
@@ -901,6 +925,8 @@ export class WorkReadModel {
     this.closed = true; if (this.timer) clearInterval(this.timer);
     for (const watcher of this.watchers.values()) watcher.close();
     this.watchers.clear(); this.rootWatchIdentities.clear();
+    for (const watcher of this.rootParents.values()) watcher.close();
+    this.rootParents.clear();
     await this.pending; await this.repairWrite; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
     await this.repair?.return(undefined);
   }

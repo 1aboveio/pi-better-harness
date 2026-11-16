@@ -62,10 +62,14 @@ export class BackgroundObservation {
       this.refresh();
     }
     if (!this.db) return [];
-    const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
-    if (!["1", "2", "3", "4"].includes(version)) return [];
     let operations: any[] = [];
-    try { operations = this.db ? this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor' AND terminal_revision = 0").all() : []; }
+    try {
+      // The file may be visible before its writer commits the initial schema.
+      // Keep publication alive and report unverified background state until refresh.
+      const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
+      if (!["1", "2", "3", "4"].includes(version)) return [];
+      operations = this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor' AND terminal_revision = 0").all();
+    }
     catch (error) { this.status = "degraded"; this.reason = String(error); return []; }
     return operations.flatMap((op: any) => {
       try {
@@ -351,9 +355,9 @@ export class BackgroundObservation {
       }
       const origin = { cwd: scope.cwd, sessionId: scope.sessionId };
       entry = { origin, rows: observeMetasForOrigin(origin), references: 0, pending: [], recent: [] };
-      if (this.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_parent_callbacks'").get())
+      if (this.status !== "degraded" && this.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_parent_callbacks'").get())
         this.refreshPending(entry, Number(this.db.prepare("SELECT value FROM coordinator_state WHERE key='change_revision'").get()?.value ?? 0));
-      if (this.db) this.refreshRecent(entry, Number(this.db.prepare("SELECT value FROM coordinator_state WHERE key='change_revision'").get()?.value ?? 0));
+      if (this.status !== "degraded" && this.db) this.refreshRecent(entry, Number(this.db.prepare("SELECT value FROM coordinator_state WHERE key='change_revision'").get()?.value ?? 0));
     }
     this.legacy.delete(key); this.legacy.set(key, entry);
     return entry;

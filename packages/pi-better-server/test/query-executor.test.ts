@@ -50,10 +50,15 @@ async function fixture(options: { intervalMs?: number; capacity?: number; timeou
       const listener = (message: any) => { if (message.type === "diagnostic-started") { worker.off("message", listener); resolve(); } };
       worker.on("message", listener);
     });
-    const finished = new Promise<number>(resolve => {
-      const listener = (message: any) => { if (message.type === "diagnostic-finished") { worker.off("message", listener); resolve(message.durationMs); } };
-      worker.on("message", listener);
+    const finished = new Promise<number>((resolve, reject) => {
+      const cleanup = () => { worker.off("message", listener); worker.off("exit", exited); worker.off("error", failed); };
+      const listener = (message: any) => { if (message.type === "diagnostic-finished") { cleanup(); resolve(message.durationMs); } };
+      const exited = (code: number) => { cleanup(); reject(new Error(`diagnostic worker exited before completing SQLite work (code ${code})`)); };
+      const failed = (error: Error) => { cleanup(); reject(error); };
+      worker.on("message", listener); worker.once("exit", exited); worker.once("error", failed);
     });
+    // Some watchdog tests intentionally discard the completion promise.
+    void finished.catch(() => {});
     worker.postMessage({ type: "diagnostic-stall", iterations }); await started;
     return { finished };
   };
@@ -139,6 +144,17 @@ for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query
   } finally { await f.close(); }
 });
 
+test("stalled diagnostic completion rejects when its worker exits", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const client = await f.client(); await ready(client);
+    const busy = await f.stall();
+    const rejected = assert.rejects(busy.finished, /worker exited before completing/);
+    await f.worker.terminate();
+    await rejected;
+  } finally { await f.close(); }
+});
+
 test("slow caller cancellation preserves other clients and ignores late replies", { timeout: 10000 }, async t => {
   const f = await fixture({ timeoutMs: 700, watchdogMs: 2000,
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
@@ -196,6 +212,9 @@ test("watchdog recovers a genuinely wedged worker while socket control stays res
   const f = await fixture({ timeoutMs: 400, watchdogMs: 1200,
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   try {
+    // The 400 ms read deadline tests the wedge, not cold worker imports.
+    if (f.executor.observation().observedAt === null)
+      await once(f.worker, "message", { signal: AbortSignal.timeout(5000) });
     const a = await f.client(), b = await f.client(); await ready(a); await ready(b);
     const epoch = b.snapshot!.instanceId;
     const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
@@ -272,7 +291,14 @@ test("an exact-ID client waits for indexing without occupying the shared read qu
     assert.equal((await client.get({ limit: 2 })).status, "rebuilding");
     assert.equal(completed, false, "the unrelated read completes while the exact ID is still awaiting inventory");
     f.worker.postMessage({ type: "release-inventory" });
-    const result = await pending;
+    let result = await pending;
+    // get() deliberately returns rebuilding after its bounded retry window.
+    // Loaded runners may spend that window initializing the real inventory.
+    if (result.status === "rebuilding") {
+      assert.equal(result.rows.length, 0);
+      await ready(client);
+      result = await client.get({ id: "sa_client_retry", limit: 1 });
+    }
     assert.equal(result.status, "ready");
     assert.equal(result.rows[0]!.meta.id, "sa_client_retry");
     assert.equal(f.executor.metrics().executor.timeouts, 0);
@@ -624,7 +650,7 @@ test("real runner timeout and canonical result supervision progress during stall
   const { RuntimeResultSupervision } = await import("../src/runtime/result-supervision.ts");
   const { createLocalSupervisor } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
   const { supervisorTaskIdForToken } = await import(new URL("../../pi-better-background-tasks/src/supervisor/store.ts", import.meta.url).href);
-  const f = await fixture();
+  const f = await fixture({ watchdogMs: 15000 });
   const lease = acquireMutationStore(f.root);
   const directory = join(f.root, "supervisor");
   const supervisor = createLocalSupervisor({ directory });
@@ -642,7 +668,7 @@ test("real runner timeout and canonical result supervision progress during stall
     host = new RuntimeResultSupervision(f.root, "slow-read-epoch");
     const busy = await f.stall(12000000);
     let readFinished = false;
-    void busy.finished.then(() => { readFinished = true; });
+    void busy.finished.then(() => { readFinished = true; }, () => {});
     const began = performance.now();
     await supervisor.start({ token, operationId, cwd: f.root, timeoutSeconds: 0.2,
       argv: [process.execPath, "-e", "setInterval(()=>{},1000)"] });
@@ -766,4 +792,31 @@ test("directory entry watchers publish repeated atomic commits without the inven
     assert.equal(f.executor.metrics().sourceWatchers, 1, "deleted raw directories release their watchers");
   } finally { await f.close(); }
   assert.equal(f.executor.metrics().executor.worker, "stopped");
+});
+
+test("root recreation after an observed absence publishes without inventory fallback", { timeout: 15000 }, async () => {
+  const f = await fixture();
+  try {
+    const id = "sa_root_gap", directory = join(f.root, "runs", id);
+    const meta = { id, sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1,
+      endedAt: Date.now(), callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "original" };
+    mkdirSync(directory);
+    writeFileSync(join(directory, "meta.json"), JSON.stringify(meta));
+    const client = await f.client(); await ready(client);
+    await client.subscribe({ cwd: f.root, sessionId: "parent", limit: 10 });
+    const waitForEvent = async (condition: () => boolean) => {
+      const deadline = Date.now() + 3000;
+      while (!condition()) {
+        assert.ok(Date.now() < deadline, `missing root event: ${JSON.stringify(f.executor.metrics())}`);
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    };
+    await waitForEvent(() => client.snapshot?.rows.length === 1);
+    renameSync(join(f.root, "runs"), join(f.root, "old-runs"));
+    // Let the reader observe ENOENT and retire the old inode watcher first.
+    await waitForEvent(() => client.snapshot?.rows.length === 0);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "meta.json"), JSON.stringify({ ...meta, name: "recreated" }));
+    await waitForEvent(() => client.snapshot?.rows[0]?.meta.name === "recreated");
+  } finally { await f.close(); }
 });

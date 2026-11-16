@@ -335,6 +335,20 @@ test("scope handoff refuses live, unknown and untransferred dead legacy holders"
     const store = openStore({ path: join(root, "operation-coordinator.sqlite") });
     try {
       const op = store.getOperation(original.ready.launch.operationId)!;
+      const scopeBefore = createHash("sha256").update(`${join(root, "operation-coordinator.sqlite")}\0${join(root, "supervisor")}`).digest("hex");
+      const claimBefore = store.readDiscoveryClaim(scopeBefore);
+      const managedLive = await host.launchParent({ kind: "process", params: { shell: false, callback: false,
+        argv: [process.execPath, "-e", "process.exit(0)"] }, ctx });
+      const managedWait = host.waitForParent(ctx, [managedLive.id], "managed result beside legacy");
+      const managedDeadline = Date.now() + 5000;
+      while (store.getOperation(managedLive.operationId)?.terminalRevision === 0 && Date.now() < managedDeadline) await delay(25);
+      assert.equal(store.getOperation(managedLive.operationId)?.terminalRevision, 1);
+      assert.equal(host.waitViewForParent(ctx, managedWait.waitId, managedWait.generation)?.phase, "ready");
+      host.cancelWaitForParent(ctx, managedWait.waitId, managedWait.generation, "regression complete");
+      assert.deepEqual(store.readDiscoveryClaim(scopeBefore), claimBefore);
+      assert.equal(store.getOperation(op.operationId)?.supervision.hostId, op.supervision.hostId);
+      assert.equal(original.child.exitCode, null);
+
       assert.equal(store.resultSupervision(op.operationId), null);
       store.recordSupervision({ operationId: op.operationId, owner: op.owner, expectedHostId: op.supervision.hostId,
         supervision: { hostId: `${original.child.pid}:legacy` } });
@@ -350,11 +364,11 @@ test("scope handoff refuses live, unknown and untransferred dead legacy holders"
       store.recordSupervision({ operationId: op.operationId, owner: op.owner,
         expectedHostId: `${original.child.pid}:legacy`, supervision: op.supervision });
       const exited = once(original.child, "exit"); original.child.kill("SIGKILL"); await exited;
-      await assert.rejects(host.launchParent({ kind: "process", params: { shell: false, callback: false,
-        argv: [process.execPath, "-e", "process.exit(0)"] }, ctx }), /untransferred legacy operation/);
-      assert.equal(store.resultScopeManaged(scope), false, "refusal must leave legacy discovery enabled");
+      const managed = await host.launchParent({ kind: "process", params: { shell: false, callback: false,
+        argv: [process.execPath, "-e", "process.exit(0)"] }, ctx });
+      assert.ok(store.resultSupervision(managed.operationId));
+      assert.equal(store.resultScopeManaged(scope), false, "new work must leave legacy discovery enabled");
       assert.equal(store.resultSupervision(op.operationId), null);
-      assert.equal(store.listOperations({ phase: "running" }).length, 1, "no replacement task was admitted");
 
       // Explicit adoption uses A's own captured authority, never the rejected
       // new task's authority. Its terminal evidence can then advance its wait.
