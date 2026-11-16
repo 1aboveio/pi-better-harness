@@ -1,8 +1,8 @@
 /**
  * Filesystem catalog: project, personal, and bundled sources.
  *
- * Discovery is deterministic and reads the disk on every call. There is no
- * launch cache. Callers that launch a batch must retain the returned snapshot
+ * Discovery is deterministic. Direct callers read disk on every call; the server
+ * can supply bounded source reuse after admission. Callers launching a batch retain the snapshot
  * and reuse that object for every job.
  *
  * Project files are read only when `projectTrusted` is true. Pass Pi's
@@ -51,6 +51,8 @@ export const DEFAULT_PROJECT_CONFIG_DIR_NAME = ".pi";
 export const SOURCE_PRECEDENCE = ["project", "user", "bundled"] as const;
 
 export interface LoadCatalogInput {
+    /** Server-owned, bounded source reuse. Admission and discovery still run first. */
+    sources?: { read(path: string): string; parse(raw: string, path: string): ParseResult };
     cwd: string;
     /** Host trust decision. Untrusted projects do not contribute definitions. */
     projectTrusted: boolean;
@@ -195,13 +197,13 @@ export function listScopedAgents(input: LoadCatalogInput, scope: "user" | "proje
     if (!isSafeConfigDirName(config)) throw new Error("Unsafe project config directory");
     const directory = scope === "project" ? projectCatalogPaths(input.cwd, config).agents : userCatalogPaths(input.userRoot).agents;
     const occurrences = new Map<string, Occurrence[]>();
-    collectDirectory(directory, scope, "agent", occurrences, diagnostics);
+    collectDirectory(directory, scope, "agent", occurrences, diagnostics, input.sources);
     const agents = [...occurrences.values()].flat().flatMap(item => item.parse.definition?.kind === "agent"
         ? [{ path: item.path, definition: item.parse.definition }] : []);
     return { agents, diagnostics };
 }
 
-/** Read every source again. Identical bytes produce the same digest and a new object. */
+/** Discover authorized sources. Identical bytes produce the same content digest. */
 export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
     const loadedAt = new Date().toISOString();
     const diagnostics: Diagnostic[] = [];
@@ -219,8 +221,8 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
 
     if (input.projectTrusted) {
         const project = projectCatalogPaths(input.cwd, configDirName);
-        collectDirectory(project.roles, "project", "role", groups.get("project")!, diagnostics);
-        collectDirectory(project.agents, "project", "agent", groups.get("project")!, diagnostics);
+        collectDirectory(project.roles, "project", "role", groups.get("project")!, diagnostics, input.sources);
+        collectDirectory(project.agents, "project", "agent", groups.get("project")!, diagnostics, input.sources);
     } else {
         const project = projectCatalogPaths(input.cwd, configDirName);
         if (pathExists(project.roles) || pathExists(project.agents) || pathExists(project.root)) {
@@ -233,8 +235,8 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
     }
 
     const user = userCatalogPaths(input.userRoot);
-    collectDirectory(user.roles, "user", "role", groups.get("user")!, diagnostics);
-    collectDirectory(user.agents, "user", "agent", groups.get("user")!, diagnostics);
+    collectDirectory(user.roles, "user", "role", groups.get("user")!, diagnostics, input.sources);
+    collectDirectory(user.agents, "user", "agent", groups.get("user")!, diagnostics, input.sources);
 
     const bundledRoles = input.bundledRoot ?? bundledRolesRoot();
     if (!existsSync(bundledRoles)) {
@@ -246,10 +248,10 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
             severity: "warning",
         }));
     } else {
-        collectDirectory(bundledRoles, "bundled", "role", groups.get("bundled")!, diagnostics);
+        collectDirectory(bundledRoles, "bundled", "role", groups.get("bundled")!, diagnostics, input.sources);
     }
     if (input.bundledAgentsRoot) {
-        collectDirectory(input.bundledAgentsRoot, "bundled", "agent", groups.get("bundled")!, diagnostics);
+        collectDirectory(input.bundledAgentsRoot, "bundled", "agent", groups.get("bundled")!, diagnostics, input.sources);
     }
 
     const { entries, blocked } = selectIdentities(groups, diagnostics);
@@ -272,8 +274,8 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
                 if (own.bundled) {
                     const fallbacks = entry.scope === "bundled" ? [entry] : entry.unused.filter(source => source.scope === "bundled");
                     const fallback = fallbacks.length === 1 ? fallbacks[0] : undefined;
-                    const raw = fallback ? readFileSync(fallback.path, "utf8") : undefined;
-                    const parsed = raw === undefined ? undefined : parseDefinition(raw, fallback!.path);
+                    const raw = fallback ? (input.sources?.read(fallback.path) ?? readFileSync(fallback.path, "utf8")) : undefined;
+                    const parsed = raw === undefined ? undefined : (input.sources?.parse(raw, fallback!.path) ?? parseDefinition(raw, fallback!.path));
                     if (!fallback || !parsed?.ok || parsed.definition?.id !== entry.id || parsed.diagnostics.some(item => item.blocking)
                         || contentDigest(raw!) !== fallback.contentDigest) {
                         const failure = diagnostic("catalog-preferences", `Cannot inherit bundled runtime defaults for ${entry.id}: a single valid bundled definition is required.`, {
@@ -526,6 +528,7 @@ function collectDirectory(
     directoryKind: CatalogKind,
     into: Map<string, Occurrence[]>,
     diagnostics: Diagnostic[],
+    sources?: LoadCatalogInput["sources"],
 ): void {
     let stats;
     try {
@@ -602,7 +605,7 @@ function collectDirectory(
         if (!fileStats.isFile()) continue;
         let raw: string;
         try {
-            raw = readFileSync(path, "utf8");
+            raw = sources?.read(path) ?? readFileSync(path, "utf8");
         } catch (error) {
             diagnostics.push(diagnostic(DiagnosticCodes.ioError, `Could not read ${path}: ${(error as Error).message}`, {
                 scope,
@@ -614,7 +617,7 @@ function collectDirectory(
         }
         let parse: ParseResult;
         try {
-            parse = parseDefinition(raw, path);
+            parse = sources?.parse(raw, path) ?? parseDefinition(raw, path);
         } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             diagnostics.push(diagnostic(

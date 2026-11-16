@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { loadCatalog, saveDefinition, resetRuntimeToBundled, resetUserDefinition, listScopedAgents } from "./domain/catalog/catalog-store.mjs";
+import { saveDefinition, resetRuntimeToBundled, resetUserDefinition, listScopedAgents } from "./domain/catalog/catalog-store.mjs";
 import { withAgentSessionSettings, saveAgentSessionDefaults } from "./domain/catalog/agent-session-settings.mjs";
 import { saveSkillExposure } from "./domain/catalog/catalog-skill-edits.mjs";
 import { parseDefinition } from "./domain/catalog/catalog-schema.mjs";
@@ -7,9 +7,11 @@ import { CatalogAdmission } from "./catalog-admission.ts";
 import { overlayDigest } from "./domain/catalog/catalog-overlay.mjs";
 import { watch, type FSWatcher } from "node:fs";
 import { dirname } from "node:path";
+import { CatalogSources } from "./catalog-sources.ts";
 
 /** One server-owned filesystem catalog; registrations belong to the live socket. */
 export class SharedCatalog {
+  readonly sources = new CatalogSources();
   private agentDir: string;
   readonly admission: CatalogAdmission;
   private observers = new Set<() => void>();
@@ -38,6 +40,7 @@ export class SharedCatalog {
       try { snapshot = read(); } catch { snapshot = { revision: "revoked", status: "revoked", roles: [], agents: [], diagnostics: [] }; }
       if (snapshot.revision === revision) return;
       revision = snapshot.revision;
+      this.sources.metrics.notifications++;
       emit({ ...snapshot, seq: ++seq });
     };
     revision = initial.revision;
@@ -45,9 +48,9 @@ export class SharedCatalog {
     this.timer ??= setInterval(() => { for (const reconcile of this.observers) reconcile(); }, 1000);
     this.timer.unref();
     return { snapshot: { ...initial, seq }, close: () => {
-      this.observers.delete(reconcile);
+      if (!this.observers.delete(reconcile)) return;
       for (const path of watched) { const entry = this.watchers.get(path); if (entry && --entry.references === 0) { entry.watcher.close(); this.watchers.delete(path); } }
-      if (!this.observers.size) { clearInterval(this.timer); this.timer = undefined; clearTimeout(this.pending); this.pending = undefined; }
+      if (!this.observers.size) { clearInterval(this.timer); this.timer = undefined; clearTimeout(this.pending); this.pending = undefined; this.sources.clear(); }
     } };
   }
 
@@ -71,9 +74,9 @@ export class SharedCatalog {
       const loc = location();
       if (command.type === "runtime_get_catalog_scope") {
         if (command.scope !== "user" && command.scope !== "project") throw new Error("Invalid catalog scope");
-        return listScopedAgents(loc, command.scope);
+        return listScopedAgents({ ...loc, sources: this.sources }, command.scope);
       }
-      const snapshot = loadCatalog(loc);
+      const snapshot = this.sources.load(loc, command.type === "runtime_edit_catalog" || command.fresh === true);
       if (command.type === "runtime_get_catalog") {
         const overlay = validateOverlay(command.overlay);
         if (registration?.authority && command.overlay !== undefined) {
