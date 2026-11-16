@@ -550,6 +550,9 @@ export class WorkReadModel {
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
       for (const [path, entry] of next) {
         if (path.startsWith(this.markers + sep)) continue;
+        // Compact archives omit volatile delivery markers; discovery order must
+        // never let them replace a retained, verified live record.
+        if (path.startsWith(this.archives + sep) && next.has(join(this.runs, entry.meta.id, "meta.json"))) continue;
         const marker = markers.get(entry.meta.sessionId);
         if (path.startsWith(this.archives + sep) && marker && marker.attemptId !== entry.meta.id && marker.startedAt >= entry.meta.startedAt) continue;
         metas.set(entry.meta.id, entry.meta);
