@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { WorkClient } from "../../pi-better-server/src/runtime/work-client.mjs";
+import { observeFixtureChild, stopFixtureChild } from "./fixture-child.mjs";
 
 /** Real query server for registered-extension fixtures; no model or HostedSession. */
 export async function startWorkRuntimeFixture(env = process.env) {
@@ -15,6 +16,7 @@ export async function startWorkRuntimeFixture(env = process.env) {
             execPath: daemonEnv.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath,
             execArgv: ["--import", "tsx"], env: daemonEnv, stdio: ["ignore", "ignore", "pipe", "ipc"],
         });
+        observeFixtureChild(child);
         child.stderr.on("data", chunk => { error += chunk; });
         const [ready] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(`Fixture daemon exited: ${error}`); })]);
         // This file-scoped query fixture outlives individual recipients and
@@ -25,15 +27,21 @@ export async function startWorkRuntimeFixture(env = process.env) {
         return ready;
     };
     const ready = await start();
-    const stopChild = async () => { retention?.close(); retention = undefined; if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.send("stop"); await exited; } };
+    let stopping;
+    const stopChild = () => stopping ??= (async () => {
+        // Keep retention until the explicit stop is sent; closing it first can
+        // race the daemon's idle shutdown and its IPC channel teardown.
+        try { await stopFixtureChild(child); }
+        finally { retention?.close(); retention = undefined; }
+    })();
     const stop = async () => {
         await stopChild();
         rmSync(transport, { recursive: true, force: true });
     };
     stop.socketPath = ready.ready;
-    stop.restart = async () => { await stopChild(); await start(); };
+    stop.restart = async () => { await stopChild(); stopping = undefined; await start(); };
     stop.pause = stopChild;
-    stop.resume = start;
+    stop.resume = async () => { stopping = undefined; return start(); };
     stop.metrics = async () => { const reply = once(child, "message"); child.send("metrics"); return (await reply)[0]; };
     stop.diagnostics = () => ({ exitCode: child.exitCode, stderr: error });
     return stop;

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Socket } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -45,6 +45,10 @@ async function fixture(options: { capacity?: number; timeoutMs?: number; watchdo
   const clients: WorkClient[] = [];
   const client = async () => { const value = new WorkClient(path, root); clients.push(value); await value.ready; return value; };
   const worker = (executor as unknown as { worker: Worker }).worker;
+  const bootstrapped = new Promise<void>(resolve => {
+    const listener = (message: any) => { if (message.type === "fixture-ready") { worker.off("message", listener); resolve(); } };
+    worker.on("message", listener);
+  });
   const stall = async (iterations = 3000000) => {
     const started = new Promise<void>(resolve => {
       const listener = (message: any) => { if (message.type === "diagnostic-started") { worker.off("message", listener); resolve(); } };
@@ -67,7 +71,7 @@ async function fixture(options: { capacity?: number; timeoutMs?: number; watchdo
     await new Promise<void>(resolve => server.close(() => resolve())); await executor.close();
     rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
   };
-  return { executor, client, stall, worker, close, root, path };
+  return { executor, client, stall, worker, bootstrapped, close, root, path };
 }
 
 async function ready(client: WorkClient) {
@@ -148,8 +152,12 @@ test("watchdog recovers a genuinely wedged worker while socket control stays res
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   try {
     // The 400 ms read deadline tests the wedge, not cold worker imports.
-    if (f.executor.observation().observedAt === null)
-      await once(f.worker, "message", { signal: AbortSignal.timeout(5000) });
+    let startupTimeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([f.bootstrapped, new Promise<never>((_, reject) => {
+        startupTimeout = setTimeout(() => reject(new Error("query fixture did not bootstrap within budget")), 5000);
+      })]);
+    } finally { clearTimeout(startupTimeout); }
     const a = await f.client(), b = await f.client(); await ready(a); await ready(b);
     const epoch = b.snapshot!.instanceId;
     const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
@@ -166,6 +174,23 @@ test("watchdog recovers a genuinely wedged worker while socket control stays res
     assert.equal(f.executor.metrics().executor.restarts, 1);
     assert.ok(controlMs < 500);
     t.diagnostic(JSON.stringify({ restartMs: performance.now() - began, controlMs, metrics: f.executor.metrics() }));
+  } finally { await f.close(); }
+});
+
+test("cold bootstrap caller deadline does not imply a wedged read worker", { timeout: 10000 }, async t => {
+  const f = await fixture({ timeoutMs: 400, watchdogMs: 2000,
+    workerUrl: new URL("./support/cold-cancellable-query-worker.mjs", import.meta.url) });
+  try {
+    const client = await f.client();
+    const began = performance.now();
+    await assert.rejects(client.subscribe({}), /runtime-timeout: caller read deadline exceeded/);
+    assert.equal((await client.request("ping")).ok, true);
+    assert.equal(f.executor.metrics().executor.callerTimeouts, 1);
+    await f.bootstrapped;
+    await ready(client);
+    assert.equal(client.snapshot?.status, "ready");
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+    t.diagnostic(JSON.stringify({ startupMs: performance.now() - began, metrics: f.executor.metrics() }));
   } finally { await f.close(); }
 });
 
@@ -217,13 +242,20 @@ test("an exact-ID client waits for indexing without occupying the shared read qu
     const blocked = new Promise<void>(resolve => {
       f.worker.on("message", message => { if (message.type === "inventory-blocked") resolve(); });
     });
+    const client = await f.client(); await blocked;
+    f.worker.postMessage({ type: "release-inventory" });
+    await ready(client);
+    const indexing = new Promise<void>(resolve => {
+      const listener = (message: any) => { if (message.type === "inventory-blocked") { f.worker.off("message", listener); resolve(); } };
+      f.worker.on("message", listener);
+    });
+    f.worker.postMessage({ type: "block-inventory" }); await indexing;
     const directory = join(f.root, "runs/sa_client_retry"); mkdirSync(directory);
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_client_retry", sessionId: "retry", cwd: f.root,
       status: "completed", startedAt: 1 }));
-    const client = await f.client(); await blocked;
     let completed = false;
     const pending = client.get({ id: "sa_client_retry", limit: 1 }).then(value => { completed = true; return value; });
-    assert.equal((await client.get({ limit: 2 })).status, "rebuilding");
+    assert.equal((await client.get({ limit: 2 })).status, "ready");
     assert.equal(completed, false, "the unrelated read completes while the exact ID is still awaiting inventory");
     f.worker.postMessage({ type: "release-inventory" });
     let result = await pending;
@@ -680,6 +712,50 @@ test("directory entry watchers publish repeated atomic commits without the inven
     assert.equal(f.executor.metrics().sourceWatchers, 1, "deleted raw directories release their watchers");
   } finally { await f.close(); }
   assert.equal(f.executor.metrics().executor.worker, "stopped");
+});
+
+for (const source of ["runs", "attempts", "session-state"]) test(`source ${source} recreation after observed absence publishes without fallback`, { timeout: 10000 }, async t => {
+  const f = await fixture();
+  const durable = join(f.root, "durable"), sessionDir = join(durable, "sessions");
+  const root = source === "runs" ? join(f.root, source) : join(durable, source);
+  const id = "sa_root_gap";
+  const meta = { id, sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1, endedAt: 2,
+    name: "before-root", recipe: { version: 1, sessionId: "worker", sessionDir, cwd: f.root } };
+  const archive = () => { mkdirSync(join(durable, "attempts"), { recursive: true }); writeFileSync(join(durable, "attempts", `${id}.json`), JSON.stringify({ version: 1, meta })); };
+  const writeSource = (name: string) => {
+    mkdirSync(root, { recursive: true });
+    if (source === "runs") { mkdirSync(join(root, id)); writeFileSync(join(root, id, "meta.json"), JSON.stringify({ ...meta, name })); }
+    else if (source === "attempts") writeFileSync(join(root, `${id}.json`), JSON.stringify({ version: 1, meta: { ...meta, name } }));
+    else writeFileSync(join(root, "worker.json"), JSON.stringify({ version: 1, sessionId: "worker", attemptId: "sa_newer", status: "killed", startedAt: 3 }));
+  };
+  const wait = async (condition: () => boolean, description: string) => {
+    const until = Date.now() + 1000;
+    while (!condition()) { assert.ok(Date.now() < until, description); await new Promise(resolve => setTimeout(resolve, 10)); }
+  };
+  try {
+    if (source === "session-state") archive();
+    writeSource("before-root");
+    const client = await f.client(); await ready(client); await client.subscribe({ cwd: f.root, limit: 10 });
+    const count = source === "session-state" ? 0 : 1;
+    await wait(() => client.snapshot?.rows.length === count, "initial source membership");
+    const before = f.executor.metrics(), oldInode = String(statSync(root).ino);
+    renameSync(root, join(f.root, `retired-${source}`));
+    // This is a publication barrier, not a sleep or a forced read/inventory:
+    // the worker has actually imported ENOENT before the new root is created.
+    await wait(() => client.snapshot?.rows.length === (source === "session-state" ? 1 : 0), "missing source root was not published");
+    writeSource("after-root");
+    const newInode = String(statSync(root).ino);
+    assert.notEqual(newInode, oldInode);
+    await wait(() => client.snapshot?.rows.length === count && (count === 0 || client.snapshot.rows[0]?.meta.name === "after-root"), "recreated source root was not published");
+    if (count) {
+      const path = source === "runs" ? join(root, id, "meta.json") : join(root, `${id}.json`);
+      const value = { ...meta, name: "after-rearm" };
+      writeFileSync(path + ".tmp", JSON.stringify(source === "runs" ? value : { version: 1, meta: value }));
+      renameSync(path + ".tmp", path);
+      await wait(() => client.snapshot?.rows[0]?.meta.name === "after-rearm", `replacement root watcher was not rearmed: ${JSON.stringify({ source, oldInode, newInode, before })}`);
+    }
+    t.diagnostic(JSON.stringify({ source, oldInode, newInode, before, after: f.executor.metrics() }));
+  } finally { await f.close(); }
 });
 
 test("root recreation after an observed absence publishes without inventory fallback", { timeout: 15000 }, async () => {

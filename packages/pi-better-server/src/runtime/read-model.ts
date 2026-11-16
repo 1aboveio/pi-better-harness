@@ -2,7 +2,7 @@ import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { dirname, relative, join, resolve, sep } from "node:path";
 import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -12,6 +12,7 @@ import { createAssignmentProjector } from "./domain/assignment-projection.mjs";
 import { createAssignmentReader } from "./domain/assignment-observation.mjs";
 import { parseArchivedAttempt, parseArchivedSessionState } from "./domain/session-store.mjs";
 import { parseRun, readRunTranscript } from "./domain/parse.mjs";
+import { withLogReadBatch, logReadMetrics } from "./domain/log-cursor.mjs";
 import { fmtSpend } from "./domain/widget.mjs";
 import { effectiveStatus } from "./domain/process-status.mjs";
 import { extractChildEventFactsFromLog, healthThresholdsForConfig } from "./domain/health-observation.mjs";
@@ -71,6 +72,8 @@ export class WorkReadModel {
   private files = new Map<string, { signature: string; meta: any }>();
   private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string }; health?: any; recipientPending?: boolean; failurePending?: boolean }>();
   private logs = new Map<string, string>();
+  private parseStates = new Map();
+  private healthStates = new Map();
   private failureJournals = new Map<string, string>();
   private processes = new Map<string, string>();
   private staged?: {
@@ -81,7 +84,7 @@ export class WorkReadModel {
   private healthRevision = "";
   private details = new Map<string, { revision: string; value: any }>();
   private watchers = new Map<string, FSWatcher>();
-  private rootParents = new Map<string, FSWatcher>();
+  private rootParents = new Map<string, { path: string; identity: string; watcher: FSWatcher }>();
   private rootWatchIdentities = new Map<string, string>();
   private listeners = new Set<() => void>();
   private timer?: ReturnType<typeof setInterval>;
@@ -95,10 +98,12 @@ export class WorkReadModel {
   private foldQueueSequence = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
   private reason: string | undefined = "Initial source inventory is rebuilding.";
-  private counters = { inventories: 0, metadataReads: 0, projections: 0, healthRecomputations: 0, healthConfigInvalidations: 0 };
+  private counters = { inventories: 0, metadataReads: 0, projections: 0, assignmentProjections: 0, logProjections: 0, healthProjections: 0, failureProjections: 0, healthRecomputations: 0, healthConfigInvalidations: 0 };
+  private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, healthDeadline: 0, unverified: 0, initial: 0 };
   get metrics() {
-    return { ...this.counters, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
-      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size, rootParentWatchers: this.rootParents.size };
+    return { ...this.counters, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
+      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size,
+      sourceParentWatchers: this.rootParents.size, rootParentWatchers: this.rootParents.size };
   }
   readonly runs: string;
   readonly archives: string;
@@ -128,40 +133,46 @@ export class WorkReadModel {
     // Watch directory entries, not file inodes. Node's Linux recursive watcher
     // can retain a replaced file's old inode after atomic rename and miss later
     // commits. Flat archives need one watcher; raw runs use one per directory.
-    this.watchRootParents();
-    for (const path of [this.runs, this.archives, this.markers]) this.watchDirectory(path);
+    for (const path of [this.runs, this.archives, this.markers]) { this.watchRootParent(path); this.watchDirectory(path); }
     this.timer = setInterval(() => { if (!this.pending) void this.reconcile(); }, options.intervalMs ?? 1000);
     this.timer.unref();
-  }
-
-  private watchRootParents() {
-    const roots = [this.runs, this.archives, this.markers];
-    for (const parent of new Set(roots.map(dirname))) {
-      if (this.closed || this.rootParents.has(parent)) continue;
-      try {
-        // An inode watcher cannot see its pathname recreated after removal.
-        // Keep the parent watched even while the source root is absent.
-        const watcher = watch(parent, (_event, filename) => {
-          if (filename && !roots.some(root => dirname(root) === parent && basename(root) === String(filename))) return;
-          void this.reconcile();
-        });
-        watcher.on("error", () => {
-          if (this.rootParents.get(parent) !== watcher) return;
-          watcher.close(); this.rootParents.delete(parent);
-          this.invalidate("Root parent watcher failed; reconciling source inventory.");
-        });
-        this.rootParents.set(parent, watcher);
-      } catch { /* Missing parents are discovered by the compatibility inventory. */ }
-    }
   }
 
   private unwatchDirectory(path: string) {
     this.watchers.get(path)?.close(); this.watchers.delete(path);
   }
+  private watchRootParent(root: string) {
+    if (this.closed) return;
+    // A watch follows an inode, not the source pathname. Keep an independent
+    // parent entry watch so recreation after an observed ENOENT remains visible.
+    for (let parent = dirname(root); ; parent = dirname(parent)) {
+      const previous = this.rootParents.get(root);
+      try {
+        const info = statSync(parent, { bigint: true });
+        const identity = `${info.dev}:${info.ino}`;
+        if (previous?.path === parent && previous.identity === identity) return;
+        const entry = relative(parent, root).split(sep)[0];
+        const watcher = watch(parent, (_event, filename) => {
+          if (this.rootParents.get(root)?.watcher !== watcher) return;
+          if (!filename || String(filename) === entry || String(filename) === relative(dirname(parent), parent)) void this.reconcile();
+        });
+        watcher.on("error", () => {
+          if (this.rootParents.get(root)?.watcher !== watcher) return;
+          watcher.close(); this.rootParents.delete(root);
+          this.invalidate("Source parent watcher failed; reconciling source inventory.");
+        });
+        previous?.watcher.close();
+        this.rootParents.set(root, { path: parent, identity, watcher });
+        return;
+      } catch { /* Missing source ancestors are watched from their nearest existing parent. */ }
+      if (dirname(parent) === parent) return;
+    }
+  }
   private watchDirectory(path: string) {
     if (this.closed || this.watchers.has(path)) return;
     try {
       const watcher = watch(path, (_event, filename) => {
+        if (this.watchers.get(path) !== watcher) return;
         if (path === this.runs) {
           // A raw directory may itself have been removed/replaced. Reattach
           // from the shared inventory, never retain its preceding inode.
@@ -247,7 +258,6 @@ export class WorkReadModel {
 
   private async scan() {
     this.counters.inventories++;
-    this.watchRootParents();
     if (this.background.refresh()) this.publish();
     let releaseCoordinator: (() => void) | undefined;
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
@@ -257,6 +267,7 @@ export class WorkReadModel {
       let batch = 0;
       let sliceStarted = performance.now();
       for (const [directory, archived] of [[this.markers, true], [this.archives, true], [this.runs, false]] as const) {
+        this.watchRootParent(directory);
         let names: string[];
         try { names = await readdir(directory); }
         catch (error) {
@@ -348,16 +359,16 @@ export class WorkReadModel {
         logs.set(entry.meta.id, signature);
         if ((signature !== this.logs.get(entry.meta.id) || this.files.get(path)?.meta.status !== entry.meta.status) && entry.meta.status !== "running"
             && entry.meta.management?.root === this.agentDir) terminalLogChanges.push(entry.meta.id);
-        if (signature !== baseline.logs.get(entry.meta.id)) logFamilies.add(JSON.stringify([entry.meta.sessionId, entry.meta.cwd]));
+        if (signature !== baseline.logs.get(entry.meta.id)) logFamilies.add(entry.meta.id);
         const failureSignature = (await Promise.all(["failures.jsonl", "failures.jsonl.observed"].map(async name => {
           try { const info = await stat(join(this.runs, entry.meta.id, name), { bigint: true }); return `${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`; }
           catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unverified"; }
         }))).join(":");
         failureJournals.set(entry.meta.id, failureSignature);
-        if (failureSignature !== baseline.failureJournals.get(entry.meta.id)) logFamilies.add(JSON.stringify([entry.meta.sessionId, entry.meta.cwd]));
+        if (failureSignature !== baseline.failureJournals.get(entry.meta.id)) logFamilies.add(entry.meta.id);
 
         const status = effectiveStatus(entry.meta); processes.set(entry.meta.id, status);
-        if (status !== baseline.processes.get(entry.meta.id)) logFamilies.add(JSON.stringify([entry.meta.sessionId, entry.meta.cwd]));
+        if (status !== baseline.processes.get(entry.meta.id)) logFamilies.add(entry.meta.id);
         if (performance.now() - sliceStarted >= 8) { await yieldTurn(); sliceStarted = performance.now(); }
       }
       const healthConfig = await readHealthConfig(this.agentDir, next.size > 0);
@@ -375,34 +386,76 @@ export class WorkReadModel {
         metas.set(entry.meta.id, entry.meta);
       }
       const attempts = [...metas.values()];
-      const affected = new Set<string>(logFamilies);
+      const affected = new Set<string>();
       const family = (meta: any) => JSON.stringify([meta.sessionId, meta.cwd]);
+      const invalidateAttempt = (meta: any) => {
+        const related = [...baseline.projected.values()].map(row => row.meta).concat(attempts);
+        const ids = new Set([meta.id]);
+        let grew = true;
+        while (grew) {
+          grew = false;
+          for (const candidate of related) {
+            if (!candidate.operations?.resumeLaunchToken || family(candidate) !== family(meta)
+                || (meta.assignment && candidate.assignment?.assignmentId !== meta.assignment.assignmentId)) continue;
+            if (ids.has(candidate.id) || ids.has(candidate.resumedFrom)) {
+              for (const id of [candidate.id, candidate.resumedFrom]) if (id && !ids.has(id)) { ids.add(id); grew = true; }
+            }
+          }
+        }
+        for (const id of ids) affected.add(id);
+      };
       for (const [path, entry] of [...baseline.files, ...next]) {
-        if (baseline.files.get(path)?.signature !== next.get(path)?.signature) affected.add(family(entry.meta));
+        if (baseline.files.get(path)?.signature !== next.get(path)?.signature) invalidateAttempt(entry.meta);
       }
       if (coordinator !== baseline.coordinator) for (const meta of attempts) {
         if (!(meta.assignment || meta.operations || meta.park)) continue;
         const owner = JSON.stringify([meta.operations?.conversationId ?? meta.sessionId, meta.operations?.workspace ?? meta.cwd]);
         if (!coordinatorConversations || !baseline.coordinatorConversations ||
-            coordinatorConversations.get(owner) !== baseline.coordinatorConversations.get(owner)) affected.add(family(meta));
+            coordinatorConversations.get(owner) !== baseline.coordinatorConversations.get(owner)) invalidateAttempt(meta);
       }
       const project = createAssignmentProjector({ attempts, observe: (owner: any) => this.reader.read(owner) });
       const rows = [];
       for (const meta of attempts) {
         let row = baseline.projected.get(meta.id);
-        if (row && row.assignment.verified && !affected.has(family(meta)) && (healthConfig.revision !== baseline.healthRevision || healthDeadlineExpired(row, now))) {
+        const assignmentChanged = !row || !row.assignment.verified || affected.has(meta.id) || processes.get(meta.id) !== baseline.processes.get(meta.id);
+        const logChanged = !row || logs.get(meta.id) !== baseline.logs.get(meta.id);
+        const failureChanged = !row || failureJournals.get(meta.id) !== baseline.failureJournals.get(meta.id);
+        const deadlineChanged = row && healthDeadlineExpired(row, now);
+        if (row && !assignmentChanged && !logChanged && !failureChanged && (healthConfig.revision !== baseline.healthRevision || deadlineChanged)) {
+          if (healthConfig.revision !== baseline.healthRevision) this.invalidations.healthConfig++;
+          if (deadlineChanged) this.invalidations.healthDeadline++;
           this.counters.healthRecomputations++;
           const health = healthWithThresholds(row.health, healthConfig.config, meta);
           row = { ...row, health, sourceRevision: hash([meta, row.assignment.revision, row.display, health, row.recipientPending, row.failurePending, failureJournals.get(meta.id)]) };
-        } else if (!row || !row.assignment.verified || affected.has(family(meta))) {
+        } else if (assignmentChanged || logChanged || failureChanged) {
+          if (!row) this.invalidations.initial++;
+          else {
+            if (affected.has(meta.id)) this.invalidations.assignmentInput++;
+            if (!row.assignment.verified) this.invalidations.unverified++;
+            if (processes.get(meta.id) !== baseline.processes.get(meta.id)) this.invalidations.process++;
+            if (logChanged) this.invalidations.log++;
+            if (failureChanged) this.invalidations.failureAttention++;
+            if (healthConfig.revision !== baseline.healthRevision) this.invalidations.healthConfig++;
+            if (deadlineChanged) this.invalidations.healthDeadline++;
+          }
           this.counters.projections++;
-          this.counters.healthRecomputations++;
-          const assignment = project(meta, processes.get(meta.id) ?? meta.status);
-          const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRun(meta.id, { logPath: join(this.runs, meta.id, "output.log") }) : undefined;
-          const display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.toolCalls.at(-1) ?? "" };
-          const health = logs.has(meta.id) ? healthWithThresholds(extractChildEventFactsFromLog(meta.id, { logPath: join(this.runs, meta.id, "output.log") }), healthConfig.config, meta) : undefined;
+          if (assignmentChanged) this.counters.assignmentProjections++;
+          const assignment = assignmentChanged ? project(meta, processes.get(meta.id) ?? meta.status) : row!.assignment;
+          let display = row?.display, health = row?.health;
+          if (logChanged) withLogReadBatch(() => {
+            this.counters.logProjections++; this.counters.healthProjections++;
+            const logPath = join(this.runs, meta.id, "output.log");
+            const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRun(meta.id, { logPath, states: this.parseStates }) : undefined;
+            display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.toolCalls.at(-1) ?? "" };
+            health = logs.has(meta.id) ? extractChildEventFactsFromLog(meta.id, { logPath, states: this.healthStates }) : undefined;
+          });
+          if (logChanged || assignmentChanged || deadlineChanged || healthConfig.revision !== baseline.healthRevision) {
+            this.counters.healthRecomputations++;
+            health = healthWithThresholds(health, healthConfig.config, meta);
+          }
           const outcome = meta.assignment ? this.reader.read({ ...meta.assignment.owner, assignmentId: meta.assignment.assignmentId }).outcome : undefined;
-          const failurePending = meta.callback !== false && failureJournals.has(meta.id) && Boolean(pendingFailureAttention(
+          if (failureChanged || assignmentChanged) this.counters.failureProjections++;
+          const failurePending = !failureChanged && !assignmentChanged ? row!.failurePending : meta.callback !== false && failureJournals.has(meta.id) && Boolean(pendingFailureAttention(
             readFailureStateReadOnly(join(this.runs, meta.id, "failures.jsonl")), Date.now(),
             { terminal: !["running", "orphaned"].includes(meta.status), deferObservationGaps: meta.status === "running" }));
           const recipientPending = Boolean(failurePending || meta.timing?.pendingWakes?.length
@@ -412,7 +465,7 @@ export class WorkReadModel {
               : meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined)));
           row = { meta, assignment, display, health, recipientPending, failurePending, sourceRevision: hash([meta, assignment.revision, display, health, recipientPending, failurePending, failureJournals.get(meta.id)]) };
         }
-        rows.push(row);
+        rows.push(row!);
         if (++batch % 256 === 0 || performance.now() - sliceStarted >= 8) {
           await yieldTurn(); sliceStarted = performance.now();
         }
@@ -425,9 +478,9 @@ export class WorkReadModel {
         healthRevision: healthConfig.revision, coordinator, coordinatorConversations };
       const uncommitted = new Set(affected);
       for (const [path, entry] of [...this.files, ...next]) {
-        if (this.files.get(path)?.signature !== next.get(path)?.signature) uncommitted.add(family(entry.meta));
+        if (this.files.get(path)?.signature !== next.get(path)?.signature) uncommitted.add(entry.meta.id);
       }
-      const verify = [...next].filter(([, entry]) => uncommitted.has(family(entry.meta)));
+      const verify = [...next].filter(([, entry]) => uncommitted.has(entry.meta.id));
       for (let offset = 0; offset < verify.length; offset += 32) {
         const group = verify.slice(offset, offset + 32);
         const observations = await Promise.all(group.map(async ([path]) => {
@@ -468,6 +521,9 @@ export class WorkReadModel {
       this.files = next; this.logs = logs; this.failureJournals = failureJournals; this.processes = processes; this.healthRevision = healthConfig.revision; this.coordinator = coordinator; this.inventory++;
       this.coordinatorConversations = coordinatorConversations;
       this.projected = new Map(rows.map(row => [row.meta.id, row]));
+      for (const states of [this.parseStates, this.healthStates]) for (const path of states.keys()) {
+        if (!metas.has(path.slice(this.runs.length + 1).split(sep)[0])) states.delete(path);
+      }
       this.staged = undefined;
       if (terminalLogChanges.length) this.onTerminalLogsChanged?.();
       const previousState = this.state;
@@ -570,9 +626,9 @@ export class WorkReadModel {
   async close() {
     this.closed = true; if (this.timer) clearInterval(this.timer);
     for (const watcher of this.watchers.values()) watcher.close();
-    this.watchers.clear(); this.rootWatchIdentities.clear();
-    for (const watcher of this.rootParents.values()) watcher.close();
+    for (const { watcher } of this.rootParents.values()) watcher.close();
     this.rootParents.clear();
+    this.watchers.clear(); this.rootWatchIdentities.clear();
     await this.pending; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
   }
 }
