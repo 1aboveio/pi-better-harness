@@ -174,6 +174,33 @@ test("failed-source deletion repair keeps its 128-path budget and does not clear
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("empty Subagent repair still publishes independent Background coordinator progress", async () => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, "empty-background", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  const store = openStore({ path: join(f.agent, "operation-coordinator.sqlite") });
+  const owner = { kind: "parent-session", sessionId: "parent", workspace: f.root };
+  const scope = { background: true, cwd: f.root, sessionId: "parent" };
+  const published: any[] = [];
+  const off = model.onChange(() => published.push(model.snapshot(scope)), scope);
+  const logBytes = model.metrics.logReads.bytes;
+  try {
+    await model.reconcile(); assert.equal(model.snapshot(scope).rows.length, 0);
+    published.length = 0;
+    store.registerOperation({ operationId: "empty-background-operation", taskId: "bgs_00000000000000000799", launchToken: "empty-background-token", owner,
+      observer: { kind: "local-supervisor", version: "1" } });
+    await model.reconcile();
+    assert.equal(published.at(-1)?.activity.active, 1, "coordinator progress must publish even with no Subagent candidates");
+    store.recordTerminalOutcome({ operationId: "empty-background-operation", eventId: "empty-background-result", outcome: "succeeded", owner,
+      evidence: [{ kind: "terminal-record", ref: "empty-background-evidence" }] });
+    await model.reconcile();
+    assert.equal(published.at(-1)?.rows[0]?.meta.status, "succeeded");
+    assert.equal(published.at(-1)?.activity.active, 0);
+    assert.equal(model.metrics.inventories, 0, "Background refresh does not require a Subagent batch");
+    assert.equal(model.metrics.scheduling.repairEntries, 0);
+    assert.equal(model.metrics.logReads.bytes, logBytes);
+  } finally { off(); await model.close(); store.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("initial repair retains health configuration degradation until valid settings recover", async () => {
   const f = fixture(); f.put("sa_health_import");
   writeFileSync(join(f.agent, "settings.json"), "invalid json");

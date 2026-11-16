@@ -13,6 +13,11 @@ export class AssignmentInbox {
         this.prefix = connection ? `${this.alias}.` : "";
         // Share the query owner's handle; only the attached derived file is durable.
         if (connection) connection.prepare(`ATTACH DATABASE ? AS ${this.alias}`).run(path);
+        // A second observer may open while the first holds a derived write
+        // transaction. Existing schema/diagnostics require no write reservation.
+        const tables = this.db.prepare(`SELECT count(*) AS n FROM ${this.prefix}sqlite_master
+            WHERE type='table' AND name IN ('position','pending','applied_scopes','diagnostics')`).get().n;
+        if (tables === 4 && this.db.prepare(`SELECT 1 FROM ${this.prefix}diagnostics LIMIT 1`).get()) return;
         this.db.exec(`CREATE TABLE IF NOT EXISTS ${this.prefix}position (
             singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation TEXT NOT NULL,
             received INTEGER NOT NULL, applied INTEGER NOT NULL);
@@ -37,6 +42,7 @@ export class AssignmentInbox {
         const after = reset ? last : position.received;
         const changes = reset ? [] : source.prepare("SELECT * FROM assignment_changes WHERE seq>? ORDER BY seq LIMIT 128").all(after);
         this.more = !reset && Number(changes.at(-1)?.seq ?? after) < last;
+        if (!reset && !changes.length) return this.batch(generation);
         this.db.exec("BEGIN IMMEDIATE");
         try {
             if (reset) {
@@ -55,13 +61,20 @@ export class AssignmentInbox {
             if (changes.length) this.db.prepare(`UPDATE ${this.prefix}position SET received=? WHERE singleton=1`).run(changes.at(-1).seq);
             this.db.exec("COMMIT");
         } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        return this.batch(generation);
+    }
+
+    batch(generation) {
         const batch = new Map(this.db.prepare(`SELECT scope, seq FROM ${this.prefix}pending ORDER BY first_seq, scope LIMIT 128`).all().map(row => [row.scope, String(row.seq)]));
         Object.defineProperty(batch, "generation", { value: generation });
         return batch;
     }
 
     acknowledge(batch, baselineComplete) {
-        if (batch.generation && batch.generation !== this.db.prepare(`SELECT generation FROM ${this.prefix}position WHERE singleton=1`).get()?.generation) return;
+        const position = this.db.prepare(`SELECT * FROM ${this.prefix}position WHERE singleton=1`).get();
+        if (batch.generation && batch.generation !== position?.generation) return;
+        if (batch.size && ![...batch.keys()].some(scope => scope !== "*" || baselineComplete)) return;
+        if (!batch.size && (!position || position.applied === position.received)) return;
         this.db.exec("BEGIN IMMEDIATE");
         try {
             const remove = this.db.prepare(`DELETE FROM ${this.prefix}pending WHERE scope=? AND seq=?`);
