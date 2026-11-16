@@ -6,16 +6,16 @@ import type { WorkReadModel } from "./read-model.ts";
 import { workScope } from "./queries.ts";
 
 export interface EncodedRead { json: string }
-interface Waiter { connection: number; resolve(value: EncodedRead): void; reject(error: Error): void }
+interface Waiter { connection: number; deadline: ReturnType<typeof setTimeout>; resolve(value: EncodedRead): void; reject(error: Error): void }
 interface Query {
   id: number; key?: string; command: Record<string, unknown>; connection: number;
-  enqueued: number; deadline: ReturnType<typeof setTimeout>; waiters: Set<Waiter>;
+  enqueued: number; started?: number; waiters: Set<Waiter>;
 }
 export type ReadStream = Pick<Duplex, "destroyed" | "writableLength" | "write" | "on" | "once" | "off">;
 interface Stream { socket: ReadStream; paused: boolean; generation: number; drain: () => void; close: () => void }
 interface WorkerMetrics { sourceWatchers?: number; inventories?: number; coordinatorConnections?: number; indexConnections?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
 export interface QueryExecutorOptions {
-  capacity?: number; timeoutMs?: number; maxConnections?: number;
+  capacity?: number; timeoutMs?: number; maxConnections?: number; watchdogMs?: number;
   workerUrl?: URL;
   onTerminalLogsChanged?: (ids: string[]) => Promise<void>;
   modelOptions?: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number };
@@ -40,6 +40,8 @@ export class WorkQueryExecutor {
   private recoveryAttempts: number[] = [];
   private internalRecoveryDemand = false;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
+  private watchdog?: ReturnType<typeof setInterval>;
+  private lastResponse = performance.now();
   private workerMetrics: WorkerMetrics = {};
   private lastObservation: Omit<ReturnType<WorkReadModel["observation"]>, "observedAt"> & { observedAt: number | null } = {
     status: "rebuilding", reason: "Initial source inventory is rebuilding.", observedAt: null, reasons: [],
@@ -51,6 +53,8 @@ export class WorkQueryExecutor {
   private rejected = 0;
   private cancelled = 0;
   private timeouts = 0;
+  private queueTimeouts = 0;
+  private callerTimeouts = 0;
   private durations: number[] = [];
   private options: QueryExecutorOptions;
   private agentDir: string;
@@ -60,6 +64,12 @@ export class WorkQueryExecutor {
     this.options = options; this.instanceId = instanceId; this.agentDir = agentDir;
     this.lag.enable();
     this.worker = this.startWorker();
+    this.watchdog = setInterval(() => {
+      if (!this.closed && !this.failure && performance.now() - this.lastResponse > (this.options.watchdogMs ?? 4000)) {
+        this.fail(new Error("runtime-unhealthy: read worker unresponsive; watchdog deadline exceeded"));
+      }
+    }, Math.min(250, (this.options.watchdogMs ?? 4000) / 4));
+    this.watchdog.unref();
   }
 
   private startWorker() {
@@ -99,6 +109,7 @@ export class WorkQueryExecutor {
       this.internalRecoveryDemand = false;
       this.exited = false; this.failure = undefined; this.termination = undefined;
       this.workerMetrics = {}; this.workerConnections.clear(); this.revision++;
+      this.lastResponse = performance.now();
       this.lastObservation = { status: "rebuilding", reason: "Read worker is recovering its source inventory.", observedAt: null, reasons: [] };
       this.lag.reset(); this.lag.enable();
       try { this.worker = this.startWorker(); }
@@ -147,7 +158,7 @@ export class WorkQueryExecutor {
   metrics() {
     return { ...this.workerMetrics, executor: { active: this.active ? 1 : 0, queued: this.queue.length,
       clients: this.streams.size, completed: this.completed, singleflightHits: this.coalesced, rejected: this.rejected,
-      cancelled: this.cancelled, timeouts: this.timeouts,
+      cancelled: this.cancelled, timeouts: this.timeouts, queueTimeouts: this.queueTimeouts, callerTimeouts: this.callerTimeouts,
       capacity: this.options.capacity ?? 64, waitMs: [...this.waits], readMs: [...this.durations],
       eventLoopLagMs: { p50: this.lag.percentile(50) / 1e6, p95: this.lag.percentile(95) / 1e6, p99: this.lag.percentile(99) / 1e6 },
       worker: this.exited ? "stopped" : this.failure ? "stopping" : "running",
@@ -162,9 +173,21 @@ export class WorkQueryExecutor {
       if (connection === 0) this.internalRecoveryDemand = true;
       this.scheduleRecovery(); return Promise.reject(this.failure);
     }
-    if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
     if (input.sinceSeq !== undefined && !Number.isSafeInteger(input.sinceSeq)) return Promise.reject(new Error("Invalid replay sequence"));
     if (input.instanceId !== undefined && (typeof input.instanceId !== "string" || input.instanceId.length > 256)) return Promise.reject(new Error("Invalid runtime instance"));
+    if (input.type === "runtime_unsubscribe") {
+      for (const query of [...this.queue, ...(this.active ? [this.active] : [])]) {
+        if (query.command.type !== "runtime_subscribe" || query.connection !== connection) continue;
+        this.finish(query, new Error("runtime-unavailable: subscription cancelled"));
+        this.release(query);
+      }
+      const stream = this.streams.get(connection);
+      if (stream) stream.generation++;
+      this.worker.postMessage({ type: "detach", connection });
+      this.workerConnections.delete(connection);
+      return Promise.resolve({ json: '{"unsubscribed":true}' });
+    }
+    if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe", "runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(String(input.type))) return Promise.reject(new Error("Unsupported read operation"));
     const command: Record<string, unknown> = { type: input.type, sinceSeq: input.sinceSeq, instanceId: input.instanceId };
     if (command.type !== "runtime_unsubscribe" && command.type !== "runtime_get_liveness" && command.type !== "runtime_get_upgrade_obligations") {
       const scope = workScope(input.scope);
@@ -183,13 +206,16 @@ export class WorkQueryExecutor {
         return Promise.reject(new Error("runtime-overloaded: read queue is full; retry later"));
       }
       const id = ++this.counter;
-      query = { id, key, command, connection: key ? 0 : connection, enqueued: performance.now(),
-        deadline: setTimeout(() => this.expire(id), this.options.timeoutMs ?? 4000), waiters: new Set() };
+      query = { id, key, command, connection: key ? 0 : connection, enqueued: performance.now(), waiters: new Set() };
       this.queue.push(query);
       if (key) this.flights.set(key, query);
     }
     const admitted = query;
-    const result = new Promise<EncodedRead>((resolve, reject) => admitted.waiters.add({ connection, resolve, reject }));
+    const result = new Promise<EncodedRead>((resolve, reject) => {
+      const waiter: Waiter = { connection, resolve, reject,
+        deadline: setTimeout(() => this.expire(admitted, waiter), this.options.timeoutMs ?? 4000) };
+      admitted.waiters.add(waiter);
+    });
     this.pump();
     return result;
   }
@@ -197,6 +223,7 @@ export class WorkQueryExecutor {
   private pump() {
     if (this.failure || this.active || !this.queue.length) return;
     const query = this.active = this.queue.shift()!;
+    query.started = performance.now();
     this.waits.push(performance.now() - query.enqueued);
     if (this.waits.length > 128) this.waits.shift();
     const stream = this.streams.get(query.connection);
@@ -207,6 +234,13 @@ export class WorkQueryExecutor {
 
   private receive(message: any) {
     if (this.failure) return;
+    this.lastResponse = performance.now();
+    if (message.type === "heartbeat") { this.worker.postMessage({ type: "heartbeat-consumed" }); return; }
+    // Replies to cancelled reads carry no fresh observation or metrics authority.
+    if (message.type === "reply" && (!this.active || message.id !== this.active.id || !this.active.waiters.size)) {
+      if (message.id === this.active?.id) { this.active = undefined; this.pump(); }
+      return;
+    }
     if (message.metrics) this.workerMetrics = message.metrics;
     if (message.observation) this.lastObservation = message.observation;
     if (message.type === "terminal-logs") {
@@ -227,27 +261,40 @@ export class WorkQueryExecutor {
     if (message.type !== "reply" || message.id !== this.active?.id) return;
     const query = this.active!;
     this.active = undefined; this.completed++;
-    this.durations.push(performance.now() - query.enqueued);
+    this.durations.push(performance.now() - query.started!);
     if (this.durations.length > 128) this.durations.shift();
     this.finish(query, message.error ? new Error(message.error) : undefined, { json: message.json });
     this.pump();
   }
 
   private finish(query: Query, error?: Error, value: EncodedRead = { json: "null" }) {
-    clearTimeout(query.deadline);
     if (query.key && this.flights.get(query.key) === query) this.flights.delete(query.key);
-    for (const waiter of query.waiters) { if (error) waiter.reject(error); else waiter.resolve(value); }
+    for (const waiter of query.waiters) { clearTimeout(waiter.deadline); if (error) waiter.reject(error); else waiter.resolve(value); }
     query.waiters.clear();
   }
 
-  private expire(id: number) {
+  private expire(query: Query, waiter: Waiter) {
+    if (!query.waiters.delete(waiter)) return;
     this.timeouts++;
-    const error = new Error("runtime-unhealthy: read deadline exceeded; retry after recovery");
-    if (this.active?.id === id) { this.fail(error); return; }
-    const index = this.queue.findIndex(query => query.id === id);
-    if (index < 0) return;
-    const [query] = this.queue.splice(index, 1);
-    this.finish(query!, error);
+    if (query === this.active) this.callerTimeouts++;
+    else this.queueTimeouts++;
+    waiter.reject(new Error(query === this.active
+      ? "runtime-timeout: caller read deadline exceeded; source was not verified"
+      : "runtime-overloaded: queued read deadline exceeded; retry later"));
+    this.release(query);
+  }
+
+  private release(query: Query) {
+    if (query.waiters.size) return;
+    this.finish(query);
+    if (query === this.active) {
+      // Keep the execution slot until cancellation is acknowledged. This bounds
+      // the worker mailbox even when native work cannot be interrupted.
+      this.worker.postMessage({ type: "cancel", id: query.id });
+    } else {
+      const index = this.queue.indexOf(query);
+      if (index >= 0) this.queue.splice(index, 1);
+    }
   }
 
   private event(connection: number, line: string) {
@@ -265,12 +312,9 @@ export class WorkQueryExecutor {
     if (this.workerConnections.delete(connection) && !this.failure) this.worker.postMessage({ type: "detach", connection });
     for (const query of [...this.queue, ...(this.active ? [this.active] : [])]) {
       for (const waiter of query.waiters) if (waiter.connection === connection) {
-        query.waiters.delete(waiter); this.cancelled++; waiter.reject(new Error("runtime-unavailable: client disconnected"));
+        query.waiters.delete(waiter); clearTimeout(waiter.deadline); this.cancelled++; waiter.reject(new Error("runtime-unavailable: client disconnected"));
       }
-      if (!query.waiters.size && query !== this.active) {
-        this.queue.splice(this.queue.indexOf(query), 1);
-        this.finish(query);
-      }
+      this.release(query);
     }
   }
 
@@ -289,6 +333,7 @@ export class WorkQueryExecutor {
 
   async close() {
     this.closed = true;
+    if (this.watchdog) clearInterval(this.watchdog);
     if (this.recoveryTimer) { clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined; }
     this.fail(new Error("runtime-unavailable: query executor closed"));
     for (const connection of this.streams.keys()) this.detach(connection);

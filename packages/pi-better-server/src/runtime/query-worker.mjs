@@ -39,6 +39,15 @@ const sendTerminalLogs = () => {
 };
 model.onTerminalLogsChanged = sendTerminalLogs;
 const sessions = new Map();
+const requests = new Map();
+// A heartbeat proves the worker can service control messages between bounded
+// indexing batches; it does not claim that a source snapshot is fresh.
+let heartbeatPending = false;
+setInterval(() => {
+  if (heartbeatPending) return;
+  heartbeatPending = true;
+  parentPort.postMessage({ type: "heartbeat" });
+}, 250).unref();
 const cache = new Map();
 const encoded = new WeakMap();
 let cacheBytes = 0, cacheHits = 0, queryCount = 0;
@@ -99,36 +108,54 @@ function session(id) {
 }
 
 parentPort.on("message", async message => {
+  if (message.type === "heartbeat-consumed") { heartbeatPending = false; return; }
+  if (message.type === "cancel") {
+    const request = requests.get(message.id);
+    if (request) {
+      request.cancelled = true;
+      requests.delete(message.id);
+      parentPort.postMessage({ type: "reply", id: message.id, error: "runtime-timeout: read cancelled" });
+    }
+    return;
+  }
   if (message.type === "terminal-logs-consumed") { if (terminalLogsPending) model.acknowledgeTerminalLogs(terminalLogsPending); terminalLogsPending = undefined; sendTerminalLogs(); return; }
   if (message.type === "revision-consumed") {
     revisionPending = false;
     if (revisionDirty) { revisionDirty = false; revision(); }
     return;
   }
-  if (message.type === "detach") { sessions.get(message.connection)?.queries.close(); sessions.delete(message.connection); return; }
+  if (message.type === "detach") {
+    for (const request of requests.values()) if (request.connection === message.connection) request.cancelled = true;
+    sessions.get(message.connection)?.queries.close(); sessions.delete(message.connection); return;
+  }
   if (message.type === "event-consumed") {
     const state = sessions.get(message.connection);
     if (state?.awaiting && state.serial === message.serial) { state.awaiting = false; state.flush(); }
     return;
   }
   if (message.type !== "query") return;
+  const request = { connection: message.connection, cancelled: false };
+  requests.set(message.id, request);
   try {
     const command = message.command;
     if (["runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(command.type)) {
       await model.reconcile();
+      if (request.cancelled) return;
       const observation = model.observation(command.type === "runtime_get_upgrade_obligations" ? model.upgradeObligations() : model.livenessReasons());
       parentPort.postMessage({ type: "reply", id: message.id, json: JSON.stringify(observation.reasons), metrics: metrics(), observation });
       return;
     }
     if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe"].includes(command.type)) throw new Error("Unsupported read operation");
     const indexed = command.type !== "runtime_get_snapshot" || !command.scope?.id || await model.ensureId(command.scope.id);
+    if (request.cancelled) return;
     const state = session(message.connection);
     state.generation = message.generation; state.pending = undefined;
     let value = state.queries.handle(command);
     if (!indexed && !value.rows.length) value = { ...value, status: "rebuilding", reason: "The requested run is being indexed; retry after reconciliation." };
     parentPort.postMessage({ type: "reply", id: message.id, json: encoded.get(value) ?? JSON.stringify(value), metrics: metrics() });
   } catch (error) {
+    if (request.cancelled) return;
     parentPort.postMessage({ type: "reply", id: message.id, error: String(error).slice(0, 512), metrics: metrics() });
-  }
+  } finally { requests.delete(message.id); }
 });
 void model.reconcile();
