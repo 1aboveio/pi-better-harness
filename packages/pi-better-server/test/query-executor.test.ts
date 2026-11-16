@@ -263,6 +263,7 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
   const f = await fixture({ watchdogMs: 800,
     workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
   try {
+    await f.bootstrapped;
     const a = await f.client(), b = await f.client();
     const began = performance.now();
     for (let i = 0; i < 6; i++) {
