@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, readdir, realpath, symlink, writeFile } from 
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 import { startDaemon, type Daemon } from "../src/server.ts";
+import { PROTOCOL_VERSION } from '../src/protocol.ts';
 import { Client, gate, makeEnv, waitFor, type Env } from "./helpers.ts";
 
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -52,6 +53,32 @@ test("native attach snapshot restores history and catches up after an active rem
   assert.equal(after.data.state.isStreaming, false);
   assert.deepEqual(after.data.activeTools, []);
   assert.ok(after.data.messages.some((message: any) => message.role === "assistant" && message.content.some((part: any) => part.text === "tool-done:gate:snapshot")));
+});
+
+test('snapshot disconnect removes only the caller while physical metadata observation drains', async () => {
+  const { daemon, client, sessionId } = await setup();
+  const hosted = daemon.registry.get(sessionId)!;
+  const models = hosted.session.modelRuntime;
+  const original = models.getAvailable.bind(models);
+  let release!: () => void, entered = false;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  models.getAvailable = async () => { entered = true; await hold; return original(); };
+  const observer = await Client.connect(daemon.socketPath);
+  cleanups.push(() => observer.close());
+  try {
+    assert.equal((await observer.request({ type: 'hello', protocolVersion: PROTOCOL_VERSION })).success,true);
+    void client.request({ type: 'client_snapshot', sessionId });
+    await waitFor('physical snapshot read entered',()=>entered);
+    client.close();
+    await waitFor('closed snapshot caller released transport',async()=>{
+      const status = await observer.request({ type: 'runtime_get_status' });
+      return status.data.transportRequests.length === 1;
+    });
+    assert.equal(hosted.operationsActive,true,'physical observation has not been cancelled or declared complete');
+  } finally {
+    release(); models.getAvailable = original;
+    await waitFor('physical snapshot settled',()=>!hosted.operationsActive);
+  }
 });
 
 test("native snapshot generation changes when a session backend is reopened", async () => {

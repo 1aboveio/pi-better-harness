@@ -922,6 +922,7 @@ function stopTicker(): void {
 /** How often supervision is reconciled. Independent of TUI render scheduling. */
 const HEALTH_TICK_MS = 15_000;
 let healthTicker: ReturnType<typeof setInterval> | undefined;
+let managedHealthClose: (() => void) | undefined;
 /** ExtensionAPI retained so health transitions can deliver coordinator follow-ups (#65). */
 let healthPi: ExtensionAPI | undefined;
 
@@ -1297,12 +1298,13 @@ function enforceTiming(pi: ExtensionAPI | undefined, meta: RunMeta, now: number)
 }
 
 /** One reconciliation + durable health-callback recovery pass. */
-function reconcileHealth(): void {
+function reconcileHealth(ids?: readonly string[]): void {
     if (!managementPort) return;
     try { managementPort.assertCurrent(); } catch { stopHealthTicker(); return; }
     const ctx = uiCtx;
     const pi = healthPi;
-    for (const summary of supervisedMetas()) {
+    const selected = ids ? ids.map(id => readMeta(id)).filter((meta): meta is NonNullable<typeof meta> => Boolean(meta)) : supervisedMetas();
+    for (const summary of selected) {
         if (!ownedByThisParent(summary)) continue;
         // running/orphaned: process reconcile. lost: durable callback recovery only.
         if (summary.status !== "running" && summary.status !== "orphaned" && summary.status !== "lost") continue;
@@ -1373,7 +1375,7 @@ function reconcileHealth(): void {
     // is the human's own interrupted work, not another session's live run, and
     // `finalizeInterruptedRunFromLog` still requires all process evidence to be
     // absent, so a live writer is never touched.
-    for (const summary of listMetas({ includeArchived: false })) {
+    for (const summary of ids ? selected : listMetas({ includeArchived: false })) {
         if (summary.status !== "running" && summary.status !== "orphaned") continue;
         if (ownedByThisParent(summary) || !ownsInterruptedSupervision(summary)) continue;
         const meta = readMeta(summary.id);
@@ -1381,7 +1383,7 @@ function reconcileHealth(): void {
         try { finalizeInterruptedRunFromLog(pi, meta, Date.now()); } catch { /* the next tick retries */ }
     }
     // Completed runs can still have failed completion handoffs to retry.
-    for (const summary of supervisedMetas()) {
+    for (const summary of selected) {
         if (!pi || !ownedByThisParent(summary) || summary.status === "running" || summary.status === "orphaned" || summary.status === "lost") continue;
         const meta = readMeta(summary.id);
         if (meta && meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined) enqueueCompletionCallback(pi!, meta.id);
@@ -1474,6 +1476,7 @@ function syncHealthTicker(): void {
         stopHealthTicker();
         return;
     }
+    if (managementPort.observeHealth) { ensureHealthTicker(); return; }
     if (needsMonitoring(supervisedMetas()) || needsInterruptedSupervision()) ensureHealthTicker();
     else stopHealthTicker();
 }
@@ -1481,6 +1484,10 @@ function syncHealthTicker(): void {
 /** Start the reconciliation loop if it isn't already running. */
 function ensureHealthTicker(): void {
     if (!managementPort) return;
+    if (managementPort.observeHealth) {
+        managedHealthClose ??= managementPort.observeHealth(ids => reconcileHealth(ids));
+        return;
+    }
     // Not gated on `sessionTornDown`: a spawn always means the current session is
     // doing new work. Only `syncHealthTicker` — the path a late child finalizer
     // takes — stays closed in a replaced instance.
@@ -1490,12 +1497,13 @@ function ensureHealthTicker(): void {
 }
 
 function stopHealthTicker(): void {
+    managedHealthClose?.(); managedHealthClose = undefined;
     if (healthTicker) { clearInterval(healthTicker); healthTicker = undefined; }
 }
 
 /** Test/diagnostic seam: whether the periodic reconciliation loop is active. */
 export function isHealthTickerActive(): boolean {
-    return healthTicker !== undefined;
+    return healthTicker !== undefined || managedHealthClose !== undefined;
 }
 
 /**

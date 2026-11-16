@@ -5,6 +5,18 @@ import { getRow, run } from "./sqlite.domain.mjs";
 import { getOperation, recordSupervision, recordTerminalOutcome } from "./operations.domain.mjs";
 import { requireId, requirePath } from "./validate.domain.mjs";
 const PREFIX = "result-supervision-v1:";
+/** A bounded observation page. A gap requires restoring active authority, not history. */
+export function resultSupervisionChanges(ctx, after) {
+    const generation = String(ctx.db.prepare("SELECT generation FROM assignment_change_source WHERE singleton=1").get().generation);
+    const bounds = ctx.db.prepare("SELECT min(seq) AS first, max(seq) AS last FROM assignment_changes").get();
+    const last = Number(bounds.last ?? 0);
+    const reset = !after || after.generation !== generation || after.seq > last
+        || (bounds.first !== null && after.seq < Number(bounds.first) - 1);
+    const rows = reset ? [] : ctx.db.prepare("SELECT seq, entity, entity_id FROM assignment_changes WHERE seq>? ORDER BY seq LIMIT 128").all(after.seq);
+    const seq = reset ? last : Number(rows.at(-1)?.seq ?? after.seq);
+    return { generation, seq, reset, more: seq < last,
+        operationIds: [...new Set(rows.filter(row => row.entity === "background:operation").map(row => String(row.entity_id)))] };
+}
 export function resultSupervisions(ctx, activeOnly = false) {
     const rows = activeOnly
         ? ctx.db.prepare("SELECT s.value FROM operations o JOIN coordinator_state s ON s.key = ? || o.operation_id WHERE o.phase = 'running'").all(PREFIX)

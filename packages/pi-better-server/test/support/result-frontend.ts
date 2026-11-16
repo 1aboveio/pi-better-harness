@@ -18,8 +18,9 @@ const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir: root, se
   noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
 await resourceLoader.reload();
 if (resourceLoader.getExtensions().errors.length) throw new Error(JSON.stringify(resourceLoader.getExtensions().errors));
+const sessionManager = process.env.PI_TEST_PERSIST_RECIPIENT === "1" ? SessionManager.create(root, join(root, "native-sessions")) : SessionManager.inMemory(root);
 const { session } = await createAgentSession({ cwd: root, agentDir: root, settingsManager, resourceLoader,
-  sessionManager: SessionManager.inMemory(root) });
+  sessionManager });
 await session.bindExtensions({ onError: error => { throw new Error(String(error)); }, shutdownHandler: () => {} });
 const tool = (name: string) => {
   const found = session.agent.state.tools.find(tool => tool.name === name);
@@ -55,5 +56,5 @@ try {
 } finally { db.close(); }
 const waited = await tool("wait_for_operations").execute("wait-760", { task_ids: [taskId], continuation_note: "Interpret the independent result" });
 if (!(waited.details as any)?.waitId) throw new Error(JSON.stringify(waited));
-process.send?.({ taskId, wait: waited.details, sessionId: session.sessionId });
+process.send?.({ taskId, wait: waited.details, sessionId: session.sessionId, sessionFile: sessionManager.getSessionFile() });
 process.on("message", () => { session.dispose(); process.exit(0); });

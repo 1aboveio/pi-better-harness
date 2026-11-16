@@ -7,13 +7,15 @@ import { existsSync } from 'node:fs';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { acquireMutationStore } from './mutation-store.ts';
 /** Fixed canonical adapter. It never owns a native parent transcript. */
-export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>) {
+export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>, verificationMs = 30000) {
     const load = (file: string) => import(`./domain/background-service/${file}.domain.mjs`);
     const [{ createObservedWaitHost }, { registerTools }, { createBackgroundTaskRuntime }, sandbox, authority, permissions, registry, navigator, failures] = await Promise.all([
         load('observed-waits'), load('tools'), load('runtime'), load('sandbox'), load('managed-authority'),
         import(String('./domain/sandbox-policy/permission-settings.domain.mjs')), load('registry'), load('navigator-provider'), load('failures'),
     ]);
+    const identity = await load('process-identity');
     const lease = acquireMutationStore(root);
+    const unknownWriters = new Map<string, number>();
     let journal: ReturnType<typeof lease.store.backgroundRequests>;
     let pi: any, service: any, session: any, runtime: any, current: any;
     let tail: Promise<unknown> = Promise.resolve(), pending = 0;
@@ -69,8 +71,14 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     pi = new Proxy(api, { get(target, key) { if (key === 'sendMessage')
                             return () => { throw new Error('Native parent transcript delivery requires authenticated frontend'); }; const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value; } });
                     runtime = createBackgroundTaskRuntime(failures.createFailureAttention((origin:any,event:any)=>new Promise<boolean>(resolve=>notifyParent({origin,taskId:event.inspectId??event.id,status:event.status,urgent:true,event:{...event,isDelivered:undefined,getSuppressionReason:undefined,onDelivered:undefined}},
-              {receiptId:event.receiptId,delivered:()=>{event.onDelivered?.(Date.now());resolve(true);},defer:()=>resolve(false)}))), (origin: any, event: any) => notifyParent({ origin, taskId: event.id, status: event.status, outcome: event.outcome, event: { ...event, isDelivered: undefined, getSuppressionReason: undefined, onDelivered: undefined, onSuppressed: undefined } }, { receiptId: event.receiptId, delivered: () => event.onDelivered?.(Date.now()), defer: () => undefined }), { assert: assertAdmission, prepared: (id: string) => journal.operation(current.ownerKey, current.record.key, { operationId: `legacy:${id}`, taskId: id, token: current.record.key }) });
+              {receiptId:event.receiptId,delivered:()=>{event.onDelivered?.(Date.now());resolve(true);},defer:()=>resolve(false)}))), (origin: any, event: any) => notifyParent({ origin, taskId: event.id, status: event.status, outcome: event.outcome, event: { ...event, isDelivered: undefined, getSuppressionReason: undefined, onDelivered: undefined, onSuppressed: undefined } }, { receiptId: event.receiptId, delivered: () => event.onDelivered?.(Date.now()), defer: () => undefined }), { assert: assertAdmission,
+                        prepared: (id: string) => journal.operation(current.ownerKey, current.record.key, { operationId: `legacy:${id}`, taskId: id, token: current.record.key }) },
+                        (kind: string, id: string, work: () => unknown, dueAt?: number) => {
+                            const origin = registry.readMeta(id)?.callbackOrigin;
+                            return lease.budget.scheduleSource(`legacy-${kind}`, id, work, JSON.stringify([origin?.cwd ?? root, origin?.sessionId ?? null]), dueAt);
+                        });
                     service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, 'operation-coordinator.sqlite'), serverOwnedResults: true, pollMs: 0,
+                        enterControl: () => lease.budget.enter('control'),
                         notifyParent, assertAdmission,
                         authorizeParentCancellation: ({requester, operation, requestId}: any) => {
                             assertAdmission();
@@ -112,8 +120,31 @@ export async function createBackgroundTools(root: string, instance: string, drai
     }
     return {
         get busy() { return pending > 0; },
+        lifecycleReasons() {
+            const now = Date.now(), reasons: any[] = journal.lifecycleReasons().map((reason: any) => ({ ...reason,
+                management: { instance } }));
+            for (const scope of scopes.values()) for (const meta of registry.listActiveMetasForOrigin({ cwd: scope.owner.workspace, sessionId: scope.owner.sessionId })) {
+                if (meta.status !== 'running') continue;
+                const watch = meta.kind === 'command_watch' || Boolean(meta.remote);
+                const verified = meta.pid && meta.pidStartTime && identity.readProcessStartToken(meta.pid) === meta.pidStartTime;
+                if (!watch && !verified) {
+                    if (!unknownWriters.has(meta.id)) unknownWriters.set(meta.id, now);
+                    const since = unknownWriters.get(meta.id)!;
+                    if (now >= since + verificationMs) continue;
+                    reasons.push({ kind: 'verification', id: meta.id, owner: scope.owner, lastProgressAt: since,
+                        nextDeadline: since + verificationMs, recovery: 'legacy-writer-unverified-no-takeover' });
+                    continue;
+                }
+                unknownWriters.delete(meta.id);
+                reasons.push({ kind: watch ? 'task' : 'runner', id: meta.id, owner: scope.owner,
+                    writer: { pid: meta.pid, start: meta.pidStartTime }, lastProgressAt: meta.lastProgressAt ?? meta.startedAt,
+                    nextDeadline: meta.deadlineAt ?? (watch ? (meta.lastCheckedAt ?? meta.startedAt) + (meta.intervalMs ?? 1000) : now + 1000),
+                    recovery: watch ? 'captured-legacy-watch' : 'captured-legacy-command' });
+            }
+            return reasons;
+        },
         metrics() { return { ...metrics, registry: registry.getRegistryIoMetrics(), cachedScopes: projections.size }; },
-        handle(command: any) {
+        handle(command: any, onAccepted?: (id: string) => void) {
             if (Object.keys(command).some(key => !['id', 'type', 'authority'].includes(key)))
                 return Promise.reject(new Error('unsupported Background request field'));
             if (pending >= 64)
@@ -231,10 +262,12 @@ export async function createBackgroundTools(root: string, instance: string, drai
                 if (admission && draining() && !prior)
                     throw new Error('runtime-draining: new Background execution deferred for upgrade');
                 if (mutation) {
-                    const accepted = journal.accept(key, record.key, authority.backgroundDigest({ tool: record.tool, params: record.params }));
+                    const accepted = journal.accept(key, record.key, authority.backgroundDigest({ tool: record.tool, params: record.params }),
+                        { instance, pid: record.pid, start: record.start });
                     if (accepted.prior)
                         return accepted.record.result ?? { content: [{ type: 'text', text: 'Accepted Background request has an uncertain outcome; inspect its exact operations before issuing new work.' }], details: { status: 'outcome_unknown', operations: accepted.record.operations } };
                     journal.dispatch(key, record.key);
+                    onAccepted?.(`background-request-v1:${authority.backgroundDigest([key, record.key])}`);
                 }
                 assertAdmission();
                 let result;

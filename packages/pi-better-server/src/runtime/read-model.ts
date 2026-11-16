@@ -18,7 +18,7 @@ import { effectiveStatus } from "./domain/process-status.mjs";
 import { extractChildEventFactsFromLog, healthThresholdsForConfig, encodeHealthLogState, decodeHealthLogState } from "./domain/health-observation.mjs";
 import { LogCheckpoints } from "./log-checkpoints.ts";
 import { BackgroundObservation } from "./background.ts";
-import { workPage } from "./work-budget.ts";
+import { workPage, createWorkBudget } from "./work-budget.ts";
 // @ts-expect-error Generated canonical read-only failure projection.
 import { readFailureStateReadOnly, pendingFailureAttention } from "./domain/subagents/shared-failure-observations.domain.mjs";
 import { readHealthConfig } from "./health-config.ts";
@@ -67,6 +67,7 @@ const healthDeadlineExpired = (row: { health?: any }, now: number) => typeof row
 
 /** Reconstructable query state. It never authorizes execution or writes source records. */
 export class WorkReadModel {
+  private budget: ReturnType<typeof createWorkBudget>;
   onTerminalLogsChanged?: () => void;
   private background: BackgroundObservation;
   private db: any;
@@ -128,7 +129,8 @@ export class WorkReadModel {
   readonly agentDir: string;
   readonly instanceId: string;
 
-  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number } = {}) {
+  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number; budgetBuffer?: SharedArrayBuffer } = {}) {
+    this.budget = createWorkBudget(options.budgetBuffer);
     this.agentDir = agentDir; this.instanceId = instanceId;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
@@ -473,7 +475,10 @@ export class WorkReadModel {
     if (this.pending) {
       return drain ? this.pending.then(() => this.reconcile()) : this.pending;
     }
+    const release = this.budget.enter("repair");
+    if (!release) return Promise.resolve();
     this.pending = (async () => {
+      this.watchRootParents();
       if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
       do {
         this.dirty = false;
@@ -515,6 +520,7 @@ export class WorkReadModel {
     })().catch(error => {
       this.repair = undefined; this.state = "degraded"; this.reason = String(error).slice(0, 512); this.publish();
     }).finally(() => {
+      release();
       this.pending = undefined;
       if ((this.hints.size || this.dirty) && !this.closed) { this.dirty = false; void this.reconcile(false); }
     });
