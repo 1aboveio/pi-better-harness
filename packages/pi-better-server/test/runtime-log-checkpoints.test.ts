@@ -7,6 +7,8 @@ import { LogCheckpoints, LOG_CHECKPOINT_ENTRY_BUDGET, LOG_CHECKPOINT_BUDGET } fr
 import { DatabaseSync } from "node:sqlite";
 import { spawnSync } from "node:child_process";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
+import { openDatabase, createContext } from "../../operation-coordinator/src/sqlite.ts";
+import { ensureSchema } from "../../operation-coordinator/src/schema.ts";
 
 const fixturePath = "../../pi-better-subagents/tests/work-runtime-fixture.mjs";
 const { startWorkRuntimeFixture } = await import(fixturePath);
@@ -14,6 +16,62 @@ const event = (value: any) => JSON.stringify(value) + "\n";
 const usage = event({ type: "message_end", message: { role: "assistant", usage: { input: 3, output: 2, cost: { total: 0.01 } } } });
 const tool = event({ type: "tool_execution_start", toolCallId: "tool", toolName: "bash", at: 100 });
 const padding = event({ type: "message_update", message: { role: "assistant", content: "x".repeat(67000) } });
+
+test("checkpoint readers open under another derived owner's reservation without hiding write contention", () => {
+  const root = mkdtempSync(join(resolve("../../.work/801"), "checkpoint-lock-"));
+  const path = join(root, "checkpoints.sqlite");
+  const firstOwner = new DatabaseSync(":memory:"), secondOwner = new DatabaseSync(":memory:");
+  const first = new LogCheckpoints(path, firstOwner);
+  let second: LogCheckpoints | undefined;
+  try {
+    first.save("log", { offset: 10, usage: 1 });
+    firstOwner.exec("BEGIN IMMEDIATE");
+    assert.doesNotThrow(() => { second = new LogCheckpoints(path, secondOwner); });
+    assert.deepEqual(second!.load("log"), { offset: 10, usage: 1 });
+    assert.throws(() => second!.save("log", { offset: 20, usage: 2 }), /database is locked/);
+    firstOwner.exec("ROLLBACK");
+    second!.save("log", { offset: 20, usage: 2 });
+    assert.deepEqual(first.load("log"), { offset: 20, usage: 2 });
+    second!.close(); second = undefined;
+    firstOwner.exec("DROP TABLE log_checkpoints.checkpoints; BEGIN IMMEDIATE");
+    assert.throws(() => new LogCheckpoints(path, secondOwner), /database is locked/,
+      "missing schema still requires initialization and cannot be treated as available under a writer");
+  } finally {
+    if (firstOwner.isTransaction) firstOwner.exec("ROLLBACK");
+    second?.close(); first.close(); secondOwner.close(); firstOwner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("actual checkpoint read models open under a derived reservation and refresh under a coordinator WAL writer", async () => {
+  const root = mkdtempSync(join(resolve("../../.work/801"), "model-lock-"));
+  const source = openDatabase(join(root, "operation-coordinator.sqlite"), { busyTimeoutMs: 0 });
+  ensureSchema(createContext(source));
+  const options = { baseDir: join(root, "runs"), durableDir: join(root, "archive"), intervalMs: 60000 };
+  const first = new WorkReadModel(root, "sql-first", options);
+  let second: WorkReadModel | undefined;
+  let writerHeld = false;
+  try {
+    (first as any).db.exec("BEGIN IMMEDIATE");
+    assert.doesNotThrow(() => { second = new WorkReadModel(root, "sql-second", options); });
+    (first as any).db.exec("ROLLBACK");
+    await first.reconcile(); await second!.reconcile();
+    source.exec("BEGIN IMMEDIATE"); writerHeld = true;
+    source.exec("INSERT INTO coordinator_state VALUES('held-writer','uncommitted')");
+    await first.reconcile(); await second!.reconcile();
+    for (const model of [first, second!]) {
+      const snapshot = model.snapshot({ background: true, cwd: root, sessionId: "sql-parent" });
+      assert.equal(snapshot.status, "ready", snapshot.reason);
+      assert.equal(model.metrics.indexConnections, 1);
+    }
+    source.exec("ROLLBACK"); writerHeld = false;
+  } finally {
+    if ((first as any).db.isTransaction) (first as any).db.exec("ROLLBACK");
+    if (writerHeld) source.exec("ROLLBACK");
+    await second?.close(); await first.close(); source.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("archiving a checkpointed raw run preserves a ready terminal observation", async () => {
   const parent = resolve("../../.work/801"); mkdirSync(parent, { recursive: true });
