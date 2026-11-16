@@ -29,6 +29,44 @@ async function settleHints(model: WorkReadModel) {
   assert.equal(model.metrics.scheduling.queued, 0, "hint obligations must be drained");
 }
 
+test("a root replaced after the first bind retires its old descriptor before publishing the new row", async () => {
+  const f = fixture(); f.put("sa_root_bind", { name: "old-root", status: "completed", endedAt: 2 });
+  const model = new WorkReadModel(f.agent, "replaced-root-bind", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile(); await settleHints(model);
+    const directory = join(f.runs, "sa_root_bind"), path = join(directory, "meta.json");
+    const retired = (model as any).watchers.get(f.runs);
+    const bind = (model as any).watchDirectory.bind(model);
+    let replaced = false;
+    (model as any).watchDirectory = (candidate: string) => {
+      bind(candidate);
+      if (candidate === directory && !replaced) {
+        replaced = true;
+        renameSync(f.runs, f.runs + "-retired");
+        f.put("sa_root_bind", { name: "new-root", status: "completed", endedAt: 2 });
+      }
+    };
+    let published = false;
+    const off = model.onChange(() => {
+      if (model.snapshot().rows[0]?.meta.name === "new-root") {
+        published = true;
+        assert.notEqual((model as any).watchers.get(f.runs), retired, "ready content must not retain the retired root inode");
+        assert.ok((model as any).watchers.get(directory), "replacement child is armed before publication");
+      }
+    });
+    const pending = (model as any).scan([path]);
+    (model as any).pending = pending;
+    await pending; (model as any).pending = undefined; off();
+    assert.equal(published, true);
+    await model.reconcile(); await settleHints(model);
+    const replacement = (model as any).watchers.get(f.runs);
+    const before = model.metrics.inventories;
+    retired.emit("change", "rename", "sa_root_bind");
+    assert.equal((model as any).watchers.get(f.runs), replacement);
+    assert.equal(model.metrics.inventories, before);
+  } finally { (model as any).pending = undefined; await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("metadata appearing after the first watch attempt is rebound before its projection publishes", async () => {
   const f = fixture();
   const model = new WorkReadModel(f.agent, "late-directory-bind", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });

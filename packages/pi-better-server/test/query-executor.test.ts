@@ -730,7 +730,7 @@ for (const outcome of ["success", "failure"]) test(`old fold ${outcome} cannot a
 });
 
 
-for (const rootRecreated of [false, true]) test(`a raw directory observed before metadata still publishes the original atomic writer commit (${rootRecreated ? "recreated root" : "existing root"})`, { timeout: 15000 }, async () => {
+for (const rootRecreated of [false, true]) test(`a raw directory observed before metadata still publishes the original atomic writer commit (${rootRecreated ? "recreated root" : "existing root"})`, { timeout: 15000 }, async t => {
   const f = await fixture();
   const { measureEventPublication } = await import(new URL("../scripts/event-publication/measure.mjs", import.meta.url).href);
   try {
@@ -742,16 +742,26 @@ for (const rootRecreated of [false, true]) test(`a raw directory observed before
       mkdirSync(directory);
       writeFileSync(metaPath, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1,
         callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "before-root" }));
-      const wait = async (condition: () => boolean) => {
+      const wait = async (condition: () => boolean, phase: string) => {
         const until = Date.now() + 1000;
         while (!condition()) {
+          if (Date.now() >= until) {
+            t.diagnostic(JSON.stringify({ phase, snapshot: client.snapshot, metrics: f.executor.metrics() }).slice(0, 32768));
+            const state = new Promise(resolve => {
+              const timer = setTimeout(() => { f.worker.off("message", listener); resolve({ error: "source diagnostic unavailable" }); }, 500);
+              const listener = (message: any) => { if (message.type === "diagnostic-source-state" && message.id === phase) { clearTimeout(timer); f.worker.off("message", listener); resolve(message.state); } };
+              f.worker.on("message", listener);
+              f.worker.postMessage({ type: "diagnostic-source-state", id: phase, scope });
+            });
+            t.diagnostic(JSON.stringify({ phase, source: await state }).slice(0, 32768));
+          }
           assert.ok(Date.now() < until, "root gap publication missing");
           await new Promise(resolve => setTimeout(resolve, 10));
         }
       };
-      await wait(() => client.snapshot?.rows[0]?.meta.name === "before-root");
+      await wait(() => client.snapshot?.rows[0]?.meta.name === "before-root", "initial-before-root");
       renameSync(join(f.root, "runs"), join(f.root, "retired-runs"));
-      await wait(() => client.snapshot?.status === "degraded");
+      await wait(() => client.snapshot?.status === "degraded", "root-absent");
       assert.equal(client.snapshot?.rows[0]?.meta.name, "before-root");
     }
     const before = f.executor.metrics().inventories ?? 0;
