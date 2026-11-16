@@ -28,7 +28,9 @@ concurrency:
 jobs:
   publish:
     name: publish ${{ inputs.package }}
-    runs-on: ubuntu-latest
+    # Same image as CI: ubuntu-26.04 fails the confinement proofs that
+    # `npm run verify` runs, so a release must not be the first to find out.
+    runs-on: ubuntu-24.04
     if: github.ref == 'refs/heads/main'
     timeout-minutes: 60
     environment: npm-publish

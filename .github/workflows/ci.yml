@@ -13,14 +13,43 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Selects the lanes a change has to prove. Every job below still runs so the
+  # required check names keep reporting; only the expensive work is conditional.
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      workspace: ${{ steps.areas.outputs.workspace }}
+      sandbox: ${{ steps.areas.outputs.sandbox }}
+      windows: ${{ steps.areas.outputs.windows }}
+      server: ${{ steps.areas.outputs.server }}
+      extensions: ${{ steps.areas.outputs.extensions }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Diffing against the base branch needs history, not one commit.
+          fetch-depth: 0
+      - name: Select the lanes this change needs
+        id: areas
+        run: node scripts/ci-changed-areas.mjs
+  # Two groups run as separate jobs so a server change waits for the slower
+  # measurement only, not for both. Each group still gets its own clean VM, which
+  # is what makes a resource measurement meaningful.
   shared-read-resources:
-    name: shared-read-resources (${{ matrix.os }})
+    name: shared-read-resources (${{ matrix.os }}, ${{ matrix.group }})
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
+        group: [runtime, reads]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -32,20 +61,20 @@ jobs:
       - name: Export pinned private runtime Node
         run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "PI_TEST_PRIVATE_RUNTIME_NODE=" + process.execPath + "\n")'
       - name: Measure the complete managed runtime
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ matrix.group == 'runtime' && !cancelled() && steps.install.outcome == 'success' }}
         env:
           PI_FULL_RUNTIME_REPORT: ${{ runner.temp }}/full-runtime-resources.json
         run: node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs
       - name: Qualify packed standalone domains and cached offline restart
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ matrix.group == 'runtime' && !cancelled() && steps.install.outcome == 'success' }}
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-standalone.test.ts
       - name: Prove real socket recipient backpressure recovery
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ matrix.group == 'runtime' && !cancelled() && steps.install.outcome == 'success' }}
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-assignment-slow-socket.test.ts
       - name: Measure real Pi and Server shared reads
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ matrix.group == 'reads' && !cancelled() && steps.install.outcome == 'success' }}
         env:
           PI_SHARED_READ_REPORT: ${{ runner.temp }}/shared-read-resources.json
         run: node packages/pi-better-server/scripts/measure-shared-reads.mjs
@@ -53,7 +82,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shared-read-resources-${{ matrix.os }}
+          name: shared-read-resources-${{ matrix.os }}-${{ matrix.group }}
           path: |
             ${{ runner.temp }}/shared-read-resources.json
             ${{ runner.temp }}/full-runtime-resources.json
@@ -62,10 +91,18 @@ jobs:
           if-no-files-found: warn
           include-hidden-files: true
 
+  # Two groups so the Node 24 kernel proofs and the real-SDK replays do not wait
+  # for each other. Both keep the require-backend contract.
   node24-sandbox:
-    name: node24-sandbox
-    runs-on: ubuntu-latest
+    name: node24-sandbox (${{ matrix.group }})
+    needs: changes
+    if: needs.changes.outputs.sandbox == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [confinement, sdk]
     env:
       PI_SANDBOX_REQUIRE_BACKEND: linux-bubblewrap
     steps:
@@ -87,46 +124,61 @@ jobs:
           bwrap --ro-bind / / -- /bin/true
           node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
       - name: Verify Node 24 confinement and fixture cleanup
+        if: matrix.group == 'confinement'
         run: |
           node --import tsx --import ./packages/pi-better-subagents/tests/isolate-registry.mjs --test packages/pi-better-subagents/tests/task_runtime.test.mjs
           node --import tsx --test packages/task-sandbox/apply-patch.test.ts
       - name: Prove sandboxed worker parking and resumption
+        if: matrix.group == 'confinement'
         env:
           PI_WORKER_KERNEL_REQUIRE: "1"
         run: node --import tsx --test packages/pi-better-subagents/tests/worker-waits-kernel.test.mjs
       - name: Real SDK assignment authority replay
+        if: matrix.group == 'sdk'
         env:
           WORKER_SDK_ONLY: "1"
         run: node --import tsx --test packages/pi-better-subagents/tests/worker-waits-kernel.test.mjs
 
       - name: Real SDK cancellation and exact-token crash recovery
+        if: matrix.group == 'sdk'
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
 
       - name: Real SDK subagent launch and bootstrap fences
+        if: matrix.group == 'sdk'
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-subagent-*.test.ts
 
   windows-verify:
     name: windows-verify
+    needs: changes
+    # Always runs so this required name keeps reporting; an empty selector
+    # output means "prove everything".
+    if: always()
     runs-on: windows-latest
     timeout-minutes: 15
     permissions:
       contents: read
+    env:
+      AFFECTED: ${{ needs.changes.outputs.windows || 'true' }}
     steps:
       - uses: actions/checkout@v4
+        if: env.AFFECTED == 'true'
 
       - uses: actions/setup-node@v4
+        if: env.AFFECTED == 'true'
         with:
           node-version: 22
           cache: npm
 
       - name: Install dependencies
+        if: env.AFFECTED == 'true'
         id: install
         run: npm ci
 
       # Existing SSH fixtures use /tmp; native Windows resolves it on this drive.
       - name: Prepare SSH fixtures and report native OpenSSH
+        if: env.AFFECTED == 'true'
         run: |
           New-Item -ItemType Directory -Force -Path /tmp | Out-Null
           & "$env:WINDIR\System32\OpenSSH\ssh.exe" -V
@@ -137,34 +189,37 @@ jobs:
       # strict types, SSH contracts, shell resolution, and log redirection —
       # instead of failing on pre-existing POSIX-only expectations.
       - name: Typecheck the background-task package
+        if: env.AFFECTED == 'true'
         run: npm run typecheck -w pi-better-background-tasks
 
       - name: Typecheck SSH core and extension
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ env.AFFECTED == 'true' && !cancelled() && steps.install.outcome == 'success' }}
         run: npm run typecheck -w ssh-core -w pi-better-ssh
 
       - name: SSH core Windows contracts
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ env.AFFECTED == 'true' && !cancelled() && steps.install.outcome == 'success' }}
         run: npm test -w ssh-core
 
       - name: SSH extension Windows integration and packaging
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ env.AFFECTED == 'true' && !cancelled() && steps.install.outcome == 'success' }}
         run: npm test -w pi-better-ssh
 
       - name: Windows process unit and integration checks
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ env.AFFECTED == 'true' && !cancelled() && steps.install.outcome == 'success' }}
         run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts src/windows-paths.test.ts
         working-directory: packages/pi-better-background-tasks
 
   # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
   pi-1x-compat:
-    name: pi-1x-compat (${{ matrix.shard }}/2)
-    runs-on: ubuntu-latest
+    name: pi-1x-compat (${{ matrix.shard }}/3)
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
@@ -192,14 +247,16 @@ jobs:
 
       - name: pi-better-server suite on supported native Pi 1.2
         env:
-          TEST_SHARD: ${{ matrix.shard }}/2
+          TEST_SHARD: ${{ matrix.shard }}/3
         run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.2.0 "$RUNNER_TEMP/pi-compat"
 
   # Exercise the affected extensions against the minimum and current Pi 1.x
   # SDKs without taking over the server lane's supported Pi 1.2 proof.
   pi-1x-compat-extensions:
     name: pi-1x-compat-extensions (${{ matrix.pi-version }})
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.extensions == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -273,7 +330,9 @@ jobs:
 
   workspace-ci:
     name: workspace-ci (${{ matrix.lane }})
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.workspace == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -281,7 +340,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [scripts-1, scripts-2, workspaces-1, workspaces-2]
+        lane: [scripts-1, scripts-2, scripts-3, workspaces-1, workspaces-2, workspaces-3, meta-1]
     steps:
       - uses: actions/checkout@v4
 
@@ -303,6 +362,7 @@ jobs:
         run: npm ci
 
       - name: Install TUI and sandbox test dependencies
+        if: matrix.lane != 'meta-1'
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -339,7 +399,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Typecheck
-        if: matrix.lane == 'scripts-1'
+        if: matrix.lane == 'meta-1'
         run: npm run typecheck
 
       - name: Root script tests
@@ -347,7 +407,7 @@ jobs:
         env:
           PI_NAVIGATOR_EVIDENCE_DIR: ${{ runner.temp }}/navigator-golden
           TEST_LANE: ${{ matrix.lane }}
-        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 --test-shard="${TEST_LANE#scripts-}/2" scripts/*.test.mjs
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 --test-shard="${TEST_LANE#scripts-}/3" scripts/*.test.mjs
 
       - name: Stage bundled components for isolated workspace tests
         if: startsWith(matrix.lane, 'workspaces-')
@@ -357,7 +417,7 @@ jobs:
         if: startsWith(matrix.lane, 'workspaces-')
         env:
           TEST_LANE: ${{ matrix.lane }}
-        run: node scripts/test-ci-workspaces.mjs --shard "${TEST_LANE#workspaces-}/2"
+        run: node scripts/test-ci-workspaces.mjs --shard "${TEST_LANE#workspaces-}/3"
 
       - name: Upload navigator golden-path evidence
         if: ${{ always() && startsWith(matrix.lane, 'scripts-') }}
@@ -372,7 +432,7 @@ jobs:
         run: npm run test:cross-session
 
       - name: Package dry run
-        if: matrix.lane == 'scripts-1'
+        if: matrix.lane == 'meta-1'
         run: |
           npm pack --dry-run --workspaces
           npm pack --dry-run -w packages/pi-better-harness --json > /tmp/pi-harness-pack.json
@@ -446,7 +506,7 @@ jobs:
 
       # Run last: replace installed peers only, preserving baseline checks and the lockfile.
       - name: Native codemode batch compatibility (Pi 0.99.1)
-        if: matrix.lane == 'scripts-2'
+        if: matrix.lane == 'scripts-3'
         timeout-minutes: 5
         env:
           PI_CODEMODE_TEST_REQUIRED: "1"
@@ -457,7 +517,9 @@ jobs:
 
   server-tests:
     name: server-tests (${{ matrix.shard }}/3)
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -504,74 +566,158 @@ jobs:
           TEST_SHARD: ${{ matrix.shard }}
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$TEST_SHARD/3" test/*.test.ts
 
-  # Keep the existing required check name, and fail on failed, cancelled, or skipped lanes.
+  # Keep the existing required check name. A lane may report skipped only when the
+  # selector said its area did not change; any other skip, failure or cancellation
+  # fails this check.
   ci:
     name: ci
     if: always()
-    needs: [workspace-ci, server-tests, shared-read-resources]
-    runs-on: ubuntu-latest
+    needs: [changes, workspace-ci, server-tests, shared-read-resources]
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Require every test lane
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          WORKSPACE_AREA: ${{ needs.changes.outputs.workspace }}
+          SERVER_AREA: ${{ needs.changes.outputs.server }}
           WORKSPACE_RESULT: ${{ needs.workspace-ci.result }}
           SERVER_RESULT: ${{ needs.server-tests.result }}
           RESOURCES_RESULT: ${{ needs.shared-read-resources.result }}
         run: |
-          test "$WORKSPACE_RESULT" = success
-          test "$SERVER_RESULT" = success
-          test "$RESOURCES_RESULT" = success
+          set -uo pipefail
+          fail=0
+          # check <lane> <result> <area changed: true|false>
+          check() {
+            case "$2" in
+              success) echo "ok   $1" ;;
+              skipped)
+                if [ "$3" = "true" ]; then
+                  echo "::error::$1 skipped although its area changed"
+                  fail=1
+                else
+                  echo "skip $1 (no related change)"
+                fi ;;
+              *) echo "::error::$1: $2"; fail=1 ;;
+            esac
+          }
+          # A broken selector means the lanes below ran with their fallback, so the
+          # gate stays red until the selector is repaired.
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::changes: $CHANGES_RESULT; lane selection did not run"
+            fail=1
+          fi
+          check workspace-ci "$WORKSPACE_RESULT" "$WORKSPACE_AREA"
+          check server-tests "$SERVER_RESULT" "$SERVER_AREA"
+          check shared-read-resources "$RESOURCES_RESULT" "$SERVER_AREA"
+          exit "$fail"
 
-  macos-sandbox:
-    name: macos-sandbox
+  # Five focused macOS lanes behind one required name. Running the same suites
+  # in a single job took eleven minutes, because every journey waited for the
+  # one before it.
+  macos-lifecycle:
+    name: macos-sandbox (lifecycle)
+    needs: changes
+    if: needs.changes.outputs.sandbox == 'true'
     runs-on: macos-latest
-    # Sequential native lifecycle, cancellation and confinement journeys exceed
-    # ten minutes on hosted macOS; individual behavioral deadlines stay intact.
-    timeout-minutes: 20
+    timeout-minutes: 10
     env:
-      # Turns "no backend, so skip" into a hard failure on the lane whose whole
-      # job is that backend. A silently skipped confinement suite is a green run
-      # that proved nothing.
+      # Turns "no backend, so skip" into a hard failure on a lane whose whole
+      # point is that backend.
       PI_SANDBOX_REQUIRE_BACKEND: macos-seatbelt
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
       - name: Install dependencies
         run: npm ci
-
       - name: Require the macOS Seatbelt backend
         run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
-
       - name: Prove runtime lifecycle with real processes and sockets
         run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 packages/pi-better-server/test/runtime-lifecycle.test.ts packages/pi-better-server/test/daemon-owner.test.ts
 
+  macos-cancellation:
+    name: macos-sandbox (cancellation)
+    needs: changes
+    if: needs.changes.outputs.sandbox == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    env:
+      # Turns "no backend, so skip" into a hard failure on a lane whose whole
+      # point is that backend.
+      PI_SANDBOX_REQUIRE_BACKEND: macos-seatbelt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Require the macOS Seatbelt backend
+        run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
       - name: Prove cancellation authority and crash recovery with real processes
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-cancellation.test.ts test/runtime-result-supervision.test.ts
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Prove subagent launch and bootstrap ownership on Node 24
-        working-directory: packages/pi-better-server
-        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test test/runtime-subagent-*.test.ts
-
+  macos-subagent:
+    name: macos-sandbox (subagent ${{ matrix.shard }}/2)
+    needs: changes
+    if: needs.changes.outputs.sandbox == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    env:
+      # Turns "no backend, so skip" into a hard failure on a lane whose whole
+      # point is that backend.
+      PI_SANDBOX_REQUIRE_BACKEND: macos-seatbelt
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Require the macOS Seatbelt backend
+        run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Prove subagent launch and bootstrap ownership on Node 24
+        working-directory: packages/pi-better-server
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-shard="${{ matrix.shard }}/2" test/runtime-subagent-*.test.ts
 
+  macos-confined-packages:
+    name: macos-sandbox (confined packages)
+    needs: changes
+    if: needs.changes.outputs.sandbox == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    env:
+      # Turns "no backend, so skip" into a hard failure on a lane whose whole
+      # point is that backend.
+      PI_SANDBOX_REQUIRE_BACKEND: macos-seatbelt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Require the macOS Seatbelt backend
+        run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
       - name: Run macOS compatibility golden paths
         timeout-minutes: 5
         env:
           PI_SANDBOX_EVIDENCE_DIR: ${{ runner.temp }}/sandbox-golden-macos
         run: npm run test:golden:sandbox
-
       - name: Upload macOS compatibility evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -579,49 +725,119 @@ jobs:
           name: sandbox-golden-macos
           path: ${{ runner.temp }}/sandbox-golden-macos
           if-no-files-found: error
-
-      - name: Run sandbox-core macOS seatbelt confinement checks
-        run: npm test -w packages/sandbox-core
-
-      - name: Run shared task file workers and trusted Pi startup
-        run: npm test -w packages/task-sandbox && npm run sync:task-sandbox && node --import tsx --test packages/pi-better-subagents/tests/task_runtime.test.mjs
-
-      - name: Run foreground sandbox confinement checks
-        run: npm test -w packages/pi-better-sandbox
-
+      # One step for the three package suites: same commands, same order, fewer
+      # npm wrappers to keep in sync.
+      - name: Run sandbox package confinement suites
+        run: |
+          set -euo pipefail
+          npm test -w packages/sandbox-core
+          npm test -w packages/task-sandbox
+          npm run sync:task-sandbox
+          node --import tsx --test packages/pi-better-subagents/tests/task_runtime.test.mjs
+          npm test -w packages/pi-better-sandbox
       - name: Run local background-task confinement checks
         run: npm run test:sandbox -w packages/pi-better-background-tasks
 
+  macos-confined-harness:
+    name: macos-sandbox (confined harness)
+    needs: changes
+    if: needs.changes.outputs.sandbox == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    env:
+      # Turns "no backend, so skip" into a hard failure on a lane whose whole
+      # point is that backend.
+      PI_SANDBOX_REQUIRE_BACKEND: macos-seatbelt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Require the macOS Seatbelt backend
+        run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
       # The whole-session demonstration gates itself on a real backend, and the
       # only job that runs the root suite is `ci`, which has none — so without
       # this step it skips everywhere and proves nothing. PI_SANDBOX_REQUIRE_BACKEND
       # is already set for this lane, which turns that skip into a hard failure.
       - name: Run the whole-session harness demonstration
         run: node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/harness-session.e2e.test.mjs
-
       - name: Run macOS sandbox-exec confinement checks
         run: npm run test:macos-sandbox -w packages/pi-better-subagents
 
+  # Required check name for the macOS sandbox proof. The work runs in two
+  # parallel halves so neither sits near a twenty-minute ceiling; this job only
+  # reduces their results, so the required name keeps reporting.
+  macos-sandbox:
+    name: macos-sandbox
+    needs: [changes, macos-lifecycle, macos-cancellation, macos-subagent, macos-confined-packages, macos-confined-harness]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require both macOS halves
+        env:
+          AFFECTED: ${{ needs.changes.outputs.sandbox || 'true' }}
+          LIFECYCLE_RESULT: ${{ needs.macos-lifecycle.result }}
+          CANCELLATION_RESULT: ${{ needs.macos-cancellation.result }}
+          SUBAGENT_RESULT: ${{ needs.macos-subagent.result }}
+          PACKAGES_RESULT: ${{ needs.macos-confined-packages.result }}
+          HARNESS_RESULT: ${{ needs.macos-confined-harness.result }}
+        run: |
+          set -uo pipefail
+          fail=0
+          # check <lane> <result>
+          check() {
+            case "$2" in
+              success) echo "ok   $1" ;;
+              skipped)
+                if [ "$AFFECTED" = "true" ]; then
+                  echo "::error::$1 skipped although sandbox paths changed"
+                  fail=1
+                else
+                  echo "skip $1 (no sandbox change)"
+                fi ;;
+              *) echo "::error::$1: $2"; fail=1 ;;
+            esac
+          }
+          check macos-lifecycle "$LIFECYCLE_RESULT"
+          check macos-cancellation "$CANCELLATION_RESULT"
+          check macos-subagent "$SUBAGENT_RESULT"
+          check macos-confined-packages "$PACKAGES_RESULT"
+          check macos-confined-harness "$HARNESS_RESULT"
+          exit "$fail"
+
   linux-sandbox:
     name: linux-sandbox
-    runs-on: ubuntu-latest
+    needs: changes
+    # Always runs so this required name keeps reporting; an empty selector
+    # output means "prove everything".
+    if: always()
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       # Same contract as the macOS lane: a runner that has lost bubblewrap must
       # fail here rather than report a skipped suite.
       PI_SANDBOX_REQUIRE_BACKEND: linux-bubblewrap
+      AFFECTED: ${{ needs.changes.outputs.sandbox || 'true' }}
     steps:
       - uses: actions/checkout@v4
+        if: env.AFFECTED == 'true'
 
       - uses: actions/setup-node@v4
+        if: env.AFFECTED == 'true'
         with:
           node-version: 22
           cache: npm
 
       - name: Install dependencies
+        if: env.AFFECTED == 'true'
         run: npm ci
 
       - name: Install bubblewrap
+        if: env.AFFECTED == 'true'
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -630,6 +846,7 @@ jobs:
           bwrap --version
 
       - name: Enable and verify bubblewrap user namespaces
+        if: env.AFFECTED == 'true'
         run: |
           set -euo pipefail
           if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
@@ -640,34 +857,40 @@ jobs:
           bwrap --ro-bind / / --bind "$probe_dir" "$probe_dir" --bind /tmp /tmp --dev /dev -- /bin/true
 
       - name: Require the Linux Bubblewrap backend
+        if: env.AFFECTED == 'true'
         # Reads the same backend selection the suites below gate on, so the probe
         # and the suites cannot disagree about whether this lane proved anything.
         run: node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
 
       - name: Run Linux compatibility golden paths
+        if: env.AFFECTED == 'true'
         timeout-minutes: 5
         env:
           PI_SANDBOX_EVIDENCE_DIR: ${{ runner.temp }}/sandbox-golden-linux
         run: npm run test:golden:sandbox
 
       - name: Upload Linux compatibility evidence
-        if: always()
+        if: ${{ env.AFFECTED == 'true' && always() }}
         uses: actions/upload-artifact@v4
         with:
           name: sandbox-golden-linux
           path: ${{ runner.temp }}/sandbox-golden-linux
           if-no-files-found: error
 
-      - name: Run sandbox-core backend checks
-        run: npm test -w packages/sandbox-core
-
-      - name: Run shared task file workers and trusted Pi startup
-        run: npm test -w packages/task-sandbox && npm run sync:task-sandbox && node --import tsx --test packages/pi-better-subagents/tests/task_runtime.test.mjs
-
-      - name: Run foreground sandbox confinement checks
-        run: npm test -w packages/pi-better-sandbox
+      # One step for the three package suites: same commands, same order, fewer
+      # npm wrappers to keep in sync.
+      - name: Run sandbox package confinement suites
+        if: env.AFFECTED == 'true'
+        run: |
+          set -euo pipefail
+          npm test -w packages/sandbox-core
+          npm test -w packages/task-sandbox
+          npm run sync:task-sandbox
+          node --import tsx --test packages/pi-better-subagents/tests/task_runtime.test.mjs
+          npm test -w packages/pi-better-sandbox
 
       - name: Run local background-task confinement checks
+        if: env.AFFECTED == 'true'
         run: npm run test:sandbox -w packages/pi-better-background-tasks
 
       # The whole-session demonstration gates itself on a real backend, and the
@@ -675,7 +898,9 @@ jobs:
       # this step it skips everywhere and proves nothing. PI_SANDBOX_REQUIRE_BACKEND
       # is already set for this lane, which turns that skip into a hard failure.
       - name: Run the whole-session harness demonstration
+        if: env.AFFECTED == 'true'
         run: node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/harness-session.e2e.test.mjs
 
       - name: Run Linux bubblewrap confinement checks
+        if: env.AFFECTED == 'true'
         run: npm run test:linux-sandbox -w packages/pi-better-subagents
