@@ -9,7 +9,8 @@ export const NAVIGATOR_ENTRY_TYPE = "pi-better-harness-navigator-panels";
 export const NAVIGATOR_STICKY_SETTING_ID = "navigator-sticky";
 type MouseEvent = { type: string; button: string; x: number; y: number; width: number; shift?: boolean; alt?: boolean; ctrl?: boolean };
 type PanelComponent = Component & { dispose?(): void; handleMouse?(event: MouseEvent): { handled: true; render: boolean } | undefined };
-export type NavigatorPanelFactory = (tui: TUI, theme: Theme) => PanelComponent;
+export type NavigatorPanelLayout = { availableRows(): number };
+export type NavigatorPanelFactory = (tui: TUI, theme: Theme, layout: NavigatorPanelLayout) => PanelComponent;
 type Panel = { factory: NavigatorPanelFactory; component?: PanelComponent | undefined };
 type Preference = { version: 1; sticky: boolean };
 type Owner = { pi: ExtensionAPI; stop?: (() => void) | undefined };
@@ -23,6 +24,8 @@ type State = {
   mounted: boolean;
   tui?: TUI | undefined;
   theme?: Theme | undefined;
+  host?: Component | undefined;
+  availableRows?: number | undefined;
   anchor?: string | undefined;
   pendingAnchor: boolean;
   generation: number;
@@ -61,14 +64,30 @@ function orderedPanels(s: State): Panel[] {
 }
 function buildPanels(s: State): void {
   if (!s.tui || !s.theme) return;
-  for (const panel of orderedPanels(s)) panel.component ??= panel.factory(s.tui, s.theme);
+  for (const panel of orderedPanels(s)) panel.component ??= panel.factory(s.tui, s.theme, { availableRows: () => s.availableRows ?? Infinity });
+}
+// Count the editor, footer and other siblings following the host in regular mode.
+// Never render ancestors here: they contain this host and would recurse.
+function rowsAfter(root: object, target: Component, width: number): number | undefined {
+  if (root === target) return 0;
+  const children = (root as Component & { children?: Component[] }).children;
+  if (!children) return undefined;
+  for (let i = children.length - 1; i >= 0; i--) {
+    const after = rowsAfter(children[i]!, target, width);
+    if (after !== undefined) return after + children.slice(i + 1).reduce((sum, child) => sum + child.render(width).length, 0);
+  }
+  return undefined;
 }
 function renderPanels(s: State, width: number): string[] {
   buildPanels(s);
   const lines: string[] = [];
   s.ranges = [];
+  const after = s.sticky && s.tui && s.host ? rowsAfter(s.tui, s.host, width) : undefined;
+  const height = s.tui?.terminal?.rows;
+  const budget = after !== undefined && height ? Math.max(0, height - after) : Infinity;
   for (const panel of orderedPanels(s)) {
     if (!panel.component) continue;
+    s.availableRows = Math.max(0, budget - lines.length);
     const rendered = panel.component.render(width);
     s.ranges.push({ start: lines.length, end: lines.length + rendered.length, component: panel.component });
     lines.push(...rendered);
@@ -115,6 +134,7 @@ function clearHost(s: State): void {
   disposePanels(s);
   s.mounted = false;
   s.tui = undefined;
+  s.host = undefined;
   s.theme = undefined;
 }
 function adoptContext(s: State, ctx: ExtensionContext): void {
@@ -134,7 +154,7 @@ function mountHost(s: State): void {
     s.tui = tui;
     s.theme = theme;
     buildPanels(s);
-    return {
+    const host: PanelComponent = {
       render(width: number) {
         const lines = renderPanels(s, width);
         if (s.sticky) return lines;
@@ -147,6 +167,8 @@ function mountHost(s: State): void {
       },
       dispose() { disposePanels(s); s.mounted = false; },
     };
+    s.host = host;
+    return host;
   }, { placement: "aboveEditor" });
 }
 function changeSticky(value: string, ctx: ExtensionContext): void {
