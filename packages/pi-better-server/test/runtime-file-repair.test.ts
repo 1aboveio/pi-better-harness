@@ -30,12 +30,18 @@ test("precise hints coalesce; bounded repair resumes despite hot writes and repa
   try {
     await model.reconcile(); disconnect();
     const before = model.metrics;
+    const unrelatedScope = model.snapshot({ id: "sa_1" }).scopeRevision;
+    let unrelatedPublications = 0;
+    const off = model.onChange(() => { unrelatedPublications++; }, { id: "sa_1" });
     f.put("sa_0", { name: "atomic" });
     for (let n = 0; n < 20; n++) model.fileHint(join(f.runs, "sa_0"), "meta.json");
     await (model as any).pending;
     assert.equal(model.snapshot({ id: "sa_0" }).rows[0]!.meta.name, "atomic");
     assert.equal(model.metrics.scheduling.repairEntries, before.scheduling.repairEntries);
     assert.ok(model.metrics.scheduling.entityBatches - before.scheduling.entityBatches <= 2);
+    assert.equal(model.snapshot({ id: "sa_1" }).scopeRevision, unrelatedScope);
+    assert.equal(unrelatedPublications, 0);
+    off();
     const ignored = model.metrics.inventories;
     model.fileHint(f.runs, ".writer.lock"); model.fileHint(join(f.runs, "sa_0"), "output.log.lock");
     assert.equal(model.metrics.inventories, ignored);
@@ -70,6 +76,20 @@ test("precise hints coalesce; bounded repair resumes despite hot writes and repa
     assert.ok(model.metrics.scheduling.queued <= 256);
     assert.deepEqual(JSON.parse(readFileSync(join(f.agent, "runtime-read-repair/subagents.json"), "utf8")).roots, [model.runs, model.archives, model.markers]);
     t.diagnostic(JSON.stringify(model.metrics));
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("initial repair retains health configuration degradation until valid settings recover", async () => {
+  const f = fixture(); f.put("sa_health_import");
+  writeFileSync(join(f.agent, "settings.json"), "invalid json");
+  const model = new WorkReadModel(f.agent, "health-import", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    assert.equal(model.observation().status, "degraded");
+    assert.match(model.observation().reason!, /Health configuration unavailable/);
+    writeFileSync(join(f.agent, "settings.json"), "{}");
+    await model.reconcile();
+    assert.equal(model.observation().status, "ready");
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
