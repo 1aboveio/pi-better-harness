@@ -10,6 +10,7 @@ import test from "node:test";
 import { createProcessListToolDefinition } from "./process-list.ts";
 import type { TaskFileController } from "./files.ts";
 import type { SandboxWritePolicy } from "../sandbox-core/index.ts";
+const { observeOwnedProcess, executableDiagnostic } = await import(String('./test-support/owned-process.mjs'));
 
 const supported = process.platform === "darwin" || process.platform === "linux";
 const mac = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
@@ -315,7 +316,8 @@ test("real selected kernel can inventory only an owned fixture with task command
     const name = "pl-fixture";
     const executable = join(f.root, name);
     copyFileSync("/bin/sleep", executable);
-    const child = childProcess.spawn(executable, ["60"], { stdio: "ignore", env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } });
+    const child = childProcess.spawn(executable, ["60"], { stdio: ['ignore', 'ignore', 'pipe'], env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } });
+    const lifecycle = observeOwnedProcess(child);
     try {
         await once(child, "spawn");
         assert.ok(child.pid);
@@ -323,6 +325,8 @@ test("real selected kernel can inventory only an owned fixture with task command
         const result = await tool.execute("kernel", { name, limit: 200 });
         // Do not print real inventory or query any unrelated PID.
         const owned = result.details.processes.find((entry) => entry.pid === child.pid);
+        if (!owned || owned.name !== name) t.diagnostic(JSON.stringify({ fixture: lifecycle.diagnostic(), ownedRow: owned, source: executableDiagnostic('/bin/sleep'),
+            executable: executableDiagnostic(executable), helper: executableDiagnostic('/usr/bin/pgrep'), platform: process.platform, node: process.version }));
         assert.ok(owned, "kernel-confined pgrep must see the owned fixture");
         assert.equal(owned.name, name);
         assert.deepEqual(Object.keys(owned).sort(), ["name", "pid"]);
@@ -334,8 +338,6 @@ test("real selected kernel can inventory only an owned fixture with task command
             assert.deepEqual(readdirSync(f.control), []);
         }
     } finally {
-        const closed = once(child, "close");
-        child.kill("SIGKILL");
-        await closed;
+        await lifecycle.stop();
     }
 });
