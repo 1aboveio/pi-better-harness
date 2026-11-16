@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Socket } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync, appendFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -308,6 +308,83 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
     t.diagnostic(JSON.stringify({ rebuildingMs: performance.now() - began, metrics: f.executor.metrics() }));
     f.worker.postMessage({ type: "release-inventory" });
     await ready(b);
+  } finally { await f.close(); }
+});
+
+test("the original before-root setup observes disk and worker roots without requesting repair", { timeout: 10000 }, async t => {
+  const f = await fixture();
+  try {
+    const client = await f.client(); await ready(client);
+    const firstReady = client.snapshot;
+    const id = "sa_metadata_gap", path = join(f.root, "runs", id, "meta.json");
+    const scope = { cwd: f.root, sessionId: "parent", limit: 10 };
+    await client.subscribe(scope);
+    mkdirSync(join(f.root, "runs", id));
+    writeFileSync(path, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1,
+      callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "before-root" }));
+    const until = Date.now() + 1000;
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).name, "before-root");
+    const capture = new Promise<any>(resolve => {
+      const timer = setTimeout(() => { f.worker.off("message", listener); resolve(undefined); }, 500);
+      const listener = (message: any) => { if (message.type === "diagnostic-source-state" && message.id === "initial-setup") { clearTimeout(timer); f.worker.off("message", listener); resolve(message.state); } };
+      f.worker.on("message", listener);
+    });
+    f.worker.postMessage({ type: "diagnostic-source-state", id: "initial-setup", scope });
+    const state = await capture;
+    assert.ok(state, "initial source observation was acknowledged");
+    assert.equal(state.configured.agentDir, f.root);
+    assert.equal(state.configured.modelOptions.baseDir, f.root);
+    assert.equal(state.roots.runs, join(f.root, "runs"));
+    assert.equal(state.imported, true, "first ready follows initial inventory completion");
+    assert.ok(state.rawEntries.some((entry: any) => entry.meta?.id === id && entry.meta.name === "before-root"));
+    while (client.snapshot?.rows[0]?.meta.name !== "before-root") {
+      if (Date.now() >= until) {
+        const terminal = await new Promise<any>(resolve => {
+          const timer = setTimeout(() => { f.worker.off("message", listener); resolve(undefined); }, 500);
+          const listener = (message: any) => { if (message.type === "diagnostic-source-state" && message.id === "initial-terminal") { clearTimeout(timer); f.worker.off("message", listener); resolve(message.state); } };
+          f.worker.on("message", listener);
+          f.worker.postMessage({ type: "diagnostic-source-state", id: "initial-terminal", scope });
+        });
+        t.diagnostic(JSON.stringify({ afterOriginalFailure: true, firstReady, setup: state, terminal }).slice(0, 32768));
+      }
+      assert.ok(Date.now() < until, "root gap publication missing");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  } finally { await f.close(); }
+});
+
+test("metadata present before the held initial inventory is included in the first ready publication", { timeout: 10000 }, async t => {
+  const f = await fixture({ workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
+  try {
+    const id = "sa_initial_source", path = join(f.root, "runs", id, "meta.json");
+    mkdirSync(join(f.root, "runs", id));
+    writeFileSync(path, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1, name: "present-before-inventory" }));
+    const client = await f.client();
+    const initial = await client.subscribe({});
+    assert.equal(initial.status, "rebuilding", "source readiness cannot precede the held first inventory");
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).name, "present-before-inventory");
+    const capture = new Promise<any>(resolve => {
+      const listener = (message: any) => { if (message.type === "initial-source-state") { f.worker.off("message", listener); resolve(message); } };
+      f.worker.on("message", listener);
+    });
+    f.worker.postMessage({ type: "initial-source-state", id, scope: {} });
+    const state = await capture;
+    assert.equal(state.imported, false);
+    assert.equal(state.configured.agentDir, f.root);
+    assert.equal(state.configured.modelOptions.baseDir, f.root);
+    assert.equal(state.runs, join(f.root, "runs"));
+    assert.equal(state.path, path);
+    assert.equal(state.meta.name, "present-before-inventory");
+    assert.ok(state.watchers.includes(state.runs), "root watcher installation precedes inventory release");
+    assert.equal(state.snapshot.status, "rebuilding");
+    const firstReady = new Promise<any>(resolve => {
+      const stop = client.onChange(snapshot => { if (snapshot.status === "ready") { stop(); resolve(snapshot); } });
+    });
+    f.worker.postMessage({ type: "release-inventory" });
+    const observed = await firstReady;
+    assert.equal(observed.rows[0]?.meta.name, "present-before-inventory");
+    assert.ok(f.executor.metrics().inventories! >= 1);
+    t.diagnostic(JSON.stringify({ beforeRelease: state, firstReady: observed }));
   } finally { await f.close(); }
 });
 
@@ -762,7 +839,7 @@ for (const outcome of ["success", "failure"]) test(`old fold ${outcome} cannot a
 });
 
 
-for (const rootRecreated of [false, true]) test(`a raw directory observed before metadata still publishes the original atomic writer commit (${rootRecreated ? "recreated root" : "existing root"})`, { timeout: 15000 }, async () => {
+for (const rootRecreated of [false, true]) test(`a raw directory observed before metadata still publishes the original atomic writer commit (${rootRecreated ? "recreated root" : "existing root"})`, { timeout: 15000 }, async t => {
   const f = await fixture();
   const { measureEventPublication } = await import(new URL("../scripts/event-publication/measure.mjs", import.meta.url).href);
   try {
@@ -774,16 +851,26 @@ for (const rootRecreated of [false, true]) test(`a raw directory observed before
       mkdirSync(directory);
       writeFileSync(metaPath, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1,
         callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "before-root" }));
-      const wait = async (condition: () => boolean) => {
+      const wait = async (condition: () => boolean, phase: string) => {
         const until = Date.now() + 1000;
         while (!condition()) {
+          if (Date.now() >= until) {
+            t.diagnostic(JSON.stringify({ phase, snapshot: client.snapshot, metrics: f.executor.metrics() }).slice(0, 32768));
+            const state = new Promise(resolve => {
+              const timer = setTimeout(() => { f.worker.off("message", listener); resolve({ error: "source diagnostic unavailable" }); }, 500);
+              const listener = (message: any) => { if (message.type === "diagnostic-source-state" && message.id === phase) { clearTimeout(timer); f.worker.off("message", listener); resolve(message.state); } };
+              f.worker.on("message", listener);
+              f.worker.postMessage({ type: "diagnostic-source-state", id: phase, scope });
+            });
+            t.diagnostic(JSON.stringify({ phase, source: await state }).slice(0, 32768));
+          }
           assert.ok(Date.now() < until, "root gap publication missing");
           await new Promise(resolve => setTimeout(resolve, 10));
         }
       };
-      await wait(() => client.snapshot?.rows[0]?.meta.name === "before-root");
+      await wait(() => client.snapshot?.rows[0]?.meta.name === "before-root", "initial-before-root");
       renameSync(join(f.root, "runs"), join(f.root, "retired-runs"));
-      await wait(() => client.snapshot?.status === "degraded");
+      await wait(() => client.snapshot?.status === "degraded", "root-absent");
       assert.equal(client.snapshot?.rows[0]?.meta.name, "before-root");
     }
     const before = f.executor.metrics().inventories ?? 0;
