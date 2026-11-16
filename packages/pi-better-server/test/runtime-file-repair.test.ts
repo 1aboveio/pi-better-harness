@@ -22,6 +22,13 @@ function fixture() {
   return { root, agent, base, runs, put };
 }
 
+async function settleHints(model: WorkReadModel) {
+  // A completed turn can schedule another turn before its waiter resumes.
+  let pending: Promise<void> | undefined;
+  while ((pending = (model as any).pending)) await pending;
+  assert.equal(model.metrics.scheduling.queued, 0, "hint obligations must be drained");
+}
+
 test("precise hints coalesce; bounded repair resumes despite hot writes and repairs missing sources", async t => {
   const f = fixture();
   for (let i = 0; i < 160; i++) f.put(`sa_${i}`);
@@ -35,7 +42,7 @@ test("precise hints coalesce; bounded repair resumes despite hot writes and repa
     const off = model.onChange(() => { unrelatedPublications++; }, { id: "sa_1" });
     f.put("sa_0", { name: "atomic" });
     for (let n = 0; n < 20; n++) model.fileHint(join(f.runs, "sa_0"), "meta.json");
-    await (model as any).pending;
+    await settleHints(model);
     assert.equal(model.snapshot({ id: "sa_0" }).rows[0]!.meta.name, "atomic");
     assert.equal(model.metrics.scheduling.repairEntries, before.scheduling.repairEntries);
     assert.ok(model.metrics.scheduling.entityBatches - before.scheduling.entityBatches <= 2);
@@ -49,7 +56,7 @@ test("precise hints coalesce; bounded repair resumes despite hot writes and repa
     const progress = model.metrics.scheduling.repairEntries;
     for (let n = 0; n < 20; n++) {
       appendFileSync(join(f.runs, "sa_0", "output.log"), JSON.stringify({ type: "agent_settled", at: n }) + "\n");
-      model.fileHint(join(f.runs, "sa_0"), "output.log"); await (model as any).pending;
+      model.fileHint(join(f.runs, "sa_0"), "output.log"); await settleHints(model);
       (model as any).repairOwed = true; await model.reconcile(false); disconnect();
       if (model.snapshot({ id: "sa_missed" }).rows.length) break;
     }
@@ -71,7 +78,7 @@ test("precise hints coalesce; bounded repair resumes despite hot writes and repa
     assert.equal(model.snapshot({ id: "sa_replacement" }).rows.length, 1);
     assert.equal(model.snapshot({ id: "sa_0" }).rows.length, 0);
     for (let n = 0; n < 320; n++) model.fileHint(f.runs, `sa_overflow_${n}`);
-    await (model as any).pending; await (model as any).repairWrite;
+    await (model as any).repairWrite; await settleHints(model);
     assert.ok(model.metrics.scheduling.overflows > 0);
     assert.ok(model.metrics.scheduling.queued <= 256);
     assert.deepEqual(JSON.parse(readFileSync(join(f.agent, "runtime-read-repair/subagents.json"), "utf8")).roots, [model.runs, model.archives, model.markers]);
@@ -112,9 +119,35 @@ for (const source of ["metadata", "archive", "marker"] as const) test(`repair ve
     rmSync(source === "metadata" ? join(directory, "sa_bad") : path, { recursive: true });
     const repairs = model.metrics.scheduling.repairEntries;
     model.fileHint(source === "metadata" ? join(directory, "sa_bad") : directory, source === "metadata" ? "meta.json" : "sa_bad.json");
-    await (model as any).pending;
+    await settleHints(model);
     assert.equal(model.observation().status, "ready", "exact deletion hint must still clear the error");
     assert.equal(model.metrics.scheduling.repairEntries, repairs, "exact deletion hint needs no inventory");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("exact deletion hints settle a follow-up turn scheduled when the first turn completes", async () => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, "follow-up-hint", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    for (const id of ["sa_first", "sa_second"]) {
+      f.put(id); writeFileSync(join(f.runs, id, "meta.json"), "broken");
+    }
+    await model.reconcile();
+    assert.equal(model.observation().status, "degraded");
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    (model as any).watchers.clear();
+    for (const id of ["sa_first", "sa_second"]) rmSync(join(f.runs, id), { recursive: true });
+    const repairs = model.metrics.scheduling.repairEntries;
+    model.fileHint(join(f.runs, "sa_first"), "meta.json");
+    const firstTurn: Promise<void> = (model as any).pending;
+    const followUp = firstTurn.then(() => {
+      assert.equal(model.observation().status, "degraded", "the second failed path still owes its hint");
+      model.fileHint(join(f.runs, "sa_second"), "meta.json");
+    });
+    await Promise.all([settleHints(model), followUp]);
+    assert.equal(model.observation().status, "ready");
+    assert.equal(model.metrics.scheduling.repairEntries, repairs, "follow-up exact hint needs no inventory");
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
