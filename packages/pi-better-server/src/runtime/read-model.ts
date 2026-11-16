@@ -1,6 +1,6 @@
 import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { opendir, readFile, stat, writeFile, mkdir, rename } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { realpathSync, statSync } from "node:fs";
@@ -61,6 +61,16 @@ export class WorkReadModel {
   private timer?: ReturnType<typeof setInterval>;
   private pending?: Promise<void>;
   private dirty = false;
+  private hints = new Map<string, number>();
+  private repair?: AsyncGenerator<string[]>;
+  private repairOwed = false;
+  private imported = false;
+  private repairWrite: Promise<void> = Promise.resolve();
+  private repairPersistencePending = false;
+  private sourceErrors = new Map<string, string>();
+  private sourceStats = 0;
+  private sourceWork = { entity: { batches: 0, paths: 0, stats: 0, metadataReads: 0, logBytes: 0, logReads: 0 }, repair: { batches: 0, paths: 0, stats: 0, metadataReads: 0, logBytes: 0, logReads: 0 } };
+  private scheduling = { entityBatches: 0, repairBatches: 0, repairEntries: 0, overflows: 0, maxQueueAgeMs: 0, maxPublicationMs: 0 };
   private closed = false;
   private inventory = 0;
   private coordinator = "unknown";
@@ -72,7 +82,7 @@ export class WorkReadModel {
   private counters = { inventories: 0, metadataReads: 0, projections: 0, assignmentProjections: 0, logProjections: 0, healthProjections: 0, failureProjections: 0 };
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, unverified: 0, initial: 0 };
   get metrics() {
-    return { ...this.counters, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
+    return { ...this.counters, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
       indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size };
   }
   readonly runs: string;
@@ -104,7 +114,7 @@ export class WorkReadModel {
     // can retain a replaced file's old inode after atomic rename and miss later
     // commits. Flat archives need one watcher; raw runs use one per directory.
     for (const path of [this.runs, this.archives, this.markers]) this.watchDirectory(path);
-    this.timer = setInterval(() => { if (!this.pending) void this.reconcile(); }, options.intervalMs ?? 1000);
+    this.timer = setInterval(() => { this.repairOwed = true; if (!this.pending) void this.reconcile(false); }, options.intervalMs ?? 1000);
     this.timer.unref();
   }
 
@@ -121,7 +131,7 @@ export class WorkReadModel {
           if (filename && safeId.test(String(filename))) this.unwatchDirectory(join(this.runs, String(filename)));
           else for (const watched of this.watchers.keys()) if (watched.startsWith(this.runs + sep)) this.unwatchDirectory(watched);
         }
-        void this.reconcile();
+        this.fileHint(path, filename ? String(filename) : undefined);
       });
       watcher.on("error", () => {
         if (this.watchers.get(path) !== watcher) return;
@@ -130,6 +140,70 @@ export class WorkReadModel {
       });
       this.watchers.set(path, watcher);
     } catch { /* Missing roots are discovered by the existing compatibility inventory. */ }
+  }
+
+  /** File notifications are hints, never authority. Unknown names owe scoped repair. */
+  fileHint(directory: string, name?: string) {
+    let path: string | undefined;
+    if (directory === this.runs && name && safeId.test(name)) path = join(directory, name, "meta.json");
+    else if ([this.archives, this.markers].includes(directory) && name && /^[A-Za-z0-9_-]+\.json$/.test(name)) path = join(directory, name);
+    else if (directory.startsWith(this.runs + sep) && name && ["meta.json", "output.log", "failures.jsonl", "failures.jsonl.observed"].includes(name)) path = join(directory, "meta.json");
+    else if (name) return; // Locks, temporary files and coordinator controls are not task inputs.
+    if (!path) { this.repairOwed = true; void this.reconcile(false); return; }
+    if (!this.hints.has(path)) {
+      if (this.hints.size >= 256) {
+        this.scheduling.overflows++; this.repairOwed = true;
+        // Persist the bounded source scope before discarding the individual hint.
+        if (!this.repairPersistencePending) {
+          this.repairPersistencePending = true;
+          this.repairWrite = this.persistRepair().finally(() => { this.repairPersistencePending = false; });
+          void this.repairWrite.then(() => this.reconcile(false)).catch(error => this.invalidate(String(error)));
+        }
+        return;
+      }
+      this.hints.set(path, Date.now());
+    }
+    void this.reconcile(false);
+  }
+
+  private async persistRepair() {
+    const directory = join(this.agentDir, "runtime-read-repair");
+    await mkdir(directory, { recursive: true });
+    const path = join(directory, "subagents.json");
+    await writeFile(path + ".tmp", JSON.stringify({ version: 1, roots: [this.runs, this.archives, this.markers] }));
+    await rename(path + ".tmp", path);
+  }
+
+  private async *repairPaths(): AsyncGenerator<string[]> {
+    // Check known paths too: an incomplete walk never deletes unseen records.
+    let batch: string[] = [];
+    for (const path of this.files.keys()) {
+      batch.push(path);
+      if (batch.length === 128) { yield batch; batch = []; }
+    }
+    for (const directory of [this.markers, this.archives, this.runs]) {
+      let handle;
+      try {
+        const info = await stat(directory, { bigint: true });
+        const identity = `${info.dev}:${info.ino}`;
+        if (this.rootWatchIdentities.get(directory) !== identity) {
+          this.unwatchDirectory(directory);
+          if (directory === this.runs) for (const path of this.watchers.keys()) if (path.startsWith(this.runs + sep)) this.unwatchDirectory(path);
+        }
+        this.rootWatchIdentities.set(directory, identity); this.watchDirectory(directory);
+        handle = await opendir(directory);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        this.unwatchDirectory(directory); continue;
+      }
+      for await (const entry of handle) {
+        if (directory === this.runs ? safeId.test(entry.name) : /^[A-Za-z0-9_-]+\.json$/.test(entry.name)) {
+          batch.push(directory === this.runs ? join(directory, entry.name, "meta.json") : join(directory, entry.name));
+          if (batch.length === 128) { yield batch; batch = []; }
+        }
+      }
+    }
+    if (batch.length) yield batch;
   }
 
   onChange(listener: () => void, scope?: WorkScope) {
@@ -168,7 +242,7 @@ export class WorkReadModel {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        this.reconcile().then(() => !!this.db.prepare("SELECT id FROM rows WHERE id = ?").get(id)),
+        (this.fileHint(this.runs, id), this.pending ?? Promise.resolve()).then(() => !!this.db.prepare("SELECT id FROM rows WHERE id = ?").get(id)),
         new Promise<false>(resolve => { timeout = setTimeout(() => resolve(false), 100); }),
       ]);
     } finally {
@@ -182,56 +256,68 @@ export class WorkReadModel {
   }
   private publish() { this.revision++; for (const listener of this.listeners) listener(); }
 
-  reconcile(): Promise<void> {
+  reconcile(drain = true): Promise<void> {
     if (this.closed) return Promise.resolve();
-    if (this.pending) { this.dirty = true; return this.pending; }
+    if (this.pending) {
+      return drain ? this.pending.then(() => this.reconcile()) : this.pending;
+    }
     this.pending = (async () => {
-      for (let pass = 0; pass < 2; pass++) {
+      if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
+      do {
         this.dirty = false;
-        await this.scan();
-        if (!this.dirty || this.closed) break;
-      }
-    })().finally(() => {
+        if (this.hints.size) {
+          const entries = [...this.hints].slice(0, 32);
+          for (const [path, queued] of entries) { this.hints.delete(path); this.scheduling.maxQueueAgeMs = Math.max(this.scheduling.maxQueueAgeMs, Date.now() - queued); }
+          this.scheduling.entityBatches++;
+          const started = performance.now();
+          await this.measuredScan("entity", entries.map(([path]) => path));
+          this.scheduling.maxPublicationMs = Math.max(this.scheduling.maxPublicationMs, performance.now() - started);
+        }
+        if (!this.repair && this.imported && !drain && !this.repairOwed) {
+          if (this.hints.size) { await yieldTurn(); continue; }
+          break;
+        }
+        this.repair ??= this.repairPaths();
+        const next = await this.repair.next();
+        if (next.done) {
+          this.repair = undefined; this.repairOwed = false;
+          if (!this.imported) { this.imported = true; this.state = this.sourceErrors.size || [...this.projected.values()].some(row => !row.assignment.verified) ? "degraded" : "ready"; this.reason = this.sourceErrors.values().next().value ?? (this.state === "ready" ? undefined : "Some assignment sources could not be verified."); this.publish(); }
+        }
+        else { this.scheduling.repairBatches++; this.scheduling.repairEntries += next.value.length; await this.measuredScan("repair", next.value); }
+        await yieldTurn();
+        if (this.closed || (!drain && !this.hints.size)) break;
+      } while (this.repair || this.hints.size);
+    })().catch(error => {
+      this.repair = undefined; this.state = "degraded"; this.reason = String(error).slice(0, 512); this.publish();
+    }).finally(() => {
       this.pending = undefined;
-      if (this.dirty && !this.closed) { this.dirty = false; void this.reconcile(); }
+      if ((this.hints.size || this.dirty) && !this.closed) { this.dirty = false; void this.reconcile(false); }
     });
     return this.pending;
   }
 
-  private async scan() {
+  private async measuredScan(kind: "entity" | "repair", paths: string[]) {
+    const before = { stats: this.sourceStats, metadataReads: this.counters.metadataReads, logBytes: logReadMetrics.bytes, logReads: logReadMetrics.reads };
+    await this.scan(paths);
+    const counter = this.sourceWork[kind]; counter.batches++; counter.paths += paths.length;
+    counter.stats += this.sourceStats - before.stats; counter.metadataReads += this.counters.metadataReads - before.metadataReads;
+    counter.logBytes += logReadMetrics.bytes - before.logBytes; counter.logReads += logReadMetrics.reads - before.logReads;
+  }
+
+  private async scan(paths: string[]) {
+    const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
     if (this.background.refresh()) this.publish();
     let releaseCoordinator: (() => void) | undefined;
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
       healthRevision: this.healthRevision, coordinator: this.coordinator, coordinatorConversations: this.coordinatorConversations };
     try {
-      const next = new Map<string, { signature: string; meta: any }>();
+      const next = new Map(baseline.files);
       let batch = 0;
       let sliceStarted = performance.now();
       for (const [directory, archived] of [[this.markers, true], [this.archives, true], [this.runs, false]] as const) {
-        let names: string[];
-        try { names = await readdir(directory); }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          this.unwatchDirectory(directory); this.rootWatchIdentities.delete(directory);
-          if (!archived) for (const watched of this.watchers.keys()) if (watched.startsWith(this.runs + sep)) this.unwatchDirectory(watched);
-          continue;
-        }
-        // Three root identities per inventory, independent of archive/client
-        // cardinality. A root can be replaced without an observed ENOENT gap.
-        const rootInfo = await stat(directory, { bigint: true });
-        const rootIdentity = `${rootInfo.dev}:${rootInfo.ino}`;
-        const previousRootIdentity = this.rootWatchIdentities.get(directory);
-        if (previousRootIdentity !== undefined && previousRootIdentity !== rootIdentity) {
-          this.unwatchDirectory(directory);
-          if (!archived) for (const watched of this.watchers.keys()) if (watched.startsWith(this.runs + sep)) this.unwatchDirectory(watched);
-        }
-        this.rootWatchIdentities.set(directory, rootIdentity);
-        this.watchDirectory(directory);
-        if (!archived) {
-          const present = new Set(names.filter(name => safeId.test(name)).map(name => join(directory, name)));
-          for (const watched of this.watchers.keys()) if (watched.startsWith(this.runs + sep) && !present.has(watched)) this.unwatchDirectory(watched);
-        }
+        const names = paths.filter(path => archived ? path.startsWith(directory + sep) && !path.slice(directory.length + 1).includes(sep)
+          : path.startsWith(directory + sep)).map(path => archived ? path.slice(directory.length + 1) : path.slice(directory.length + 1).split(sep)[0]!);
         // Bound filesystem concurrency without serializing every archive round trip.
         const candidates = names.filter(name => safeId.test(archived ? name.replace(/\.json$/, "") : name)
           && (!archived || name.endsWith(".json")));
@@ -240,7 +326,7 @@ export class WorkReadModel {
           const observations = await Promise.all(group.map(async name => {
             if (!archived) this.watchDirectory(join(directory, name));
             const path = archived ? join(directory, name) : join(directory, name, "meta.json");
-            try { return { info: await stat(path, { bigint: true }) }; }
+            try { return { info: await sourceStat(path, { bigint: true }) }; }
             catch (error) { return { error }; }
           }));
           for (const [index, name] of group.entries()) {
@@ -251,8 +337,9 @@ export class WorkReadModel {
               if (!observation.info) throw observation.error;
               const info = observation.info;
               const signature = `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
-              let entry = baseline.files.get(path);
+              let entry = next.get(path);
               if (entry?.signature !== signature) {
+                if (info.size > 1024n * 1024n) throw new Error(`Run metadata exceeds the 1 MiB observation budget: ${id}`);
                 this.counters.metadataReads++;
                 const raw = await readFile(path, "utf8");
                 if (directory === this.markers) {
@@ -269,6 +356,10 @@ export class WorkReadModel {
               next.set(path, entry!);
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+              try { await sourceStat(directory); }
+              catch { throw new Error(`Source directory unavailable; retaining verified records: ${directory}`); }
+              next.delete(path);
+              if (!archived) this.unwatchDirectory(join(directory, name));
             }
             if (++batch % 256 === 0 || performance.now() - sliceStarted >= 8) {
               await yieldTurn(); sliceStarted = performance.now();
@@ -290,10 +381,17 @@ export class WorkReadModel {
       const terminalLogChanges: string[] = [];
       for (const [path, entry] of next) {
         if (!path.startsWith(this.runs + sep)) continue;
+        if (!paths.includes(path)) {
+          const id = entry.meta.id;
+          if (baseline.logs.has(id)) logs.set(id, baseline.logs.get(id)!);
+          if (baseline.failureJournals.has(id)) failureJournals.set(id, baseline.failureJournals.get(id)!);
+          if (baseline.processes.has(id)) processes.set(id, baseline.processes.get(id)!);
+          continue;
+        }
         let signature = baseline.logs.get(entry.meta.id);
         {
           try {
-            const info = await stat(join(this.runs, entry.meta.id, "output.log"), { bigint: true });
+            const info = await sourceStat(join(this.runs, entry.meta.id, "output.log"), { bigint: true });
             signature = `${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
           } catch (error) { signature = (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unverified"; }
         }
@@ -302,7 +400,7 @@ export class WorkReadModel {
             && entry.meta.management?.root === this.agentDir) terminalLogChanges.push(entry.meta.id);
         if (signature !== baseline.logs.get(entry.meta.id)) logFamilies.add(entry.meta.id);
         const failureSignature = (await Promise.all(["failures.jsonl", "failures.jsonl.observed"].map(async name => {
-          try { const info = await stat(join(this.runs, entry.meta.id, name), { bigint: true }); return `${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`; }
+          try { const info = await sourceStat(join(this.runs, entry.meta.id, name), { bigint: true }); return `${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`; }
           catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unverified"; }
         }))).join(":");
         failureJournals.set(entry.meta.id, failureSignature);
@@ -326,8 +424,14 @@ export class WorkReadModel {
       const attempts = [...metas.values()];
       const affected = new Set<string>();
       const family = (meta: any) => JSON.stringify([meta.sessionId, meta.cwd]);
+      const lineage = new Map<string, any[]>();
+      for (const candidate of [...baseline.projected.values()].map(row => row.meta).concat(attempts)) {
+        if (!candidate.operations?.resumeLaunchToken) continue;
+        const key = family(candidate), group = lineage.get(key) ?? [];
+        group.push(candidate); lineage.set(key, group);
+      }
       const invalidateAttempt = (meta: any) => {
-        const related = [...baseline.projected.values()].map(row => row.meta).concat(attempts);
+        const related = lineage.get(family(meta)) ?? [];
         const ids = new Set([meta.id]);
         let grew = true;
         while (grew) {
@@ -343,7 +447,11 @@ export class WorkReadModel {
         for (const id of ids) affected.add(id);
       };
       for (const [path, entry] of [...baseline.files, ...next]) {
-        if (baseline.files.get(path)?.signature !== next.get(path)?.signature) invalidateAttempt(entry.meta);
+        if (baseline.files.get(path)?.signature !== next.get(path)?.signature) {
+          if (path.startsWith(this.markers + sep)) {
+            for (const meta of attempts) if (meta.sessionId === entry.meta.sessionId) invalidateAttempt(meta);
+          } else invalidateAttempt(entry.meta);
+        }
       }
       if (coordinator !== baseline.coordinator) for (const meta of attempts) {
         if (!(meta.assignment || meta.operations || meta.park)) continue;
@@ -352,10 +460,11 @@ export class WorkReadModel {
             coordinatorConversations.get(owner) !== baseline.coordinatorConversations.get(owner)) invalidateAttempt(meta);
       }
       const project = createAssignmentProjector({ attempts, observe: (owner: any) => this.reader.read(owner) });
+      const touched = new Set(paths.map(path => next.get(path)?.meta.id));
       const rows = [];
       for (const meta of attempts) {
         let row = baseline.projected.get(meta.id);
-        const assignmentChanged = !row || !row.assignment.verified || affected.has(meta.id) || processes.get(meta.id) !== baseline.processes.get(meta.id);
+        const assignmentChanged = !row || (!row.assignment.verified && touched.has(meta.id)) || affected.has(meta.id) || processes.get(meta.id) !== baseline.processes.get(meta.id);
         const logChanged = !row || logs.get(meta.id) !== baseline.logs.get(meta.id);
         const failureChanged = !row || failureJournals.get(meta.id) !== baseline.failureJournals.get(meta.id);
         if (assignmentChanged || logChanged || failureChanged || healthConfig.revision !== baseline.healthRevision) {
@@ -411,7 +520,7 @@ export class WorkReadModel {
       for (let offset = 0; offset < verify.length; offset += 32) {
         const group = verify.slice(offset, offset + 32);
         const observations = await Promise.all(group.map(async ([path]) => {
-          try { return { info: await stat(path, { bigint: true }) }; }
+          try { return { info: await sourceStat(path, { bigint: true }) }; }
           catch (error) { return { error }; }
         }));
         for (const [index, [, entry]] of group.entries()) {
@@ -455,11 +564,14 @@ export class WorkReadModel {
       if (terminalLogChanges.length) this.onTerminalLogsChanged?.();
       const previousState = this.state;
       const previousReason = this.reason;
-      this.state = rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
-      this.reason = this.state === "degraded" ? "Some assignment sources could not be verified." : undefined;
-      if (semanticChange || previousState !== this.state || previousReason !== this.reason) this.publish();
+      for (const path of paths) this.sourceErrors.delete(path);
+      this.state = this.sourceErrors.size ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
+      this.reason = this.sourceErrors.values().next().value ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
+      if ((this.imported || paths.length === 128) && (semanticChange || previousState !== this.state || previousReason !== this.reason)) this.publish();
     } catch (error) {
       if (this.closed) return;
+      if (this.dirty) for (const path of paths) if (!this.hints.has(path)) this.hints.set(path, Date.now());
+      for (const path of paths) this.sourceErrors.set(path, String(error).slice(0, 512));
       this.state = "degraded"; this.reason = String(error).slice(0, 512); this.publish();
     } finally { releaseCoordinator?.(); }
   }
@@ -547,6 +659,7 @@ export class WorkReadModel {
     this.closed = true; if (this.timer) clearInterval(this.timer);
     for (const watcher of this.watchers.values()) watcher.close();
     this.watchers.clear(); this.rootWatchIdentities.clear();
-    await this.pending; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
+    await this.pending; await this.repairWrite; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
+    await this.repair?.return(undefined);
   }
 }
