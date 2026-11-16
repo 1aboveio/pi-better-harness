@@ -33,14 +33,19 @@ export function ensureAssignmentChanges(ctx) {
         // These are observation inputs, not execution or delivery authority. Old
         // cooperative SQL writers inherit the same atomic invalidation triggers.
         const backgroundSources = [
-            { table: "operations", select: (r) => `SELECT ${r}.operation_id WHERE ${r}.observer_kind='local-supervisor'` },
-            { table: "waits", select: (r) => `SELECT d.operation_id FROM wait_dependencies d JOIN operations o ON o.operation_id=d.operation_id WHERE d.wait_id=${r}.wait_id AND d.generation=${r}.generation AND o.observer_kind='local-supervisor'` },
-            { table: "wait_dependencies", select: (r) => `SELECT ${r}.operation_id WHERE EXISTS(SELECT 1 FROM operations o WHERE o.operation_id=${r}.operation_id AND o.observer_kind='local-supervisor')` },
-            { table: "background_parent_callbacks", select: (r) => `SELECT ${r}.operation_id WHERE 1` },
-            { table: "coordinator_state", select: (r) => `SELECT o.operation_id FROM operations o WHERE ${r}.key LIKE 'result-supervision-v1:%' AND o.operation_id=substr(${r}.key,length('result-supervision-v1:')+1) AND o.observer_kind='local-supervisor'` },
+            { table: "operations", select: (r) => `SELECT ${r}.operation_id, 1 WHERE ${r}.observer_kind='local-supervisor'` },
+            { table: "waits", select: (r) => `SELECT d.operation_id, 1 FROM wait_dependencies d JOIN operations o ON o.operation_id=d.operation_id WHERE d.wait_id=${r}.wait_id AND d.generation=${r}.generation AND o.observer_kind='local-supervisor'` },
+            { table: "wait_dependencies", select: (r) => `SELECT ${r}.operation_id, 1 WHERE EXISTS(SELECT 1 FROM operations o WHERE o.operation_id=${r}.operation_id AND o.observer_kind='local-supervisor')` },
+            { table: "background_parent_callbacks", select: (r) => `SELECT ${r}.operation_id, 1 WHERE 1` },
+            { table: "coordinator_state", select: (r) => `SELECT o.operation_id, 1 FROM operations o WHERE ${r}.key LIKE 'result-supervision-v1:%' AND o.operation_id=substr(${r}.key,length('result-supervision-v1:')+1) AND o.observer_kind='local-supervisor'` },
         ];
+        // Version 1 installed one-column SELECTs into a two-column INSERT. Replace
+        // only these owned triggers, atomically, without resetting source positions.
+        const replaceBackgroundTriggers = ctx.db.prepare("SELECT value FROM schema_meta WHERE key='background_input_triggers_version'").get()?.value !== "2";
         for (const { table, select } of backgroundSources)
             for (const action of ["INSERT", "UPDATE", "DELETE"]) {
+                if (replaceBackgroundTriggers)
+                    ctx.db.exec(`DROP TRIGGER IF EXISTS background_input_${table}_${action.toLowerCase()}`);
                 const records = action === "UPDATE" ? ["OLD", "NEW"] : [action === "DELETE" ? "OLD" : "NEW"];
                 ctx.db.exec(`CREATE TRIGGER IF NOT EXISTS background_input_${table}_${action.toLowerCase()}
                 ${action === "DELETE" ? "BEFORE" : "AFTER"} ${action} ON ${table} BEGIN
@@ -48,6 +53,8 @@ export function ensureAssignmentChanges(ctx) {
                     ON CONFLICT(operation_id) DO UPDATE SET revision=revision+1;`).join(" ")}
                 END;`);
             }
+        if (replaceBackgroundTriggers)
+            ctx.db.prepare("INSERT OR REPLACE INTO schema_meta(key,value) VALUES('background_input_triggers_version','2')").run();
         ctx.db.exec(`CREATE TRIGGER IF NOT EXISTS background_journal_insert AFTER INSERT ON background_input_versions BEGIN
             INSERT INTO assignment_changes(entity,entity_id,assignment_id,session_id,workspace)
             SELECT 'background:operation', NEW.operation_id, NEW.operation_id, owner_session_id, owner_workspace FROM operations WHERE operation_id=NEW.operation_id;
