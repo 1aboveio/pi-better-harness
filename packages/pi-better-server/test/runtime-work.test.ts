@@ -10,6 +10,7 @@ import { WorkClient } from "../src/runtime/work-client.mjs";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
 import { privateRuntimeNode } from "./private-runtime-node.ts";
+import { runtimeWorkFailureState } from "./support/runtime-work-failure-state.ts";
 
 function fixtureRoot(name: string) {
   const parent = resolve("../../.work/753");
@@ -288,7 +289,16 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
   }
 });
 
-test("registered Navigator preserves older active rows and the same consumers recover across daemon replacement", { timeout: 30000 }, async () => {
+test("registered Navigator preserves older active rows and the same consumers recover across daemon replacement", { timeout: 30000 }, async t => {
+  let child: ReturnType<typeof fork> | undefined, launching: ReturnType<typeof fork> | undefined, observation: any;
+  let replacement = "initial";
+  const phase = runtimeWorkFailureState(t, "navigator-replacement", () => {
+    const cached = observation?.workObservation();
+    const process = launching ?? child;
+    return { replacement, child: process && { pid: process.pid, exitCode: process.exitCode, signalCode: process.signalCode, connected: process.connected },
+      observation: cached && { status: cached.status, reason: cached.reason, instanceId: cached.instanceId, seq: cached.seq,
+        active: cached.activity?.active, rows: cached.rows?.length, sample: cached.rows?.slice(0, 8).map((row: any) => ({ id: row.meta.id, status: row.meta.status })) } };
+  });
   const root = fixtureRoot("consumer");
   const transport = mkdtempSync("/tmp/p753-");
   const agent = join(root, "agent"), runs = join(root, "pi-better-subagents/runs");
@@ -296,13 +306,16 @@ test("registered Navigator preserves older active rows and the same consumers re
   const saved = new Map(["PI_CODING_AGENT_DIR", "TMPDIR", "PI_CATALOG_ACCEPTANCE_PROBE"].map(key => [key, process.env[key]]));
   process.env.PI_CODING_AGENT_DIR = agent; process.env.TMPDIR = root; process.env.PI_CATALOG_ACCEPTANCE_PROBE = "1";
   const launch = async () => {
+    phase(`daemon:${replacement}:ready-message`);
     const worker = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execArgv: ["--import", "tsx"],
       env: { ...process.env, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "inherit", "ipc"] });
-    await once(worker, "message"); return worker;
+    launching = worker;
+    await once(worker, "message"); launching = undefined; return worker;
   };
-  let child = await launch();
-  const stop = async () => { if (child.exitCode === null) { const exited = once(child, "exit"); child.send("stop"); await exited; } };
-  const until = async (check: () => boolean | Promise<boolean>) => {
+  child = await launch();
+  const stop = async () => { phase(`daemon:${replacement}:exit`); if (child!.exitCode === null) { const exited = once(child!, "exit"); child!.send("stop"); await exited; } };
+  const until = async (label: string, check: () => boolean | Promise<boolean>) => {
+    phase(label);
     const deadline = Date.now() + 10000;
     while (!await check()) { assert.ok(Date.now() < deadline, "production observation did not converge"); await new Promise(resolve => setTimeout(resolve, 10)); }
   };
@@ -312,9 +325,11 @@ test("registered Navigator preserves older active rows and the same consumers re
     ui: { theme: { fg: (_c: string, s: string) => s }, notify() {}, setStatus() {}, setWidget() {}, getEditorComponent() {}, setEditorComponent() {} } };
   try {
     register(new URL("../../pi-better-subagents/tests/pi_host_stub_hooks.mjs", import.meta.url));
+    phase("extension:import");
     const { default: extension } = await import(new URL("../../pi-better-subagents/index.ts", import.meta.url).href);
-    const observation = await import(new URL("../../pi-better-subagents/work-observation.ts", import.meta.url).href);
+    observation = await import(new URL("../../pi-better-subagents/work-observation.ts", import.meta.url).href);
     extension({ on: (name: string, fn: Function) => handlers.set(name, fn), registerTool: (tool: any) => tools.set(tool.name, tool), sendMessage() {} });
+    phase("extension:session-start");
     await handlers.get("session_start")!({}, ctx);
     for (let i = 0; i < 201; i++) {
       const id = `sa_review_${i}`; mkdirSync(join(runs, id));
@@ -327,8 +342,9 @@ test("registered Navigator preserves older active rows and the same consumers re
         { type: "message_update", message: { role: "assistant", content: "x".repeat(67000) } },
       ].map(event => JSON.stringify(event) + "\n").join(""));
     }
-    await until(() => observation.workObservation()?.activity.active === 1);
-    await until(async () => (await observation.observedList({ cwd: root })).totalMatching === 201);
+    await until("initial:active-observation", () => observation.workObservation()?.activity.active === 1);
+    await until("initial:201-history-list", async () => (await observation.observedList({ cwd: root })).totalMatching === 201);
+    phase("initial:201-history-list-confirmation");
     assert.equal((await observation.observedList({ cwd: root })).totalMatching, 201);
     const hooks = (globalThis as any)[Symbol.for("pi-better-subagents.acceptance-hooks")];
     const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("subagents");
@@ -339,33 +355,39 @@ test("registered Navigator preserves older active rows and the same consumers re
       writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, sessionId: `active-${i}`,
         callbackOrigin: { cwd: root, sessionId: "parent" }, spawnPid: process.pid, pid: process.pid, status: "running", startedAt: 1000 + i }));
     }
-    await until(() => observation.workObservation()?.activity.active === 202);
+    await until("initial:202-active-pages", () => observation.workObservation()?.activity.active === 202);
     assert.equal(provider.visibleCount(), 202, "active pages are complete beyond the transport page size");
     assert.ok(hooks.listRows().some((row: any) => row.id === "sa_review_0"));
     for (const mode of ["tool-retry", "subscription-only"]) {
+      replacement = mode;
       const previous = observation.workObservation().instanceId;
       await stop();
-      await until(() => observation.workObservation()?.status === "degraded");
+      await until(`${mode}:disconnect-observed`, () => observation.workObservation()?.status === "degraded");
       assert.ok(observation.workObservation().rows.some((row: any) => row.meta.id === "sa_review_0"));
       child = await launch();
       if (mode === "tool-retry") {
+        phase(`${mode}:active-list`);
         const listed = await observation.observedList({ cwd: root, active: true });
         assert.equal(listed.totalMatching, 202);
+        phase(`${mode}:older-active-assignment`);
         const assignment = await observation.observedAssignment("sa_review_0");
         assert.equal(assignment.assignment.state, "running");
       }
-      await until(() => observation.workObservation()?.status === "ready" && observation.workObservation()?.instanceId !== previous);
+      await until(`${mode}:same-consumer-new-instance`, () => observation.workObservation()?.status === "ready" && observation.workObservation()?.instanceId !== previous);
       assert.equal(provider.visibleCount(), 202);
       assert.ok(hooks.listRows().some((row: any) => row.id === "sa_review_0"));
       const restored = hooks.listRows().find((row: any) => row.id === "sa_review_0");
       assert.equal(restored.tool, "bash");
       assert.match(restored.tokens, /120/);
+      phase(`${mode}:result-tool`);
       const result = await tools.get("subagent_result").execute("review", { id: "sa_review_0", all: true }, undefined, undefined, ctx);
       assert.equal(result.details.assignment.state, "running");
       assert.equal(result.details.snapshot.instanceId, observation.workObservation().instanceId);
+      phase(`${mode}:list-tool`);
       let listed = await tools.get("subagent_list").execute("recovered-list", { all: true, limit: 100 }, undefined, undefined, ctx);
       let row = listed.details.snapshot.rows.find((row: any) => row.meta.id === "sa_review_0");
       while (!row && listed.details.snapshot.nextCursor) {
+        phase(`${mode}:list-tool-next-page`);
         listed = await tools.get("subagent_list").execute("recovered-page", { all: true, limit: 100, cursor: listed.details.snapshot.nextCursor }, undefined, undefined, ctx);
         row = listed.details.snapshot.rows.find((row: any) => row.meta.id === "sa_review_0");
       }
@@ -376,28 +398,38 @@ test("registered Navigator preserves older active rows and the same consumers re
     writeFileSync(join(runs, "sa_review_0", "meta.json"), JSON.stringify({ id: "sa_review_0", cwd: root, sessionId: "worker-0",
       callbackOrigin: { cwd: root, sessionId: "parent" }, spawnPid: process.pid, pid: process.pid,
       status: "completed", startedAt: 0, endedAt: Date.now() }));
-    await until(() => hooks.listRows().find((row: any) => row.id === "sa_review_0")?.status === "completed");
+    await until("final:older-active-completion", () => hooks.listRows().find((row: any) => row.id === "sa_review_0")?.status === "completed");
     assert.equal(provider.visibleCount(), 201, "recent completion remains visible without counting it as active");
     const beforeClose = observation.workObservation().seq;
     assert.equal(provider.close("sa_review_0").action, "dismissed");
     assert.equal(observation.workObservation().seq, beforeClose, "the server snapshot has not advanced synchronously");
     assert.ok(!hooks.listRows().some((row: any) => row.id === "sa_review_0"), "confirmed dismissal must hide a stale cached row before the next server observation");
-    await until(() => Boolean(observation.workObservation()?.rows.find((row: any) => row.meta.id === "sa_review_0")?.meta.dismissedAt));
+    await until("final:dismissal-observed", () => Boolean(observation.workObservation()?.rows.find((row: any) => row.meta.id === "sa_review_0")?.meta.dismissedAt));
     assert.ok(!hooks.listRows().some((row: any) => row.id === "sa_review_0"), "the acknowledged dismissal must not reappear");
   } finally {
+    phase("cleanup:session-shutdown");
     await handlers.get("session_shutdown")?.({}, ctx); await stop();
     for (const [key, value] of saved) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
   }
 });
 
-test("10000 durable records use bounded indexed history pages; a single archive replacement projects only its family", { timeout: 60000 }, async () => {
+test("10000 durable records use bounded indexed history pages; a single archive replacement projects only its family", { timeout: 60000 }, async t => {
+  let model: WorkReadModel | undefined;
+  const phase = runtimeWorkFailureState(t, "10000-history", () => {
+    const state = model as any;
+    return state && { pending: Boolean(state.pending), imported: state.imported, dirty: state.dirty, repair: Boolean(state.repair),
+      hints: state.hints.size, files: state.files.size, projected: state.projected.size, status: state.state, reason: state.reason,
+      sourceErrors: state.sourceErrors.size, counters: state.counters, scheduling: state.scheduling, sourceWork: state.sourceWork,
+      checkpoints: state.checkpoints.metrics };
+  });
   const root = fixtureRoot("history");
   const durable = join(root, "durable"), archives = join(durable, "attempts"), sessions = join(durable, "sessions");
   mkdirSync(archives, { recursive: true });
   const meta = (i: number) => ({ id: `sa_history_${i}`, sessionId: `conversation-${i}`, cwd: root, status: "completed", startedAt: i,
     assignment: { assignmentId: `history-assignment-${i}` },
     recipe: { version: 1, sessionId: `conversation-${i}`, cwd: root, sessionDir: sessions } });
+  phase("seed:10000-archives");
   for (let i = 0; i < 10000; i++) writeFileSync(join(archives, `sa_history_${i}.json`), JSON.stringify({ version: 1, meta: meta(i) }));
   const runs = join(root, "runs"); mkdirSync(runs);
   for (let i = 0; i < 7; i++) {
@@ -407,8 +439,9 @@ test("10000 durable records use bounded indexed history pages; a single archive 
   const coordinatorPath = new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href;
   const { openStore } = await import(coordinatorPath);
   const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
-  const model = new WorkReadModel(root, "history-instance", { baseDir: root, durableDir: durable, intervalMs: 60000 });
+  model = new WorkReadModel(root, "history-instance", { baseDir: root, durableDir: durable, intervalMs: 60000 });
   try {
+    phase("reconcile:first-import");
     await model.reconcile();
     assert.equal(model.snapshot().status, "ready");
     const before = { ...model.metrics };
@@ -420,7 +453,9 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     assert.deepEqual(next.rows.map(row => row.meta.id), ["sa_history_9996", "sa_history_9995", "sa_history_9994"]);
     assert.deepEqual(model.metrics, before, "indexed queries perform no inventory, metadata reads or projections");
     const changed = { ...meta(9999), name: "external replacement" };
+    phase("archive:external-replacement-process");
     execFileSync(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], process.argv[2])", join(archives, "sa_history_9999.json"), JSON.stringify({ version: 1, meta: changed })]);
+    phase("reconcile:one-archive-replacement");
     await model.reconcile();
     assert.equal(model.snapshot({ id: changed.id }).rows[0]!.meta.name, "external replacement");
     assert.equal(model.metrics.metadataReads - before.metadataReads, 1);
@@ -428,6 +463,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     assert.throws(() => model.snapshot({ cwd: root, statuses: ["completed"], limit: 3, cursor: first.nextCursor }), /resync_required/);
     const markers = join(durable, "session-state"); mkdirSync(markers);
     writeFileSync(join(markers, "conversation-9999.json"), JSON.stringify({ version: 1, sessionId: "conversation-9999", attemptId: "sa_newer_failed", status: "failed", startedAt: 30000, at: Date.now() }));
+    phase("reconcile:conversation-marker");
     await model.reconcile();
     assert.equal(model.snapshot({ id: changed.id }).rows.length, 0, "a later failed conversation marker hides the stale completed archive");
     const projected = model.metrics.projections;
@@ -436,6 +472,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
       observer: { kind: "background-tasks", version: "1" }, supervision: { hostId: "history-host", runnerId: "history-runner" }, authorityRef: "scope" });
     writer.registerWait({ waitId: "history-wait", owner, dependencies: [{ operationId: "history-op" }],
       origin: { attemptId: "sa_history_9998", assignmentRef: "history-assignment-9998" }, continuationNote: "Interpret evidence." });
+    phase("reconcile:one-assignment-wait");
     await model.reconcile();
     assert.equal(model.snapshot({ id: "sa_history_9998" }).rows[0]!.assignment.state, "waiting");
     assert.equal(model.metrics.projections - projected, 1, "one coordinator change must not reproject unrelated historical conversations");
@@ -445,6 +482,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
       outcome: "failed", reason: "Retained diagnosis", evidence: [], waits: [], processUncertain: false };
     writer.registerAssignment(decision);
     writer.recordAssignmentOutcome(decision);
+    phase("reconcile:one-assignment-outcome");
     await model.reconcile();
     assert.equal(model.snapshot({ id: "sa_history_9997" }).rows[0]!.assignment.state, "failed");
     assert.equal(model.metrics.projections - beforeOutcome, 1, "outcome-only changes invalidate their own conversation");
@@ -452,14 +490,16 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     const external = new DatabaseSync(join(root, "operation-coordinator.sqlite"));
     try {
       external.exec("UPDATE schema_meta SET value = 'unsupported' WHERE key = 'schema_version'");
+      phase("reconcile:unsupported-schema");
       await model.reconcile();
       assert.equal(model.snapshot().status, "degraded", "a schema-only change invalidates previously verified observations");
       assert.equal(model.snapshot({ id: "sa_history_9997" }).rows[0]!.assignment.verified, false);
       external.exec("UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'");
+      phase("reconcile:restored-schema");
       await model.reconcile();
       assert.equal(model.snapshot().status, "ready", "compatible coordinator state recovers without restarting the read model");
     } finally { external.close(); }
-  } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+  } finally { phase("cleanup:model-close"); await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("concurrent coordinator writes cannot starve an initial inventory or hide later assignment changes", { timeout: 10000 }, async () => {
