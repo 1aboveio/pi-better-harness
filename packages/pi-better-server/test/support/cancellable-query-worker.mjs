@@ -17,3 +17,4 @@ parentPort.on("message", message => {
   }
 });
 await import("../../src/runtime/query-worker.mjs");
+parentPort.postMessage({ type: "fixture-ready" });
