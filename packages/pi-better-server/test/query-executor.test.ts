@@ -10,13 +10,13 @@ import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 
-async function fixture(options: { capacity?: number; timeoutMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
+async function fixture(options: { intervalMs?: number; capacity?: number; timeoutMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
   mkdirSync(join(root, "runs"));
   const transport = mkdtempSync("/tmp/query-socket-");
   const executor = new WorkQueryExecutor(root, "query-instance", { ...options,
     workerUrl: options.workerUrl ?? new URL("./support/slow-query-worker.mjs", import.meta.url),
-    modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 } });
+    modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: options.intervalMs ?? 60000 } });
   const sockets = new Set<Socket>();
   const server = createServer(socket => {
     sockets.add(socket); socket.on("close", () => sockets.delete(socket));
@@ -408,6 +408,46 @@ test('Subagents and Background share one coordinator read connection in the quer
     assert.equal((f.executor.metrics().sqlite as any).active, 3, 'one coordinator, one query index and one durable assignment inbox, regardless of domain');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
   } finally { await f.close(); }
+});
+
+test("assignment wait, resume claim, cancellation, outcome and receipt cross the real socket", { timeout: 10000 }, async () => {
+  const f = await fixture({ intervalMs: 25 });
+  const { openStore } = await import(new URL('../../operation-coordinator/index.ts', import.meta.url).href);
+  const store = openStore({ path: join(f.root, 'operation-coordinator.sqlite') });
+  const owner = { kind: "worker-conversation", sessionId: "worker", workspace: f.root };
+  const recipient = { kind: "parent-session", sessionId: "parent", workspace: f.root };
+  store.registerAssignment({ assignmentId: "assignment", owner, recipient });
+  mkdirSync(join(f.root, "runs", "attempt"));
+  writeFileSync(join(f.root, "runs", "attempt", "meta.json"), JSON.stringify({ id: "attempt", sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1,
+    assignment: { assignmentId: "assignment", owner, recipient }, callbackOrigin: { cwd: f.root, sessionId: "parent" } }));
+  const client = await f.client();
+  const observed = async (predicate: (snapshot: any) => boolean) => {
+    const current = await client.get({ id: "attempt" });
+    if (predicate(current)) return current;
+    return new Promise<any>((resolve, reject) => {
+      const timeout = setTimeout(() => { stop(); reject(new Error("assignment socket observation did not advance")); }, 3000);
+      const stop = client.onChange(snapshot => { if (predicate(snapshot)) { clearTimeout(timeout); stop(); resolve(snapshot); } });
+    });
+  };
+  try {
+    await client.subscribe({ id: "attempt" });
+    await observed(s => s.status === "ready" && s.rows.length === 1);
+    store.registerOperation({ operationId: "dependency", taskId: "task", launchToken: "launch", owner, observer: { kind: "background-tasks", version: "1" } });
+    const wait = store.registerWait({ waitId: "wait", owner, dependencies: [{ operationId: "dependency" }], origin: { assignmentRef: "assignment", attemptId: "attempt" }, continuationNote: "Continue" }).wait;
+    await observed(s => s.rows[0]?.assignment.state === "waiting" && s.activity.active === 1);
+    store.recordTerminalOutcome({ operationId: "dependency", eventId: "terminal", owner, outcome: "succeeded", evidence: [{ kind: "summary", ref: "fixture-result", summary: "Completed dependency" }] });
+    const claim = store.claimResume({ waitId: wait.waitId, generation: wait.generation, expectedCancelEpoch: 0, lease: { ownerId: "host" }, reservedCheckpointId: "checkpoint" }).claim;
+    await observed(s => s.rows[0]?.assignment.reason === "resume-claimed");
+    store.cancelWait({ waitId: wait.waitId, generation: wait.generation, owner, expectedCancelEpoch: 0, reason: "cancel" });
+    assert.throws(() => store.publishResumeAttempt({ waitId: wait.waitId, generation: wait.generation, claimId: claim.claimId, claimToken: claim.claimToken, attemptId: "forbidden", launchToken: "forbidden" }), /cancel|claim|phase/i);
+    store.recordAssignmentOutcome({ assignmentId: "assignment", owner, recipient, revision: 1, outcome: "cancelled", reason: "cancel", evidence: [], waits: [{ waitId: wait.waitId, generation: wait.generation, cancelEpoch: 1 }], processUncertain: false });
+    await observed(s => s.rows[0]?.assignment.state === "cancelled");
+    store.receiptAssignmentOutcome({ assignmentId: "assignment", recipient, revision: 1, entryId: "entry" });
+    await observed(s => s.rows[0]?.recipientPending === false);
+    assert.equal(store.getWait(wait).phase, "cancelled");
+    assert.equal(store.getAssignmentOutcome("assignment").disposition, null, "derived observation must not consume a result");
+    assert.equal(store.listOutbox().find((event: any) => event.type === "assignment-outcome").state, "delivered");
+  } finally { store.close(); await f.close(); }
 });
 
 

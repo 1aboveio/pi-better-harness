@@ -1,6 +1,5 @@
 // Generated from packages/operation-coordinator/assignment-observation.mjs. Do not edit directly.
 import { createRequire } from "node:module";
-import { createHash } from "node:crypto";
 import { AssignmentInbox } from "./assignment-inbox.mjs";
 
 /** Read-only, bounded projection input. Never creates/migrates a database. */
@@ -98,30 +97,6 @@ export function createAssignmentReader(path, inboxPath = ":memory:") {
             } catch {
                 return { verified: false, waits: [], reason: "Coordinator state is unverified; compatible supervision is unavailable." };
             }
-        },
-        conversationRevisions() {
-            try {
-                this.revision();
-                if (!["1", "2", "3", "4"].includes(db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value)) return undefined;
-                const hashes = new Map();
-                const add = (sessionId, workspace, value) => {
-                    const key = JSON.stringify([sessionId, workspace]);
-                    if (!hashes.has(key)) hashes.set(key, createHash("sha256"));
-                    hashes.get(key).update(JSON.stringify(value));
-                };
-                // One source pass per changed database revision, instead of one
-                // projection/query/log parse for every historical attempt.
-                for (const row of db.prepare(`SELECT w.*, (SELECT json_group_array(attempt_id)
-                    FROM resume_claims c WHERE c.wait_id = w.wait_id AND c.generation = w.generation) AS claimed_attempts
-                    FROM waits w WHERE owner_kind = 'worker-conversation' ORDER BY wait_id, generation`).all()) {
-                    add(row.owner_session_id, row.owner_workspace, row);
-                }
-                for (const row of db.prepare("SELECT record_json FROM assignment_outcomes ORDER BY assignment_id").all()) {
-                    const record = JSON.parse(row.record_json);
-                    add(record.owner.sessionId, record.owner.workspace, record);
-                }
-                return new Map([...hashes].map(([key, hash]) => [key, hash.digest("hex")]));
-            } catch { return undefined; }
         },
         upgradeObligations() {
             try { this.revision(); } catch (error) {

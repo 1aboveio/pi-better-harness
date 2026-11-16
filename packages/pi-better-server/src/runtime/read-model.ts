@@ -26,7 +26,7 @@ export interface WorkSnapshot {
   instanceId: string; runtimeEpoch: string; scopeRevision: string; seq: number;
   observedRevisionVector: { inventory: number; coordinator: string; healthConfig: string };
   status: "ready" | "rebuilding" | "degraded"; reason?: string;
-  rows: Array<{ meta: any; assignment: any; sourceRevision: string }>;
+  rows: Array<{ meta: any; assignment: any; sourceRevision: string; recipientPending?: boolean }>;
   nextCursor?: string; activity: { active: number }; nextDeadline: number | null;
   totalMatching: number;
   backgroundIndex?: any;
@@ -51,7 +51,7 @@ export class WorkReadModel {
   private staged?: {
     files: WorkReadModel["files"]; projected: WorkReadModel["projected"];
     logs: Map<string, string>; failureJournals: Map<string, string>; processes: Map<string, string>; healthRevision: string;
-    coordinator: string; coordinatorConversations?: Map<string, string>;
+    coordinator: string;
   };
   private healthRevision = "";
   private details = new Map<string, { revision: string; value: any }>();
@@ -74,8 +74,8 @@ export class WorkReadModel {
   private closed = false;
   private inventory = 0;
   private coordinator = "unknown";
-  private coordinatorConversations?: Map<string, string>;
   private assignmentBaseline?: { key: string; seq: string };
+  private assignmentFault?: { state: WorkSnapshot["status"]; reason?: string };
   private revision = 0;
   private foldQueueSequence = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
@@ -107,6 +107,8 @@ export class WorkReadModel {
       CREATE INDEX work_terminal ON rows(active, ended, started DESC, id DESC);
       CREATE INDEX work_recipient_pending ON rows(origin_cwd, origin_session, recipient_pending, started DESC, id DESC);
       CREATE INDEX work_state ON rows(state, started DESC, id DESC);
+      CREATE TABLE assignment_members (scope TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(scope,id));
+      CREATE INDEX assignment_member_id ON assignment_members(id);
       CREATE TABLE terminal_log_folds (id TEXT PRIMARY KEY, revision TEXT NOT NULL, pending INTEGER NOT NULL, queue_position INTEGER NOT NULL);
       CREATE INDEX pending_terminal_log_folds ON terminal_log_folds(pending, queue_position, id);`);
     this.runs = join(options.baseDir ?? join(realpathSync(tmpdir()), "pi-better-subagents"), "runs");
@@ -258,6 +260,72 @@ export class WorkReadModel {
   }
   private publish() { this.revision++; for (const listener of this.listeners) listener(); }
 
+  /** Ordinary coordinator commits use the reverse scope index, not the source inventory. */
+  private refreshAssignments() {
+    if (!this.imported || this.staged) return;
+    let release: (() => void) | undefined;
+    try {
+      const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
+      const changes = this.reader.changes();
+      if (changes.has("*")) {
+        this.imported = false; this.repairOwed = true;
+        this.state = "rebuilding"; this.reason = "Assignment source baseline is rebuilding.";
+        this.publish(); return;
+      }
+      const selected = new Map<string, any>();
+      const select = this.db.prepare("SELECT r.payload FROM assignment_members m JOIN rows r ON r.id=m.id WHERE m.scope=?");
+      for (const scope of changes.keys()) for (const record of select.all(scope)) {
+        const row = JSON.parse(record.payload); selected.set(row.meta.id, row);
+      }
+      const project = createAssignmentProjector({ attempts: [...selected.values()].map(row => row.meta), observe: (owner: any) => this.reader.read(owner) });
+      const updated: any[] = [];
+      for (const row of selected.values()) {
+        const meta = row.meta;
+        const assignment = project(meta, this.processes.get(meta.id) ?? meta.status);
+        if (!assignment.verified) throw new Error(`Assignment observation is unverified: ${meta.id}`);
+        const outcome = meta.assignment ? this.reader.read({ ...meta.assignment.owner, assignmentId: meta.assignment.assignmentId }).outcome : undefined;
+        const recipientPending = Boolean(row.failurePending || meta.timing?.pendingWakes?.length
+          || (meta.status === "orphaned" && meta.orphanedCallbackSentAt === undefined && meta.orphanedCallbackSuppressedAt === undefined)
+          || (meta.status === "lost" && meta.lostCallbackSentAt === undefined && meta.lostCallbackSuppressedAt === undefined)
+          || (meta.callback !== false && (meta.assignment ? outcome && !outcome.deliveryReceipt && !outcome.disposition
+            : meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined)));
+        updated.push({ ...row, assignment, recipientPending, sourceRevision: hash([meta, assignment.revision, row.display, row.health, recipientPending, row.failurePending, this.failureJournals.get(meta.id)]) });
+      }
+      let changed = false;
+      this.db.exec("BEGIN");
+      try {
+        const update = this.db.prepare("UPDATE rows SET state=?, active=?, recipient_pending=?, payload=? WHERE id=?");
+        for (const row of updated) {
+          if (row.sourceRevision === this.projected.get(row.meta.id)?.sourceRevision) continue;
+          update.run(row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, row.recipientPending ? 1 : 0, JSON.stringify(row), row.meta.id);
+          changed = true;
+        }
+        this.db.exec("COMMIT");
+      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      // A crash after application but before acknowledgement safely repeats this batch.
+      for (const row of updated) this.projected.set(row.meta.id, row);
+      this.reader.acknowledgeChanges(changes, false);
+      if (this.reader.changeMetrics.more || this.reader.changeMetrics.pending) this.dirty = true;
+      this.coordinator = snapshot.revision;
+      this.counters.assignmentProjections += updated.length; this.counters.projections += updated.length;
+      this.invalidations.assignmentInput += updated.length;
+      if (this.assignmentFault) {
+        this.state = this.assignmentFault.state; this.reason = this.assignmentFault.reason;
+        this.assignmentFault = undefined; changed = true;
+      }
+      if (changed) this.publish();
+    } catch (error) {
+      if (!this.projected.size) return;
+      this.assignmentFault ??= { state: this.state, reason: this.reason };
+      if (String(error).includes("no such table: assignment_change_source")) {
+        // Old sources have no feed. Finish one budgeted compatibility pass;
+        // continuous legacy writes do not restart a pass already in progress.
+        this.imported = false; this.repairOwed = true; this.state = "rebuilding";
+      } else this.state = "degraded";
+      this.reason = String(error).slice(0, 512); this.publish();
+    } finally { release?.(); }
+  }
+
   reconcile(drain = true): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.pending) {
@@ -267,6 +335,7 @@ export class WorkReadModel {
       if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
       do {
         this.dirty = false;
+        this.refreshAssignments();
         if (this.hints.size) {
           const entries = [...this.hints].slice(0, 32);
           for (const [path, queued] of entries) { this.hints.delete(path); this.scheduling.maxQueueAgeMs = Math.max(this.scheduling.maxQueueAgeMs, Date.now() - queued); }
@@ -283,7 +352,7 @@ export class WorkReadModel {
         const next = await this.repair.next();
         if (next.done) {
           this.repair = undefined; this.repairOwed = false;
-          if (this.assignmentBaseline && !this.sourceErrors.size) this.reader.acknowledgeChanges(new Map([["*", this.assignmentBaseline.seq]]), true);
+          if (this.assignmentBaseline && !this.sourceErrors.size && ![...this.projected.values()].some(row => !row.assignment.verified)) this.reader.acknowledgeChanges(new Map([["*", this.assignmentBaseline.seq]]), true);
           if (!this.imported) { this.imported = true; this.state = this.sourceErrors.size || [...this.projected.values()].some(row => !row.assignment.verified) ? "degraded" : "ready"; this.reason = this.sourceErrors.values().next().value ?? (this.state === "ready" ? undefined : "Some assignment sources could not be verified."); this.publish(); }
         }
         else { this.scheduling.repairBatches++; this.scheduling.repairEntries += next.value.length; await this.measuredScan("repair", next.value); }
@@ -308,12 +377,13 @@ export class WorkReadModel {
   }
 
   private async scan(paths: string[]) {
+    this.assignmentFault = undefined;
     const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
     if (this.background.refresh()) this.publish();
     let releaseCoordinator: (() => void) | undefined;
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
-      healthRevision: this.healthRevision, coordinator: this.coordinator, coordinatorConversations: this.coordinatorConversations };
+      healthRevision: this.healthRevision, coordinator: this.coordinator };
     try {
       const next = new Map(baseline.files);
       let batch = 0;
@@ -389,7 +459,6 @@ export class WorkReadModel {
           }
         }
       }
-      const coordinatorConversations = baseline.coordinatorConversations;
       const logs = new Map<string, string>();
       const failureJournals = new Map<string, string>();
       const processes = new Map<string, string>();
@@ -529,7 +598,7 @@ export class WorkReadModel {
       // Subsequent commits remain beyond the durable received position.
       // Retry caches are never queryable. Validate all unpublished families again before committing them.
       this.staged = { files: next, projected: new Map(rows.map(row => [row.meta.id, row])), logs, failureJournals, processes,
-        healthRevision: healthConfig.revision, coordinator, coordinatorConversations };
+        healthRevision: healthConfig.revision, coordinator };
       const uncommitted = new Set(affected);
       for (const [path, entry] of [...this.files, ...next]) {
         if (this.files.get(path)?.signature !== next.get(path)?.signature) uncommitted.add(entry.meta.id);
@@ -560,7 +629,7 @@ export class WorkReadModel {
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");
       let semanticChange = false;
       try {
-        for (const id of this.projected.keys()) if (!metas.has(id)) { remove.run(id); this.db.prepare("DELETE FROM terminal_log_folds WHERE id=?").run(id); semanticChange = true; }
+        for (const id of this.projected.keys()) if (!metas.has(id)) { remove.run(id); this.db.prepare("DELETE FROM assignment_members WHERE id=?").run(id); this.db.prepare("DELETE FROM terminal_log_folds WHERE id=?").run(id); semanticChange = true; }
         for (const id of terminalLogChanges) this.db.prepare("INSERT INTO terminal_log_folds VALUES (?, ?, 1, ?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, pending=1, queue_position=CASE WHEN terminal_log_folds.pending=0 THEN excluded.queue_position ELSE terminal_log_folds.queue_position END").run(id, hash([logs.get(id), metas.get(id)?.status]), ++this.foldQueueSequence);
         for (const row of rows) {
           if (this.projected.get(row.meta.id)?.sourceRevision === row.sourceRevision) continue;
@@ -569,13 +638,16 @@ export class WorkReadModel {
           if (m.management?.root !== this.agentDir || m.status === "running") this.db.prepare("DELETE FROM terminal_log_folds WHERE id=?").run(m.id);
           insert.run(m.id, m.cwd, m.callbackOrigin?.cwd ?? m.cwd, m.callbackOrigin?.sessionId ?? null,
             m.startedAt, row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, m.endedAt ?? m.lostAt ?? null, row.recipientPending ? 1 : 0, JSON.stringify(row));
+          this.db.prepare("DELETE FROM assignment_members WHERE id=?").run(m.id);
+          const session = m.assignment?.owner.sessionId ?? m.operations?.conversationId ?? m.sessionId;
+          const workspace = m.assignment?.owner.workspace ?? m.operations?.workspace ?? m.cwd;
+          for (const assignmentId of new Set([m.assignment?.assignmentId ?? null, null])) this.db.prepare("INSERT INTO assignment_members VALUES(?,?)").run(JSON.stringify([session, workspace, assignmentId]), m.id);
         }
         this.db.exec("COMMIT");
       } catch (error) { this.db.exec("ROLLBACK"); throw error; }
       // Only the completed bounded source walk may acknowledge a baseline.
-      if (assignmentChanges) this.reader.acknowledgeChanges(assignmentChanges, false);
+      if (assignmentChanges && rows.every(row => row.assignment.verified)) this.reader.acknowledgeChanges(assignmentChanges, false);
       this.files = next; this.logs = logs; this.failureJournals = failureJournals; this.processes = processes; this.healthRevision = healthConfig.revision; this.coordinator = coordinator; this.inventory++;
-      this.coordinatorConversations = coordinatorConversations;
       this.projected = new Map(rows.map(row => [row.meta.id, row]));
       for (const states of [this.parseStates, this.healthStates]) for (const path of states.keys()) {
         if (!metas.has(path.slice(this.runs.length + 1).split(sep)[0])) states.delete(path);

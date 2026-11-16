@@ -11,12 +11,16 @@ export function ensureAssignmentChanges(ctx: StoreContext): void {
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, entity_id TEXT NOT NULL DEFAULT '',
                 assignment_id TEXT, session_id TEXT NOT NULL, workspace TEXT NOT NULL,
                 changed_at INTEGER NOT NULL DEFAULT (unixepoch()*1000));
+            CREATE INDEX IF NOT EXISTS waits_assignment_observation ON waits
+                (owner_kind,owner_session_id,owner_workspace,json_extract(origin_json,'$.assignmentRef'),created_at DESC,generation DESC);
+            CREATE INDEX IF NOT EXISTS resume_claims_wait_observation ON resume_claims(wait_id,generation,attempt_id);
             CREATE TRIGGER IF NOT EXISTS assignment_changes_retention AFTER INSERT ON assignment_changes
             BEGIN DELETE FROM assignment_changes WHERE seq <= NEW.seq - 4096; END;`);
         const sources = [
             { table: "waits", select: (r: string) => `SELECT 'wait', ${r}.wait_id || ':' || ${r}.generation, json_extract(${r}.origin_json,'$.assignmentRef'), ${r}.owner_session_id, ${r}.owner_workspace WHERE ${r}.owner_kind='worker-conversation'` },
             { table: "resume_claims", select: (r: string) => `SELECT 'claim', ${r}.claim_id, json_extract(w.origin_json,'$.assignmentRef'), w.owner_session_id, w.owner_workspace FROM waits w WHERE w.wait_id=${r}.wait_id AND w.generation=${r}.generation AND w.owner_kind='worker-conversation'` },
             { table: "assignment_bindings", select: (r: string) => `SELECT 'binding', ${r}.assignment_id, ${r}.assignment_id, json_extract(${r}.owner_json,'$.sessionId'), json_extract(${r}.owner_json,'$.workspace')` },
+            { table: "assignment_attempts", select: (r: string) => `SELECT 'attempt', ${r}.attempt_id, b.assignment_id, json_extract(b.owner_json,'$.sessionId'), json_extract(b.owner_json,'$.workspace') FROM assignment_bindings b WHERE b.assignment_id=${r}.assignment_id` },
             { table: "assignment_outcomes", select: (r: string) => `SELECT 'outcome', ${r}.assignment_id, ${r}.assignment_id, json_extract(${r}.record_json,'$.owner.sessionId'), json_extract(${r}.record_json,'$.owner.workspace')` },
             { table: "outbox_events", select: (r: string) => `SELECT 'receipt', ${r}.event_id, b.assignment_id, json_extract(b.owner_json,'$.sessionId'), json_extract(b.owner_json,'$.workspace') FROM assignment_bindings b WHERE b.assignment_id=${r}.operation_id UNION ALL SELECT 'receipt', ${r}.event_id, json_extract(w.origin_json,'$.assignmentRef'), w.owner_session_id, w.owner_workspace FROM waits w WHERE w.wait_id=${r}.wait_id AND w.generation=${r}.generation AND w.owner_kind='worker-conversation'` },
         ];

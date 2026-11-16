@@ -115,3 +115,37 @@ test("actual database file replacement invalidates the received generation", () 
         assert.ok(reader.changes().has("*"));
     } finally { reader.close(); first.closeStore(); replacement.closeStore(); }
 });
+
+test("continuous commits cross receive pages without skipping pending scopes or accepting an old generation", () => {
+    const h = createHarness(), source = new DatabaseSync(h.path), inbox = new AssignmentInbox(":memory:");
+    try {
+        const baseline = inbox.receive(source, "one");
+        inbox.acknowledge(baseline, true);
+        source.exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<300)
+            INSERT INTO assignment_changes(entity,assignment_id,session_id,workspace) SELECT 'outcome',printf('a%d',x),'s','/w' FROM n`);
+        let pages = 0;
+        do {
+            const batch = inbox.receive(source, "one");
+            if (pages === 0) source.exec("INSERT INTO assignment_changes(entity,assignment_id,session_id,workspace) VALUES('receipt','last','s','/w')");
+            inbox.acknowledge(batch, false); pages++;
+        } while (inbox.metrics.more);
+        assert.equal(pages, 3);
+        assert.equal(inbox.metrics.received, 301);
+        assert.equal(inbox.metrics.applied, 301);
+        assert.equal(inbox.db.prepare("SELECT count(*) AS n FROM applied_scopes WHERE scope!='*'").get().n, 301);
+        assert.ok(inbox.receive(source, "two").has("*"));
+        inbox.acknowledge(baseline, true);
+        assert.equal(inbox.metrics.pending, 1, "old baseline cannot acknowledge a replacement source");
+    } finally { inbox.close(); source.close(); h.closeStore(); }
+});
+
+test("exact assignment wait observations use the compound source index", () => {
+    const h = createHarness(), source = new DatabaseSync(h.path);
+    try {
+        const plan = source.prepare(`EXPLAIN QUERY PLAN SELECT wait_id,generation,phase FROM waits
+            WHERE owner_kind='worker-conversation' AND owner_session_id=? AND owner_workspace=?
+            AND json_extract(origin_json,'$.assignmentRef')=? ORDER BY created_at DESC,generation DESC LIMIT 100`)
+            .all(workerOwner.sessionId, workerOwner.workspace, "assignment");
+        assert.match(plan.map(row => row.detail).join("\n"), /USING INDEX waits_assignment_observation/);
+    } finally { source.close(); h.closeStore(); }
+});

@@ -10,6 +10,7 @@ export class AssignmentInbox {
             received INTEGER NOT NULL, applied INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS pending (
                 scope TEXT PRIMARY KEY, seq INTEGER NOT NULL, first_seq INTEGER NOT NULL, since INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS applied_scopes (scope TEXT PRIMARY KEY, seq INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS diagnostics (repairs INTEGER NOT NULL);
             INSERT INTO diagnostics SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM diagnostics);`);
     }
@@ -27,10 +28,11 @@ export class AssignmentInbox {
             || (bounds.first !== null && position.received < Number(bounds.first) - 1);
         const after = reset ? last : position.received;
         const changes = reset ? [] : source.prepare("SELECT * FROM assignment_changes WHERE seq>? ORDER BY seq LIMIT 128").all(after);
+        this.more = !reset && Number(changes.at(-1)?.seq ?? after) < last;
         this.db.exec("BEGIN IMMEDIATE");
         try {
             if (reset) {
-                this.db.exec("DELETE FROM pending; UPDATE diagnostics SET repairs=repairs+1");
+                this.db.exec("DELETE FROM pending; DELETE FROM applied_scopes; UPDATE diagnostics SET repairs=repairs+1");
                 this.db.prepare("INSERT INTO pending VALUES('*', ?, 0, ?)").run(last, Date.now());
                 this.db.prepare("INSERT OR REPLACE INTO position VALUES(1, ?, ?, 0)").run(generation, last);
             }
@@ -41,14 +43,20 @@ export class AssignmentInbox {
             if (changes.length) this.db.prepare("UPDATE position SET received=? WHERE singleton=1").run(changes.at(-1).seq);
             this.db.exec("COMMIT");
         } catch (error) { this.db.exec("ROLLBACK"); throw error; }
-        return new Map(this.db.prepare("SELECT scope, seq FROM pending ORDER BY first_seq, scope LIMIT 128").all().map(row => [row.scope, String(row.seq)]));
+        const batch = new Map(this.db.prepare("SELECT scope, seq FROM pending ORDER BY first_seq, scope LIMIT 128").all().map(row => [row.scope, String(row.seq)]));
+        Object.defineProperty(batch, "generation", { value: generation });
+        return batch;
     }
 
     acknowledge(batch, baselineComplete) {
+        if (batch.generation && batch.generation !== this.db.prepare("SELECT generation FROM position WHERE singleton=1").get()?.generation) return;
         this.db.exec("BEGIN IMMEDIATE");
         try {
             const remove = this.db.prepare("DELETE FROM pending WHERE scope=? AND seq=?");
-            for (const [scope, seq] of batch) if (scope !== "*" || baselineComplete) remove.run(scope, Number(seq));
+            const applied = this.db.prepare("INSERT INTO applied_scopes VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET seq=max(seq,excluded.seq)");
+            for (const [scope, seq] of batch) if (scope !== "*" || baselineComplete) {
+                if (remove.run(scope, Number(seq)).changes) applied.run(scope, Number(seq));
+            }
             // A later entity completing cannot advance past any earlier obligation.
             this.db.exec(`UPDATE position SET applied=max(0,min(received,
                 COALESCE((SELECT min(first_seq)-1 FROM pending), received))) WHERE singleton=1`);
@@ -56,8 +64,11 @@ export class AssignmentInbox {
         } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     }
     get metrics() {
+        const pending = this.db.prepare("SELECT count(*) AS pending, min(since) AS oldestPendingAt FROM pending").get();
         return { ...this.db.prepare("SELECT * FROM position").get(),
-            ...this.db.prepare("SELECT count(*) AS pending, min(since) AS oldestPendingAt FROM pending").get(),
+            more: Boolean(this.more),
+            affected: this.db.prepare("SELECT scope, seq, first_seq, since FROM pending ORDER BY first_seq, scope LIMIT 128").all(),
+            ...pending, oldestPendingAgeMs: pending.oldestPendingAt === null ? 0 : Math.max(0, Date.now() - Number(pending.oldestPendingAt)),
             ...this.db.prepare("SELECT repairs FROM diagnostics").get() };
     }
     close() { this.db.close(); }

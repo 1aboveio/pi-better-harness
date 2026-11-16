@@ -97,6 +97,7 @@ function createBranchCtx(cwd: string, sessionId: string, branchIds: readonly str
 }
 
 function startHost(options: {
+  storePath?: string;
   harness?: Harness;
   root: string;
   supervisor?: LocalSupervisor;
@@ -106,7 +107,7 @@ function startHost(options: {
   const harness = options.harness ?? createHarness();
   const notifications: ParentNotification[] = [];
   const host = createObservedWaitHost(harness.pi, {
-    storePath: join(options.root, "operations.sqlite"),
+    storePath: options.storePath ?? join(options.root, "operations.sqlite"),
     supervisorDirectory: join(options.root, "supervisor"),
     pollMs: 0,
     ...(options.supervisor ? { supervisor: options.supervisor } : {}),
@@ -1352,7 +1353,14 @@ describe("Subagents request/reply surface", () => {
   it("registers a run, executes a tool, stages then releases a checkpoint, and acknowledges", async () => {
     const root = workspace("rpc");
     const harness = createHarness();
-    const { host } = startHost({ root, harness });
+    const { host } = startHost({ root, harness, storePath: join(root, "operation-coordinator.sqlite") });
+    const { WorkReadModel } = await import(new URL("../../pi-better-server/src/runtime/read-model.ts", import.meta.url).href);
+    mkdirSync(join(root, "runs", "attempt-rpc"), { recursive: true });
+    writeFileSync(join(root, "runs", "attempt-rpc", "meta.json"), JSON.stringify({ id: "attempt-rpc", sessionId: "conv-rpc", cwd: root, status: "completed", startedAt: 1, operations: { conversationId: "conv-rpc", workspace: root } }));
+    const model = new WorkReadModel(root, "tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+    cleanups.push(() => model.close());
+    await model.reconcile();
+    const inventories = model.metrics.inventories;
     const call = rpcClient(harness.events);
     const readyEvents: Array<Record<string, unknown>> = [];
     harness.events.on(OBSERVED_WAITS_READY_CHANNEL, (value: unknown) => readyEvents.push(value as Record<string, unknown>));
@@ -1405,6 +1413,11 @@ describe("Subagents request/reply surface", () => {
     expect(admitted.phase).toBe("parking");
     const waitId = String(admitted.waitId);
     const generation = Number(admitted.generation);
+
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-rpc" }).rows[0].assignment.state).toBe("waiting");
+    expect(model.snapshot({ id: "attempt-rpc" }).activity.active).toBe(1);
+    expect(model.metrics.inventories).toBe(inventories);
 
     // Stage while the child is alive: the wait must not look parked yet.
     const staged = await call("checkpoint", {
@@ -1471,13 +1484,23 @@ describe("Subagents request/reply surface", () => {
       note: "rpc worker result interpreted",
     });
     expect(ack.phase).toBe("consumed");
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-rpc" }).rows[0].assignment.state).toBe("completed");
+    expect(model.metrics.inventories).toBe(inventories);
     expect(await call("release-run", { runId })).toMatchObject({ released: true });
   });
 
   it("claims, publishes, releases and cancels resume generations through the service", async () => {
     const root = workspace("rpc-resume");
     const harness = createHarness();
-    const { host } = startHost({ root, harness });
+    const { host } = startHost({ root, harness, storePath: join(root, "operation-coordinator.sqlite") });
+    const { WorkReadModel } = await import(new URL("../../pi-better-server/src/runtime/read-model.ts", import.meta.url).href);
+    mkdirSync(join(root, "runs", "attempt-resume"), { recursive: true });
+    writeFileSync(join(root, "runs", "attempt-resume", "meta.json"), JSON.stringify({ id: "attempt-resume", sessionId: "conv-resume", cwd: root, status: "completed", startedAt: 1, operations: { conversationId: "conv-resume", workspace: root } }));
+    const model = new WorkReadModel(root, "claim-tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+    cleanups.push(() => model.close());
+    await model.reconcile();
+    const inventories = model.metrics.inventories;
     const call = rpcClient(harness.events);
     const runId = "run-resume";
     const conversationId = "conv-resume";
@@ -1532,6 +1555,8 @@ describe("Subagents request/reply surface", () => {
     });
     expect(typeof first.claimId).toBe("string");
     expect(typeof first.claimToken).toBe("string");
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-resume" }).rows[0].assignment.reason).toBe("resume-claimed");
     const released = await call("release-resume", {
       runId, waitId, generation,
       claimId: first.claimId,
@@ -1569,6 +1594,10 @@ describe("Subagents request/reply surface", () => {
       reason: "owner cancelled the parked assignment",
     });
     expect(cancelled.phase).toBe("cancelled");
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-resume" }).rows[0].assignment.state).toBe("cancelled");
+    expect(model.snapshot({ id: "attempt-resume" }).activity.active).toBe(0);
+    expect(model.metrics.inventories).toBe(inventories);
     expect((await call("wait-snapshot", { waitId, generation })).claim).toBeNull();
   });
 
