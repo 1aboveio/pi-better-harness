@@ -260,7 +260,7 @@ export class BackgroundHistory {
           this.metrics.projections++;
           meta = active ?? this.project([op])[0];
           if (meta?.dismissedAt !== undefined) continue;
-          meta = { ...meta, callbackOrigin: { cwd: op.owner_workspace, sessionId: op.owner_session_id }, logPath: meta.logPaths?.stdout ?? "" };
+          meta = { ...meta, callbackOrigin: { cwd: op.owner_workspace, sessionId: op.owner_session_id, branchId: op.owner_branch_id ?? null }, logPath: meta.logPaths?.stdout ?? "" };
         }
         if (meta) save(key, meta, signature, "", false, context);
         else if (previous.get(key)?.signature === signature) seen.add(key);

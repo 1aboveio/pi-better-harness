@@ -32,6 +32,21 @@ function context(cwd, id) {
     return { cwd, sessionManager: SessionManager.inMemory(cwd, { id }) };
 }
 
+it("notifies only the captured workspace, session and branch owner", () => {
+    const p = provider();
+    const ctx = { cwd: "/project", sessionManager: { getSessionId: () => "parent-a", getBranch: () => [{ id: "branch-a" }] } };
+    let changes = 0;
+    const off = p.current.onActivityChanged(() => { changes++; }, ctx);
+    seed("sa_goal_foreign_session", { cwd: "/project", sessionId: "parent-b", branchId: "branch-a" });
+    seed("sa_goal_foreign_workspace", { cwd: "/other", sessionId: "parent-a", branchId: "branch-a" });
+    seed("sa_goal_foreign_branch", { cwd: "/project", sessionId: "parent-a", branchId: "branch-b" });
+    assert.equal(changes, 0);
+    seed("sa_goal_exact_branch", { cwd: "/project", sessionId: "parent-a", branchId: "branch-a" });
+    assert.equal(changes, 1);
+    assert.deepEqual(p.current.getActivity(ctx).items.map(item => item.id), ["sa_goal_exact_branch"]);
+    off(); p.events.clear();
+});
+
 it("scopes by stable callback origin, not child cwd, child session id or just the parent PID", () => {
     const own = seed("sa_goal_own", { cwd: "/project", sessionId: "parent-a" });
     seed("sa_goal_sibling", { cwd: "/project", sessionId: "parent-b" });

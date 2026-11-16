@@ -50,6 +50,8 @@ export interface BackgroundProviderSnapshot {
 
 export interface BackgroundActivityProvider {
   id: string;
+  /** v1 requires notifications and an explicit nextDeadline (including null). */
+  activityVersion?: 1;
   label?: string;
   getActivity(ctx: ExtensionContext): BackgroundProviderSnapshot | Promise<BackgroundProviderSnapshot>;
   onActivityChanged?(notify: () => void, ctx?: ExtensionContext): () => void;

@@ -65,7 +65,7 @@ export function writeMeta(meta) {
     indexMeta(meta);
     for (const listener of metaChangedListeners) {
         try {
-            listener();
+            listener(meta);
         }
         catch { /* best effort */ }
     }
@@ -165,7 +165,7 @@ export function removeMeta(meta) {
         removeIndexEntry(originActiveIndexDir(originOf(meta)), meta.id);
         for (const listener of metaChangedListeners) {
             try {
-                listener();
+                listener(meta);
             }
             catch { /* best effort */ }
         }

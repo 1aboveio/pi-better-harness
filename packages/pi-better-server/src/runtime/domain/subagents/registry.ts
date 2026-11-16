@@ -42,6 +42,7 @@ export type RunStatus = "running" | "completed" | "failed" | "killed" | "orphane
 export interface RunCallbackOrigin {
     cwd: string;
     sessionId?: string;
+    branchId?: string | null;
 }
 
 /**
@@ -1177,7 +1178,7 @@ export function setMetaWriteBarrierForTests(barrier: (() => void) | undefined): 
 // cross-process index changes before any cached IDs are reused.
 const indexIdsCache = new Map<string, { ids: Set<string>; signature: string }>();
 const initializedIndexes = new Set<string>();
-const metaChangedListeners = new Set<() => void>();
+const metaChangedListeners = new Set<(meta?: RunMeta) => void>();
 const registryIo = { fullDirectoryReads: 0, indexDirectoryReads: 0, metadataFileReads: 0, indexRevisionChecks: 0 };
 
 export interface RegistryIoMetrics {
@@ -1275,11 +1276,11 @@ export function writeMeta(meta: RunMeta, options: { ifAbsent?: boolean } = {}): 
         owns();
     });
     for (const listener of metaChangedListeners) {
-        try { listener(); } catch { /* best effort */ }
+        try { listener(meta); } catch { /* best effort */ }
     }
 }
 
-export function onMetaChanged(listener: () => void): () => void {
+export function onMetaChanged(listener: (meta?: RunMeta) => void): () => void {
     metaChangedListeners.add(listener);
     return () => metaChangedListeners.delete(listener);
 }
@@ -1341,7 +1342,7 @@ export function removeMetaArtifacts(meta: RunMeta, options: RemoveMetaArtifactsO
         removeIndexEntry(join(baseDir(), "by-parent-active", String(meta.spawnPid)), meta.id);
         removeIndexEntry(join(baseDir(), "by-origin", originKey(originOf(meta))), meta.id);
         for (const listener of metaChangedListeners) {
-            try { listener(); } catch { /* best effort */ }
+            try { listener(meta); } catch { /* best effort */ }
         }
         return true;
     } catch {

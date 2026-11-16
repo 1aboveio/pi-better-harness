@@ -312,6 +312,8 @@ export default function (pi: ExtensionAPI): void {
   const providerUnsubscribers = new Map<string, () => void>();
   const providerCache = new Map<string, BackgroundProviderSnapshot>();
   const dirtyProviders = new Set<string>();
+  const providerBindings = new Map<string, number>();
+  const compatibilityReadAt = new Map<string, number>();
   let providerDeadline: ReturnType<typeof setTimeout> | undefined;
   providers.set("subagents", {
     id: "subagents",
@@ -672,17 +674,24 @@ export default function (pi: ExtensionAPI): void {
     return goal;
   };
 
-  const publishSnapshot = async (ctx: ExtensionContext): Promise<ActivitySnapshot | null> => {
+  const publishSnapshot = async (ctx: ExtensionContext, explicit = true): Promise<ActivitySnapshot | null> => {
+    bindProviderSubscriptions();
     const execution = executionGeneration;
     const sequence = ++snapshotSequence;
     const snapshot = await collectActivitySnapshot(ctx, [...providers.values()].map(provider => ({
       ...provider,
       getActivity: async () => {
         const cached = providerCache.get(provider.id);
+        if (cached && !provider.onActivityChanged && !explicit && Date.now() < (compatibilityReadAt.get(provider.id) ?? 0)) return cached;
         if (cached && provider.onActivityChanged && !dirtyProviders.has(provider.id) &&
             !(typeof cached.nextDeadline === "number" && cached.nextDeadline <= Date.now())) return cached;
         dirtyProviders.delete(provider.id);
         const value = await provider.getActivity(ctx);
+        if (!provider.onActivityChanged) compatibilityReadAt.set(provider.id, Date.now() + POLL_INTERVAL_MS);
+        if (provider.activityVersion === 1 && value.nextDeadline !== null &&
+            (typeof value.nextDeadline !== "number" || !Number.isFinite(value.nextDeadline))) {
+          throw new Error(`${provider.id}: activity v1 requires an explicit nextDeadline`);
+        }
         if (execution === executionGeneration) providerCache.set(provider.id, value);
         return value;
       },
@@ -748,7 +757,7 @@ export default function (pi: ExtensionAPI): void {
     }
     collecting = true;
     const session = sessionGeneration;
-    void publishSnapshot(ctx).finally(() => {
+    void publishSnapshot(ctx, false).finally(() => {
       if (session !== sessionGeneration) return;
       collecting = false;
       if (collectionPending) {
@@ -777,6 +786,7 @@ export default function (pi: ExtensionAPI): void {
   };
 
   const syncPollingState = (): void => {
+    bindProviderSubscriptions();
     armProviderDeadline();
     const ctx = currentCtx;
     const goal = ctx ? currentGoalSnapshot(ctx) : null;
@@ -792,6 +802,8 @@ export default function (pi: ExtensionAPI): void {
     if (providerDeadline) clearTimeout(providerDeadline);
     providerDeadline = undefined;
     if (!currentCtx) return;
+    const goal = getGoal(currentCtx);
+    if (isForegroundBusy(currentCtx) || (goal && (!isPokeable(goal) || currentContinuationState(currentCtx, goal.goalId)?.blocked))) return;
     const deadlines = [...providerCache.values()].map(value => value.nextDeadline)
       .filter((value): value is number => typeof value === "number" && value > Date.now());
     if (!deadlines.length) return;
@@ -801,6 +813,20 @@ export default function (pi: ExtensionAPI): void {
       if (execution === executionGeneration) collectIfPossible();
     }, Math.min(MAX_TIMER_DELAY_MS, Math.max(1, Math.min(...deadlines) - Date.now())));
     providerDeadline.unref?.();
+  }
+
+  function bindProviderSubscriptions(): void {
+    for (const provider of providers.values()) {
+      if (!provider.onActivityChanged || providerBindings.get(provider.id) === executionGeneration) continue;
+      providerUnsubscribers.get(provider.id)?.();
+      const execution = executionGeneration;
+      providerBindings.set(provider.id, execution);
+      providerUnsubscribers.set(provider.id, provider.onActivityChanged(() => {
+        if (!currentCtx || execution !== executionGeneration || providers.get(provider.id) !== provider) return;
+        dirtyProviders.add(provider.id);
+        collectIfPossible();
+      }, currentCtx));
+    }
   }
 
   const installGoalWidget = (ctx: ExtensionContext): void => {
@@ -931,18 +957,15 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     const accepted = candidate as BackgroundActivityProvider;
+    if (accepted.activityVersion !== undefined && accepted.activityVersion !== 1) return;
+    if (accepted.activityVersion === 1 && typeof accepted.onActivityChanged !== "function") return;
     providerUnsubscribers.get(accepted.id)?.();
     providerUnsubscribers.delete(accepted.id);
     providers.set(accepted.id, accepted);
     providerCache.delete(accepted.id);
     dirtyProviders.add(accepted.id);
-    if (typeof accepted.onActivityChanged === "function") {
-      providerUnsubscribers.set(accepted.id, accepted.onActivityChanged(() => {
-        if (providers.get(accepted.id) !== accepted) return;
-        dirtyProviders.add(accepted.id);
-        collectIfPossible();
-      }));
-    }
+    providerBindings.delete(accepted.id);
+    bindProviderSubscriptions();
     if (latestSnapshot) collectIfPossible();
   });
 
@@ -1615,6 +1638,7 @@ export default function (pi: ExtensionAPI): void {
       updatedAt: Math.floor(now / 1000),
     });
     if (blocked) {
+      syncPollingState();
       refreshGoalWidget?.();
       if (ctx.hasUI) {
         ctx.ui.notify(

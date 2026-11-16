@@ -863,7 +863,8 @@ function getCallbackOrigin(ctx) {
         sessionId = undefined;
         unavailable = true;
     }
-    const origin = { cwd: ctx?.cwd ?? "", sessionId };
+    const origin = { cwd: ctx?.cwd ?? "", sessionId,
+        branchId: ctx?.sessionManager?.getLeafId?.() ?? null };
     if (unavailable)
         unavailableSessionOrigins.add(origin);
     return origin;

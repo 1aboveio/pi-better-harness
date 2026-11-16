@@ -17,6 +17,14 @@ function meta(overrides: Partial<BackgroundTaskMeta>): BackgroundTaskMeta {
 }
 
 describe("goal provider", () => {
+  it("retains only tasks whose captured branch is on the active branch", () => {
+    const ctx = { cwd: "/tmp/project", sessionManager: { getSessionId: () => "session-a", getBranch: () => [{ id: "active" }] } } as never;
+    const snapshot = collectBackgroundTaskGoalActivity([
+      meta({ id: "own", callbackOrigin: { cwd: "/tmp/project", sessionId: "session-a", branchId: "active" } }),
+      meta({ id: "foreign", callbackOrigin: { cwd: "/tmp/project", sessionId: "session-a", branchId: "other" } }),
+    ], ctx);
+    expect(snapshot.items.map(item => item.id)).toEqual(["own"]);
+  });
   it("reports running background tasks as active goal activity", () => {
     const snapshot = collectBackgroundTaskGoalActivity([
       meta({ id: "running", status: "running", name: "watch pr" }),

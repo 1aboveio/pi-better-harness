@@ -11,7 +11,7 @@ const metaCache = new Map<string, BackgroundTaskMeta>();
 // cross-process index changes before any cached IDs are reused.
 const indexIdsCache = new Map<string, { ids: Set<string>; signature: string }>();
 const initializedIndexes = new Set<string>();
-const metaChangedListeners = new Set<() => void>();
+const metaChangedListeners = new Set<(meta?: BackgroundTaskMeta) => void>();
 const registryIo = { fullDirectoryReads: 0, indexDirectoryReads: 0, metadataFileReads: 0, terminalMetadataFileReads: 0, indexRevisionChecks: 0 };
 
 export interface RegistryIoMetrics {
@@ -84,11 +84,11 @@ export function writeMeta(meta: BackgroundTaskMeta): void {
   metaCache.set(meta.id, meta);
   indexMeta(meta);
   for (const listener of metaChangedListeners) {
-    try { listener(); } catch { /* best effort */ }
+    try { listener(meta); } catch { /* best effort */ }
   }
 }
 
-export function onMetaChanged(listener: () => void): () => void {
+export function onMetaChanged(listener: (meta?: BackgroundTaskMeta) => void): () => void {
   metaChangedListeners.add(listener);
   return () => metaChangedListeners.delete(listener);
 }
@@ -191,7 +191,7 @@ export function removeMeta(meta: BackgroundTaskMeta): boolean {
     removeIndexEntry(originIndexDir(originOf(meta)), meta.id);
     removeIndexEntry(originActiveIndexDir(originOf(meta)), meta.id);
     for (const listener of metaChangedListeners) {
-      try { listener(); } catch { /* best effort */ }
+      try { listener(meta); } catch { /* best effort */ }
     }
     return true;
   } catch {

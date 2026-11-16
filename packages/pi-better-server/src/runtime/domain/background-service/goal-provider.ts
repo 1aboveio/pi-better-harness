@@ -56,6 +56,7 @@ export function registerBackgroundTasksGoalProvider(pi: ExtensionAPI): void {
       id: "background-tasks",
       label: "Background Tasks",
       scope: "session",
+      activityVersion: 1,
       getActivity: async (ctx: ExtensionContext) => {
         const snapshot = await backgroundGoalObservation(pi, ctx);
         if (snapshot.status !== "ready") throw new Error(snapshot.reason ?? "Background activity is unverified");
@@ -67,10 +68,17 @@ export function registerBackgroundTasksGoalProvider(pi: ExtensionAPI): void {
       },
       // A durable operation change must refresh Goal activity even though it
       // never writes a mutable legacy registry meta.
-      onActivityChanged: (notify: () => void) => {
+      onActivityChanged: (notify: () => void, ctx?: ExtensionContext) => {
         const offRuntime = onBackgroundObservation(pi, notify);
-        const offMeta = onMetaChanged(notify);
-        const offDurable = getObservedWaitHost(pi)?.onDurableTaskChange(notify);
+        const offMeta = onMetaChanged(meta => {
+          if (ctx && meta && !belongsToGoalActivitySession(meta, ctx)) return;
+          notify();
+        });
+        const offDurable = getObservedWaitHost(pi)?.onDurableTaskChange(change => {
+          if (ctx && (change.workspace !== ctx.cwd || change.sessionId !== ctx.sessionManager.getSessionId())) return;
+          if (ctx && change.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === change.branchId)) return;
+          notify();
+        });
         return () => {
           offRuntime();
           offMeta();
@@ -103,6 +111,7 @@ function belongsToGoalActivitySession(meta: BackgroundTaskMeta, ctx: ExtensionCo
   const origin = meta.callbackOrigin;
   if (origin) {
     if (origin.cwd !== active.cwd) return false;
+    if (origin.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === origin.branchId)) return false;
     if (origin.sessionId || active.sessionId) return origin.sessionId === active.sessionId;
     return true;
   }
@@ -129,6 +138,7 @@ function isVisibleDurableGoalActivity(
   if (ctx) {
     const active = getGoalActivityOrigin(ctx);
     if (task.owner.workspace !== active.cwd) return false;
+    if (task.owner.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === task.owner.branchId)) return false;
     if (active.sessionId || task.owner.sessionId) {
       if (task.owner.sessionId !== active.sessionId) return false;
     }

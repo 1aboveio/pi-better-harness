@@ -289,7 +289,7 @@ export class BackgroundObservation {
         const status = inspection?.terminal ? inspection.status : op.terminal_revision > 0 ? op.terminal_outcome : inspection?.status ?? "running";
         const row = { durable: true, id: op.task_id, operationId: op.operation_id, kind: context.kind ?? inspection?.kind ?? "process",
           status, active: !terminal, terminal, attention: terminal && status !== "succeeded", waits,
-          owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace },
+          owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace, branchId: op.owner_branch_id ?? null },
           startedAt: inspection?.result?.startedAt ?? inspection?.launch.createdAt ?? op.created_at,
           endedAt: inspection?.result?.endedAt ?? op.terminal_at ?? undefined,
           cwd: inspection?.launch.cwd ?? op.owner_workspace, name: context.name, command: context.command, argv: context.argv,
@@ -308,13 +308,13 @@ export class BackgroundObservation {
     if (!entry.origin.sessionId || entry.pendingRevision === revision) return;
     // These compact pointers only notify the frontend that obligations exist.
     // The canonical manager independently pages and resolves every obligation.
-    entry.pending = this.db.prepare(`SELECT o.operation_id,o.task_id,o.owner_kind,o.owner_workspace,o.owner_session_id,
+    entry.pending = this.db.prepare(`SELECT o.operation_id,o.task_id,o.owner_kind,o.owner_workspace,o.owner_session_id,o.owner_branch_id,
         o.terminal_outcome,o.terminal_at,o.created_at FROM background_parent_callbacks c
       JOIN operations o ON o.operation_id=c.operation_id
       WHERE c.owner_kind='parent-session' AND c.owner_workspace=? AND c.owner_session_id=? AND o.terminal_revision>0
       ORDER BY c.operation_id LIMIT ?`).all(entry.origin.cwd, entry.origin.sessionId, DISCOVERY_PAGE_SIZE)
       .map((op: any) => ({ durable: true, id: op.task_id, operationId: op.operation_id, callbackPending: true,
-        owner: { kind: op.owner_kind, workspace: op.owner_workspace, sessionId: op.owner_session_id },
+        owner: { kind: op.owner_kind, workspace: op.owner_workspace, sessionId: op.owner_session_id, branchId: op.owner_branch_id ?? null },
         status: op.terminal_outcome, terminal: true, active: false, startedAt: op.created_at, endedAt: op.terminal_at }));
     entry.pendingRevision = revision;
   }

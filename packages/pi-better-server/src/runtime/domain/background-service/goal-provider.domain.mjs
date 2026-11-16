@@ -27,6 +27,7 @@ export function registerBackgroundTasksGoalProvider(pi) {
             id: "background-tasks",
             label: "Background Tasks",
             scope: "session",
+            activityVersion: 1,
             getActivity: async (ctx) => {
                 const snapshot = await backgroundGoalObservation(pi, ctx);
                 if (snapshot.status !== "ready")
@@ -39,10 +40,20 @@ export function registerBackgroundTasksGoalProvider(pi) {
             },
             // A durable operation change must refresh Goal activity even though it
             // never writes a mutable legacy registry meta.
-            onActivityChanged: (notify) => {
+            onActivityChanged: (notify, ctx) => {
                 const offRuntime = onBackgroundObservation(pi, notify);
-                const offMeta = onMetaChanged(notify);
-                const offDurable = getObservedWaitHost(pi)?.onDurableTaskChange(notify);
+                const offMeta = onMetaChanged(meta => {
+                    if (ctx && meta && !belongsToGoalActivitySession(meta, ctx))
+                        return;
+                    notify();
+                });
+                const offDurable = getObservedWaitHost(pi)?.onDurableTaskChange(change => {
+                    if (ctx && (change.workspace !== ctx.cwd || change.sessionId !== ctx.sessionManager.getSessionId()))
+                        return;
+                    if (ctx && change.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === change.branchId))
+                        return;
+                    notify();
+                });
                 return () => {
                     offRuntime();
                     offMeta();
@@ -77,6 +88,8 @@ function belongsToGoalActivitySession(meta, ctx) {
     if (origin) {
         if (origin.cwd !== active.cwd)
             return false;
+        if (origin.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === origin.branchId))
+            return false;
         if (origin.sessionId || active.sessionId)
             return origin.sessionId === active.sessionId;
         return true;
@@ -101,6 +114,8 @@ function isVisibleDurableGoalActivity(task, ctx, now) {
     if (ctx) {
         const active = getGoalActivityOrigin(ctx);
         if (task.owner.workspace !== active.cwd)
+            return false;
+        if (task.owner.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === task.owner.branchId))
             return false;
         if (active.sessionId || task.owner.sessionId) {
             if (task.owner.sessionId !== active.sessionId)

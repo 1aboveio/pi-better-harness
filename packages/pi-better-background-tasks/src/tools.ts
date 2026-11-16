@@ -954,7 +954,8 @@ function getCallbackOrigin(ctx: ExtensionContext | undefined): BackgroundTaskCal
     sessionId = undefined;
     unavailable = true;
   }
-  const origin = { cwd: ctx?.cwd ?? "", sessionId };
+  const origin: BackgroundTaskCallbackOrigin = { cwd: ctx?.cwd ?? "", sessionId,
+    branchId: ctx?.sessionManager?.getLeafId?.() ?? null };
   if (unavailable) unavailableSessionOrigins.add(origin);
   return origin;
 }

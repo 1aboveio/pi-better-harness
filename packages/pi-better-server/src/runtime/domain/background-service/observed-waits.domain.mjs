@@ -1274,7 +1274,7 @@ export class ObservedWaitHost {
         if (owner.kind !== "parent-session" || this.activeOwnerRelation(owner) !== "match")
             return;
         this.invalidateDurableProjection(owner);
-        const change = { sessionId: owner.sessionId, workspace: owner.workspace };
+        const change = { sessionId: owner.sessionId, workspace: owner.workspace, branchId: owner.branchId ?? null };
         for (const listener of [...this.durableChangeListeners]) {
             try {
                 listener(change);
@@ -1354,7 +1354,7 @@ export class ObservedWaitHost {
             logPaths: { stdout: pathSet.stdout, stderr: pathSet.stderr, events: pathSet.events },
             waits,
             ...(context?.sandbox ? { sandbox: context.sandbox } : {}),
-            owner: { sessionId: operation.owner.sessionId, workspace: operation.owner.workspace },
+            owner: { sessionId: operation.owner.sessionId, workspace: operation.owner.workspace, branchId: operation.owner.branchId ?? null },
         };
     }
     status(taskId, owner) {

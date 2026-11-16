@@ -93,6 +93,7 @@ export interface ResolvedRemoteTaskMetadata {
 export interface BackgroundTaskCallbackOrigin {
   cwd: string;
   sessionId?: string;
+  branchId?: string | null;
 }
 
 export interface TaskSandboxProvenance {

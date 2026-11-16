@@ -353,7 +353,7 @@ function callbackOriginFromContext(ctx: ExtensionContext): RunCallbackOrigin {
     } catch {
         sessionId = undefined;
     }
-    return { cwd: ctx.cwd, sessionId };
+    return { cwd: ctx.cwd, sessionId, branchId: ctx.sessionManager?.getLeafId?.() ?? null };
 }
 
 /** Origin with a readable session id, or undefined when identity is unavailable. */

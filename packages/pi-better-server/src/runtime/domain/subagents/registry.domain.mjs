@@ -1002,7 +1002,7 @@ export function writeMeta(meta, options = {}) {
     });
     for (const listener of metaChangedListeners) {
         try {
-            listener();
+            listener(meta);
         }
         catch { /* best effort */ }
     }
@@ -1054,7 +1054,7 @@ export function removeMetaArtifacts(meta, options = {}) {
         removeIndexEntry(join(baseDir(), "by-origin", originKey(originOf(meta))), meta.id);
         for (const listener of metaChangedListeners) {
             try {
-                listener();
+                listener(meta);
             }
             catch { /* best effort */ }
         }
