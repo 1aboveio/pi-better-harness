@@ -353,14 +353,19 @@ export class WorkReadModel {
   }
 
   /** Ordinary coordinator commits use the reverse scope index, not the source inventory. */
-  private refreshAssignments() {
-    if (!this.imported || this.staged) return;
+  private refreshAssignments(baselineOnly = false) {
+    if ((!this.imported && !baselineOnly) || this.staged) return;
     let release: (() => void) | undefined;
     try {
       const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
       const changes = this.reader.changes();
       if (changes.has("*")) {
         const key = `${this.reader.changeMetrics.generation}:${changes.get("*")}`;
+        if (baselineOnly) {
+          this.assignmentBaseline = { key, seq: changes.get("*")! };
+          this.coordinator = snapshot.revision;
+          return;
+        }
         if (this.assignmentBaseline?.key === key) return;
         this.imported = false; this.repairOwed = true;
         if (!this.sourceErrors.size) { this.state = "rebuilding"; this.reason = "Assignment source baseline is rebuilding."; }
@@ -456,7 +461,7 @@ export class WorkReadModel {
           this.repair = undefined; this.repairOwed = false;
           // An empty metadata inventory still needs a journal baseline before
           // later exact hints can be treated as incremental updates.
-          if (!this.imported && !this.assignmentBaseline && !this.files.size && !this.sourceErrors.size) await this.measuredScan("repair", []);
+          if (!this.imported && !this.assignmentBaseline && !this.files.size && !this.sourceErrors.size) this.refreshAssignments(true);
           if (this.assignmentBaseline && !this.sourceErrors.size && ![...this.projected.values()].some(row => !row.assignment.verified)) this.reader.acknowledgeChanges(new Map([["*", this.assignmentBaseline.seq]]), true);
           if (!this.imported) {
             this.imported = true;
