@@ -117,17 +117,49 @@ for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query
     const page = await first.get(scope);
     const before = f.executor.metrics() as any;
     let events = 0;
-    const stops = clients.map(client => client.onChange(() => events++));
+    let phase = "metadata-update";
+    const frameSummary = (value: any) => {
+      const cursor = value.nextCursor ?? value.rows?.[0]?.cursor;
+      let publicationScope;
+      if (cursor) {
+        try {
+          const [key, instanceId, tokenRevision] = JSON.parse(Buffer.from(cursor, "base64url").toString());
+          publicationScope = { key, instanceId, tokenRevision };
+        } catch (error) { publicationScope = { decodeError: String(error) }; }
+      }
+      return { status: value.status, reason: value.reason, seq: value.seq, scopeRevision: value.scopeRevision,
+        instanceId: value.instanceId, publicationScope, observedRevisionVector: value.observedRevisionVector,
+        resyncRequired: value.resyncRequired, resyncReason: value.resyncReason,
+        totalMatching: value.totalMatching, activity: value.activity, nextDeadline: value.nextDeadline,
+        rows: value.rows?.map((row: any) => ({ id: row.meta.id, cwd: row.meta.cwd, name: row.meta.name,
+          origin: row.meta.callbackOrigin, state: row.assignment.state, sourceRevision: row.sourceRevision })) };
+    };
+    const frames: Array<{ subscriber: number; phase: string; snapshot: ReturnType<typeof frameSummary> }> = [];
+    const stops = clients.map((client, subscriber) => client.onChange(value => {
+      events++;
+      if (frames.length < 32) frames.push({ subscriber, phase, snapshot: frameSummary(value) });
+    }));
     write("sa_a", join(f.root, "a"), "unrelated"); await f.executor.livenessReasons();
+    phase = "log-append";
     appendFileSync(join(f.root, "runs/sa_a/output.log"), '{"type":"agent_end"}\n'); await f.executor.livenessReasons();
+    phase = "workspace-move";
     write("sa_a", join(f.root, "c"), "moved"); await f.executor.livenessReasons();
+    phase = "terminal-update";
     const meta = join(f.root, "runs/sa_a/meta.json");
     writeFileSync(meta, JSON.stringify({ id: "sa_a", cwd: join(f.root, "c"), status: "failed", startedAt: 1 }));
     await f.executor.livenessReasons();
+    phase = "deletion";
     rmSync(join(f.root, "runs/sa_a"), { recursive: true }); await f.executor.livenessReasons();
+    phase = "final-scoped-read";
     for (const client of clients) await client.get(scope);
     const unchanged = f.executor.metrics() as any;
-    assert.equal(events, 0, "unrelated content sends no scoped frames");
+    try { assert.equal(events, 0, "unrelated content sends no scoped frames"); }
+    catch (error) {
+      console.error(`Scoped publication failure: ${JSON.stringify({ scope, clients: count, events,
+        omittedFrames: events - frames.length, baseline: frameSummary(page), frames,
+        final: clients.map(client => frameSummary(client.snapshot)), before, after: unchanged })}`);
+      throw error;
+    }
     assert.equal(unchanged.queryCount, before.queryCount, "unrelated content retains the cached page");
     assert.equal(unchanged.serializationCount, before.serializationCount);
     const next = await first.get({ ...scope, cursor: page.nextCursor });
@@ -263,6 +295,7 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
   const f = await fixture({ watchdogMs: 800,
     workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
   try {
+    await f.bootstrapped;
     const a = await f.client(), b = await f.client();
     const began = performance.now();
     for (let i = 0; i < 6; i++) {
@@ -501,7 +534,7 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
     const after = await b.request("runtime_get_metrics");
     assert.equal(after.queryCount, before, "the worker cache avoids repeated SQLite for a warmed scope");
     assert.ok(after.cacheHits > 0);
-    assert.equal(after.sqlite.active, 1, "only the derived index exists when no coordinator source is present");
+    assert.equal(after.sqlite.active, 1, "the query index owns the attached checkpoint store when no coordinator source is present");
   } finally { await f.close(); }
 });
 
@@ -624,7 +657,7 @@ test('Subagents and Background share one coordinator read connection in the quer
     await f.executor.livenessReasons();
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
-    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator and one derived connection with the durable inbox attached, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator and one derived connection with inbox and checkpoints attached, regardless of domain');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
     t.diagnostic(JSON.stringify({ retainedBudget: 2, sqlite: f.executor.metrics().sqlite }));
   } finally { await f.close(); }

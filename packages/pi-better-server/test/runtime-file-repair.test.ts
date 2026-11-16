@@ -41,6 +41,7 @@ test("late compact archives cannot replace live recipient markers or reset its c
     await model.reconcile();
     const first = model.snapshot(scope);
     assert.equal(model.snapshot({ ...scope, pendingRecipient: true }).rows[0]!.meta.id, id);
+    // Completed archives omit the volatile completion markers by design.
     const compact: Record<string, unknown> = { ...meta };
     delete compact.completionCallbackPendingAt;
     delete compact.callbackOrigin;
@@ -56,6 +57,7 @@ test("late compact archives cannot replace live recipient markers or reset its c
     model.fileHint(join(f.runs, id), "meta.json"); await settleHints(model);
     assert.equal(model.snapshot({ ...scope, pendingRecipient: true }).rows.length, 0);
     assert.throws(() => model.snapshot({ ...scope, cursor: first.nextCursor }), /resync_required/);
+    // Losing volatile storage still exposes the verified archive for history.
     rmSync(join(f.runs, id), { recursive: true });
     model.fileHint(f.runs, id); await settleHints(model);
     assert.equal(model.snapshot({ id }).rows[0]!.meta.id, id);
