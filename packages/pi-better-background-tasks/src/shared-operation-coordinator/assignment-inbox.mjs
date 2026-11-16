@@ -2,7 +2,8 @@ import { createRequire } from "node:module";
 
 /** Rebuildable observation state, never an execution or delivery credential. */
 export class AssignmentInbox {
-    constructor(path) {
+    constructor(path, options = {}) {
+        this.entityPrefix = options.entityPrefix;
         const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
         this.db = new DatabaseSync(path);
         this.db.exec(`CREATE TABLE IF NOT EXISTS position (
@@ -38,7 +39,11 @@ export class AssignmentInbox {
             }
             const insert = this.db.prepare(`INSERT INTO pending VALUES(?, ?, ?, ?)
                 ON CONFLICT(scope) DO UPDATE SET seq=excluded.seq`);
-            for (const change of changes) insert.run(JSON.stringify([change.session_id, change.workspace, change.assignment_id]), change.seq, change.seq, Date.now());
+            for (const change of changes) {
+                const background = change.entity.startsWith('background:');
+                if (this.entityPrefix ? !change.entity.startsWith(this.entityPrefix) : background) continue;
+                insert.run(JSON.stringify([change.session_id, change.workspace, change.assignment_id]), change.seq, change.seq, Date.now());
+            }
             // The obligations above and received position commit together.
             if (changes.length) this.db.prepare("UPDATE position SET received=? WHERE singleton=1").run(changes.at(-1).seq);
             this.db.exec("COMMIT");

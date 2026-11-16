@@ -10,6 +10,35 @@ import { cleanupHarnesses, createHarness, workerOwner, parentOwner, registerOper
 
 afterEach(cleanupHarnesses);
 
+test("Background and assignment consumers share journal recovery without accepting each other's scopes", () => {
+    const h = createHarness(), source = new DatabaseSync(h.path);
+    const assignment = new AssignmentInbox(":memory:");
+    const background = new AssignmentInbox(h.path + ".background", { entityPrefix: "background:" });
+    try {
+        assignment.acknowledge(assignment.receive(source, "source"), true);
+        background.acknowledge(background.receive(source, "source"), true);
+        h.store.registerOperation({ operationId: "exact-background", taskId: "exact-background", launchToken: "token",
+            owner: parentOwner, observer: { kind: "local-supervisor", version: "1" } });
+        h.store.registerAssignment({ assignmentId: "assignment-only", owner: workerOwner, recipient: parentOwner });
+        const a = assignment.receive(source, "source"), b = background.receive(source, "source");
+        assert.equal(a.size, 1); assert.equal(b.size, 1);
+        assert.equal(JSON.parse([...b.keys()][0])[2], "exact-background");
+        assert.equal(JSON.parse([...a.keys()][0])[2], "assignment-only");
+        const received = background.metrics.received;
+        const reopened = new AssignmentInbox(h.path + ".background", { entityPrefix: "background:" });
+        try {
+            assert.equal(reopened.receive(source, "source").size, 1);
+            assert.equal(reopened.metrics.received, received);
+            assert.equal(reopened.metrics.pending, 1);
+            reopened.acknowledge(b, false);
+            assert.equal(reopened.metrics.pending, 0);
+            reopened.receive(source, "replacement");
+            reopened.acknowledge(b, true);
+            assert.equal(reopened.metrics.pending, 1, "old generation cannot acknowledge replacement baseline");
+        } finally { reopened.close(); }
+    } finally { assignment.close(); background.close(); source.close(); h.closeStore(); }
+});
+
 test("Background input revisions are exact, atomic, and inherited by direct SQL writers", () => {
     const h = createHarness(), db = new DatabaseSync(h.path);
     try {

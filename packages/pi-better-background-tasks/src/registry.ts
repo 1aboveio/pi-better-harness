@@ -251,6 +251,7 @@ export function listActiveMetasForOrigin(origin: BackgroundTaskCallbackOrigin): 
 export function observeMetasForOrigin(origin: BackgroundTaskCallbackOrigin, activeOnly = true): BackgroundTaskMeta[] {
   const directory = activeOnly ? originActiveIndexDir(origin) : originIndexDir(origin);
   let ids: string[];
+  registryIo.indexDirectoryReads++;
   try { ids = readdirSync(directory).filter(id => id !== ".initialized"); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   return ids.map(id => {

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackgroundObservation } from "../src/runtime/background.ts";
-import { openStore } from "../../operation-coordinator/index.ts";
+const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 
 test("one Background task input changes only its projection and dependent wait query", async () => {
   const root = mkdtempSync(join(tmpdir(), "background-inputs-"));
@@ -34,23 +34,49 @@ test("one Background task input changes only its projection and dependent wait q
     const path = join(directory, "observed", `${ids[0]}.json`);
     writeFileSync(path + ".tmp", JSON.stringify({ name: "changed" }));
     renameSync(path + ".tmp", path);
-    observation.refresh();
+    for (let page = 0; page < 4; page++) observation.refresh();
     assert.equal(observation.metrics.runnerSnapshots, before.runnerSnapshots + 1);
     assert.equal(observation.read(scope).find(row => row.id === ids[0]).name, "changed");
     const dependencies = observation.metrics.dependencyQueries;
-    store.registerWait({ waitId: "exact-wait", owner, dependencies: [{ operationId: ids[0]! }], continuationNote: "Read result" });
+    const wait = store.registerWait({ waitId: "exact-wait", owner, dependencies: [{ operationId: ids[0]! }], continuationNote: "Read result" });
     observation.refresh();
     assert.equal(observation.metrics.runnerSnapshots, before.runnerSnapshots + 2);
     assert.equal(observation.metrics.dependencyQueries, dependencies + 1);
     assert.equal(observation.read(scope).find(row => row.id === ids[0]).waits[0].waitId, "exact-wait");
+    const beforeCancel = { ...observation.metrics };
+    store.cancelWait({ waitId: "exact-wait", generation: wait.generation, expectedCancelEpoch: 0, owner, reason: "no continuation needed" });
+    observation.refresh();
+    assert.equal(observation.read(scope).find(row => row.id === ids[0]).waits.length, 0);
+    assert.equal(observation.metrics.dependencyQueries, beforeCancel.dependencyQueries + 1);
+    assert.equal(observation.metrics.runnerSnapshots, beforeCancel.runnerSnapshots + 1);
 
     writeFileSync(path, "{");
-    observation.refresh();
+    for (let page = 0; page < 4 && observation.status !== "degraded"; page++) observation.refresh();
     assert.equal(observation.status, "degraded");
     assert.equal(observation.read(scope).find(row => row.id === ids[0]).name, "changed");
     writeFileSync(path, JSON.stringify({ name: "recovered" }));
-    observation.refresh();
+    for (let page = 0; page < 4; page++) observation.refresh();
     assert.equal(observation.status, "ready");
     assert.equal(observation.read(scope).find(row => row.id === ids[0]).name, "recovered");
   } finally { await observation.close(); store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("recent Background terminals expire through deadline work without a caller refresh", async t => {
+  const root = mkdtempSync(join(tmpdir(), "background-expiry-"));
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 200000 });
+  const store = openStore({ path: join(root, "operation-coordinator.sqlite"), now: () => Date.now() });
+  const observation = new BackgroundObservation(root, join(root, "supervisor"));
+  const owner = { kind: "parent-session" as const, workspace: root, sessionId: "parent" };
+  const scope = { background: true, cwd: root, sessionId: "parent" };
+  try {
+    store.registerOperation({ operationId: "expiry", taskId: "bgs_00000000000000000001", launchToken: "expiry", owner,
+      observer: { kind: "local-supervisor", version: "1" } });
+    store.recordTerminalOutcome({ operationId: "expiry", eventId: "expiry", owner, outcome: "succeeded", evidence: [{ kind: "terminal-record", ref: "expiry" }] });
+    store.setParentCallbackPending("bgs_00000000000000000001", false);
+    assert.equal(observation.read(scope).length, 1);
+    observation.refresh();
+    t.mock.timers.tick(30001);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(observation.read(scope).length, 0);
+  } finally { await observation.close(); store.close(); t.mock.timers.reset(); rmSync(root, { recursive: true, force: true }); }
 });

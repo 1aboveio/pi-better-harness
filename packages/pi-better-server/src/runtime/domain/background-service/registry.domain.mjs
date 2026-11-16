@@ -233,6 +233,7 @@ export function listActiveMetasForOrigin(origin) {
 export function observeMetasForOrigin(origin, activeOnly = true) {
     const directory = activeOnly ? originActiveIndexDir(origin) : originIndexDir(origin);
     let ids;
+    registryIo.indexDirectoryReads++;
     try {
         ids = readdirSync(directory).filter(id => id !== ".initialized");
     }

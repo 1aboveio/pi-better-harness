@@ -43,6 +43,7 @@ test("Background history queries observe work completed between shared active re
     const history = await read();
     assert.equal(history.rows.length, 1, "a warmed history scope must include a newly completed operation");
     assert.equal(history.rows[0].meta.status, "succeeded");
+    const beforeWait = JSON.parse((await client.handle({ type: "runtime_get_metrics" })).json).background.history;
     const events: any[] = [];
     socket.write = (line: string) => { events.push(JSON.parse(line)); return true; };
     await client.handle({ type: "runtime_subscribe", scope });
@@ -52,6 +53,9 @@ test("Background history queries observe work completed between shared active re
       assert.ok(Date.now() < deadline, "coordinator-only terminal history changes did not notify the subscriber"); await delay(20);
     }
     assert.equal((await read()).rows[0].meta.waits[0].waitId, "terminal-wait", "waits added after completion invalidate the indexed projection");
+    const afterWait = JSON.parse((await client.handle({ type: "runtime_get_metrics" })).json).background.history;
+    assert.equal(afterWait.inventories, beforeWait.inventories, "a dependent wait updates history without restarting its baseline");
+    assert.ok(afterWait.incrementalBatches > beforeWait.incrementalBatches);
   } finally {
     client.close(); await executor.close(); writer.close(); rmSync(root, { recursive: true, force: true });
   }

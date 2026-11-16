@@ -17,6 +17,7 @@ import { fmtSpend } from "./domain/widget.mjs";
 import { effectiveStatus } from "./domain/process-status.mjs";
 import { extractChildEventFactsFromLog, healthThresholdsForConfig } from "./domain/health-observation.mjs";
 import { BackgroundObservation } from "./background.ts";
+import { workPage } from "./work-budget.ts";
 // @ts-expect-error Generated canonical read-only failure projection.
 import { readFailureStateReadOnly, pendingFailureAttention } from "./domain/subagents/shared-failure-observations.domain.mjs";
 import { readHealthConfig } from "./health-config.ts";
@@ -259,7 +260,7 @@ export class WorkReadModel {
     this.listeners.add(notify);
     return () => { this.listeners.delete(notify); release?.(); };
   }
-  get backgroundMetrics() { return { ...this.background.metrics, scopes: this.background.scopeCount, history: this.background.historyMetrics }; }
+  get backgroundMetrics() { return { ...this.background.metrics, registry: this.background.registryMetrics, changes: this.background.changeMetrics, scopes: this.background.scopeCount, history: this.background.historyMetrics }; }
   observation(reasons = this.livenessReasons({ refresh: false })) {
     return { status: this.state, reason: this.reason, observedAt: Date.now(), reasons };
   }
@@ -428,7 +429,7 @@ export class WorkReadModel {
         this.dirty = false;
         this.refreshAssignments();
         if (this.hints.size) {
-          const entries = [...this.hints].slice(0, 32);
+          const entries = workPage(this.hints);
           for (const [path, queued] of entries) { this.hints.delete(path); this.scheduling.maxQueueAgeMs = Math.max(this.scheduling.maxQueueAgeMs, Date.now() - queued); }
           this.scheduling.entityBatches++;
           const started = performance.now();

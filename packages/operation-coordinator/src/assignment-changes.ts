@@ -15,6 +15,7 @@ export function ensureAssignmentChanges(ctx: StoreContext): void {
             CREATE INDEX IF NOT EXISTS resume_claims_wait_observation ON resume_claims(wait_id,generation,attempt_id);
             CREATE TABLE IF NOT EXISTS background_input_versions (
                 operation_id TEXT PRIMARY KEY, revision INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS background_operation_repair ON operations(observer_kind,operation_id);
             CREATE TRIGGER IF NOT EXISTS assignment_changes_retention AFTER INSERT ON assignment_changes
             BEGIN DELETE FROM assignment_changes WHERE seq <= NEW.seq - 4096; END;`);
         const sources = [
@@ -35,6 +36,8 @@ export function ensureAssignmentChanges(ctx: StoreContext): void {
             { table: "operations", select: (r: string) => `SELECT ${r}.operation_id WHERE ${r}.observer_kind='local-supervisor'` },
             { table: "waits", select: (r: string) => `SELECT d.operation_id FROM wait_dependencies d JOIN operations o ON o.operation_id=d.operation_id WHERE d.wait_id=${r}.wait_id AND d.generation=${r}.generation AND o.observer_kind='local-supervisor'` },
             { table: "wait_dependencies", select: (r: string) => `SELECT ${r}.operation_id WHERE EXISTS(SELECT 1 FROM operations o WHERE o.operation_id=${r}.operation_id AND o.observer_kind='local-supervisor')` },
+            { table: "background_parent_callbacks", select: (r: string) => `SELECT ${r}.operation_id WHERE 1` },
+            { table: "coordinator_state", select: (r: string) => `SELECT o.operation_id FROM operations o WHERE ${r}.key LIKE 'result-supervision-v1:%' AND o.operation_id=substr(${r}.key,length('result-supervision-v1:')+1) AND o.observer_kind='local-supervisor'` },
         ];
         for (const { table, select } of backgroundSources) for (const action of ["INSERT", "UPDATE", "DELETE"]) {
             const records = action === "UPDATE" ? ["OLD", "NEW"] : [action === "DELETE" ? "OLD" : "NEW"];
@@ -44,5 +47,17 @@ export function ensureAssignmentChanges(ctx: StoreContext): void {
                     ON CONFLICT(operation_id) DO UPDATE SET revision=revision+1;`).join(" ")}
                 END;`);
         }
+        ctx.db.exec(`CREATE TRIGGER IF NOT EXISTS background_journal_insert AFTER INSERT ON background_input_versions BEGIN
+            INSERT INTO assignment_changes(entity,entity_id,assignment_id,session_id,workspace)
+            SELECT 'background:operation', NEW.operation_id, NEW.operation_id, owner_session_id, owner_workspace FROM operations WHERE operation_id=NEW.operation_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS background_journal_update AFTER UPDATE ON background_input_versions BEGIN
+            INSERT INTO assignment_changes(entity,entity_id,assignment_id,session_id,workspace)
+            SELECT 'background:operation', NEW.operation_id, NEW.operation_id, owner_session_id, owner_workspace FROM operations WHERE operation_id=NEW.operation_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS background_journal_previous_scope AFTER UPDATE ON operations
+            WHEN OLD.observer_kind='local-supervisor' AND (OLD.owner_session_id<>NEW.owner_session_id OR OLD.owner_workspace<>NEW.owner_workspace OR OLD.owner_kind<>NEW.owner_kind)
+            BEGIN INSERT INTO assignment_changes(entity,entity_id,assignment_id,session_id,workspace)
+            VALUES('background:operation',OLD.operation_id,OLD.operation_id,OLD.owner_session_id,OLD.owner_workspace); END;`);
     });
 }
