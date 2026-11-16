@@ -87,6 +87,147 @@ test("concurrent report-only children share one authenticated transport and tear
   } finally { await a.close(); await b.close(); await Promise.all(transports.map((transport) => transport.close())); }
 });
 
+test("a read-only worker can correct oversized evidence with a retained byte excerpt", async () => {
+  const f = await fixture("report-large-excerpt");
+  try {
+    const source = Buffer.alloc(106732, "x");
+    source.write("workflow evidence", 70000);
+    writeFileSync(join(f.workspace, "android.yml"), source);
+    const permissions = { enabled: true, projectFiles: "read", outsideProject: "off", storedCredentials: "off", commands: true, network: false };
+    writeMeta({ ...readMeta(f.id), operations: { policy: { sandbox: { permissions } } } });
+    f.pi.events.on("pi-better-sandbox:policy-request", () => f.pi.events.emit("pi-better-sandbox:policy", { state: "enabled", permissions }));
+    const evidence = { path: "android.yml", explanation: "Relevant workflow commands" };
+    await assert.rejects(() => f.send({ ...f.report, evidence: [evidence] }), (error) => {
+      assert.match(error.message, /android\.yml.*106732.*65536.*max_bytes/);
+      assert.equal(error.retryable, true);
+      return true;
+    });
+    assert.match(readMeta(f.id).assignmentReportRejection.reason, /106732/);
+    const input = { ...f.report, evidence: [{ ...evidence, offset: 70000, max_bytes: 4096 }] };
+    await f.send(input);
+    assert.equal(readMeta(f.id).assignmentReportRejection, undefined);
+    const report = readAssignmentReport(readMeta(f.id));
+    assert.deepEqual(report.evidence[0].range, { offset: 70000, bytes: 4096, sourceBytes: 106732 });
+    assert.deepEqual(readFileSync(report.evidence[0].path), source.subarray(70000, 74096));
+    writeFileSync(join(f.workspace, "android.yml"), "changed");
+    await f.send(input);
+    await assert.rejects(() => f.send({ ...input, evidence: [{ ...evidence, offset: 0, max_bytes: 4096 }] }), /Conflicting/);
+    const terminal = { ...readMeta(f.id), status: "completed", exitCode: 0 };
+    writeMeta(terminal);
+    assert.equal(commitAssignmentTerminal(terminal).outcome, "succeeded");
+  } finally { await f.close(); }
+});
+
+test("rejected evidence remains actionable when an otherwise clean child exits", async () => {
+  const f = await fixture("report-rejected-outcome");
+  try {
+    writeFileSync(join(f.workspace, "large"), Buffer.alloc(106732));
+    await assert.rejects(() => f.send({ ...f.report, evidence: [{ path: "large", explanation: "source" }] }));
+    const terminal = { ...readMeta(f.id), status: "completed", exitCode: 0 };
+    writeMeta(terminal);
+    const outcome = commitAssignmentTerminal(terminal);
+    assert.equal(outcome.outcome, "failed");
+    assert.match(outcome.reason, /Assignment report rejected:.*large.*106732.*max_bytes/);
+    assert.equal(readMeta(f.id).exitCode, 0);
+  } finally { await f.close(); }
+});
+
+test("byte excerpts reject invalid ranges and preserve the workspace boundary", async () => {
+  const f = await fixture("report-excerpt-boundary");
+  try {
+    for (const range of [{ offset: 1 }, { offset: 999, max_bytes: 1 }, { offset: -1, max_bytes: 1 }, { max_bytes: 65537 }, { max_bytes: 0 }]) {
+      await assert.rejects(() => f.send({ ...f.report, evidence: [{ ...f.report.evidence[0], ...range }] }));
+      assert.equal(readMeta(f.id).assignmentReport, undefined);
+    }
+    await assert.rejects(() => f.send({ ...f.report, evidence: [{ path: "/etc/hosts", explanation: "foreign excerpt", max_bytes: 16 }] }), /Foreign/);
+    await f.send({ ...f.report, evidence: [{ ...f.report.evidence[0], max_bytes: 65536 }] });
+    assert.equal(readAssignmentReport(readMeta(f.id)).evidence[0].range.bytes, Buffer.byteLength("actual synchronous work\n"));
+  } finally { await f.close(); }
+});
+
+test("incomplete reports preserve remaining work and concrete blockers for the parent", async () => {
+  const f = await fixture("report-incomplete-detail");
+  try {
+    await f.send({ ...f.report, status: "incomplete", reason: "Native validation is blocked", remaining_work: ["Run native compatibility checks"],
+      blocker: { kind: "permission", reason: "ADB access has not been granted" } });
+    const report = readAssignmentReport(readMeta(f.id));
+    assert.deepEqual(report.remainingWork, ["Run native compatibility checks"]);
+    assert.deepEqual(report.blocker, { kind: "permission", reason: "ADB access has not been granted" });
+    await f.send({ ...f.report, status: "incomplete", reason: "Native validation is blocked", remaining_work: report.remainingWork,
+      blocker: { reason: "ADB access has not been granted", kind: "permission" } });
+    const terminal = { ...readMeta(f.id), status: "completed", exitCode: 0 };
+    writeMeta(terminal);
+    const outcome = commitAssignmentTerminal(terminal);
+    assert.equal(outcome.outcome, "failed");
+    assert.match(outcome.reason, /Assignment incomplete:.*ADB access.*Run native compatibility/);
+  } finally { await f.close(); }
+});
+
+test("authenticated schema refusals retain the latest diagnostic without accepting a report", async () => {
+  const f = await fixture("report-schema-rejected");
+  try {
+    await assert.rejects(() => f.send({ ...f.report, evidence: [{ ...f.report.evidence[0], offset: -1, max_bytes: 1 }] }), /less than 0/);
+    assert.match(readMeta(f.id).assignmentReportRejection.reason, /offset.*less than 0/);
+    await assert.rejects(() => f.send({ ...f.report, evidence: [{ ...f.report.evidence[0], max_bytes: 65537 }] }), /greater than 65536/);
+    assert.match(readMeta(f.id).assignmentReportRejection.reason, /max_bytes.*greater than 65536/);
+    assert.equal(readMeta(f.id).assignmentReport, undefined);
+    const terminal = { ...readMeta(f.id), status: "completed", exitCode: 0 };
+    writeMeta(terminal);
+    assert.match(commitAssignmentTerminal(terminal).reason, /Assignment report rejected:.*max_bytes/);
+    const rejection = readMeta(f.id).assignmentReportRejection;
+    await assert.rejects(() => f.send({ ...f.report, evidence: [] }), /authoritative/);
+    assert.deepEqual(readMeta(f.id).assignmentReportRejection, rejection);
+  } finally { await f.close(); }
+});
+
+test("unavailable current permission evidence is retained and can be corrected without widening access", async () => {
+  const f = await fixture("report-policy-rejected");
+  let projectFiles = "invalid";
+  f.pi.events.on("pi-better-sandbox:policy-request", () => f.pi.events.emit("pi-better-sandbox:policy", {
+    state: "enabled", permissions: { enabled: true, projectFiles, outsideProject: "off", storedCredentials: "off", commands: true, network: false },
+  }));
+  try {
+    await assert.rejects(() => f.send(), /Invalid/);
+    assert.match(readMeta(f.id).assignmentReportRejection.reason, /Invalid/);
+    assert.equal(readMeta(f.id).assignmentReport, undefined);
+    projectFiles = "read";
+    await f.send();
+    assert.equal(readMeta(f.id).assignmentReportRejection, undefined);
+  } finally { await f.close(); }
+});
+
+test("maximum incomplete detail stays within the terminal reason bound and retains full detail", async () => {
+  const f = await fixture("report-incomplete-bound");
+  try {
+    const remaining = Array.from({ length: 8 }, (_, i) => `${i}:${"x".repeat(1022)}`);
+    await f.send({ ...f.report, status: "incomplete", reason: "r".repeat(2048), remaining_work: remaining,
+      blocker: { kind: "external-input", reason: "b".repeat(1024) } });
+    const terminal = { ...readMeta(f.id), status: "completed", exitCode: 0 };
+    writeMeta(terminal);
+    const outcome = commitAssignmentTerminal(terminal);
+    assert.equal(outcome.outcome, "failed");
+    assert.equal(outcome.reason.length, 8192);
+    assert.deepEqual(readAssignmentReport(terminal).remainingWork, remaining);
+  } finally { await f.close(); }
+});
+
+test("contradictory completion can be corrected before commitment and full-size excerpts stay bounded", async () => {
+  const f = await fixture("report-contradictory-completion");
+  try {
+    await assert.rejects(() => f.send({ ...f.report, remaining_work: ["Still needs validation"] }), /complete.*remaining work/);
+    await assert.rejects(() => f.send({ ...f.report, blocker: { kind: "permission", reason: "Access denied" } }), /complete.*blocker/);
+    writeFileSync(join(f.workspace, "large"), Buffer.alloc(106732, "y"));
+    await f.send({ ...f.report, evidence: [{ path: "large", explanation: "Bounded source excerpt", max_bytes: 65536 }] });
+    const report = readAssignmentReport(readMeta(f.id));
+    assert.equal(readFileSync(report.evidence[0].path).length, 65536);
+    assert.equal(readMeta(f.id).assignmentReportRejection, undefined);
+    const accepted = readMeta(f.id).assignmentReport;
+    await assert.rejects(() => f.send(), /Conflicting/);
+    assert.deepEqual(readMeta(f.id).assignmentReport, accepted);
+    assert.equal(readMeta(f.id).assignmentReportRejection, undefined);
+  } finally { await f.close(); }
+});
+
 test("a superseded conversation writer lease cannot publish an assignment report", async () => {
   const f = await fixture("report-stale-lease", { writerLeaseId: "superseded-lease" });
   try {
