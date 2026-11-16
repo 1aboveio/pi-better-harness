@@ -1,0 +1,12 @@
+✔ workload transport uses the explicit direct owned directory without a nested suffix (2.522125ms)
+✔ workload transport preserves default selection and enforces socket bytes at the exact boundary (0.415292ms)
+✔ incremental qualification rejects short windows and invalid workload identities (0.42375ms)
+✔ seeded native workload has exact durable history, group logs and expected result bytes (473.149958ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 580.566291

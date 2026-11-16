@@ -1,0 +1,12 @@
+Full runtime report: /Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/docs/evidence/issue-808/transport-r3/native-report.json
+/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/src/startup/admission.ts:23
+function refuse(reason: string): never { throw new Error(`Startup admission: ${reason}`); }
+                                               ^
+
+Error: Startup admission: startup intent has no activation journal
+    at refuse (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/src/startup/admission.ts:23:48)
+    at check (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/src/startup/admission.ts:63:37)
+    at checkStartupAdmission (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/src/startup/admission.ts:46:9)
+    at <anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/scripts/measure-full-runtime.mjs:51:3)
+
+Node.js v24.21.0

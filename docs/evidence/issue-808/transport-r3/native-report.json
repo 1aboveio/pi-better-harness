@@ -1,0 +1,37 @@
+{
+  "root": "/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p751-full-mEpCcJ",
+  "transport": "/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/s",
+  "socketPath": "/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/s/pi-server.sock",
+  "socketBytes": 101,
+  "mode": "mixed-adapter-smoke-not-performance",
+  "platform": "darwin",
+  "node": "v24.21.0",
+  "machine": {
+    "release": "24.6.0",
+    "arch": "arm64",
+    "cpus": 16,
+    "cpuModel": "Apple M3 Max",
+    "totalMemory": 137438953472
+  },
+  "source": {
+    "head": "178d133a9ce4a03d78bb665f69eebc3a4a3fdc7f",
+    "dirty": "?? .private-808/",
+    "kind": "git-checkout",
+    "manifest": {
+      "algorithm": "sha256",
+      "scope": "packages and scripts excluding node_modules/dist/coverage, plus root package manifests",
+      "files": 2081,
+      "sha256": "c5dbd0ab125bac0458688e1146bcf017ad0196f8e57af5886ae241956e063ddc"
+    }
+  },
+  "scope": "Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two real RemoteClientSession adapters over loopback Unix transport with HostedSessions (not cross-machine SSH); sampler overhead included",
+  "scenarios": [],
+  "phase": "startup-admission-preflight",
+  "startup": {
+    "intent": "activation",
+    "inheritedGuardedChild": true,
+    "inheritedRebind": false
+  },
+  "failure": "Error: Startup admission: startup intent has no activation journal",
+  "errors": ""
+}

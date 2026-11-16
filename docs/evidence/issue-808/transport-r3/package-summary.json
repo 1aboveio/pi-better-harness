@@ -1,0 +1,11 @@
+{
+  "name": "pi-better-server",
+  "version": "0.5.0",
+  "dryRun": true,
+  "fileCount": 726,
+  "requiredFilesPresent": [
+    "scripts/measure-full-runtime/incremental-workload.mjs",
+    "scripts/measure-full-runtime/incremental-workload.d.mts",
+    "scripts/measure-full-runtime/acceptance-map.json"
+  ]
+}

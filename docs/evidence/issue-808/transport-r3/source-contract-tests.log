@@ -1,0 +1,12 @@
+✔ an exact task hint fences a genuinely changed source before publication and retries (1053.532917ms)
+✔ a malformed replacement discards unpublished staging without blocking its sibling (57.868375ms)
+✔ captured coordinator snapshot fences concurrent-commits (2336.204959ms)
+✔ captured coordinator snapshot fences replacement (1683.002959ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4183.718167

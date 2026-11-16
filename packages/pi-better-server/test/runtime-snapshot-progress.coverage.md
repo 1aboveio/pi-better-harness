@@ -45,3 +45,18 @@ native fixture refused its registered transport path on macOS: 135 bytes exceeds
 the 103-byte Unix socket limit. No shorter path, alias, runtime or admission retry
 was attempted. A coordinator-approved shorter transport resource is needed.
 There is no native performance result or paired ten-minute comparison yet.
+
+## Owned Transport Checkpoint
+
+`Decision808-owned-short-transport` (plan revision 244) supplies an existing owned
+short directory. `PI_FULL_RUNTIME_TRANSPORT_DIR` selects that directory directly;
+bulk temporary data remains under `TMPDIR`. Component checks cover exact 103/104
+byte socket boundaries, UTF-8 bytes, default selection, explicit canonical ownership
+and invalid paths. The fixture does not delete the supplied transport directory.
+
+The primary r3 attempt used the approved `units/808/s/pi-server.sock` at 101 bytes.
+The existing admission preflight then refused the inherited activation intent:
+`Startup admission: startup intent has no activation journal`. The fixture did
+not spawn a guardian or Server and did not retry. The separate previously refused
+daemon test was not rerun. Native evidence is retained outside disposable caches
+in `docs/evidence/issue-808/transport-r3/native-report.json`.

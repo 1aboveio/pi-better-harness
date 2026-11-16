@@ -2,7 +2,8 @@
   "issue": 808,
   "baseline": "eec7b3e256a7548bbf67f69cd468f12eb3b91dc8",
   "cwd": "repository root",
-  "environment": ["TMPDIR=<owned .private-808/tmp>", "npm_config_cache=<owned .private-808/npm-cache>"],
+  "environment": ["TMPDIR=<owned .private-808/tmp>", "npm_config_cache=<owned .private-808/npm-cache>", "PI_FULL_RUNTIME_TRANSPORT_DIR=<approved existing canonical owned short directory>", "PI_FULL_RUNTIME_REPORT=<unique retained evidence path outside disposable caches>"],
+  "transport": "The explicit directory owns pi-server.sock directly, with no random nested suffix. The 103-byte guard and existing startup admission remain mandatory. Bulk data stays in TMPDIR. An admission refusal is not retried through another runtime, authority, path or settings.",
   "nativeLanes": ["macOS actual processes/SQLite/socket", "Linux actual processes/SQLite/socket"],
   "qualification": "notRun; these commands are checkpoints, not acceptance verdicts",
   "criteria": [
