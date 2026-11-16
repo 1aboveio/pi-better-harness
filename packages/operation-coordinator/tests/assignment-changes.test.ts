@@ -149,3 +149,28 @@ test("exact assignment wait observations use the compound source index", () => {
         assert.match(plan.map(row => row.detail).join("\n"), /USING INDEX waits_assignment_observation/);
     } finally { source.close(); h.closeStore(); }
 });
+
+test("attached inbox shares the derived handle, keeps receive atomic and survives detach/reopen", () => {
+    const h = createHarness(), source = new DatabaseSync(h.path), derived = new DatabaseSync(":memory:");
+    let inbox = new AssignmentInbox(h.path + ".derived", derived);
+    try {
+        assert.equal(inbox.db, derived);
+        derived.exec("CREATE TABLE query_owner(value TEXT); INSERT INTO query_owner VALUES('retained')");
+        assert.ok(derived.prepare("PRAGMA database_list").all().some(row => row.name === "assignment_inbox"));
+        inbox.acknowledge(inbox.receive(source, "one"), true);
+        h.store.registerAssignment({ assignmentId: "attached", owner: workerOwner, recipient: parentOwner });
+        derived.exec("CREATE TRIGGER assignment_inbox.reject_pending BEFORE INSERT ON pending BEGIN SELECT RAISE(ABORT,'injected attached receive failure'); END");
+        assert.throws(() => inbox.receive(source, "one"), /injected attached receive failure/);
+        assert.equal(inbox.metrics.received, 0);
+        assert.equal(inbox.metrics.pending, 0);
+        derived.exec("DROP TRIGGER assignment_inbox.reject_pending");
+        assert.equal(inbox.receive(source, "one").size, 1);
+        inbox.close();
+        assert.equal(derived.prepare("SELECT value FROM query_owner").get()!.value, "retained", "inbox does not close the query owner's handle");
+        inbox = new AssignmentInbox(h.path + ".derived", derived);
+        const pending = inbox.receive(source, "one");
+        assert.equal(pending.size, 1);
+        inbox.acknowledge(pending, true);
+        assert.equal(inbox.metrics.applied, inbox.metrics.received);
+    } finally { inbox.close(); derived.close(); source.close(); h.closeStore(); }
+});

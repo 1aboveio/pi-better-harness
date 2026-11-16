@@ -115,7 +115,7 @@ export class WorkReadModel {
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, unverified: 0, initial: 0 };
   get metrics() {
     return { ...this.counters, assignments: this.reader.changeMetrics, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
-      indexConnections: this.closed ? 0 : 2, sourceWatchers: this.watchers.size };
+      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size };
   }
   readonly runs: string;
   readonly archives: string;
@@ -128,7 +128,7 @@ export class WorkReadModel {
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
     mkdirSync(join(agentDir, "runtime-read-repair"), { recursive: true });
-    this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"), join(agentDir, "runtime-read-repair", "assignments.sqlite"));
+    this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"), join(agentDir, "runtime-read-repair", "assignments.sqlite"), this.db);
     this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(true), refresh => this.reader.connection(refresh));
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
       started REAL, state TEXT, active INTEGER, ended REAL, recipient_pending INTEGER, payload TEXT);
