@@ -311,6 +311,7 @@ export default function (pi: ExtensionAPI): void {
   const providers = new Map<string, BackgroundActivityProvider>();
   const providerUnsubscribers = new Map<string, () => void>();
   const providerCache = new Map<string, BackgroundProviderSnapshot>();
+  const providerCacheSequences = new Map<string, number>();
   const dirtyProviders = new Set<string>();
   const providerBindings = new Map<string, number>();
   const compatibilityReadAt = new Map<string, number>();
@@ -687,12 +688,17 @@ export default function (pi: ExtensionAPI): void {
             !(typeof cached.nextDeadline === "number" && cached.nextDeadline <= Date.now())) return cached;
         dirtyProviders.delete(provider.id);
         const value = await provider.getActivity(ctx);
-        if (!provider.onActivityChanged) compatibilityReadAt.set(provider.id, Date.now() + POLL_INTERVAL_MS);
         if (provider.activityVersion === 1 && value.nextDeadline !== null &&
             (typeof value.nextDeadline !== "number" || !Number.isFinite(value.nextDeadline))) {
           throw new Error(`${provider.id}: activity v1 requires an explicit nextDeadline`);
         }
-        if (execution === executionGeneration) providerCache.set(provider.id, value);
+        // Explicit inspections may finish before an older notification read.
+        if (execution === executionGeneration && providers.get(provider.id) === provider &&
+            sequence >= (providerCacheSequences.get(provider.id) ?? 0)) {
+          providerCacheSequences.set(provider.id, sequence);
+          providerCache.set(provider.id, value);
+          if (!provider.onActivityChanged) compatibilityReadAt.set(provider.id, Date.now() + POLL_INTERVAL_MS);
+        }
         return value;
       },
     })), foregroundRunning);
@@ -963,6 +969,7 @@ export default function (pi: ExtensionAPI): void {
     providerUnsubscribers.delete(accepted.id);
     providers.set(accepted.id, accepted);
     providerCache.delete(accepted.id);
+    providerCacheSequences.set(accepted.id, ++snapshotSequence);
     dirtyProviders.add(accepted.id);
     providerBindings.delete(accepted.id);
     bindProviderSubscriptions();

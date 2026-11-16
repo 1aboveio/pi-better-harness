@@ -6,6 +6,76 @@ import extension from "./extension-fixture.js";
 import type { ActivitySnapshot } from "../src/types.js";
 import { currentGoalSnapshot, continuationStateEntry, createContinuationState } from "../src/goal-state.js";
 
+for (const inspection of ["command", "tool", "registration", "replacement"]) {
+  test(`Goal keeps newer provider cache after overlapping ${inspection}`, async t => {
+    t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 100_000 });
+    const registering = inspection === "registration" || inspection === "replacement";
+    const events = new EventEmitter(), handlers = new Map<string, any>();
+    const commands = new Map<string, any>(), tools = new Map<string, any>();
+    const entries: any[] = [], messages: any[] = [], snapshots: ActivitySnapshot[] = [];
+    const ctx = { hasUI: false, cwd: "/owner", isIdle: () => true,
+      sessionManager: { getSessionId: () => "owner", getBranch: () => entries },
+      ui: { notify() {}, setWidget() {} } } as unknown as ExtensionContext;
+    extension({ events, on: (key: string, handler: any) => handlers.set(key, handler),
+      registerCommand: (key: string, command: any) => commands.set(key, command),
+      registerTool: (tool: any) => tools.set(tool.name, tool),
+      appendEntry: (customType: string, data: any) => entries.push({ type: "custom", customType, data }),
+      sendMessage: (message: any) => messages.push(message),
+    } as unknown as ExtensionAPI);
+    const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+    let notify = () => {}, running = true, defer = false, reads = 0;
+    let resolveOld!: (value: any) => void;
+    const provider = { id: "subagents", activityVersion: 1,
+      onActivityChanged: (changed: () => void) => { notify = changed; return () => {}; },
+      getActivity: () => {
+        reads++;
+        const value = { providerId: "subagents", nextDeadline: registering && running ? 100_001 : null,
+          items: [{ id: "worker", status: running ? "running" : "completed", active: running, terminal: !running }] };
+        return defer ? new Promise(resolve => { resolveOld = resolve; }) : value;
+      },
+    };
+    events.on("pi-better-goal:activity", value => snapshots.push(value));
+    events.emit("pi-better-goal:register-provider", provider);
+    await handlers.get("session_start")({}, ctx);
+    await commands.get("goal").handler("finish", ctx);
+    await handlers.get("agent_start")({}, ctx);
+    await handlers.get("agent_settled")({}, ctx);
+    t.after(() => handlers.get("session_shutdown")({}, ctx));
+    defer = true;
+    let oldInspection: Promise<void> | undefined;
+    if (registering) {
+      // Expire the cache without firing timers, then start an explicit read.
+      t.mock.timers.setTime(100_001);
+      oldInspection = commands.get("better-activity").handler("", ctx);
+    } else notify(); // A captures running, then waits while the task completes.
+    assert.equal(typeof resolveOld, "function");
+    defer = false;
+    running = false;
+    notify();
+    if (registering) {
+      // Re-registering even the same object invalidates its in-flight reads.
+      events.emit("pi-better-goal:register-provider", inspection === "replacement" ? { ...provider } : provider);
+      await flush();
+    } else if (inspection === "command") await commands.get("better-activity").handler("", ctx);
+    else await tools.get("get_background_activity").execute("inspect", {}, undefined, undefined, ctx);
+    if (inspection !== "registration") assert.equal(snapshots.at(-1)?.backgroundRunning, false);
+    resolveOld({ providerId: "subagents", nextDeadline: null,
+      items: [{ id: "worker", status: "running", active: true }] });
+    await oldInspection;
+    await flush();
+    if (registering) await commands.get("better-activity").handler("", ctx);
+    assert.equal(snapshots.at(-1)?.backgroundRunning, false, "pending pass must not reuse the older running result");
+    const settledReads = reads, beforeWake = messages.length;
+    t.mock.timers.tick(60_000);
+    await flush();
+    assert.equal(messages.length, beforeWake + 1, "completion still drains exactly once");
+    t.mock.timers.tick(60_000);
+    await flush();
+    assert.equal(messages.length, beforeWake + 1);
+    assert.equal(reads, settledReads, "null-deadline cache stays warm after completion");
+  });
+}
+
 for (const transition of ["pause", "resume", "hold", "complete", "clear", "session_tree", "agent_start", "session_shutdown"]) {
   test(`Goal fences activity callbacks and deadlines across ${transition}`, async t => {
     t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 100_000 });
