@@ -1,8 +1,8 @@
 /**
  * Filesystem catalog: project, personal, and bundled sources.
  *
- * Discovery is deterministic and reads the disk on every call. There is no
- * launch cache. Callers that launch a batch must retain the returned snapshot
+ * Discovery is deterministic. Direct callers read disk on every call; the server
+ * can supply bounded source reuse after admission. Callers launching a batch retain the snapshot
  * and reuse that object for every job.
  *
  * Project files are read only when `projectTrusted` is true. Pass Pi's
@@ -51,6 +51,13 @@ export const DEFAULT_PROJECT_CONFIG_DIR_NAME = ".pi";
 export const SOURCE_PRECEDENCE = ["project", "user", "bundled"] as const;
 
 export interface LoadCatalogInput {
+    /** Server-owned, bounded source reuse. Admission and discovery still run first. */
+    sources?: {
+        read(path: string): string;
+        parse(raw: string, path: string): ParseResult;
+        entry?(entry: CatalogEntry): CatalogEntry;
+        preferences?(root: string): ReturnType<typeof readCatalogPreferences>;
+    };
     cwd: string;
     /** Host trust decision. Untrusted projects do not contribute definitions. */
     projectTrusted: boolean;
@@ -195,13 +202,13 @@ export function listScopedAgents(input: LoadCatalogInput, scope: "user" | "proje
     if (!isSafeConfigDirName(config)) throw new Error("Unsafe project config directory");
     const directory = scope === "project" ? projectCatalogPaths(input.cwd, config).agents : userCatalogPaths(input.userRoot).agents;
     const occurrences = new Map<string, Occurrence[]>();
-    collectDirectory(directory, scope, "agent", occurrences, diagnostics);
+    collectDirectory(directory, scope, "agent", occurrences, diagnostics, input.sources);
     const agents = [...occurrences.values()].flat().flatMap(item => item.parse.definition?.kind === "agent"
         ? [{ path: item.path, definition: item.parse.definition }] : []);
     return { agents, diagnostics };
 }
 
-/** Read every source again. Identical bytes produce the same digest and a new object. */
+/** Discover authorized sources. Identical bytes produce the same content digest. */
 export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
     const loadedAt = new Date().toISOString();
     const diagnostics: Diagnostic[] = [];
@@ -219,8 +226,8 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
 
     if (input.projectTrusted) {
         const project = projectCatalogPaths(input.cwd, configDirName);
-        collectDirectory(project.roles, "project", "role", groups.get("project")!, diagnostics);
-        collectDirectory(project.agents, "project", "agent", groups.get("project")!, diagnostics);
+        collectDirectory(project.roles, "project", "role", groups.get("project")!, diagnostics, input.sources);
+        collectDirectory(project.agents, "project", "agent", groups.get("project")!, diagnostics, input.sources);
     } else {
         const project = projectCatalogPaths(input.cwd, configDirName);
         if (pathExists(project.roles) || pathExists(project.agents) || pathExists(project.root)) {
@@ -233,8 +240,8 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
     }
 
     const user = userCatalogPaths(input.userRoot);
-    collectDirectory(user.roles, "user", "role", groups.get("user")!, diagnostics);
-    collectDirectory(user.agents, "user", "agent", groups.get("user")!, diagnostics);
+    collectDirectory(user.roles, "user", "role", groups.get("user")!, diagnostics, input.sources);
+    collectDirectory(user.agents, "user", "agent", groups.get("user")!, diagnostics, input.sources);
 
     const bundledRoles = input.bundledRoot ?? bundledRolesRoot();
     if (!existsSync(bundledRoles)) {
@@ -246,24 +253,22 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
             severity: "warning",
         }));
     } else {
-        collectDirectory(bundledRoles, "bundled", "role", groups.get("bundled")!, diagnostics);
+        collectDirectory(bundledRoles, "bundled", "role", groups.get("bundled")!, diagnostics, input.sources);
     }
     if (input.bundledAgentsRoot) {
-        collectDirectory(input.bundledAgentsRoot, "bundled", "agent", groups.get("bundled")!, diagnostics);
+        collectDirectory(input.bundledAgentsRoot, "bundled", "agent", groups.get("bundled")!, diagnostics, input.sources);
     }
 
     const { entries, blocked } = selectIdentities(groups, diagnostics);
     const savedSettings: Record<string, { model?: string | null; effort?: ThinkingLevel | null }> = {};
     const preferenceSources: Record<string, Partial<Record<"model" | "effort", { scope: "user" | "project"; path: string; bundled?: boolean }>>> = {};
-    const preferenceDigests: string[] = [];
     const scopes = [
         { scope: "user" as const, root: user.root },
         ...(input.projectTrusted ? [{ scope: "project" as const, root: projectCatalogPaths(input.cwd, configDirName).root }] : []),
     ];
     for (const { scope, root } of scopes) {
         try {
-            const preferences = readCatalogPreferences(root);
-            preferenceDigests.push(preferences.digest);
+            const preferences = input.sources?.preferences?.(root) ?? readCatalogPreferences(root);
             for (const entry of entries) {
                 if (scope === "user" && entry.scope === "project") continue;
                 const own = preferences.settings[entry.id];
@@ -272,8 +277,8 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
                 if (own.bundled) {
                     const fallbacks = entry.scope === "bundled" ? [entry] : entry.unused.filter(source => source.scope === "bundled");
                     const fallback = fallbacks.length === 1 ? fallbacks[0] : undefined;
-                    const raw = fallback ? readFileSync(fallback.path, "utf8") : undefined;
-                    const parsed = raw === undefined ? undefined : parseDefinition(raw, fallback!.path);
+                    const raw = fallback ? (input.sources?.read(fallback.path) ?? readFileSync(fallback.path, "utf8")) : undefined;
+                    const parsed = raw === undefined ? undefined : (input.sources?.parse(raw, fallback!.path) ?? parseDefinition(raw, fallback!.path));
                     if (!fallback || !parsed?.ok || parsed.definition?.id !== entry.id || parsed.diagnostics.some(item => item.blocking)
                         || contentDigest(raw!) !== fallback.contentDigest) {
                         const failure = diagnostic("catalog-preferences", `Cannot inherit bundled runtime defaults for ${entry.id}: a single valid bundled definition is required.`, {
@@ -309,8 +314,8 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
             }
         }
     }
-    const snapshot = finishSnapshot(entries, blocked, diagnostics, loadedAt);
-    const digest = contentDigest(JSON.stringify([snapshot.digest, preferenceDigests, savedSettings, preferenceSources]));
+    const snapshot = finishSnapshot(entries, blocked, diagnostics, loadedAt, input.sources);
+    const digest = contentDigest(JSON.stringify([snapshot.digest, savedSettings, preferenceSources]));
     return deepFreeze({ ...snapshot, digest, revision: digest, savedSettings, preferenceSources });
 }
 
@@ -526,6 +531,7 @@ function collectDirectory(
     directoryKind: CatalogKind,
     into: Map<string, Occurrence[]>,
     diagnostics: Diagnostic[],
+    sources?: LoadCatalogInput["sources"],
 ): void {
     let stats;
     try {
@@ -602,7 +608,7 @@ function collectDirectory(
         if (!fileStats.isFile()) continue;
         let raw: string;
         try {
-            raw = readFileSync(path, "utf8");
+            raw = sources?.read(path) ?? readFileSync(path, "utf8");
         } catch (error) {
             diagnostics.push(diagnostic(DiagnosticCodes.ioError, `Could not read ${path}: ${(error as Error).message}`, {
                 scope,
@@ -614,7 +620,7 @@ function collectDirectory(
         }
         let parse: ParseResult;
         try {
-            parse = parseDefinition(raw, path);
+            parse = sources?.parse(raw, path) ?? parseDefinition(raw, path);
         } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             diagnostics.push(diagnostic(
@@ -765,11 +771,12 @@ function finishSnapshot(
     blocked: CatalogEntry[],
     diagnostics: Diagnostic[],
     loadedAt: string,
+    sources?: LoadCatalogInput["sources"],
 ): CatalogSnapshot {
     const roleEntries: Array<readonly [string, CatalogEntry]> = [];
     const agentEntries: Array<readonly [string, CatalogEntry]> = [];
     for (const entry of entries) {
-        const frozen = deepFreeze(cloneEntry(entry));
+        const frozen = sources?.entry?.(entry) ?? deepFreeze(cloneEntry(entry));
         if (frozen.kind === "role") roleEntries.push([frozen.id, frozen]);
         else agentEntries.push([frozen.id, frozen]);
     }

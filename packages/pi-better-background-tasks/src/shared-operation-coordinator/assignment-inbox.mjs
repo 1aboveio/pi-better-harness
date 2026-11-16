@@ -24,8 +24,12 @@ export class AssignmentInbox {
             CREATE TABLE IF NOT EXISTS ${this.prefix}pending (
                 scope TEXT PRIMARY KEY, seq INTEGER NOT NULL, first_seq INTEGER NOT NULL, since INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS ${this.prefix}applied_scopes (scope TEXT PRIMARY KEY, seq INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS ${this.prefix}diagnostics (repairs INTEGER NOT NULL);
-            INSERT INTO ${this.prefix}diagnostics SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM ${this.prefix}diagnostics);`);
+            CREATE TABLE IF NOT EXISTS ${this.prefix}diagnostics (repairs INTEGER NOT NULL);`);
+        // Reopening an initialized inbox must not reserve every attached file
+        // merely to execute an INSERT whose SELECT would produce no rows.
+        if (!this.db.prepare(`SELECT 1 FROM ${this.prefix}diagnostics LIMIT 1`).get()) {
+            this.db.exec(`INSERT INTO ${this.prefix}diagnostics SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM ${this.prefix}diagnostics)`);
+        }
     }
 
     receive(source, identity) {

@@ -5,11 +5,11 @@ import { WorkClient } from '../src/runtime/work-client.mjs';
 
 // A duplex peer keeps the exact client framing and request deadlines while
 // controlling when the replacement worker can accept subscriptions.
-function fixture() {
+function fixture(Client = WorkClient) {
   const socket: any = new PassThrough();
   const requests: any[] = [];
   socket.write = (line: string) => { requests.push(JSON.parse(line)); return true; };
-  const client = new WorkClient(socket, '/agent');
+  const client = new Client(socket, '/agent');
   const reply = (request: any, data: any, error?: string) => socket.emit('data', JSON.stringify({id:request.id,success:!error,data,error})+'\n');
   reply(requests[0], {});
   const event = () => socket.emit('data', JSON.stringify({type:'event',event:{type:'resync_required',reason:'read-worker-recovered'}})+'\n');
@@ -22,8 +22,12 @@ async function until(predicate: () => boolean) {
 }
 const snapshot = (epoch: string) => ({instanceId:epoch,seq:1,status:'ready',rows:[]});
 
-test('client retries a replacement subscription after a startup deadline', async () => {
-  const f=fixture();
+for (const [name, path] of Object.entries({ canonical: '../src/runtime/work-client.mjs',
+  subagent: '../../pi-better-subagents/shared-work-client.mjs', background: '../../pi-better-background-tasks/src/shared-work-client.mjs',
+  embeddedSubagent: '../src/runtime/domain/subagents/shared-work-client.mjs', embeddedBackground: '../src/runtime/domain/background-service/shared-work-client.mjs' })) {
+test(`${name} client retries a replacement subscription after a startup deadline`, async () => {
+  const { WorkClient: Client }: { WorkClient: typeof WorkClient } = await import(path);
+  const f=fixture(Client);
   try {
     const initial=f.client.subscribe({cwd:'/project'});
     await until(()=>f.requests.length>=2);f.reply(f.requests[1],snapshot('old'));await initial;
@@ -36,6 +40,7 @@ test('client retries a replacement subscription after a startup deadline', async
     assert.equal(f.client.snapshot?.status,'ready');
   } finally {f.client.close();}
 });
+}
 
 test('closing cancels a pending recovery retry', async () => {
   const f=fixture();await f.client.ready;

@@ -1,4 +1,17 @@
 import { parentPort } from "node:worker_threads";
+// The fixture imports the model before the production worker can own control
+// messages. Keep that async bootstrap responsive without claiming source readiness.
+let bootstrapHeartbeatPending = false;
+const acknowledgeBootstrap = message => {
+  if (message.type === "heartbeat-consumed") bootstrapHeartbeatPending = false;
+};
+parentPort.on("message", acknowledgeBootstrap);
+const bootstrapHeartbeat = setInterval(() => {
+  if (bootstrapHeartbeatPending) return;
+  bootstrapHeartbeatPending = true;
+  parentPort.postMessage({ type: "heartbeat" });
+}, 250);
+bootstrapHeartbeat.unref();
 if (Number(process.versions.node.split(".")[0]) < 24) {
   const { register } = await import("tsx/esm/api");
   register();
@@ -28,4 +41,7 @@ parentPort.on("message", message => {
   }
 });
 await import("../../src/runtime/query-worker.mjs");
+clearInterval(bootstrapHeartbeat);
+parentPort.off("message", acknowledgeBootstrap);
+parentPort.postMessage({ type: "fixture-ready" });
 parentPort.postMessage({ type: "inventory-blocked" });

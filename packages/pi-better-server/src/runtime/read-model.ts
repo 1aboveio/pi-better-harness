@@ -11,11 +11,12 @@ import { performance } from "node:perf_hooks";
 import { createAssignmentProjector } from "./domain/assignment-projection.mjs";
 import { createAssignmentReader } from "./domain/assignment-observation.mjs";
 import { parseArchivedAttempt, parseArchivedSessionState } from "./domain/session-store.mjs";
-import { parseRun, parseRunDisplay, readRunTranscript } from "./domain/parse.mjs";
+import { parseRun, parseRunDisplay, readRunTranscript, encodeParseLogState, decodeParseLogState } from "./domain/parse.mjs";
 import { withLogReadBatch, logReadMetrics } from "./domain/log-cursor.mjs";
 import { fmtSpend } from "./domain/widget.mjs";
 import { effectiveStatus } from "./domain/process-status.mjs";
-import { extractChildEventFactsFromLog, healthThresholdsForConfig } from "./domain/health-observation.mjs";
+import { extractChildEventFactsFromLog, healthThresholdsForConfig, encodeHealthLogState, decodeHealthLogState } from "./domain/health-observation.mjs";
+import { LogCheckpoints } from "./log-checkpoints.ts";
 import { BackgroundObservation } from "./background.ts";
 import { workPage } from "./work-budget.ts";
 // @ts-expect-error Generated canonical read-only failure projection.
@@ -71,10 +72,11 @@ export class WorkReadModel {
   private db: any;
   private reader: ReturnType<typeof createAssignmentReader>;
   private files = new Map<string, { signature: string; meta: any }>();
-  private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string }; health?: any; recipientPending?: boolean; failurePending?: boolean }>();
+  private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string; diagnostics?: string[]; coverage?: any }; health?: any; recipientPending?: boolean; failurePending?: boolean }>();
   private logs = new Map<string, string>();
   private parseStates = new Map();
   private healthStates = new Map();
+  private checkpoints: LogCheckpoints;
   private failureJournals = new Map<string, string>();
   private processes = new Map<string, string>();
   private staged?: {
@@ -99,6 +101,7 @@ export class WorkReadModel {
   private repairWrite: Promise<void> = Promise.resolve();
   private repairPersistencePending = false;
   private sourceErrors = new Map<string, string>();
+  private sourceRace?: { reason: string; paths: Set<string>; rows: any[] };
   private sourceStats = 0;
   private sourceWork = { entity: { batches: 0, paths: 0, stats: 0, metadataReads: 0, logBytes: 0, logReads: 0 }, repair: { batches: 0, paths: 0, stats: 0, metadataReads: 0, logBytes: 0, logReads: 0 } };
   private scheduling = { entityBatches: 0, repairBatches: 0, repairEntries: 0, overflows: 0, maxQueueAgeMs: 0, maxPublicationMs: 0 };
@@ -109,7 +112,7 @@ export class WorkReadModel {
   private assignmentFault?: { state: WorkSnapshot["status"]; reason?: string };
   private revision = 0;
   private scopeSequence = 0;
-  private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number }>();
+  private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number; status: string }>();
   private changedRows: Array<{ before?: any; after?: any }> = [];
   private foldQueueSequence = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
@@ -117,7 +120,7 @@ export class WorkReadModel {
   private counters = { inventories: 0, metadataReads: 0, projections: 0, assignmentProjections: 0, logProjections: 0, healthProjections: 0, failureProjections: 0, healthRecomputations: 0, healthConfigInvalidations: 0 };
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, healthDeadline: 0, unverified: 0, initial: 0 };
   get metrics() {
-    return { ...this.counters, assignments: this.reader.changeMetrics, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
+    return { ...this.counters, assignments: this.reader.changeMetrics, checkpoints: { ...this.checkpoints.metrics, hotDisplay: this.parseStates.size, hotHealth: this.healthStates.size }, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
       indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size, sourceParentWatchers: this.rootParents.size, rootParentWatchers: this.rootParents.size };
   }
   readonly runs: string;
@@ -130,6 +133,7 @@ export class WorkReadModel {
     this.agentDir = agentDir; this.instanceId = instanceId;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
+    this.checkpoints = new LogCheckpoints(join(agentDir, "runtime-log-checkpoints.sqlite"), this.db);
     mkdirSync(join(agentDir, "runtime-read-repair"), { recursive: true });
     this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"), join(agentDir, "runtime-read-repair", "assignments.sqlite"), this.db);
     this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(true), refresh => this.reader.connection(refresh));
@@ -345,7 +349,7 @@ export class WorkReadModel {
     if (!entry) {
       if (scope.cursor) throw new Error("resync_required: cursor retention expired");
       if (this.scopes.size >= 128) this.scopes.delete(this.scopes.keys().next().value!);
-      entry = { scope: { ...scope, cursor: undefined }, token: ++this.scopeSequence, revision: 0, used: now };
+      entry = { scope: { ...scope, cursor: undefined }, token: ++this.scopeSequence, revision: 0, used: now, status: hash(this.scopeStatus(scope)) };
       this.scopes.set(key, entry);
     }
     entry.used = now;
@@ -377,9 +381,11 @@ export class WorkReadModel {
     this.revision++;
     for (const entry of this.scopes.values()) {
       if (backgroundOnly) continue;
-      if (!this.changedRows.length || this.changedRows.some(({ before, after }) =>
+      const status = hash(this.scopeStatus(entry.scope));
+      if (entry.status !== status || this.changedRows.some(({ before, after }) =>
         this.matchesScope(entry.scope, before) || this.matchesScope(entry.scope, after)
         || this.matchesScope(entry.scope, before, true) !== this.matchesScope(entry.scope, after, true))) entry.revision++;
+      entry.status = status;
     }
     this.changedRows = [];
     for (const listener of this.listeners) listener();
@@ -464,6 +470,18 @@ export class WorkReadModel {
     } finally { release?.(); }
   }
 
+  private scopeStatus(scope: WorkScope): { status: WorkSnapshot["status"]; reason?: string } {
+    const race = this.sourceRace;
+    // Only a validated, entity-attributed retry can leave another scope ready.
+    // Root, coordinator, malformed-input and initial-import failures stay global.
+    if (this.imported && this.state === "degraded" && race && this.reason === race.reason
+        && [...this.sourceErrors.keys()].every(path => race.paths.has(path))
+        && !race.rows.some(row => this.matchesScope({ id: scope.id, cwd: scope.cwd, sessionId: scope.sessionId }, row))) {
+      return { status: "ready" };
+    }
+    return { status: this.state, reason: this.reason };
+  }
+
   reconcile(drain = true): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.pending) {
@@ -530,6 +548,7 @@ export class WorkReadModel {
     const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
     let releaseCoordinator: (() => void) | undefined;
+    let sourceRace: WorkReadModel["sourceRace"];
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
       healthRevision: this.healthRevision, coordinator: this.coordinator };
     try {
@@ -769,9 +788,33 @@ export class WorkReadModel {
           if (logChanged) withLogReadBatch(() => {
             this.counters.logProjections++; this.counters.healthProjections++;
             const logPath = join(this.runs, meta.id, "output.log");
-            const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRunDisplay(meta.id, { logPath, states: this.parseStates }) : undefined;
+            if (!this.parseStates.has(logPath) || !this.healthStates.has(logPath)) {
+              const saved = this.checkpoints.load(logPath);
+              if (saved) {
+                try {
+                  if (!Number.isSafeInteger(saved.display.cursor.offset) || !Number.isSafeInteger(saved.health.cursor.offset)) throw new Error("Invalid checkpoint offset");
+                  this.parseStates.set(logPath, decodeParseLogState(saved.display));
+                  this.healthStates.set(logPath, decodeHealthLogState(saved.health));
+                } catch { this.parseStates.delete(logPath); this.healthStates.delete(logPath); }
+              }
+            }
+            const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRunDisplay(meta.id, { logPath, states: this.parseStates, summaryOnly: true }) : undefined;
             display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.tool ?? "" };
             health = logs.has(meta.id) ? extractChildEventFactsFromLog(meta.id, { logPath, states: this.healthStates }) : undefined;
+            const displayState = this.parseStates.get(logPath), healthState = this.healthStates.get(logPath);
+            display = { ...display!, diagnostics: parsed?.diagnostics, coverage: displayState ? {
+              start: displayState.cursor.coverageStart ?? 0, offset: displayState.cursor.offset,
+              totalBytes: displayState.totalBytes, missing: displayState.cursor.missing,
+              complete: !displayState.catchingUp && !displayState.windowTruncated && displayState.cursor.offset === displayState.totalBytes,
+            } : undefined };
+            if (health && healthState) health = { ...health, coverage: { start: healthState.cursor.coverageStart ?? 0,
+              offset: healthState.cursor.offset, missing: healthState.cursor.missing } };
+            if (displayState?.catchingUp) logs.set(meta.id, `${logs.get(meta.id)}:catching-up`);
+            if (displayState && healthState) this.checkpoints.save(logPath, {
+              display: encodeParseLogState(displayState), health: encodeHealthLogState(healthState),
+            });
+            while (this.parseStates.size > 64) this.parseStates.delete(this.parseStates.keys().next().value);
+            while (this.healthStates.size > 64) this.healthStates.delete(this.healthStates.keys().next().value);
           });
           if (logChanged || assignmentChanged || deadlineChanged || healthConfig.revision !== baseline.healthRevision) {
             this.counters.healthRecomputations++;
@@ -817,13 +860,32 @@ export class WorkReadModel {
           try { return { info: await sourceStat(path, { bigint: true }) }; }
           catch (error) { return { error }; }
         }));
-        for (const [index, [, entry]] of group.entries()) {
+        for (const [index, [path, entry]] of group.entries()) {
           const observation = observations[index]!;
           if (!observation.info) throw observation.error;
           const info = observation.info;
           if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
             this.dirty = true;
-            throw new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
+            const error = new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
+            if ((this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
+                && path.startsWith(this.runs + sep) && info.size <= 1024n * 1024n && !failedPaths.size && [...this.sourceErrors].every(([path, reason]) =>
+              this.sourceRace?.paths.has(path) && reason === this.sourceRace.reason)) {
+              // Recheck only for error routing: a concurrent move can affect a
+              // new workspace/recipient. Never publish this uncommitted row.
+              try {
+                this.counters.metadataReads++;
+                const current = JSON.parse(await readFile(path, "utf8"));
+                const checked = await sourceStat(path, { bigint: true });
+                if (current?.id === entry.meta.id && typeof current.cwd === "string" && Number.isFinite(current.startedAt)
+                    && typeof current.status === "string" && checked.size <= 1024n * 1024n
+                    && `${checked.dev}:${checked.ino}:${checked.size}:${checked.mtimeNs}:${checked.ctimeNs}` === `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`) {
+                  sourceRace = { reason: String(error), paths: new Set(paths), rows: [
+                    ...[...uncommitted].flatMap(id => [this.projected.get(id), this.staged?.projected.get(id)].filter(Boolean)),
+                    { meta: current, assignment: { state: current.status } }] };
+                }
+              } catch { /* Unreadable/unstable routing evidence keeps degradation global. */ }
+            }
+            throw error;
           }
           if (++batch % 256 === 0 || performance.now() - sliceStarted >= 8) {
             await yieldTurn(); sliceStarted = performance.now();
@@ -873,15 +935,17 @@ export class WorkReadModel {
         if (error) this.sourceErrors.set(path, error);
         else this.sourceErrors.delete(path);
       }
+      if (!this.sourceErrors.size) this.sourceRace = undefined;
       this.state = this.sourceErrors.size || healthConfig.reason ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
       this.reason = this.sourceErrors.values().next().value ?? healthConfig.reason ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
       if ((this.imported || paths.length === 128) && (semanticChange || previousState !== this.state || previousReason !== this.reason)) {
-        this.changedRows = previousState === this.state && previousReason === this.reason ? changedRows : [];
+        this.changedRows = changedRows;
         this.publish();
       }
     } catch (error) {
       if (this.closed) return;
       const reason = String(error).slice(0, 512);
+      this.sourceRace = sourceRace;
       if (this.dirty) for (const path of paths) if (!this.hints.has(path)) this.hints.set(path, Date.now());
       for (const path of paths) this.sourceErrors.set(path, reason);
       const changed = this.state !== "degraded" || this.reason !== reason;
@@ -949,7 +1013,7 @@ export class WorkReadModel {
     });
     const deadlines = rows.map((row: any) => row.health?.nextDeadline).filter((deadline: any) => typeof deadline === "number");
     return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([key, entry.token, entry.revision]), seq: this.revision,
-      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, status: this.state, reason: this.reason,
+      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, ...this.scopeStatus(scope),
       totalMatching,
       rows: page.map((record: any, index: number) => {
         const row = rows[index];
@@ -983,7 +1047,7 @@ export class WorkReadModel {
     for (const { watcher } of this.rootParents.values()) watcher.close();
     this.rootParents.clear();
     this.watchers.clear(); this.rootWatchIdentities.clear();
-    await this.pending; await this.repairWrite; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
+    await this.pending; await this.repairWrite; this.listeners.clear(); await this.background.close(); this.reader.close(); this.checkpoints.close(); this.db.close();
     await this.repair?.return(undefined);
   }
 }
