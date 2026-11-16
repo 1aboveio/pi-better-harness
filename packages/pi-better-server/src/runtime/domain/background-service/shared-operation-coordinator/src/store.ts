@@ -26,6 +26,7 @@ import {
     requirePath,
 } from "./validate.ts";
 import { ensureSchema } from "./schema.ts";
+import { ensureAssignmentChanges } from "./assignment-changes.ts";
 import { createContext, openDatabase, type StoreContext } from "./sqlite.ts";
 import {
     getOperation as readOperationRecord,
@@ -327,6 +328,7 @@ export function openStore(options: StoreOptions): Store {
     const ctx: StoreContext = createContext(db, options.now ? { now: options.now } : {});
     try {
         ensureSchema(ctx);
+        ensureAssignmentChanges(ctx);
     } catch (error) {
         try {
             db.close();

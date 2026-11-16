@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { opendir, readFile, stat, writeFile, mkdir, rename } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import { realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { setImmediate as yieldTurn } from "node:timers/promises";
@@ -75,6 +75,7 @@ export class WorkReadModel {
   private inventory = 0;
   private coordinator = "unknown";
   private coordinatorConversations?: Map<string, string>;
+  private assignmentBaseline?: { key: string; seq: string };
   private revision = 0;
   private foldQueueSequence = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
@@ -82,8 +83,8 @@ export class WorkReadModel {
   private counters = { inventories: 0, metadataReads: 0, projections: 0, assignmentProjections: 0, logProjections: 0, healthProjections: 0, failureProjections: 0 };
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, unverified: 0, initial: 0 };
   get metrics() {
-    return { ...this.counters, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
-      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size };
+    return { ...this.counters, assignments: this.reader.changeMetrics, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
+      indexConnections: this.closed ? 0 : 2, sourceWatchers: this.watchers.size };
   }
   readonly runs: string;
   readonly archives: string;
@@ -95,7 +96,8 @@ export class WorkReadModel {
     this.agentDir = agentDir; this.instanceId = instanceId;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
-    this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"));
+    mkdirSync(join(agentDir, "runtime-read-repair"), { recursive: true });
+    this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"), join(agentDir, "runtime-read-repair", "assignments.sqlite"));
     this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(), refresh => this.reader.connection(refresh));
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
       started REAL, state TEXT, active INTEGER, ended REAL, recipient_pending INTEGER, payload TEXT);
@@ -281,6 +283,7 @@ export class WorkReadModel {
         const next = await this.repair.next();
         if (next.done) {
           this.repair = undefined; this.repairOwed = false;
+          if (this.assignmentBaseline && !this.sourceErrors.size) this.reader.acknowledgeChanges(new Map([["*", this.assignmentBaseline.seq]]), true);
           if (!this.imported) { this.imported = true; this.state = this.sourceErrors.size || [...this.projected.values()].some(row => !row.assignment.verified) ? "degraded" : "ready"; this.reason = this.sourceErrors.values().next().value ?? (this.state === "ready" ? undefined : "Some assignment sources could not be verified."); this.publish(); }
         }
         else { this.scheduling.repairBatches++; this.scheduling.repairEntries += next.value.length; await this.measuredScan("repair", next.value); }
@@ -373,7 +376,20 @@ export class WorkReadModel {
         const snapshot = this.reader.beginSnapshot();
         coordinator = snapshot.revision; releaseCoordinator = snapshot.release;
       } catch { coordinator = "unknown"; }
-      const coordinatorConversations = coordinator === baseline.coordinator ? baseline.coordinatorConversations : this.reader.conversationRevisions();
+      let assignmentChanges: Map<string, string> | undefined;
+      try { assignmentChanges = this.reader.changes(); } catch { /* Legacy sources are reconciled through bounded metadata repair. */ }
+      if (assignmentChanges?.has("*")) {
+        const seq = assignmentChanges.get("*")!;
+        const key = `${this.reader.changeMetrics.generation}:${seq}`;
+        if (this.assignmentBaseline?.key !== key) {
+          this.assignmentBaseline = { key, seq };
+          if (this.imported) {
+            this.imported = false; this.repairOwed = true;
+            await this.repair?.return(undefined); this.repair = undefined;
+          }
+        }
+      }
+      const coordinatorConversations = baseline.coordinatorConversations;
       const logs = new Map<string, string>();
       const failureJournals = new Map<string, string>();
       const processes = new Map<string, string>();
@@ -412,7 +428,7 @@ export class WorkReadModel {
       }
       const healthConfig = await readHealthConfig(this.agentDir, next.size > 0);
       const changed = next.size !== baseline.files.size || [...next].some(([path, entry]) => baseline.files.get(path)?.signature !== entry.signature);
-      if (!this.staged && !changed && !logFamilies.size && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && this.state === "ready") return;
+      if (!this.staged && !changed && !logFamilies.size && !assignmentChanges?.size && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && this.state === "ready") return;
       const metas = new Map<string, any>();
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
       for (const [path, entry] of next) {
@@ -453,11 +469,14 @@ export class WorkReadModel {
           } else invalidateAttempt(entry.meta);
         }
       }
-      if (coordinator !== baseline.coordinator) for (const meta of attempts) {
+      for (const meta of attempts) {
         if (!(meta.assignment || meta.operations || meta.park)) continue;
-        const owner = JSON.stringify([meta.operations?.conversationId ?? meta.sessionId, meta.operations?.workspace ?? meta.cwd]);
-        if (!coordinatorConversations || !baseline.coordinatorConversations ||
-            coordinatorConversations.get(owner) !== baseline.coordinatorConversations.get(owner)) invalidateAttempt(meta);
+        const session = meta.assignment?.owner.sessionId ?? meta.operations?.conversationId ?? meta.sessionId;
+        const workspace = meta.assignment?.owner.workspace ?? meta.operations?.workspace ?? meta.cwd;
+        if ((assignmentChanges?.has("*") && paths.some(path => next.get(path)?.meta.id === meta.id))
+            || assignmentChanges?.has(JSON.stringify([session, workspace, meta.assignment?.assignmentId ?? null]))
+            || assignmentChanges?.has(JSON.stringify([session, workspace, null]))
+            || (!assignmentChanges && paths.some(path => next.get(path)?.meta.id === meta.id))) invalidateAttempt(meta);
       }
       const project = createAssignmentProjector({ attempts, observe: (owner: any) => this.reader.read(owner) });
       const touched = new Set(paths.map(path => next.get(path)?.meta.id));
@@ -506,9 +525,8 @@ export class WorkReadModel {
           await yieldTurn(); sliceStarted = performance.now();
         }
       }
-      let after: string;
-      try { after = this.reader.revision(); } catch { after = "unknown"; }
-      if (after !== coordinator) { this.state = "degraded"; this.reason = "Coordinator changed during observation; retrying."; this.dirty = true; this.publish(); return; }
+      // The pinned source snapshot is a valid baseline even while writers advance.
+      // Subsequent commits remain beyond the durable received position.
       // Retry caches are never queryable. Validate all unpublished families again before committing them.
       this.staged = { files: next, projected: new Map(rows.map(row => [row.meta.id, row])), logs, failureJournals, processes,
         healthRevision: healthConfig.revision, coordinator, coordinatorConversations };
@@ -554,6 +572,8 @@ export class WorkReadModel {
         }
         this.db.exec("COMMIT");
       } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      // Only the completed bounded source walk may acknowledge a baseline.
+      if (assignmentChanges) this.reader.acknowledgeChanges(assignmentChanges, false);
       this.files = next; this.logs = logs; this.failureJournals = failureJournals; this.processes = processes; this.healthRevision = healthConfig.revision; this.coordinator = coordinator; this.inventory++;
       this.coordinatorConversations = coordinatorConversations;
       this.projected = new Map(rows.map(row => [row.meta.id, row]));

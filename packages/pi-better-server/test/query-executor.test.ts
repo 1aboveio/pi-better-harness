@@ -405,7 +405,7 @@ test('Subagents and Background share one coordinator read connection in the quer
     await f.executor.livenessReasons();
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
-    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator plus one derived index, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).active, 3, 'one coordinator, one query index and one durable assignment inbox, regardless of domain');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
   } finally { await f.close(); }
 });

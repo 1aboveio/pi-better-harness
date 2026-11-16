@@ -1,6 +1,7 @@
 // Generated from packages/operation-coordinator/assignment-observation.mjs. Do not edit directly.
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
+import { AssignmentInbox } from "./assignment-inbox.mjs";
 
 /** Read-only, bounded projection input. Never creates/migrates a database. */
 export function readAssignmentWaits(path, owner, connection) {
@@ -44,7 +45,8 @@ export function readAssignmentWaits(path, owner, connection) {
 }
 
 /** A root read model owns this connection; ordinary observers remain one-shot. */
-export function createAssignmentReader(path) {
+export function createAssignmentReader(path, inboxPath = ":memory:") {
+    const inbox = new AssignmentInbox(inboxPath);
     let db;
     let identity;
     let snapshot = false;
@@ -66,6 +68,9 @@ export function createAssignmentReader(path) {
             return `${identity}:${db.prepare("PRAGMA data_version").get().data_version}`;
         },
         connection(refresh = true) { if (refresh) this.revision(); return db; },
+        changes() { this.revision(); return inbox.receive(db, identity); },
+        acknowledgeChanges(batch, complete) { inbox.acknowledge(batch, complete); },
+        get changeMetrics() { return inbox.metrics; },
 
         beginSnapshot() {
             this.revision();
@@ -144,7 +149,7 @@ export function createAssignmentReader(path) {
             return [...obligations, ...reasons];
         },
 
-        close() { if (snapshot) { db.exec("ROLLBACK"); snapshot = false; } db?.close(); db = undefined; statements.clear(); identity = undefined; },
+        close() { if (snapshot) { db.exec("ROLLBACK"); snapshot = false; } db?.close(); db = undefined; statements.clear(); identity = undefined; inbox.close(); },
 
     };
 }

@@ -92,6 +92,7 @@ writeFileSync(join(root, "packages/pi-better-background-tasks/src/shared-work-cl
 for (const [name, source] of [
   ["assignment-projection.mjs", "packages/pi-better-subagents/assignment-projection.mjs"],
   ["assignment-observation.mjs", "packages/operation-coordinator/assignment-observation.mjs"],
+  ["assignment-inbox.mjs", "packages/operation-coordinator/assignment-inbox.mjs"],
 ]) {
   const text = readFileSync(join(root, source), "utf8").replace("./shared-operation-coordinator/assignment-observation.mjs", "./assignment-observation.mjs");
   writeFileSync(join(target, name), `// Generated from ${source}. Do not edit directly.\n${text}`);
