@@ -818,7 +818,12 @@ for (const source of ["runs", "attempts", "session-state"]) test(`source ${sourc
       const value = { ...meta, name: "after-rearm" };
       writeFileSync(path + ".tmp", JSON.stringify(source === "runs" ? value : { version: 1, meta: value }));
       renameSync(path + ".tmp", path);
-      await wait(() => client.snapshot?.rows[0]?.meta.name === "after-rearm", `replacement root watcher was not rearmed: ${JSON.stringify({ source, oldInode, newInode, before })}`);
+      try {
+        await wait(() => client.snapshot?.rows[0]?.meta.name === "after-rearm", `replacement root watcher was not rearmed: ${JSON.stringify({ source, oldInode, newInode, before })}`);
+      } catch (error) {
+        t.diagnostic(JSON.stringify({ source, snapshot: client.snapshot, metrics: f.executor.metrics() }));
+        throw error;
+      }
     }
     t.diagnostic(JSON.stringify({ source, oldInode, newInode, before, after: f.executor.metrics() }));
   } finally { await f.close(); }
