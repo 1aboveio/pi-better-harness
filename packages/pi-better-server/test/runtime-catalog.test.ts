@@ -37,7 +37,7 @@ test("real daemon catalog isolates two projects, freezes branch reads, rejects s
     const admissionPath = new URL("../../pi-better-subagents/catalog-host-admission.ts", import.meta.url).href;
     const { createCatalogHostAdapter, noteCatalogHostContext, closeCatalogHost } = await import(admissionPath);
     const [message] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(`startup failed: ${errors}`); })]);
-    for (const cwd of [projects[0], projects[0], projects[1]]) {
+    for (const cwd of [projects[0], projects[0], projects[1], ...Array<string>(8).fill(projects[0])]) {
       const client = new WorkClient(message.ready, agent, ["runtime-catalog-v1"]); clients.push(client);
       const adapter = createCatalogHostAdapter(); adapters.push(adapter);
       adapter.noteCatalogHostContext({ cwd, isProjectTrusted: () => trust.get(cwd) === true, sessionManager: { getSessionId: () => `pi-${clients.length}` } }, () => ({}));
@@ -56,6 +56,22 @@ test("real daemon catalog isolates two projects, freezes branch reads, rejects s
     const role = (snapshot: any) => new Map(snapshot.roles).get("role.fixture") as any;
     const first = await get(0);
     assert.equal(role(first).definition.name, "Project0");
+    const metrics = async () => {
+      const result = once(child, "message"); child.send("metrics");
+      return (await result)[0].catalog;
+    };
+    const beforeEquivalent = await metrics();
+    for (const count of [1, 5, 10]) {
+      const equivalent = clients.map((_, index) => index).filter(index => index !== 2).slice(0, count);
+      for (const index of equivalent) assert.equal((await get(index)).revision, first.revision);
+    }
+    const afterEquivalent = await metrics();
+    assert.equal(afterEquivalent.reads, beforeEquivalent.reads, "socket clients share source bytes");
+    assert.equal(afterEquivalent.parses, beforeEquivalent.parses, "socket clients share definition parsing");
+    assert.equal(afterEquivalent.scopes, beforeEquivalent.scopes, "equivalent socket clients reuse scope computation");
+    writeFileSync(join(projects[0], ".pi/agents/roles/fixture.md"), markdown("Project0"));
+    assert.equal((await get(1)).revision, first.revision, "same-content rewrite keeps content revision");
+    assert.equal((await metrics()).parses, beforeEquivalent.parses, "same-content rewrite reuses parsing");
     assert.equal(role(await get(2)).definition.name, "Project1");
     assert.equal((await get(1)).revision, first.revision);
     for (const cwd of projects) {

@@ -29,6 +29,42 @@ async function settleHints(model: WorkReadModel) {
   assert.equal(model.metrics.scheduling.queued, 0, "hint obligations must be drained");
 }
 
+test("late compact archives cannot replace live recipient markers or reset its cursor", async () => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, "source-precedence", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  const id = "sa_pending";
+  const meta = f.put(id, { status: "completed", callback: true, completionCallbackPendingAt: 1,
+    recipe: { version: 1, sessionId: id, sessionDir: join(f.root, "durable/sessions"), cwd: f.root } });
+  f.put("sa_other", { status: "completed" });
+  const scope = { cwd: f.root, sessionId: "parent", limit: 1 };
+  try {
+    await model.reconcile();
+    const first = model.snapshot(scope);
+    assert.equal(model.snapshot({ ...scope, pendingRecipient: true }).rows[0]!.meta.id, id);
+    // Completed archives omit the volatile completion markers by design.
+    const compact: Record<string, unknown> = { ...meta };
+    delete compact.completionCallbackPendingAt;
+    delete compact.callbackOrigin;
+    mkdirSync(model.archives, { recursive: true });
+    writeFileSync(join(model.archives, `${id}.json`), JSON.stringify({ version: 1, meta: compact }));
+    model.fileHint(model.archives, `${id}.json`);
+    await settleHints(model);
+    assert.equal(model.snapshot({ id }).rows[0]!.meta.completionCallbackPendingAt, 1);
+    assert.equal(model.snapshot({ ...scope, pendingRecipient: true }).rows[0]!.meta.id, id);
+    assert.equal(model.snapshot(scope).scopeRevision, first.scopeRevision);
+    assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
+    writeFileSync(join(f.runs, id, "meta.json"), JSON.stringify({ ...meta, completionCallbackSentAt: 2 }));
+    model.fileHint(join(f.runs, id), "meta.json"); await settleHints(model);
+    assert.equal(model.snapshot({ ...scope, pendingRecipient: true }).rows.length, 0);
+    assert.throws(() => model.snapshot({ ...scope, cursor: first.nextCursor }), /resync_required/);
+    // Losing volatile storage still exposes the verified archive for history.
+    rmSync(join(f.runs, id), { recursive: true });
+    model.fileHint(f.runs, id); await settleHints(model);
+    assert.equal(model.snapshot({ id }).rows[0]!.meta.id, id);
+    assert.equal(model.snapshot({ id }).rows[0]!.meta.completionCallbackPendingAt, undefined);
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("metadata appearing after the first watch attempt is rebound before its projection publishes", async () => {
   const f = fixture();
   const model = new WorkReadModel(f.agent, "late-directory-bind", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
