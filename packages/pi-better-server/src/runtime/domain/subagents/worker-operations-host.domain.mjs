@@ -169,6 +169,7 @@ export async function createOperationBridgeHost(options = {}) {
                 ? { checkpointEvidenceValidator: registration.checkpointEvidenceValidator }
                 : {}),
             handlers: Object.freeze({ ...registration.handlers }),
+            onToolRejected: registration.onToolRejected,
             descriptor,
         });
         runs.set(registration.runId, {
@@ -469,13 +470,17 @@ export async function createOperationBridgeHost(options = {}) {
             return;
         }
         const params = (envelope.params ?? {});
+        const reject = (error) => {
+            run.registration.onToolRejected?.(error, makeContext(run, envelope, new AbortController().signal));
+            sendError(socket, envelope.id, error);
+        };
         if (findSecretField(params)) {
-            sendError(socket, envelope.id, { code: "authority-field", message: "request contains a credential-shaped field" });
+            reject({ code: "authority-field", message: "request contains a credential-shaped field" });
             return;
         }
         const bridgeEnvironmentField = findBridgeEnvironmentKey(params);
         if (bridgeEnvironmentField) {
-            sendError(socket, envelope.id, {
+            reject({
                 code: "bridge-env-leak",
                 message: `${bridgeEnvironmentField} is a parent bridge credential and cannot be passed to a launched task`,
             });
@@ -484,7 +489,7 @@ export async function createOperationBridgeHost(options = {}) {
         }
         const authorityField = findAuthorityField(params);
         if (authorityField) {
-            sendError(socket, envelope.id, {
+            reject({
                 code: "authority-field",
                 message: `caller field ${authorityField} would override parent authority`,
             });
@@ -493,7 +498,7 @@ export async function createOperationBridgeHost(options = {}) {
         }
         const schema = validateJsonSchema(descriptor.parameters, params);
         if (!schema.ok) {
-            sendError(socket, envelope.id, {
+            reject({
                 code: "schema-invalid",
                 message: `${schema.path}: ${schema.message}`,
             });
