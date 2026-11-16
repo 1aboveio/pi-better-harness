@@ -124,6 +124,7 @@ import {
 } from "./types.ts";
 
 export interface Store {
+    hasSubagentManagement(): boolean;
     resultSupervisionChanges(after?: Parameters<typeof resultSupervisionChanges>[1]): ReturnType<typeof resultSupervisionChanges>;
     subagentLaunchJournal(): SubagentLaunchJournal;
     resultScopeManaged(scope: string): boolean;
@@ -353,6 +354,7 @@ export function openStore(options: StoreOptions): Store {
         resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
+        hasSubagentManagement() { alive(); return Boolean(ctx.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='subagent_management'").get()); },
         resultSupervisionChanges(after) { alive(); return resultSupervisionChanges(ctx, after); },
         resultSupervisions(activeOnly) { alive(); return resultSupervisions(ctx, activeOnly); },
         handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },

@@ -7,13 +7,15 @@ import { existsSync } from 'node:fs';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { acquireMutationStore } from './mutation-store.ts';
 /** Fixed canonical adapter. It never owns a native parent transcript. */
-export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>) {
+export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>, verificationMs = 30000) {
     const load = (file: string) => import(`./domain/background-service/${file}.domain.mjs`);
     const [{ createObservedWaitHost }, { registerTools }, { createBackgroundTaskRuntime }, sandbox, authority, permissions, registry, navigator, failures] = await Promise.all([
         load('observed-waits'), load('tools'), load('runtime'), load('sandbox'), load('managed-authority'),
         import(String('./domain/sandbox-policy/permission-settings.domain.mjs')), load('registry'), load('navigator-provider'), load('failures'),
     ]);
+    const identity = await load('process-identity');
     const lease = acquireMutationStore(root);
+    const unknownWriters = new Map<string, number>();
     let journal: ReturnType<typeof lease.store.backgroundRequests>;
     let pi: any, service: any, session: any, runtime: any, current: any;
     let tail: Promise<unknown> = Promise.resolve(), pending = 0;
@@ -113,6 +115,28 @@ export async function createBackgroundTools(root: string, instance: string, drai
     }
     return {
         get busy() { return pending > 0; },
+        lifecycleReasons() {
+            const now = Date.now(), reasons: any[] = [];
+            for (const scope of scopes.values()) for (const meta of registry.listActiveMetasForOrigin({ cwd: scope.owner.workspace, sessionId: scope.owner.sessionId })) {
+                if (meta.status !== 'running') continue;
+                const watch = meta.kind === 'command_watch' || Boolean(meta.remote);
+                const verified = meta.pid && meta.pidStartTime && identity.readProcessStartToken(meta.pid) === meta.pidStartTime;
+                if (!watch && !verified) {
+                    if (!unknownWriters.has(meta.id)) unknownWriters.set(meta.id, now);
+                    const since = unknownWriters.get(meta.id)!;
+                    if (now >= since + verificationMs) continue;
+                    reasons.push({ kind: 'verification', id: meta.id, owner: scope.owner, lastProgressAt: since,
+                        nextDeadline: since + verificationMs, recovery: 'legacy-writer-unverified-no-takeover' });
+                    continue;
+                }
+                unknownWriters.delete(meta.id);
+                reasons.push({ kind: watch ? 'task' : 'runner', id: meta.id, owner: scope.owner,
+                    writer: { pid: meta.pid, start: meta.pidStartTime }, lastProgressAt: meta.lastProgressAt ?? meta.startedAt,
+                    nextDeadline: meta.deadlineAt ?? (watch ? (meta.lastCheckedAt ?? meta.startedAt) + (meta.intervalMs ?? 1000) : now + 1000),
+                    recovery: watch ? 'captured-legacy-watch' : 'captured-legacy-command' });
+            }
+            return reasons;
+        },
         metrics() { return { ...metrics, registry: registry.getRegistryIoMetrics(), cachedScopes: projections.size }; },
         handle(command: any) {
             if (Object.keys(command).some(key => !['id', 'type', 'authority'].includes(key)))

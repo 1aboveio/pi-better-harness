@@ -1,4 +1,4 @@
-import { createBackgroundTools, hasBackgroundRequests } from "./runtime/background-tools.ts";
+import { createBackgroundTools } from "./runtime/background-tools.ts";
 import { createLocalWorkClient } from "./runtime/local-client.ts";
 import { chmodSync, existsSync, realpathSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
@@ -20,12 +20,12 @@ import type { IdleSessionsLease, UpgradeRequest } from "./startup/managed-types.
 import { HostedSession } from "./hosted-session.ts";
 import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts";
 import { runtimeRoot } from "./runtime/root.ts";
-import { RuntimeCancellation, hasPendingCancellation } from "./runtime/cancellation.ts";
-import { RuntimeResultSupervision, hasResultSupervision } from "./runtime/result-supervision.ts";
+import { RuntimeCancellation } from "./runtime/cancellation.ts";
+import { RuntimeResultSupervision } from "./runtime/result-supervision.ts";
 import { SharedCatalog } from "./runtime/catalog.ts";
 import { acquireMutationStore, mutationStoreMetrics } from "./runtime/mutation-store.ts";
 import { WorkQueryExecutor } from "./runtime/query-executor.ts";
-import { createSubagentLaunch, hasSubagentManagement } from "./runtime/subagent-launch.ts";
+import { createSubagentLaunch } from "./runtime/subagent-launch.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
   /** Defaults to `~/.pi/agent/server` (or `$PI_SERVER_DIR`). */
@@ -97,7 +97,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     let launchInitialization: ReturnType<typeof createSubagentLaunch> | undefined;
     let backgroundInitialization: ReturnType<typeof createBackgroundTools> | undefined;
     let backgroundTools: Awaited<ReturnType<typeof createBackgroundTools>> | undefined;
-    const initializeBackground = () => backgroundInitialization ??= createBackgroundTools(realpathSync(getAgentDir()), instanceId!, () => Boolean(pendingUpgrade), scope => work().snapshot(scope)).then(host => backgroundTools = host).catch(error => { backgroundInitialization = undefined; throw error; });
+    const initializeBackground = () => backgroundInitialization ??= createBackgroundTools(realpathSync(getAgentDir()), instanceId!, () => Boolean(pendingUpgrade), scope => work().snapshot(scope), config.runtimeIdleMs).then(host => backgroundTools = host).catch(error => { backgroundInitialization = undefined; throw error; });
     let cancellations: RuntimeCancellation | undefined;
     const controlStore = acquireMutationStore(realpathSync(getAgentDir()));
     let resultSupervision: RuntimeResultSupervision | undefined;
@@ -126,9 +126,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         }
       }
     };
-    if (hasResultSupervision(getAgentDir())) resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
+    if (controlStore.store.resultSupervisions(true).length) resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
     resultPorts.set(resultRoot, resultPort);
-    if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
+    if (controlStore.store.pendingTaskCancellations().length) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
     const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
     const initializeLaunch = () => {
       if (!launchInitialization) {
@@ -142,7 +142,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       }
       return launchInitialization;
     };
-    if (hasSubagentManagement(getAgentDir())) {
+    if (controlStore.store.hasSubagentManagement()) {
       void initializeLaunch().catch(error => log(`Subagent supervision unavailable: ${String(error)}`));
     }
     const work = () => {
@@ -150,7 +150,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         workModel = new WorkQueryExecutor(realpathSync(getAgentDir()), instanceId!, {
           budgetBuffer: controlStore.budget.buffer,
           onTerminalLogsChanged: async ids => {
-            if (!launchInitialization && !hasSubagentManagement(getAgentDir())) return;
+            if (!launchInitialization && !controlStore.store.hasSubagentManagement()) return;
             const host = await initializeLaunch();
             await host.foldTerminalFailures(ids);
           },
@@ -170,7 +170,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const safeUpgrade = !!(build && instanceId && sessionMaintenance
       && typeof sessionMaintenance.withIdleSessions === "function" && "publishRuntimeEvent" in HostedSession.prototype);
     let pendingUpgrade: UpgradeRequest | undefined;
-    if(hasBackgroundRequests(resultRoot)) void initializeBackground().catch(error => log(`Background request recovery unavailable: ${String(error)}`));
+    if(controlStore.store.backgroundRequests().hasPending()) void initializeBackground().catch(error => log(`Background request recovery unavailable: ${String(error)}`));
     const reconnectControllers = new Map<ConnectionControl, boolean>();
     const setUpgradeFence = (epoch: string | null) => {
       const lease = acquireMutationStore(realpathSync(getAgentDir()));
@@ -271,6 +271,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
                 ...registry.list().filter(session => session.live).map(session => ({ kind: "hosted-session", id: session.sessionId })),
                 ...(resultSupervision?.livenessReasons() ?? []),
                 ...(launches?.lifecycleReasons() ?? []),
+                ...(backgroundTools?.lifecycleReasons() ?? []),
                 ...(observation?.reasons ?? []).filter((reason: any) => !resultSupervision?.manages(reason.operationId))],
               livenessObservation: observation ?? { status: "unobserved", reasons: [], observedAt: null },
               nextIdleDeadline: runtimeClients.size > 0 || registry.activeCount > 0 ? null
@@ -368,7 +369,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               workQueries ??= work().connect(socket);
               const data = await workQueries.handle(command);
               if (type === "runtime_get_metrics") {
-                return reply({ data: { ...JSON.parse(data.json), mutationSqlite: mutationStoreMetrics(getAgentDir()) } });
+                return reply({ data: { ...JSON.parse(data.json), mutationSqlite: mutationStoreMetrics(getAgentDir()),
+                  workBudget: controlStore.budget.metrics(), resultSupervision: resultSupervision?.metrics,
+                  subagentLifecycle: launches?.status().lifecycle } });
               }
               if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
               // Snapshot JSON is encoded in the worker; only the small envelope runs here.
@@ -609,6 +612,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return;
           }
           if (launches?.lifecycleReasons().length) { runtimeZeroSince = undefined; return; }
+          if (backgroundTools?.lifecycleReasons().length) { runtimeZeroSince = undefined; return; }
           try {
             // Control never waits for a queued/rebuilding/wedged read worker.
             // Legacy passive evidence is usable only within its existing idle

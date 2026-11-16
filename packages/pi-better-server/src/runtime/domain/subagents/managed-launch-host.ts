@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync, statSync, watch, type FSWatcher } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync, watch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -79,6 +79,7 @@ export class ManagedSubagentHost {
             const meta = readMeta(id);
             if (meta?.management?.root === this.root && meta.management.instance === this.instance && meta.management.epoch === this.epoch) {
                 if (signatures.get(id) === signature(meta)) return;
+                if (!this.writerProofs.has(id)) this.writerProofs.set(id, { verified: false, checkedAt: Date.now(), unknownSince: Date.now() });
                 this.known.set(id, meta); dirty.add(id); schedule();
             }
         };
@@ -92,7 +93,7 @@ export class ManagedSubagentHost {
                 const release = this.enterControl?.();
                 if (this.enterControl && !release) {
                     ids.forEach(id => dirty.add(id));
-                    timer = setTimeout(schedule, 1); timer.unref(); return;
+                    timer = setTimeout(schedule, 1000); timer.unref(); return;
                 }
                 this.lifecycleMetrics.passes++; this.lifecycleMetrics.entities += ids.length;
                 for (const id of ids) this.lifecycleMetrics.deadlineLatenessMs = Math.max(this.lifecycleMetrics.deadlineLatenessMs, now - (this.healthDue.get(id) ?? now));
@@ -127,6 +128,7 @@ export class ManagedSubagentHost {
             }
         };
         try {
+            mkdirSync(join(baseDir(), "runs"), { recursive: true });
             const watcher = watch(join(baseDir(), "runs"), { recursive: true }, (_event, file) => {
                 const id = file && String(file).split(/[/\\]/)[0];
                 if (id && /^[A-Za-z0-9_-]+$/.test(id)) hint(id);
@@ -145,6 +147,7 @@ export class ManagedSubagentHost {
     get busy() { return this.pending > 0 || Boolean(this.failureResponse); }
     status() {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
+            lifecycle: { ...this.lifecycleMetrics, activeDeadlines: this.healthDue.size },
             inFlight: this.pending, failureFold: { worker: Boolean(this.failureWorker), inFlight: Boolean(this.failureResponse) }, continuationReady: this.workerHost?.service.continuationReady ?? false, continuationUnavailable: [...this.continuationFailures].map(([key, value]) => ({ key, ...value })), unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt: any) => !readMeta(attempt.id)).length };
     }
     constructor(private root: string, private instance: string, private catalog: any, sharedStore?: unknown, private createWorkerHost?: (pi: ExtensionAPI) => NonNullable<ManagedSubagentHost["workerHost"]>, private readPermissions?: () => unknown, private verificationMs = 30000, private enterControl?: () => (() => void) | undefined) {
@@ -223,7 +226,10 @@ export class ManagedSubagentHost {
         }
     }
     async recover() {
-        for (const meta of listMetas({ includeArchived: false })) if (meta.management?.root === this.root) this.known.set(meta.id, meta);
+        for (const meta of listMetas({ includeArchived: false })) if (meta.management?.root === this.root) {
+            this.known.set(meta.id, meta);
+            this.writerProofs.set(meta.id, { verified: false, checkedAt: Date.now(), unknownSince: Date.now() });
+        }
         if (listMetas({ includeArchived: false }).some(meta => meta.management?.root === this.root)) await this.initialize();
     }
     private grant(authority: any) {
@@ -402,7 +408,10 @@ export class ManagedSubagentHost {
     }
     /** One root mechanical worker; no coordinator connection or query mutations. */
     foldTerminalFailures(ids: readonly string[]): Promise<void> {
+        let release: (() => void) | undefined;
         const result = this.tail.catch(() => undefined).then(async () => {
+            release = this.enterControl?.();
+            if (this.enterControl && !release) throw new Error("runtime-overloaded: failure fold source capacity");
             this.journal.current(this.epoch);
             if (Atomics.load(this.foldRevocation, 0)) throw new Error("failure-fold-owner-revoked");
             if (this.failureWorkerError) throw this.failureWorkerError;
@@ -423,11 +432,22 @@ export class ManagedSubagentHost {
                 worker.on("exit", code => fail(new Error(`failure-fold-worker-exited: ${code}`)));
                 worker.unref();
             }
-            await new Promise<void>((resolve, reject) => {
-                this.failureResponse = { resolve, reject };
-                this.failureWorker!.postMessage({ ids });
-            });
-        });
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+                await new Promise<void>((resolve, reject) => {
+                    this.failureResponse = { resolve, reject };
+                    timer = setTimeout(() => {
+                        const error = new Error("failure-fold-verification-deadline: source worker did not acknowledge");
+                        Atomics.store(this.foldRevocation, 0, 1);
+                        this.failureWorkerError = error;
+                        this.failureResponse = undefined;
+                        void this.failureWorker?.terminate();
+                        reject(error);
+                    }, this.verificationMs);
+                    this.failureWorker!.postMessage({ ids });
+                });
+            } finally { if (timer) clearTimeout(timer); }
+        }).finally(() => release?.());
         this.tail = result;
         return result;
     }

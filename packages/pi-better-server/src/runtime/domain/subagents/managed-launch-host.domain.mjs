@@ -1,6 +1,6 @@
 // Generated fixed launch domain from packages/pi-better-subagents/managed-launch-host.ts. Do not edit directly.
 import { createHash, timingSafeEqual } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync, statSync, watch } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync, watch } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -93,6 +93,8 @@ export class ManagedSubagentHost {
             if (meta?.management?.root === this.root && meta.management.instance === this.instance && meta.management.epoch === this.epoch) {
                 if (signatures.get(id) === signature(meta))
                     return;
+                if (!this.writerProofs.has(id))
+                    this.writerProofs.set(id, { verified: false, checkedAt: Date.now(), unknownSince: Date.now() });
                 this.known.set(id, meta);
                 dirty.add(id);
                 schedule();
@@ -110,7 +112,7 @@ export class ManagedSubagentHost {
                 const release = this.enterControl?.();
                 if (this.enterControl && !release) {
                     ids.forEach(id => dirty.add(id));
-                    timer = setTimeout(schedule, 1);
+                    timer = setTimeout(schedule, 1000);
                     timer.unref();
                     return;
                 }
@@ -165,6 +167,7 @@ export class ManagedSubagentHost {
             }
         };
         try {
+            mkdirSync(join(baseDir(), "runs"), { recursive: true });
             const watcher = watch(join(baseDir(), "runs"), { recursive: true }, (_event, file) => {
                 const id = file && String(file).split(/[/\\]/)[0];
                 if (id && /^[A-Za-z0-9_-]+$/.test(id))
@@ -189,6 +192,7 @@ export class ManagedSubagentHost {
     get busy() { return this.pending > 0 || Boolean(this.failureResponse); }
     status() {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
+            lifecycle: { ...this.lifecycleMetrics, activeDeadlines: this.healthDue.size },
             inFlight: this.pending, failureFold: { worker: Boolean(this.failureWorker), inFlight: Boolean(this.failureResponse) }, continuationReady: this.workerHost?.service.continuationReady ?? false, continuationUnavailable: [...this.continuationFailures].map(([key, value]) => ({ key, ...value })), unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt) => !readMeta(attempt.id)).length };
     }
     constructor(root, instance, catalog, sharedStore, createWorkerHost, readPermissions, verificationMs = 30000, enterControl) {
@@ -293,8 +297,10 @@ export class ManagedSubagentHost {
     }
     async recover() {
         for (const meta of listMetas({ includeArchived: false }))
-            if (meta.management?.root === this.root)
+            if (meta.management?.root === this.root) {
                 this.known.set(meta.id, meta);
+                this.writerProofs.set(meta.id, { verified: false, checkedAt: Date.now(), unknownSince: Date.now() });
+            }
         if (listMetas({ includeArchived: false }).some(meta => meta.management?.root === this.root))
             await this.initialize();
     }
@@ -496,7 +502,11 @@ export class ManagedSubagentHost {
     }
     /** One root mechanical worker; no coordinator connection or query mutations. */
     foldTerminalFailures(ids) {
+        let release;
         const result = this.tail.catch(() => undefined).then(async () => {
+            release = this.enterControl?.();
+            if (this.enterControl && !release)
+                throw new Error("runtime-overloaded: failure fold source capacity");
             this.journal.current(this.epoch);
             if (Atomics.load(this.foldRevocation, 0))
                 throw new Error("failure-fold-owner-revoked");
@@ -525,11 +535,26 @@ export class ManagedSubagentHost {
                 worker.on("exit", code => fail(new Error(`failure-fold-worker-exited: ${code}`)));
                 worker.unref();
             }
-            await new Promise((resolve, reject) => {
-                this.failureResponse = { resolve, reject };
-                this.failureWorker.postMessage({ ids });
-            });
-        });
+            let timer;
+            try {
+                await new Promise((resolve, reject) => {
+                    this.failureResponse = { resolve, reject };
+                    timer = setTimeout(() => {
+                        const error = new Error("failure-fold-verification-deadline: source worker did not acknowledge");
+                        Atomics.store(this.foldRevocation, 0, 1);
+                        this.failureWorkerError = error;
+                        this.failureResponse = undefined;
+                        void this.failureWorker?.terminate();
+                        reject(error);
+                    }, this.verificationMs);
+                    this.failureWorker.postMessage({ ids });
+                });
+            }
+            finally {
+                if (timer)
+                    clearTimeout(timer);
+            }
+        }).finally(() => release?.());
         this.tail = result;
         return result;
     }

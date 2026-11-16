@@ -81,7 +81,10 @@ export class RuntimeResultSupervision {
   reconcile() {
     if (this.closed) return;
     const release = this.budget.enter("control");
-    if (!release) { this.schedule(); return; }
+    if (!release) {
+      if (this.timer) clearTimeout(this.timer);
+      this.timer = setTimeout(() => this.reconcile(), 1000); this.timer.unref(); return;
+    }
     this.metrics.passes++;
     try {
       this.reason = undefined;

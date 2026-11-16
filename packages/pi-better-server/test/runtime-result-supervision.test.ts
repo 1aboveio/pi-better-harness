@@ -21,20 +21,27 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
   const transport = mkdtempSync("/tmp/p760-");
   const children: ReturnType<typeof fork>[] = [];
   const clients: WorkClient[] = [];
+  const stops = new Map<ReturnType<typeof fork>, unknown>();
+  let nativeSessionFile: string | undefined;
   let taskId: string | undefined;
   const taskIds: string[] = [];
   const start = async (file: string) => {
     const child = fork(new URL(file, import.meta.url), [], { execArgv: ["--import", "tsx"],
-      env: { ...process.env, ...(crash === "idle-guardian" ? { PI_SERVER_RUNTIME_IDLE_MS: "1000" } : {}), PI_TEST_PERMISSION_PUBLISHER: crash === "published-permissions" ? "1" : "0", TMPDIR: file.includes("result-frontend") ? runnerRoot : root, PI_CODING_AGENT_DIR: root, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+      env: { ...process.env, ...(crash === "idle-guardian" ? { PI_SERVER_RUNTIME_IDLE_MS: "1000", PI_TEST_PERSIST_RECIPIENT: "1" } : {}),
+        LAUNCH_WORKSPACE: root, BACKGROUND_ONLY: "1", BACKGROUND_SESSION_FILE: nativeSessionFile,
+        PI_TEST_PERMISSION_PUBLISHER: crash === "published-permissions" ? "1" : "0", TMPDIR: file.includes("result-frontend") ? runnerRoot : root, PI_CODING_AGENT_DIR: root, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
     children.push(child);
+    stops.set(child, file.includes("measure-full-runtime") ? { stop: true } : "stop");
+    const exited = once(child, "exit");
     let errors = ""; child.stderr!.on("data", chunk => { errors += chunk; });
-    const [ready] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(errors); })]);
-    return { child, ready };
+    const [ready] = await Promise.race([once(child, "message"), exited.then(() => { throw new Error(errors); })]);
+    return { child, ready, exited };
   };
   try {
     let server = await start(crash === "idle-guardian" ? "./support/guarded-work-daemon.ts" : "./support/work-daemon.ts");
     const frontends = await Promise.all(Array.from({ length: crash === "concurrent-frontends" ? 2 : 1 }, () => start("./support/result-frontend.ts")));
     const frontend = frontends[0]!;
+    nativeSessionFile = frontend.ready.sessionFile;
     taskIds.push(...frontends.map(frontend => frontend.ready.taskId));
     taskId = frontend.ready.taskId;
     // The fixed runtime owns launch evidence now. Follow its persisted exact
@@ -143,7 +150,35 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       assert.equal(store.listOutbox({ recipient: operation.owner }).length, 1);
       assert.equal(readFileSync(join(root, "executions"), "utf8"), executions);
       if (crash === "idle-guardian") {
-        const [code, signal] = await once(server.child, "exit");
+        const handoff = new WorkClient(server.ready.ready, root); clients.push(handoff); await handoff.ready;
+        writeFileSync(join(root, "server-registration-v1.json"), JSON.stringify({ version: 1, agentDir: root, serverDir: transport }));
+        const recipient = await start("../scripts/measure-full-runtime/frontend.ts");
+        assert.equal(recipient.ready.sessionId, operation.owner.sessionId, "reopen the real persisted recipient, not a replacement identity");
+        handoff.close();
+        let sequence = 0;
+        const call = async (request: any) => {
+          const response = once(recipient.child, "message");
+          recipient.child.send({ ...request, id: ++sequence, key: `receipt-${sequence}` });
+          const [reply] = await response;
+          assert.equal(reply.error, undefined, reply.stack);
+          return reply.result;
+        };
+        const deadline = Date.now() + 10000;
+        let messages: any[] = [];
+        do {
+          await call({ tool: "bg_task_status", params: { id: taskId } });
+          messages = (await call({ entries: true })).filter((entry: any) => entry.type === "custom_message"
+            && entry.details?.completionEventIds?.includes(events[0].eventId));
+          if (messages.length) break;
+          assert.ok(Date.now() < deadline, "Exact native completion receipt was not delivered");
+          await delay(20);
+        } while (true);
+        assert.equal(messages.length, 1);
+        await call({ tool: "bg_task_status", params: { id: taskId } });
+        assert.equal((await call({ entries: true })).filter((entry: any) => entry.type === "custom_message"
+          && entry.details?.completionEventIds?.includes(events[0].eventId)).length, 1);
+        recipient.child.send({ stop: true }); await recipient.exited;
+        const [code, signal] = await server.exited;
         assert.equal(code, 0);
         assert.equal(signal, null);
         const checkpoint = JSON.parse(readFileSync(join(transport, "clean-stop.json"), "utf8"));
@@ -159,7 +194,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
   } finally {
     for (const client of clients) client.close();
     for (const child of children) if (child.exitCode === null && child.signalCode === null) {
-      const exited = once(child, "exit"); child.send("stop"); await exited;
+      const exited = once(child, "exit"); child.send(stops.get(child) as any); await exited;
     }
     for (const id of taskIds) await createLocalSupervisor({ directory }).stop(id);
     rmSync(transport, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });

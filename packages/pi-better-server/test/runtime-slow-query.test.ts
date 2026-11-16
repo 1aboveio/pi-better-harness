@@ -23,6 +23,10 @@ test("a wedged reader cannot delay the configured idle fence after the last clie
     client = new WorkClient(started.socket, agent); await client.ready; await client.get({});
     const wedged = once(child, "message"); child.send("wedge");
     assert.equal((await wedged)[0].type, "wedged");
+    const wedgeControl = performance.now();
+    await client.request("runtime_get_status");
+    await client.request("runtime_cancellation_status");
+    assert.ok(performance.now() - wedgeControl < 1000, "control must not queue behind a wedged reader");
     client.close();
     const [code, signal] = await exited;
     assert.equal(code, 0, errors); assert.equal(signal, null);
