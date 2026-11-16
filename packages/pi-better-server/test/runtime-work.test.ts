@@ -529,6 +529,44 @@ test("source churn retries reuse completed historical parsing without publishing
   } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("source retry invalidates cached assignments when a newer journal position arrives", async () => {
+  const root = fixtureRoot("source-journal-churn");
+  const metas = ["history", "changing"].map(name => ({ id: `sa_${name}`, sessionId: name, cwd: root,
+    status: "completed", startedAt: 1, operations: { conversationId: name, workspace: root } }));
+  for (const meta of metas) {
+    mkdirSync(join(root, "runs", meta.id), { recursive: true });
+    writeFileSync(join(root, "runs", meta.id, "meta.json"), JSON.stringify(meta));
+  }
+  const { openStore } = await import(new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href);
+  const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
+  const model = new WorkReadModel(root, "journal-churn", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  const reader = (model as any).reader;
+  const read = reader.read.bind(reader);
+  let changed = false;
+  reader.read = (owner: any) => {
+    const result = read(owner);
+    if (!changed) {
+      changed = true;
+      writeFileSync(join(root, "runs/sa_changing/meta.json"), JSON.stringify({ ...metas[1], name: "latest" }));
+      const owner = { kind: "worker-conversation" as const, sessionId: "history", workspace: root };
+      writer.registerOperation({ operationId: "retry-op", taskId: "retry-task", launchToken: "retry-token", owner,
+        observer: { kind: "background-tasks", version: "1" }, supervision: { hostId: "host", runnerId: "runner" }, authorityRef: "scope" });
+      writer.registerWait({ waitId: "retry-wait", owner, dependencies: [{ operationId: "retry-op" }],
+        origin: { attemptId: "sa_history" }, continuationNote: "Interpret evidence." });
+    }
+    return result;
+  };
+  try {
+    await model.reconcile();
+    assert.equal(model.snapshot().status, "ready");
+    assert.equal(model.snapshot({ id: "sa_history" }).rows[0]!.assignment.state, "waiting");
+    assert.equal(model.snapshot({ id: "sa_changing" }).rows[0]!.meta.name, "latest");
+    assert.equal(model.metrics.metadataReads, 3);
+    assert.equal(model.metrics.projections, 4, "the changed file and newer assignment obligation each invalidate their cached family");
+    assert.equal(model.metrics.assignments.pending, 0);
+  } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("watch overflow and lost notifications reconcile external writes once and retain stale degraded rows", { timeout: 10000 }, async () => {
   const root = fixtureRoot("inventory");
   const runs = join(root, "runs"); mkdirSync(runs);
@@ -583,7 +621,7 @@ test("watch overflow and lost notifications reconcile external writes once and r
   } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("a paused real socket has bounded queued snapshots and receives explicit resync after draining", { timeout: 10000 }, async () => {
+test("a paused real socket has bounded queued snapshots and receives explicit resync after draining", { timeout: 10000 }, async t => {
   const root = fixtureRoot("slow");
   const transport = mkdtempSync("/tmp/p753-");
   const runs = join(root, "runs", "sa_slow"); mkdirSync(runs, { recursive: true });
@@ -597,11 +635,15 @@ test("a paused real socket has bounded queued snapshots and receives explicit re
   server.listen(path); await once(server, "listening");
   const client = connect(path); client.pause();
   await once(server, "connection");
+  let cancelResync = () => {};
   try {
     queries.handle({ type: "runtime_subscribe", scope: {} });
+    // Identical invalidations are coalesced; backpressure needs real content changes.
     for (let i = 0; i < 1000; i++) model.invalidate(`watcher overflow ${i}`);
     assert.ok(accepted.writableLength <= 103000, `queued bytes exceeded one snapshot plus the queue allowance: ${accepted.writableLength}`);
     const resynced = new Promise<void>((resolve, reject) => {
+      cancelResync = () => reject(t.signal.reason);
+      t.signal.addEventListener("abort", cancelResync, { once: true });
       let buffer = "";
       client.setEncoding("utf8");
       client.on("data", chunk => {
@@ -614,6 +656,7 @@ test("a paused real socket has bounded queued snapshots and receives explicit re
     });
     client.resume(); await resynced;
   } finally {
+    t.signal.removeEventListener("abort", cancelResync);
     client.destroy(); accepted.destroy(); queries.close();
     await new Promise<void>(resolve => server.close(() => resolve()));
     await model.close(); rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });

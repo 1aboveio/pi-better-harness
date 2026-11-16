@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { WorkClient } from "../../pi-better-server/src/runtime/work-client.mjs";
+import { stopFixtureChild } from "./fixture-child.mjs";
 
 /** Real query server for registered-extension fixtures; no model or HostedSession. */
 export async function startWorkRuntimeFixture(env = process.env) {
@@ -25,15 +26,21 @@ export async function startWorkRuntimeFixture(env = process.env) {
         return ready;
     };
     const ready = await start();
-    const stopChild = async () => { retention?.close(); retention = undefined; if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.send("stop"); await exited; } };
+    let stopping;
+    const stopChild = () => stopping ??= (async () => {
+        // Keep retention until the explicit stop is sent; closing it first can
+        // race the daemon's idle shutdown and its IPC channel teardown.
+        try { await stopFixtureChild(child); }
+        finally { retention?.close(); retention = undefined; }
+    })();
     const stop = async () => {
         await stopChild();
         rmSync(transport, { recursive: true, force: true });
     };
     stop.socketPath = ready.ready;
-    stop.restart = async () => { await stopChild(); await start(); };
+    stop.restart = async () => { await stopChild(); stopping = undefined; await start(); };
     stop.pause = stopChild;
-    stop.resume = start;
+    stop.resume = async () => { stopping = undefined; return start(); };
     stop.metrics = async () => { const reply = once(child, "message"); child.send("metrics"); return (await reply)[0]; };
     stop.diagnostics = () => ({ exitCode: child.exitCode, stderr: error });
     return stop;

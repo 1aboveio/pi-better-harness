@@ -45,7 +45,7 @@ test('pending and recent queries decode only bounded relevant rows among 10000 h
     const h=createHarness();
     for(const id of ['recent-a','recent-b','recent-c']) operation(h.store,id);
     operation(h.store,'foreign',{...parentOwner,sessionId:'foreign'});
-    const db=new DatabaseSync(h.path);
+    let db=new DatabaseSync(h.path);
     history(db,10000);
     db.exec("UPDATE operations SET terminal_revision=1,terminal_at=100,phase='terminal' WHERE operation_id LIKE 'recent-%'");
     db.exec("UPDATE operations SET supervision_json='invalid foreign payload',terminal_revision=1,terminal_at=100,phase='terminal' WHERE operation_id='foreign'");
@@ -57,8 +57,16 @@ test('pending and recent queries decode only bounded relevant rows among 10000 h
     assert.deepEqual(h.store.listRecentBackgroundTerminals({since:100,owner:scope,after:{terminalAt:100,operationId:'recent-b'}}).map(op=>op.operationId),['recent-c']);
     const recentPlan=db.prepare("EXPLAIN QUERY PLAN SELECT * FROM operations WHERE observer_kind='local-supervisor' AND terminal_revision>0 AND terminal_at>=? AND owner_kind='parent-session' AND owner_workspace=? AND owner_session_id=? ORDER BY terminal_at,operation_id LIMIT 256").all(100,scope.workspace,scope.sessionId);
     assert.match(JSON.stringify(recentPlan),/SEARCH operations USING INDEX operations_background_owner_recent/);
+    db.exec('DROP INDEX background_operation_repair; CREATE INDEX background_operation_repair ON operations(observer_kind,operation_id)');
+    db.close();
+    h.reopen();
+    db=new DatabaseSync(h.path);
     const globalPlan=db.prepare("EXPLAIN QUERY PLAN SELECT * FROM operations WHERE observer_kind='local-supervisor' AND terminal_revision>0 AND terminal_at>=? ORDER BY terminal_at,operation_id LIMIT 256").all(100);
     assert.match(JSON.stringify(globalPlan),/SEARCH operations USING INDEX operations_background_recent/);
+    assert.doesNotMatch(JSON.stringify(globalPlan),/TEMP B-TREE/);
+    const repairPlan=db.prepare("EXPLAIN QUERY PLAN SELECT operation_id FROM operations WHERE observer_kind='local-supervisor' AND operation_id>? ORDER BY operation_id LIMIT ?").all('',128);
+    assert.match(JSON.stringify(repairPlan),/SEARCH operations USING COVERING INDEX background_operation_repair/);
+    assert.doesNotMatch(JSON.stringify(repairPlan),/TEMP B-TREE/);
     const pendingPlan=db.prepare("EXPLAIN QUERY PLAN SELECT o.* FROM background_parent_callbacks p JOIN operations o ON o.operation_id=p.operation_id WHERE p.owner_kind='parent-session' AND p.owner_workspace=? AND p.owner_session_id=? AND p.operation_id>? ORDER BY p.operation_id LIMIT 256").all(scope.workspace,scope.sessionId,'');
     assert.match(JSON.stringify(pendingPlan),/SEARCH p USING COVERING INDEX background_parent_callbacks_owner/);
     db.close();h.closeStore();

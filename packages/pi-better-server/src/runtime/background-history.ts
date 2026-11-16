@@ -110,6 +110,27 @@ export class BackgroundHistory {
     if (!this.scheduled) { this.scheduled = true; setImmediate(() => { this.scheduled = false; if (!this.closed && !this.pending) this.startRefresh(); }); }
   }
 
+  private operationInput(op: any) {
+    const waits = this.source().prepare(`SELECT w.* FROM waits w JOIN wait_dependencies d ON w.wait_id = d.wait_id AND w.generation = d.generation
+      WHERE d.operation_id = ? ORDER BY w.wait_id, w.generation`).all(op.operation_id);
+    this.metrics.dependencyQueries++;
+    const directory = this.directoryFor(op);
+    const context = currentIdentity(join(directory, "observed", `${op.task_id}.json`));
+    const files = ["launch", "claim", "command", "result", "lost", "stop", "cleanup"]
+      .map(name => currentIdentity(join(directory, "tasks", op.task_id, `${name}.json`)));
+    this.metrics.inputStats += 8;
+    const active = op.phase === "running" ? this.project([op])[0] : undefined;
+    return { context, active, signature: digest([op, waits, context, files, active]) };
+  }
+
+  repairOperation(op: any, id: string) {
+    if (!this.activated || !this.imported || this.closed) return;
+    const previous = this.db.prepare("SELECT signature FROM background_history WHERE key=?").get(`d:${id}`);
+    if (op?.owner_kind !== "parent-session" || op.observer_kind !== "local-supervisor") {
+      if (previous) this.invalidateOperation(id);
+    } else if (!previous || previous.signature !== this.operationInput(op).signature) this.invalidateOperation(id);
+  }
+
   private invalidateLegacy() {
     this.legacyOwed = true; this.completed = 0;
     this.invalidateOperation("");
@@ -246,15 +267,7 @@ export class BackgroundHistory {
       for (const op of operations) {
         if (this.closed) return;
         const key = `d:${op.operation_id}`;
-        this.metrics.dependencyQueries++;
-        const waits = source.prepare(`SELECT w.* FROM waits w JOIN wait_dependencies d ON w.wait_id = d.wait_id AND w.generation = d.generation
-          WHERE d.operation_id = ? ORDER BY w.wait_id, w.generation`).all(op.operation_id);
-        const directory = this.directoryFor(op);
-        const context = await identity(join(directory, "observed", `${op.task_id}.json`));
-        this.metrics.inputStats += 8;
-        const files = await Promise.all(["launch", "claim", "command", "result", "lost", "stop", "cleanup"].map(name => identity(join(directory, "tasks", op.task_id, `${name}.json`))));
-        const active = op.phase === "running" ? this.project([op])[0] : undefined;
-        const signature = digest([op, waits, context, files, active]);
+        const { context, active, signature } = this.operationInput(op);
         let meta;
         if (previous.get(key)?.signature !== signature) {
           this.metrics.projections++;

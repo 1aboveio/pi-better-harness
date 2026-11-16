@@ -25,7 +25,7 @@ export class BackgroundObservation {
   private identity?: string;
   private knownCoordinator = false;
   private rows: any[] = [];
-  private terminalProjections = new Map<string, { version: string; authority: string; inspection: any; row: any; dependencyVersion?: number }>();
+  private terminalProjections = new Map<string, { version: string; authority: string; operation: any; inspection: any; row: any; dependencyVersion?: number }>();
   private hasInputVersions = false;
   private inbox: any;
   private dirtyOperations = new Set<string>();
@@ -179,16 +179,19 @@ export class BackgroundObservation {
       this.repairIds.clear();
       if (this.db) {
         const repair = this.db.prepare("SELECT operation_id FROM operations WHERE observer_kind='local-supervisor' AND operation_id>? ORDER BY operation_id LIMIT ?").all(this.repairAfter, ENTITY_BUDGET);
-        for (const op of repair) { this.repairIds.add(op.operation_id); this.metrics.repairEntries++; this.history?.invalidateOperation(op.operation_id); }
+        for (const op of repair) { this.repairIds.add(op.operation_id); this.metrics.repairEntries++; }
         this.repairAfter = repair.length === ENTITY_BUDGET ? repair.at(-1).operation_id : "";
         if (!this.repairAfter) this.repairComplete = true;
-        this.inbox.db.prepare(`INSERT OR REPLACE INTO ${this.inbox.prefix}background_file_repair VALUES(1,?,?,?)`).run(this.identity ?? "", this.repairAfter, Number(this.repairComplete));
+        const saved = this.inbox.db.prepare(`SELECT * FROM ${this.inbox.prefix}background_file_repair WHERE singleton=1`).get();
+        if (!saved || saved.identity !== (this.identity ?? "") || saved.after_id !== this.repairAfter || saved.complete !== Number(this.repairComplete))
+          this.inbox.db.prepare(`INSERT OR REPLACE INTO ${this.inbox.prefix}background_file_repair VALUES(1,?,?,?)`).run(this.identity ?? "", this.repairAfter, Number(this.repairComplete));
       }
       const hasPendingIndex = Boolean(this.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_parent_callbacks'").get());
       this.changedOperations.clear();
       if (this.db) for (const id of new Set([...this.dirtyOperations, ...this.repairIds])) {
         this.metrics.exactOperationQueries++;
         this.changedOperations.set(id, this.db.prepare("SELECT * FROM operations WHERE operation_id=?").get(id));
+        if (this.repairIds.has(id)) this.history?.repairOperation(this.changedOperations.get(id), id);
       }
       const operations = this.db ? this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor'").all() : [];
       this.metrics.activeRows += operations.length;
@@ -253,8 +256,6 @@ export class BackgroundObservation {
         this.observeDirectory(directory);
         const cached = this.terminalProjections.get(op.operation_id);
         const authority = JSON.stringify([op, directory]);
-        if (useCache && cached && !this.dirtyOperations.has(op.operation_id) && !this.repairIds.has(op.operation_id)
-          && cached.authority === authority && this.hasInputVersions) { this.metrics.projectionHits++; return cached.row; }
         const work = !useCache ? this.metrics.sourceWork.history : this.repairIds.has(op.operation_id) && !this.dirtyOperations.has(op.operation_id)
           ? this.metrics.sourceWork.repair : this.metrics.sourceWork.active;
         const dependencyVersion = this.hasInputVersions
@@ -283,6 +284,7 @@ export class BackgroundObservation {
         }
         const version = JSON.stringify([op, directory, identities, waits]);
         if (useCache && cached?.version === version) { cached.dependencyVersion = dependencyVersion; this.metrics.projectionHits++; return cached.row; }
+        if (useCache) this.history?.invalidateOperation(op.operation_id);
         this.metrics.runnerSnapshots++;
         work.snapshots++;
         const inspection = snapshot(directory, op.task_id);
@@ -300,7 +302,7 @@ export class BackgroundObservation {
           dismissedAt: context.dismissedAt, exitCode: inspection?.result?.exitCode ?? null, logPaths: inspection?.logs ?? {} };
         if (useCache) {
           this.terminalProjections.delete(op.operation_id);
-          this.terminalProjections.set(op.operation_id, { version, authority, inspection, row, dependencyVersion });
+          this.terminalProjections.set(op.operation_id, { version, authority, operation: op, inspection, row, dependencyVersion });
           if (this.terminalProjections.size > 4096) this.terminalProjections.delete(this.terminalProjections.keys().next().value!);
         }
         return row;
@@ -333,6 +335,14 @@ export class BackgroundObservation {
       entry.recentRevision = revision;
     } else {
       const rows = new Map(entry.recent.filter(row => Date.now() - row.endedAt < 30000).map(row => [row.operationId, row]));
+      // Retained visible terminals must observe atomic file replacement even
+      // before a watcher hint arrives or the historical repair cursor reaches them.
+      for (const id of rows.keys()) if (!this.changedOperations.has(id)) {
+        let op = this.terminalProjections.get(id)?.operation;
+        if (!op) { this.metrics.exactOperationQueries++; op = this.db.prepare("SELECT * FROM operations WHERE operation_id=?").get(id); }
+        if (op) rows.set(id, this.project([op])[0]);
+        else rows.delete(id);
+      }
       for (const [id, op] of this.changedOperations) {
         if (op?.owner_kind === "parent-session" && op.owner_workspace === entry.origin.cwd && op.owner_session_id === (entry.origin.sessionId ?? "")
           && op.observer_kind === "local-supervisor" && op.terminal_revision > 0 && Date.now() - op.terminal_at < 30000) {
