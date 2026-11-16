@@ -524,7 +524,7 @@ export class WorkReadModel {
               totalBytes: displayState.totalBytes, missing: displayState.cursor.missing,
               complete: !displayState.catchingUp && !displayState.windowTruncated && displayState.cursor.offset === displayState.totalBytes,
             } : undefined };
-            if (healthState) health = { ...health, coverage: { start: healthState.cursor.coverageStart ?? 0,
+            if (health && healthState) health = { ...health, coverage: { start: healthState.cursor.coverageStart ?? 0,
               offset: healthState.cursor.offset, missing: healthState.cursor.missing } };
             if (displayState?.catchingUp) logs.set(meta.id, `${logs.get(meta.id)}:catching-up`);
             if (displayState && healthState) this.checkpoints.save(logPath, {

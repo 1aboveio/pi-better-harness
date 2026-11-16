@@ -6,6 +6,7 @@ import { WorkClient } from "../src/runtime/work-client.mjs";
 import { LogCheckpoints, LOG_CHECKPOINT_ENTRY_BUDGET, LOG_CHECKPOINT_BUDGET } from "../src/runtime/log-checkpoints.ts";
 import { DatabaseSync } from "node:sqlite";
 import { spawnSync } from "node:child_process";
+import { WorkReadModel } from "../src/runtime/read-model.ts";
 
 const fixturePath = "../../pi-better-subagents/tests/work-runtime-fixture.mjs";
 const { startWorkRuntimeFixture } = await import(fixturePath);
@@ -13,6 +14,32 @@ const event = (value: any) => JSON.stringify(value) + "\n";
 const usage = event({ type: "message_end", message: { role: "assistant", usage: { input: 3, output: 2, cost: { total: 0.01 } } } });
 const tool = event({ type: "tool_execution_start", toolCallId: "tool", toolName: "bash", at: 100 });
 const padding = event({ type: "message_update", message: { role: "assistant", content: "x".repeat(67000) } });
+
+test("archiving a checkpointed raw run preserves a ready terminal observation", async () => {
+  const parent = resolve("../../.work/801"); mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, "archive-checkpoint-"));
+  const id = "sa_archived_checkpoint", directory = join(root, "runs", id);
+  const meta = { id, cwd: root, sessionId: "worker", status: "completed", startedAt: 1, endedAt: 2,
+    recipe: { version: 1, sessionId: "worker", sessionDir: join(root, "durable", "sessions"), cwd: root } };
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "meta.json"), JSON.stringify(meta));
+  writeFileSync(join(directory, "output.log"), usage + tool);
+  const model = new WorkReadModel(root, "archive-checkpoint", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    assert.equal(model.snapshot().status, "ready");
+    assert.equal((model.snapshot().rows[0] as any).health.facts.activeTools.length, 1);
+    mkdirSync(join(root, "durable", "attempts"), { recursive: true });
+    writeFileSync(join(root, "durable", "attempts", `${id}.json`), JSON.stringify({ version: 1, meta }));
+    rmSync(directory, { recursive: true });
+    await model.reconcile();
+    const archived = model.snapshot();
+    assert.equal(archived.status, "ready", archived.reason);
+    assert.equal(archived.rows[0]?.meta.id, id);
+    assert.equal(archived.rows[0]?.meta.status, "completed");
+    assert.equal((archived.rows[0] as any).health, undefined, "archive-only rows have no raw-log health facts");
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 for (const count of [48, 96, 144]) test(`${count} tasks recover socket summaries after eviction and restart`, { timeout: 30000 }, async t => {
   const parent = resolve("../../.work/801"); mkdirSync(parent, { recursive: true });
