@@ -775,6 +775,50 @@ for (const outcome of ["success", "failure"]) test(`old fold ${outcome} cannot a
 });
 
 
+for (const rootRecreated of [false, true]) test(`a raw directory observed before metadata still publishes the original atomic writer commit (${rootRecreated ? "recreated root" : "existing root"})`, { timeout: 15000 }, async () => {
+  const f = await fixture();
+  const { measureEventPublication } = await import(new URL("../scripts/event-publication/measure.mjs", import.meta.url).href);
+  try {
+    const client = await f.client(); await ready(client);
+    const id = "sa_metadata_gap", directory = join(f.root, "runs", id), metaPath = join(directory, "meta.json");
+    const scope = { cwd: f.root, sessionId: "parent", limit: 10 };
+    await client.subscribe(scope);
+    if (rootRecreated) {
+      mkdirSync(directory);
+      writeFileSync(metaPath, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1,
+        callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "before-root" }));
+      const wait = async (condition: () => boolean) => {
+        const until = Date.now() + 1000;
+        while (!condition()) {
+          assert.ok(Date.now() < until, "root gap publication missing");
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      };
+      await wait(() => client.snapshot?.rows[0]?.meta.name === "before-root");
+      renameSync(join(f.root, "runs"), join(f.root, "retired-runs"));
+      await wait(() => client.snapshot?.status === "degraded");
+      assert.equal(client.snapshot?.rows[0]?.meta.name, "before-root");
+    }
+    const before = f.executor.metrics().inventories ?? 0;
+    mkdirSync(directory, { recursive: true });
+    const until = Date.now() + 1000;
+    do {
+      // Query capture refreshes metrics, never requests inventory repair.
+      await client.get(scope);
+      assert.ok(Date.now() < until, "raw directory creation hint was not processed");
+      if ((f.executor.metrics().inventories ?? 0) > before && client.snapshot?.rows.length === 0) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    } while (true);
+    writeFileSync(metaPath, JSON.stringify({ id, sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1,
+      endedAt: Date.now(), callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "original" }));
+    const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id,
+      subscribers: 1, commits: 1, phase: rootRecreated ? "metadata-after-root-recreation" : "metadata-after-directory-hint", diagnostics: () => f.executor.metrics() });
+    assert.ok(report.ms.max <= 1000, JSON.stringify(report));
+    await client.get(scope);
+    assert.equal(f.executor.metrics().sourceWatchers, 2);
+  } finally { await f.close(); }
+});
+
 test("directory entry watchers publish repeated atomic commits without the inventory fallback", { timeout: 15000 }, async () => {
   const f = await fixture(); // fallback interval is 60 seconds, longer than this test
   const { measureEventPublication } = await import(new URL("../scripts/event-publication/measure.mjs", import.meta.url).href);
@@ -787,7 +831,8 @@ test("directory entry watchers publish repeated atomic commits without the inven
     const client = await f.client(); await ready(client);
     const scope = { cwd: f.root, sessionId: "parent", limit: 10 };
     for (const subscribers of [1, 5, 10]) {
-      const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers, commits: 5 });
+      const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers, commits: 5,
+        phase: "initial-directory", diagnostics: () => f.executor.metrics() });
       assert.ok(report.ms.max <= 1000, JSON.stringify(report));
       assert.equal(f.executor.metrics().sourceWatchers, 2, "one root and one raw directory, independent of clients/files");
     }
@@ -799,7 +844,8 @@ test("directory entry watchers publish repeated atomic commits without the inven
     while (client.snapshot?.rows[0]?.meta.name !== "replaced-directory") {
       assert.ok(Date.now() < until, "directory replacement was not published"); await new Promise(resolve => setTimeout(resolve, 10));
     }
-    const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5 });
+    const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5,
+      phase: "replaced-directory", diagnostics: () => f.executor.metrics() });
     assert.ok(report.ms.max <= 1000, JSON.stringify(report));
     // The entire source root can also move while its pathname is immediately
     // recreated. Identity checks must rebind both root and child watchers.
@@ -810,7 +856,8 @@ test("directory entry watchers publish repeated atomic commits without the inven
     while (client.snapshot?.rows[0]?.meta.name !== "replaced-root") {
       assert.ok(Date.now() < rootBy, "root replacement was not published"); await new Promise(resolve => setTimeout(resolve, 10));
     }
-    const rootReport = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5 });
+    const rootReport = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5,
+      phase: "replaced-root", diagnostics: () => f.executor.metrics() });
     assert.ok(rootReport.ms.max <= 1000, JSON.stringify(rootReport));
     assert.equal(f.executor.metrics().sourceWatchers, 2);
     rmSync(directory, { recursive: true });

@@ -126,12 +126,16 @@ export function commitAssignmentTerminal(meta, recoveryFailure = false) {
         }
         const complete = meta.status === "completed" && (report ? report.status === "complete"
             : !invalidReport && waits.some((w) => w.acknowledgement?.disposition === "assignment-complete"));
+        const reportReason = report?.status === "incomplete" ? `Assignment incomplete: ${report.reason}`
+            + (report.blocker ? ` Blocked (${report.blocker.kind}): ${report.blocker.reason}.` : "")
+            + (report.remainingWork ? ` Remaining work: ${report.remainingWork.join("; ")}.` : "") : report?.reason;
         try {
             return store.recordAssignmentOutcome({ ...binding, revision: 1,
                 outcome: complete ? "succeeded" : meta.status === "killed" ? "cancelled" : "failed",
-                reason: meta.failureReason || invalidReport || (meta.status === "completed" && report ? report.reason : complete ? "Assigned work and required interpretation are complete."
-                    : meta.status === "completed" ? "Assignment completion is unverified: the attempt exited without an evidence-backed completion decision. Inspect retained output and continue unfinished work or report a concrete blocker."
-                        : `Assignment ended ${meta.status}; retained attempt evidence is available.`),
+                reason: (meta.failureReason || invalidReport || (meta.status === "completed" && report ? reportReason : complete ? "Assigned work and required interpretation are complete."
+                    : meta.status === "completed" && meta.assignmentReportRejection ? `Assignment report rejected: ${meta.assignmentReportRejection.reason}`
+                        : meta.status === "completed" ? "Assignment completion is unverified: the attempt exited without an evidence-backed completion decision. Inspect retained output and continue unfinished work or report a concrete blocker."
+                            : `Assignment ended ${meta.status}; retained attempt evidence is available.`)).slice(0, 8192),
                 processUncertain: meta.status === "lost" || typeof meta.exitCode !== "number"
                     || waits.some((w) => w.dependencies.some((d) => d.terminalRevision === 0)
                         || store.listResumeClaims({ waitId: w.waitId, generation: w.generation, state: "published" }).length > 0),

@@ -580,7 +580,15 @@ export class WorkReadModel {
                 try {
                   await sourceStat(directory);
                   next.delete(path);
-                  if (!archived) this.unwatchDirectory(join(directory, name));
+                  if (!archived) {
+                    // A mkdir notification can arrive before its metadata commit.
+                    // Retire the inode watcher only when the directory is gone.
+                    try { await sourceStat(join(directory, name)); }
+                    catch (error) {
+                      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+                      this.unwatchDirectory(join(directory, name));
+                    }
+                  }
                 } catch {
                   failedPaths.set(path, `Source directory unavailable; retaining verified records: ${directory}`);
                 }
@@ -664,6 +672,10 @@ export class WorkReadModel {
       const changed = next.size !== baseline.files.size || [...next].some(([path, entry]) => baseline.files.get(path)?.signature !== entry.signature);
       const now = Date.now();
       const deadlineExpired = [...baseline.projected.values()].some(row => healthDeadlineExpired(row, now));
+      // A delayed mkdir notification may retire a watch during the awaited reads.
+      for (const path of paths) if (path.startsWith(this.runs + sep) && next.has(path)) {
+        this.watchDirectory(this.runs); this.watchDirectory(dirname(path));
+      }
       if (!this.staged && !changed && !failedPaths.size && !this.sourceErrors.size && !logFamilies.size && !assignmentChanges?.size && !deadlineExpired && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && !healthConfig.reason && this.state === "ready") return;
       const metas = new Map<string, any>();
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
@@ -818,6 +830,9 @@ export class WorkReadModel {
         }
       }
       if (this.closed) return;
+      for (const path of paths) if (path.startsWith(this.runs + sep) && next.has(path)) {
+        this.watchDirectory(this.runs); this.watchDirectory(dirname(path));
+      }
       this.db.exec("BEGIN");
       const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");

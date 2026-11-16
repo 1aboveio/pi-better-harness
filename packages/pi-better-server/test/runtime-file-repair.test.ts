@@ -109,6 +109,41 @@ for (const successor of ["parent", "another-session"]) test(`late archive preser
   }
 });
 
+test("metadata appearing after the first watch attempt is rebound before its projection publishes", async () => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, "late-directory-bind", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile(); await settleHints(model);
+    const directory = join(f.runs, "sa_late_bind"), path = join(directory, "meta.json");
+    const bind = (model as any).watchDirectory.bind(model);
+    let created = false;
+    (model as any).watchDirectory = (candidate: string) => {
+      bind(candidate);
+      if (candidate === directory && !created) {
+        assert.equal((model as any).watchers.has(directory), false, "first bind sees the missing directory");
+        created = true;
+        f.put("sa_late_bind", { name: "committed-after-bind", status: "completed", endedAt: 2 });
+      }
+    };
+    let published = false;
+    const off = model.onChange(() => {
+      if (model.snapshot({ id: "sa_late_bind" }).rows.length) {
+        published = true;
+        assert.equal((model as any).watchers.has(directory), true, "a ready row must not outlive a failed initial bind");
+      }
+    });
+    // Match an in-flight entity turn: real directory notifications queue behind it.
+    const pending = (model as any).scan([path]);
+    (model as any).pending = pending;
+    await pending;
+    (model as any).pending = undefined;
+    off();
+    assert.equal(published, true);
+    await model.reconcile(false); await settleHints(model);
+    assert.equal(model.snapshot({ id: "sa_late_bind" }).rows[0]!.meta.name, "committed-after-bind");
+  } finally { (model as any).pending = undefined; await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("nullable and over-budget replacements retain verified rows until deletion is verified under an available root", async () => {
   const f = fixture(); f.put("sa_invalid", { name: "verified" }); f.put("sa_sibling", { name: "before" });
   const model = new WorkReadModel(f.agent, "invalid-root-union", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });

@@ -31,6 +31,23 @@ uses the existing terminal contract to report failure to establish completion, n
 failure of the child process. Parent inspection and acceptance remain separate;
 an explicit follow-up can continue the same conversation as a new assignment.
 Existing attempt failures and explicit stops retain their diagnostic records.
+
+Evidence reports may retain explicit byte excerpts from larger workspace files.
+The 65,536-byte bound applies to each retained file or excerpt, with a zero-based
+inclusive `offset` and `max_bytes`; the end is exclusive and bounded by EOF.
+The retained report binds the source path, source size, excerpt range and digest.
+Captured and current read permissions, workspace and credential exclusions, and
+the live writer fence apply before capture. Read-only workers need no workspace
+writes to report evidence. A refusal is not a committed report: the writer may
+correct the path or excerpt and retry. The latest authenticated rejection is
+retained for parent diagnosis and cleared after a successful correction. Accepted
+reports remain immutable, with identical retries returning the retained bytes.
+An incomplete report may retain remaining work and a concrete permission or
+external-input blocker. Parent terminal reasons distinguish incomplete work,
+report rejection and process failure while retaining the separate process status
+and exit code. Full detail remains in the bounded report if the terminal reason
+must be shortened to the coordinator's limit.
+
 The atomic assignment terminal decision and delivery contract is defined by
 ADR 0020's #710 extension. A committed coordinator outcome takes precedence over
 held dependency waits without implying those waits were interpreted. New launch
