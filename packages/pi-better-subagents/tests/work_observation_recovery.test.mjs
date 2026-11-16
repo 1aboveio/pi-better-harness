@@ -10,18 +10,19 @@ import { startWorkObservation, stopWorkObservation, workObservation } from "../w
 
 // An external query transport deterministically advances between bounded pages.
 // The collector must preserve its final notification, without another event.
-for (const mode of ["recover", "stop", "final-page-stop", "no-new-event"]) test(`shared observation pagination recovery: ${mode}`, async () => {
+for (const mode of ["recover", "stop", "final-page-stop", "final-anchor-stop", "no-new-event"]) test(`shared observation pagination recovery: ${mode}`, async () => {
     const stopDuringRecovery = mode === "stop";
     const root = realpathSync(mkdtempSync("/tmp/pi-obs-retry-"));
-    let sequence = 0, conflicts = 0, historyReads = 0;
+    let sequence = 0, conflicts = 0, historyReads = 0, anchorReads = 0;
     const originalGet = WorkClient.prototype.get;
-    if (mode === "final-page-stop") WorkClient.prototype.get = async function(scope) {
+    if (["final-page-stop", "final-anchor-stop"].includes(mode)) WorkClient.prototype.get = async function(scope) {
         const result = await originalGet.call(this, scope);
         // The real socket response completed, but the consumer has not resumed.
-        if (scope.pendingRecipient) stopWorkObservation();
+        if (mode === "final-page-stop" && scope.pendingRecipient) stopWorkObservation();
+        if (mode === "final-anchor-stop" && scope.limit === 1 && ++anchorReads === 2) stopWorkObservation();
         return result;
     };
-    const snapshot = () => ({ instanceId: "fixture", seq: sequence, status: "ready", rows: [], totalMatching: 0 });
+    const snapshot = () => ({ instanceId: "fixture", seq: sequence, scopeRevision: String(sequence), status: "ready", rows: [], totalMatching: 0 });
     const server = createServer(socket => {
         let buffer = "";
         socket.on("data", chunk => {
@@ -62,8 +63,8 @@ for (const mode of ["recover", "stop", "final-page-stop", "no-new-event"]) test(
         }
         const deadline = Date.now() + 1000;
         while (!stopDuringRecovery && mode !== "final-page-stop" && workObservation()?.status !== "ready" && Date.now() < deadline) await delay(10);
-        assert.equal(conflicts, 2);
-        if (stopDuringRecovery || mode === "final-page-stop") {
+        assert.equal(conflicts, ["final-page-stop", "final-anchor-stop"].includes(mode) ? 1 : 2);
+        if (stopDuringRecovery || ["final-page-stop", "final-anchor-stop"].includes(mode)) {
             await delay(20);
             assert.equal(workObservation(), undefined, "an in-flight dirty collection cannot restore a stopped generation");
             return;

@@ -1,12 +1,51 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import type { Socket } from "node:net";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
+
+test("content revisions route old and new scopes while unrelated cursors survive", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scope-revisions-"));
+  const a = join(root, "a"), b = join(root, "b"), c = join(root, "c");
+  const write = (id: string, cwd: string, name = id, status = "completed") => {
+    mkdirSync(join(root, "runs", id), { recursive: true });
+    writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, name, status,
+      callbackOrigin: { cwd, sessionId: "parent" }, startedAt: 1 }));
+  };
+  write("sa_a", a); write("sa_b1", b); write("sa_b2", b); write("sa_c", c);
+  const model = new WorkReadModel(root, "scope-revisions", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  const changes = { a: 0, b: 0, c: 0 };
+  try {
+    await model.reconcile();
+    for (const [key, cwd] of Object.entries({ a, b, c })) model.onChange(() => changes[key as keyof typeof changes]++, { cwd });
+    const scope = { cwd: b, limit: 1 }, first = model.snapshot(scope);
+    const unchanged = () => {
+      assert.equal(changes.b, 0);
+      assert.equal(model.snapshot(scope).scopeRevision, first.scopeRevision);
+      assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
+    };
+    appendFileSync(join(root, "runs/sa_a/output.log"), JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "progress" }] } }) + "\n");
+    await model.reconcile(); unchanged();
+    write("sa_a", c, "moved"); await model.reconcile(); unchanged();
+    assert.ok(changes.a > 0); assert.ok(changes.c > 0);
+    write("sa_a", c, "terminal", "failed"); await model.reconcile(); unchanged();
+    rmSync(join(root, "runs/sa_a"), { recursive: true }); await model.reconcile(); unchanged();
+    assert.throws(() => model.snapshot({ ...scope, sessionId: "other", cursor: first.nextCursor }), /resync_required/);
+    write("sa_b1", b, "changed"); await model.reconcile();
+    assert.ok(changes.b > 0);
+    assert.throws(() => model.snapshot({ ...scope, cursor: first.nextCursor }), /resync_required/);
+    const fresh = model.snapshot(scope);
+    assert.equal(model.snapshot({ ...scope, cursor: fresh.nextCursor }).rows.length, 1);
+    const entries = (model as any).scopes as Map<string, { used: number }>;
+    for (const entry of entries.values()) entry.used = Date.now() - 300000;
+    assert.throws(() => model.snapshot({ ...scope, cursor: fresh.nextCursor }), /retention expired/);
+    assert.equal(model.snapshot(scope).rows.length, 1, "an expired page can restart from a fresh bounded page");
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test("activity stays within workspace, origin session and exact run scopes", async () => {
   const root = mkdtempSync(join(tmpdir(), "runtime-scopes-"));
