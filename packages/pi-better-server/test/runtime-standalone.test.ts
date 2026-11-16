@@ -95,7 +95,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
     const ctx={cwd:${JSON.stringify(evidence)},sessionManager:{getSessionId:()=> 'cold-background'}};
     const {registerTools}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "tools.ts"))}).href);
     const {registerBackgroundTasksGoalProvider}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "goal-provider.ts"))}).href);
-    const {closeBackgroundObservation}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "work-observation.ts"))}).href);
+    const {backgroundObservation,closeBackgroundObservation}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "work-observation.ts"))}).href);
   `;
   const coldScript = entryScript + `
     try {
@@ -193,6 +193,8 @@ test("packed standalone packages use one pinned socket runtime, including cached
   const recoveryScript = entryScript + `
     import {readFileSync,appendFileSync,existsSync} from 'node:fs';
     import {connect} from 'node:net';
+    import {execFileSync} from 'node:child_process';
+    const {WorkClient}=await import(${JSON.stringify(pathToFileURL(join(backgroundSource, "shared-work-client.mjs")).href)});
     const {inspectDaemonOwner}=await import(${JSON.stringify(new URL("../daemon-owner.mjs", pathToFileURL(clients[1]!)).href)});
     const transport=process.env.PI_SERVER_DIR;
     const registration=readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8');
@@ -221,9 +223,33 @@ test("packed standalone packages use one pinned socket runtime, including cached
       await provider.getActivity(ctx); // retain this exact production client's connection
       await stop();trace('clean-stop');assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
       assert.deepEqual((await provider.getActivity(ctx)).items,[]);trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
-      const crashed=owner().pid;process.kill(crashed,'SIGSTOP');
-      const interrupted=provider.getActivity(ctx);await new Promise(r=>setImmediate(r));trace('before-kill');process.kill(crashed,'SIGKILL');trace('kill-sent');
-      assert.deepEqual((await interrupted).items,[]);trace('crash-recovery-ready');assert.notEqual(owner().pid,crashed);await listed();
+      const crashedOwner=owner(),crashed=crashedOwner.pid;paused=crashed;process.kill(crashed,'SIGSTOP');
+      // Observe the stop before sending: SIGSTOP delivery alone is not an acknowledgment.
+      const stoppedBy=Date.now()+5000;
+      while(!execFileSync('ps',['-o','state=','-p',String(crashed)],{encoding:'utf8'}).trim().startsWith('T')) {
+        assert.ok(Date.now()<stoppedBy,'original daemon did not acknowledge SIGSTOP');
+        await new Promise(r=>setImmediate(r));
+      }
+      trace('stop-observed');
+      const originalRequest=WorkClient.prototype.request;let interruptedStarted=false;
+      WorkClient.prototype.request=function(type,params) {
+        const pending=originalRequest.call(this,type,params);
+        if(!interruptedStarted&&type==='runtime_get_snapshot') {
+          const requestId='work-'+this.sequence;
+          assert.equal(this.pending.has(requestId),true,'the interrupted RPC must be registered before the kill');
+          assert.equal(this.snapshot.instanceId,crashedOwner.token,'the interrupted read uses the original cached client');
+          assert.equal(params.scope.sessionId,ctx.sessionManager.getSessionId());
+          interruptedStarted=true;trace('read-inflight:'+requestId);trace('before-kill');
+          process.kill(crashed,'SIGKILL');paused=undefined;trace('kill-sent');
+        }
+        return pending;
+      };
+      try {
+        // Goal's warmed getActivity is a cache read, not a transport request.
+        const interrupted=backgroundObservation(pi,ctx);
+        assert.deepEqual((await interrupted).rows,[]);assert.equal(interruptedStarted,true);
+        trace('crash-recovery-ready');assert.notEqual(owner().pid,crashed);assert.notEqual(owner().token,crashedOwner.token);await listed();
+      } finally {WorkClient.prototype.request=originalRequest;}
       await stop();closeBackgroundObservation(pi);await listed('bg_status');
       assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
       assert.deepEqual((await provider.getActivity({...ctx,sessionManager:{getSessionId:()=> 'foreign'}})).items,[]);
