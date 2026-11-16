@@ -186,7 +186,22 @@ export class WorkReadModel {
     }
   }
   private watchDirectory(path: string) {
-    if (this.closed || this.watchers.has(path)) return;
+    if (this.closed) return;
+    let identity: string | undefined;
+    if ([this.runs, this.archives, this.markers].includes(path)) {
+      try {
+        const info = statSync(path, { bigint: true });
+        identity = `${info.dev}:${info.ino}`;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
+      }
+      if (!identity || this.rootWatchIdentities.get(path) !== identity) {
+        this.unwatchDirectory(path); this.rootWatchIdentities.delete(path);
+        if (path === this.runs) for (const child of this.watchers.keys()) if (child.startsWith(this.runs + sep)) this.unwatchDirectory(child);
+      }
+      if (!identity) return;
+    }
+    if (this.watchers.has(path)) return;
     try {
       const watcher = watch(path, (_event, filename) => {
         if (this.watchers.get(path) !== watcher) return;
@@ -204,6 +219,7 @@ export class WorkReadModel {
         this.invalidate("Watcher overflow or failure; reconciling source inventory.");
       });
       this.watchers.set(path, watcher);
+      if (identity) this.rootWatchIdentities.set(path, identity);
     } catch { /* Missing roots are discovered by the existing compatibility inventory. */ }
   }
 
@@ -262,7 +278,7 @@ export class WorkReadModel {
           this.unwatchDirectory(directory);
           if (directory === this.runs) for (const path of this.watchers.keys()) if (path.startsWith(this.runs + sep)) this.unwatchDirectory(path);
         }
-        this.rootWatchIdentities.set(directory, identity); this.watchDirectory(directory);
+        this.watchDirectory(directory);
         handle = await opendir(directory);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -389,7 +405,7 @@ export class WorkReadModel {
   private scopeStatus(scope: WorkScope): { status: WorkSnapshot["status"]; reason?: string } {
     const race = this.sourceRace;
     // Only a validated, entity-attributed retry can leave another scope ready.
-    // Root, coordinator, malformed-input and initial-import failures stay global.
+    // Root, coordinator, unattributed and initial-import failures stay global.
     if (this.imported && this.state === "degraded" && race && this.reason === race.reason
         && [...this.sourceErrors.keys()].every(path => race.paths.has(path))
         && !race.rows.some(row => this.matchesScope({ id: scope.id, cwd: scope.cwd, sessionId: scope.sessionId }, row))) {
@@ -464,6 +480,7 @@ export class WorkReadModel {
     try {
       const next = new Map(baseline.files);
       const failedPaths = new Map<string, string>();
+      const malformedPaths = new Set<string>();
       let batch = 0;
       let sliceStarted = performance.now();
       for (const [directory, archived] of [[this.markers, true], [this.archives, true], [this.runs, false]] as const) {
@@ -506,6 +523,7 @@ export class WorkReadModel {
               }
               next.set(path, entry!);
             } catch (error) {
+              if (!archived && error instanceof SyntaxError && this.files.has(path)) malformedPaths.add(path);
               if ((error as NodeJS.ErrnoException).code === "ENOENT") {
                 try {
                   await sourceStat(directory);
@@ -590,10 +608,14 @@ export class WorkReadModel {
       const changed = next.size !== baseline.files.size || [...next].some(([path, entry]) => baseline.files.get(path)?.signature !== entry.signature);
       const now = Date.now();
       const deadlineExpired = [...baseline.projected.values()].some(row => healthDeadlineExpired(row, now));
+      const rawDirectories = [...new Set(paths.filter(path => path.startsWith(this.runs + sep) && next.has(path)).map(path => dirname(path)))];
+      const rearmRawDirectories = () => {
+        if (!rawDirectories.length) return;
+        this.watchDirectory(this.runs);
+        for (const directory of rawDirectories) this.watchDirectory(directory);
+      };
       // A delayed mkdir notification may retire a watch during the awaited reads.
-      for (const path of paths) if (path.startsWith(this.runs + sep) && next.has(path)) {
-        this.watchDirectory(this.runs); this.watchDirectory(dirname(path));
-      }
+      rearmRawDirectories();
       if (!this.staged && !changed && !failedPaths.size && !this.sourceErrors.size && !logFamilies.size && !deadlineExpired && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && !healthConfig.reason && this.state === "ready") return;
       const metas = new Map<string, any>();
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
@@ -779,9 +801,7 @@ export class WorkReadModel {
         }
       }
       if (this.closed) return;
-      for (const path of paths) if (path.startsWith(this.runs + sep) && next.has(path)) {
-        this.watchDirectory(this.runs); this.watchDirectory(dirname(path));
-      }
+      rearmRawDirectories();
       this.db.exec("BEGIN");
       const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");
@@ -815,6 +835,14 @@ export class WorkReadModel {
         const error = failedPaths.get(path);
         if (error) this.sourceErrors.set(path, error);
         else this.sourceErrors.delete(path);
+      }
+      // Incomplete raw writes retain their verified namespace, not partial JSON.
+      // New/unknown records and mixed failures cannot be narrowed this way.
+      if (failedPaths.size && failedPaths.size === malformedPaths.size
+          && (previousState === "ready" || this.sourceRace && previousReason === this.sourceRace.reason)
+          && [...this.sourceErrors.keys()].every(path => malformedPaths.has(path))) {
+        this.sourceRace = { reason: failedPaths.values().next().value!, paths: malformedPaths,
+          rows: [...malformedPaths].map(path => this.projected.get(this.files.get(path)!.meta.id)) };
       }
       if (!this.sourceErrors.size) this.sourceRace = undefined;
       this.state = this.sourceErrors.size || healthConfig.reason ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
