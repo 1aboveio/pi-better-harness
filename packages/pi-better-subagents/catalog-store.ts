@@ -52,7 +52,12 @@ export const SOURCE_PRECEDENCE = ["project", "user", "bundled"] as const;
 
 export interface LoadCatalogInput {
     /** Server-owned, bounded source reuse. Admission and discovery still run first. */
-    sources?: { read(path: string): string; parse(raw: string, path: string): ParseResult };
+    sources?: {
+        read(path: string): string;
+        parse(raw: string, path: string): ParseResult;
+        entry?(entry: CatalogEntry): CatalogEntry;
+        preferences?(root: string): ReturnType<typeof readCatalogPreferences>;
+    };
     cwd: string;
     /** Host trust decision. Untrusted projects do not contribute definitions. */
     projectTrusted: boolean;
@@ -257,15 +262,13 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
     const { entries, blocked } = selectIdentities(groups, diagnostics);
     const savedSettings: Record<string, { model?: string | null; effort?: ThinkingLevel | null }> = {};
     const preferenceSources: Record<string, Partial<Record<"model" | "effort", { scope: "user" | "project"; path: string; bundled?: boolean }>>> = {};
-    const preferenceDigests: string[] = [];
     const scopes = [
         { scope: "user" as const, root: user.root },
         ...(input.projectTrusted ? [{ scope: "project" as const, root: projectCatalogPaths(input.cwd, configDirName).root }] : []),
     ];
     for (const { scope, root } of scopes) {
         try {
-            const preferences = readCatalogPreferences(root);
-            preferenceDigests.push(preferences.digest);
+            const preferences = input.sources?.preferences?.(root) ?? readCatalogPreferences(root);
             for (const entry of entries) {
                 if (scope === "user" && entry.scope === "project") continue;
                 const own = preferences.settings[entry.id];
@@ -311,8 +314,8 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
             }
         }
     }
-    const snapshot = finishSnapshot(entries, blocked, diagnostics, loadedAt);
-    const digest = contentDigest(JSON.stringify([snapshot.digest, preferenceDigests, savedSettings, preferenceSources]));
+    const snapshot = finishSnapshot(entries, blocked, diagnostics, loadedAt, input.sources);
+    const digest = contentDigest(JSON.stringify([snapshot.digest, savedSettings, preferenceSources]));
     return deepFreeze({ ...snapshot, digest, revision: digest, savedSettings, preferenceSources });
 }
 
@@ -768,11 +771,12 @@ function finishSnapshot(
     blocked: CatalogEntry[],
     diagnostics: Diagnostic[],
     loadedAt: string,
+    sources?: LoadCatalogInput["sources"],
 ): CatalogSnapshot {
     const roleEntries: Array<readonly [string, CatalogEntry]> = [];
     const agentEntries: Array<readonly [string, CatalogEntry]> = [];
     for (const entry of entries) {
-        const frozen = deepFreeze(cloneEntry(entry));
+        const frozen = sources?.entry?.(entry) ?? deepFreeze(cloneEntry(entry));
         if (frozen.kind === "role") roleEntries.push([frozen.id, frozen]);
         else agentEntries.push([frozen.id, frozen]);
     }

@@ -122,15 +122,13 @@ export function loadCatalog(input) {
     const { entries, blocked } = selectIdentities(groups, diagnostics);
     const savedSettings = {};
     const preferenceSources = {};
-    const preferenceDigests = [];
     const scopes = [
         { scope: "user", root: user.root },
         ...(input.projectTrusted ? [{ scope: "project", root: projectCatalogPaths(input.cwd, configDirName).root }] : []),
     ];
     for (const { scope, root } of scopes) {
         try {
-            const preferences = readCatalogPreferences(root);
-            preferenceDigests.push(preferences.digest);
+            const preferences = input.sources?.preferences?.(root) ?? readCatalogPreferences(root);
             for (const entry of entries) {
                 if (scope === "user" && entry.scope === "project")
                     continue;
@@ -182,8 +180,8 @@ export function loadCatalog(input) {
             }
         }
     }
-    const snapshot = finishSnapshot(entries, blocked, diagnostics, loadedAt);
-    const digest = contentDigest(JSON.stringify([snapshot.digest, preferenceDigests, savedSettings, preferenceSources]));
+    const snapshot = finishSnapshot(entries, blocked, diagnostics, loadedAt, input.sources);
+    const digest = contentDigest(JSON.stringify([snapshot.digest, savedSettings, preferenceSources]));
     return deepFreeze({ ...snapshot, digest, revision: digest, savedSettings, preferenceSources });
 }
 export function refreshCatalog(input) {
@@ -586,11 +584,11 @@ function unusedSource(occurrence, reason) {
         reason,
     };
 }
-function finishSnapshot(entries, blocked, diagnostics, loadedAt) {
+function finishSnapshot(entries, blocked, diagnostics, loadedAt, sources) {
     const roleEntries = [];
     const agentEntries = [];
     for (const entry of entries) {
-        const frozen = deepFreeze(cloneEntry(entry));
+        const frozen = sources?.entry?.(entry) ?? deepFreeze(cloneEntry(entry));
         if (frozen.kind === "role")
             roleEntries.push([frozen.id, frozen]);
         else
