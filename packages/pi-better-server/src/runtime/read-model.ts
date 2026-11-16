@@ -2,7 +2,7 @@ import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { dirname, relative, join, resolve, sep } from "node:path";
 import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -84,6 +84,7 @@ export class WorkReadModel {
   private healthRevision = "";
   private details = new Map<string, { revision: string; value: any }>();
   private watchers = new Map<string, FSWatcher>();
+  private rootParents = new Map<string, { path: string; identity: string; watcher: FSWatcher }>();
   private rootWatchIdentities = new Map<string, string>();
   private listeners = new Set<() => void>();
   private timer?: ReturnType<typeof setInterval>;
@@ -104,7 +105,7 @@ export class WorkReadModel {
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, healthDeadline: 0, unverified: 0, initial: 0 };
   get metrics() {
     return { ...this.counters, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
-      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size };
+      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size, sourceParentWatchers: this.rootParents.size };
   }
   readonly runs: string;
   readonly archives: string;
@@ -134,7 +135,7 @@ export class WorkReadModel {
     // Watch directory entries, not file inodes. Node's Linux recursive watcher
     // can retain a replaced file's old inode after atomic rename and miss later
     // commits. Flat archives need one watcher; raw runs use one per directory.
-    for (const path of [this.runs, this.archives, this.markers]) this.watchDirectory(path);
+    for (const path of [this.runs, this.archives, this.markers]) { this.watchRootParent(path); this.watchDirectory(path); }
     this.timer = setInterval(() => { if (!this.pending) void this.reconcile(); }, options.intervalMs ?? 1000);
     this.timer.unref();
   }
@@ -142,10 +143,38 @@ export class WorkReadModel {
   private unwatchDirectory(path: string) {
     this.watchers.get(path)?.close(); this.watchers.delete(path);
   }
+  private watchRootParent(root: string) {
+    if (this.closed) return;
+    // A watch follows an inode, not the source pathname. Keep an independent
+    // parent entry watch so recreation after an observed ENOENT remains visible.
+    for (let parent = dirname(root); ; parent = dirname(parent)) {
+      const previous = this.rootParents.get(root);
+      try {
+        const info = statSync(parent, { bigint: true });
+        const identity = `${info.dev}:${info.ino}`;
+        if (previous?.path === parent && previous.identity === identity) return;
+        const entry = relative(parent, root).split(sep)[0];
+        const watcher = watch(parent, (_event, filename) => {
+          if (this.rootParents.get(root)?.watcher !== watcher) return;
+          if (!filename || String(filename) === entry || String(filename) === relative(dirname(parent), parent)) void this.reconcile();
+        });
+        watcher.on("error", () => {
+          if (this.rootParents.get(root)?.watcher !== watcher) return;
+          watcher.close(); this.rootParents.delete(root);
+          this.invalidate("Source parent watcher failed; reconciling source inventory.");
+        });
+        previous?.watcher.close();
+        this.rootParents.set(root, { path: parent, identity, watcher });
+        return;
+      } catch { /* Missing source ancestors are watched from their nearest existing parent. */ }
+      if (dirname(parent) === parent) return;
+    }
+  }
   private watchDirectory(path: string) {
     if (this.closed || this.watchers.has(path)) return;
     try {
       const watcher = watch(path, (_event, filename) => {
+        if (this.watchers.get(path) !== watcher) return;
         if (path === this.runs) {
           // A raw directory may itself have been removed/replaced. Reattach
           // from the shared inventory, never retain its preceding inode.
@@ -294,6 +323,7 @@ export class WorkReadModel {
       let batch = 0;
       let sliceStarted = performance.now();
       for (const [directory, archived] of [[this.markers, true], [this.archives, true], [this.runs, false]] as const) {
+        this.watchRootParent(directory);
         let names: string[];
         try { names = await readdir(directory); }
         catch (error) {
@@ -661,6 +691,8 @@ export class WorkReadModel {
   async close() {
     this.closed = true; if (this.timer) clearInterval(this.timer);
     for (const watcher of this.watchers.values()) watcher.close();
+    for (const { watcher } of this.rootParents.values()) watcher.close();
+    this.rootParents.clear();
     this.watchers.clear(); this.rootWatchIdentities.clear();
     await this.pending; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
   }
