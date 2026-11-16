@@ -22,7 +22,7 @@
  */
 import { closeSync, openSync, readSync, statSync, } from "node:fs";
 import { readBoundedTail, tailTerminalDisplay } from "./shared-log-utils.domain.mjs";
-import { readAppendedLines } from "./log-cursor.domain.mjs";
+import { readAppendedLines, parseLogEvent, logReadMetrics } from "./log-cursor.domain.mjs";
 import { logPathFor } from "./registry.domain.mjs";
 const DEFAULT_PARSE_TAIL_BYTES = 32 * 1024 * 1024; // 32 MiB
 const DEFAULT_RAW_TAIL_BYTES = 256 * 1024; // 256 KiB
@@ -974,7 +974,7 @@ function selectParsableLines(lines) {
 }
 function tryParse(line) {
     try {
-        return JSON.parse(line);
+        return parseLogEvent(line);
     }
     catch {
         return undefined;
@@ -995,6 +995,7 @@ function activityTextOf(e) {
 }
 /** Fold one event into the run's accumulated state. */
 function foldParseEvent(state, e) {
+    logReadMetrics.displayFolded++;
     const type = e.type;
     state.sawAnyEvent = true;
     // Authoritative final answer: the last assistant message at run end.
@@ -1093,7 +1094,8 @@ function foldParseEvent(state, e) {
  */
 export function parseRun(id, options = {}) {
     const key = options.logPath ?? id;
-    const previous = parseStates.get(key);
+    const states = options.states ?? parseStates;
+    const previous = states.get(key);
     const read = readAppendedLines(options.logPath ?? logPathFor(id), previous?.cursor, maxParseBytes());
     const state = read.restarted || !previous ? freshState(read.cursor) : previous;
     state.cursor = read.cursor;
@@ -1102,7 +1104,10 @@ export function parseRun(id, options = {}) {
     if (read.truncated)
         state.windowTruncated = true;
     state.error = read.error;
-    rememberParseState(key, state);
+    if (options.states)
+        states.set(key, state);
+    else
+        rememberParseState(key, state);
     if (read.error !== undefined) {
         return {
             finalText: "", lastActivity: "", toolCalls: [], unmatchedToolCalls: [], sawEnd: false,

@@ -11,7 +11,7 @@
  * and must not collapse into stale. Raw log mtime/size is diagnostic only.
  */
 import { statSync } from "node:fs";
-import { DEFAULT_MAX_READ_BYTES, readAppendedLines } from "./log-cursor.mjs";
+import { DEFAULT_MAX_READ_BYTES, readAppendedLines, parseLogEvent, logReadMetrics } from "./log-cursor.mjs";
 import { logPathFor } from "./log-paths.mjs";
 import { observeStall } from "./shared-stall-detector.mjs";
 /** Defaults tuned for coordinator workloads; override per call or via config. */
@@ -142,6 +142,9 @@ export function mayAffectChildEventFacts(line) {
  * that already parsed NDJSON). Skips non-objects; ignores raw non-JSON noise.
  */
 export function extractChildEventFacts(events) {
+    return createChildEventFactFold()(events);
+}
+function createChildEventFactFold() {
     const openTools = new Map();
     let anonymous = 0;
     const meaningful = {};
@@ -158,171 +161,174 @@ export function extractChildEventFacts(events) {
         lastError: undefined,
         errorHistory: [],
     };
-    for (const raw of events) {
-        if (!raw || typeof raw !== "object")
-            continue;
-        const e = raw;
-        const type = typeof e.type === "string" ? e.type : undefined;
-        if (!type)
-            continue;
-        // Only parsed-event write provenance counts as wall-clock activity.
-        const at = eventTime(e);
-        if (type === "tool_execution_start") {
-            const toolName = typeof e.toolName === "string" ? e.toolName : "unknown";
-            const toolCallId = typeof e.toolCallId === "string" ? e.toolCallId : undefined;
-            const key = toolCallId ?? `anonymous:${anonymous++}`;
-            openTools.set(key, { toolCallId, toolName, startedAt: at });
-            lastToolAt = at ?? lastToolAt;
-            bumpMeaningful(meaningful, at);
-            continue;
-        }
-        if (type === "tool_execution_update") {
-            lastToolAt = at ?? lastToolAt;
-            bumpMeaningful(meaningful, at);
-            continue;
-        }
-        if (type === "tool_execution_end") {
-            const toolCallId = typeof e.toolCallId === "string" ? e.toolCallId : undefined;
-            if (toolCallId) {
-                openTools.delete(toolCallId);
-            }
-            else if (typeof e.toolName === "string") {
-                const match = [...openTools].find(([, t]) => t.toolName === e.toolName);
-                if (match)
-                    openTools.delete(match[0]);
-            }
-            lastToolAt = at ?? lastToolAt;
-            bumpMeaningful(meaningful, at);
-            // Successful tool completion supersedes prior retry intent (AC9).
-            if (e.isError !== true)
-                markRecovered(recovery);
-            continue;
-        }
-        if (type === "compaction_start") {
-            compacting = true;
-            compactionStartedAt = at;
-            bumpMeaningful(meaningful, at);
-            continue;
-        }
-        if (type === "compaction_end") {
-            compacting = false;
-            lastCompaction = {
-                reason: typeof e.reason === "string" ? e.reason : undefined,
-                aborted: typeof e.aborted === "boolean" ? e.aborted : undefined,
-                willRetry: typeof e.willRetry === "boolean" ? e.willRetry : undefined,
-                errorMessage: typeof e.errorMessage === "string" ? e.errorMessage : undefined,
-                at,
-            };
-            compactionStartedAt = undefined;
-            bumpMeaningful(meaningful, at);
-            continue;
-        }
-        if (type === "auto_retry_start") {
-            recovery.retrying = true;
-            recovery.recoveredAfterError = false;
-            recovery.willRetry = true;
-            retry = {
-                attempt: typeof e.attempt === "number" ? e.attempt : undefined,
-                maxAttempts: typeof e.maxAttempts === "number" ? e.maxAttempts : undefined,
-                startedAt: at,
-            };
-            const msg = typeof e.errorMessage === "string" ? e.errorMessage : "model retry";
-            recovery.lastError = { message: msg, at };
-            pushError(recovery.errorHistory, recovery.lastError);
-            bumpMeaningful(meaningful, at);
-            continue;
-        }
-        if (type === "auto_retry_end") {
-            recovery.retrying = false;
-            const success = e.success === true;
-            if (success) {
-                markRecovered(recovery);
-            }
-            else {
-                const msg = typeof e.finalError === "string"
-                    ? e.finalError
-                    : (recovery.lastError?.message ?? "model retry exhausted");
-                recovery.lastError = { message: msg, at };
-                pushError(recovery.errorHistory, recovery.lastError);
-                recovery.recoveredAfterError = false;
-            }
-            bumpMeaningful(meaningful, at);
-            continue;
-        }
-        if (type === "message_end") {
-            const msg = e.message;
-            if (isAssistantMessage(msg)) {
-                if (assistantIsError(msg)) {
-                    const message = typeof msg.errorMessage === "string"
-                        ? msg.errorMessage
-                        : "assistant stopReason=error";
-                    recovery.lastError = { message, at };
-                    pushError(recovery.errorHistory, recovery.lastError);
-                    recovery.recoveredAfterError = false;
-                    // Model-error evidence is meaningful for timing, not healthy progress.
-                    bumpMeaningful(meaningful, at);
-                }
-                else {
-                    bumpMeaningful(meaningful, at);
-                    // Later successful assistant evidence clears retry/warning (AC9).
-                    markRecovered(recovery);
-                }
-            }
-            // user message_end is not child progress
-            continue;
-        }
-        if (type === "turn_end") {
-            const msg = e.message;
-            if (isAssistantMessage(msg) && !assistantIsError(msg)) {
+    return (events) => {
+        for (const raw of events) {
+            logReadMetrics.healthFolded++;
+            if (!raw || typeof raw !== "object")
+                continue;
+            const e = raw;
+            const type = typeof e.type === "string" ? e.type : undefined;
+            if (!type)
+                continue;
+            // Only parsed-event write provenance counts as wall-clock activity.
+            const at = eventTime(e);
+            if (type === "tool_execution_start") {
+                const toolName = typeof e.toolName === "string" ? e.toolName : "unknown";
+                const toolCallId = typeof e.toolCallId === "string" ? e.toolCallId : undefined;
+                const key = toolCallId ?? `anonymous:${anonymous++}`;
+                openTools.set(key, { toolCallId, toolName, startedAt: at });
+                lastToolAt = at ?? lastToolAt;
                 bumpMeaningful(meaningful, at);
-                markRecovered(recovery);
+                continue;
             }
-            continue;
-        }
-        if (type === "agent_end") {
-            if (typeof e.willRetry === "boolean")
-                recovery.willRetry = e.willRetry;
-            if (recovery.willRetry === true) {
+            if (type === "tool_execution_update") {
+                lastToolAt = at ?? lastToolAt;
+                bumpMeaningful(meaningful, at);
+                continue;
+            }
+            if (type === "tool_execution_end") {
+                const toolCallId = typeof e.toolCallId === "string" ? e.toolCallId : undefined;
+                if (toolCallId) {
+                    openTools.delete(toolCallId);
+                }
+                else if (typeof e.toolName === "string") {
+                    const match = [...openTools].find(([, t]) => t.toolName === e.toolName);
+                    if (match)
+                        openTools.delete(match[0]);
+                }
+                lastToolAt = at ?? lastToolAt;
+                bumpMeaningful(meaningful, at);
+                // Successful tool completion supersedes prior retry intent (AC9).
+                if (e.isError !== true)
+                    markRecovered(recovery);
+                continue;
+            }
+            if (type === "compaction_start") {
+                compacting = true;
+                compactionStartedAt = at;
+                bumpMeaningful(meaningful, at);
+                continue;
+            }
+            if (type === "compaction_end") {
+                compacting = false;
+                lastCompaction = {
+                    reason: typeof e.reason === "string" ? e.reason : undefined,
+                    aborted: typeof e.aborted === "boolean" ? e.aborted : undefined,
+                    willRetry: typeof e.willRetry === "boolean" ? e.willRetry : undefined,
+                    errorMessage: typeof e.errorMessage === "string" ? e.errorMessage : undefined,
+                    at,
+                };
+                compactionStartedAt = undefined;
+                bumpMeaningful(meaningful, at);
+                continue;
+            }
+            if (type === "auto_retry_start") {
                 recovery.retrying = true;
                 recovery.recoveredAfterError = false;
+                recovery.willRetry = true;
+                retry = {
+                    attempt: typeof e.attempt === "number" ? e.attempt : undefined,
+                    maxAttempts: typeof e.maxAttempts === "number" ? e.maxAttempts : undefined,
+                    startedAt: at,
+                };
+                const msg = typeof e.errorMessage === "string" ? e.errorMessage : "model retry";
+                recovery.lastError = { message: msg, at };
+                pushError(recovery.errorHistory, recovery.lastError);
                 bumpMeaningful(meaningful, at);
+                continue;
             }
-            continue;
+            if (type === "auto_retry_end") {
+                recovery.retrying = false;
+                const success = e.success === true;
+                if (success) {
+                    markRecovered(recovery);
+                }
+                else {
+                    const msg = typeof e.finalError === "string"
+                        ? e.finalError
+                        : (recovery.lastError?.message ?? "model retry exhausted");
+                    recovery.lastError = { message: msg, at };
+                    pushError(recovery.errorHistory, recovery.lastError);
+                    recovery.recoveredAfterError = false;
+                }
+                bumpMeaningful(meaningful, at);
+                continue;
+            }
+            if (type === "message_end") {
+                const msg = e.message;
+                if (isAssistantMessage(msg)) {
+                    if (assistantIsError(msg)) {
+                        const message = typeof msg.errorMessage === "string"
+                            ? msg.errorMessage
+                            : "assistant stopReason=error";
+                        recovery.lastError = { message, at };
+                        pushError(recovery.errorHistory, recovery.lastError);
+                        recovery.recoveredAfterError = false;
+                        // Model-error evidence is meaningful for timing, not healthy progress.
+                        bumpMeaningful(meaningful, at);
+                    }
+                    else {
+                        bumpMeaningful(meaningful, at);
+                        // Later successful assistant evidence clears retry/warning (AC9).
+                        markRecovered(recovery);
+                    }
+                }
+                // user message_end is not child progress
+                continue;
+            }
+            if (type === "turn_end") {
+                const msg = e.message;
+                if (isAssistantMessage(msg) && !assistantIsError(msg)) {
+                    bumpMeaningful(meaningful, at);
+                    markRecovered(recovery);
+                }
+                continue;
+            }
+            if (type === "agent_end") {
+                if (typeof e.willRetry === "boolean")
+                    recovery.willRetry = e.willRetry;
+                if (recovery.willRetry === true) {
+                    recovery.retrying = true;
+                    recovery.recoveredAfterError = false;
+                    bumpMeaningful(meaningful, at);
+                }
+                continue;
+            }
+            if (type === "agent_settled") {
+                sawAgentSettled = true;
+                // Settled ends the active retry phase; retain error history for detail.
+                recovery.retrying = false;
+                if (recovery.willRetry === true)
+                    recovery.willRetry = false;
+                bumpMeaningful(meaningful, at);
+                continue;
+            }
+            // message_update is noisy; intentionally NOT meaningful for stale detection.
         }
-        if (type === "agent_settled") {
-            sawAgentSettled = true;
-            // Settled ends the active retry phase; retain error history for detail.
-            recovery.retrying = false;
-            if (recovery.willRetry === true)
-                recovery.willRetry = false;
-            bumpMeaningful(meaningful, at);
-            continue;
-        }
-        // message_update is noisy; intentionally NOT meaningful for stale detection.
-    }
-    let modelState = "ok";
-    if (recovery.retrying || recovery.willRetry === true)
-        modelState = "retrying";
-    else if (recovery.lastError && !recovery.recoveredAfterError)
-        modelState = "error";
-    else
-        modelState = "ok";
-    return {
-        lastMeaningfulAt: meaningful.last,
-        activeTools: [...openTools.values()],
-        lastToolAt,
-        compacting,
-        compactionStartedAt,
-        lastCompaction,
-        model: {
-            state: modelState,
-            lastError: recovery.lastError,
-            errorHistory: [...recovery.errorHistory],
-            retry,
-        },
-        sawAgentSettled,
-        willRetry: recovery.willRetry,
-        longModelCallSupported: false,
+        let modelState = "ok";
+        if (recovery.retrying || recovery.willRetry === true)
+            modelState = "retrying";
+        else if (recovery.lastError && !recovery.recoveredAfterError)
+            modelState = "error";
+        else
+            modelState = "ok";
+        return {
+            lastMeaningfulAt: meaningful.last,
+            activeTools: [...openTools.values()],
+            lastToolAt,
+            compacting,
+            compactionStartedAt,
+            lastCompaction,
+            model: {
+                state: modelState,
+                lastError: recovery.lastError,
+                errorHistory: [...recovery.errorHistory],
+                retry,
+            },
+            sawAgentSettled,
+            willRetry: recovery.willRetry,
+            longModelCallSupported: false,
+        };
     };
 }
 /** Parse the fact-relevant events out of raw NDJSON lines. */
@@ -336,7 +342,7 @@ function parseFactEvents(lines) {
         if (!mayAffectChildEventFacts(s))
             continue;
         try {
-            events.push(JSON.parse(s));
+            events.push(parseLogEvent(s));
             sizes.push(s.length);
         }
         catch {
@@ -347,14 +353,8 @@ function parseFactEvents(lines) {
 }
 // ---- incremental log reading ----------------------------------------------
 //
-// Logs are append-only and reach gigabytes, so facts are folded from an
-// accumulated event list that grows by the bytes appended since the last read
-// (see log-cursor.ts). Only the types the fold consumes are retained, which is
-// ~2% of a log's lines; `message_update` alone is 98% of the volume and cannot
-// move a fact. The retained list is capped, oldest-first, and a drop is
-// reported as a diagnostic rather than silently changing an observation.
-/** Memory budget for one run's retained fact-relevant events. */
-const MAX_RETAINED_EVENT_BYTES = 8 * 1024 * 1024; // 8 MiB
+// Retain structural facts, not source events. Only newly completed lines enter
+// the fold; a skipped byte window remains explicitly reported in rawLog.
 function maxHealthReadBytes() {
     const raw = process.env.PI_SUBAGENT_MAX_HEALTH_READ_BYTES;
     if (!raw)
@@ -389,15 +389,6 @@ function rememberState(id, state) {
         factLogStates.delete(oldest.value);
     }
 }
-function trimToBudget(state) {
-    while (state.bytes > MAX_RETAINED_EVENT_BYTES && state.events.length > 1) {
-        state.events.shift();
-        state.bytes -= state.sizes.shift() ?? 0;
-        state.dropped = true;
-    }
-    if (state.bytes < 0)
-        state.bytes = 0;
-}
 /**
  * Read a run log for event facts + raw mtime/size diagnostics.
  * Raw log write time never promotes activity health by itself.
@@ -428,7 +419,8 @@ export function extractChildEventFactsFromLog(id, opts = {}) {
         return { facts: extractChildEventFacts(events), rawLog };
     }
     const key = opts.logPath ?? id;
-    const previous = factLogStates.get(key);
+    const states = opts.states ?? factLogStates;
+    const previous = states.get(key);
     const read = readAppendedLines(path, previous?.cursor, maxHealthReadBytes());
     if (read.error !== undefined) {
         rawLog.error = rawLog.error ?? read.error;
@@ -436,24 +428,19 @@ export function extractChildEventFactsFromLog(id, opts = {}) {
             return { facts: emptyFacts(), rawLog };
     }
     const state = read.restarted || !previous
-        ? { cursor: read.cursor, events: [], sizes: [], bytes: 0, truncated: false, dropped: false }
+        ? { cursor: read.cursor, fold: createChildEventFactFold(), truncated: false }
         : previous;
     state.cursor = read.cursor;
     state.truncated = state.truncated || read.truncated;
     const parsed = parseFactEvents(read.lines);
-    if (parsed.events.length > 0) {
-        state.events.push(...parsed.events);
-        state.sizes.push(...parsed.sizes);
-        for (const size of parsed.sizes)
-            state.bytes += size;
-        trimToBudget(state);
-    }
-    rememberState(key, state);
+    const facts = state.fold(parsed.events);
+    if (opts.states)
+        states.set(key, state);
+    else
+        rememberState(key, state);
     if (state.truncated)
         rawLog.windowTruncated = true;
-    if (state.dropped)
-        rawLog.eventsDropped = true;
-    return { facts: extractChildEventFacts(state.events), rawLog };
+    return { facts, rawLog };
 }
 function processLiveness(status, supervised) {
     if (status === "orphaned")

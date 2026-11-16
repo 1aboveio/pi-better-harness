@@ -23,6 +23,24 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 /** Bytes of the log head kept to detect a rewrite behind our back. */
 const HEAD_SAMPLE_BYTES = 256;
 
+export const logReadMetrics = { bytes: 0, reads: 0, parsedEvents: 0, displayFolded: 0, healthFolded: 0 };
+let batch: { reads: Map<string, LogRead>; events: Map<string, unknown>; ranges: Map<string, Array<{ start: number; data: Buffer }>> } | undefined;
+
+/** Share identical ranges and decoding only during a synchronous observation. */
+export function withLogReadBatch<T>(observe: () => T): T {
+    const previous = batch;
+    batch = { reads: new Map(), events: new Map(), ranges: new Map() };
+    try { return observe(); } finally { batch = previous; }
+}
+
+export function parseLogEvent(line: string): any {
+    if (batch?.events.has(line)) return batch.events.get(line);
+    const event = JSON.parse(line);
+    logReadMetrics.parsedEvents++;
+    batch?.events.set(line, event);
+    return event;
+}
+
 /** Default ceiling on a single read: also the cold-start tail window. */
 export const DEFAULT_MAX_READ_BYTES = 32 * 1024 * 1024; // 32 MiB
 
@@ -63,22 +81,38 @@ function errText(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
 }
 
-function readAt(fd: number, position: number, length: number): Buffer {
+function readAt(fd: number, position: number, length: number, path: string): Buffer {
     const buf = Buffer.allocUnsafe(length);
+    const ranges = batch?.ranges.get(path) ?? [];
     let filled = 0;
     while (filled < length) {
-        const n = readSync(fd, buf, filled, length - filled, position + filled);
+        const at = position + filled;
+        const cached = ranges.find(range => range.start <= at && range.start + range.data.length > at);
+        if (cached) {
+            const offset = at - cached.start;
+            const n = Math.min(length - filled, cached.data.length - offset);
+            cached.data.copy(buf, filled, offset, offset + n);
+            filled += n;
+            continue;
+        }
+        const next = Math.min(position + length, ...ranges.filter(range => range.start > at).map(range => range.start));
+        const n = readSync(fd, buf, filled, next - at, at);
         if (n <= 0) break;
+        if (batch) {
+            ranges.push({ start: at, data: buf.subarray(filled, filled + n) });
+            batch.ranges.set(path, ranges);
+        }
         filled += n;
+        logReadMetrics.bytes += n;
     }
     return filled === length ? buf : buf.subarray(0, filled);
 }
 
 /** Head sample as a byte-exact string, for rewrite detection. */
-function readHead(fd: number, size: number): string {
+function readHead(fd: number, size: number, path: string): string {
     const length = Math.min(HEAD_SAMPLE_BYTES, size);
     if (length <= 0) return "";
-    return readAt(fd, 0, length).toString("latin1");
+    return readAt(fd, 0, length, path).toString("latin1");
 }
 
 /**
@@ -104,6 +138,16 @@ export function readAppendedLines(
     previous?: LogCursor,
     maxBytes: number = DEFAULT_MAX_READ_BYTES,
 ): LogRead {
+    const key = JSON.stringify([path, previous, maxBytes]);
+    const cached = batch?.reads.get(key);
+    if (cached) return cached;
+    const result = readLines(path, previous, maxBytes);
+    batch?.reads.set(key, result);
+    return result;
+}
+
+function readLines(path: string, previous: LogCursor | undefined, maxBytes: number): LogRead {
+    logReadMetrics.reads++;
     const empty = (error?: string): LogRead => ({
         lines: [],
         cursor: previous ?? { offset: 0, head: "" },
@@ -128,7 +172,7 @@ export function readAppendedLines(
     }
 
     try {
-        const head = readHead(fd, size);
+        const head = readHead(fd, size, path);
         // A log that shrank or whose head changed is a different log: the old
         // offset would point into unrelated bytes. Compare only the prefix the
         // two samples share, so a log still shorter than the sample window is
@@ -153,7 +197,7 @@ export function readAppendedLines(
             return { lines: [], cursor: { offset: start, head }, totalBytes: size, truncated, restarted };
         }
 
-        const buf = readAt(fd, start, size - start);
+        const buf = readAt(fd, start, size - start, path);
         const lastNewline = buf.lastIndexOf(0x0a);
         if (lastNewline === -1) {
             // No complete line yet. Hold position so the line can finish —

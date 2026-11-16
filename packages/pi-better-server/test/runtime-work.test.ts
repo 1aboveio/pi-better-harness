@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork, execFileSync } from "node:child_process";
 import { createServer, connect, type Socket } from "node:net";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
 import { register, createRequire, syncBuiltinESMExports } from "node:module";
@@ -131,6 +131,15 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.equal(displayed.tool, "bash");
       assert.match(displayed.tokens, /120/);
       assert.ok(displayed.facts.some((fact: string) => /bash/.test(fact)), "cached health facts preserve configured long-tool diagnostics without client I/O");
+      const logBefore = await first.request("runtime_get_metrics");
+      appendFileSync(join(runs, "sa_shared_0", "output.log"), JSON.stringify({ type: "tool_execution_start", toolCallId: "new-tool", toolName: "read", at: Date.now() }) + "\n");
+      for (let retry = 0; hooks.listRows().find((row: any) => row.id === "sa_shared_0")?.tool !== "read"; retry++) {
+        assert.ok(retry < 200, "Navigator did not consume the changed log snapshot");
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      const logAfter = await first.request("runtime_get_metrics");
+      assert.equal(logAfter.logProjections - logBefore.logProjections, 1);
+      assert.equal(logAfter.assignmentProjections - logBefore.assignmentProjections, 0);
       assert.equal(localConnections, 0, "actual registered provider paints never open the coordinator");
       const result = await tools.get("subagent_result").execute("result", { id: "sa_shared_0", all: true }, undefined, undefined, ctx);
       assert.equal(result.details.assignment.revision, first.snapshot!.rows.find(row => row.meta.id === "sa_shared_0")!.assignment.revision);

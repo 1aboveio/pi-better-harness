@@ -27,7 +27,7 @@ import {
     statSync,
 } from "node:fs";
 import { readBoundedTail, tailTerminalDisplay } from "./shared-log-utils.ts";
-import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
+import { readAppendedLines, parseLogEvent, logReadMetrics, type LogCursor } from "./log-cursor.ts";
 import { logPathFor } from "./registry.ts";
 
 interface ContentBlock { type: string; text?: string; thinking?: string; name?: string }
@@ -1208,7 +1208,7 @@ function selectParsableLines(lines: readonly string[]): Array<{ index: number; e
 
 function tryParse(line: string): Record<string, unknown> | undefined {
     try {
-        return JSON.parse(line) as Record<string, unknown>;
+        return parseLogEvent(line) as Record<string, unknown>;
     } catch {
         return undefined;
     }
@@ -1228,6 +1228,7 @@ function activityTextOf(e: Record<string, unknown>): string | undefined {
 
 /** Fold one event into the run's accumulated state. */
 function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
+    logReadMetrics.displayFolded++;
     const type = e.type as string | undefined;
     state.sawAnyEvent = true;
 
@@ -1312,16 +1313,18 @@ function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
  * rotated, truncated, or rewritten log is detected and re-read from a bounded
  * tail (see log-cursor.ts).
  */
-export function parseRun(id: string, options: { logPath?: string } = {}): ParsedRun {
+export function parseRun(id: string, options: { logPath?: string; states?: Map<string, ParseState> } = {}): ParsedRun {
     const key = options.logPath ?? id;
-    const previous = parseStates.get(key);
+    const states = options.states ?? parseStates;
+    const previous = states.get(key);
     const read = readAppendedLines(options.logPath ?? logPathFor(id), previous?.cursor, maxParseBytes());
     const state = read.restarted || !previous ? freshState(read.cursor) : previous;
     state.cursor = read.cursor;
     if (read.totalBytes > 0) state.totalBytes = read.totalBytes;
     if (read.truncated) state.windowTruncated = true;
     state.error = read.error;
-    rememberParseState(key, state);
+    if (options.states) states.set(key, state);
+    else rememberParseState(key, state);
 
     if (read.error !== undefined) {
         return {
