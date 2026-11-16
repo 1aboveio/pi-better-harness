@@ -45,6 +45,10 @@ async function fixture(options: { intervalMs?: number; capacity?: number; timeou
   const clients: WorkClient[] = [];
   const client = async () => { const value = new WorkClient(path, root); clients.push(value); await value.ready; return value; };
   const worker = (executor as unknown as { worker: Worker }).worker;
+  const bootstrapped = new Promise<void>(resolve => {
+    const listener = (message: any) => { if (message.type === "fixture-ready") { worker.off("message", listener); resolve(); } };
+    worker.on("message", listener);
+  });
   const stall = async (iterations = 3000000) => {
     const started = new Promise<void>(resolve => {
       const listener = (message: any) => { if (message.type === "diagnostic-started") { worker.off("message", listener); resolve(); } };
@@ -67,7 +71,7 @@ async function fixture(options: { intervalMs?: number; capacity?: number; timeou
     await new Promise<void>(resolve => server.close(() => resolve())); await executor.close();
     rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
   };
-  return { executor, client, stall, worker, close, root, path };
+  return { executor, client, stall, worker, bootstrapped, close, root, path };
 }
 
 async function ready(client: WorkClient) {
@@ -213,8 +217,12 @@ test("watchdog recovers a genuinely wedged worker while socket control stays res
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   try {
     // The 400 ms read deadline tests the wedge, not cold worker imports.
-    if (f.executor.observation().observedAt === null)
-      await once(f.worker, "message", { signal: AbortSignal.timeout(5000) });
+    let startupTimeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([f.bootstrapped, new Promise<never>((_, reject) => {
+        startupTimeout = setTimeout(() => reject(new Error("query fixture did not bootstrap within budget")), 5000);
+      })]);
+    } finally { clearTimeout(startupTimeout); }
     const a = await f.client(), b = await f.client(); await ready(a); await ready(b);
     const epoch = b.snapshot!.instanceId;
     const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
@@ -231,6 +239,23 @@ test("watchdog recovers a genuinely wedged worker while socket control stays res
     assert.equal(f.executor.metrics().executor.restarts, 1);
     assert.ok(controlMs < 500);
     t.diagnostic(JSON.stringify({ restartMs: performance.now() - began, controlMs, metrics: f.executor.metrics() }));
+  } finally { await f.close(); }
+});
+
+test("cold bootstrap caller deadline does not imply a wedged read worker", { timeout: 10000 }, async t => {
+  const f = await fixture({ timeoutMs: 400, watchdogMs: 2000,
+    workerUrl: new URL("./support/cold-cancellable-query-worker.mjs", import.meta.url) });
+  try {
+    const client = await f.client();
+    const began = performance.now();
+    await assert.rejects(client.subscribe({}), /runtime-timeout: caller read deadline exceeded/);
+    assert.equal((await client.request("ping")).ok, true);
+    assert.equal(f.executor.metrics().executor.callerTimeouts, 1);
+    await f.bootstrapped;
+    await ready(client);
+    assert.equal(client.snapshot?.status, "ready");
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+    t.diagnostic(JSON.stringify({ startupMs: performance.now() - began, metrics: f.executor.metrics() }));
   } finally { await f.close(); }
 });
 
@@ -282,13 +307,20 @@ test("an exact-ID client waits for indexing without occupying the shared read qu
     const blocked = new Promise<void>(resolve => {
       f.worker.on("message", message => { if (message.type === "inventory-blocked") resolve(); });
     });
+    const client = await f.client(); await blocked;
+    f.worker.postMessage({ type: "release-inventory" });
+    await ready(client);
+    const indexing = new Promise<void>(resolve => {
+      const listener = (message: any) => { if (message.type === "inventory-blocked") { f.worker.off("message", listener); resolve(); } };
+      f.worker.on("message", listener);
+    });
+    f.worker.postMessage({ type: "block-inventory" }); await indexing;
     const directory = join(f.root, "runs/sa_client_retry"); mkdirSync(directory);
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_client_retry", sessionId: "retry", cwd: f.root,
       status: "completed", startedAt: 1 }));
-    const client = await f.client(); await blocked;
     let completed = false;
     const pending = client.get({ id: "sa_client_retry", limit: 1 }).then(value => { completed = true; return value; });
-    assert.equal((await client.get({ limit: 2 })).status, "rebuilding");
+    assert.equal((await client.get({ limit: 2 })).status, "ready");
     assert.equal(completed, false, "the unrelated read completes while the exact ID is still awaiting inventory");
     f.worker.postMessage({ type: "release-inventory" });
     let result = await pending;
@@ -745,6 +777,50 @@ for (const outcome of ["success", "failure"]) test(`old fold ${outcome} cannot a
 });
 
 
+for (const rootRecreated of [false, true]) test(`a raw directory observed before metadata still publishes the original atomic writer commit (${rootRecreated ? "recreated root" : "existing root"})`, { timeout: 15000 }, async () => {
+  const f = await fixture();
+  const { measureEventPublication } = await import(new URL("../scripts/event-publication/measure.mjs", import.meta.url).href);
+  try {
+    const client = await f.client(); await ready(client);
+    const id = "sa_metadata_gap", directory = join(f.root, "runs", id), metaPath = join(directory, "meta.json");
+    const scope = { cwd: f.root, sessionId: "parent", limit: 10 };
+    await client.subscribe(scope);
+    if (rootRecreated) {
+      mkdirSync(directory);
+      writeFileSync(metaPath, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1,
+        callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "before-root" }));
+      const wait = async (condition: () => boolean) => {
+        const until = Date.now() + 1000;
+        while (!condition()) {
+          assert.ok(Date.now() < until, "root gap publication missing");
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      };
+      await wait(() => client.snapshot?.rows[0]?.meta.name === "before-root");
+      renameSync(join(f.root, "runs"), join(f.root, "retired-runs"));
+      await wait(() => client.snapshot?.status === "degraded");
+      assert.equal(client.snapshot?.rows[0]?.meta.name, "before-root");
+    }
+    const before = f.executor.metrics().inventories ?? 0;
+    mkdirSync(directory, { recursive: true });
+    const until = Date.now() + 1000;
+    do {
+      // Query capture refreshes metrics, never requests inventory repair.
+      await client.get(scope);
+      assert.ok(Date.now() < until, "raw directory creation hint was not processed");
+      if ((f.executor.metrics().inventories ?? 0) > before && client.snapshot?.rows.length === 0) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    } while (true);
+    writeFileSync(metaPath, JSON.stringify({ id, sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1,
+      endedAt: Date.now(), callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "original" }));
+    const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id,
+      subscribers: 1, commits: 1, phase: rootRecreated ? "metadata-after-root-recreation" : "metadata-after-directory-hint", diagnostics: () => f.executor.metrics() });
+    assert.ok(report.ms.max <= 1000, JSON.stringify(report));
+    await client.get(scope);
+    assert.equal(f.executor.metrics().sourceWatchers, 2);
+  } finally { await f.close(); }
+});
+
 test("directory entry watchers publish repeated atomic commits without the inventory fallback", { timeout: 15000 }, async () => {
   const f = await fixture(); // fallback interval is 60 seconds, longer than this test
   const { measureEventPublication } = await import(new URL("../scripts/event-publication/measure.mjs", import.meta.url).href);
@@ -757,7 +833,8 @@ test("directory entry watchers publish repeated atomic commits without the inven
     const client = await f.client(); await ready(client);
     const scope = { cwd: f.root, sessionId: "parent", limit: 10 };
     for (const subscribers of [1, 5, 10]) {
-      const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers, commits: 5 });
+      const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers, commits: 5,
+        phase: "initial-directory", diagnostics: () => f.executor.metrics() });
       assert.ok(report.ms.max <= 1000, JSON.stringify(report));
       assert.equal(f.executor.metrics().sourceWatchers, 2, "one root and one raw directory, independent of clients/files");
     }
@@ -769,7 +846,8 @@ test("directory entry watchers publish repeated atomic commits without the inven
     while (client.snapshot?.rows[0]?.meta.name !== "replaced-directory") {
       assert.ok(Date.now() < until, "directory replacement was not published"); await new Promise(resolve => setTimeout(resolve, 10));
     }
-    const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5 });
+    const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5,
+      phase: "replaced-directory", diagnostics: () => f.executor.metrics() });
     assert.ok(report.ms.max <= 1000, JSON.stringify(report));
     // The entire source root can also move while its pathname is immediately
     // recreated. Identity checks must rebind both root and child watchers.
@@ -780,7 +858,8 @@ test("directory entry watchers publish repeated atomic commits without the inven
     while (client.snapshot?.rows[0]?.meta.name !== "replaced-root") {
       assert.ok(Date.now() < rootBy, "root replacement was not published"); await new Promise(resolve => setTimeout(resolve, 10));
     }
-    const rootReport = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5 });
+    const rootReport = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id, subscribers: 1, commits: 5,
+      phase: "replaced-root", diagnostics: () => f.executor.metrics() });
     assert.ok(rootReport.ms.max <= 1000, JSON.stringify(rootReport));
     assert.equal(f.executor.metrics().sourceWatchers, 2);
     rmSync(directory, { recursive: true });
@@ -833,7 +912,12 @@ for (const source of ["runs", "attempts", "session-state"]) test(`source ${sourc
       const value = { ...meta, name: "after-rearm" };
       writeFileSync(path + ".tmp", JSON.stringify(source === "runs" ? value : { version: 1, meta: value }));
       renameSync(path + ".tmp", path);
-      await wait(() => client.snapshot?.rows[0]?.meta.name === "after-rearm", `replacement root watcher was not rearmed: ${JSON.stringify({ source, oldInode, newInode, before })}`);
+      try {
+        await wait(() => client.snapshot?.rows[0]?.meta.name === "after-rearm", `replacement root watcher was not rearmed: ${JSON.stringify({ source, oldInode, newInode, before })}`);
+      } catch (error) {
+        t.diagnostic(JSON.stringify({ source, snapshot: client.snapshot, metrics: f.executor.metrics() }));
+        throw error;
+      }
     }
     t.diagnostic(JSON.stringify({ source, oldInode, newInode, before, after: f.executor.metrics() }));
   } finally { await f.close(); }
@@ -863,6 +947,6 @@ test("root recreation after an observed absence publishes without inventory fall
     assert.equal(client.snapshot?.rows.length, 1, "unavailable roots retain verified rows");
     mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ ...meta, name: "recreated" }));
-    await waitForEvent(() => client.snapshot?.rows[0]?.meta.name === "recreated");
+    await waitForEvent(() => client.snapshot?.status === "ready" && client.snapshot.rows[0]?.meta.name === "recreated");
   } finally { await f.close(); }
 });
