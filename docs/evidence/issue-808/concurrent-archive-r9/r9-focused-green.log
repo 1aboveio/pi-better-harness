@@ -1,0 +1,46 @@
+✔ assignment receipt uses indexed dispatch and recovers none (1400.298709ms)
+✔ assignment receipt uses indexed dispatch and recovers before-apply (266.346791ms)
+✔ assignment receipt uses indexed dispatch and recovers after-apply (365.299875ms)
+✔ assignment receipt uses indexed dispatch and recovers retry (272.368375ms)
+✔ assignment receipt uses indexed dispatch and recovers unverified (219.110708ms)
+✔ bounded baseline hands off continuous receipts and rebuilds a truncated journal without false ready (5177.438417ms)
+✔ archive publication during raw metadata observation recovers with dropped hints; rootUnavailable=false, activeRepair=false (1486.528333ms)
+ℹ {"rootUnavailable":false,"activeRepair":false,"turns":1,"status":"ready","inventories":3,"repairEntries":3,"target":"verified-archive","sibling":"sibling-progress","total":2}
+✔ archive publication during raw metadata observation recovers with dropped hints; rootUnavailable=true, activeRepair=false (391.602208ms)
+ℹ {"rootUnavailable":true,"activeRepair":false,"turns":1,"status":"ready","inventories":3,"repairEntries":3,"target":"verified-archive","sibling":"sibling-progress","total":2}
+✔ archive publication during raw metadata observation recovers with dropped hints; rootUnavailable=false, activeRepair=true (8131.226542ms)
+ℹ {"rootUnavailable":false,"activeRepair":true,"turns":2,"status":"ready","inventories":4,"repairEntries":256,"target":"verified-archive","sibling":"sibling-progress","total":260}
+✔ deleted empty log is unavailable, never complete; verified facts and recovery survive (1401.619041ms)
+ℹ {"empty":true,"complete":false,"status":"degraded","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-3J71pK/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✔ deleted nonempty log is unavailable, never complete; verified facts and recovery survive (180.972625ms)
+ℹ {"empty":false,"complete":false,"status":"degraded","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-ATEoRP/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✔ unreadable log retains last verified row, empty truncation and inode replacement still recover (204.458916ms)
+✔ unavailable source cannot rewrite a durable fold across derived-reader reopen (562.425708ms)
+✔ never-observed missing source is degraded and does not create a complete checkpoint (380.019917ms)
+✔ verified archive-only membership does not promise or require deleted raw-log coverage (369.634459ms)
+✔ missing-source reconciliation accepts only the expected degradation, never unrelated malformed metadata (338.709959ms)
+✔ captured coordinator snapshot fences concurrent-commits (7055.064083ms)
+✔ captured coordinator snapshot fences replacement (3392.525625ms)
+✔ existing external file writer returns source-byte receipts and preserves its legacy metadata path (172.113334ms)
+✔ 48 workload logs preserve real usage through append, checkpoint restore and source faults (46.7985ms)
+✔ 96 workload logs preserve real usage through append, checkpoint restore and source faults (97.615875ms)
+✔ 192 workload logs preserve real usage through append, checkpoint restore and source faults (195.010958ms)
+✔ settings mutations and exact task identity retain separate actual ordinary/repair counters (1942.605458ms)
+✔ component reconciliation checks real projected identities, complete history pages and final usage (1793.398292ms)
+✔ component source changes preserve unrelated scope revisions and historical cursors (1410.105166ms)
+✔ plan selects exact fixture identities and independent faults after capability-gated recovery (47.987875ms)
+✔ component file/projection sequence with recovery controls=false preserves honest final-source reconciliation (4365.967042ms)
+ℹ {"observation":"component-only deleted source reconciliation","step":"delete-log","projectedComplete":false,"diagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-sequence-UbR3ou/pi-better-subagents/runs/sa_808_group_0/output.log'"],"state":"completed"}
+✔ component file/projection sequence with recovery controls=true preserves honest final-source reconciliation (3490.909625ms)
+ℹ {"observation":"component-only deleted source reconciliation","step":"delete-log","projectedComplete":false,"diagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-sequence-Q1PqjM/pi-better-subagents/runs/sa_808_group_0/output.log'"],"state":"completed"}
+✔ recovery receipt cannot claim eviction unless actual parser caches were emptied (614.47125ms)
+✔ failed writer stops once and preserves original failure separately from reporting failure (26.588416ms)
+✔ real missing-file parser diagnostics reconcile as unavailable, never a complete zero bill (29.317917ms)
+ℹ tests 31
+ℹ suites 0
+ℹ pass 31
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 10594.462166

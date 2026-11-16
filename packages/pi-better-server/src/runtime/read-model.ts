@@ -858,7 +858,16 @@ export class WorkReadModel {
         }));
         for (const [index, [, entry]] of group.entries()) {
           const observation = observations[index]!;
-          if (!observation.info) throw observation.error;
+          if (!observation.info) {
+            if ((observation.error as NodeJS.ErrnoException)?.code === "ENOENT") {
+              this.dirty = true;
+              // The source may have moved to an archive whose hint was lost.
+              // Reobserve the batch and owe existing bounded discovery without
+              // resetting an in-progress repair cursor or inventing membership.
+              this.repairOwed = true;
+            }
+            throw observation.error;
+          }
           const info = observation.info;
           if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
             this.dirty = true;

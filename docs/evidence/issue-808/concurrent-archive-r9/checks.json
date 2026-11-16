@@ -1,0 +1,16 @@
+{
+  "scope": "Source/component only; not AC4 or native campaign acceptance",
+  "base": "20ec9fbf19734ef963b19c0c89026307bcf2e316",
+  "controlled": {"passed": 3, "failed": 0, "evidence": "r9-controlled-green-cursor.log"},
+  "focused": {"passed": 31, "failed": 0, "evidence": "r9-focused-green.log"},
+  "existingFileSelection": {"passed": 21, "failed": 0, "evidence": "r9-file-regressions.log", "nativeDaemonTest": "Excluded by positive name selection, not retried"},
+  "typecheck": {"command": "npm run typecheck -w packages/pi-better-server", "status": "passed", "evidence": "r9-typecheck.log"},
+  "domainSync": {"command": "node scripts/sync-runtime-domain.mjs", "status": "passed", "repeatedSync": "git diff --binary byte-identical before/after repeat", "generatedDrift": false},
+  "acceptanceMap": "JSON.parse passed; all eight AC retained",
+  "diffCheck": "git diff --check passed",
+  "logNormalization": "Committed copies trim trailing whitespace only; raw .private-808/tmp/r9-* logs retained. Initial staged diff check reported TAP whitespace and typecheck blank EOF; final check rerun after formatting.",
+  "notRun": ["full server/workspace/CI suite", "standalone build/package", "native fixture/probe/Server/guardian", "paired ten-minute workloads"],
+  "guardAndAuthorityChanges": false,
+  "nativeAttempts": 0,
+  "progressAccounting": "Source increment does not reset native no-progress history or satisfy the unchanged both-OS/fixed-host/duration bar"
+}

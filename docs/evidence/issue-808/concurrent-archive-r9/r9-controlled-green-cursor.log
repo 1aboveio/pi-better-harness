@@ -1,0 +1,14 @@
+✔ archive publication during raw metadata observation recovers with dropped hints; rootUnavailable=false, activeRepair=false (1071.863042ms)
+ℹ {"rootUnavailable":false,"activeRepair":false,"turns":1,"status":"ready","inventories":3,"repairEntries":3,"target":"verified-archive","sibling":"sibling-progress","total":2}
+✔ archive publication during raw metadata observation recovers with dropped hints; rootUnavailable=true, activeRepair=false (62.592584ms)
+ℹ {"rootUnavailable":true,"activeRepair":false,"turns":1,"status":"ready","inventories":3,"repairEntries":3,"target":"verified-archive","sibling":"sibling-progress","total":2}
+✔ archive publication during raw metadata observation recovers with dropped hints; rootUnavailable=false, activeRepair=true (2650.043125ms)
+ℹ {"rootUnavailable":false,"activeRepair":true,"turns":2,"status":"ready","inventories":4,"repairEntries":256,"target":"verified-archive","sibling":"sibling-progress","total":260}
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3986.257791

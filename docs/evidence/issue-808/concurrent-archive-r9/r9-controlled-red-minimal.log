@@ -1,0 +1,33 @@
+✖ archive publication during raw metadata observation recovers with dropped hints; rootUnavailable=false (965.445125ms)
+ℹ {"rootUnavailable":false,"turns":8,"status":"degraded","reason":"Error: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-concurrent-archive-gVOmPJ/pi-better-subagents/runs/sa_808_group_0/meta.json'","inventories":1,"repairEntries":0,"rows":[{"id":"sa_808_group_1"},{"id":"sa_808_group_0"}]}
+✔ archive publication during raw metadata observation recovers with dropped hints; rootUnavailable=true (114.624459ms)
+ℹ {"rootUnavailable":true,"turns":1,"status":"ready","inventories":2,"repairEntries":4,"rows":[{"id":"sa_808_group_1","name":"sibling-progress"},{"id":"sa_808_group_0","name":"verified-archive"}]}
+ℹ tests 2
+ℹ suites 0
+ℹ pass 1
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1256.986084
+
+✖ failing tests:
+
+test at packages/pi-better-server/test/runtime-concurrent-archive.test.ts:1:963
+✖ archive publication during raw metadata observation recovers with dropped hints; rootUnavailable=false (965.445125ms)
+  AssertionError [ERR_ASSERTION]: Error: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-concurrent-archive-gVOmPJ/pi-better-subagents/runs/sa_808_group_0/meta.json'
+  + actual - expected
+
+  + 'degraded'
+  - 'ready'
+
+      at TestContext.<anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/test/runtime-concurrent-archive.test.ts:71:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'degraded',
+    expected: 'ready',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
