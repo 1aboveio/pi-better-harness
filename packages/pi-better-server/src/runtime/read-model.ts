@@ -164,6 +164,7 @@ export class WorkReadModel {
         // An inode watcher cannot see its pathname recreated after removal.
         // Keep the parent watched even while the source root is absent.
         const watcher = watch(parent, (_event, filename) => {
+          if (this.closed || this.rootParents.get(parent) !== watcher) return;
           if (filename && !roots.some(root => dirname(root) === parent && basename(root) === String(filename))) return;
           void this.reconcile();
         });
@@ -184,6 +185,7 @@ export class WorkReadModel {
     if (this.closed || this.watchers.has(path)) return;
     try {
       const watcher = watch(path, (_event, filename) => {
+        if (this.closed || this.watchers.get(path) !== watcher) return;
         if (path === this.runs) {
           // A raw directory may itself have been removed/replaced. Reattach
           // from the shared inventory, never retain its preceding inode.
@@ -259,7 +261,10 @@ export class WorkReadModel {
         handle = await opendir(directory);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        this.unwatchDirectory(directory); continue;
+        this.unwatchDirectory(directory);
+        this.rootWatchIdentities.delete(directory);
+        if (directory === this.runs) for (const path of this.watchers.keys()) if (path.startsWith(this.runs + sep)) this.unwatchDirectory(path);
+        continue;
       }
       for await (const entry of handle) {
         if (directory === this.runs ? safeId.test(entry.name) : /^[A-Za-z0-9_-]+\.json$/.test(entry.name)) {

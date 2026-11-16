@@ -804,19 +804,42 @@ test("root recreation after an observed absence publishes without inventory fall
     writeFileSync(join(directory, "meta.json"), JSON.stringify(meta));
     const client = await f.client(); await ready(client);
     await client.subscribe({ cwd: f.root, sessionId: "parent", limit: 10 });
-    const waitForEvent = async (condition: () => boolean) => {
+    const waitForEvent = async (condition: () => boolean | Promise<boolean>) => {
       const deadline = Date.now() + 3000;
-      while (!condition()) {
+      while (!(await condition())) {
         assert.ok(Date.now() < deadline, `missing root event: ${JSON.stringify(f.executor.metrics())}`);
         await new Promise(resolve => setTimeout(resolve, 10));
       }
     };
     await waitForEvent(() => client.snapshot?.rows.length === 1);
     renameSync(join(f.root, "runs"), join(f.root, "old-runs"));
-    // Let the reader observe ENOENT and retire the old inode watcher first.
-    await waitForEvent(() => client.snapshot?.rows.length === 0);
+    // A missing source is not verified deletion (#799): retain the last observation.
+    await waitForEvent(() => client.snapshot?.status === "degraded");
+    assert.match(client.snapshot!.reason!, /Source directory unavailable; retaining verified records/);
+    assert.equal(client.snapshot!.rows[0]?.meta.name, "original");
+    assert.equal(client.snapshot!.rows.length, 1);
+    await waitForEvent(async () => {
+      // Snapshot queries return fresh metrics without requesting inventory repair.
+      await client.get({ cwd: f.root, sessionId: "parent", limit: 10 });
+      return f.executor.metrics().sourceWatchers === 0;
+    });
     mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ ...meta, name: "recreated" }));
     await waitForEvent(() => client.snapshot?.rows[0]?.meta.name === "recreated");
+    assert.equal(client.snapshot!.status, "ready");
+    await waitForEvent(async () => {
+      await client.get({ cwd: f.root, sessionId: "parent", limit: 10 });
+      return f.executor.metrics().sourceWatchers === 2;
+    });
+    const retiredMeta = join(f.root, "old-runs", id, "meta.json");
+    writeFileSync(retiredMeta, JSON.stringify({ ...meta, name: "retired-inode" }));
+    // A current-root commit supplies the barrier: retired data must never win.
+    writeFileSync(join(directory, "meta.json"), JSON.stringify({ ...meta, name: "current-inode" }));
+    await waitForEvent(() => client.snapshot?.rows[0]?.meta.name === "current-inode");
+    assert.equal(f.executor.metrics().sourceWatchers, 2);
+    rmSync(directory, { recursive: true });
+    await waitForEvent(() => client.snapshot?.rows.length === 0);
+    assert.equal(client.snapshot!.status, "ready", "deletion is verified while the source root exists");
+    assert.equal(f.executor.metrics().executor.restarts, 0);
   } finally { await f.close(); }
 });

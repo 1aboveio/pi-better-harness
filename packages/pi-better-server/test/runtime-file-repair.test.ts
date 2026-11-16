@@ -29,6 +29,33 @@ async function settleHints(model: WorkReadModel) {
   assert.equal(model.metrics.scheduling.queued, 0, "hint obligations must be drained");
 }
 
+test("retired root and child watcher callbacks cannot schedule repair", async () => {
+  const f = fixture(); f.put("sa_retired");
+  const model = new WorkReadModel(f.agent, "retired-watchers", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    const retired = [...(model as any).watchers.values()];
+    renameSync(f.runs, f.runs + "-away");
+    await model.reconcile(); await settleHints(model);
+    assert.equal(model.metrics.sourceWatchers, 0);
+    assert.equal(model.snapshot().status, "degraded");
+    assert.equal(model.snapshot().rows.length, 1);
+    mkdirSync(f.runs); f.put("sa_retired", { name: "new-root" });
+    await model.reconcile(); await settleHints(model);
+    const parentWatchers = (model as any).rootParents as Map<string, import("node:fs").FSWatcher>;
+    const oldParents = [...parentWatchers.values()];
+    oldParents.forEach(watcher => watcher.close()); parentWatchers.clear();
+    (model as any).watchRootParents();
+    const before = model.metrics;
+    for (const watcher of retired) watcher.emit("change", "change", "meta.json");
+    for (const watcher of oldParents) watcher.emit("change", "rename", "runs");
+    assert.equal((model as any).pending, undefined, "retired callbacks cannot start a new pass");
+    assert.equal(model.metrics.scheduling.queued, 0);
+    assert.equal(model.metrics.inventories, before.inventories);
+    assert.equal(model.snapshot().rows[0]?.meta.name, "new-root");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("precise hints coalesce; bounded repair resumes despite hot writes and repairs missing sources", async t => {
   const f = fixture();
   for (let i = 0; i < 160; i++) f.put(`sa_${i}`);
