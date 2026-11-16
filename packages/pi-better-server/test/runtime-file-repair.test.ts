@@ -29,6 +29,41 @@ async function settleHints(model: WorkReadModel) {
   assert.equal(model.metrics.scheduling.queued, 0, "hint obligations must be drained");
 }
 
+test("an exact hint imports a present source after missed notifications without another inventory walk", async t => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, "missed-initial-event", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile(); await settleHints(model);
+    assert.equal((model as any).imported, true);
+    assert.equal(model.snapshot().status, "ready");
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    (model as any).watchers.clear();
+    for (const value of (model as any).rootParents.values()) value.watcher.close();
+    (model as any).rootParents.clear();
+    const before = model.metrics;
+    const entityPaths: string[] = [];
+    const measuredScan = (model as any).measuredScan.bind(model);
+    (model as any).measuredScan = (kind: string, paths: string[]) => {
+      if (kind === "entity") entityPaths.push(...paths);
+      return measuredScan(kind, paths);
+    };
+    f.put("sa_missed_initial", { name: "present-on-disk", status: "completed", endedAt: 2 });
+    const path = join(f.runs, "sa_missed_initial", "meta.json");
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).name, "present-on-disk");
+    assert.equal(model.snapshot().rows.length, 0, "no event means no projection after the completed empty initial walk");
+    let published = false;
+    const off = model.onChange(() => { published = model.snapshot().rows[0]?.meta.name === "present-on-disk"; });
+    model.fileHint(f.runs, "sa_missed_initial"); await settleHints(model); off();
+    assert.equal(published, true);
+    assert.equal(model.snapshot().rows[0]?.meta.name, "present-on-disk");
+    assert.equal(model.metrics.scheduling.repairEntries, before.scheduling.repairEntries);
+    assert.ok(entityPaths.length > 0);
+    assert.deepEqual([...new Set(entityPaths)], [path]);
+    assert.equal(model.metrics.metadataReads - before.metadataReads, 1);
+    t.diagnostic(JSON.stringify({ before, afterExactHint: model.metrics }));
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("a root replaced after the first bind retires its old descriptor before publishing the new row", async () => {
   const f = fixture(); f.put("sa_root_bind", { name: "old-root", status: "completed", endedAt: 2 });
   const model = new WorkReadModel(f.agent, "replaced-root-bind", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });

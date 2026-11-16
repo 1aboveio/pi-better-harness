@@ -1,4 +1,4 @@
-import { parentPort } from "node:worker_threads";
+import { parentPort, workerData } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 import { statSync, readdirSync, readFileSync } from "node:fs";
 
@@ -17,9 +17,15 @@ WorkReadModel.prototype.fileHint = function (...args) {
 };
 
 parentPort.on("message", message => {
+  if (message.type === "diagnostic-source-hint") {
+    latestModel.fileHint(latestModel.runs, message.id);
+    return;
+  }
   if (message.type === "diagnostic-source-state") {
     const model = latestModel;
     parentPort.postMessage({ type: "diagnostic-source-state", id: message.id, state: model && {
+      configured: workerData, imported: model.imported,
+      roots: { agentDir: model.agentDir, runs: model.runs, archives: model.archives, markers: model.markers },
       watchers: [...model.watchers.keys()], rootIdentities: [...model.rootWatchIdentities],
       actualRoots: [model.runs, model.archives, model.markers].map(path => {
         try { const info = statSync(path, { bigint: true }); return { path, identity: `${info.dev}:${info.ino}`, changeListeners: model.watchers.get(path)?.listenerCount("change") }; }
