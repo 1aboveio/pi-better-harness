@@ -68,6 +68,12 @@ describe("goal provider", () => {
     ], context("/tmp/project", "session-a"), now);
 
     expect(snapshot.items.map((item) => item.id)).toEqual(["recent-failure", "running"]);
+    expect(snapshot.nextDeadline).toBe(now + 20_000);
+    const expired = collectBackgroundTaskGoalActivity([
+      meta({ id: "recent-failure", status: "failed", endedAt: now - 10_000, callbackOrigin: { cwd: "/tmp/project", sessionId: "session-a" } }),
+    ], context("/tmp/project", "session-a"), now + 20_000);
+    expect(expired.items).toEqual([]);
+    expect(expired.nextDeadline).toBeNull();
   });
 });
 
