@@ -744,3 +744,30 @@ for (const source of ["runs", "attempts", "session-state"]) test(`source ${sourc
     t.diagnostic(JSON.stringify({ source, oldInode, newInode, before, after: f.executor.metrics() }));
   } finally { await f.close(); }
 });
+
+test("root recreation after an observed absence publishes without inventory fallback", { timeout: 15000 }, async () => {
+  const f = await fixture();
+  try {
+    const id = "sa_root_gap", directory = join(f.root, "runs", id);
+    const meta = { id, sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1,
+      endedAt: Date.now(), callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "original" };
+    mkdirSync(directory);
+    writeFileSync(join(directory, "meta.json"), JSON.stringify(meta));
+    const client = await f.client(); await ready(client);
+    await client.subscribe({ cwd: f.root, sessionId: "parent", limit: 10 });
+    const waitForEvent = async (condition: () => boolean) => {
+      const deadline = Date.now() + 3000;
+      while (!condition()) {
+        assert.ok(Date.now() < deadline, `missing root event: ${JSON.stringify(f.executor.metrics())}`);
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    };
+    await waitForEvent(() => client.snapshot?.rows.length === 1);
+    renameSync(join(f.root, "runs"), join(f.root, "old-runs"));
+    // Let the reader observe ENOENT and retire the old inode watcher first.
+    await waitForEvent(() => client.snapshot?.rows.length === 0);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "meta.json"), JSON.stringify({ ...meta, name: "recreated" }));
+    await waitForEvent(() => client.snapshot?.rows[0]?.meta.name === "recreated");
+  } finally { await f.close(); }
+});

@@ -42,15 +42,34 @@ function buildPanels(s) {
     if (!s.tui || !s.theme)
         return;
     for (const panel of orderedPanels(s))
-        panel.component ??= panel.factory(s.tui, s.theme);
+        panel.component ??= panel.factory(s.tui, s.theme, { availableRows: () => s.availableRows ?? Infinity });
+}
+// Count the editor, footer and other siblings following the host in regular mode.
+// Never render ancestors here: they contain this host and would recurse.
+function rowsAfter(root, target, width) {
+    if (root === target)
+        return 0;
+    const children = root.children;
+    if (!children)
+        return undefined;
+    for (let i = children.length - 1; i >= 0; i--) {
+        const after = rowsAfter(children[i], target, width);
+        if (after !== undefined)
+            return after + children.slice(i + 1).reduce((sum, child) => sum + child.render(width).length, 0);
+    }
+    return undefined;
 }
 function renderPanels(s, width) {
     buildPanels(s);
     const lines = [];
     s.ranges = [];
+    const after = s.sticky && s.tui && s.host ? rowsAfter(s.tui, s.host, width) : undefined;
+    const height = s.tui?.terminal?.rows;
+    const budget = after !== undefined && height ? Math.max(0, height - after) : Infinity;
     for (const panel of orderedPanels(s)) {
         if (!panel.component)
             continue;
+        s.availableRows = Math.max(0, budget - lines.length);
         const rendered = panel.component.render(width);
         s.ranges.push({ start: lines.length, end: lines.length + rendered.length, component: panel.component });
         lines.push(...rendered);
@@ -110,6 +129,7 @@ function clearHost(s) {
     disposePanels(s);
     s.mounted = false;
     s.tui = undefined;
+    s.host = undefined;
     s.theme = undefined;
 }
 function adoptContext(s, ctx) {
@@ -131,7 +151,7 @@ function mountHost(s) {
         s.tui = tui;
         s.theme = theme;
         buildPanels(s);
-        return {
+        const host = {
             render(width) {
                 const lines = renderPanels(s, width);
                 if (s.sticky)
@@ -147,6 +167,8 @@ function mountHost(s) {
             },
             dispose() { disposePanels(s); s.mounted = false; },
         };
+        s.host = host;
+        return host;
     }, { placement: "aboveEditor" });
 }
 function changeSticky(value, ctx) {
