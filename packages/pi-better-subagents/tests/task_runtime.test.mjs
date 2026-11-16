@@ -237,6 +237,7 @@ test('SDK-loaded guarded tools confine writes and reject unclassified extension 
 });
 
 test('Process access activates the fixed inventory without general commands and stays immutable', { skip: !supported }, async (t) => {
+    const { observeOwnedProcess, executableDiagnostic } = await import('../../task-sandbox/test-support/owned-process.mjs');
     const f = fixture(t, { processAccess: 'read', commands: false, network: false,
         storedCredentials: process.platform === 'linux' ? 'read' : 'off' });
     f.policy.tools = ['process_list', 'bash'];
@@ -244,18 +245,17 @@ test('Process access activates the fixed inventory without general commands and 
     const name = 'pi-task-proc';
     const executable = join(f.project, name);
     copyFileSync('/bin/sleep', executable);
-    const owned = spawn(executable, ['60'], { stdio: 'ignore' });
-    t.after(async () => {
-        if (owned.pid && owned.exitCode === null && owned.signalCode === null) {
-            const closed = once(owned, 'close');
-            owned.kill('SIGKILL');
-            await closed;
-        }
-    });
+    const owned = spawn(executable, ['60'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const lifecycle = observeOwnedProcess(owned);
+    t.after(() => lifecycle.stop());
     await once(owned, 'spawn');
     const listed = await execute(session, 'process_list', { name, limit: 200 });
     const details = JSON.parse(listed.content.find((part) => part.type === 'text').text);
     assert.equal(details.scope, 'current-user');
+    const ownedRow = details.processes.find((row) => row.pid === owned.pid);
+    if (ownedRow?.name !== name) t.diagnostic(JSON.stringify({ fixture: lifecycle.diagnostic(), ownedRow,
+        source: executableDiagnostic('/bin/sleep'), executable: executableDiagnostic(executable),
+        helper: executableDiagnostic('/usr/bin/pgrep'), platform: process.platform, node: process.version }));
     assert.ok(details.processes.some((row) => row.pid === owned.pid && row.name === name), 'the confined inventory sees its owned fixture process');
     assert.ok(details.processes.every((row) => Object.keys(row).sort().join(',') === 'name,pid'));
     assert.equal(session.agent.state.tools.some((tool) => tool.name === 'bash'), false,
