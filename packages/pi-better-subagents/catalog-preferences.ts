@@ -32,7 +32,7 @@ function preferences(id: string, value: unknown): CatalogPreference {
 }
 
 function snapshot(values: CatalogPreferences): { settings: CatalogPreferences; digest: string } {
-    const settings = Object.freeze(Object.fromEntries(Object.keys(values).sort().map(id => [id, values[id]])));
+    const settings = Object.freeze(Object.fromEntries(Object.keys(values).sort().map(id => [id, values[id]!])));
     return { settings, digest: createHash("sha256").update(JSON.stringify(settings)).digest("hex") };
 }
 

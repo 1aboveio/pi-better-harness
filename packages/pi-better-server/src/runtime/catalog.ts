@@ -1,55 +1,87 @@
 import { realpathSync } from "node:fs";
-import { loadCatalog, saveDefinition, resetRuntimeToBundled, resetUserDefinition, listScopedAgents } from "./domain/catalog/catalog-store.mjs";
+import { saveDefinition, resetRuntimeToBundled, resetUserDefinition, listScopedAgents } from "./domain/catalog/catalog-store.mjs";
 import { withAgentSessionSettings, saveAgentSessionDefaults } from "./domain/catalog/agent-session-settings.mjs";
 import { saveSkillExposure } from "./domain/catalog/catalog-skill-edits.mjs";
 import { parseDefinition } from "./domain/catalog/catalog-schema.mjs";
 import { CatalogAdmission } from "./catalog-admission.ts";
 import { overlayDigest } from "./domain/catalog/catalog-overlay.mjs";
-import { watch, type FSWatcher } from "node:fs";
-import { dirname } from "node:path";
+import { watch, lstatSync, type FSWatcher } from "node:fs";
+import { join } from "node:path";
+import { CatalogSources } from "./catalog-sources.ts";
 
 /** One server-owned filesystem catalog; registrations belong to the live socket. */
 export class SharedCatalog {
+  readonly sources = new CatalogSources();
   private agentDir: string;
   readonly admission: CatalogAdmission;
   private observers = new Set<() => void>();
   private timer?: ReturnType<typeof setInterval>;
   private pending?: ReturnType<typeof setTimeout>;
-  private watchers = new Map<string, { watcher: FSWatcher; references: number }>();
+  private watchers = new Map<string, { watcher: FSWatcher; identity: string }>();
   constructor(agentDir: string, instanceId: string) { this.agentDir = agentDir; this.admission = new CatalogAdmission(agentDir, instanceId); }
 
   observe(read: () => any, emit: (snapshot: any) => void) {
     if (this.observers.size >= 64) throw new Error("catalog-subscription-limit");
     let revision: string | undefined, seq = 0;
-    const watched: string[] = [];
     const initial = read();
-    const paths = new Set<string>([this.agentDir, ...[...initial.roles, ...initial.agents].map(([, entry]: any) => dirname(entry.path))]);
-    const notify = () => { this.pending ??= setTimeout(() => { this.pending = undefined; for (const reconcile of this.observers) reconcile(); }, 50); this.pending.unref(); };
-    for (const path of paths) {
-      const existing = this.watchers.get(path);
-      if (existing) { existing.references++; watched.push(path); continue; }
-      try {
-        const watcher = watch(path, { persistent: false }, notify); watcher.on("error", notify);
-        this.watchers.set(path, { watcher, references: 1 }); watched.push(path);
-      } catch { /* Bounded reconciliation also discovers newly created paths. */ }
-    }
     const reconcile = () => {
       let snapshot;
       try { snapshot = read(); } catch { snapshot = { revision: "revoked", status: "revoked", roles: [], agents: [], diagnostics: [] }; }
       if (snapshot.revision === revision) return;
       revision = snapshot.revision;
+      this.sources.metrics.notifications++;
       emit({ ...snapshot, seq: ++seq });
     };
     revision = initial.revision;
     this.observers.add(reconcile);
-    this.timer ??= setInterval(() => { for (const reconcile of this.observers) reconcile(); }, 1000);
+    this.cycle();
+    this.timer ??= setInterval(() => this.cycle(), 1000);
     this.timer.unref();
     return { snapshot: { ...initial, seq }, close: () => {
-      this.observers.delete(reconcile);
-      for (const path of watched) { const entry = this.watchers.get(path); if (entry && --entry.references === 0) { entry.watcher.close(); this.watchers.delete(path); } }
-      if (!this.observers.size) { clearInterval(this.timer); this.timer = undefined; clearTimeout(this.pending); this.pending = undefined; }
+      if (!this.observers.delete(reconcile)) return;
+      if (!this.observers.size) {
+        clearInterval(this.timer); this.timer = undefined; clearTimeout(this.pending); this.pending = undefined;
+        for (const { watcher } of this.watchers.values()) watcher.close();
+        this.watchers.clear(); this.sources.clear();
+      } else this.cycle();
     } };
   }
+
+  private cycle() {
+    this.sources.beginObservation();
+    try {
+      // Verify every live grant before any project reconciliation work.
+      for (const reconcile of this.observers) reconcile();
+      if (this.sources.repair(128)) for (const reconcile of this.observers) reconcile();
+      const paths = this.sources.watchPaths();
+      for (const [path, entry] of this.watchers) {
+        let identity = "";
+        try { const stat = lstatSync(path); identity = `${stat.dev}:${stat.ino}`; } catch { /* Replaced/missing root. */ }
+        if (!paths.has(path) || identity !== entry.identity) { entry.watcher.close(); this.watchers.delete(path); }
+      }
+      for (const path of paths) {
+        if (this.watchers.has(path)) continue;
+        try {
+          const stat = lstatSync(path);
+          if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+          const watcher = watch(path, { persistent: false }, (_event, name) => {
+            this.sources.hint(name ? join(path, name.toString()) : path);
+            this.schedule();
+          });
+          watcher.on("error", () => { watcher.close(); this.watchers.delete(path); this.schedule(); });
+          this.watchers.set(path, { watcher, identity: `${stat.dev}:${stat.ino}` });
+        } catch { /* Repair discovers missing and rebuilt directories without a watcher. */ }
+      }
+    } finally { this.sources.endObservation(); }
+  }
+
+  private schedule() {
+    if (!this.observers.size || this.pending) return;
+    this.pending = setTimeout(() => { this.pending = undefined; this.cycle(); }, 50);
+    this.pending.unref();
+  }
+
+  get observationResources() { return { observers: this.observers.size, watchers: this.watchers.size, timer: !!this.timer, pending: !!this.pending }; }
 
   connection() {
     let registration: { cwd: string; sessionId: string; projectAccess: boolean; authority?: unknown } | undefined;
@@ -71,9 +103,9 @@ export class SharedCatalog {
       const loc = location();
       if (command.type === "runtime_get_catalog_scope") {
         if (command.scope !== "user" && command.scope !== "project") throw new Error("Invalid catalog scope");
-        return listScopedAgents(loc, command.scope);
+        return listScopedAgents({ ...loc, sources: this.sources }, command.scope);
       }
-      const snapshot = loadCatalog(loc);
+      const snapshot = this.sources.load(loc, command.type === "runtime_edit_catalog" || command.fresh === true);
       if (command.type === "runtime_get_catalog") {
         const overlay = validateOverlay(command.overlay);
         if (registration?.authority && command.overlay !== undefined) {
