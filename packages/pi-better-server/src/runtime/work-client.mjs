@@ -32,7 +32,7 @@ export class WorkClient {
                     if (message.type === "event") {
                         if (message.event.type === "runtime_catalog_snapshot") { for (const listener of this.catalogListeners) listener(message.event.snapshot); continue; }
                         if (message.event.type === "resync_required") { this.degrade(message.event.reason); this.scheduleRecovery(); }
-                        else if (message.event.type === "runtime_snapshot") this.accept(message.event.snapshot);
+                        else if (message.event.type === "runtime_snapshot") this.accept(message.event.snapshot, message.event.previousSeq);
                     } else {
                         const request = this.pending.get(message.id);
                         if (!request) continue;
@@ -64,14 +64,17 @@ export class WorkClient {
         this.snapshot = { ...this.snapshot, status: "degraded", reason, rows: this.snapshot?.rows ?? [] };
         this.notify();
     }
-    accept(snapshot) {
+    accept(snapshot, previousSeq) {
         if (this.snapshot?.instanceId === snapshot.instanceId && snapshot.seq < this.snapshot.seq) return;
         if (this.snapshot?.instanceId && this.snapshot.instanceId !== snapshot.instanceId) {
             this.degrade("instance-changed: resync required");
             snapshot = { ...snapshot, resyncRequired: true, resyncReason: "instance-changed" };
+        } else if (this.snapshot?.seq !== undefined && Number.isSafeInteger(previousSeq) && previousSeq > this.snapshot.seq) {
+            this.degrade("sequence-gap: replacing with a full authoritative snapshot");
+            snapshot = { ...snapshot, resyncRequired: true, resyncReason: "sequence-gap" };
         }
-        // seq is global, so unrelated scopes legitimately skip values. Each
-        // event is complete; only explicit resync or instance changes fence it.
+        // Global seq may skip unrelated changes; only a missing subscription
+        // predecessor indicates loss. The received snapshot is still complete.
         this.snapshot = Object.freeze(snapshot); this.notify();
     }
     scheduleRecovery(delay = 0) {
