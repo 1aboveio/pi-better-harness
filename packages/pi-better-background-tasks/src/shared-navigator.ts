@@ -406,7 +406,7 @@ function createPointerNavigation(targetAt: (event: WidgetMouseEvent) => string |
   };
 }
 
-function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, deps: HostDeps, panelLayout: NavigatorPanelLayout): MainListWidget {
+function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, deps: HostDeps, panelLayout: NavigatorPanelLayout = { availableRows: () => Infinity }): MainListWidget {
   const requestRender = () => tui.requestRender?.();
   state().mainListRequestRender = requestRender;
   // navigatorId per rendered line, so a pointer row resolves by structure, never by row text.

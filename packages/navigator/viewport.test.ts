@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { Container, TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { Container, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import * as tuiSdk from "@earendil-works/pi-tui";
 import { ensureBackgroundWorkNavigator, disposeBackgroundWorkNavigator, registerBackgroundWorkProvider, refreshBackgroundWorkNavigator } from "./index.ts";
 import { __resetNavigatorPanelsForTests } from "./shared-navigator-panels.ts";
 
@@ -13,7 +14,11 @@ for (const providerId of ["subagents", "background-tasks"]) {
     const terminal = new Proxy({ columns: 100, rows: 24, kittyProtocolActive: false, write: (s: string) => writes.push(s) }, {
       get: (target, key) => key in target ? Reflect.get(target, key) : () => undefined,
     });
-    const tui = new TUI(terminal as any, false);
+    type Renderer = new (terminal: any, cursor?: boolean) => TUI;
+    const sdk = tuiSdk as unknown as { TUI?: Renderer; TuiMainScreen?: Renderer };
+    const MainScreen = sdk.TUI ?? sdk.TuiMainScreen;
+    assert.ok(MainScreen);
+    const tui = new MainScreen(terminal as any, false);
     const theme = { fg: (_: string, value: string) => value };
     const widgets = new Container();
     const editor = { render: () => Array.from({ length: editorHeight }, (_, i) => `editor ${i}`), invalidate() {}, getText: () => "", handleInput() {} };
