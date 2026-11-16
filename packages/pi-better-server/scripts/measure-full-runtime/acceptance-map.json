@@ -1,0 +1,59 @@
+{
+  "issue": 808,
+  "baseline": "eec7b3e256a7548bbf67f69cd468f12eb3b91dc8",
+  "cwd": "repository root",
+  "environment": ["TMPDIR=<owned .private-808/tmp>", "npm_config_cache=<owned .private-808/npm-cache>"],
+  "nativeLanes": ["macOS actual processes/SQLite/socket", "Linux actual processes/SQLite/socket"],
+  "qualification": "notRun; these commands are checkpoints, not acceptance verdicts",
+  "criteria": [
+    {
+      "ac": 1,
+      "command": "PI_INCREMENTAL_WORKLOAD=1 PI_INCREMENTAL_HISTORY=4416 PI_INCREMENTAL_CLIENTS=1 PI_INCREMENTAL_GROUP=48 node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs",
+      "matrix": {"history": [4416, 10000], "clients": [1, 5, 10], "group": [48, 96, 192]},
+      "implemented": "Existing real process workload, source counters before/after, unchanged log/projection assertions, exact final result and historical identity reconciliation",
+      "missing": ["actual native runs", "ordinary versus repair fold/byte accounting across matrix", "fixed active-workload parity proof"]
+    },
+    {
+      "ac": 2,
+      "command": "node --import tsx --test packages/pi-better-server/test/runtime-health-config.test.ts packages/pi-better-server/test/runtime-incremental-log.test.ts packages/pi-better-server/test/runtime-log-checkpoints.test.ts packages/pi-better-server/test/runtime-log-checkpoint-folds.test.ts",
+      "implemented": "Existing parent regression checkpoints; same-group seed and expected final results in full workload",
+      "missing": ["external writer changes/settings rewrite/append/eviction/restart integrated with full process workload", "actual bytes/folds/projections for every 48/96/larger group"]
+    },
+    {
+      "ac": 3,
+      "command": "node --import tsx --test packages/pi-better-server/test/runtime-scope-boundaries.test.ts packages/pi-better-server/test/runtime-local-client.test.ts",
+      "implemented": "Existing scoped socket regression checkpoints",
+      "missing": ["two concurrent scopes/pages in full workload", "zero-I/O unchanged list/detail drawing", "slow subscriber backpressure/resync qualification"]
+    },
+    {
+      "ac": 4,
+      "command": "node --import tsx --test packages/pi-better-server/test/runtime-file-repair.test.ts packages/pi-better-server/test/runtime-snapshot-progress.test.ts packages/pi-better-server/test/runtime-assignment-crashes.test.ts",
+      "implemented": "Existing parent fault checkpoints plus real coordinator replacement and external-writer bounded snapshot progress; adapted metadata publication races",
+      "missing": ["continuous commits during initial build/repair in full workload", "dropped hints/replacement/truncation/deletion/journal gaps/out-of-order completion/crash qualification", "watermark/completeness/progress assertions across real processes"]
+    },
+    {
+      "ac": 5,
+      "command": "node --import tsx --test packages/pi-better-server/test/runtime-slow-query.test.ts packages/pi-better-server/test/runtime-result-supervision.test.ts packages/pi-better-server/test/runtime-scope-boundaries.test.ts",
+      "implemented": "Existing control/supervision regression checkpoints",
+      "missing": ["slow query/wedged worker/corrupt index real-process combined fault lane", "no duplicate launch/wrong consume/scope leak/unauthorized wake qualification"]
+    },
+    {
+      "ac": 6,
+      "command": "node --import tsx --test packages/pi-better-server/test/runtime-lifecycle.test.ts packages/pi-better-server/test/runtime-socket-lifecycle.test.ts",
+      "implemented": "Existing lifecycle regression checkpoints and full workload owned-process cleanup",
+      "missing": ["macOS and Linux actual execution", "zero leftover watchers/workers/connections and natural idle Server/guardian exit", "canonical CI execution addition"]
+    },
+    {
+      "ac": 7,
+      "command": "PI_INCREMENTAL_WORKLOAD=1 PI_INCREMENTAL_DURATION_MS=600000 node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs",
+      "implemented": "Ten-minute minimum enforced per workload; existing process CPU/RSS/I/O/RPC/lag sampler and source/hardware identity retained",
+      "missing": ["same fixed machine baseline plus exact merged candidate runs >=10 minutes EACH workload", "aggregate peak/RSS/GC/queue age/event/recovery/exit diagnostics", "bounded diagnostic overhead comparison", "baseline fixture parity and paired report validator"]
+    },
+    {
+      "ac": 8,
+      "command": "git diff eec7b3e256a7548bbf67f69cd468f12eb3b91dc8 -- packages/pi-better-server/src/runtime docs/plans/unified-server-runtime.md",
+      "implemented": "No production scan/poll/invalidation removal made in unit808; this map records actual incomplete state",
+      "missing": ["audit superseded paths after measured qualification", "compatibility source/budget/scope documentation", "design implementation and acceptance update from actual runs"]
+    }
+  ]
+}

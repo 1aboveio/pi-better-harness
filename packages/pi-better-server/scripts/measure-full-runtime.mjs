@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { sourceProvenance } from './source-provenance.mjs';
 import { randomUUID } from 'node:crypto';
 import { fork } from 'node:child_process';
-import { cpus, totalmem, release, arch } from 'node:os';
+import { cpus, totalmem, release, arch, tmpdir } from 'node:os';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,7 +13,9 @@ import { inspectDaemonOwner, processMatchesStart } from '../src/daemon-owner.ts'
 import { WorkClient } from '../src/runtime/work-client.mjs';
 import { DaemonClient } from '../src/client.ts';
 import { RemoteClientSession } from '../src/remote-client/session.ts';
-const root = realpathSync(mkdtempSync('/tmp/p751-full-')), agent = join(root, 'agent'), transport = join(root, 's'), cwd = join(root, 'workspace'), samples = join(root, 'samples');
+import { workloadSettings, seedWorkload, reconcileWorkload } from './measure-full-runtime/incremental-workload.mjs';
+const incremental = workloadSettings();
+const root = realpathSync(mkdtempSync(join(tmpdir(), 'p751-full-'))), agent = join(root, 'agent'), transport = join(root, 's'), cwd = join(root, 'workspace'), samples = join(root, 'samples');
 for (const path of [agent, transport, cwd, samples, join(agent, 'agents/roles')]) mkdirSync(path, { recursive: true });
 const sessionFile=join(root,'resource-session.jsonl');
 writeFileSync(sessionFile,JSON.stringify({type:'session',version:3,id:randomUUID(),timestamp:new Date().toISOString(),cwd})+'\n');
@@ -22,6 +24,8 @@ const execPath = process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath;
 process.env.PI_RESOURCE_REPORT_DIR=samples;await import(probe);
 const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root, TMP: root, TEMP: root, PI_RESOURCE_REPORT_DIR: samples,
   BACKGROUND_SESSION_FILE:sessionFile,NODE_OPTIONS: `--import ${probe}`, LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: join(cwd, 'entered'), LAUNCH_RELEASE: join(cwd, 'release'), PI_OFFLINE: '1' };
+const workload = incremental ? seedWorkload({ root, agent, cwd, settings: incremental }) : undefined;
+if (workload) env.PI_SUBAGENT_DURABLE_DIR = workload.durable;
 mkdirSync(join(agent,'extensions'),{recursive:true});
 writeFileSync(join(agent,'extensions','resource-hosted.ts'),`export { default } from ${JSON.stringify(fileURLToPath(new URL('./measure-full-runtime/hosted-extension.ts',import.meta.url)))};\n`);
 writeFileSync(join(agent, 'auth.json'), JSON.stringify({ openai: { type: 'api_key', key: 'offline-fixture' } }));
@@ -30,6 +34,7 @@ writeFileSync(join(agent, 'agents/roles/fixture.md'), '---\nschema: pi-agent/v1\
 let errors = '', seq = 0; const children = [], clients = [];
 const report = { root, mode: process.env.PI_FULL_RUNTIME_MATRIX_ONLY ? "mixed-adapter-smoke-not-performance" : "resource-matrix", platform: process.platform, node: process.version, machine:{release:release(),arch:arch(),cpus:cpus().length,cpuModel:cpus()[0]?.model,totalMemory:totalmem()}, source:sourceProvenance(fileURLToPath(new URL('../../..', import.meta.url))), scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two real RemoteClientSession adapters over loopback Unix transport with HostedSessions (not cross-machine SSH); sampler overhead included', scenarios: [] };
 const output = process.env.PI_FULL_RUNTIME_REPORT ?? join(root, 'report.json');
+if (incremental) Object.assign(report, { incremental, workload, qualification: 'notRun', missing: ['fault matrix', 'scope/UI matrix', 'native dual-platform runs', 'paired fixed-host comparison', 'GC/peak/queue-age diagnostics', 'natural idle exit'] });
 function start(url) { const child = fork(url, [], { execPath, execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); children.push(child); child.stdout.resume(); child.stderr.on('data', d => { errors += d; }); return child; }
 async function until(label, fn, timeout = 30000) { const deadline = Date.now()+timeout; while (Date.now()<deadline) { const value = await fn(); if (value) return value; await delay(25); } throw new Error(`${label} timed out: ${errors.slice(-4000)}`); }
 function message(child, predicate) { return new Promise((resolve, reject) => { const timer = setTimeout(() => { cleanup(); reject(new Error(`IPC timeout: ${errors.slice(-2000)}`)); }, 30000); const on = value => { if (predicate(value)) { cleanup(); resolve(value); } }; const exit = () => { cleanup(); reject(new Error(`Child exited: ${errors}`)); }; function cleanup() { clearTimeout(timer); child.off('message', on); child.off('exit', exit); } child.on('message', on); child.once('exit', exit); }); }
@@ -72,7 +77,7 @@ try {
   assert.equal(legacy.details.launched.length,2,JSON.stringify(legacy));
   await until('legacy commands',()=>[0,1].every(index=>{try{return Number(readFileSync(join(cwd,`legacy-pid-${index}`),'utf8'))>0;}catch{return false;}}));
   await work.request('runtime_cancellation_status');
-  for (const count of (process.env.PI_FULL_RUNTIME_MATRIX_ONLY?[1]:[1,5,10])) {
+  for (const count of (incremental ? [incremental.clients] : process.env.PI_FULL_RUNTIME_MATRIX_ONLY?[1]:[1,5,10])) {
     while(clients.length<count) { const child=start(new URL('./measure-full-runtime/frontend.ts',import.meta.url)); await message(child,m=>m.ready); clients.push(child); }
     await work.get({cwd,active:true});
     const warmup=[];
@@ -103,9 +108,18 @@ try {
     const before=await sampleAll();
     const role = pid => pid===process.pid?'remote-adapters-and-measurement':pid===remoteClaim.pid?'remote-runner':pid===remoteCommandPid?'remote-command':pid===owner.pid ? 'server' : pid===guardian.pid ? 'guardian' : pid===worker.pid ? 'worker' : pid===claim.pid ? 'runner' : pid===commandPid ? 'command' : legacyPids.includes(pid)?'legacy-command':'pi';
     for(const pid of required) assert.ok(before.some(v=>v.identity.pid===pid),`Missing instrumented actual process ${pid}`);
-    const measurementStart=performance.now(), latencies=[]; const duration=process.env.PI_FULL_RUNTIME_MATRIX_ONLY?100:count===10?60000:3000;
+    const workloadBefore = workload ? await reconcileWorkload(work, cwd, workload) : undefined;
+    const countersBefore = await work.request('runtime_get_metrics');
+    const measurementStart=performance.now(), latencies=[]; const duration=incremental?.durationMs ?? (process.env.PI_FULL_RUNTIME_MATRIX_ONLY?100:count===10?60000:3000);
     while(performance.now()-measurementStart<duration) { const began=performance.now(); await work.request('runtime_get_status'); latencies.push(performance.now()-began); await delay(100); }
     const after=await sampleAll(), metrics=await work.request('runtime_get_metrics'), status=await work.request('runtime_get_status');
+    const workloadAfter = workload ? await reconcileWorkload(work, cwd, workload) : undefined;
+    if (workload) {
+      assert.deepEqual(workloadAfter, workloadBefore, 'Exact authoritative fixture results must survive the observation window');
+      assert.equal(metrics.projections, countersBefore.projections, 'Unchanged work must not be reprojected');
+      assert.equal(metrics.logReads.bytes, countersBefore.logReads.bytes, 'Ordinary observation must not reread unchanged logs');
+      (report.incrementalWindows ??= []).push({ clients: count, countersBefore, countersAfter: metrics, workloadBefore, workloadAfter });
+    }
     assert.equal(status.hostedSessions,2); assert.equal(inspectDaemonOwner(transport).owner.pid,owner.pid);
     const resources=after.map(value=>{ const prior=before.find(v=>v.identity.pid===value.identity.pid); assert.ok(prior,'Unexpected process appeared during steady measurement'); return { ...value, role: role(value.identity.pid), cpuMs:((value.cpu.user-prior.cpu.user)+(value.cpu.system-prior.cpu.system))/1000,fsRead:value.usage.fsRead-prior.usage.fsRead,fsWrite:value.usage.fsWrite-prior.usage.fsWrite }; });
     for(const client of clients) assert.equal(resources.find(value=>value.identity.pid===client.pid).connections.coordinator,0,'ordinary native frontends must not open coordinator stores');

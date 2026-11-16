@@ -1356,7 +1356,9 @@ export function parseRun(id: string, options: { logPath?: string; states?: Map<s
     if (options.summaryOnly) {
         state.finalText = "";
         state.lastActivity = "";
-        state.toolCalls = state.toolCalls.slice(-256);
+        state.toolCalls = state.toolCalls.slice(-1);
+        state.openToolCalls.clear();
+        state.modelError = undefined;
     }
 
     // A log whose final line was never terminated — a writer mid-event, or one

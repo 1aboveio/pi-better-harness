@@ -1138,7 +1138,9 @@ export function parseRun(id, options = {}) {
     if (options.summaryOnly) {
         state.finalText = "";
         state.lastActivity = "";
-        state.toolCalls = state.toolCalls.slice(-256);
+        state.toolCalls = state.toolCalls.slice(-1);
+        state.openToolCalls.clear();
+        state.modelError = undefined;
     }
     // A log whose final line was never terminated — a writer mid-event, or one
     // that simply did not end with a newline — still has to be readable. Fold it

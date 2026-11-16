@@ -478,7 +478,7 @@ export class WorkReadModel {
     const release = this.budget.enter("repair");
     if (!release) return Promise.resolve();
     this.pending = (async () => {
-      this.watchRootParents();
+      for (const root of [this.runs, this.archives, this.markers]) this.watchRootParent(root);
       if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
       do {
         this.dirty = false;

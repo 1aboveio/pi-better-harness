@@ -271,7 +271,7 @@ test("a later archive never overrides its live raw task, and raw deletion reveal
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test("an exact task hint retries after the coordinator changes during observation", async () => {
+test("an exact task hint fences a genuinely changed source before publication and retries", async () => {
   const f = fixture(); f.put("sa_race", { name: "before" });
   const model = new WorkReadModel(f.agent, "coordinator-race", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
   try {
@@ -283,12 +283,13 @@ test("an exact task hint retries after the coordinator changes during observatio
     let races = 0;
     reader.beginSnapshot = () => {
       const snapshot = beginSnapshot();
-      return races++ === 0 ? { ...snapshot, revision: "changed-during-read" } : snapshot;
+      if (races++ === 0) f.put("sa_race", { name: "winning-source" });
+      return snapshot;
     };
     f.put("sa_race", { name: "after" });
     model.fileHint(join(f.runs, "sa_race"), "meta.json"); await settleHints(model);
     assert.ok(races >= 2, "the failed validation must trigger another entity observation");
-    assert.equal(model.snapshot().rows[0]!.meta.name, "after");
+    assert.equal(model.snapshot().rows[0]!.meta.name, "winning-source");
     assert.equal(model.observation().status, "ready");
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -302,15 +303,12 @@ test("a malformed replacement discards unpublished staging without blocking its 
     (model as any).watchers.clear();
     const paths = ["sa_racy", "sa_sibling"].map(id => join(f.runs, id, "meta.json"));
     f.put("sa_racy", { name: "unpublished" }); f.put("sa_sibling", { name: "new" });
-    const reader = (model as any).reader, beginSnapshot = reader.beginSnapshot.bind(reader), revision = reader.revision.bind(reader);
+    const reader = (model as any).reader, beginSnapshot = reader.beginSnapshot.bind(reader);
     reader.beginSnapshot = () => {
       const snapshot = beginSnapshot();
-      reader.revision = () => {
-        writeFileSync(paths[0]!, "broken");
-        reader.revision = revision;
-        reader.beginSnapshot = beginSnapshot;
-        return revision();
-      };
+      // Metadata has been read; publication still must validate its exact bytes.
+      writeFileSync(paths[0]!, "broken");
+      reader.beginSnapshot = beginSnapshot;
       return snapshot;
     };
     await (model as any).scan(paths);
