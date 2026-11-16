@@ -104,9 +104,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const resultPorts: Map<string, any> = (globalThis as any)[resultPortKey] ??= new Map();
     const resultRoot = realpathSync(getAgentDir());
     const resultPort = { status() {
-      resultSupervision ??= new RuntimeResultSupervision(resultRoot, instanceId!);
+      resultSupervision ??= new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
       resultSupervision.reconcile();
-      return { hostId: resultSupervision.hostId, epoch: resultSupervision.epoch, reason: resultSupervision.reason };
+      return { hostId: resultSupervision.hostId, epoch: resultSupervision.epoch, reason: resultSupervision.reason,
+        obligations: resultSupervision.livenessReasons(), metrics: resultSupervision.metrics };
     } };
     let workModel: WorkQueryExecutor | undefined;
     let registry!: SessionRegistry;
@@ -123,7 +124,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         }
       }
     };
-    if (hasResultSupervision(getAgentDir())) resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!);
+    if (hasResultSupervision(getAgentDir())) resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
     resultPorts.set(resultRoot, resultPort);
     if (hasPendingCancellation(getAgentDir())) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
     const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
@@ -258,11 +259,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               capabilities: ["runtime-status-v1"], hostedSessions: registry.activeCount, lifecycle: config,
               subagentManagement: launches?.status() ?? null,
               backgroundManagement: backgroundTools?.metrics() ?? null,
+              resultSupervision: resultSupervision ? { reason: resultSupervision.reason, metrics: resultSupervision.metrics } : null,
               guardianBinding: guardianBinding?.identity ?? null,
               workObservation: observation ? { status: observation.status, reason: observation.reason, observedAt: observation.observedAt } : null,
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
                 ...registry.list().filter(session => session.live).map(session => ({ kind: "hosted-session", id: session.sessionId })),
-                ...(observation?.reasons ?? [])],
+                ...(resultSupervision?.livenessReasons() ?? []),
+                ...(observation?.reasons ?? []).filter((reason: any) => !resultSupervision?.manages(reason.operationId))],
               livenessObservation: observation ?? { status: "unobserved", reasons: [], observedAt: null },
               nextIdleDeadline: runtimeClients.size > 0 || registry.activeCount > 0 ? null
                 : hostedUsed ? config.daemonIdleMs === 0 || zeroSince === undefined ? null : zeroSince + config.daemonIdleMs
@@ -591,8 +594,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             : (now() - runtimeZeroSince < config.runtimeIdleMs || now() < startupUntil)) return;
           // Recheck durable activity before fencing admission; observation never adopts a writer.
           if (draining) return;
+          resultSupervision?.reconcile();
+          if (resultSupervision?.livenessReasons().length) {
+            runtimeZeroSince = undefined;
+            return;
+          }
           try {
-            if ((await work().livenessReasons()).length > 0) {
+            if ((await work().livenessReasons()).some((reason: any) => !resultSupervision?.manages(reason.operationId))) {
               runtimeZeroSince = undefined;
               return;
             }

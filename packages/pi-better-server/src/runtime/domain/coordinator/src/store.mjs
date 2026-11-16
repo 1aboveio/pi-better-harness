@@ -12,7 +12,7 @@ import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgro
 import { BackgroundRequests } from "./background-requests.mjs";
 import { StoreError } from "./errors.mjs";
 import { SubagentLaunchJournal } from "./subagent-launch.mjs";
-import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.mjs";
+import { resultSupervisionChanges, resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.mjs";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.mjs";
 import { repairFailedResume } from "./recovery.mjs";
 import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.mjs";
@@ -54,6 +54,7 @@ export function openStore(options) {
         resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
+        resultSupervisionChanges(after) { alive(); return resultSupervisionChanges(ctx, after); },
         resultSupervisions(activeOnly) { alive(); return resultSupervisions(ctx, activeOnly); },
         handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
         handoffResultSupervisions(input) { alive(); return handoffResultSupervisions(ctx, input); },
