@@ -12,6 +12,11 @@ export class WorkClient {
     scope;
     buffer = "";
     closed = false;
+    recoveryTimer;
+    recoveryActive = false;
+    recoveryAgain = false;
+    recoveryDelay = 100;
+    scopeGeneration = 0;
     constructor(socketPath, agentDir, requiredCapabilities = []) {
         this.socket = typeof socketPath === "string" ? connect(socketPath) : socketPath;
         this.socket.setEncoding("utf8");
@@ -32,7 +37,7 @@ export class WorkClient {
                         }
                         if (message.event.type === "resync_required") {
                             this.degrade(message.event.reason);
-                            void this.resync().catch(error => this.degrade(String(error)));
+                            this.scheduleRecovery();
                         }
                         else if (message.event.type === "runtime_snapshot")
                             this.accept(message.event.snapshot);
@@ -95,16 +100,62 @@ export class WorkClient {
         this.snapshot = Object.freeze(snapshot);
         this.notify();
     }
+    scheduleRecovery(delay = 0) {
+        if (this.closed)
+            return;
+        if (this.recoveryActive) {
+            this.recoveryAgain = true;
+            return;
+        }
+        if (this.recoveryTimer)
+            return;
+        this.recoveryTimer = setTimeout(() => {
+            this.recoveryTimer = undefined;
+            void this.recover();
+        }, delay);
+        this.recoveryTimer.unref?.();
+    }
+    async recover() {
+        const generation = this.scopeGeneration;
+        this.recoveryActive = true;
+        let retry = false;
+        try {
+            await this.resync();
+            this.recoveryDelay = 100;
+        }
+        catch (error) {
+            if (!this.closed && generation === this.scopeGeneration) {
+                this.degrade(String(error));
+                retry = /runtime-(?:timeout|overloaded|unhealthy)/.test(String(error));
+            }
+        }
+        finally {
+            this.recoveryActive = false;
+            const again = this.recoveryAgain;
+            this.recoveryAgain = false;
+            if (!this.closed && (again || retry && generation === this.scopeGeneration)) {
+                this.scheduleRecovery(again ? 0 : this.recoveryDelay);
+                this.recoveryDelay = Math.min(1000, this.recoveryDelay * 2);
+            }
+        }
+    }
     async subscribe(scope) {
         await this.ready;
+        this.scopeGeneration++;
+        clearTimeout(this.recoveryTimer);
+        this.recoveryTimer = undefined;
+        this.recoveryAgain = false;
+        this.recoveryDelay = 100;
         this.scope = scope;
         const snapshot = await this.request("runtime_subscribe", { scope });
         this.accept(snapshot);
         return snapshot;
     }
     async resync() {
+        const generation = this.scopeGeneration;
         const snapshot = await this.request("runtime_subscribe", { scope: this.scope, sinceSeq: this.snapshot?.seq, instanceId: this.snapshot?.instanceId });
-        this.accept(snapshot);
+        if (!this.closed && generation === this.scopeGeneration)
+            this.accept(snapshot);
         return snapshot;
     }
     async get(scope) {
@@ -122,6 +173,9 @@ export class WorkClient {
         if (this.closed)
             return;
         this.closed = true;
+        this.scopeGeneration++;
+        clearTimeout(this.recoveryTimer);
+        this.recoveryTimer = undefined;
         for (const request of this.pending.values()) {
             clearTimeout(request.timer);
             request.reject(error);
