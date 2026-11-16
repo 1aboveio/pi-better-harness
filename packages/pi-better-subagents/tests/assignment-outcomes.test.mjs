@@ -39,17 +39,55 @@ async function observeFixture(sessionId = "parent", settleMs = 75) {
 
 function host(sessionId = "parent", options = {}) {
     const tools = new Map(), handlers = new Map(), entries = options.entries ?? [], sent = [];
+    const notifications = new EventEmitter();
     const events = new EventEmitter();
     if (!options.noGoal) events.on("pi-better-goal:operation-resume-admission", (request) => request.reply({ allowed: options.allowed !== false, revision: 1, isCurrent: () => options.allowed !== false }));
     const pi = { events, registerTool: (tool) => tools.set(tool.name, tool), on: (name, fn) => handlers.set(name, fn),
         sendMessage: (message, sendOptions) => {
-            sent.push({ message, options: sendOptions });
-            entries.push({ id: `entry-${entries.length}`, type: "message", message: { role: "custom", ...message } });
+            const notification = { message, options: sendOptions, entryId: `entry-${entries.length}` };
+            sent.push(notification);
+            entries.push({ id: notification.entryId, type: "message", message: { role: "custom", ...message } });
+            notifications.emit("sent", notification);
         } };
     const ctx = { cwd: process.cwd(), isIdle: () => true, hasUI: false,
         ui: { notify() {}, setWidget() {} }, sessionManager: { getSessionId: () => sessionId, getBranch: () => entries } };
     extension(pi);
-    return { pi, ctx, entries, sent, tools, handlers, async start({ settleMs = 75 } = {}) { await handlers.get("session_start")?.({}, ctx); await observeFixture(sessionId, settleMs); }, async close() { await handlers.get("session_shutdown")?.({ reason: "reload" }, ctx); } };
+    return { pi, ctx, entries, sent, tools, handlers, notifications, async start({ settleMs = 75 } = {}) { await handlers.get("session_start")?.({}, ctx); await observeFixture(sessionId, settleMs); }, async close() { await handlers.get("session_shutdown")?.({ reason: "reload" }, ctx); } };
+}
+
+const representsOutcome = (notification, eventId) => notification.message.details?.completionEventIds?.includes(eventId);
+
+async function deliveredOutcome(h, meta) {
+    const eventId = readOutcome(meta).eventId;
+    let timer, onSent;
+    const advanced = new Set();
+    try {
+        const notification = await new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error(`Exact outcome ${eventId} was not delivered; batches=${JSON.stringify(h.sent.map(item => item.message.details))}`)), 3000);
+            onSent = item => {
+                if (representsOutcome(item, eventId)) { resolve(item); return; }
+                if (advanced.has(item) || !item.options.triggerTurn) return;
+                advanced.add(item);
+                // The real host runs the follow-up requested by an earlier batch.
+                void Promise.resolve().then(async () => {
+                    const isIdle = h.ctx.isIdle;
+                    h.ctx.isIdle = () => false;
+                    try { await h.handlers.get("agent_start")({}, h.ctx); }
+                    finally { h.ctx.isIdle = isIdle; }
+                    await h.handlers.get("agent_settled")({}, h.ctx);
+                }).catch(reject);
+            };
+            h.notifications.on("sent", onSent);
+            for (const item of h.sent) onSent(item);
+        });
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.filter(item => representsOutcome(item, eventId)).length, 1, "the exact outcome is handed off once");
+        assert.equal(readOutcome(meta).deliveryReceipt.entryId, notification.entryId, "receipt belongs to the exact containing batch");
+        return notification;
+    } finally {
+        clearTimeout(timer);
+        if (onSent) h.notifications.off("sent", onSent);
+    }
 }
 
 function failedAssignment(id, branchId = null) {
@@ -217,10 +255,8 @@ test("ordinary failure uses actual finalizer, callback batcher and result acknow
     const h = host();
     try {
         await h.start();
-        await getCallbackBatcher(h.pi).flush();
-        assert.equal(h.sent.length, 1);
-        assert.match(h.sent[0].message.content, new RegExp(outcome.eventId));
-        assert.equal(readOutcome(meta).deliveryReceipt.entryId, "entry-0");
+        const notification = await deliveredOutcome(h, meta);
+        assert.match(notification.message.content, new RegExp(outcome.eventId));
         const result = await h.tools.get("subagent_result").execute("inspect", { id: meta.id, operation_id: operationId }, undefined, undefined, h.ctx);
         assert.match(result.details.outcome.logs[0].text, /retained failed-test/);
         assert.match(result.content[0].text, /retained failed-test/);
@@ -233,6 +269,68 @@ test("ordinary failure uses actual finalizer, callback batcher and result acknow
         assert.equal(store.listResumeClaims({ waitId: wait.waitId })[0].state, "published");
         assert.throws(() => removeRunDirectory(meta.id), /retains this run/);
     } finally { await h.close(); store.close(); }
+});
+
+test("an earlier legal batch cannot stand in for a later exact outcome or its receipt", async () => {
+    const earlier = failedAssignment("controlled-earlier-outcome");
+    const h = host();
+    let later;
+    try {
+        await h.start({ settleMs: 0 });
+        const first = await deliveredOutcome(h, earlier.meta);
+        // Create the later result only after the earlier batch has been handed off.
+        later = failedAssignment("controlled-later-outcome");
+        const eventId = readOutcome(later.meta).eventId;
+        assert.equal(representsOutcome(first, eventId), false);
+        await observeFixture("parent", 0);
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(readOutcome(later.meta).deliveryReceipt, null, "earlier handoff holds the foreground gate, not a receipt for later work");
+        const delivered = await deliveredOutcome(h, later.meta);
+        assert.notEqual(delivered.entryId, first.entryId);
+        assert.equal(h.sent.filter(item => representsOutcome(item, readOutcome(earlier.meta).eventId)).length, 1);
+        assert.equal(later.store.getWait(later.wait).acknowledgement, null);
+        assert.equal(later.store.listResumeClaims({ waitId: later.wait.waitId })[0].state, "published");
+        assert.ok(later.store.listEvidencePins({ waitId: eventId, generation: 1 }).length);
+    } finally { await h.close(); earlier.store.close(); later?.store.close(); }
+});
+
+test("two exact outcomes admitted while busy retain distinct receipts in one coalesced batch", async () => {
+    const fixtures = [failedAssignment("coalesced-outcome-a"), failedAssignment("coalesced-outcome-b")];
+    const h = host();
+    h.ctx.isIdle = () => false;
+    const batcher = getCallbackBatcher(h.pi), enqueue = batcher.enqueue;
+    const expected = new Set(fixtures.map(({ meta }) => readOutcome(meta).eventId));
+    let timer, release;
+    const admitted = new Promise((resolve, reject) => {
+        release = resolve;
+        timer = setTimeout(() => reject(new Error(`Exact outcomes not queued: ${JSON.stringify([...expected])}`)), 3000);
+    });
+    const enqueues = mock.method(batcher, "enqueue", event => {
+        const inserted = enqueue(event);
+        if (inserted) expected.delete(event.receiptId);
+        if (!expected.size) release();
+        return inserted;
+    });
+    try {
+        await h.start({ settleMs: 0 });
+        await admitted;
+        assert.ok(batcher.pendingCount() >= 2);
+        assert.equal(h.sent.length, 0, "busy foreground is a delivery gate, not a receipt");
+        for (const { meta } of fixtures) assert.equal(readOutcome(meta).deliveryReceipt, null);
+        h.ctx.isIdle = () => true;
+        await h.handlers.get("agent_settled")({}, h.ctx);
+        await batcher.flush();
+        const notifications = await Promise.all(fixtures.map(({ meta }) => deliveredOutcome(h, meta)));
+        assert.equal(notifications[0].entryId, notifications[1].entryId);
+        assert.notEqual(readOutcome(fixtures[0].meta).eventId, readOutcome(fixtures[1].meta).eventId);
+        for (const { store, wait, meta } of fixtures) {
+            assert.equal(store.getWait(wait).acknowledgement, null);
+            assert.ok(store.listEvidencePins({ waitId: readOutcome(meta).eventId, generation: 1 }).length);
+        }
+    } finally {
+        clearTimeout(timer); enqueues.mock.restore(); await h.close();
+        for (const { store } of fixtures) store.close();
+    }
 });
 
 test("quoted outcome text is not a recipient receipt", () => {

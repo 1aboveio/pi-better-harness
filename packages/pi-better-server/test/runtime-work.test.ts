@@ -65,7 +65,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
         maximum: main.maximum + worker.maximum };
     };
     const sqliteBefore = await actualConnections();
-    assert.equal(sqliteBefore.active, 2, "one coordinator and one derived connection retain the query index and attached durable inbox");
+    assert.equal(sqliteBefore.active, 2, "one coordinator and one derived connection retain the query index, inbox and checkpoints");
     assert.equal(first.snapshot!.rows.length, 50);
     for (const count of [1, 5, 10]) {
       while (clients.length < count) {
@@ -340,6 +340,11 @@ test("registered Navigator preserves older active rows and the same consumers re
       writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, sessionId: `worker-${i}`,
         callbackOrigin: { cwd: root, sessionId: "parent" }, spawnPid: process.pid, pid: process.pid,
         status: i === 0 ? "running" : "completed", startedAt: i, ...(i ? { endedAt: 1 } : {}) }));
+      writeFileSync(join(runs, id, "output.log"), [
+        { type: "message_end", message: { role: "assistant", usage: { input: 120, cost: { total: 0.01 } } } },
+        { type: "tool_execution_start", toolCallId: "recovery", toolName: "bash", at: Date.now() },
+        { type: "message_update", message: { role: "assistant", content: "x".repeat(67000) } },
+      ].map(event => JSON.stringify(event) + "\n").join(""));
     }
     await until(() => observation.workObservation()?.activity.active === 1);
     await until(async () => (await observation.observedList({ cwd: root })).totalMatching === 201);
@@ -371,9 +376,21 @@ test("registered Navigator preserves older active rows and the same consumers re
       await until(() => observation.workObservation()?.status === "ready" && observation.workObservation()?.instanceId !== previous);
       assert.equal(provider.visibleCount(), 202);
       assert.ok(hooks.listRows().some((row: any) => row.id === "sa_review_0"));
+      const restored = hooks.listRows().find((row: any) => row.id === "sa_review_0");
+      assert.equal(restored.tool, "bash");
+      assert.match(restored.tokens, /120/);
       const result = await tools.get("subagent_result").execute("review", { id: "sa_review_0", all: true }, undefined, undefined, ctx);
       assert.equal(result.details.assignment.state, "running");
       assert.equal(result.details.snapshot.instanceId, observation.workObservation().instanceId);
+      let listed = await tools.get("subagent_list").execute("recovered-list", { all: true, limit: 100 }, undefined, undefined, ctx);
+      let row = listed.details.snapshot.rows.find((row: any) => row.meta.id === "sa_review_0");
+      while (!row && listed.details.snapshot.nextCursor) {
+        listed = await tools.get("subagent_list").execute("recovered-page", { all: true, limit: 100, cursor: listed.details.snapshot.nextCursor }, undefined, undefined, ctx);
+        row = listed.details.snapshot.rows.find((row: any) => row.meta.id === "sa_review_0");
+      }
+      assert.ok(row, "the recovered list contains the older active task across pages");
+      assert.ok(row.display.spend.includes("0.01"));
+      assert.equal(row.health.facts.activeTools.length, 1);
     }
     writeFileSync(join(runs, "sa_review_0", "meta.json"), JSON.stringify({ id: "sa_review_0", cwd: root, sessionId: "worker-0",
       callbackOrigin: { cwd: root, sessionId: "parent" }, spawnPid: process.pid, pid: process.pid,

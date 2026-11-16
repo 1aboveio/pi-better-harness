@@ -406,6 +406,7 @@ export class ObservedWaitHost {
     discoveryToken;
     discoveryRole;
     reconcileInFlight;
+    reconcileScope;
     authorityPassCache;
     /** Running operations this follower is currently assigned to supervise. */
     followerRunningTasks = new Set();
@@ -685,16 +686,26 @@ export class ObservedWaitHost {
     }
     /** A deterministic, awaitable reconciliation pass for tests and session activation. */
     async reconcileNow() {
-        if (this.reconcileInFlight)
-            return this.reconcileInFlight;
+        const scope = this.recoveryScopeState();
+        if (this.reconcileInFlight) {
+            const sameScope = this.reconcileScope === scope;
+            await this.reconcileInFlight;
+            // Startup or another foreground's pass cannot verify this scope's recovery.
+            if (!sameScope)
+                return this.reconcileNow();
+            return;
+        }
+        this.reconcileScope = scope;
         const pass = this.reconcilePass();
         this.reconcileInFlight = pass;
         try {
             await pass;
         }
         finally {
-            if (this.reconcileInFlight === pass)
+            if (this.reconcileInFlight === pass) {
                 this.reconcileInFlight = undefined;
+                this.reconcileScope = undefined;
+            }
         }
     }
     async reconcilePass() {

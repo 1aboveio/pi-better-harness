@@ -598,6 +598,31 @@ describe("supervision authority", () => {
     expect(pendingReads.every(scope => scope.sessionId === "current-session" && scope.workspace === root && scope.limit === 256)).toBe(true);
   });
 
+  it("the first scoped recovery cannot coalesce into an unscoped startup pass", async () => {
+    const root = workspace("startup-scoped-recovery");
+    const store = openStore({ path: join(root, "operations.sqlite") });
+    cleanups.push(() => store.close());
+    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store,
+      supervisorDirectory: join(root, "supervisor"), pollMs: 0, serverOwnedResults: true });
+    cleanups.push(() => host.close());
+    host.start();
+    host.noteParentContext(createCtx(root, "first-owner"), { recover: false });
+    expect(host.hasPendingParentCallbackRecovery()).toBe(true);
+    const revision = store.getChangeRevision();
+    host.noteParentContext(createCtx(root, "first-owner"));
+    await host.reconcileNow();
+    expect(host.hasPendingParentCallbackRecovery(), "the first observation must recover its own scope").toBe(false);
+    expect(store.getChangeRevision()).toBe(revision);
+    for (let index = 0; index < 10; index++) {
+      host.noteParentContext(createCtx(root, "first-owner"), { recover: false });
+      expect(host.hasPendingParentCallbackRecovery()).toBe(false);
+    }
+    host.noteParentContext(createCtx(root, "first-owner", "other-branch"), { recover: false });
+    expect(host.hasPendingParentCallbackRecovery()).toBe(true);
+    await host.reconcileNow();
+    expect(host.hasPendingParentCallbackRecovery()).toBe(false);
+  });
+
   it("recovers first and tail callback pages without claim-scan starvation or unbounded retries", async () => {
     const root = workspace("paged-callback-recovery"), directory = join(root, "supervisor");
     const store = openStore({ path: join(root, "operations.sqlite") });

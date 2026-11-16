@@ -263,6 +263,7 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
   const f = await fixture({ watchdogMs: 800,
     workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
   try {
+    await f.bootstrapped;
     const a = await f.client(), b = await f.client();
     const began = performance.now();
     for (let i = 0; i < 6; i++) {
@@ -501,7 +502,7 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
     const after = await b.request("runtime_get_metrics");
     assert.equal(after.queryCount, before, "the worker cache avoids repeated SQLite for a warmed scope");
     assert.ok(after.cacheHits > 0);
-    assert.equal(after.sqlite.active, 1, "only the derived index exists when no coordinator source is present");
+    assert.equal(after.sqlite.active, 1, "the query index owns the attached checkpoint store when no coordinator source is present");
   } finally { await f.close(); }
 });
 
@@ -624,7 +625,7 @@ test('Subagents and Background share one coordinator read connection in the quer
     await f.executor.livenessReasons();
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
-    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator and one derived connection with the durable inbox attached, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator and one derived connection with inbox and checkpoints attached, regardless of domain');
     assert.equal((f.executor.metrics().sqlite as any).opens, 2, 'both inbox attachments reuse the existing derived handle without another constructor open');
     assert.equal((f.executor.metrics().sqlite as any).maximum, 2, 'Background attachment cannot temporarily exceed the existing handle budget');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
