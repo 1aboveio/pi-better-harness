@@ -9,6 +9,7 @@ import { register, createRequire, syncBuiltinESMExports } from "node:module";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
+import { privateRuntimeNode } from "./private-runtime-node.ts";
 
 function fixtureRoot(name: string) {
   const parent = resolve("../../.work/753");
@@ -38,7 +39,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], usage: { input: 100, output: 20, cost: { total: 0.01 } } } },
   ].map(event => JSON.stringify(event)).join("\n") + "\n");
   const child = fork(new URL("./support/work-daemon.ts", import.meta.url), [], {
-    execArgv: ["--import", "tsx"], env: { ...process.env, TMPDIR: root, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport }, stdio: ["ignore", "pipe", "pipe", "ipc"],
+    execPath: privateRuntimeNode().node, execArgv: ["--import", "tsx"], env: { ...process.env, TMPDIR: root, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport }, stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
   let errors = "";
   child.stderr!.on("data", data => { errors += data; });
@@ -132,7 +133,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.match(displayed.tokens, /120/);
       assert.ok(displayed.facts.some((fact: string) => /bash/.test(fact)), "cached health facts preserve configured long-tool diagnostics without client I/O");
       const logBefore = await first.request("runtime_get_metrics");
-      appendFileSync(join(runs, "sa_shared_0", "output.log"), JSON.stringify({ type: "tool_execution_start", toolCallId: "new-tool", toolName: "read", at: Date.now() }) + "\n");
+      appendFileSync(join(runs, "sa_shared_0", "output.log"), JSON.stringify({ type: "tool_execution_start", toolCallId: "new-tool", toolName: "read", at: Date.now() - 1000 }) + "\n");
       for (let retry = 0; hooks.listRows().find((row: any) => row.id === "sa_shared_0")?.tool !== "read"; retry++) {
         assert.ok(retry < 200, "Navigator did not consume the changed log snapshot");
         await new Promise(resolve => setTimeout(resolve, 20));
@@ -181,6 +182,16 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.equal(paintIo, 0, "60 actual registered list/detail draws perform no filesystem reads, stats or opens");
       assert.equal(registryIo.getRegistryIoMetrics().metadataFileReads, 0, "registered detail draws consume the cached server snapshot");
       assert.equal(localConnections, 0, "registered detail draws never open a local coordinator");
+      assert.ok(displayed.facts.some((fact: string) => /long bash/.test(fact)));
+      writeFileSync(join(agent, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: { healthLongToolMs: 600000 } } }));
+      const thresholdDeadline = Date.now() + 10000;
+      while (hooks.listRows().find((row: any) => row.id === "sa_shared_0").facts.some((fact: string) => /long (bash|read)/.test(fact))) {
+        assert.ok(Date.now() < thresholdDeadline, "Navigator did not observe new health thresholds");
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      const refreshed = await tools.get("subagent_list").execute("health-list", { all: true, limit: 100 }, undefined, undefined, ctx);
+      assert.ok(refreshed.details.snapshot.rows.length > 0);
+      assert.ok(refreshed.details.snapshot.rows.every((row: any) => row.health.thresholds.longToolMs === 600000), "tool and Navigator share the updated judgment");
     } finally {
       sqlite.DatabaseSync = OriginalDatabase;
       await handlers.get("session_shutdown")?.({}, ctx);
@@ -569,7 +580,7 @@ test("a paused real socket has bounded queued snapshots and receives explicit re
   await once(server, "connection");
   try {
     queries.handle({ type: "runtime_subscribe", scope: {} });
-    for (let i = 0; i < 1000; i++) model.invalidate("watcher overflow");
+    for (let i = 0; i < 1000; i++) model.invalidate(`watcher overflow ${i}`);
     assert.ok(accepted.writableLength <= 103000, `queued bytes exceeded one snapshot plus the queue allowance: ${accepted.writableLength}`);
     const resynced = new Promise<void>((resolve, reject) => {
       let buffer = "";

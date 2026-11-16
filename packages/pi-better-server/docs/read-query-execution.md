@@ -48,6 +48,8 @@ batches. It is not a constant-cost history algorithm or part of activity checks.
 | Executing plus queued operations | 64 per root |
 | Read connections | 64 per root |
 | Logical read deadline, including queue wait | 4 seconds, before the client's 5-second timeout |
+| Unresponsive worker watchdog | 4 seconds without a worker response; sampled every 250 ms |
+| Worker heartbeat | At most one unacknowledged frame; every 250 ms when credited |
 | Executor close wait | 1 second |
 | Cached scopes | 32, with at most 16 MiB of serialized snapshots |
 | Background observation scopes | 128; active subscriptions stay pinned, one-shot scopes evict by least recent use |
@@ -73,11 +75,27 @@ resync behavior. Full snapshots can replace intermediate notifications.
 
 ## Failure And Shutdown
 
-An active deadline or worker error rejects admitted and future reads, drops queued
-work, requests resync and marks the executor degraded. There is no automatic worker
-replacement or restart loop. Cached read-model metrics and the ordinary server
-status RPC remain available. A new server instance rebuilds derived state and
-uses its new instance identity; failed-worker replies are ignored.
+Each caller has its own deadline, including callers sharing one operation. A queued
+deadline reports `runtime-overloaded`; an executing caller deadline reports
+`runtime-timeout` and explicitly says the source was not verified. Neither deadline
+invalidates other subscriptions or restarts the worker. Metrics distinguish queue
+and caller timeouts; `waitMs` measures queue residence and `readMs` measures execution.
+When no callers remain, the executor removes queued work or sends cancellation
+directly to the worker. The execution slot stays occupied until acknowledgement,
+bounding the mailbox during uninterruptible native work. Cancelled asynchronous
+work checks cancellation before snapshot capture, subscription installation and
+reply publication. Late replies cannot update observations or metrics. Unsubscribe
+and disconnect bypass the query queue and invalidate the connection's event generation.
+
+A worker heartbeat proves responsiveness between yielding source batches, not
+source freshness. Rebuilding observations remain rebuilding. The separate watchdog
+terminates a genuinely unresponsive worker, while worker errors and exits retain
+the existing recovery path. These failures reject admitted reads, request resync
+and mark the executor degraded. Recovery waits 500 ms and allows two restarts in
+60 seconds while connections or explicit internal demand remain. Recovered reads
+use a new observation epoch. Worker identity and request IDs fence old replies;
+close cancels recovery and never revives a worker. Cached metrics and ordinary
+server status remain available throughout failure and recovery.
 
 `Worker.terminate()` cannot interrupt a native SQLite call immediately. The executor
 therefore distinguishes logical cancellation from actual worker exit and reports

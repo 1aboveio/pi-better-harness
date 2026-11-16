@@ -35,6 +35,34 @@ export interface WorkSnapshot {
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const safeId = /^[A-Za-z0-9_-]+$/;
 
+function healthWithThresholds(health: any, config: any, meta: any) {
+  if (!health) return undefined;
+  const value = { ...health, thresholds: healthThresholdsForConfig(config) };
+  return { ...value, nextDeadline: nextHealthDeadline(value, meta) };
+}
+
+function nextHealthDeadline(health: any, meta: any, now = Date.now()): number | null {
+  if (!health) return null;
+  const { thresholds } = health;
+  const facts = health.facts;
+  const tool = facts.activeTools.at(-1);
+  const toolStart = tool?.startedAt ?? facts.lastToolAt ?? facts.lastMeaningfulAt;
+  const compactionStart = facts.compactionStartedAt ?? facts.lastMeaningfulAt;
+  const anchor = facts.lastMeaningfulAt ?? meta.startedAt;
+  const deadlines: number[] = [];
+  if (["running", "orphaned"].includes(meta.status)) {
+    if (tool && Number.isFinite(toolStart)) deadlines.push(toolStart + thresholds.longToolMs);
+    if (facts.compacting && Number.isFinite(compactionStart)) deadlines.push(compactionStart + thresholds.longCompactionMs);
+    if (!tool && !facts.compacting && !["retrying", "error"].includes(facts.model.state) && Number.isFinite(anchor)) {
+      deadlines.push(anchor + thresholds.quietMs, anchor + thresholds.staleMs);
+    }
+  }
+  const future = deadlines.filter(deadline => deadline > now);
+  return future.length ? Math.min(...future) : null;
+}
+
+const healthDeadlineExpired = (row: { health?: any }, now: number) => typeof row.health?.nextDeadline === "number" && row.health.nextDeadline <= now;
+
 /** Reconstructable query state. It never authorizes execution or writes source records. */
 export class WorkReadModel {
   onTerminalLogsChanged?: () => void;
@@ -77,10 +105,13 @@ export class WorkReadModel {
   private assignmentBaseline?: { key: string; seq: string };
   private assignmentFault?: { state: WorkSnapshot["status"]; reason?: string };
   private revision = 0;
+  private scopeSequence = 0;
+  private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number }>();
+  private changedRows: Array<{ before?: any; after?: any }> = [];
   private foldQueueSequence = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
   private reason: string | undefined = "Initial source inventory is rebuilding.";
-  private counters = { inventories: 0, metadataReads: 0, projections: 0, assignmentProjections: 0, logProjections: 0, healthProjections: 0, failureProjections: 0 };
+  private counters = { inventories: 0, metadataReads: 0, projections: 0, assignmentProjections: 0, logProjections: 0, healthProjections: 0, failureProjections: 0, healthRecomputations: 0, healthConfigInvalidations: 0 };
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, unverified: 0, initial: 0 };
   get metrics() {
     return { ...this.counters, assignments: this.reader.changeMetrics, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
@@ -98,7 +129,7 @@ export class WorkReadModel {
     this.db = new DatabaseSync(":memory:");
     mkdirSync(join(agentDir, "runtime-read-repair"), { recursive: true });
     this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"), join(agentDir, "runtime-read-repair", "assignments.sqlite"));
-    this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(), refresh => this.reader.connection(refresh));
+    this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(true), refresh => this.reader.connection(refresh));
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
       started REAL, state TEXT, active INTEGER, ended REAL, recipient_pending INTEGER, payload TEXT);
       CREATE INDEX work_folder ON rows(cwd, started DESC, id DESC);
@@ -185,6 +216,12 @@ export class WorkReadModel {
       batch.push(path);
       if (batch.length === 128) { yield batch; batch = []; }
     }
+    // Failed first reads have no verified file entry, but still owe repair.
+    for (const path of this.sourceErrors.keys()) {
+      if (this.files.has(path)) continue;
+      batch.push(path);
+      if (batch.length === 128) { yield batch; batch = []; }
+    }
     for (const directory of [this.markers, this.archives, this.runs]) {
       let handle;
       try {
@@ -211,9 +248,16 @@ export class WorkReadModel {
   }
 
   onChange(listener: () => void, scope?: WorkScope) {
+    if (scope) scope = { ...scope, cursor: undefined };
     const release = scope?.background ? this.background.retain(scope) : undefined;
-    this.listeners.add(listener);
-    return () => { this.listeners.delete(listener); release?.(); };
+    let revision = scope ? this.contentRevision(scope) : undefined;
+    const notify = () => {
+      const next = scope ? this.contentRevision(scope) : undefined;
+      if (scope && next === revision) return;
+      revision = next; listener();
+    };
+    this.listeners.add(notify);
+    return () => { this.listeners.delete(notify); release?.(); };
   }
   get backgroundMetrics() { return { ...this.background.metrics, scopes: this.background.scopeCount, history: this.background.historyMetrics }; }
   observation(reasons = this.livenessReasons({ refresh: false })) {
@@ -224,7 +268,7 @@ export class WorkReadModel {
       ...[...this.projected.values()].filter(row => row.meta.status === "running"
         && processMatchesStart(row.meta.pid, row.meta.pidStartTime))
         .map(row => ({ kind: "worker", id: row.meta.id, owner: row.meta.callbackOrigin,
-          lastProgressAt: row.meta.startedAt, nextDeadline: null, recovery: "observe-existing-worker" })),
+          lastProgressAt: row.meta.startedAt, nextDeadline: nextHealthDeadline(row.health, row.meta), recovery: "observe-existing-worker" })),
       ...this.background.livenessReasons(options),
     ];
   }
@@ -254,11 +298,58 @@ export class WorkReadModel {
     }
   }
   invalidate(reason: string) {
+    const changed = this.state !== "degraded" || this.reason !== reason;
     this.state = "degraded"; this.reason = reason;
-    this.publish();
+    if (changed) this.publish();
     void this.reconcile();
   }
-  private publish() { this.revision++; for (const listener of this.listeners) listener(); }
+  private scopeKey(scope: WorkScope) { return hash({ ...scope, cursor: undefined }); }
+  private scopeEntry(scope: WorkScope) {
+    const key = this.scopeKey(scope), now = Date.now();
+    for (const [id, entry] of this.scopes) if (now - entry.used >= 300000) this.scopes.delete(id);
+    let entry = this.scopes.get(key);
+    if (!entry) {
+      if (scope.cursor) throw new Error("resync_required: cursor retention expired");
+      if (this.scopes.size >= 128) this.scopes.delete(this.scopes.keys().next().value!);
+      entry = { scope: { ...scope, cursor: undefined }, token: ++this.scopeSequence, revision: 0, used: now };
+      this.scopes.set(key, entry);
+    }
+    entry.used = now;
+    return entry;
+  }
+  contentRevision(scope: WorkScope = {}) {
+    if (scope.background) return String(this.revision);
+    const entry = this.scopeEntry(scope);
+    return `${entry.token}:${entry.revision}`;
+  }
+  private matchesScope(scope: WorkScope, row: any, activity = false) {
+    if (!row) return false;
+    const m = row.meta;
+    if (scope.id && scope.id !== m.id) return false;
+    if (scope.sessionId) {
+      if (scope.sessionId !== m.callbackOrigin?.sessionId || scope.cwd !== (m.callbackOrigin?.cwd ?? m.cwd)) return false;
+    } else if (scope.cwd) {
+      const cwd = resolve(scope.cwd), prefix = cwd.endsWith(sep) ? cwd : cwd + sep;
+      if (m.cwd !== cwd && !m.cwd.startsWith(prefix)) return false;
+    }
+    const active = ["running", "waiting"].includes(row.assignment.state);
+    if (activity) return active;
+    return (scope.active === undefined || scope.active === active)
+      && (scope.pendingRecipient === undefined || scope.pendingRecipient === !!row.recipientPending)
+      && (scope.endedAfter === undefined || (m.endedAt ?? m.lostAt ?? Infinity) >= scope.endedAfter)
+      && (!scope.statuses?.length || scope.statuses.includes(row.assignment.state));
+  }
+  private publish(backgroundOnly = false) {
+    this.revision++;
+    for (const entry of this.scopes.values()) {
+      if (backgroundOnly) continue;
+      if (!this.changedRows.length || this.changedRows.some(({ before, after }) =>
+        this.matchesScope(entry.scope, before) || this.matchesScope(entry.scope, after)
+        || this.matchesScope(entry.scope, before, true) !== this.matchesScope(entry.scope, after, true))) entry.revision++;
+    }
+    this.changedRows = [];
+    for (const listener of this.listeners) listener();
+  }
 
   /** Ordinary coordinator commits use the reverse scope index, not the source inventory. */
   private refreshAssignments() {
@@ -268,8 +359,10 @@ export class WorkReadModel {
       const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
       const changes = this.reader.changes();
       if (changes.has("*")) {
+        const key = `${this.reader.changeMetrics.generation}:${changes.get("*")}`;
+        if (this.assignmentBaseline?.key === key) return;
         this.imported = false; this.repairOwed = true;
-        this.state = "rebuilding"; this.reason = "Assignment source baseline is rebuilding.";
+        if (!this.sourceErrors.size) { this.state = "rebuilding"; this.reason = "Assignment source baseline is rebuilding."; }
         this.publish(); return;
       }
       const selected = new Map<string, any>();
@@ -292,12 +385,14 @@ export class WorkReadModel {
         updated.push({ ...row, assignment, recipientPending, sourceRevision: hash([meta, assignment.revision, row.display, row.health, recipientPending, row.failurePending, this.failureJournals.get(meta.id)]) });
       }
       let changed = false;
+      const changedRows: WorkReadModel["changedRows"] = [];
       this.db.exec("BEGIN");
       try {
         const update = this.db.prepare("UPDATE rows SET state=?, active=?, recipient_pending=?, payload=? WHERE id=?");
         for (const row of updated) {
           if (row.sourceRevision === this.projected.get(row.meta.id)?.sourceRevision) continue;
           update.run(row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, row.recipientPending ? 1 : 0, JSON.stringify(row), row.meta.id);
+          changedRows.push({ before: this.projected.get(row.meta.id), after: row });
           changed = true;
         }
         this.db.exec("COMMIT");
@@ -309,13 +404,17 @@ export class WorkReadModel {
       this.coordinator = snapshot.revision;
       this.counters.assignmentProjections += updated.length; this.counters.projections += updated.length;
       this.invalidations.assignmentInput += updated.length;
+      this.changedRows = changedRows;
       if (this.assignmentFault) {
         this.state = this.assignmentFault.state; this.reason = this.assignmentFault.reason;
-        this.assignmentFault = undefined; changed = true;
+        this.assignmentFault = undefined; this.changedRows = []; changed = true;
       }
       if (changed) this.publish();
     } catch (error) {
       if (!this.projected.size) return;
+      // A coordinator has never been required for plain archived/log-only runs.
+      // Losing an already observed database still degrades the existing coverage.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && this.coordinator === "unknown") return;
       this.assignmentFault ??= { state: this.state, reason: this.reason };
       if (String(error).includes("no such table: assignment_change_source")) {
         // Old sources have no feed. Finish one budgeted compatibility pass;
@@ -352,8 +451,17 @@ export class WorkReadModel {
         const next = await this.repair.next();
         if (next.done) {
           this.repair = undefined; this.repairOwed = false;
+          // An empty metadata inventory still needs a journal baseline before
+          // later exact hints can be treated as incremental updates.
+          if (!this.imported && !this.assignmentBaseline && !this.files.size && !this.sourceErrors.size) await this.measuredScan("repair", []);
           if (this.assignmentBaseline && !this.sourceErrors.size && ![...this.projected.values()].some(row => !row.assignment.verified)) this.reader.acknowledgeChanges(new Map([["*", this.assignmentBaseline.seq]]), true);
-          if (!this.imported) { this.imported = true; this.state = this.sourceErrors.size || [...this.projected.values()].some(row => !row.assignment.verified) ? "degraded" : "ready"; this.reason = this.sourceErrors.values().next().value ?? (this.state === "ready" ? undefined : "Some assignment sources could not be verified."); this.publish(); }
+          if (!this.imported) {
+            this.imported = true;
+            const degraded = this.state === "degraded" || this.sourceErrors.size || [...this.projected.values()].some(row => !row.assignment.verified);
+            this.state = degraded ? "degraded" : "ready";
+            this.reason = this.state === "ready" ? undefined : this.sourceErrors.values().next().value ?? this.reason ?? "Some assignment sources could not be verified.";
+            this.publish();
+          }
         }
         else { this.scheduling.repairBatches++; this.scheduling.repairEntries += next.value.length; await this.measuredScan("repair", next.value); }
         await yieldTurn();
@@ -380,7 +488,7 @@ export class WorkReadModel {
     this.assignmentFault = undefined;
     const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
-    if (this.background.refresh()) this.publish();
+    if (this.background.refresh()) this.publish(true);
     let releaseCoordinator: (() => void) | undefined;
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
       healthRevision: this.healthRevision, coordinator: this.coordinator };
@@ -496,8 +604,11 @@ export class WorkReadModel {
         if (performance.now() - sliceStarted >= 8) { await yieldTurn(); sliceStarted = performance.now(); }
       }
       const healthConfig = await readHealthConfig(this.agentDir, next.size > 0);
+      if (healthConfig.revision !== baseline.healthRevision) this.counters.healthConfigInvalidations++;
       const changed = next.size !== baseline.files.size || [...next].some(([path, entry]) => baseline.files.get(path)?.signature !== entry.signature);
-      if (!this.staged && !changed && !logFamilies.size && !assignmentChanges?.size && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && this.state === "ready") return;
+      const now = Date.now();
+      const deadlineExpired = [...baseline.projected.values()].some(row => healthDeadlineExpired(row, now));
+      if (!this.staged && !changed && !logFamilies.size && !assignmentChanges?.size && !deadlineExpired && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && !healthConfig.reason && this.state === "ready") return;
       const metas = new Map<string, any>();
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
       for (const [path, entry] of next) {
@@ -555,7 +666,12 @@ export class WorkReadModel {
         const assignmentChanged = !row || (!row.assignment.verified && touched.has(meta.id)) || affected.has(meta.id) || processes.get(meta.id) !== baseline.processes.get(meta.id);
         const logChanged = !row || logs.get(meta.id) !== baseline.logs.get(meta.id);
         const failureChanged = !row || failureJournals.get(meta.id) !== baseline.failureJournals.get(meta.id);
-        if (assignmentChanged || logChanged || failureChanged || healthConfig.revision !== baseline.healthRevision) {
+        if (row && !assignmentChanged && !logChanged && !failureChanged && (healthConfig.revision !== baseline.healthRevision || healthDeadlineExpired(row, now))) {
+          if (healthConfig.revision !== baseline.healthRevision) this.invalidations.healthConfig++;
+          this.counters.healthRecomputations++;
+          const health = healthWithThresholds(row.health, healthConfig.config, meta);
+          row = { ...row, health, sourceRevision: hash([meta, row.assignment.revision, row.display, health, row.recipientPending, row.failurePending, failureJournals.get(meta.id)]) };
+        } else if (assignmentChanged || logChanged || failureChanged) {
           if (!row) this.invalidations.initial++;
           else {
             if (affected.has(meta.id)) this.invalidations.assignmentInput++;
@@ -576,7 +692,10 @@ export class WorkReadModel {
             display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.toolCalls.at(-1) ?? "" };
             health = logs.has(meta.id) ? extractChildEventFactsFromLog(meta.id, { logPath, states: this.healthStates }) : undefined;
           });
-          if (health) health = { ...health, thresholds: healthThresholdsForConfig(healthConfig.config) };
+          if (logChanged || assignmentChanged || healthConfig.revision !== baseline.healthRevision || (row && healthDeadlineExpired(row, now))) {
+            this.counters.healthRecomputations++;
+            health = healthWithThresholds(health, healthConfig.config, meta);
+          }
           const outcome = meta.assignment ? this.reader.read({ ...meta.assignment.owner, assignmentId: meta.assignment.assignmentId }).outcome : undefined;
           if (failureChanged || assignmentChanged) this.counters.failureProjections++;
           const failurePending = !failureChanged && !assignmentChanged ? row!.failurePending : meta.callback !== false && failureJournals.has(meta.id) && Boolean(pendingFailureAttention(
@@ -628,12 +747,14 @@ export class WorkReadModel {
       const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");
       let semanticChange = false;
+      const changedRows: WorkReadModel["changedRows"] = [];
       try {
-        for (const id of this.projected.keys()) if (!metas.has(id)) { remove.run(id); this.db.prepare("DELETE FROM assignment_members WHERE id=?").run(id); this.db.prepare("DELETE FROM terminal_log_folds WHERE id=?").run(id); semanticChange = true; }
+        for (const id of this.projected.keys()) if (!metas.has(id)) { changedRows.push({ before: this.projected.get(id) }); remove.run(id); this.db.prepare("DELETE FROM assignment_members WHERE id=?").run(id); this.db.prepare("DELETE FROM terminal_log_folds WHERE id=?").run(id); semanticChange = true; }
         for (const id of terminalLogChanges) this.db.prepare("INSERT INTO terminal_log_folds VALUES (?, ?, 1, ?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, pending=1, queue_position=CASE WHEN terminal_log_folds.pending=0 THEN excluded.queue_position ELSE terminal_log_folds.queue_position END").run(id, hash([logs.get(id), metas.get(id)?.status]), ++this.foldQueueSequence);
         for (const row of rows) {
           if (this.projected.get(row.meta.id)?.sourceRevision === row.sourceRevision) continue;
           semanticChange = true;
+          changedRows.push({ before: this.projected.get(row.meta.id), after: row });
           const m = row.meta;
           if (m.management?.root !== this.agentDir || m.status === "running") this.db.prepare("DELETE FROM terminal_log_folds WHERE id=?").run(m.id);
           insert.run(m.id, m.cwd, m.callbackOrigin?.cwd ?? m.cwd, m.callbackOrigin?.sessionId ?? null,
@@ -657,14 +778,20 @@ export class WorkReadModel {
       const previousState = this.state;
       const previousReason = this.reason;
       for (const path of paths) this.sourceErrors.delete(path);
-      this.state = this.sourceErrors.size ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
-      this.reason = this.sourceErrors.values().next().value ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
-      if ((this.imported || paths.length === 128) && (semanticChange || previousState !== this.state || previousReason !== this.reason)) this.publish();
+      this.state = this.sourceErrors.size || healthConfig.reason ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
+      this.reason = this.sourceErrors.values().next().value ?? healthConfig.reason ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
+      if ((this.imported || paths.length === 128) && (semanticChange || previousState !== this.state || previousReason !== this.reason)) {
+        this.changedRows = previousState === this.state && previousReason === this.reason ? changedRows : [];
+        this.publish();
+      }
     } catch (error) {
       if (this.closed) return;
+      const reason = String(error).slice(0, 512);
       if (this.dirty) for (const path of paths) if (!this.hints.has(path)) this.hints.set(path, Date.now());
-      for (const path of paths) this.sourceErrors.set(path, String(error).slice(0, 512));
-      this.state = "degraded"; this.reason = String(error).slice(0, 512); this.publish();
+      for (const path of paths) this.sourceErrors.set(path, reason);
+      const changed = this.state !== "degraded" || this.reason !== reason;
+      this.state = "degraded"; this.reason = reason;
+      if (changed) this.publish();
     } finally { releaseCoordinator?.(); }
   }
 
@@ -681,7 +808,7 @@ export class WorkReadModel {
 
   snapshot(scope: WorkScope = {}): WorkSnapshot {
     if (scope.background) {
-      if (scope.backgroundHistory && this.background.refresh()) this.publish();
+      if (scope.backgroundHistory && this.background.refresh()) this.publish(true);
       const index = scope.backgroundHistory ? this.background.historyIndex(scope) : undefined;
       const tasks = this.background.read(scope, index);
       const status = this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
@@ -707,22 +834,30 @@ export class WorkReadModel {
     if (scope.active !== undefined) { clauses.push("active = ?"); args.push(scope.active ? 1 : 0); }
     if (scope.endedAfter !== undefined) { clauses.push("(ended IS NULL OR ended >= ?)"); args.push(scope.endedAfter); }
     if (scope.statuses?.length) { clauses.push(`state IN (${scope.statuses.map(() => "?").join(",")})`); args.push(...scope.statuses); }
-    const key = hash({ ...scope, cursor: undefined });
+    const key = this.scopeKey(scope);
+    const entry = this.scopeEntry(scope);
     const totalMatching = Number(this.db.prepare(`SELECT count(*) AS n FROM rows ${clauses.length ? "WHERE " + clauses.join(" AND ") : ""}`).get(...args).n);
     if (scope.cursor) {
       let cursor;
       try { cursor = JSON.parse(Buffer.from(scope.cursor, "base64url").toString()); } catch { throw new Error("Invalid runtime cursor"); }
-      if (!Array.isArray(cursor) || cursor[0] !== key || cursor[1] !== this.instanceId || cursor[2] !== this.revision) throw new Error("resync_required: cursor snapshot changed");
+      if (!Array.isArray(cursor) || cursor[0] !== key || cursor[1] !== this.instanceId || cursor[2] !== `${entry.token}:${entry.revision}`) throw new Error("resync_required: cursor snapshot changed");
       clauses.push("(started < ? OR (started = ? AND id < ?))"); args.push(cursor[3], cursor[3], cursor[4]);
     }
     const limit = Math.max(1, Math.min(200, Number.isSafeInteger(scope.limit) ? scope.limit! : 50));
     const records = this.db.prepare(`SELECT payload, started, id FROM rows ${clauses.length ? "WHERE " + clauses.join(" AND ") : ""} ORDER BY started DESC, id DESC LIMIT ?`).all(...args, limit + 1);
     const page = records.slice(0, limit), last = page.at(-1);
-    return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([key, this.revision]), seq: this.revision,
+    const now = Date.now();
+    const rows = page.map((record: any) => {
+      const row = JSON.parse(record.payload);
+      if (row.health) row.health.nextDeadline = nextHealthDeadline(row.health, row.meta, now);
+      return row;
+    });
+    const deadlines = rows.map((row: any) => row.health?.nextDeadline).filter((deadline: any) => typeof deadline === "number");
+    return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([key, entry.token, entry.revision]), seq: this.revision,
       observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, status: this.state, reason: this.reason,
       totalMatching,
-      rows: page.map((record: any) => {
-        const row = JSON.parse(record.payload);
+      rows: page.map((record: any, index: number) => {
+        const row = rows[index];
         if (scope.detail && scope.id) {
           let cached = this.details.get(row.meta.id);
           if (!cached || cached.revision !== row.sourceRevision) {
@@ -741,10 +876,10 @@ export class WorkReadModel {
           }
           row.detail = cached.value;
         }
-        return { ...row, cursor: Buffer.from(JSON.stringify([key, this.instanceId, this.revision, record.started, record.id])).toString("base64url") };
+        return { ...row, cursor: Buffer.from(JSON.stringify([key, this.instanceId, `${entry.token}:${entry.revision}`, record.started, record.id])).toString("base64url") };
       }),
-      ...(records.length > limit ? { nextCursor: Buffer.from(JSON.stringify([key, this.instanceId, this.revision, last.started, last.id])).toString("base64url") } : {}),
-      activity: { active }, nextDeadline: null };
+      ...(records.length > limit ? { nextCursor: Buffer.from(JSON.stringify([key, this.instanceId, `${entry.token}:${entry.revision}`, last.started, last.id])).toString("base64url") } : {}),
+      activity: { active }, nextDeadline: deadlines.length ? Math.min(...deadlines) : null };
   }
 
   async close() {

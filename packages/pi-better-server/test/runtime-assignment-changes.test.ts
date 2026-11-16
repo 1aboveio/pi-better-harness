@@ -27,6 +27,8 @@ for (const crash of ["none", "before-apply", "after-apply", "retry", "unverified
     await model.reconcile(); await model.reconcile();
     const before = model.metrics;
     const b = model.snapshot({ id: "b" }).rows[0]!.sourceRevision;
+    const scopeB = model.snapshot({ id: "b" }).scopeRevision;
+    const scopeA = model.snapshot({ id: "a" }).scopeRevision;
     const read = (model as any).reader.read.bind((model as any).reader);
     if (crash === "unverified") (model as any).reader.read = () => ({ verified: false, waits: [], reason: "injected unavailable source" });
     if (crash === "before-apply" || crash === "retry") (model as any).db.exec("CREATE TRIGGER fail_projection BEFORE UPDATE ON rows BEGIN SELECT RAISE(ABORT,'injected application crash'); END");
@@ -52,6 +54,10 @@ for (const crash of ["none", "before-apply", "after-apply", "retry", "unverified
       return;
     }
     assert.equal(model.metrics.assignmentProjections - before.assignmentProjections, 1);
+    if (crash === "none") {
+      assert.equal(model.snapshot({ id: "b" }).scopeRevision, scopeB, "parent scope routing preserves unrelated assignment scopes");
+      assert.notEqual(model.snapshot({ id: "a" }).scopeRevision, scopeA);
+    }
     assert.equal(model.metrics.inventories, before.inventories, "indexed receipt dispatch must not scan the source inventory");
     assert.equal(model.snapshot({ id: "b" }).rows[0]!.sourceRevision, b);
     assert.equal(model.metrics.logProjections, before.logProjections);
