@@ -149,24 +149,24 @@ export function mayAffectChildEventFacts(line) {
 export function extractChildEventFacts(events) {
     return createChildEventFactFold()(events);
 }
-function createChildEventFactFold() {
-    const openTools = new Map();
-    let anonymous = 0;
-    const meaningful = {};
-    let lastToolAt;
-    let compacting = false;
-    let compactionStartedAt;
-    let lastCompaction;
-    let sawAgentSettled = false;
-    let retry;
-    const recovery = {
+function createChildEventFactFold(saved) {
+    const openTools = new Map(saved?.openTools);
+    let anonymous = saved?.anonymous ?? 0;
+    const meaningful = saved?.meaningful ?? {};
+    let lastToolAt = saved?.lastToolAt;
+    let compacting = saved?.compacting ?? false;
+    let compactionStartedAt = saved?.compactionStartedAt;
+    let lastCompaction = saved?.lastCompaction;
+    let sawAgentSettled = saved?.sawAgentSettled ?? false;
+    let retry = saved?.retry;
+    const recovery = saved?.recovery ?? {
         recoveredAfterError: false,
         retrying: false,
         willRetry: undefined,
         lastError: undefined,
         errorHistory: [],
     };
-    return (events) => {
+    const fold = (events) => {
         for (const raw of events) {
             logReadMetrics.healthFolded++;
             if (!raw || typeof raw !== "object")
@@ -335,6 +335,18 @@ function createChildEventFactFold() {
             longModelCallSupported: false,
         };
     };
+    return Object.assign(fold, { snapshot: () => ({ openTools: [...openTools], anonymous,
+            meaningful, lastToolAt, compacting, compactionStartedAt, lastCompaction,
+            sawAgentSettled, retry, recovery }) });
+}
+export function encodeHealthLogState(state) {
+    return { cursor: state.cursor, truncated: state.truncated, fold: state.fold.snapshot() };
+}
+export function decodeHealthLogState(saved) {
+    if (!saved?.fold?.recovery || !Array.isArray(saved.fold.openTools)
+        || !Number.isSafeInteger(saved.cursor?.offset) || saved.cursor.offset < 0)
+        throw new Error("Invalid health checkpoint");
+    return { cursor: saved.cursor, truncated: saved.truncated, fold: createChildEventFactFold(saved.fold) };
 }
 /** Parse the fact-relevant events out of raw NDJSON lines. */
 function parseFactEvents(lines) {
