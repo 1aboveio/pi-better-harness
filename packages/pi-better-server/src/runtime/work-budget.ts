@@ -34,7 +34,7 @@ export function createWorkBudget(buffer = new SharedArrayBuffer(Int32Array.BYTES
   };
   const sourceWork = new Map<string, { started: number; completed: number; failed: number; elapsedMs: number; active: number }>();
   return { buffer,
-    // Only timer callbacks use deferred dispatch. Synchronous source callers
+    // Timers and accepted recovery use deferred dispatch. Synchronous callers
     // retain their return/throw contract; nested source measurement never waits.
     scheduleSource<T>(kind: string, id: string, work: () => T, owner = 'runtime', dueAt?: number): Promise<Awaited<T>> {
       if (reservation.getStore()?.active) return Promise.resolve().then(() => this.source(kind, work)) as Promise<Awaited<T>>;
@@ -46,7 +46,7 @@ export function createWorkBudget(buffer = new SharedArrayBuffer(Int32Array.BYTES
       pending.set(key, result);
       queue.push(() => {
         // Outstanding observations cannot consume the slots needed by deadlines.
-        const observation = !['legacy-process-deadline', 'legacy-handoff'].includes(kind);
+        const observation = !['legacy-process-deadline', 'legacy-handoff', 'cancellation'].includes(kind);
         if (observation && owner !== 'runtime' && (ownerObservations.get(owner) ?? 0) >= 2) return false;
         if (observation && counters.length > legacyIndex) {
           for (;;) {

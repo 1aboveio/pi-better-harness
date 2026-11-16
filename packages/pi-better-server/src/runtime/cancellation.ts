@@ -29,6 +29,7 @@ export function hasPendingCancellation(root: string): boolean {
 export class RuntimeCancellation {
   private store: any;
   private releaseStore: () => void;
+  private budget: ReturnType<typeof acquireMutationStore>['budget'];
   private pending = new Map<string, Promise<unknown>>();
   private reasons = new Map<string, any>();
   lifecycleReasons() { return [...this.reasons.values()].map(reason => ({ ...reason })); }
@@ -39,13 +40,14 @@ export class RuntimeCancellation {
     this.fault = fault;
     const lease = acquireMutationStore(root);
     this.store = lease.store;
+    this.budget = lease.budget;
     this.releaseStore = lease.release;
     try {
       this.epoch = this.store.cancellationRuntimeEpoch(instanceId);
       for (const admission of this.store.pendingTaskCancellations()) void this.execute(admission);
     } catch (error) { this.releaseStore(); throw error; }
   }
-  async handle(command: Record<string, unknown>, onAccepted?: (id: string) => void) {
+  async handle(command: Record<string, unknown>, onAccepted?: (id: string) => void, releaseControl?: () => void) {
     if (Object.keys(command).some(key => !["id", "type", "credential"].includes(key))) throw new Error("not_accepted: unsupported cancellation field");
     if (command.type === "runtime_cancellation_status") return { runtimeEpoch: this.epoch };
     if (typeof command.credential !== "string") throw new Error("not_accepted: permission-unavailable: cancellation credential required");
@@ -60,20 +62,21 @@ export class RuntimeCancellation {
     catch (error) { throw new Error(`not_accepted: ${String(error)}`); }
     this.fault?.("accepted");
     onAccepted?.(`cancellation:${createHash('sha256').update(JSON.stringify([admission.request.owner, admission.request.idempotencyKey])).digest('hex')}`);
-    return this.execute(admission);
+    return this.execute(admission, releaseControl);
   }
-  private execute(admission: any): Promise<any> {
+  private execute(admission: any, releaseControl?: () => void): Promise<any> {
     const key = JSON.stringify([admission.request.owner, admission.request.idempotencyKey]);
     const running = this.pending.get(key);
-    if (running) return running;
+    if (running) { releaseControl?.(); return running; }
     const intent = this.store.getTaskCancellation(admission.request);
     const progress = (phase: string) => this.reasons.set(key, { kind: 'task',
       id: `cancellation:${createHash('sha256').update(key).digest('hex')}`, operationId: intent.operationId, taskId: intent.taskId,
       owner: admission.request.owner, management: { epoch: this.epoch }, acceptedAt: intent.acceptedAt,
       phase, lastProgressAt: Date.now(), executionDeadline: null, nextDeadline: null,
       recovery: 'recover-exact-durable-stop-intent-without-repeating-ambiguous-process-action' });
-    progress('accepted');
-    const execution = Promise.resolve().then(async () => {
+    progress(releaseControl ? 'accepted' : 'waiting-for-control-capacity');
+    const run = async () => {
+      progress('accepted');
       try {
         const supervisor = createLocalSupervisor({ directory: admission.directory });
         const stop = readStopRequest(admission.directory, intent.taskId);
@@ -102,8 +105,14 @@ export class RuntimeCancellation {
           ...(result.terminal ? { publication: supervisorTerminalPublication(operation, inspection) } : {}) });
       } catch {
         return { ...this.store.unknownTaskCancellation(admission.request), state: "outcome_unknown" };
-      } finally { this.pending.delete(key); this.reasons.delete(key); }
-    });
+      }
+    };
+    // Recovery reserves here; socket execution transfers its existing lease.
+    // Both retain capacity until the physical operation has settled.
+    const dispatched = releaseControl
+      ? Promise.resolve().then(run).finally(releaseControl)
+      : this.budget.scheduleSource('cancellation', key, () => Promise.resolve().then(run));
+    const execution = dispatched.finally(() => { this.pending.delete(key); this.reasons.delete(key); });
     this.pending.set(key, execution);
     return execution;
   }

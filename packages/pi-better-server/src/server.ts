@@ -309,7 +309,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             try {
               if (!releaseControl) throw new Error("runtime-overloaded: control source capacity");
               cancellations ??= new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
-              return reply({ data: await cancellations.handle(command, accepted('cancellation')) });
+              return reply({ data: await cancellations.handle(command, accepted('cancellation'), releaseControl) });
             } finally { releaseControl?.(); runtimeInFlight--; }
           }
           if (type === "runtime_bind_catalog_host") {

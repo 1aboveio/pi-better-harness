@@ -81,8 +81,6 @@ export class HostedSession {
       ...(this.session.isBashRunning ? [{ ...base, kind: 'hosted-bash', id: this.generation, retainsExecution: !bashBlocked }] : []),
       ...(this.activity?.lifecycleReasons() ?? []).map(record => ({ ...base, ...record, retainsExecution: record.kind !== 'hosted-observation' })),
       ...hostedCacheReasons(this.session),
-      ...(this.session.isBashRunning ? [{ ...base, kind: 'hosted-bash', id: this.generation, retainsExecution: this.executionActive }] : []),
-      ...(this.activity?.lifecycleReasons() ?? []).map(record => ({ ...base, ...record })),
     ];
   }
   private readonly workContext = new AsyncLocalStorage<CommandWork>();

@@ -64,6 +64,31 @@ function busy(reason: MaintenanceBusyError["reason"]) {
   return (error: unknown) => error instanceof MaintenanceBusyError && error.reason === reason;
 }
 
+test('blocked bash and independent active tool report one bash identity and one activity owner', async t => {
+  const f = await setup(t);
+  const tools = (f.hosted as unknown as { activeTools: Map<string, unknown> }).activeTools;
+  let providerActive = true;
+  f.pi.events.emit('pi-better-goal:register-provider', { id: 'component-owner', scope: 'session',
+    getActivity: () => ({ items: [{ active: providerActive }] }) });
+  await f.hosted.refreshActivity();
+  // Reproduce the exact reported component state without launching a bash process.
+  Object.defineProperty(f.sdk, 'isBashRunning', { configurable: true, get: () => true });
+  tools.set('independent-tool', {});
+  const dialog = f.ctx.ui.confirm('Decision', 'Continue?');
+  try {
+    assert.equal(f.hosted.executionActive, true);
+    const reasons = f.hosted.lifecycleReasons();
+    const bash = reasons.filter(reason => reason.kind === 'hosted-bash');
+    assert.equal(bash.length, 1);
+    assert.equal('retainsExecution' in bash[0]! && bash[0].retainsExecution, false);
+    assert.equal(reasons.filter(reason => reason.kind === 'hosted-provider' && reason.id === 'component-owner').length, 1);
+  } finally {
+    tools.clear(); Reflect.deleteProperty(f.sdk, 'isBashRunning');
+    f.hosted.answerDialog(f.hosted.needsInput[0]!.id, { confirmed: false }); await dialog;
+    providerActive = false; await f.hosted.refreshActivity();
+  }
+});
+
 test('liveness records follow actual hosted commands and human dialogs without giving passive state a lease', async t => {
   const f = await setup(t);
   const command = f.hosted.handle({ type: 'prompt', message: 'record liveness', id: 'request' });
