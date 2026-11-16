@@ -38,7 +38,7 @@ function reconnectLater(current) {
     retry.unref?.();
     backoff = Math.min(2000, backoff * 2);
 }
-// Every page is bounded; history cannot displace active rows. Never combine epochs/revisions.
+// Every page is bounded; a conversation anchor fences collection across filtered queries.
 async function collect(candidate, current) {
     dirty = true;
     if (collecting && collectingClient === candidate)
@@ -51,6 +51,8 @@ async function collect(candidate, current) {
             let completed = false;
             for (let attempt = 0; attempt < 2 && !completed; attempt++) {
                 try {
+                    const anchorScope = { ...context.origin, limit: 1 };
+                    const anchor = await candidate.get(anchorScope);
                     const first = await candidate.get(scope);
                     if (current !== generation || candidate !== client)
                         return;
@@ -63,13 +65,13 @@ async function collect(candidate, current) {
                     let cursor = first.nextCursor;
                     while (cursor) {
                         const page = await candidate.get({ ...scope, cursor });
-                        if (page.seq !== first.seq || page.instanceId !== first.instanceId)
+                        if (page.scopeRevision !== first.scopeRevision || page.instanceId !== first.instanceId)
                             throw new Error("resync_required: active pages changed");
                         rows.push(...page.rows);
                         cursor = page.nextCursor;
                     }
                     const history = await candidate.get({ ...context.origin, active: false, endedAfter: Date.now() - TERMINAL_NAVIGATOR_RETENTION_MS, limit: 200 });
-                    if (history.seq !== first.seq || history.instanceId !== first.instanceId)
+                    if (history.instanceId !== first.instanceId)
                         throw new Error("resync_required: history changed");
                     if (current !== generation || candidate !== client)
                         return;
@@ -77,15 +79,20 @@ async function collect(candidate, current) {
                     let owedCursor;
                     do {
                         const page = await candidate.get({ ...context.origin, pendingRecipient: true, limit: 200, ...(owedCursor ? { cursor: owedCursor } : {}) });
-                        if (page.seq !== first.seq || page.instanceId !== first.instanceId)
+                        if (page.instanceId !== first.instanceId)
                             throw new Error("resync_required: recipient page changed");
                         owed.push(...page.rows);
                         owedCursor = page.nextCursor;
                     } while (owedCursor);
                     if (current !== generation || candidate !== client)
                         return;
+                    const confirmed = await candidate.get(anchorScope);
+                    if (current !== generation || candidate !== client)
+                        return;
+                    if (confirmed.instanceId !== anchor.instanceId || confirmed.scopeRevision !== anchor.scopeRevision)
+                        throw new Error("resync_required: conversation changed during collection");
                     const allRows = [...new Map([...rows, ...history.rows, ...owed].map(row => [row.meta.id, row])).values()];
-                    snapshot = { ...first, rows: allRows, nextCursor: undefined,
+                    snapshot = { ...first, seq: anchor.seq, observedRevisionVector: anchor.observedRevisionVector, rows: allRows, nextCursor: undefined,
                         totalMatching: first.totalMatching + history.totalMatching, activity: { active: rows.length } };
                     completed = true;
                     refresh();
@@ -145,7 +152,7 @@ async function connectObservation(current) {
             void collect(candidate, current).catch(error => { if (current === generation)
                 degraded(error); });
     });
-    await candidate.subscribe({ ...saved.origin, active: true, limit: 200 });
+    await candidate.subscribe({ ...saved.origin, limit: 200 });
     if (candidate.snapshot?.status === "rebuilding")
         await new Promise((resolve, reject) => {
             const timer = setTimeout(() => { stop(); reject(new Error("Runtime scope is still rebuilding; retry the observation.")); }, 5000);

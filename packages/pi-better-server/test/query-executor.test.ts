@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Socket } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync, appendFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -82,6 +82,71 @@ async function ready(client: WorkClient) {
     const stop = client.onChange(snapshot => { if (snapshot.status === "ready") { clearTimeout(timeout); stop(); resolve(); } });
   });
 }
+
+test("identical Work identities do not share visible results across admitted roots", { timeout: 10000 }, async () => {
+  const left = await fixture(), right = await fixture();
+  try {
+    const clients = [await left.client(), await right.client()];
+    await Promise.all(clients.map(ready));
+    for (const [index, f] of [left, right].entries()) {
+      mkdirSync(join(f.root, "runs/sa_same"));
+      writeFileSync(join(f.root, "runs/sa_same/meta.json"), JSON.stringify({ id: "sa_same", cwd: "/same-workspace",
+        callbackOrigin: { cwd: "/same-workspace", sessionId: "same-session" }, status: "completed", startedAt: 1, name: `root-${index}` }));
+      await f.executor.livenessReasons();
+    }
+    const scope = { cwd: "/same-workspace", sessionId: "same-session", id: "sa_same" };
+    assert.equal((await clients[0]!.get(scope)).rows[0]!.meta.name, "root-0");
+    assert.equal((await clients[1]!.get(scope)).rows[0]!.meta.name, "root-1");
+    assert.equal((await clients[0]!.get({ ...scope, sessionId: "other" })).rows.length, 0);
+  } finally { await left.close(); await right.close(); }
+});
+
+for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query and encoding work`, { timeout: 15000 }, async () => {
+  const f = await fixture();
+  const scope = { cwd: join(f.root, "b"), limit: 1 };
+  const write = (id: string, cwd: string, name: string) => {
+    mkdirSync(join(f.root, "runs", id), { recursive: true });
+    writeFileSync(join(f.root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, name, status: "completed", startedAt: 1 }));
+  };
+  try {
+    const first = await f.client(); await ready(first);
+    write("sa_a", join(f.root, "a"), "a"); write("sa_b1", scope.cwd, "b1"); write("sa_b2", scope.cwd, "b2");
+    await f.executor.livenessReasons();
+    const clients = [first, ...await Promise.all(Array.from({ length: count - 1 }, () => f.client()))];
+    for (const client of clients) await client.subscribe(scope);
+    const page = await first.get(scope);
+    const before = f.executor.metrics() as any;
+    let events = 0;
+    const stops = clients.map(client => client.onChange(() => events++));
+    write("sa_a", join(f.root, "a"), "unrelated"); await f.executor.livenessReasons();
+    appendFileSync(join(f.root, "runs/sa_a/output.log"), '{"type":"agent_end"}\n'); await f.executor.livenessReasons();
+    write("sa_a", join(f.root, "c"), "moved"); await f.executor.livenessReasons();
+    const meta = join(f.root, "runs/sa_a/meta.json");
+    writeFileSync(meta, JSON.stringify({ id: "sa_a", cwd: join(f.root, "c"), status: "failed", startedAt: 1 }));
+    await f.executor.livenessReasons();
+    rmSync(join(f.root, "runs/sa_a"), { recursive: true }); await f.executor.livenessReasons();
+    for (const client of clients) await client.get(scope);
+    const unchanged = f.executor.metrics() as any;
+    assert.equal(events, 0, "unrelated content sends no scoped frames");
+    assert.equal(unchanged.queryCount, before.queryCount, "unrelated content retains the cached page");
+    assert.equal(unchanged.serializationCount, before.serializationCount);
+    const next = await first.get({ ...scope, cursor: page.nextCursor });
+    assert.equal(next.rows.length, 1);
+    const baseline = f.executor.metrics() as any;
+    const received = clients.map(client => new Promise<void>(resolve => {
+      const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) { stop(); resolve(); } });
+    }));
+    write("sa_b2", scope.cwd, "changed"); await f.executor.livenessReasons(); await Promise.all(received);
+    await first.get(scope);
+    const changed = f.executor.metrics() as any;
+    assert.equal(changed.queryCount - baseline.queryCount, 1);
+    assert.equal(changed.serializationCount - baseline.serializationCount, 1);
+    assert.equal(changed.eventEncoding.serializations - baseline.eventEncoding.serializations, 1);
+    assert.equal(changed.eventEncoding.frames - baseline.eventEncoding.frames, count);
+    assert.ok(changed.eventEncoding.bytes > baseline.eventEncoding.bytes);
+    stops.forEach(stop => stop());
+  } finally { await f.close(); }
+});
 
 test("stalled diagnostic completion rejects when its worker exits", { timeout: 10000 }, async () => {
   const f = await fixture();

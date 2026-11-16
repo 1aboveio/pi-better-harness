@@ -25,7 +25,7 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
   }
 };
 const { WorkReadModel } = await import("./read-model.ts");
-const { WorkQueries } = await import("./queries.ts");
+const { WorkQueries, workScope, queryEncodingMetrics, snapshotJSON } = await import("./queries.ts");
 const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);
 // One bounded in-flight batch. Remaining obligations stay in the reconstructable
 // inventory index; an acknowledgement cannot erase a newer revision of an ID.
@@ -50,23 +50,26 @@ setInterval(() => {
 }, 250).unref();
 const cache = new Map();
 const encoded = new WeakMap();
-let cacheBytes = 0, cacheHits = 0, queryCount = 0;
+let cacheBytes = 0, cacheHits = 0, queryCount = 0, serializationCount = 0;
 let revisionPending = false, revisionDirty = false;
 const durations = [];
-const metrics = () => ({ ...model.metrics, background: model.backgroundMetrics, sqlite: { ...connections }, cacheHits, queryCount, cacheBytes,
+const metrics = () => ({ ...model.metrics, background: model.backgroundMetrics, sqlite: { ...connections }, cacheHits, queryCount, serializationCount, eventEncoding: { ...queryEncodingMetrics }, cacheBytes,
   cacheEntries: cache.size, queryDurationMs: [...durations] });
 const snapshot = model.snapshot.bind(model);
 model.snapshot = scope => {
+  scope = workScope(scope ?? {});
   const key = JSON.stringify(scope ?? {});
+  const revision = model.contentRevision(scope);
   const cacheable = !scope?.backgroundHistory;
   const previous = cacheable ? cache.get(key) : undefined;
-  if (previous && (previous.value.nextDeadline === null || previous.value.nextDeadline > Date.now())) {
+  if (previous?.revision === revision && (previous.value.nextDeadline === null || previous.value.nextDeadline > Date.now())) {
     cacheHits++; cache.delete(key); cache.set(key, previous); return previous.value;
   }
   if (previous) { cacheBytes -= previous.bytes; cache.delete(key); }
   const started = performance.now();
   const value = snapshot(scope);
-  const json = JSON.stringify(value);
+  const json = snapshotJSON(value);
+  serializationCount++;
   const bytes = Buffer.byteLength(json);
   encoded.set(value, json);
   queryCount++; durations.push(performance.now() - started);
@@ -76,7 +79,7 @@ model.snapshot = scope => {
       const oldest = cache.keys().next().value;
       cacheBytes -= cache.get(oldest).bytes; cache.delete(oldest);
     }
-    cache.set(key, { value, bytes }); cacheBytes += bytes;
+    cache.set(key, { value, bytes, revision }); cacheBytes += bytes;
   }
   return value;
 };
@@ -85,7 +88,6 @@ function revision() {
   parentPort.postMessage({ type: "revision", metrics: metrics(), observation: model.observation() });
 }
 model.onChange(() => {
-  cache.clear(); cacheBytes = 0;
   if (revisionPending) revisionDirty = true;
   else revision();
 });
