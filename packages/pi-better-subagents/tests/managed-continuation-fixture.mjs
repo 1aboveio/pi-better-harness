@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import { startContinuationModel, continuationModels } from "../../pi-better-server/test/support/subagent-offline-model.ts";
 import { WorkClient } from "../../pi-better-server/src/runtime/work-client.mjs";
-import { stopFixtureChild } from "./fixture-child.mjs";
+import { observeFixtureChild, stopFixtureChild } from "./fixture-child.mjs";
 
 /** Real SDK foregrounds share a real daemon. Only the remote model is substituted. */
 export async function continuationFixture({ root, artifacts, workspace }) {
@@ -31,6 +31,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
             env: { ...env, LAUNCH_WORKSPACE: cwd, CONTINUATION_CONTEXT: JSON.stringify({ sessionId, sessionDir: join(root, "parents"), sessionFile: options.sessionFile, ui: options.ui, failHealthNotify: options.failHealthNotify, policy }) },
             stdio: ["ignore", "ignore", "pipe", "ipc"],
         });
+        observeFixtureChild(child);
         actors.add(child); child.stderr.on("data", bytes => { errors += bytes; });
         const tools = new Map(), sent = [], delivered = [], notes = [];
         const update = state => {
