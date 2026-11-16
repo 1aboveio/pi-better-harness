@@ -217,7 +217,12 @@ test("watchdog recovers a genuinely wedged worker while socket control stays res
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   try {
     // The 400 ms read deadline tests the wedge, not cold worker imports.
-    await f.bootstrapped;
+    let startupTimeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([f.bootstrapped, new Promise<never>((_, reject) => {
+        startupTimeout = setTimeout(() => reject(new Error("query fixture did not bootstrap within budget")), 5000);
+      })]);
+    } finally { clearTimeout(startupTimeout); }
     const a = await f.client(), b = await f.client(); await ready(a); await ready(b);
     const epoch = b.snapshot!.instanceId;
     const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
