@@ -59,11 +59,11 @@ export class BackgroundHistory {
     this.db = db; this.directory = directory; this.source = source; this.project = project; this.changed = changed;
     this.directoryFor = directoryFor;
     db.exec(`CREATE TABLE background_history (key TEXT PRIMARY KEY, id TEXT, workspace TEXT, session TEXT,
-      known INTEGER, unreadable INTEGER, state TEXT, started REAL, payload TEXT, signature TEXT, failure TEXT, spawn_pid INTEGER, active INTEGER, context TEXT);
-      CREATE INDEX background_history_scope ON background_history(workspace, session, state, started DESC, id DESC);
-      CREATE INDEX background_history_process ON background_history(workspace, session, spawn_pid, state, started DESC, id DESC);
-      CREATE INDEX background_history_state ON background_history(state, started DESC, id DESC);
-      CREATE INDEX background_history_order ON background_history(started DESC, id DESC);
+      known INTEGER, unreadable INTEGER, state TEXT, started REAL, payload TEXT, signature TEXT, failure TEXT, spawn_pid INTEGER, active INTEGER, context TEXT, dismissed INTEGER);
+      CREATE INDEX background_history_scope ON background_history(dismissed, workspace, session, state, started DESC, id DESC);
+      CREATE INDEX background_history_process ON background_history(dismissed, workspace, session, spawn_pid, state, started DESC, id DESC);
+      CREATE INDEX background_history_state ON background_history(dismissed, state, started DESC, id DESC);
+      CREATE INDEX background_history_order ON background_history(dismissed, started DESC, id DESC);
       CREATE TABLE background_history_revisions (workspace TEXT, session TEXT, state TEXT, content INTEGER, failure INTEGER,
         PRIMARY KEY (workspace, session, state));`);
   }
@@ -179,7 +179,7 @@ export class BackgroundHistory {
       this.startRefresh(version);
     }
     const resource = `list:${sessionScopeKey({ all: scope.backgroundAll, origin: { cwd: scope.cwd, sessionId: scope.sessionId }, processId: scope.processId })}:${[...(scope.statuses ?? [])].sort().join(",")}`;
-    const clauses = ["unreadable = 0"], args: any[] = [];
+    const clauses = ["unreadable = 0", "dismissed = 0"], args: any[] = [];
     if (!scope.backgroundAll) clauses.push("known = 1");
     if (!scope.backgroundAll) { clauses.push("workspace = ? AND session = ?"); args.push(scope.cwd, scope.sessionId ?? ""); }
     if (!scope.backgroundAll && !scope.sessionId) { clauses.push("spawn_pid = ?"); args.push(scope.processId ?? -1); }
@@ -210,7 +210,7 @@ export class BackgroundHistory {
     const revisions = this.db.prepare(`SELECT sum(content) AS content, sum(failure) AS failure FROM background_history_revisions
       WHERE workspace = ? AND session = ? AND state IN (${revisionStates.map(() => "?").join(",")})`)
       .get(scope.backgroundAll ? "" : scope.cwd, scope.backgroundAll ? "" : scope.sessionId || `process:${scope.processId ?? -1}`, ...revisionStates);
-    const diagnostics = this.db.prepare("SELECT sum(unreadable) AS unreadable, sum(known = 0 AND unreadable = 0) AS unknown FROM background_history").get();
+    const diagnostics = this.db.prepare("SELECT sum(unreadable) AS unreadable, sum(known = 0 AND unreadable = 0) AS unknown FROM background_history WHERE dismissed = 0").get();
     return { records: records.slice(0, scope.limit ?? 10).map((meta: any) => ({ id: meta.id, found: true, readable: true, meta })),
       page: { total: Number(aggregate.n), before, nextCursor: page.nextCursor, resource,
         contentRevision: digest([aggregate.n, revisions.content, diagnostics.unreadable, diagnostics.unknown]), failureRevision: digest(revisions.failure),
@@ -232,7 +232,7 @@ export class BackgroundHistory {
     for (const id of dirty) this.dirty.delete(id);
     this.dirty.delete("");
     const seen = new Set<string>();
-    const upsert = this.db.prepare(`INSERT OR REPLACE INTO background_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const upsert = this.db.prepare(`INSERT OR REPLACE INTO background_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const previous = this.db.prepare("SELECT * FROM background_history WHERE key = ?");
     const bump = (row: any, content: boolean, failure: boolean) => {
       const session = row.session || `process:${row.spawn_pid ?? -1}`;
@@ -255,7 +255,7 @@ export class BackgroundHistory {
       const known = origin && typeof origin.cwd === "string";
       upsert.run(key, meta?.id ?? key, origin?.cwd ?? "", origin?.sessionId ?? "", known ? 1 : 0, unreadable ? 1 : 0,
         meta?.status ?? "", meta?.startedAt ?? 0, JSON.stringify(meta ?? null), signature, failure, meta?.spawnPid ?? null,
-        meta?.durable ? Number(meta.active) : Number(meta?.status === "running"), context);
+        meta?.durable ? Number(meta.active) : Number(meta?.status === "running"), context, Number(meta?.dismissedAt !== undefined));
       this.changes++;
       if (old) bump(old, true, old.failure !== failure);
       bump(previous.get(key), true, old?.failure !== failure);
@@ -278,7 +278,8 @@ export class BackgroundHistory {
         if (previous.get(key)?.signature !== signature) {
           this.metrics.projections++;
           meta = active ?? this.project([op])[0];
-          if (meta?.dismissedAt !== undefined) continue;
+          // Retain the source signature even when dismissal hides the row:
+          // absence would make every exact repair demand another history build.
           meta = { ...meta, callbackOrigin: { cwd: op.owner_workspace, sessionId: op.owner_session_id }, logPath: meta.logPaths?.stdout ?? "" };
         }
         if (meta) save(key, meta, signature, "", false, context);
