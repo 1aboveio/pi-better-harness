@@ -15,6 +15,24 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('maintenance explains each real gate operation until settlement without an invented deadline', async () => {
+  const env = makeEnv(); mkdirSync(env.serverDir);
+  const registry = new SessionRegistry({ serverDir: env.serverDir });
+  try {
+    const release = registry.maintenance.enterSessionOperation();
+    const reason = registry.maintenance.lifecycleReasons()[0]!;
+    assert.equal(reason.source,'session-operation'); assert.equal(reason.executionDeadline,null);
+    assert.ok(reason.lastProgressAt); release(); release();
+    assert.deepEqual(registry.maintenance.lifecycleReasons(),[]);
+    await registry.maintenance.withIdleSessions('reload', async () => {
+      assert.equal(registry.maintenance.busy,true);
+      assert.equal(registry.maintenance.lifecycleReasons()[0]?.source,'reload');
+    });
+    assert.equal(registry.maintenance.busy,false);
+    assert.deepEqual(registry.maintenance.lifecycleReasons(),[]);
+  } finally { await registry.shutdown(); }
+});
+
 async function setup(t: TestContext, initialize?: (pi: ExtensionAPI, ctx: ExtensionContext) => void) {
   const previous = { ...process.env };
   const env = makeEnv();

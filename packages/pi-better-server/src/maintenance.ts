@@ -16,7 +16,7 @@ export class MaintenanceBusyError extends Error {
   }
 }
 
-type Admission = { gate: HostMaintenance; closed: boolean; calls: number; persistenceSafe: boolean; reloadEntry: boolean };
+type Admission = { gate: HostMaintenance; manager?: SessionManager; closed: boolean; calls: number; persistenceSafe: boolean; reloadEntry: boolean };
 type Method = (this: any, ...args: any[]) => any;
 type WarmGuard = { state: Admission; methods: Map<string, Method> };
 type GuardState = { managers: WeakMap<object, Admission>; installed: WeakSet<object>; supported: WeakSet<object>; tools: WeakSet<object>; warmers?: WeakMap<object, WarmGuard> };
@@ -41,12 +41,14 @@ function tracked(state: Admission | undefined, original: Method, receiver: unkno
     throw error;
   }
   state.calls++;
+  const finishRecord = state.gate.trackOperation(`sdk:${original.name || 'call'}`, state.manager?.getSessionId());
   try {
     const result = Reflect.apply(original, receiver, args);
-    if (result && typeof result.then === "function") return Promise.resolve(result).finally(() => { state.calls--; });
+    if (result && typeof result.then === "function") return Promise.resolve(result).finally(() => { state.calls--; finishRecord(); });
     state.calls--;
+    finishRecord();
     return result;
-  } catch (error) { state.calls--; throw error; }
+  } catch (error) { state.calls--; finishRecord(); throw error; }
 }
 
 function wrap(proto: object, name: string, invoke: (original: Method, receiver: any, args: any[]) => any): boolean {
@@ -205,6 +207,15 @@ export async function reloadHostedSession(session: AgentSession): Promise<void> 
 
 /** The registry, native reload/package host and upgrade activation share this one gate. */
 export class HostMaintenance {
+  private recordCounter = 0;
+  private records = new Map<number, { kind: string; id: number; source: string; sessionId?: string; lastProgressAt: number; executionDeadline: null; nextDeadline: null; recovery: string }>();
+  lifecycleReasons() { return [...this.records.values()].map(record => ({ ...record })); }
+  trackOperation(source: string, sessionId?: string): () => void {
+    const id = ++this.recordCounter;
+    this.records.set(id, { kind: 'host-operation', id, source, sessionId, lastProgressAt: Date.now(),
+      executionDeadline: null, nextDeadline: null, recovery: 'drain-admitted-host-operation-until-settlement' });
+    return () => { this.records.delete(id); };
+  }
   private purpose: MaintenancePurpose | undefined;
   private operations = 0;
   private stopped = false;
@@ -225,7 +236,7 @@ export class HostMaintenance {
     const proto = SessionManager.prototype as unknown as Record<string, unknown>;
     const sessionProto = AgentSession.prototype as unknown as Record<string, unknown>;
     guards.managers.set(manager, {
-      gate: this, closed: false, calls: 0, reloadEntry: false,
+      gate: this, manager, closed: false, calls: 0, reloadEntry: false,
       persistenceSafe: /^(0\.82|1\.2)\./.test(VERSION) && guards.supported.has(AgentSession.prototype) && guards.supported.has(SessionManager.prototype) &&
         ["_persist", "_rewriteFile"].every(name => typeof proto[name] === "function" && !Object.hasOwn(manager, name)) &&
         ["_buildRuntime", "_refreshToolRegistry", "prompt", "compact", "executeBash"].every(name => typeof sessionProto[name] === "function"),
@@ -241,15 +252,17 @@ export class HostMaintenance {
     const state = guards.managers.get(manager)!;
     assertAdmission(state);
     state.calls++;
+    const finishRecord = this.trackOperation('hosted-tool', manager.getSessionId());
     let released = false;
-    return () => { if (!released) { released = true; state.calls--; } };
+    return () => { if (!released) { released = true; state.calls--; finishRecord(); } };
   }
 
   enterSessionOperation(): () => void {
     this.assertAdmission();
     this.operations++;
+    const finishRecord = this.trackOperation('session-operation');
     let released = false;
-    return () => { if (!released) { released = true; this.operations--; } };
+    return () => { if (!released) { released = true; this.operations--; finishRecord(); } };
   }
 
   async withIdleSessions<T>(purpose: MaintenancePurpose, run: (sessions: HostedSession[], lease: IdleSessionsLease) => Promise<T>): Promise<T> {
@@ -311,7 +324,8 @@ export class HostMaintenance {
         for (const session of sessions) session.fence();
       },
     };
+    const finishRecord = this.trackOperation(purpose);
     try { await lease.refreshIdle(); return await run(sessions, lease); }
-    finally { valid = false; if (!this.stopped && held) this.purpose = undefined; }
+    finally { finishRecord(); valid = false; if (!this.stopped && held) this.purpose = undefined; }
   }
 }

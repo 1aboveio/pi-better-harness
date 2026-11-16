@@ -164,6 +164,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     // Structural port permits independent integration with the shared maintenance owner.
     const sessionMaintenance = (registry as SessionRegistry & { maintenance?: {
       readonly busy: boolean;
+      lifecycleReasons(): unknown[];
       enterSessionOperation(): () => void;
       withIdleSessions<T>(purpose: "upgrade", run: (live: HostedSession[], lease: IdleSessionsLease) => Promise<T>): Promise<T>;
     } }).maintenance;
@@ -193,6 +194,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const sockets = new Set<Socket>();
     const dispatches = new Set<Promise<void>>();
     let inFlight = 0;
+    let requestCounter = 0, connectionCounter = 0;
+    const requests = new Map<number, { kind: string; id: number; connection: number; lastProgressAt: number; nextDeadline: null; executionDeadline: null; recovery: string }>();
     let draining = false;
     let idleStopping = false;
     let idleEvidence: unknown;
@@ -204,6 +207,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     let zeroSince: number | undefined = registry.activeCount === 0 ? now() : undefined;
     let startupUntil = 0;
     const server: Server = createServer((socket) => {
+      const connection = ++connectionCounter;
       sockets.add(socket);
       const send = (message: ServerMessage): void => {
         if (!socket.destroyed) socket.write(encodeLine(message));
@@ -238,6 +242,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           return;
         }
         inFlight++;
+        const request = ++requestCounter;
+        requests.set(request, { kind: 'transport-request', id: request, connection, lastProgressAt: now(),
+          nextDeadline: null, executionDeadline: null,
+          recovery: 'dispatch-drains-to-settlement-read-waiters-use-existing-caller-cancellation-accepted-effects-use-durable-owner' });
         try {
           if (!type) {
             send(failure(id, "unknown", "Missing command type"));
@@ -268,12 +276,17 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               guardianBinding: guardianBinding?.identity ?? null,
               workObservation: observation ? { status: observation.status, reason: observation.reason, observedAt: observation.observedAt } : null,
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
+                ...requests.values(),
                 ...registry.list().filter(session => session.live).map(session => ({ kind: "hosted-session", id: session.sessionId })),
                 ...(resultSupervision?.livenessReasons() ?? []),
                 ...(launches?.lifecycleReasons() ?? []),
                 ...(backgroundTools?.lifecycleReasons() ?? []),
+                ...(cancellations?.lifecycleReasons() ?? []),
+                ...(sessionMaintenance?.lifecycleReasons() ?? []),
                 ...(observation?.reasons ?? []).filter((reason: any) => !resultSupervision?.manages(reason.operationId))],
               livenessObservation: observation ?? { status: "unobserved", reasons: [], observedAt: null },
+              readRequests: workModel?.requestReasons() ?? [],
+              transportRequests: [...requests.values()].map(reason => ({ ...reason })),
               nextIdleDeadline: runtimeClients.size > 0 || registry.activeCount > 0 ? null
                 : hostedUsed ? config.daemonIdleMs === 0 || zeroSince === undefined ? null : zeroSince + config.daemonIdleMs
                 : runtimeZeroSince === undefined ? null : runtimeZeroSince + config.runtimeIdleMs } });
@@ -482,6 +495,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         } finally {
           releaseSessionOperation?.();
           inFlight--;
+          requests.delete(request);
           if (registry.activeCount > 0) { zeroSince = undefined; hostedUsed = true; }
           else zeroSince ??= now();
         }

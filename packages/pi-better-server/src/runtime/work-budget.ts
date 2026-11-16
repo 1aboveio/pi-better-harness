@@ -6,34 +6,49 @@ export type WorkLane = "control" | "query" | "repair";
 const lanes: WorkLane[] = ["control", "query", "repair"];
 const limits = [16, 8, 8];
 const sourceKinds = ['legacy-watch', 'legacy-remote-poll', 'legacy-handoff', 'legacy-process-deadline', 'legacy-log-retention'];
+const wakeIndex = 10 + sourceKinds.length * 5;
+export function notifyWorkBudget(buffer: SharedArrayBuffer) {
+  const counters = new Int32Array(buffer);
+  if (counters.length > wakeIndex) { Atomics.add(counters, wakeIndex, 1); Atomics.notify(counters, wakeIndex); }
+}
 /** Root-wide outstanding source work. Reserved lanes cannot be consumed by a wedged reader. */
-export function createWorkBudget(buffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * (10 + sourceKinds.length * 5))) {
+export function createWorkBudget(buffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * (wakeIndex + 7))) {
   const counters = new Int32Array(buffer);
   const legacyIndex = 9 + sourceKinds.length * 5;
   const reservation = new AsyncLocalStorage<{ active: boolean }>();
   const pending = new Map<string, Promise<unknown>>();
+  const ownerObservations = new Map<string, number>();
   const queue: Array<() => boolean> = [];
-  let retry: ReturnType<typeof setTimeout> | undefined;
+  let waiting = false, pumping = false;
   const pump = () => {
-    retry = undefined;
-    while (queue.length && queue[0]!()) queue.shift();
-    if (queue.length) { retry = setTimeout(pump, 5); retry.unref(); }
+    if (pumping) return;
+    pumping = true;
+    const version = Atomics.load(counters, wakeIndex);
+    for (let i = 0; i < queue.length;) { if (queue[i]!()) queue.splice(i, 1); else i++; }
+    pumping = false;
+    if (queue.length && !waiting) {
+      const wait = (Atomics as typeof Atomics & { waitAsync(array: Int32Array, index: number, value: number): { async: boolean; value: string | Promise<string> } }).waitAsync(counters, wakeIndex, version);
+      if (wait.async) { waiting = true; void (wait.value as Promise<string>).then(() => { waiting = false; pump(); }); }
+      else queueMicrotask(pump);
+    }
   };
   const sourceWork = new Map<string, { started: number; completed: number; failed: number; elapsedMs: number; active: number }>();
   return { buffer,
     // Only timer callbacks use deferred dispatch. Synchronous source callers
     // retain their return/throw contract; nested source measurement never waits.
-    scheduleSource<T>(kind: string, id: string, work: () => T): Promise<Awaited<T>> {
+    scheduleSource<T>(kind: string, id: string, work: () => T, owner = 'runtime'): Promise<Awaited<T>> {
       if (reservation.getStore()?.active) return Promise.resolve().then(() => this.source(kind, work)) as Promise<Awaited<T>>;
-      const key = JSON.stringify([kind, id]);
+      const key = JSON.stringify([owner, kind, id]);
       const prior = pending.get(key);
       if (prior) return prior as Promise<Awaited<T>>;
       let resolve!: (value: Awaited<T>) => void, reject!: (error: unknown) => void;
       const result = new Promise<Awaited<T>>((yes, no) => { resolve = yes; reject = no; });
       pending.set(key, result);
       queue.push(() => {
-        // Legacy polls cannot occupy all control slots while awaiting a provider.
-        if (counters.length > legacyIndex) {
+        // Outstanding observations cannot consume the slots needed by deadlines.
+        const observation = !['legacy-process-deadline', 'legacy-handoff'].includes(kind);
+        if (observation && owner !== 'runtime' && (ownerObservations.get(owner) ?? 0) >= 2) return false;
+        if (observation && counters.length > legacyIndex) {
           for (;;) {
             const active = Atomics.load(counters, legacyIndex);
             if (active >= 8) return false;
@@ -41,15 +56,20 @@ export function createWorkBudget(buffer = new SharedArrayBuffer(Int32Array.BYTES
           }
         }
         const release = this.enter('control');
-        if (!release) { if (counters.length > legacyIndex) Atomics.sub(counters, legacyIndex, 1); return false; }
+        if (!release) { if (observation && counters.length > legacyIndex) Atomics.sub(counters, legacyIndex, 1); return false; }
         const scope = { active: true };
-        const finish = () => { scope.active = false; release(); if (counters.length > legacyIndex) Atomics.sub(counters, legacyIndex, 1); pending.delete(key); if (queue.length && !retry) { retry = setTimeout(pump, 0); retry.unref(); } };
+        if (observation) ownerObservations.set(owner, (ownerObservations.get(owner) ?? 0) + 1);
+        const finish = () => {
+          scope.active = false;
+          if (observation) { const left = ownerObservations.get(owner)! - 1; if (left) ownerObservations.set(owner, left); else ownerObservations.delete(owner); }
+          if (observation && counters.length > legacyIndex) Atomics.sub(counters, legacyIndex, 1); pending.delete(key); release();
+        };
         try {
           Promise.resolve(reservation.run(scope, () => this.source(kind, work))).then(value => { finish(); resolve(value); }, error => { finish(); reject(error); });
         } catch (error) { finish(); reject(error); }
         return true;
       });
-      if (!retry) pump();
+      pump();
       return result;
     },
     // Measure at the owner that performs the work, including asynchronous completion.
@@ -81,8 +101,14 @@ export function createWorkBudget(buffer = new SharedArrayBuffer(Int32Array.BYTES
         if (Atomics.compareExchange(counters, index, used, used + 1) === used) break;
       }
       Atomics.add(counters, index + 3, 1);
+      const started = performance.now();
       let released = false;
-      return () => { if (!released) { released = true; Atomics.sub(counters, index, 1); } };
+      return () => { if (!released) {
+        released = true; Atomics.sub(counters, index, 1);
+        Atomics.add(counters, wakeIndex + 1 + index, 1);
+        Atomics.add(counters, wakeIndex + 4 + index, Math.round(performance.now() - started));
+        notifyWorkBudget(buffer);
+      } };
     },
     metrics() { return { queuedSources: queue.length, sources: { ...Object.fromEntries([...sourceWork].map(([kind, metric]) => [kind, { ...metric }])),
       ...Object.fromEntries(sourceKinds.flatMap((kind, i) => {
@@ -90,7 +116,8 @@ export function createWorkBudget(buffer = new SharedArrayBuffer(Int32Array.BYTES
         return counters.length < base + 5 ? [] : [[kind, { started: Atomics.load(counters, base), completed: Atomics.load(counters, base + 1),
           failed: Atomics.load(counters, base + 2), elapsedMs: Atomics.load(counters, base + 3), active: Atomics.load(counters, base + 4) }]];
       })) }, capacity: ENTITY_BUDGET, lanes: Object.fromEntries(lanes.map((lane, i) => [lane,
-      { capacity: limits[i], active: Atomics.load(counters, i), admitted: Atomics.load(counters, i + 3), deferred: Atomics.load(counters, i + 6) }])) }; },
+      { capacity: limits[i], active: Atomics.load(counters, i), admitted: Atomics.load(counters, i + 3), deferred: Atomics.load(counters, i + 6),
+        completed: Atomics.load(counters, wakeIndex + 1 + i), elapsedMs: Atomics.load(counters, wakeIndex + 4 + i) }])) }; },
   };
 }
 export function workPage<T>(items: Iterable<T>, limit = ENTITY_BUDGET): T[] {

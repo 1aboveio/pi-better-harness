@@ -2,6 +2,45 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createWorkBudget } from "../src/runtime/work-budget.ts";
 
+test('observation owner saturation does not block another owner or critical work behind it', async () => {
+  const budget = createWorkBudget();
+  const done: Array<() => void> = [];
+  const first = Array.from({length:4}, (_, i) => budget.scheduleSource('legacy-remote-poll',String(i),
+    () => new Promise<void>(resolve => done.push(resolve)), 'owner-a'));
+  assert.equal(done.length,2);
+  assert.equal(budget.metrics().queuedSources,2);
+  assert.equal(await budget.scheduleSource('legacy-handoff','critical',()=>42,'owner-b'),42);
+  assert.equal(await budget.scheduleSource('legacy-remote-poll','0',()=>7,'owner-b'),7);
+  assert.equal(budget.metrics().queuedSources,2);
+  const keepAlive = setTimeout(()=>{},1000);
+  try {
+    done.splice(0).forEach(resolve=>resolve());
+    await new Promise(resolve=>setTimeout(resolve,10));
+    assert.equal(done.length,2);
+    done.forEach(resolve=>resolve()); await Promise.all(first);
+    assert.equal(budget.metrics().queuedSources,0);
+  } finally { clearTimeout(keepAlive); done.forEach(resolve=>resolve()); }
+});
+
+test('pending remote observations cannot block another owner deadline or handoff', async () => {
+  const budget = createWorkBudget();
+  const finish: Array<() => void> = [];
+  const observations = Array.from({length:8}, (_,i) => budget.scheduleSource('legacy-remote-poll',`remote:${i}`,
+    () => new Promise<void>(resolve => finish.push(resolve))));
+  const originalDeadline = Date.now();
+  const timeout = setTimeout(() => finish.forEach(resolve => resolve()),100);
+  try {
+    const deadline = budget.scheduleSource('legacy-process-deadline','another-owner:deadline', () => {
+      assert.equal(finish.length,8);
+      assert.equal(budget.metrics().sources['legacy-remote-poll']!.active,8);
+      return originalDeadline;
+    });
+    assert.equal(await deadline,originalDeadline);
+    assert.equal(budget.metrics().sources['legacy-remote-poll']!.completed,0,'no physical observation credit was released');
+    assert.equal(await budget.scheduleSource('legacy-handoff','third-owner:handoff',() => 42),42);
+  } finally { clearTimeout(timeout); finish.forEach(resolve => resolve()); await Promise.all(observations); }
+});
+
 test("legacy dispatch reserves shared control capacity and queued identities progress once capacity returns", async () => {
   const root = createWorkBudget(), peer = createWorkBudget(root.buffer);
   const held = Array.from({ length: 16 }, () => peer.enter("control")!);
@@ -55,6 +94,9 @@ test("one total source capacity reserves independent control, query and repair p
   assert.equal(Object.values(root.metrics().lanes).reduce((sum, lane) => sum + lane.active, 0), 32);
   for (const leave of release) { assert.equal(typeof leave, "function"); leave(); leave(); }
   assert.equal(Object.values(root.metrics().lanes).reduce((sum, lane) => sum + lane.active, 0), 0);
+  assert.equal(root.metrics().lanes.control!.completed,16);
+  assert.equal(root.metrics().lanes.query!.completed,8);
+  assert.equal(root.metrics().lanes.repair!.completed,8);
   assert.ok(root.enter("control"), "wedged read credits cannot consume reserved control admission");
 });
 

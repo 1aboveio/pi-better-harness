@@ -222,7 +222,13 @@ export class SessionRegistry {
     try { this.maintenance.assertAdmission(); }
     catch (error) { return Promise.reject(error); }
     const prior = this.operations.get(sessionId) ?? Promise.resolve();
-    const result = prior.then(run, run);
+    const finishQueued = this.maintenance.trackOperation('registry-queued', sessionId);
+    const dispatch = async () => {
+      finishQueued();
+      const finishRunning = this.maintenance.trackOperation('registry-dispatched', sessionId);
+      try { return await run(); } finally { finishRunning(); }
+    };
+    const result = prior.then(dispatch, dispatch);
     const tail = result.catch(() => undefined);
     this.operations.set(sessionId, tail);
     void tail.then(() => {

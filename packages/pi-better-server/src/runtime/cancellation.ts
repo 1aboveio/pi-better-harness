@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { createHash } from 'node:crypto';
 import { createRequire } from "node:module";
 import { acquireMutationStore } from "./mutation-store.ts";
 // @ts-expect-error Generated canonical supervisor; only stop is invoked here.
@@ -29,6 +30,8 @@ export class RuntimeCancellation {
   private store: any;
   private releaseStore: () => void;
   private pending = new Map<string, Promise<unknown>>();
+  private reasons = new Map<string, any>();
+  lifecycleReasons() { return [...this.reasons.values()].map(reason => ({ ...reason })); }
   readonly epoch: number;
   private fault?: (stage: CancellationStage) => void;
   get busy() { return this.pending.size > 0; }
@@ -63,6 +66,12 @@ export class RuntimeCancellation {
     const running = this.pending.get(key);
     if (running) return running;
     const intent = this.store.getTaskCancellation(admission.request);
+    const progress = (phase: string) => this.reasons.set(key, { kind: 'task',
+      id: `cancellation:${createHash('sha256').update(key).digest('hex')}`, operationId: intent.operationId, taskId: intent.taskId,
+      owner: admission.request.owner, management: { epoch: this.epoch }, acceptedAt: intent.acceptedAt,
+      phase, lastProgressAt: Date.now(), executionDeadline: null, nextDeadline: null,
+      recovery: 'recover-exact-durable-stop-intent-without-repeating-ambiguous-process-action' });
+    progress('accepted');
     const execution = Promise.resolve().then(async () => {
       try {
         const supervisor = createLocalSupervisor({ directory: admission.directory });
@@ -78,8 +87,10 @@ export class RuntimeCancellation {
           const inspection = supervisor.snapshot(intent.taskId);
           if (inspection?.token !== intent.expectedLaunchToken) throw new Error("Exact launch token mismatch; refusing action");
           this.fault?.("before-stop-file");
+          progress('writing-stop-intent');
           writeStopRequest(admission.directory, { version: 1, taskId: intent.taskId, token: intent.expectedLaunchToken, requestedAt: Date.now(), reason: intent.reason });
           this.fault?.("after-stop-file");
+          progress('awaiting-exact-supervisor-stop');
           result = await supervisor.stop(intent.taskId, { token: intent.expectedLaunchToken, reason: intent.reason });
           this.fault?.("after-process-action");
         }
@@ -90,7 +101,7 @@ export class RuntimeCancellation {
           ...(result.terminal ? { publication: supervisorTerminalPublication(operation, inspection) } : {}) });
       } catch {
         return { ...this.store.unknownTaskCancellation(admission.request), state: "outcome_unknown" };
-      } finally { this.pending.delete(key); }
+      } finally { this.pending.delete(key); this.reasons.delete(key); }
     });
     this.pending.set(key, execution);
     return execution;

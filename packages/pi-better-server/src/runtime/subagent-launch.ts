@@ -29,6 +29,8 @@ export async function createSubagentLaunch(root: string, instance: string, catal
     const runtimePath = "./domain/background-service/runtime.domain.mjs";
     const { registerTools } = await import(toolsPath);
     const { createBackgroundTaskRuntime } = await import(runtimePath);
+    const registryPath = './domain/background-service/registry.domain.mjs';
+    const { readMeta } = await import(registryPath);
     const sandboxPath="./domain/background-service/sandbox.domain.mjs";
     const sandbox=await import(sandboxPath);
     host = new ManagedSubagentHost(root, instance, catalog, lease.store, (pi: any) => {
@@ -49,7 +51,10 @@ export async function createSubagentLaunch(root: string, instance: string, catal
         }
       });
       const runtime = createBackgroundTaskRuntime(undefined, undefined, undefined,
-        (kind: string, id: string, work: () => unknown) => lease.budget.scheduleSource(`legacy-${kind}`, `subagent:${id}`, work));
+        (kind: string, id: string, work: () => unknown) => {
+          const origin = readMeta(id)?.callbackOrigin;
+          return lease.budget.scheduleSource(`legacy-${kind}`, id, work, JSON.stringify([origin?.cwd ?? root, origin?.sessionId ?? null]));
+        });
       registerTools(pi, runtime, () => undefined);
       const close = service.close.bind(service);
       service.close = () => { try { close(); } finally { runtime.suspendScheduledWork(); } };

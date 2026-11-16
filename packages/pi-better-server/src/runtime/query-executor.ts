@@ -4,12 +4,13 @@ import { resolve } from "node:path";
 import type { Duplex } from "node:stream";
 import type { WorkReadModel } from "./read-model.ts";
 import { workScope } from "./queries.ts";
+import { notifyWorkBudget } from "./work-budget.ts";
 
 export interface EncodedRead { json: string }
-interface Waiter { connection: number; deadline: ReturnType<typeof setTimeout>; resolve(value: EncodedRead): void; reject(error: Error): void }
+interface Waiter { connection: number; expiresAt: number; deadline: ReturnType<typeof setTimeout>; resolve(value: EncodedRead): void; reject(error: Error): void }
 interface Query {
   id: number; key?: string; command: Record<string, unknown>; connection: number;
-  enqueued: number; started?: number; waiters: Set<Waiter>;
+  enqueued: number; started?: number; progressAt: number; waiters: Set<Waiter>;
 }
 export type ReadStream = Pick<Duplex, "destroyed" | "writableLength" | "write" | "on" | "once" | "off">;
 interface Stream { socket: ReadStream; paused: boolean; generation: number; drain: () => void; close: () => void }
@@ -60,6 +61,15 @@ export class WorkQueryExecutor {
   private options: QueryExecutorOptions;
   private agentDir: string;
   readonly instanceId: string;
+  requestReasons() {
+    return [...this.queue, ...(this.active ? [this.active] : [])].flatMap(query => [...query.waiters].map(waiter => ({
+      kind: 'read-request', id: query.id, connection: waiter.connection, generation: this.workerGeneration,
+      phase: query.started === undefined ? 'queued' : 'dispatched',
+      lastProgressAt: query.progressAt,
+      nextDeadline: waiter.expiresAt, executionDeadline: null,
+      recovery: 'caller-timeout-or-disconnect-removes-waiter-without-cancelling-physical-worker-work',
+    })));
+  }
 
   constructor(agentDir: string, instanceId: string, options: QueryExecutorOptions = {}) {
     this.options = options; this.instanceId = instanceId; this.agentDir = agentDir;
@@ -79,6 +89,7 @@ export class WorkQueryExecutor {
       // A dead generation cannot retain source credits in the shared budget.
       const counts = new Int32Array(this.options.budgetBuffer);
       Atomics.store(counts, 1, 0); Atomics.store(counts, 2, 0);
+      notifyWorkBudget(this.options.budgetBuffer);
     }
     const instanceId = this.workerGeneration ? `${this.instanceId}:reads:${this.workerGeneration}` : this.instanceId;
     const worker = new Worker(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url), {
@@ -213,13 +224,14 @@ export class WorkQueryExecutor {
         return Promise.reject(new Error("runtime-overloaded: read queue is full; retry later"));
       }
       const id = ++this.counter;
-      query = { id, key, command, connection: key ? 0 : connection, enqueued: performance.now(), waiters: new Set() };
+      query = { id, key, command, connection: key ? 0 : connection, enqueued: performance.now(), progressAt: Date.now(), waiters: new Set() };
       this.queue.push(query);
       if (key) this.flights.set(key, query);
     }
     const admitted = query;
     const result = new Promise<EncodedRead>((resolve, reject) => {
       const waiter: Waiter = { connection, resolve, reject,
+        expiresAt: Date.now() + (this.options.timeoutMs ?? 4000),
         deadline: setTimeout(() => this.expire(admitted, waiter), this.options.timeoutMs ?? 4000) };
       admitted.waiters.add(waiter);
     });
@@ -231,6 +243,7 @@ export class WorkQueryExecutor {
     if (this.failure || this.active || !this.queue.length) return;
     const query = this.active = this.queue.shift()!;
     query.started = performance.now();
+    query.progressAt = Date.now();
     this.waits.push(performance.now() - query.enqueued);
     if (this.waits.length > 128) this.waits.shift();
     const stream = this.streams.get(query.connection);
