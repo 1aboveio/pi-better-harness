@@ -11,7 +11,7 @@ export function instrumentRecoveryTrace(source) {
   };
   replace('service.noteParentContext(ctx, { recover: false });', `
     const traceRecoveryState = () => {
-      const state = service.activeOrigin ? service.callbackRecoveryScopes.get(JSON.stringify([service.activeOrigin.cwd, service.activeOrigin.sessionId])) : service.unscopedCallbackRecovery;
+      const state = service.activeOrigin ? service.callbackRecoveryScopes.get(JSON.stringify([service.activeOrigin.cwd, service.activeOrigin.sessionId, service.activeContext.sessionManager.getBranch().map(entry => entry.id).filter(id => typeof id === 'string')])) : service.unscopedCallbackRecovery;
       return state ? { ...state } : null;
     };
     const traceBeforeContext = { owner: service.activeOrigin, state: traceRecoveryState() };
@@ -22,7 +22,7 @@ export function instrumentRecoveryTrace(source) {
   replace('metrics.reconciles++;', `
     const traceAfterContext = traceRecoveryState();
     recordRecoveryTrace({ event: 'reconcile', owner: record.owner, branchDigest: authority.backgroundDigest(record.branchIds),
-      coordinatorRevision: traceCoordinatorRevision, cachedRecoveryDigest: recoveryVersions.get(key) ?? null,
+      coordinatorRevision: traceCoordinatorRevision, cachedRecoveryDigest: recoveryVersions.get(viewKey) ?? null,
       recoveryDigest: recoveryVersion, pending: !traceAfterContext || traceAfterContext.revision < 0 || traceAfterContext.delivery !== undefined || traceAfterContext.claims !== undefined,
       beforeContext: traceBeforeContext, afterContext: traceAfterContext });
     metrics.reconciles++;`);
@@ -36,9 +36,9 @@ export function instrumentRecoveryTrace(source) {
   replace('deliveries.delete(record.params.token);', `
     recordRecoveryTrace({ event: 'invalidate', owner: record.owner, reason: record.params.delivered === true ? 'receipt-delivered' : 'receipt-deferred' });
     deliveries.delete(record.params.token);`);
-  replace('scopes.delete(oldest); recoveryVersions.delete(oldest);', `
+  replace('scopes.delete(oldest); forgetOwner(oldest);', `
     recordRecoveryTrace({ event: 'invalidate', ownerKey: oldest, reason: 'scope-evicted' });
-    scopes.delete(oldest); recoveryVersions.delete(oldest);`);
+    scopes.delete(oldest); forgetOwner(oldest);`);
   return `import { recordRecoveryTrace } from ${JSON.stringify(recorder)};\n${source}`;
 }
 

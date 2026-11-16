@@ -10,7 +10,7 @@ test('resource fixture trace instruments the real recovery gate without replacin
   const source = readFileSync(target, 'utf8');
   const instrumented = instrumentRecoveryTrace(source);
   for (const gate of [
-    'recoveryVersions.get(key) !== recoveryVersion || service.hasPendingParentCallbackRecovery()',
+    'recoveryVersions.get(viewKey) !== recoveryVersion || service.hasPendingParentCallbackRecovery()',
     'projection?.revision !== revision',
     'Date.now() - item.createdAt > 30000',
     'record.params.delivered === true && !service.isParentOriginActive(item.notification.origin, item.notification.branchId)',
