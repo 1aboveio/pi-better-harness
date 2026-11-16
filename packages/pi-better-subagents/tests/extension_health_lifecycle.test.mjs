@@ -1536,18 +1536,35 @@ describe("callback session isolation", () => {
         const cwd = tmpdir();
         const h = await makeHarness({ cwd, sessionId: "session-a" });
         try {
+            const originalBranch = await h.recipient.captureBranch();
+            await h.recipient.branch(originalBranch);
+            h.ctx.sessionManager.getLeafId = () => originalBranch;
+            h.ctx.sessionManager.getBranch = () => [{ id: originalBranch }];
             const { id, pid } = await spawnRun(h);
             const launched = readMeta(id);
-            assert.deepEqual(launched.callbackOrigin, { cwd, sessionId: "session-a" });
+            const originalOrigin = { cwd, sessionId: "session-a", branchId: originalBranch };
+            const originalRecipient = { kind: "parent-session", workspace: cwd, sessionId: "session-a", branchId: originalBranch, goalId: null };
+            assert.deepEqual(launched.callbackOrigin, originalOrigin);
+            assert.deepEqual(launched.assignment.recipient, originalRecipient);
 
             const switchedCtx = {
                 ...h.ctx,
                 sessionManager: { getSessionId: () => "session-b" },
             };
             await h.handlers.get("session_start")({}, switchedCtx);
+            const changedBranch = await h.recipient.captureBranch();
+            await h.recipient.branch(changedBranch);
+            switchedCtx.sessionManager.getLeafId = () => changedBranch;
+            switchedCtx.sessionManager.getBranch = () => [{ id: changedBranch }];
+            await h.handlers.get("session_tree")({}, switchedCtx);
+            assert.notEqual(changedBranch, originalBranch);
+            assert.deepEqual(readMeta(id).callbackOrigin, originalOrigin, "foreground changes cannot retarget the captured callback");
+            assert.deepEqual(readMeta(id).assignment.recipient, originalRecipient);
 
             killProcessTree(pid, "SIGKILL");
             await waitFor(() => readMeta(id)?.completionCallbackPendingAt);
+            assert.deepEqual(readMeta(id).callbackOrigin, originalOrigin);
+            assert.deepEqual(readMeta(id).assignment.recipient, originalRecipient, "completion remains pinned to the launch recipient");
             assert.equal(readMeta(id).completionCallbackSentAt, undefined);
             assert.equal(readMeta(id).completionCallbackSuppressedAt, undefined, "the original recipient retains its obligation");
             await h.recipient.flush();
