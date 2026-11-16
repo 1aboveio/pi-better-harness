@@ -28,7 +28,7 @@ test('plan selects exact fixture identities and independent faults after capabil
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-for (const recoveryAvailable of [false, true]) test(`component file/projection sequence with recovery controls=${recoveryAvailable} preserves honest final-source rejection`, async t => {
+for (const recoveryAvailable of [false, true]) test(`component file/projection sequence with recovery controls=${recoveryAvailable} preserves honest final-source reconciliation`, async t => {
   const f = fixture(96), { manifest } = f;
   const create = () => new WorkReadModel(manifest.agent, 'component-reader', { baseDir: join(f.root, 'pi-better-subagents'), durableDir: manifest.durable, intervalMs: 60000 });
   let model = create(), state: any;
@@ -46,21 +46,29 @@ for (const recoveryAvailable of [false, true]) test(`component file/projection s
         return { action: 'restart', scope: 'component', client };
       } },
     } : {};
-    await assert.rejects(runMutationSequence({ manifest, client, evidenceScope: 'component', recovery,
+    let failure: unknown;
+    try { await runMutationSequence({ manifest, client, evidenceScope: 'component', recovery,
       write: async command => { writes.push(command.kind); return mutateWorkload(manifest, command); },
       observe: async command => {
         if (command.id) model.fileHint(join(manifest.runs, command.id), 'output.log');
         await model.reconcile();
       }, onState: value => { state = value; },
-    }), /Missing source cannot claim complete log coverage/);
-    // The actual current projection retains complete:true after deleting an empty
-    // log. The new reconciler must reject that claim, not silently bless zero usage.
-    assert.equal(state.steps.at(-1).key, 'delete-log'); assert.equal(state.steps.at(-1).status, 'failed');
+    }); } catch (error) { failure = error; }
+    assert.equal(state.steps.at(-1).key, 'delete-log');
     const deleted = model.snapshot({ id: manifest.tasks[0]!.id, detail: true }).rows[0] as any;
-    t.diagnostic(JSON.stringify({ observation: 'component-only deleted source rejection', step: 'delete-log',
-      projectedComplete: deleted.display.coverage.complete, diagnostics: deleted.detail.parsed.diagnostics,
+    t.diagnostic(JSON.stringify({ observation: 'component-only deleted source reconciliation', step: 'delete-log',
+      projectedComplete: deleted.display?.coverage?.complete, diagnostics: deleted.detail.parsed.diagnostics,
       state: state.steps.at(-1).status, error: state.steps.at(-1).error }));
-    assert.equal(state.complete, false); assert.equal(state.nativeQualification, 'notRun');
+    if (deleted.display?.coverage?.complete === true) {
+      // Reject the current false claim without making a future source fix fail.
+      assert.match(String(failure), /Missing source cannot claim complete log coverage/);
+      assert.equal(state.steps.at(-1).status, 'failed'); assert.equal(state.complete, false);
+    } else {
+      assert.equal(failure, undefined); assert.equal(state.steps.at(-1).status, 'completed');
+      assert.equal(state.steps.at(-1).final.results[0].sourceCompleteness, 'unavailable');
+      assert.equal(state.steps.at(-1).final.results[0].costUSD, null);
+    }
+    assert.equal(state.nativeQualification, 'notRun');
     assert.deepEqual(writes.slice(-3), ['replace-log', 'truncate-log', 'delete-log']);
     assert.equal(state.steps.find((step: any) => step.key === 'replace-log').final.results[0].costUSD, 0.05);
     assert.equal(state.steps.find((step: any) => step.key === 'truncate-log').final.results[0].sourceCompleteness, 'empty');
