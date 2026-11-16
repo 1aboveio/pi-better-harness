@@ -538,6 +538,7 @@ export class WorkReadModel {
       healthRevision: this.healthRevision, coordinator: this.coordinator };
     try {
       const next = new Map(baseline.files);
+      const failedPaths = new Map<string, string>();
       let batch = 0;
       let sliceStarted = performance.now();
       for (const [directory, archived] of [[this.markers, true], [this.archives, true], [this.runs, false]] as const) {
@@ -580,11 +581,20 @@ export class WorkReadModel {
               }
               next.set(path, entry!);
             } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-              try { await sourceStat(directory); }
-              catch { throw new Error(`Source directory unavailable; retaining verified records: ${directory}`); }
-              next.delete(path);
-              if (!archived) this.unwatchDirectory(join(directory, name));
+              if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+                try {
+                  await sourceStat(directory);
+                  next.delete(path);
+                  if (!archived) this.unwatchDirectory(join(directory, name));
+                } catch {
+                  failedPaths.set(path, `Source directory unavailable; retaining verified records: ${directory}`);
+                }
+              } else failedPaths.set(path, String(error).slice(0, 512));
+              if (failedPaths.has(path)) {
+                const verified = this.files.get(path);
+                if (verified) next.set(path, verified);
+                else next.delete(path);
+              }
             }
             if (++batch % 256 === 0 || performance.now() - sliceStarted >= 8) {
               await yieldTurn(); sliceStarted = performance.now();
@@ -618,6 +628,13 @@ export class WorkReadModel {
       const terminalLogChanges: string[] = [];
       for (const [path, entry] of next) {
         if (!path.startsWith(this.runs + sep)) continue;
+        if (failedPaths.has(path)) {
+          const id = entry.meta.id;
+          if (this.logs.has(id)) logs.set(id, this.logs.get(id)!);
+          if (this.failureJournals.has(id)) failureJournals.set(id, this.failureJournals.get(id)!);
+          if (this.processes.has(id)) processes.set(id, this.processes.get(id)!);
+          continue;
+        }
         if (!paths.includes(path)) {
           const id = entry.meta.id;
           if (baseline.logs.has(id)) logs.set(id, baseline.logs.get(id)!);
@@ -652,7 +669,7 @@ export class WorkReadModel {
       const changed = next.size !== baseline.files.size || [...next].some(([path, entry]) => baseline.files.get(path)?.signature !== entry.signature);
       const now = Date.now();
       const deadlineExpired = [...baseline.projected.values()].some(row => healthDeadlineExpired(row, now));
-      if (!this.staged && !changed && !logFamilies.size && !assignmentChanges?.size && !deadlineExpired && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && !healthConfig.reason && this.state === "ready") return;
+      if (!this.staged && !changed && !failedPaths.size && !this.sourceErrors.size && !logFamilies.size && !assignmentChanges?.size && !deadlineExpired && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && !healthConfig.reason && this.state === "ready") return;
       const metas = new Map<string, any>();
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
       for (const [path, entry] of next) {
@@ -795,6 +812,9 @@ export class WorkReadModel {
       }
       // The pinned source snapshot is a valid baseline even while writers advance.
       // Subsequent commits remain beyond the durable received position.
+      // revision() validates the source inode while the transaction pins data_version.
+      // Ignore unrelated later commits, but never publish a replaced coordinator.
+      if (coordinator !== "unknown") this.reader.revision();
       // Retry caches are never queryable. Validate all unpublished families again before committing them.
       this.staged = { files: next, projected: new Map(rows.map(row => [row.meta.id, row])), logs, failureJournals, processes,
         healthRevision: healthConfig.revision, coordinator, assignmentChanges: assignmentChanges && new Map(assignmentChanges),
@@ -803,7 +823,7 @@ export class WorkReadModel {
       for (const [path, entry] of [...this.files, ...next]) {
         if (this.files.get(path)?.signature !== next.get(path)?.signature) uncommitted.add(entry.meta.id);
       }
-      const verify = [...next].filter(([, entry]) => uncommitted.has(entry.meta.id));
+      const verify = [...next].filter(([path, entry]) => !failedPaths.has(path) && uncommitted.has(entry.meta.id));
       for (let offset = 0; offset < verify.length; offset += 32) {
         const group = verify.slice(offset, offset + 32);
         const observations = await Promise.all(group.map(async ([path]) => {
@@ -858,7 +878,11 @@ export class WorkReadModel {
       if (terminalLogChanges.length) this.onTerminalLogsChanged?.();
       const previousState = this.state;
       const previousReason = this.reason;
-      for (const path of paths) this.sourceErrors.delete(path);
+      for (const path of paths) {
+        const error = failedPaths.get(path);
+        if (error) this.sourceErrors.set(path, error);
+        else this.sourceErrors.delete(path);
+      }
       this.state = this.sourceErrors.size || healthConfig.reason ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
       this.reason = this.sourceErrors.values().next().value ?? healthConfig.reason ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
       if ((this.imported || paths.length === 128) && (semanticChange || previousState !== this.state || previousReason !== this.reason)) {

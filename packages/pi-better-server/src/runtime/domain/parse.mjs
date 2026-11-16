@@ -1181,6 +1181,19 @@ export function parseRun(id, options = {}) {
         diagnostics,
     };
 }
+/** Keep only the incremental facts needed by task-list displays. Detail reads use their own cursor. */
+export function parseRunDisplay(id, options) {
+    const parsed = parseRun(id, options);
+    const state = options.states.get(options.logPath ?? id);
+    if (state) {
+        state.finalText = "";
+        state.lastActivity = "";
+        state.toolCalls = state.toolCalls.slice(-1);
+        state.openToolCalls.clear();
+        state.modelError = undefined;
+    }
+    return { usage: parsed.usage, tool: parsed.toolCalls.at(-1) ?? "" };
+}
 /** Build the human-readable body for subagent_output. Exported for unit testing. */
 export function formatSubagentOutputBody(head, tools, parsedBody, rawTail, diagnostics) {
     let body;

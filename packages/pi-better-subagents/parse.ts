@@ -1356,7 +1356,9 @@ export function parseRun(id: string, options: { logPath?: string; states?: Map<s
     if (options.summaryOnly) {
         state.finalText = "";
         state.lastActivity = "";
-        state.toolCalls = state.toolCalls.slice(-256);
+        state.toolCalls = state.toolCalls.slice(-1);
+        state.openToolCalls.clear();
+        state.modelError = undefined;
     }
 
     // A log whose final line was never terminated — a writer mid-event, or one
@@ -1400,6 +1402,20 @@ export function parseRun(id: string, options: { logPath?: string; states?: Map<s
         usage,
         diagnostics,
     };
+}
+
+/** Keep only the incremental facts needed by task-list displays. Detail reads use their own cursor. */
+export function parseRunDisplay(id: string, options: { logPath?: string; states: Map<string, ParseState> }): { usage: Usage; tool: string } {
+    const parsed = parseRun(id, options);
+    const state = options.states.get(options.logPath ?? id);
+    if (state) {
+        state.finalText = "";
+        state.lastActivity = "";
+        state.toolCalls = state.toolCalls.slice(-1);
+        state.openToolCalls.clear();
+        state.modelError = undefined;
+    }
+    return { usage: parsed.usage, tool: parsed.toolCalls.at(-1) ?? "" };
 }
 
 /** Build the human-readable body for subagent_output. Exported for unit testing. */
