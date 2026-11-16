@@ -243,7 +243,7 @@ function refreshMainListWidget() {
     }
     if (!s.mainListWidgetInstalled) {
         try {
-            setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, (tui, theme) => createMainListWidget(tui, theme, deps), { placement: "aboveEditor" });
+            setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, (tui, theme, layout) => createMainListWidget(tui, theme, deps, layout), { placement: "aboveEditor" });
             s.mainListWidgetInstalled = true;
         }
         catch { /* ignore */ }
@@ -301,7 +301,7 @@ function createPointerNavigation(targetAt, activate) {
         },
     };
 }
-function createMainListWidget(tui, theme, deps) {
+function createMainListWidget(tui, theme, deps, panelLayout = { availableRows: () => Infinity }) {
     const requestRender = () => tui.requestRender?.();
     state().mainListRequestRender = requestRender;
     // navigatorId per rendered line, so a pointer row resolves by structure, never by row text.
@@ -339,8 +339,23 @@ function createMainListWidget(tui, theme, deps) {
             }
             lineWidth = renderWidth(width);
             // The leading gap line belongs to the widget too, so its slot stays ownerless.
+            let rawLines = ["", ...layout.lines];
             lineOwners = [undefined, ...layout.owners];
-            const lines = ["", ...layout.lines].map((line, index) => pointer.hovered && lineOwners[index] === pointer.hovered ? highlightPointerTarget(theme, line, lineWidth) : line);
+            const budget = Math.max(0, Math.floor(panelLayout.availableRows()));
+            if (rawLines.length > budget) {
+                const selected = state().mainListFocused ? lineOwners.indexOf(state().mainListSelectedId) : -1;
+                const count = Math.max(0, budget - 1);
+                const start = selected >= 0 ? Math.max(0, Math.min(selected - Math.floor(count / 2), rawLines.length - count)) : 2;
+                rawLines = rawLines.slice(start, start + count);
+                lineOwners = lineOwners.slice(start, start + count);
+                const visible = new Set(lineOwners.filter(Boolean));
+                if (budget > 0) {
+                    const hidden = rows.length - visible.size;
+                    rawLines.push(deps.truncate(hidden ? `   +${hidden} tasks` : `   ${rows.length} tasks`, renderWidth(width)));
+                    lineOwners.push(undefined);
+                }
+            }
+            const lines = rawLines.map((line, index) => pointer.hovered && lineOwners[index] === pointer.hovered ? highlightPointerTarget(theme, line, lineWidth) : line);
             state().lastMainListLines = lines;
             return lines;
         },
