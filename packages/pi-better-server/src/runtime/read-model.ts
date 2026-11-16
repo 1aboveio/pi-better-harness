@@ -80,6 +80,7 @@ export class WorkReadModel {
     files: WorkReadModel["files"]; projected: WorkReadModel["projected"];
     logs: Map<string, string>; failureJournals: Map<string, string>; processes: Map<string, string>; healthRevision: string;
     coordinator: string;
+    assignmentChanges?: Map<string, string>; assignmentGeneration: string;
   };
   private healthRevision = "";
   private details = new Map<string, { revision: string; value: any }>();
@@ -687,13 +688,19 @@ export class WorkReadModel {
           } else invalidateAttempt(entry.meta);
         }
       }
+      const assignmentGeneration = this.reader.changeMetrics.generation;
+      // An unpublished retry may reuse a verified projection only at the same
+      // durable source generation and per-scope position. Receipt stays pending.
+      const changedScope = (scope: string) => assignmentChanges?.has(scope)
+        && (!this.staged || this.staged.assignmentGeneration !== assignmentGeneration
+          || this.staged.assignmentChanges?.get(scope) !== assignmentChanges.get(scope));
       for (const meta of attempts) {
         if (!(meta.assignment || meta.operations || meta.park)) continue;
-        const session = meta.assignment?.owner.sessionId ?? meta.operations?.conversationId ?? meta.sessionId;
-        const workspace = meta.assignment?.owner.workspace ?? meta.operations?.workspace ?? meta.cwd;
-        if ((assignmentChanges?.has("*") && paths.some(path => next.get(path)?.meta.id === meta.id))
-            || assignmentChanges?.has(JSON.stringify([session, workspace, meta.assignment?.assignmentId ?? null]))
-            || assignmentChanges?.has(JSON.stringify([session, workspace, null]))
+        const session = meta.assignment?.owner?.sessionId ?? meta.operations?.conversationId ?? meta.sessionId;
+        const workspace = meta.assignment?.owner?.workspace ?? meta.operations?.workspace ?? meta.cwd;
+        if ((changedScope("*") && paths.some(path => next.get(path)?.meta.id === meta.id))
+            || changedScope(JSON.stringify([session, workspace, meta.assignment?.assignmentId ?? null]))
+            || changedScope(JSON.stringify([session, workspace, null]))
             || (!assignmentChanges && paths.some(path => next.get(path)?.meta.id === meta.id))) invalidateAttempt(meta);
       }
       const project = createAssignmentProjector({ attempts, observe: (owner: any) => this.reader.read(owner) });
@@ -758,7 +765,8 @@ export class WorkReadModel {
       // Subsequent commits remain beyond the durable received position.
       // Retry caches are never queryable. Validate all unpublished families again before committing them.
       this.staged = { files: next, projected: new Map(rows.map(row => [row.meta.id, row])), logs, failureJournals, processes,
-        healthRevision: healthConfig.revision, coordinator };
+        healthRevision: healthConfig.revision, coordinator, assignmentChanges: assignmentChanges && new Map(assignmentChanges),
+        assignmentGeneration };
       const uncommitted = new Set(affected);
       for (const [path, entry] of [...this.files, ...next]) {
         if (this.files.get(path)?.signature !== next.get(path)?.signature) uncommitted.add(entry.meta.id);
@@ -801,8 +809,8 @@ export class WorkReadModel {
           insert.run(m.id, m.cwd, m.callbackOrigin?.cwd ?? m.cwd, m.callbackOrigin?.sessionId ?? null,
             m.startedAt, row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, m.endedAt ?? m.lostAt ?? null, row.recipientPending ? 1 : 0, JSON.stringify(row));
           this.db.prepare("DELETE FROM assignment_members WHERE id=?").run(m.id);
-          const session = m.assignment?.owner.sessionId ?? m.operations?.conversationId ?? m.sessionId;
-          const workspace = m.assignment?.owner.workspace ?? m.operations?.workspace ?? m.cwd;
+          const session = m.assignment?.owner?.sessionId ?? m.operations?.conversationId ?? m.sessionId;
+          const workspace = m.assignment?.owner?.workspace ?? m.operations?.workspace ?? m.cwd;
           for (const assignmentId of new Set([m.assignment?.assignmentId ?? null, null])) this.db.prepare("INSERT INTO assignment_members VALUES(?,?)").run(JSON.stringify([session, workspace, assignmentId]), m.id);
         }
         this.db.exec("COMMIT");
