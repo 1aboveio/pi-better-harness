@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { runDir, writeMeta, type RunMeta } from "./registry.ts";
 import { credentialFilePaths } from "./shared-sandbox-core.ts";
 import type { PermissionSnapshot, PermissionProfile } from "./permission-policy.ts";
-import { OperationBridgeError } from "./operation-bridge-types.ts";
+import { OperationBridgeError, redactSecret } from "./operation-bridge-types.ts";
 
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 const inside = (root: string, path: string) => { const rel = relative(root, path); return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel)); };
@@ -40,12 +40,17 @@ export function recordAssignmentReport(id: string, input: unknown, assertAuthori
     catch (error) {
         // Refused input is not a committed report: the same writer may correct it.
         // Recheck the live writer before retaining even diagnostic metadata.
-        const latest = assertAuthority();
-        if (!latest.assignmentReport) writeMeta({ ...latest, assignmentReportRejection: {
-            reason: (error instanceof Error ? error.message : String(error)).slice(0, 2048), rejectedAt: Date.now(),
-        } });
+        recordAssignmentReportRejection(error instanceof Error ? error.message : String(error), assertAuthority);
         throw error;
     }
+}
+
+/** Also used for authenticated bridge refusals that never enter the report handler. */
+export function recordAssignmentReportRejection(reason: string, assertAuthority: () => RunMeta): void {
+    const latest = assertAuthority();
+    if (!latest.assignmentReport) writeMeta({ ...latest, assignmentReportRejection: {
+        reason: redactSecret(reason), rejectedAt: Date.now(),
+    } });
 }
 
 function retainAssignmentReport(id: string, input: unknown, meta: RunMeta, assertAuthority: () => RunMeta, current?: PermissionSnapshot) {
@@ -68,7 +73,8 @@ function retainAssignmentReport(id: string, input: unknown, meta: RunMeta, asser
     // Keep the legacy digest for whole-file reports without the additive fields.
     const request: unknown[] = [report.status, report.reason, report.evidence.map((e) => e.offset === undefined && e.max_bytes === undefined
         ? [e.path, e.explanation] : [e.path, e.explanation, e.offset ?? 0, e.max_bytes])];
-    if (report.remaining_work || report.blocker) request.push([report.remaining_work ?? null, report.blocker ?? null]);
+    if (report.remaining_work || report.blocker) request.push([report.remaining_work ?? null,
+        report.blocker ? [report.blocker.kind, report.blocker.reason] : null]);
     const requestDigest = hash(JSON.stringify(request));
     if (meta.assignmentReport) {
         const accepted = readAssignmentReport(meta)!;

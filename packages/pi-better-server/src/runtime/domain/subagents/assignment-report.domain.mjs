@@ -5,7 +5,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { runDir, writeMeta } from "./registry.domain.mjs";
 import { credentialFilePaths } from "./shared-sandbox-core.domain.mjs";
-import { OperationBridgeError } from "./operation-bridge-types.domain.mjs";
+import { OperationBridgeError, redactSecret } from "./operation-bridge-types.domain.mjs";
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const inside = (root, path) => { const rel = relative(root, path); return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel)); };
 function retainedBytes(path, limit) {
@@ -32,13 +32,17 @@ export function recordAssignmentReport(id, input, assertAuthority, current) {
     catch (error) {
         // Refused input is not a committed report: the same writer may correct it.
         // Recheck the live writer before retaining even diagnostic metadata.
-        const latest = assertAuthority();
-        if (!latest.assignmentReport)
-            writeMeta({ ...latest, assignmentReportRejection: {
-                    reason: (error instanceof Error ? error.message : String(error)).slice(0, 2048), rejectedAt: Date.now(),
-                } });
+        recordAssignmentReportRejection(error instanceof Error ? error.message : String(error), assertAuthority);
         throw error;
     }
+}
+/** Also used for authenticated bridge refusals that never enter the report handler. */
+export function recordAssignmentReportRejection(reason, assertAuthority) {
+    const latest = assertAuthority();
+    if (!latest.assignmentReport)
+        writeMeta({ ...latest, assignmentReportRejection: {
+                reason: redactSecret(reason), rejectedAt: Date.now(),
+            } });
 }
 function retainAssignmentReport(id, input, meta, assertAuthority, current) {
     const report = input;
@@ -68,7 +72,8 @@ function retainAssignmentReport(id, input, meta, assertAuthority, current) {
     const request = [report.status, report.reason, report.evidence.map((e) => e.offset === undefined && e.max_bytes === undefined
             ? [e.path, e.explanation] : [e.path, e.explanation, e.offset ?? 0, e.max_bytes])];
     if (report.remaining_work || report.blocker)
-        request.push([report.remaining_work ?? null, report.blocker ?? null]);
+        request.push([report.remaining_work ?? null,
+            report.blocker ? [report.blocker.kind, report.blocker.reason] : null]);
     const requestDigest = hash(JSON.stringify(request));
     if (meta.assignmentReport) {
         const accepted = readAssignmentReport(meta);
