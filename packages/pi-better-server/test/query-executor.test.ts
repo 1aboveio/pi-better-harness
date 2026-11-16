@@ -2,13 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Socket } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync, openSync, closeSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+const { commitMetadata } = await import(String("../scripts/event-publication/commit.mjs"));
 
 async function fixture(options: { capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
@@ -101,7 +102,10 @@ test("identical Work identities do not share visible results across admitted roo
   } finally { await left.close(); await right.close(); }
 });
 
-for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query and encoding work`, { timeout: 15000 }, async () => {
+for (const { count, readOnEvent } of [
+  ...[1, 5, 10].map(count => ({ count, readOnEvent: false })),
+  { count: 10, readOnEvent: true },
+]) test(readOnEvent ? "10 socket clients share publication with concurrent event-triggered reads" : `${count} socket clients share scoped query and encoding work`, { timeout: 15000 }, async () => {
   const f = await fixture();
   const scope = { cwd: join(f.root, "b"), limit: 1 };
   const write = (id: string, cwd: string, name: string) => {
@@ -165,19 +169,86 @@ for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query
     const next = await first.get({ ...scope, cursor: page.nextCursor });
     assert.equal(next.rows.length, 1);
     const baseline = f.executor.metrics() as any;
+    const eventReads: Array<Promise<any>> = [];
     const received = clients.map(client => new Promise<void>(resolve => {
-      const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) { stop(); resolve(); } });
+      const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) {
+        if (readOnEvent) eventReads.push(client.get(scope));
+        stop(); resolve();
+      } });
     }));
-    write("sa_b2", scope.cwd, "changed"); await f.executor.livenessReasons(); await Promise.all(received);
+    phase = "in-scope-update";
+    await commitMetadata(join(f.root, "runs/sa_b2/meta.json"), "changed");
+    await f.executor.livenessReasons(); await Promise.all(received);
+    const overlapping = await Promise.all(eventReads);
+    if (readOnEvent) {
+      assert.equal(overlapping.length, count);
+      for (const value of overlapping) assert.equal(value.rows[0]?.meta.name, "changed");
+    }
     await first.get(scope);
     const changed = f.executor.metrics() as any;
-    assert.equal(changed.queryCount - baseline.queryCount, 1);
-    assert.equal(changed.serializationCount - baseline.serializationCount, 1);
-    assert.equal(changed.eventEncoding.serializations - baseline.eventEncoding.serializations, 1);
-    assert.equal(changed.eventEncoding.frames - baseline.eventEncoding.frames, count);
+    try {
+      assert.equal(changed.queryCount - baseline.queryCount, 1);
+      assert.equal(changed.serializationCount - baseline.serializationCount, 1);
+      assert.equal(changed.eventEncoding.serializations - baseline.eventEncoding.serializations, 1);
+      assert.equal(changed.eventEncoding.frames - baseline.eventEncoding.frames, count);
+    } catch (error) {
+      console.error(`Shared query failure: ${JSON.stringify({ scope, clients: count, baseline, changed,
+        frames, final: clients.map(client => frameSummary(client.snapshot)) })}`);
+      throw error;
+    }
     assert.ok(changed.eventEncoding.bytes > baseline.eventEncoding.bytes);
     stops.forEach(stop => stop());
   } finally { await f.close(); }
+});
+
+test("10 socket clients share each truthful partial-write and recovery epoch", { timeout: 15000 }, async () => {
+  const f = await fixture();
+  const scope = { cwd: join(f.root, "b"), limit: 1 };
+  const directory = join(f.root, "runs/sa_partial_b"), path = join(directory, "meta.json");
+  const meta = { id: "sa_partial_b", cwd: scope.cwd, name: "verified", status: "completed", startedAt: 1 };
+  let held: number | undefined;
+  try {
+    const first = await f.client(); await ready(first);
+    mkdirSync(directory); writeFileSync(path, JSON.stringify(meta));
+    await f.executor.livenessReasons();
+    const clients = [first, ...await Promise.all(Array.from({ length: 9 }, () => f.client()))];
+    for (const client of clients) await client.subscribe(scope);
+    const initial = await first.get(scope), baseline = f.executor.metrics() as any;
+    const awaiting = (status: string) => Promise.all(clients.map(client => new Promise<void>(resolve => {
+      const stop = client.onChange(value => { if (value.status === status) { stop(); resolve(); } });
+    })));
+    const assertSharedEpoch = (before: any, after: any) => {
+      assert.equal(after.queryCount - before.queryCount, 1);
+      assert.equal(after.serializationCount - before.serializationCount, 1);
+      assert.equal(after.eventEncoding.serializations - before.eventEncoding.serializations, 1);
+      assert.equal(after.eventEncoding.frames - before.eventEncoding.frames, clients.length);
+    };
+    const degradedFrames = awaiting("degraded");
+    held = openSync(path, "w"); writeSync(held, '{"id":');
+    await f.executor.livenessReasons(); await degradedFrames;
+    const degraded = await Promise.all(clients.map(client => client.get(scope)));
+    for (const value of degraded) {
+      assert.equal(value.status, "degraded");
+      assert.match(value.reason!, /SyntaxError/);
+      assert.deepEqual(value.rows[0]!.meta, initial.rows[0]!.meta, "partial metadata is never published");
+      assert.equal(value.rows[0]!.sourceRevision, initial.rows[0]!.sourceRevision);
+      assert.equal(value.scopeRevision, degraded[0]!.scopeRevision);
+    }
+    const afterFailure = f.executor.metrics() as any;
+    assertSharedEpoch(baseline, afterFailure);
+    const readyFrames = awaiting("ready");
+    writeSync(held, JSON.stringify({ ...meta, name: "changed" }), 0, "utf8");
+    closeSync(held); held = undefined;
+    await f.executor.livenessReasons(); await readyFrames;
+    const recovered = await Promise.all(clients.map(client => client.get(scope)));
+    for (const value of recovered) {
+      assert.equal(value.status, "ready");
+      assert.equal(value.rows[0]!.meta.name, "changed");
+      assert.notEqual(value.scopeRevision, degraded[0]!.scopeRevision);
+      assert.equal(value.scopeRevision, recovered[0]!.scopeRevision);
+    }
+    assertSharedEpoch(afterFailure, f.executor.metrics());
+  } finally { if (held !== undefined) closeSync(held); await f.close(); }
 });
 
 test("stalled diagnostic completion rejects when its worker exits", { timeout: 10000 }, async () => {
@@ -295,6 +366,7 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
   const f = await fixture({ watchdogMs: 800,
     workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
   try {
+    await f.bootstrapped;
     const a = await f.client(), b = await f.client();
     const began = performance.now();
     for (let i = 0; i < 6; i++) {
@@ -610,7 +682,7 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
     const after = await b.request("runtime_get_metrics");
     assert.equal(after.queryCount, before, "the worker cache avoids repeated SQLite for a warmed scope");
     assert.ok(after.cacheHits > 0);
-    assert.equal(after.sqlite.active, 1, "only the derived index exists when no coordinator source is present");
+    assert.equal(after.sqlite.active, 1, "the query index owns the attached checkpoint store when no coordinator source is present");
   } finally { await f.close(); }
 });
 
@@ -733,7 +805,7 @@ test('Subagents and Background share one coordinator read connection in the quer
     await f.executor.livenessReasons();
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
-    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator plus one derived index, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator plus one derived index with attached checkpoints, regardless of domain');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
   } finally { await f.close(); }
 });

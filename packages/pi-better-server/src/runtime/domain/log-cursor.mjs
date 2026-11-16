@@ -18,7 +18,7 @@
  *     cursor skips ahead rather than falling permanently behind, and
  *     `truncated` reports that bytes were never seen.
  */
-import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, openSync, readSync, statSync, fstatSync } from "node:fs";
 /** Bytes of the log head kept to detect a rewrite behind our back. */
 const HEAD_SAMPLE_BYTES = 256;
 export const logReadMetrics = { bytes: 0, reads: 0, parsedEvents: 0, displayFolded: 0, healthFolded: 0 };
@@ -99,16 +99,16 @@ function headsAgree(previous, current) {
  * Passing `previous: undefined` starts cold: the last `maxBytes` of the log,
  * with the leading partial line dropped.
  */
-export function readAppendedLines(path, previous, maxBytes = DEFAULT_MAX_READ_BYTES) {
-    const key = JSON.stringify([path, previous, maxBytes]);
+export function readAppendedLines(path, previous, maxBytes = DEFAULT_MAX_READ_BYTES, cumulative = false) {
+    const key = JSON.stringify([path, previous, maxBytes, cumulative]);
     const cached = batch?.reads.get(key);
     if (cached)
         return cached;
-    const result = readLines(path, previous, maxBytes);
+    const result = readLines(path, previous, maxBytes, cumulative);
     batch?.reads.set(key, result);
     return result;
 }
-function readLines(path, previous, maxBytes) {
+function readLines(path, previous, maxBytes, cumulative) {
     logReadMetrics.reads++;
     const empty = (error) => ({
         lines: [],
@@ -133,54 +133,76 @@ function readLines(path, previous, maxBytes) {
         return empty(errText(err));
     }
     try {
+        const info = fstatSync(fd);
+        size = info.size;
+        const generation = `${info.dev}:${info.ino}:${info.birthtimeMs}`;
         const head = readHead(fd, size, path);
         // A log that shrank or whose head changed is a different log: the old
         // offset would point into unrelated bytes. Compare only the prefix the
         // two samples share, so a log still shorter than the sample window is
         // not "rewritten" every time it grows.
         const resumable = previous !== undefined
+            && (previous.generation === undefined || previous.generation === generation)
+            && !(previous.size === size && previous.modified !== undefined && previous.modified !== info.mtimeMs)
             && previous.offset <= size
             && headsAgree(previous.head, head);
         const restarted = previous !== undefined && !resumable;
+        let coverageStart = resumable ? previous.coverageStart ?? 0 : 0;
+        let missing = resumable ? previous.missing : undefined;
+        let skipLeading = resumable ? previous.skipLeading : false;
+        const cursor = (offset) => ({ offset, head, generation, size, modified: info.mtimeMs, coverageStart, missing, skipLeading });
         let start = resumable ? previous.offset : 0;
         let truncated = false;
-        if (size - start > maxBytes) {
+        if (!cumulative && size - start > maxBytes) {
             // Skip ahead instead of lagging: a chatty log must not push the
             // cursor permanently into the past.
             start = size - maxBytes;
+            coverageStart = start;
+            missing = [missing?.[0] ?? (resumable ? previous.offset : 0), start];
             truncated = true;
         }
         // We begin mid-line whenever bytes were skipped.
-        const startedMidLine = truncated;
+        const startedMidLine = truncated || skipLeading;
         if (size === start) {
-            return { lines: [], cursor: { offset: start, head }, totalBytes: size, truncated, restarted };
+            return { lines: [], cursor: cursor(start), totalBytes: size, truncated, restarted };
         }
-        const buf = readAt(fd, start, size - start, path);
+        const end = cumulative ? Math.min(size, start + maxBytes) : size;
+        const buf = readAt(fd, start, end - start, path);
         const lastNewline = buf.lastIndexOf(0x0a);
         if (lastNewline === -1) {
             // No complete line yet. Hold position so the line can finish —
             // unless it is an oversized partial we already skipped into, which
             // would otherwise be re-read forever.
-            const offset = startedMidLine ? start + buf.length : start;
+            const oversized = cumulative && end < size;
+            if (oversized)
+                missing = [missing?.[0] ?? start, end];
+            if (oversized)
+                skipLeading = true;
+            const offset = startedMidLine || oversized ? start + buf.length : start;
             const partial = startedMidLine ? undefined : buf.toString("utf-8");
-            return { lines: [], partial, cursor: { offset, head }, totalBytes: size, truncated, restarted };
+            return { lines: [], partial: oversized ? undefined : partial, cursor: cursor(offset), totalBytes: size, truncated: truncated || oversized, restarted, more: end < size };
         }
         const text = buf.subarray(0, lastNewline + 1).toString("utf-8");
         const lines = text.split("\n");
         lines.pop(); // trailing "" after the final newline
-        if (startedMidLine)
+        if (startedMidLine) {
             lines.shift(); // partial first line
+            missing = [missing?.[0] ?? 0, start + buf.indexOf(0x0a) + 1];
+            coverageStart = Math.max(coverageStart, missing[1]);
+            skipLeading = false;
+        }
         // Anything after the final newline is unterminated: hand it over
         // separately rather than pretending it is a line.
         const trailing = buf.subarray(lastNewline + 1);
-        const partial = trailing.length > 0 ? trailing.toString("utf-8") : undefined;
+        const partial = end === size && trailing.length > 0 ? trailing.toString("utf-8") : undefined;
         return {
             lines,
             partial,
-            cursor: { offset: start + lastNewline + 1, head },
+            cursor: cursor(start + lastNewline + 1),
             totalBytes: size,
             truncated,
             restarted,
+            more: end < size,
         };
     }
     catch (err) {
