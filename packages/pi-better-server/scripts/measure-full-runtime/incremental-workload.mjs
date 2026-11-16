@@ -141,6 +141,7 @@ export function reconcileTask(task, row, cwd) {
     assert.ok(row.detail.parsed.diagnostics?.some(message => /ENOENT|Log unreadable/.test(message)), 'Deleted log must report unavailable evidence');
     assert.notEqual(row.display?.coverage?.complete, true, 'Missing source cannot claim complete log coverage');
   } else {
+    assert.ok(!row.display?.coverage?.error, 'Present source projection must be verified');
     assert.ok(!row.detail.parsed.diagnostics?.some(message => /Log unreadable|Incomplete usage|catch-up pending|Log truncated/.test(message)), 'Present source must be fully reconciled');
   }
   assert.equal(row.detail.parsed.finalText, task.finalText);
@@ -153,14 +154,21 @@ export function reconcileTask(task, row, cwd) {
 }
 
 export async function reconcileWorkload(work, cwd, manifest) {
+  const missingSource = manifest.tasks.some(task => task.logState === 'missing');
+  const verifyStatus = snapshot => {
+    if (missingSource) {
+      assert.equal(snapshot.status, 'degraded', 'Missing log evidence must remain degraded');
+      assert.match(snapshot.reason ?? '', /Log source unavailable/, 'Only the expected missing-log degradation is admissible');
+    } else assert.equal(snapshot.status, 'ready', snapshot.reason);
+  };
   const snapshot = await work.get({ cwd, active: false, limit: 1 });
-  assert.equal(snapshot.status, 'ready', snapshot.reason);
+  verifyStatus(snapshot);
   // The full-runtime fixture also creates unrelated real work. Count this fixture's
   // exact identities through detail queries, not a global count containing them.
   const results = [];
   for (const task of manifest.tasks) {
     const detail = await work.get({ id: task.id, detail: true });
-    assert.equal(detail.status, 'ready', detail.reason);
+    verifyStatus(detail);
     assert.equal(detail.rows.length, 1, `Missing exact task ${task.id}`);
     results.push(reconcileTask(task, detail.rows[0], cwd));
   }
@@ -169,7 +177,7 @@ export async function reconcileWorkload(work, cwd, manifest) {
   let cursor;
   do {
     const page = await work.get({ cwd, active: false, limit: 200, ...(cursor ? { cursor } : {}) });
-    assert.equal(page.status, 'ready', page.reason);
+    verifyStatus(page);
     for (const row of page.rows) if (row.meta.id.startsWith('sa_808_history_')) {
       assert.equal(row.meta.status, 'completed');
       assert.equal(row.meta.cwd, cwd);

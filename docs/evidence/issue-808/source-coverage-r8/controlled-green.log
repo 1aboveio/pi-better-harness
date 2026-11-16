@@ -1,0 +1,40 @@
+✔ assignment receipt uses indexed dispatch and recovers none (1620.419541ms)
+✔ assignment receipt uses indexed dispatch and recovers before-apply (358.878375ms)
+✔ assignment receipt uses indexed dispatch and recovers after-apply (471.734833ms)
+✔ assignment receipt uses indexed dispatch and recovers retry (180.697166ms)
+✔ assignment receipt uses indexed dispatch and recovers unverified (125.232792ms)
+✔ bounded baseline hands off continuous receipts and rebuilds a truncated journal without false ready (4043.84475ms)
+✔ deleted empty log is unavailable, never complete; verified facts and recovery survive (1564.174334ms)
+ℹ {"empty":true,"complete":false,"status":"degraded","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-tq0UvR/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✔ deleted nonempty log is unavailable, never complete; verified facts and recovery survive (197.837417ms)
+ℹ {"empty":false,"complete":false,"status":"degraded","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-PIiuGA/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✔ unreadable log retains last verified row, empty truncation and inode replacement still recover (353.916708ms)
+✔ unavailable source cannot rewrite a durable fold across derived-reader reopen (340.822625ms)
+✔ never-observed missing source is degraded and does not create a complete checkpoint (205.600166ms)
+✔ verified archive-only membership does not promise or require deleted raw-log coverage (303.823875ms)
+✔ missing-source reconciliation accepts only the expected degradation, never unrelated malformed metadata (229.870625ms)
+✔ captured coordinator snapshot fences concurrent-commits (6154.611833ms)
+✔ captured coordinator snapshot fences replacement (2649.373458ms)
+✔ existing external file writer returns source-byte receipts and preserves its legacy metadata path (182.634083ms)
+✔ 48 workload logs preserve real usage through append, checkpoint restore and source faults (48.899292ms)
+✔ 96 workload logs preserve real usage through append, checkpoint restore and source faults (92.609584ms)
+✔ 192 workload logs preserve real usage through append, checkpoint restore and source faults (184.066833ms)
+✔ settings mutations and exact task identity retain separate actual ordinary/repair counters (1906.99425ms)
+✔ component reconciliation checks real projected identities, complete history pages and final usage (1222.077542ms)
+✔ component source changes preserve unrelated scope revisions and historical cursors (1111.780208ms)
+✔ plan selects exact fixture identities and independent faults after capability-gated recovery (40.360375ms)
+✔ component file/projection sequence with recovery controls=false preserves honest final-source reconciliation (3737.903167ms)
+ℹ {"observation":"component-only deleted source reconciliation","step":"delete-log","projectedComplete":false,"diagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-sequence-DhfLNo/pi-better-subagents/runs/sa_808_group_0/output.log'"],"state":"completed"}
+✔ component file/projection sequence with recovery controls=true preserves honest final-source reconciliation (2999.271334ms)
+ℹ {"observation":"component-only deleted source reconciliation","step":"delete-log","projectedComplete":false,"diagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-sequence-kH5TJr/pi-better-subagents/runs/sa_808_group_0/output.log'"],"state":"completed"}
+✔ recovery receipt cannot claim eviction unless actual parser caches were emptied (274.657208ms)
+✔ failed writer stops once and preserves original failure separately from reporting failure (28.89975ms)
+✔ real missing-file parser diagnostics reconcile as unavailable, never a complete zero bill (26.932417ms)
+ℹ tests 28
+ℹ suites 0
+ℹ pass 28
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 8941.426916

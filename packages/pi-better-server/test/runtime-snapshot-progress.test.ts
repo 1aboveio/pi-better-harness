@@ -16,6 +16,7 @@ for (const fault of ['concurrent-commits', 'replacement']) test(`captured coordi
   for (let i = 0; i < 260; i++) {
     const directory = join(root, 'runs', `sa_${i}`); mkdirSync(directory, { recursive: true });
     const path = join(directory, 'meta.json'); paths.push(path);
+    writeFileSync(join(directory, 'output.log'), '');
     writeFileSync(path, JSON.stringify({ id: `sa_${i}`, cwd: root, sessionId: `sa_${i}`, status: 'completed', startedAt: i }));
   }
   const model = new WorkReadModel(root, 'captured', { baseDir: root, durableDir: join(root, 'archive'), intervalMs: 60000 });

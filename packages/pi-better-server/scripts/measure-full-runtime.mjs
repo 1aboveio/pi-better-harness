@@ -199,8 +199,8 @@ try {
           if (['theme', 'same-settings'].includes(mutation.kind)) return true;
           try {
             const snapshot = await client.get({ id: mutation.id }), row = snapshot.rows[0];
+            if (mutation.kind === 'delete-log') return snapshot.status === 'degraded' && /Log source unavailable/.test(snapshot.reason ?? '') && Boolean(row?.health?.rawLog?.error);
             if (snapshot.status !== 'ready') return false;
-            if (mutation.kind === 'delete-log') return Boolean(row?.health?.rawLog?.error);
             return row?.display?.coverage?.complete && row.display.coverage.offset === receipt.afterBytes;
           } catch (error) { if (!/resync|state-degraded/.test(String(error))) throw error; return false; }
         });

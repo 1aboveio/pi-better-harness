@@ -18,6 +18,7 @@ for (const crash of ["none", "before-apply", "after-apply", "retry", "unverified
     store.registerAssignment({ assignmentId: id, owner, recipient });
     store.recordAssignmentOutcome({ assignmentId: id, owner, recipient, revision: 1, outcome: "failed", reason: "test", evidence: [], waits: [], processUncertain: false });
     mkdirSync(join(baseDir, "runs", id));
+    writeFileSync(join(baseDir, "runs", id, "output.log"), "");
     writeFileSync(join(baseDir, "runs", id, "meta.json"), JSON.stringify({ id, cwd: root, sessionId: "worker", status: "completed", startedAt: 1,
       assignment: { assignmentId: id, owner, recipient }, callbackOrigin: { cwd: root, sessionId: "parent" } }));
   }
@@ -80,6 +81,7 @@ test("bounded baseline hands off continuous receipts and rebuilds a truncated jo
   for (let i = 0; i < 260; i++) {
     const id = `attempt_${i}`;
     mkdirSync(join(root, "runs", id));
+    writeFileSync(join(root, "runs", id, "output.log"), "");
     writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, sessionId: "worker", cwd: root, status: "completed", startedAt: i,
       ...(i === 259 ? { assignment: { assignmentId: "target", owner, recipient } } : {}) }));
   }

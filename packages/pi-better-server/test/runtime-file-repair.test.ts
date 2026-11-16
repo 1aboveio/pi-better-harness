@@ -16,7 +16,8 @@ function fixture() {
   mkdirSync(agent); mkdirSync(runs, { recursive: true });
   openStore({ path: join(agent, "operation-coordinator.sqlite") }).close();
   const put = (id: string, extra = {}) => {
-    mkdirSync(join(runs, id), { recursive: true });
+    const created = mkdirSync(join(runs, id), { recursive: true });
+    if (created) writeFileSync(join(runs, id, "output.log"), "");
     const meta = { id, cwd: root, sessionId: id, callback: false, status: "running", pid: process.pid, startedAt: 1, callbackOrigin: { cwd: root, sessionId: "parent" }, ...extra };
     writeFileSync(join(runs, id, "meta.json"), JSON.stringify(meta)); return meta;
   };

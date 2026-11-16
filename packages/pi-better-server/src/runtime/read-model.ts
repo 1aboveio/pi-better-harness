@@ -737,6 +737,7 @@ export class WorkReadModel {
       const project = createAssignmentProjector({ attempts, observe: (owner: any) => this.reader.read(owner) });
       const touched = new Set(paths.map(path => next.get(path)?.meta.id));
       const rows = [];
+      let logError: string | undefined;
       for (const meta of attempts) {
         let row = baseline.projected.get(meta.id);
         const assignmentChanged = !row || (!row.assignment.verified && touched.has(meta.id)) || affected.has(meta.id) || processes.get(meta.id) !== baseline.processes.get(meta.id);
@@ -767,6 +768,22 @@ export class WorkReadModel {
           if (logChanged) withLogReadBatch(() => {
             this.counters.logProjections++; this.counters.healthProjections++;
             const logPath = join(this.runs, meta.id, "output.log");
+            const unavailable = (reason: string) => {
+              const verified = this.projected.get(meta.id);
+              const error = `Log source unavailable: ${reason}`;
+              display = { ...(verified?.display ?? { spend: "", tool: "" }),
+                diagnostics: [...(verified?.display?.diagnostics ?? []).filter(value => value !== verified?.display?.coverage?.error), error],
+                coverage: { ...verified?.display?.coverage, complete: false, error } };
+              health = verified?.health ?? health ?? extractChildEventFactsFromLog(meta.id, { logPath, states: this.healthStates });
+              if (health) health = { ...health, rawLog: { ...health.rawLog, error }, coverage: { ...health.coverage, complete: false, error } };
+              // Failed transient folds must not replace durable verified state or
+              // accumulate beyond the normal hot-cache budget.
+              this.parseStates.delete(logPath); this.healthStates.delete(logPath);
+            };
+            // Archive-only records do not promise raw-log coverage. A raw record
+            // with an unavailable source retains verified facts, not a zero fold.
+            if (!logs.has(meta.id)) { display = { spend: "", tool: "" }; health = undefined; return; }
+            if (["missing", "unverified"].includes(logs.get(meta.id)!)) { unavailable(`${logs.get(meta.id)}: ${logPath}`); return; }
             if (!this.parseStates.has(logPath) || !this.healthStates.has(logPath)) {
               const saved = this.checkpoints.load(logPath);
               if (saved) {
@@ -781,10 +798,12 @@ export class WorkReadModel {
             display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.toolCalls.at(-1) ?? "" };
             health = logs.has(meta.id) ? extractChildEventFactsFromLog(meta.id, { logPath, states: this.healthStates }) : undefined;
             const displayState = this.parseStates.get(logPath), healthState = this.healthStates.get(logPath);
+            const readError = displayState?.error ?? health?.rawLog?.error;
+            if (readError) { unavailable(readError); return; }
             display = { ...display!, diagnostics: parsed?.diagnostics, coverage: displayState ? {
               start: displayState.cursor.coverageStart ?? 0, offset: displayState.cursor.offset,
               totalBytes: displayState.totalBytes, missing: displayState.cursor.missing,
-              complete: !displayState.catchingUp && !displayState.windowTruncated && displayState.cursor.offset === displayState.totalBytes,
+              complete: !displayState.error && !displayState.cursor.missing && !displayState.catchingUp && !displayState.windowTruncated && displayState.cursor.offset === displayState.totalBytes,
             } : undefined };
             if (health && healthState) health = { ...health, coverage: { start: healthState.cursor.coverageStart ?? 0,
               offset: healthState.cursor.offset, missing: healthState.cursor.missing } };
@@ -812,6 +831,7 @@ export class WorkReadModel {
           row = { meta, assignment, display, health, recipientPending, failurePending, sourceRevision: hash([meta, assignment.revision, display, health, recipientPending, failurePending, failureJournals.get(meta.id)]) };
         }
         rows.push(row!);
+        logError ??= row?.display?.coverage?.error;
         if (++batch % 256 === 0 || performance.now() - sliceStarted >= 8) {
           await yieldTurn(); sliceStarted = performance.now();
         }
@@ -889,8 +909,8 @@ export class WorkReadModel {
         if (error) this.sourceErrors.set(path, error);
         else this.sourceErrors.delete(path);
       }
-      this.state = this.sourceErrors.size || healthConfig.reason ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
-      this.reason = this.sourceErrors.values().next().value ?? healthConfig.reason ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
+      this.state = this.sourceErrors.size || healthConfig.reason || logError ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
+      this.reason = this.sourceErrors.values().next().value ?? healthConfig.reason ?? logError ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
       if ((this.imported || paths.length === 128) && (semanticChange || previousState !== this.state || previousReason !== this.reason)) {
         this.changedRows = previousState === this.state && previousReason === this.reason ? changedRows : [];
         this.publish();

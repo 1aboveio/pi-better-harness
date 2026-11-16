@@ -1,0 +1,91 @@
+✔ deleted empty log is unavailable, never complete; verified facts and recovery survive (1408.314667ms)
+ℹ {"empty":true,"complete":false,"status":"degraded","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-gdDqR5/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✔ deleted nonempty log is unavailable, never complete; verified facts and recovery survive (261.954875ms)
+ℹ {"empty":false,"complete":false,"status":"degraded","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-VnYvYf/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✔ unreadable log retains last verified row, empty truncation and inode replacement still recover (124.765333ms)
+✔ unavailable source cannot rewrite a durable fold across derived-reader reopen (267.378709ms)
+✖ verified archive-only membership does not promise or require deleted raw-log coverage (170.853458ms)
+✖ captured coordinator snapshot fences concurrent-commits (3860.89175ms)
+✖ captured coordinator snapshot fences replacement (2041.761291ms)
+✔ existing external file writer returns source-byte receipts and preserves its legacy metadata path (137.817375ms)
+✔ 48 workload logs preserve real usage through append, checkpoint restore and source faults (39.677459ms)
+✔ 96 workload logs preserve real usage through append, checkpoint restore and source faults (84.455791ms)
+✔ 192 workload logs preserve real usage through append, checkpoint restore and source faults (168.592959ms)
+✔ settings mutations and exact task identity retain separate actual ordinary/repair counters (1706.318083ms)
+✔ component reconciliation checks real projected identities, complete history pages and final usage (653.786708ms)
+✔ component source changes preserve unrelated scope revisions and historical cursors (507.275125ms)
+✔ plan selects exact fixture identities and independent faults after capability-gated recovery (35.067ms)
+✔ component file/projection sequence with recovery controls=false preserves honest final-source reconciliation (2657.983375ms)
+ℹ {"observation":"component-only deleted source reconciliation","step":"delete-log","projectedComplete":false,"diagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-sequence-mUHetv/pi-better-subagents/runs/sa_808_group_0/output.log'"],"state":"completed"}
+✔ component file/projection sequence with recovery controls=true preserves honest final-source reconciliation (1618.259708ms)
+ℹ {"observation":"component-only deleted source reconciliation","step":"delete-log","projectedComplete":false,"diagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-sequence-CVgwhx/pi-better-subagents/runs/sa_808_group_0/output.log'"],"state":"completed"}
+✔ recovery receipt cannot claim eviction unless actual parser caches were emptied (376.629083ms)
+✔ failed writer stops once and preserves original failure separately from reporting failure (24.153958ms)
+✔ real missing-file parser diagnostics reconcile as unavailable, never a complete zero bill (23.671792ms)
+ℹ tests 20
+ℹ suites 0
+ℹ pass 17
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 6092.420875
+
+✖ failing tests:
+
+test at packages/pi-better-server/test/runtime-log-source-coverage.test.ts:1:6804
+✖ verified archive-only membership does not promise or require deleted raw-log coverage (170.853458ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'degraded'
+  - 'ready'
+  
+      at TestContext.<anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/test/runtime-log-source-coverage.test.ts:109:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'degraded',
+    expected: 'ready',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at packages/pi-better-server/test/runtime-snapshot-progress.test.ts:1:612
+✖ captured coordinator snapshot fences concurrent-commits (3860.89175ms)
+  AssertionError [ERR_ASSERTION]: Log source unavailable: missing: /Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-snapshot-JyYNaC/runs/sa_253/output.log
+  + actual - expected
+  
+  + 'degraded'
+  - 'ready'
+  
+      at TestContext.<anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/test/runtime-snapshot-progress.test.ts:48:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'degraded',
+    expected: 'ready',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at packages/pi-better-server/test/runtime-snapshot-progress.test.ts:1:612
+✖ captured coordinator snapshot fences replacement (2041.761291ms)
+  AssertionError [ERR_ASSERTION]: Log source unavailable: missing: /Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-snapshot-WlisnL/runs/sa_0/output.log
+  + actual - expected
+  
+  + 'degraded'
+  - 'ready'
+  
+      at TestContext.<anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/test/runtime-snapshot-progress.test.ts:48:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'degraded',
+    expected: 'ready',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

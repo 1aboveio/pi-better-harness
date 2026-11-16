@@ -1,0 +1,59 @@
+✔ assignment receipt uses indexed dispatch and recovers none (1643.659542ms)
+✔ assignment receipt uses indexed dispatch and recovers before-apply (285.550625ms)
+✔ assignment receipt uses indexed dispatch and recovers after-apply (373.266417ms)
+✔ assignment receipt uses indexed dispatch and recovers retry (303.207042ms)
+✔ assignment receipt uses indexed dispatch and recovers unverified (359.05ms)
+✔ bounded baseline hands off continuous receipts and rebuilds a truncated journal without false ready (4329.678542ms)
+✔ deleted empty log is unavailable, never complete; verified facts and recovery survive (1658.637917ms)
+ℹ {"empty":true,"complete":false,"status":"degraded","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-hWDPiu/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✔ deleted nonempty log is unavailable, never complete; verified facts and recovery survive (184.764375ms)
+ℹ {"empty":false,"complete":false,"status":"degraded","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-ywgQ7r/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✔ unreadable log retains last verified row, empty truncation and inode replacement still recover (241.953834ms)
+✔ unavailable source cannot rewrite a durable fold across derived-reader reopen (604.242959ms)
+✖ verified archive-only membership does not promise or require deleted raw-log coverage (323.661041ms)
+✔ captured coordinator snapshot fences concurrent-commits (6748.450208ms)
+✔ captured coordinator snapshot fences replacement (2740.995709ms)
+✔ existing external file writer returns source-byte receipts and preserves its legacy metadata path (155.776ms)
+✔ 48 workload logs preserve real usage through append, checkpoint restore and source faults (44.458167ms)
+✔ 96 workload logs preserve real usage through append, checkpoint restore and source faults (210.742959ms)
+✔ 192 workload logs preserve real usage through append, checkpoint restore and source faults (179.798959ms)
+✔ settings mutations and exact task identity retain separate actual ordinary/repair counters (2347.738625ms)
+✔ component reconciliation checks real projected identities, complete history pages and final usage (1371.93475ms)
+✔ component source changes preserve unrelated scope revisions and historical cursors (1042.642916ms)
+✔ plan selects exact fixture identities and independent faults after capability-gated recovery (29.909083ms)
+✔ component file/projection sequence with recovery controls=false preserves honest final-source reconciliation (4377.026ms)
+ℹ {"observation":"component-only deleted source reconciliation","step":"delete-log","projectedComplete":false,"diagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-sequence-8tpT11/pi-better-subagents/runs/sa_808_group_0/output.log'"],"state":"completed"}
+✔ component file/projection sequence with recovery controls=true preserves honest final-source reconciliation (3013.419625ms)
+ℹ {"observation":"component-only deleted source reconciliation","step":"delete-log","projectedComplete":false,"diagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-sequence-RLAsZv/pi-better-subagents/runs/sa_808_group_0/output.log'"],"state":"completed"}
+✔ recovery receipt cannot claim eviction unless actual parser caches were emptied (378.795417ms)
+✔ failed writer stops once and preserves original failure separately from reporting failure (21.8475ms)
+✔ real missing-file parser diagnostics reconcile as unavailable, never a complete zero bill (23.444334ms)
+ℹ tests 26
+ℹ suites 0
+ℹ pass 25
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9684.343791
+
+✖ failing tests:
+
+test at packages/pi-better-server/test/runtime-log-source-coverage.test.ts:1:6804
+✖ verified archive-only membership does not promise or require deleted raw-log coverage (323.661041ms)
+  AssertionError [ERR_ASSERTION]: Error: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-archive-source-zg7t5a/pi-better-subagents/runs/sa_808_group_0/meta.json'
+  + actual - expected
+  
+  + 'degraded'
+  - 'ready'
+  
+      at TestContext.<anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/test/runtime-log-source-coverage.test.ts:110:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'degraded',
+    expected: 'ready',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

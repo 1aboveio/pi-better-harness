@@ -1,0 +1,31 @@
+✔ retired root and child watcher callbacks cannot schedule repair (716.107916ms)
+✔ late compact archives cannot replace live recipient markers or reset its cursor (157.050667ms)
+✔ late archive preserves saved-conversation recipient obligations for parent (216.512459ms)
+✔ late archive preserves saved-conversation recipient obligations for another-session (270.722833ms)
+✔ nullable and over-budget replacements retain verified rows until deletion is verified under an available root (122.771167ms)
+✔ compact display cursors do not discard independent detail text and tool history (64.040542ms)
+✔ idle timer repair stays bounded as unchanged task history grows (6712.957417ms)
+ℹ {"batches":3,"paths":384,"stats":1536}
+✔ display cursors retain usage and the latest tool without historical response payloads (136.293042ms)
+✔ a malformed task does not block verified siblings in the same repair batch (73.40475ms)
+✔ a later archive never overrides its live raw task, and raw deletion reveals the archive (26.646834ms)
+✔ an exact task hint fences a genuinely changed source before publication and retries (40.863833ms)
+✔ a malformed replacement discards unpublished staging without blocking its sibling (42.5505ms)
+✔ precise hints coalesce; bounded repair resumes despite hot writes and repairs missing sources (3603.0655ms)
+ℹ {"inventories":39,"metadataReads":163,"projections":165,"assignmentProjections":163,"logProjections":164,"healthProjections":164,"failureProjections":163,"healthRecomputations":165,"healthConfigInvalidations":1,"checkpoints":{"restores":1,"misses":162,"commits":164,"oversized":0,"hotDisplay":1,"hotHealth":1},"assignments":{"singleton":1,"generation":"16777232:1055066623:4:7759a244457b843b68fc6510100e2385","received":0,"applied":0,"more":false,"affected":[],"pending":0,"oldestPendingAt":null,"oldestPendingAgeMs":0,"repairs":1},"sourceWork":{"entity":{"batches":15,"paths":263,"stats":539,"metadataReads":1,"logBytes":96,"logReads":2},"repair":{"batches":24,"paths":2218,"stats":8384,"metadataReads":162,"logBytes":0,"logReads":162}},"scheduling":{"entityBatches":15,"repairBatches":24,"repairEntries":2218,"overflows":63,"maxQueueAgeMs":20,"maxPublicationMs":5.208749999999782,"queued":0},"invalidations":{"assignmentInput":1,"process":0,"log":2,"failureAttention":0,"healthConfig":0,"healthDeadline":0,"unverified":0,"initial":162},"logReads":{"bytes":108147,"reads":696,"parsedEvents":113,"displayFolded":110,"healthFolded":107},"coordinatorConnections":1,"indexConnections":1,"sourceWatchers":2,"sourceParentWatchers":3,"rootParentWatchers":3}
+✔ repair verifies missed deletion of never-imported invalid metadata, retaining errors while its root is missing (33.582042ms)
+✔ repair verifies missed deletion of never-imported invalid archive, retaining errors while its root is missing (35.984709ms)
+✔ repair verifies missed deletion of never-imported invalid marker, retaining errors while its root is missing (54.803ms)
+✔ exact deletion hints settle a follow-up turn scheduled when the first turn completes (38.864916ms)
+✔ failed-source deletion repair keeps its 128-path budget and does not clear unverified errors early (560.16025ms)
+✔ retired root watcher callbacks cannot act on replacement descriptors (22.519792ms)
+✔ empty Subagent repair still publishes independent Background coordinator progress (27.503792ms)
+✔ initial repair retains health configuration degradation until valid settings recover (30.793667ms)
+ℹ tests 21
+ℹ suites 0
+ℹ pass 21
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 13162.834792

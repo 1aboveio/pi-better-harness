@@ -1,0 +1,7 @@
+{
+  "name": "pi-better-server",
+  "version": "0.5.0",
+  "dryRun": true,
+  "sourceCoverageFixPackaged": true,
+  "fileCount": 732
+}

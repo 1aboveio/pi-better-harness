@@ -44,6 +44,12 @@ remains failed, not completed. This source failure is recorded separately from
 the passing safety-rejection assertions; no production fix or assertion waiver
 was introduced in this unit.
 
+At the r8 source checkpoint this specific production defect was corrected after
+a controlled real-file RED/GREEN regression. Missing/unreadable raw logs now retain
+verified facts as degraded/incomplete without checkpoint writes. The original r7
+failure evidence remains historical and unmodified. Reconciliation admits only the
+expected missing-log degradation, never unrelated errors or a complete claim.
+
 An unavailable log is distinct from an available empty log. Missing-source
 diagnostics are mandatory and reconciled cumulative cost/input/output are null,
 never an asserted complete zero bill. A direct actual-file/parser check covers
@@ -53,7 +59,7 @@ that classification without emulating a native client.
 
 The primary fixture has no legitimate runtime eviction/restart hook. It must not
 invent one, clear inherited authority or retry a refused runtime. The deleted-log
-false completeness needs source-owner disposition before this case can pass.
+production fix has component coverage, but its native verification is still unrun.
 
 All original native both-OS, actual-session, fixed-host and at-least-ten-minute
 EACH workload criteria remain. Full crash/drop/gap/out-of-order recovery, UI/

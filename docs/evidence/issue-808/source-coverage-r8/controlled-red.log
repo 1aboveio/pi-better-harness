@@ -1,0 +1,66 @@
+✖ deleted empty log is unavailable, never complete; verified facts and recovery survive (1080.919167ms)
+ℹ {"empty":true,"complete":true,"status":"ready","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-i54QI7/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✖ deleted nonempty log is unavailable, never complete; verified facts and recovery survive (29.418834ms)
+ℹ {"empty":false,"complete":true,"status":"ready","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-GoJM7h/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✖ unreadable log retains last verified row, empty truncation and inode replacement still recover (23.009583ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 0
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1339.927834
+
+✖ failing tests:
+
+test at packages/pi-better-server/test/runtime-log-source-coverage.test.ts:1:740
+✖ deleted empty log is unavailable, never complete; verified facts and recovery survive (1080.919167ms)
+  AssertionError [ERR_ASSERTION]: ENOENT source cannot be complete even at offset0/total0
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/test/runtime-log-source-coverage.test.ts:28:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at packages/pi-better-server/test/runtime-log-source-coverage.test.ts:1:740
+✖ deleted nonempty log is unavailable, never complete; verified facts and recovery survive (29.418834ms)
+  AssertionError [ERR_ASSERTION]: ENOENT source cannot be complete even at offset0/total0
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/test/runtime-log-source-coverage.test.ts:28:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at packages/pi-better-server/test/runtime-log-source-coverage.test.ts:1:3574
+✖ unreadable log retains last verified row, empty truncation and inode replacement still recover (23.009583ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  true !== false
+  
+      at TestContext.<anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/test/runtime-log-source-coverage.test.ts:59:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
