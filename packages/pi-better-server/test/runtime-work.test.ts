@@ -64,7 +64,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
         maximum: main.maximum + worker.maximum };
     };
     const sqliteBefore = await actualConnections();
-    assert.equal(sqliteBefore.active, 3, "the query index, durable assignment inbox and coordinator connection are retained by the daemon");
+    assert.equal(sqliteBefore.active, 2, "one coordinator and one derived connection retain the query index and attached durable inbox");
     assert.equal(first.snapshot!.rows.length, 50);
     for (const count of [1, 5, 10]) {
       while (clients.length < count) {
@@ -87,7 +87,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.equal(after.projections, before.projections);
       assert.equal(after.metadataReads, before.metadataReads);
       assert.equal(after.coordinatorConnections, 1);
-      assert.equal(after.indexConnections, 2);
+      assert.equal(after.indexConnections, 1);
       assert.deepEqual(await actualConnections(), sqliteBefore, "queries do not open extra SQLite connections");
     }
     for (const count of [1, 5, 10]) {
@@ -105,7 +105,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.equal(after.projections, before.projections, `${count} independent client processes do not project unchanged scopes`);
       assert.equal(after.metadataReads, before.metadataReads, `${count} independent client processes do not reread metadata`);
       assert.equal(after.coordinatorConnections, 1);
-      assert.equal(after.indexConnections, 2);
+      assert.equal(after.indexConnections, 1);
       assert.deepEqual(await actualConnections(), sqliteBefore, "independent processes share the same actual retained SQLite connections");
     }
     const saved = new Map(["PI_CODING_AGENT_DIR", "TMPDIR", "PI_CATALOG_ACCEPTANCE_PROBE"].map(key => [key, process.env[key]]));

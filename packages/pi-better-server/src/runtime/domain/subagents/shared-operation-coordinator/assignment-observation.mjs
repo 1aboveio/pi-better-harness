@@ -46,8 +46,8 @@ export function readAssignmentWaits(path, owner, connection) {
     }
 }
 /** A root read model owns this connection; ordinary observers remain one-shot. */
-export function createAssignmentReader(path, inboxPath = ":memory:") {
-    const inbox = new AssignmentInbox(inboxPath);
+export function createAssignmentReader(path, inboxPath = ":memory:", derivedConnection) {
+    const inbox = new AssignmentInbox(inboxPath, derivedConnection);
     let db;
     let identity;
     let snapshot = false;

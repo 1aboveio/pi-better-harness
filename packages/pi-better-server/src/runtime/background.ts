@@ -91,7 +91,7 @@ export class BackgroundObservation {
     setImmediate(() => { this.scheduled = false; if (!this.closed && this.refresh()) this.changed(); });
   }
   private oweRepair() {
-    this.inbox.db.prepare("INSERT OR REPLACE INTO background_file_repair VALUES(1,?,'',0)").run(this.identity ?? "");
+    this.inbox.db.prepare(`INSERT OR REPLACE INTO ${this.inbox.prefix}background_file_repair VALUES(1,?,'',0)`).run(this.identity ?? "");
     this.repairAfter = ""; this.repairComplete = false;
   }
   private observeDirectory(directory: string) {
@@ -128,9 +128,11 @@ export class BackgroundObservation {
     this.changed = changed;
     this.root = root; this.directory = directory;
     mkdirSync(join(root, "runtime-read-repair"), { recursive: true });
-    this.inbox = new AssignmentInbox(join(root, "runtime-read-repair", "background.sqlite"), { entityPrefix: "background:" });
-    this.inbox.db.exec("CREATE TABLE IF NOT EXISTS background_file_repair(singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT, after_id TEXT, complete INTEGER)");
-    const repair = this.inbox.db.prepare("SELECT * FROM background_file_repair WHERE singleton=1").get();
+    this.inbox = indexDb
+      ? new AssignmentInbox(join(root, "runtime-read-repair", "background.sqlite"), indexDb, { entityPrefix: "background:" })
+      : new AssignmentInbox(join(root, "runtime-read-repair", "background.sqlite"), { entityPrefix: "background:" });
+    this.inbox.db.exec(`CREATE TABLE IF NOT EXISTS ${this.inbox.prefix}background_file_repair(singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT, after_id TEXT, complete INTEGER)`);
+    const repair = this.inbox.db.prepare(`SELECT * FROM ${this.inbox.prefix}background_file_repair WHERE singleton=1`).get();
     if (repair) { this.identity = repair.identity || undefined; this.knownCoordinator = Boolean(this.identity); this.repairAfter = repair.after_id; this.repairComplete = Boolean(repair.complete); }
     if (indexDb) this.history = new BackgroundHistory(indexDb, directory, () => {
       if (this.status === "degraded") throw new Error(this.reason);
@@ -176,7 +178,7 @@ export class BackgroundObservation {
         for (const op of repair) { this.repairIds.add(op.operation_id); this.metrics.repairEntries++; this.history?.invalidateOperation(op.operation_id); }
         this.repairAfter = repair.length === ENTITY_BUDGET ? repair.at(-1).operation_id : "";
         if (!this.repairAfter) this.repairComplete = true;
-        this.inbox.db.prepare("INSERT OR REPLACE INTO background_file_repair VALUES(1,?,?,?)").run(this.identity ?? "", this.repairAfter, Number(this.repairComplete));
+        this.inbox.db.prepare(`INSERT OR REPLACE INTO ${this.inbox.prefix}background_file_repair VALUES(1,?,?,?)`).run(this.identity ?? "", this.repairAfter, Number(this.repairComplete));
       }
       const hasPendingIndex = Boolean(this.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_parent_callbacks'").get());
       this.changedOperations.clear();

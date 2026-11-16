@@ -557,7 +557,7 @@ test("diagnostic observation uses pushed state without initiating another invent
   } finally { await f.close(); }
 });
 
-test('Subagents and Background share one coordinator read connection in the query worker', async () => {
+test('Subagents and Background share one coordinator read connection in the query worker', async t => {
   const f = await fixture();
   const { openStore } = await import(new URL('../../operation-coordinator/index.ts', import.meta.url).href);
   const store = openStore({ path: join(f.root, 'operation-coordinator.sqlite') }); store.close();
@@ -566,12 +566,15 @@ test('Subagents and Background share one coordinator read connection in the quer
     await f.executor.livenessReasons();
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
-    assert.equal((f.executor.metrics().sqlite as any).active, 3, 'one coordinator, one query index and one durable assignment inbox, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator and one derived connection with the durable inbox attached, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).opens, 2, 'both inbox attachments reuse the existing derived handle without another constructor open');
+    assert.equal((f.executor.metrics().sqlite as any).maximum, 2, 'Background attachment cannot temporarily exceed the existing handle budget');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
+    t.diagnostic(JSON.stringify({ retainedBudget: 2, sqlite: f.executor.metrics().sqlite }));
   } finally { await f.close(); }
 });
 
-test("assignment wait, resume claim, cancellation, outcome and receipt cross the real socket", { timeout: 10000 }, async () => {
+test("assignment wait, resume claim, cancellation, outcome and receipt cross the real socket", { timeout: 10000 }, async t => {
   const f = await fixture({ intervalMs: 25 });
   const { openStore } = await import(new URL('../../operation-coordinator/index.ts', import.meta.url).href);
   const store = openStore({ path: join(f.root, 'operation-coordinator.sqlite') });
@@ -605,6 +608,10 @@ test("assignment wait, resume claim, cancellation, outcome and receipt cross the
     await observed(s => s.rows[0]?.assignment.state === "cancelled");
     store.receiptAssignmentOutcome({ assignmentId: "assignment", recipient, revision: 1, entryId: "entry" });
     await observed(s => s.rows[0]?.recipientPending === false);
+    const sqlite = f.executor.metrics().sqlite as any;
+    assert.equal(sqlite.active, 2, "the full receipt journey retains only the source and shared derived handles");
+    assert.ok(sqlite.maximum <= 2, "inbox transactions do not open an extra SQLite handle");
+    t.diagnostic(JSON.stringify({ retainedBudget: 2, sqlite }));
     assert.equal(store.getWait(wait).phase, "cancelled");
     assert.equal(store.getAssignmentOutcome("assignment").disposition, null, "derived observation must not consume a result");
     assert.equal(store.listOutbox().find((event: any) => event.type === "assignment-outcome").state, "delivered");

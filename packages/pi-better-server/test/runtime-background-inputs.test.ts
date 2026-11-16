@@ -4,7 +4,24 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackgroundObservation } from "../src/runtime/background.ts";
+import { WorkReadModel } from "../src/runtime/read-model.ts";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
+
+test("Background constructor attaches its inbox and repair state to the query owner's handle", async () => {
+  const root = mkdtempSync(join(tmpdir(), "background-connection-"));
+  const model = new WorkReadModel(root, "shared-inboxes", { baseDir: join(root, "runs"), durableDir: join(root, "archive"), intervalMs: 60000 });
+  try {
+    const derived = (model as any).db;
+    const inbox = (model as any).background.inbox;
+    assert.equal(inbox.db, derived);
+    assert.equal(inbox.prefix, "background_inbox.");
+    assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "assignment_inbox", "background_inbox"]);
+    assert.ok(derived.prepare("SELECT name FROM background_inbox.sqlite_master WHERE name='background_file_repair'").get());
+    assert.equal(derived.prepare("SELECT name FROM main.sqlite_master WHERE name='background_file_repair'").get(), undefined);
+    assert.equal(derived.prepare("SELECT name FROM assignment_inbox.sqlite_master WHERE name='background_file_repair'").get(), undefined);
+    assert.equal(model.metrics.indexConnections, 1);
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test("one Background task input changes only its projection and dependent wait query", async () => {
   const root = mkdtempSync(join(tmpdir(), "background-inputs-"));
