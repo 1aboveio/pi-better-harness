@@ -1,8 +1,22 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
+import { socketPathFor } from '../../src/runtime/socket.ts';
 
 export const baseline = 'eec7b3e256a7548bbf67f69cd468f12eb3b91dc8';
+
+export function workloadTransport(root, env = process.env) {
+  const explicit = env.PI_FULL_RUNTIME_TRANSPORT_DIR;
+  const directory = explicit ?? join(root, 's');
+  if (explicit !== undefined) {
+    assert.ok(isAbsolute(explicit), 'PI_FULL_RUNTIME_TRANSPORT_DIR must be an absolute existing owned directory');
+    assert.equal(realpathSync(explicit), explicit, 'Workload transport must be canonical, not an alias');
+    const info = statSync(explicit);
+    assert.ok(info.isDirectory(), 'Workload transport must be a directory');
+    if (process.getuid) assert.equal(info.uid, process.getuid(), 'Workload transport must be owned by the current user');
+  }
+  return { directory, socketPath: socketPathFor(directory) };
+}
 
 export function workloadSettings(env = process.env) {
   if (env.PI_INCREMENTAL_WORKLOAD !== '1') return undefined;

@@ -1,9 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { workloadSettings, seedWorkload } from '../scripts/measure-full-runtime/incremental-workload.mjs';
+import { workloadSettings, seedWorkload, workloadTransport } from '../scripts/measure-full-runtime/incremental-workload.mjs';
+import { socketPathFor } from '../src/runtime/socket.ts';
+
+test('workload transport uses the explicit direct owned directory without a nested suffix', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'p808-transport-'));
+  try {
+    // The registered local TMPDIR is deliberately too long for a socket. This
+    // selection test verifies no truncation or nested random transport is added.
+    const selected = process.env.PI_FULL_RUNTIME_TRANSPORT_DIR ?? directory;
+    if (Buffer.byteLength(join(selected, 'pi-server.sock')) <= 103) {
+      const transport = workloadTransport('/bulk', { PI_FULL_RUNTIME_TRANSPORT_DIR: selected });
+      assert.equal(transport.directory, selected);
+      assert.equal(transport.socketPath, join(selected, 'pi-server.sock'));
+    } else {
+      assert.throws(() => workloadTransport('/bulk', { PI_FULL_RUNTIME_TRANSPORT_DIR: selected }), /Socket path is too long/);
+    }
+    assert.throws(() => workloadTransport('/bulk', { PI_FULL_RUNTIME_TRANSPORT_DIR: 'relative' }), /absolute/);
+    assert.throws(() => workloadTransport('/bulk', { PI_FULL_RUNTIME_TRANSPORT_DIR: join(directory, 'missing') }), /ENOENT/);
+    const file = join(directory, 'file'); writeFileSync(file, '');
+    assert.throws(() => workloadTransport('/bulk', { PI_FULL_RUNTIME_TRANSPORT_DIR: file }), /directory/);
+    const alias = join(directory, 'alias'); symlinkSync(directory, alias);
+    assert.throws(() => workloadTransport('/bulk', { PI_FULL_RUNTIME_TRANSPORT_DIR: alias }), /alias/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('workload transport preserves default selection and enforces socket bytes at the exact boundary', () => {
+  assert.deepEqual(workloadTransport('/bulk', {}), { directory: '/bulk/s', socketPath: '/bulk/s/pi-server.sock' });
+  const directory = '/' + 'a'.repeat(87);
+  assert.equal(Buffer.byteLength(socketPathFor(directory)), 103);
+  assert.throws(() => socketPathFor(directory + 'a'), /104 > 103/);
+  assert.throws(() => socketPathFor('/' + '\u00e9'.repeat(45)), /106 > 103/);
+  assert.throws(() => workloadTransport(directory + '/bulk', {}), /Socket path is too long/);
+});
 
 test('incremental qualification rejects short windows and invalid workload identities', () => {
   assert.equal(workloadSettings({}), undefined);

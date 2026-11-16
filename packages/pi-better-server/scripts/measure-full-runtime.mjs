@@ -13,9 +13,12 @@ import { inspectDaemonOwner, processMatchesStart } from '../src/daemon-owner.ts'
 import { WorkClient } from '../src/runtime/work-client.mjs';
 import { DaemonClient } from '../src/client.ts';
 import { RemoteClientSession } from '../src/remote-client/session.ts';
-import { workloadSettings, seedWorkload, reconcileWorkload } from './measure-full-runtime/incremental-workload.mjs';
+import { workloadSettings, seedWorkload, reconcileWorkload, workloadTransport } from './measure-full-runtime/incremental-workload.mjs';
+import { checkStartupAdmission, startupIntentFromEnv } from '../src/startup/admission.ts';
+import { readOwnBuild } from '../src/startup/artifact.ts';
 const incremental = workloadSettings();
-const root = realpathSync(mkdtempSync(join(tmpdir(), 'p751-full-'))), agent = join(root, 'agent'), transport = join(root, 's'), cwd = join(root, 'workspace'), samples = join(root, 'samples');
+const root = realpathSync(mkdtempSync(join(tmpdir(), 'p751-full-'))), agent = join(root, 'agent'), cwd = join(root, 'workspace'), samples = join(root, 'samples');
+const { directory: transport, socketPath } = workloadTransport(root);
 for (const path of [agent, transport, cwd, samples, join(agent, 'agents/roles')]) mkdirSync(path, { recursive: true });
 const sessionFile=join(root,'resource-session.jsonl');
 writeFileSync(sessionFile,JSON.stringify({type:'session',version:3,id:randomUUID(),timestamp:new Date().toISOString(),cwd})+'\n');
@@ -32,7 +35,7 @@ writeFileSync(join(agent, 'auth.json'), JSON.stringify({ openai: { type: 'api_ke
 writeFileSync(join(agent, 'settings.json'), JSON.stringify({ piBetterHarness: { subagents: { providerExtensions: { openai: fileURLToPath(new URL('../test/support/subagent-offline-model.ts', import.meta.url)) }, defaultTools: 'read', maxConcurrent: 1 } } }));
 writeFileSync(join(agent, 'agents/roles/fixture.md'), '---\nschema: pi-agent/v1\nkind: role\nid: role.fixture\nname: Fixture\ndefaults:\n  model: openai/gpt-4.1\n---\nOffline resource fixture.\n');
 let errors = '', seq = 0; const children = [], clients = [];
-const report = { root, mode: process.env.PI_FULL_RUNTIME_MATRIX_ONLY ? "mixed-adapter-smoke-not-performance" : "resource-matrix", platform: process.platform, node: process.version, machine:{release:release(),arch:arch(),cpus:cpus().length,cpuModel:cpus()[0]?.model,totalMemory:totalmem()}, source:sourceProvenance(fileURLToPath(new URL('../../..', import.meta.url))), scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two real RemoteClientSession adapters over loopback Unix transport with HostedSessions (not cross-machine SSH); sampler overhead included', scenarios: [] };
+const report = { root, transport, socketPath, socketBytes: Buffer.byteLength(socketPath), mode: process.env.PI_FULL_RUNTIME_MATRIX_ONLY ? "mixed-adapter-smoke-not-performance" : "resource-matrix", platform: process.platform, node: process.version, machine:{release:release(),arch:arch(),cpus:cpus().length,cpuModel:cpus()[0]?.model,totalMemory:totalmem()}, source:sourceProvenance(fileURLToPath(new URL('../../..', import.meta.url))), scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two real RemoteClientSession adapters over loopback Unix transport with HostedSessions (not cross-machine SSH); sampler overhead included', scenarios: [] };
 const output = process.env.PI_FULL_RUNTIME_REPORT ?? join(root, 'report.json');
 if (incremental) Object.assign(report, { incremental, workload, qualification: 'notRun', missing: ['fault matrix', 'scope/UI matrix', 'native dual-platform runs', 'paired fixed-host comparison', 'GC/peak/queue-age diagnostics', 'natural idle exit'] });
 function start(url) { const child = fork(url, [], { execPath, execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); children.push(child); child.stdout.resume(); child.stderr.on('data', d => { errors += d; }); return child; }
@@ -42,6 +45,12 @@ async function call(child, tool, params, key = `resource-${++seq}`) { const id =
 function observed() { return readdirSync(samples).filter(name => name.endsWith('.json')).flatMap(name => { try { const value = JSON.parse(readFileSync(join(samples,name),'utf8')); return processMatchesStart(value.identity.pid,value.identity.start) ? [value] : []; } catch { return []; } }); }
 let guardian, work; const hostedClients=[], remotes=[];
 try {
+  report.phase = 'startup-admission-preflight';
+  const intent = startupIntentFromEnv(env);
+  report.startup = { intent: intent.kind, inheritedGuardedChild: Boolean(env.PI_SERVER_GUARDED_CHILD), inheritedRebind: Boolean(env.PI_SERVER_GUARDIAN_REBIND) };
+  checkStartupAdmission({ canonicalServerDir: transport, agentDir: agent, build: readOwnBuild(), intent });
+  assert.ok(!env.PI_SERVER_GUARDED_CHILD && !env.PI_SERVER_GUARDIAN_REBIND, 'Primary workload requires its own legitimate guardian bootstrap; inherited guardian authority cannot be reused');
+  report.phase = 'start-primary-guardian';
   guardian = start(new URL('../src/cli.ts', import.meta.url));
   const owner = await until('server owner', () => { const v = inspectDaemonOwner(transport); return v.status === 'live' && v.owner; });
   await until('socket', async () => { try { work = new WorkClient(join(transport,'pi-server.sock'), agent); await work.ready; return true; } catch { work?.close(); return false; } });
