@@ -6,6 +6,7 @@ import test from "node:test";
 import { describeSandboxSupport } from "../sandbox-core/index.ts";
 import { createTaskExecutor } from "./exec.ts";
 import { createRunApplicationToolDefinition } from "./application.ts";
+const { executableDiagnostic } = await import(String('./test-support/owned-process.mjs'));
 
 const support = describeSandboxSupport();
 // Skip is right on a developer machine without a backend, but the lane whose
@@ -37,7 +38,8 @@ test("direct executable tokens cannot become env assignments that launch an unch
         let literalOutput = "";
         const result = await run({ kind: "argv", execPath: alias, execArgs: ["%s", "literal; argument"] }, root,
             { onData: (chunk) => { literalOutput += chunk; } });
-        assert.equal(result.exitCode, 0);
+        assert.equal(result.exitCode, 0, JSON.stringify({ phase: 'literal-executable-alias', output: literalOutput.slice(0, 2048),
+            source: executableDiagnostic('/usr/bin/printf'), executable: executableDiagnostic(alias), platform: process.platform, node: process.version }));
         assert.equal(literalOutput, "literal; argument");
         const trueAlias = join(root, "runner=1");
         symlinkSync("/usr/bin/true", trueAlias);
