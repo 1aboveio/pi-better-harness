@@ -2,6 +2,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createWorkBudget } from "../src/runtime/work-budget.ts";
 
+test('pending source state is bounded by live owner kind entity and reports actual due versus start', async () => {
+  const budget = createWorkBudget();
+  const held = Array.from({length:16},()=>budget.enter('control')!);
+  const dueAt = Date.now() - 50;
+  let calls = 0;
+  const first = budget.scheduleSource('legacy-handoff','entity',()=>++calls,'owner',dueAt);
+  for (let i=0;i<10000;i++) assert.equal(budget.scheduleSource('legacy-handoff','entity',()=>++calls,'owner',dueAt),first);
+  assert.equal(budget.metrics().queuedSources,1);
+  held.forEach(release=>release());
+  const keepAlive=setTimeout(()=>{},1000);
+  try { assert.equal(await first,1); } finally { clearTimeout(keepAlive); }
+  assert.equal(budget.metrics().queuedSources,0);
+  assert.equal(budget.metrics().pendingSources,0);
+  assert.ok(budget.metrics().sources['legacy-handoff']!.deadlineLatenessMs >= 50);
+  assert.equal(calls,1);
+});
+
 test('observation owner saturation does not block another owner or critical work behind it', async () => {
   const budget = createWorkBudget();
   const done: Array<() => void> = [];

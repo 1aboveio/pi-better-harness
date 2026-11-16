@@ -64,6 +64,29 @@ function busy(reason: MaintenanceBusyError["reason"]) {
   return (error: unknown) => error instanceof MaintenanceBusyError && error.reason === reason;
 }
 
+test('liveness records follow actual hosted commands and human dialogs without giving passive state a lease', async t => {
+  const f = await setup(t);
+  const command = f.hosted.handle({ type: 'prompt', message: 'record liveness', id: 'request' });
+  assert.ok(f.hosted.lifecycleReasons().some(reason => reason.kind === 'hosted-command'));
+  assert.equal(f.hosted.executionActive, f.hosted.lifecycleReasons().some(reason => 'retainsExecution' in reason && reason.retainsExecution));
+  await command;
+  await f.sdk.waitForIdle();
+  const passive = f.hosted.handle({ type: 'get_state', id: 'state' });
+  const passiveRecords = f.hosted.lifecycleReasons().filter(reason => reason.kind === 'hosted-operation');
+  assert.ok(passiveRecords.every(reason => 'retainsExecution' in reason && reason.retainsExecution === false));
+  await passive;
+  assert.equal(f.hosted.operationsActive,false);
+  assert.equal(f.hosted.lifecycleReasons().some(reason => reason.kind === 'hosted-operation'),false);
+  const dialog = f.ctx.ui.confirm('Decision','Continue?');
+  const pending = f.hosted.needsInput[0]!;
+  assert.ok(pending);
+  assert.ok(f.hosted.lifecycleReasons().some(reason => reason.kind === 'hosted-dialog' && 'retainsExecution' in reason && reason.retainsExecution === false));
+  f.hosted.answerDialog(pending.id, { cancelled: true });
+  await dialog;
+  assert.equal(f.hosted.lifecycleReasons().some(reason => reason.kind === 'hosted-dialog'),false);
+  assert.equal(f.hosted.executionActive, f.hosted.lifecycleReasons().some(reason => 'retainsExecution' in reason && reason.retainsExecution));
+});
+
 test("one gate excludes native reload, registry mutation and retained SDK calls without touching inactivity", async t => {
   const f = await setup(t);
   const sdk = f.sdk;

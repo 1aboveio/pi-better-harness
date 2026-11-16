@@ -93,6 +93,15 @@ export class SessionRegistry {
   get hasPendingOperations(): boolean {
     return this.creating > 0 || this.operations.size > 0 || this.pending.size > 0 || this.releasing.size > 0;
   }
+  lifecycleReasons() {
+    return [...this.live].flatMap(([sessionId, hosted]) => {
+      const entry = this.entries.get(sessionId)!;
+      const last = Date.parse(entry.lastActivityAt ?? entry.createdAt);
+      return [{ kind: 'hosted-session', id: sessionId, lastProgressAt: Number.isFinite(last) ? last : null,
+        nextDeadline: this.sessionIdleMs === 0 || !Number.isFinite(last) ? null : last + this.sessionIdleMs,
+        executionDeadline: null, recovery: 'configured-hosted-idle-expiry-after-execution-clears' }, ...hosted.lifecycleReasons()];
+    });
+  }
 
   /** Recheck under the same serialization as open/close; no await between the final check and fencing. */
   async expireIdle(now = this.now()): Promise<string[]> {
@@ -147,8 +156,9 @@ export class SessionRegistry {
     this.maintenance.assertAdmission();
     if (this.stopping) throw new Error("Session registry is shutting down");
     this.creating++;
+    const finishCreating = this.maintenance.trackOperation('registry-create');
     try { return await this.createNow(request); }
-    finally { this.creating--; }
+    finally { this.creating--; finishCreating(); }
   }
 
   private async createNow(request: CreateSessionRequest): Promise<SessionSummary> {
@@ -287,6 +297,7 @@ export class SessionRegistry {
    * back until the old session's events have stopped.
    */
   private releaseLive(sessionId: string, abort: boolean): Promise<void> {
+    const finishRelease = this.maintenance.trackOperation('registry-release', sessionId);
     const prior = this.releasing.get(sessionId);
     this.live.get(sessionId)?.fence();
     const run = (async () => {
@@ -297,6 +308,7 @@ export class SessionRegistry {
       if (hosted) await hosted.dispose({ abort });
     })();
     const tracked = run.finally(() => {
+      finishRelease();
       if (this.releasing.get(sessionId) === tracked) this.releasing.delete(sessionId);
     });
     this.releasing.set(sessionId, tracked);
@@ -374,7 +386,8 @@ export class SessionRegistry {
     if (existing) return Promise.resolve(existing);
     const inFlight = this.pending.get(entry.sessionId);
     if (inFlight) return inFlight;
-    const started = this.start(entry, manager, useDefaultModel).finally(() => this.pending.delete(entry.sessionId));
+    const finishStart = this.maintenance.trackOperation('registry-host-start', entry.sessionId);
+    const started = this.start(entry, manager, useDefaultModel).finally(() => { this.pending.delete(entry.sessionId); finishStart(); });
     this.pending.set(entry.sessionId, started);
     return started;
   }

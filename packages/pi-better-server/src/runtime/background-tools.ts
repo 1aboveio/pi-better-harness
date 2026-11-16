@@ -73,9 +73,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     runtime = createBackgroundTaskRuntime(failures.createFailureAttention((origin:any,event:any)=>new Promise<boolean>(resolve=>notifyParent({origin,taskId:event.inspectId??event.id,status:event.status,urgent:true,event:{...event,isDelivered:undefined,getSuppressionReason:undefined,onDelivered:undefined}},
               {receiptId:event.receiptId,delivered:()=>{event.onDelivered?.(Date.now());resolve(true);},defer:()=>resolve(false)}))), (origin: any, event: any) => notifyParent({ origin, taskId: event.id, status: event.status, outcome: event.outcome, event: { ...event, isDelivered: undefined, getSuppressionReason: undefined, onDelivered: undefined, onSuppressed: undefined } }, { receiptId: event.receiptId, delivered: () => event.onDelivered?.(Date.now()), defer: () => undefined }), { assert: assertAdmission,
                         prepared: (id: string) => journal.operation(current.ownerKey, current.record.key, { operationId: `legacy:${id}`, taskId: id, token: current.record.key }) },
-                        (kind: string, id: string, work: () => unknown) => {
+                        (kind: string, id: string, work: () => unknown, dueAt?: number) => {
                             const origin = registry.readMeta(id)?.callbackOrigin;
-                            return lease.budget.scheduleSource(`legacy-${kind}`, id, work, JSON.stringify([origin?.cwd ?? root, origin?.sessionId ?? null]));
+                            return lease.budget.scheduleSource(`legacy-${kind}`, id, work, JSON.stringify([origin?.cwd ?? root, origin?.sessionId ?? null]), dueAt);
                         });
                     service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, 'operation-coordinator.sqlite'), serverOwnedResults: true, pollMs: 0,
                         enterControl: () => lease.budget.enter('control'),
@@ -144,7 +144,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
             return reasons;
         },
         metrics() { return { ...metrics, registry: registry.getRegistryIoMetrics(), cachedScopes: projections.size }; },
-        handle(command: any) {
+        handle(command: any, onAccepted?: (id: string) => void) {
             if (Object.keys(command).some(key => !['id', 'type', 'authority'].includes(key)))
                 return Promise.reject(new Error('unsupported Background request field'));
             if (pending >= 64)
@@ -267,6 +267,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     if (accepted.prior)
                         return accepted.record.result ?? { content: [{ type: 'text', text: 'Accepted Background request has an uncertain outcome; inspect its exact operations before issuing new work.' }], details: { status: 'outcome_unknown', operations: accepted.record.operations } };
                     journal.dispatch(key, record.key);
+                    onAccepted?.(`background-request-v1:${authority.backgroundDigest([key, record.key])}`);
                 }
                 assertAdmission();
                 let result;

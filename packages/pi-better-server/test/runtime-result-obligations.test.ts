@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RuntimeResultSupervision } from "../src/runtime/result-supervision.ts";
+import { acquireMutationStore } from '../src/runtime/mutation-store.ts';
 
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 
@@ -19,6 +20,13 @@ test("unavailable result authority has a bounded verification obligation, not a 
     store.handoffResultSupervision({ operationId: "operation", expectedHostId: "frontend",
       directory: join(root, "captured"), hostId: "server:old", epoch: "old" });
     supervisor = new RuntimeResultSupervision(root, "new", 1000);
+    const budgetLease = acquireMutationStore(root);
+    const held = Array.from({length:8},()=>[budgetLease.budget.enter('query')!,budgetLease.budget.enter('repair')!]).flat();
+    try {
+      const before = supervisor.metrics.passes;
+      supervisor.reconcile();
+      assert.ok(supervisor.metrics.passes > before, 'actual authority supervision progresses with both read planes saturated');
+    } finally { held.forEach(release=>release()); budgetLease.release(); }
     assert.equal(supervisor.livenessReasons().length, 1);
     assert.equal(supervisor.manages("operation"), true);
     assert.equal(supervisor.manages("foreign"), false);

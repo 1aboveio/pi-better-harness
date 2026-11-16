@@ -197,6 +197,20 @@ export function assertHostedAdmission(session: AgentSession, metadata = false): 
 }
 
 export function hostedSdkCalls(session: AgentSession): number { return guards.managers.get(session.sessionManager)?.calls ?? 0; }
+const warmingRuns = new WeakMap<object, number>();
+let warmingRunCounter = 0;
+export function hostedCacheReasons(session: AgentSession) {
+  const warmer = (session as unknown as { _cacheWarmer?: { run?: unknown } })._cacheWarmer;
+  const run = warmer?.run;
+  if (cacheWarmingState(session) === 'idle') return [];
+  let id: number | null = null;
+  if (run && typeof run === 'object') {
+    id = warmingRuns.get(run) ?? ++warmingRunCounter; warmingRuns.set(run, id);
+  }
+  return [{ kind: 'hosted-cache-work', owner: session.sessionId, id, state: run === undefined ? 'unsupported-observation' : 'queued-or-running',
+    lastProgressAt: null, executionDeadline: null, nextDeadline: null, retainsExecution: false,
+    recovery: 'existing-sdk-cache-warmer-must-retire-run-before-maintenance-no-new-runtime-lease' }];
+}
 
 export async function reloadHostedSession(session: AgentSession): Promise<void> {
   const state = guards.managers.get(session.sessionManager);

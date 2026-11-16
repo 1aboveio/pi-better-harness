@@ -51,9 +51,9 @@ export async function createSubagentLaunch(root: string, instance: string, catal
         }
       });
       const runtime = createBackgroundTaskRuntime(undefined, undefined, undefined,
-        (kind: string, id: string, work: () => unknown) => {
+        (kind: string, id: string, work: () => unknown, dueAt?: number) => {
           const origin = readMeta(id)?.callbackOrigin;
-          return lease.budget.scheduleSource(`legacy-${kind}`, id, work, JSON.stringify([origin?.cwd ?? root, origin?.sessionId ?? null]));
+          return lease.budget.scheduleSource(`legacy-${kind}`, id, work, JSON.stringify([origin?.cwd ?? root, origin?.sessionId ?? null]), dueAt);
         });
       registerTools(pi, runtime, () => undefined);
       const close = service.close.bind(service);

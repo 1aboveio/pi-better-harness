@@ -3,12 +3,12 @@ import type { AgentSession, AgentSessionEvent, RpcCommand, RpcResponse, RpcSessi
 import { randomUUID } from "node:crypto";
 import type { EventLog, LoggedEvent, Replay } from "./event-log.ts";
 import { UNSUPPORTED_SESSION_COMMANDS } from "./protocol.ts";
-import { assertHostedAdmission, fenceHostedSession, reloadHostedSession } from "./maintenance.ts";
+import { assertHostedAdmission, fenceHostedSession, reloadHostedSession, hostedCacheReasons } from "./maintenance.ts";
 import type { SessionActivity } from "./session-activity.ts";
 import { UiBridge, type PendingDialog } from "./ui-bridge.ts";
 
 type Listener = (logged: LoggedEvent) => void;
-type CommandWork = { kind: string; dialogs: number };
+type CommandWork = { kind: string; dialogs: number; id: number; startedAt: number };
 
 function ok(id: string | undefined, command: string, data?: unknown): RpcResponse {
   return { ...(id !== undefined ? { id } : {}), type: "response", command, success: true, ...(data !== undefined ? { data } : {}) } as RpcResponse;
@@ -60,6 +60,31 @@ export class HostedSession {
   private runtimeReleased = false;
   private operations = 0;
   private readonly commandsInFlight = new Set<CommandWork>();
+  private operationCounter = 0;
+  private progressAt = Date.now();
+  private operationRecords = new Map<number, { source: string; lastProgressAt: number }>();
+  lifecycleReasons() {
+    const dialogs = [...this.dialogWork.values()];
+    const modelBlocked = dialogs.some(work => work.toolCallId || !work.command || ['prompt','steer','follow_up'].includes(work.command.kind));
+    const compactBlocked = dialogs.some(work => !work.toolCallId && (!work.command || work.command.kind === 'compact'));
+    const bashBlocked = dialogs.some(work => !work.toolCallId && (!work.command || work.command.kind === 'bash'));
+    const blockedTools = new Set(dialogs.map(work => work.toolCallId));
+    const base = { owner: this.session.sessionId, generation: this.generation, lastProgressAt: this.progressAt,
+      executionDeadline: null, nextDeadline: null, recovery: 'existing-hosted-idle-and-admission-policy' };
+    return [
+      ...[...this.operationRecords].map(([id, record]) => ({ ...base, kind: 'hosted-operation', id, ...record, retainsExecution: false })),
+      ...[...this.commandsInFlight].map(work => ({ ...base, kind: 'hosted-command', id: work.id, source: work.kind, lastProgressAt: work.startedAt, retainsExecution: work.dialogs === 0 })),
+      ...[...this.activeTools.keys()].map(id => ({ ...base, kind: 'hosted-tool', id, retainsExecution: !blockedTools.has(id) })),
+      ...[...this.dialogWork.keys()].map(id => ({ ...base, kind: 'hosted-dialog', id, retainsExecution: false })),
+      ...(this.turnActive ? [{ ...base, kind: 'hosted-turn', id: this.generation, retainsExecution: !modelBlocked }] : []),
+      ...(this.session.isCompacting ? [{ ...base, kind: 'hosted-compaction', id: this.generation, retainsExecution: !compactBlocked }] : []),
+      ...(this.session.isBashRunning ? [{ ...base, kind: 'hosted-bash', id: this.generation, retainsExecution: !bashBlocked }] : []),
+      ...(this.activity?.lifecycleReasons() ?? []).map(record => ({ ...base, ...record, retainsExecution: record.kind !== 'hosted-observation' })),
+      ...hostedCacheReasons(this.session),
+      ...(this.session.isBashRunning ? [{ ...base, kind: 'hosted-bash', id: this.generation, retainsExecution: this.executionActive }] : []),
+      ...(this.activity?.lifecycleReasons() ?? []).map(record => ({ ...base, ...record })),
+    ];
+  }
   private readonly workContext = new AsyncLocalStorage<CommandWork>();
   private readonly dialogWork = new Map<string, { command?: CommandWork; toolCallId?: string }>();
   /**
@@ -136,8 +161,10 @@ export class HostedSession {
   async clientSnapshot(): Promise<Record<string, unknown>> {
     if (this.disposed) throw new Error("Session runtime is closed; explicitly reopen the session");
     this.operations++;
+    const record = ++this.operationCounter;
+    this.operationRecords.set(record, { source: 'client-snapshot', lastProgressAt: Date.now() });
     try { return await this.readClientSnapshot(); }
-    finally { this.operations--; }
+    finally { this.operations--; this.operationRecords.delete(record); }
   }
 
   private async readClientSnapshot(): Promise<Record<string, unknown>> {
@@ -219,6 +246,7 @@ export class HostedSession {
   publishRuntimeEvent(event: unknown): void { this.publish(event); }
 
   private publish(event: unknown): void {
+    this.progressAt = Date.now();
     if (this.runtimeReleased) return;
     const logged = this.log.append(event);
     for (const listener of this.listeners) listener(logged);
@@ -418,7 +446,8 @@ export class HostedSession {
     try { if (!command.type.startsWith("get_")) assertHostedAdmission(this.session, command.type === "set_session_name"); }
     catch (error) { return fail(command.id, command.type, String(error)); }
     this.operations++;
-    const work: CommandWork = { kind: command.type, dialogs: 0 };
+    const work: CommandWork = { kind: command.type, dialogs: 0, id: ++this.operationCounter, startedAt: Date.now() };
+    this.operationRecords.set(work.id, { source: passive ? 'passive-rpc' : 'command-rpc', lastProgressAt: work.startedAt });
     if (!passive) {
       // Installed synchronously, before dispatch can reach provider/preflight awaits.
       this.commandsInFlight.add(work);
@@ -428,6 +457,7 @@ export class HostedSession {
     try { return await this.workContext.run(work, () => this.dispatch(command)); }
     finally {
       this.operations--;
+      this.operationRecords.delete(work.id);
       if (!passive) {
         this.commandsInFlight.delete(work);
         this.onActivity("work");

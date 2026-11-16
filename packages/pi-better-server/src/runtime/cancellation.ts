@@ -45,7 +45,7 @@ export class RuntimeCancellation {
       for (const admission of this.store.pendingTaskCancellations()) void this.execute(admission);
     } catch (error) { this.releaseStore(); throw error; }
   }
-  async handle(command: Record<string, unknown>) {
+  async handle(command: Record<string, unknown>, onAccepted?: (id: string) => void) {
     if (Object.keys(command).some(key => !["id", "type", "credential"].includes(key))) throw new Error("not_accepted: unsupported cancellation field");
     if (command.type === "runtime_cancellation_status") return { runtimeEpoch: this.epoch };
     if (typeof command.credential !== "string") throw new Error("not_accepted: permission-unavailable: cancellation credential required");
@@ -59,6 +59,7 @@ export class RuntimeCancellation {
     try { this.store.acceptAuthorizedTaskCancellation({ credential: command.credential, runtimeEpoch: this.epoch }); }
     catch (error) { throw new Error(`not_accepted: ${String(error)}`); }
     this.fault?.("accepted");
+    onAccepted?.(`cancellation:${createHash('sha256').update(JSON.stringify([admission.request.owner, admission.request.idempotencyKey])).digest('hex')}`);
     return this.execute(admission);
   }
   private execute(admission: any): Promise<any> {

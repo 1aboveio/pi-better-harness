@@ -1156,7 +1156,7 @@ describe("command watch progress evidence", () => {
     vi.useFakeTimers(); vi.setSystemTime(watchStartedAt);
     const budget = createWorkBudget(), peer = createWorkBudget(budget.buffer);
     const runtime = createBackgroundTaskRuntime(undefined, undefined, undefined,
-      (kind, id, work) => budget.scheduleSource(`legacy-${kind}`, id, work));
+      (kind, id, work, dueAt) => budget.scheduleSource(`legacy-${kind}`, id, work, 'runtime', dueAt));
     const held = Array.from({ length: 16 }, () => peer.enter('control')!);
     const scripted = scriptedWatch([{ stdout: 'pending' }]);
     const meta = runtime.startWatchTask(fakePi, {

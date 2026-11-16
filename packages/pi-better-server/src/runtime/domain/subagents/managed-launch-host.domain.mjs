@@ -466,7 +466,7 @@ export class ManagedSubagentHost {
                     runId: meta.id, sessionId: meta.sessionId, status: meta.status,
                 })) }, content: [{ type: "text", text: `Original launch ${status}; no replacement attempt was dispatched.` }] };
     }
-    handle(command) {
+    handle(command, onAccepted) {
         if (Object.keys(command).some(key => !["id", "type", "authority"].includes(key)))
             return Promise.reject(new Error("unsupported launch field"));
         this.pending++;
@@ -476,6 +476,7 @@ export class ManagedSubagentHost {
             const ownerKey = JSON.stringify([record.owner.workspace, record.owner.sessionId]);
             const digest = launchDigest({ tool: record.tool, params: record.params });
             const intent = this.journal.accept(ownerKey, record.key, digest, this.epoch);
+            onAccepted?.(`launch-progress:${launchDigest([ownerKey, record.key])}`);
             if (intent.prior) {
                 if (intent.result)
                     return JSON.parse(intent.result);

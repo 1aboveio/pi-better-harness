@@ -195,7 +195,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const dispatches = new Set<Promise<void>>();
     let inFlight = 0;
     let requestCounter = 0, connectionCounter = 0;
-    const requests = new Map<number, { kind: string; id: number; connection: number; lastProgressAt: number; nextDeadline: null; executionDeadline: null; recovery: string }>();
+    const requests = new Map<number, { kind: string; id: number; connection: number; operation?: { kind: string; id: string }; lastProgressAt: number; nextDeadline: null; executionDeadline: null; recovery: string }>();
     let draining = false;
     let idleStopping = false;
     let idleEvidence: unknown;
@@ -246,6 +246,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         requests.set(request, { kind: 'transport-request', id: request, connection, lastProgressAt: now(),
           nextDeadline: null, executionDeadline: null,
           recovery: 'dispatch-drains-to-settlement-read-waiters-use-existing-caller-cancellation-accepted-effects-use-durable-owner' });
+        const accepted = (kind: string) => (operationId: string) => {
+          const record = requests.get(request);
+          if (record) { record.operation = { kind, id: operationId }; record.lastProgressAt = now(); }
+        };
         try {
           if (!type) {
             send(failure(id, "unknown", "Missing command type"));
@@ -277,7 +281,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
               workObservation: observation ? { status: observation.status, reason: observation.reason, observedAt: observation.observedAt } : null,
               livenessReasons: [...[...runtimeClients.values()].map(id => ({ kind: "connection", id })),
                 ...requests.values(),
-                ...registry.list().filter(session => session.live).map(session => ({ kind: "hosted-session", id: session.sessionId })),
+                ...registry.lifecycleReasons(),
                 ...(resultSupervision?.livenessReasons() ?? []),
                 ...(launches?.lifecycleReasons() ?? []),
                 ...(backgroundTools?.lifecycleReasons() ?? []),
@@ -305,7 +309,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             try {
               if (!releaseControl) throw new Error("runtime-overloaded: control source capacity");
               cancellations ??= new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
-              return reply({ data: await cancellations.handle(command) });
+              return reply({ data: await cancellations.handle(command, accepted('cancellation')) });
             } finally { releaseControl?.(); runtimeInFlight--; }
           }
           if (type === "runtime_bind_catalog_host") {
@@ -318,7 +322,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             if (socket.writableLength > 4 * 1024 * 1024) { socket.destroy(); return; }
             if (runtimeInFlight >= 32) throw new Error("runtime-overloaded");
             runtimeInFlight++;
-            try { return reply({data: await (await initializeBackground()).handle(command)}); } finally { runtimeInFlight--; }
+            try { return reply({data: await (await initializeBackground()).handle(command, accepted('background-request'))}); } finally { runtimeInFlight--; }
           }
           if (type === "runtime_launch_subagent") {
             if (!greeted) throw new Error("not_accepted: launch requires hello");
@@ -327,7 +331,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             runtimeInFlight++;
             try {
               launches = await initializeLaunch();
-              const data = await launches.handle(command);
+              const data = await launches.handle(command, accepted('managed-launch'));
               // The durable launch receipt must not fail because derived reads
               // are rebuilding or overloaded. Refresh independently.
               void work().livenessReasons().catch(error => log(`Launch snapshot refresh unavailable: ${String(error)}`));
