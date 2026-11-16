@@ -360,8 +360,10 @@ export class WorkReadModel {
       const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
       const changes = this.reader.changes();
       if (changes.has("*")) {
+        const key = `${this.reader.changeMetrics.generation}:${changes.get("*")}`;
+        if (this.assignmentBaseline?.key === key) return;
         this.imported = false; this.repairOwed = true;
-        this.state = "rebuilding"; this.reason = "Assignment source baseline is rebuilding.";
+        if (!this.sourceErrors.size) { this.state = "rebuilding"; this.reason = "Assignment source baseline is rebuilding."; }
         this.publish(); return;
       }
       const selected = new Map<string, any>();
@@ -384,12 +386,14 @@ export class WorkReadModel {
         updated.push({ ...row, assignment, recipientPending, sourceRevision: hash([meta, assignment.revision, row.display, row.health, recipientPending, row.failurePending, this.failureJournals.get(meta.id)]) });
       }
       let changed = false;
+      const changedRows: WorkReadModel["changedRows"] = [];
       this.db.exec("BEGIN");
       try {
         const update = this.db.prepare("UPDATE rows SET state=?, active=?, recipient_pending=?, payload=? WHERE id=?");
         for (const row of updated) {
           if (row.sourceRevision === this.projected.get(row.meta.id)?.sourceRevision) continue;
           update.run(row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, row.recipientPending ? 1 : 0, JSON.stringify(row), row.meta.id);
+          changedRows.push({ before: this.projected.get(row.meta.id), after: row });
           changed = true;
         }
         this.db.exec("COMMIT");
@@ -401,13 +405,17 @@ export class WorkReadModel {
       this.coordinator = snapshot.revision;
       this.counters.assignmentProjections += updated.length; this.counters.projections += updated.length;
       this.invalidations.assignmentInput += updated.length;
+      this.changedRows = changedRows;
       if (this.assignmentFault) {
         this.state = this.assignmentFault.state; this.reason = this.assignmentFault.reason;
-        this.assignmentFault = undefined; changed = true;
+        this.assignmentFault = undefined; this.changedRows = []; changed = true;
       }
       if (changed) this.publish();
     } catch (error) {
       if (!this.projected.size) return;
+      // A coordinator has never been required for plain archived/log-only runs.
+      // Losing an already observed database still degrades the existing coverage.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && this.coordinator === "unknown") return;
       this.assignmentFault ??= { state: this.state, reason: this.reason };
       if (String(error).includes("no such table: assignment_change_source")) {
         // Old sources have no feed. Finish one budgeted compatibility pass;
@@ -444,6 +452,9 @@ export class WorkReadModel {
         const next = await this.repair.next();
         if (next.done) {
           this.repair = undefined; this.repairOwed = false;
+          // An empty metadata inventory still needs a journal baseline before
+          // later exact hints can be treated as incremental updates.
+          if (!this.imported && !this.assignmentBaseline && !this.files.size && !this.sourceErrors.size) await this.measuredScan("repair", []);
           if (this.assignmentBaseline && !this.sourceErrors.size && ![...this.projected.values()].some(row => !row.assignment.verified)) this.reader.acknowledgeChanges(new Map([["*", this.assignmentBaseline.seq]]), true);
           if (!this.imported) {
             this.imported = true;
