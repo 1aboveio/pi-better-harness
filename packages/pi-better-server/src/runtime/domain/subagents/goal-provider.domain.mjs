@@ -50,6 +50,7 @@ export function registerSubagentsGoalProvider(pi) {
                     label: "Subagents",
                     items: listMetasForParent(process.pid)
                         .filter((meta) => !origin || belongsToOrigin(meta, origin))
+                        .filter((meta) => !ctx || !meta.callbackOrigin?.branchId || ctx.sessionManager.getBranch().some(entry => entry.id === meta.callbackOrigin?.branchId))
                         .map((meta) => {
                         const status = effectiveStatus(meta);
                         const active = status === "running" || status === "orphaned";

@@ -7,6 +7,18 @@ const hostedClients = new WeakSet();
 const clients = new WeakMap();
 const generations = new WeakMap();
 const listeners = new WeakMap();
+const activityScopes = new WeakMap();
+/** Goal reads the subscribed observation, never a periodic full-state RPC. */
+export async function backgroundGoalObservation(pi, ctx) {
+    const scope = { background: true, cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId(), processId: process.pid };
+    const client = await observationClient(pi, scope);
+    const key = JSON.stringify(scope);
+    if (activityScopes.get(client) !== key) {
+        await client.subscribe(scope);
+        activityScopes.set(client, key);
+    }
+    return client.snapshot;
+}
 export function onBackgroundObservation(pi, notify) {
     let set = listeners.get(pi);
     if (!set) {
@@ -71,6 +83,7 @@ function observationClient(pi, scope) {
                     notify(); });
                 try {
                     await hosted.subscribe(scope);
+                    activityScopes.set(hosted, JSON.stringify({ ...scope, processId: process.pid }));
                     checkOpen();
                     return hosted;
                 }
@@ -123,6 +136,7 @@ function observationClient(pi, scope) {
                     throw error;
                 }
                 subscribed = true;
+                activityScopes.set(client, JSON.stringify({ ...scope, processId: process.pid }));
                 return client;
             };
             try {

@@ -42,13 +42,17 @@ export interface BackgroundProviderSnapshot {
   providerId: string;
   label?: string;
   items: BackgroundWorkItem[];
+  /** Absolute milliseconds; null means no time-dependent change is owed. */
+  nextDeadline?: number | null;
+  /** Legacy providers cost at most one collection per compatibility interval. */
+  compatibilityIntervalMs?: number;
 }
 
 export interface BackgroundActivityProvider {
   id: string;
   label?: string;
   getActivity(ctx: ExtensionContext): BackgroundProviderSnapshot | Promise<BackgroundProviderSnapshot>;
-  onActivityChanged?(notify: () => void): () => void;
+  onActivityChanged?(notify: () => void, ctx?: ExtensionContext): () => void;
 }
 
 export interface ActivitySnapshot {

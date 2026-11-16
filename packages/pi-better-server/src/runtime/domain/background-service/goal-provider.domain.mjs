@@ -3,22 +3,22 @@ import { listMetas, onMetaChanged } from "./registry.domain.mjs";
 import { getObservedWaitHost } from "./observed-waits.domain.mjs";
 import { isTerminalStatus } from "./types.domain.mjs";
 import { backgroundTaskProgressAt, observeBackgroundTaskStall } from "./stall.domain.mjs";
-import { backgroundObservation, onBackgroundObservation } from "./work-observation.domain.mjs";
+import { backgroundGoalObservation, onBackgroundObservation } from "./work-observation.domain.mjs";
 const GOAL_READY_EVENT = "pi-better-goal:ready";
 const GOAL_REGISTER_PROVIDER_EVENT = "pi-better-goal:register-provider";
 const readySubscriptions = new WeakSet();
 export function collectBackgroundTaskGoalActivity(metas = listMetas(), ctx, now = Date.now(), durable = []) {
+    const items = [
+        ...metas.filter((meta) => isVisibleGoalActivity(meta, ctx, now)).map(backgroundTaskToGoalItem),
+        ...durable.filter((task) => isVisibleDurableGoalActivity(task, ctx, now)).map(durableTaskToGoalItem),
+    ];
+    const deadlines = items.filter(item => item.terminal && typeof item.endedAt === "number")
+        .map(item => item.endedAt + TERMINAL_GOAL_ACTIVITY_RETENTION_MS).filter(deadline => deadline > now);
     return {
         providerId: "background-tasks",
         label: "Background Tasks",
-        items: [
-            ...metas
-                .filter((meta) => isVisibleGoalActivity(meta, ctx, now))
-                .map(backgroundTaskToGoalItem),
-            ...durable
-                .filter((task) => isVisibleDurableGoalActivity(task, ctx, now))
-                .map(durableTaskToGoalItem),
-        ],
+        items,
+        nextDeadline: deadlines.length ? Math.min(...deadlines) : null,
     };
 }
 export function registerBackgroundTasksGoalProvider(pi) {
@@ -28,12 +28,14 @@ export function registerBackgroundTasksGoalProvider(pi) {
             label: "Background Tasks",
             scope: "session",
             getActivity: async (ctx) => {
-                const snapshot = await backgroundObservation(pi, ctx);
+                const snapshot = await backgroundGoalObservation(pi, ctx);
                 if (snapshot.status !== "ready")
                     throw new Error(snapshot.reason ?? "Background activity is unverified");
                 const durable = snapshot.rows.filter((row) => row.meta.durable).map((row) => row.meta);
                 const legacy = snapshot.rows.filter((row) => !row.meta.durable).map((row) => row.meta);
-                return collectBackgroundTaskGoalActivity(legacy, ctx, Date.now(), durable);
+                const activity = collectBackgroundTaskGoalActivity(legacy, ctx, Date.now(), durable);
+                const deadlines = [activity.nextDeadline, snapshot.nextDeadline].filter((value) => typeof value === "number" && value > Date.now());
+                return { ...activity, nextDeadline: deadlines.length ? Math.min(...deadlines) : null };
             },
             // A durable operation change must refresh Goal activity even though it
             // never writes a mutable legacy registry meta.

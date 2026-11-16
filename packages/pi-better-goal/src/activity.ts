@@ -96,6 +96,8 @@ export async function collectActivitySnapshot(
       const normalized: BackgroundProviderSnapshot = {
         providerId: snapshot.providerId || provider.id,
         items: snapshot.items,
+        ...(snapshot.nextDeadline !== undefined ? { nextDeadline: snapshot.nextDeadline } : {}),
+        ...(!provider.onActivityChanged ? { compatibilityIntervalMs: 2_000 } : {}),
       };
       const label = snapshot.label ?? provider.label;
       if (label !== undefined) {

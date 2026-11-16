@@ -105,7 +105,7 @@ test("active background work adds completion-audit guidance to the agent prompt"
   await handlers.get("session_shutdown")?.({}, ctx);
 });
 
-test("idle sessions sleep until provider activity needs polling", async (t) => {
+test("notifying providers sleep between real activity changes even while running", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
@@ -161,7 +161,7 @@ test("idle sessions sleep until provider activity needs polling", async (t) => {
   assert.ok(afterWake > afterStartup, "provider changes wake one immediate collection");
   t.mock.timers.tick(2_000);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.ok(collections > afterWake, "owned running work keeps polling active");
+  assert.equal(collections, afterWake, "owned notifying work does not need polling");
 
   active = false;
   activityChanged?.();

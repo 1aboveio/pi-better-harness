@@ -56,6 +56,7 @@ import {
   type ActivitySnapshot,
   type BackgroundActivityProvider,
   type BackgroundWorkItem,
+  type BackgroundProviderSnapshot,
   type GoalSnapshot,
 } from "./types.js";
 
@@ -309,6 +310,9 @@ export default function (pi: ExtensionAPI): void {
   initializeNavigatorPanels(pi);
   const providers = new Map<string, BackgroundActivityProvider>();
   const providerUnsubscribers = new Map<string, () => void>();
+  const providerCache = new Map<string, BackgroundProviderSnapshot>();
+  const dirtyProviders = new Set<string>();
+  let providerDeadline: ReturnType<typeof setTimeout> | undefined;
   providers.set("subagents", {
     id: "subagents",
     label: "Subagents",
@@ -671,11 +675,23 @@ export default function (pi: ExtensionAPI): void {
   const publishSnapshot = async (ctx: ExtensionContext): Promise<ActivitySnapshot | null> => {
     const execution = executionGeneration;
     const sequence = ++snapshotSequence;
-    const snapshot = await collectActivitySnapshot(ctx, providers.values(), foregroundRunning);
+    const snapshot = await collectActivitySnapshot(ctx, [...providers.values()].map(provider => ({
+      ...provider,
+      getActivity: async () => {
+        const cached = providerCache.get(provider.id);
+        if (cached && provider.onActivityChanged && !dirtyProviders.has(provider.id) &&
+            !(typeof cached.nextDeadline === "number" && cached.nextDeadline <= Date.now())) return cached;
+        dirtyProviders.delete(provider.id);
+        const value = await provider.getActivity(ctx);
+        if (execution === executionGeneration) providerCache.set(provider.id, value);
+        return value;
+      },
+    })), foregroundRunning);
     if (execution !== executionGeneration) return null;
     if (sequence < lastAppliedSnapshotSequence) return latestSnapshot;
     lastAppliedSnapshotSequence = sequence;
     latestSnapshot = snapshot;
+    armProviderDeadline();
 
     const goal = currentGoalSnapshot(ctx);
     const wakePlan = planBackgroundDrainWake(backgroundDrainTracker, goal, snapshot);
@@ -761,14 +777,31 @@ export default function (pi: ExtensionAPI): void {
   };
 
   const syncPollingState = (): void => {
+    armProviderDeadline();
     const ctx = currentCtx;
     const goal = ctx ? currentGoalSnapshot(ctx) : null;
-    if (ctx && (isPokeable(goal) || latestSnapshot?.backgroundRunning === true)) {
+    if (ctx && [...providers.values()].some(provider => !provider.onActivityChanged) &&
+        (isPokeable(goal) || latestSnapshot?.backgroundRunning === true)) {
       startPolling();
     } else {
       stopPolling();
     }
   };
+
+  function armProviderDeadline(): void {
+    if (providerDeadline) clearTimeout(providerDeadline);
+    providerDeadline = undefined;
+    if (!currentCtx) return;
+    const deadlines = [...providerCache.values()].map(value => value.nextDeadline)
+      .filter((value): value is number => typeof value === "number" && value > Date.now());
+    if (!deadlines.length) return;
+    const execution = executionGeneration;
+    providerDeadline = setTimeout(() => {
+      providerDeadline = undefined;
+      if (execution === executionGeneration) collectIfPossible();
+    }, Math.min(MAX_TIMER_DELAY_MS, Math.max(1, Math.min(...deadlines) - Date.now())));
+    providerDeadline.unref?.();
+  }
 
   const installGoalWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) {
@@ -901,8 +934,14 @@ export default function (pi: ExtensionAPI): void {
     providerUnsubscribers.get(accepted.id)?.();
     providerUnsubscribers.delete(accepted.id);
     providers.set(accepted.id, accepted);
+    providerCache.delete(accepted.id);
+    dirtyProviders.add(accepted.id);
     if (typeof accepted.onActivityChanged === "function") {
-      providerUnsubscribers.set(accepted.id, accepted.onActivityChanged(collectIfPossible));
+      providerUnsubscribers.set(accepted.id, accepted.onActivityChanged(() => {
+        if (providers.get(accepted.id) !== accepted) return;
+        dirtyProviders.add(accepted.id);
+        collectIfPossible();
+      }));
     }
     if (latestSnapshot) collectIfPossible();
   });
@@ -1268,6 +1307,8 @@ export default function (pi: ExtensionAPI): void {
     lastAgentEvidence = null;
     collecting = false;
     collectionPending = false;
+    providerCache.clear();
+    dirtyProviders.clear();
     currentCtx = ctx;
     foregroundRunning = !ctx.isIdle();
     agentLoopActive = false;
@@ -1311,6 +1352,16 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("ui_prompt_start", () => { uiPromptDepth += 1; });
+  pi.on("session_tree", async (_event, ctx) => {
+    executionGeneration += 1;
+    clearIdleContinuation();
+    backgroundDrainTracker = null;
+    continuationQueuedFor = null;
+    providerCache.clear();
+    currentCtx = ctx;
+    await publishSnapshot(ctx);
+    syncPollingState();
+  });
   pi.on("ui_prompt_end", () => { uiPromptDepth = Math.max(0, uiPromptDepth - 1); });
 
   pi.on("input", async (event, ctx) => {
@@ -1612,6 +1663,11 @@ export default function (pi: ExtensionAPI): void {
     terminalInputIsEditor = undefined;
     uiPromptDepth = 0;
     stopPolling();
+    if (providerDeadline) clearTimeout(providerDeadline);
+    providerDeadline = undefined;
+    for (const off of providerUnsubscribers.values()) off();
+    providerUnsubscribers.clear();
+    providerCache.clear();
     foregroundRunning = false;
     pendingQuestions.clear();
     clearIdleContinuation();
