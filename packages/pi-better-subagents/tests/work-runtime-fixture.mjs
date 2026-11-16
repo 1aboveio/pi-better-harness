@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { WorkClient } from "../../pi-better-server/src/runtime/work-client.mjs";
-import { stopFixtureChild } from "./fixture-child.mjs";
+import { observeFixtureChild, stopFixtureChild } from "./fixture-child.mjs";
 
 /** Real query server for registered-extension fixtures; no model or HostedSession. */
 export async function startWorkRuntimeFixture(env = process.env) {
@@ -16,6 +16,7 @@ export async function startWorkRuntimeFixture(env = process.env) {
             execPath: daemonEnv.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath,
             execArgv: ["--import", "tsx"], env: daemonEnv, stdio: ["ignore", "ignore", "pipe", "ipc"],
         });
+        observeFixtureChild(child);
         child.stderr.on("data", chunk => { error += chunk; });
         const [ready] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(`Fixture daemon exited: ${error}`); })]);
         // This file-scoped query fixture outlives individual recipients and

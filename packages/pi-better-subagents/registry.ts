@@ -244,6 +244,8 @@ export interface RunMeta {
     completionCallbackSuppressedReason?: string;
     outcomeDeliveryDeferredReason?: string;
     assignmentReport?: { version: 1; assignmentId: string; attemptId: string; digest: string; path: string };
+    /** Latest authenticated refusal, cleared when a corrected report is retained. */
+    assignmentReportRejection?: { reason: string; rejectedAt: number };
     orphanedCallbackSuppressedAt?: number;
     orphanedCallbackSuppressedReason?: string;
     lostCallbackSuppressedAt?: number;
