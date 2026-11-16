@@ -68,7 +68,6 @@ const green = {
   SERVER_AREA: "true",
   WORKSPACE_RESULT: "success",
   SERVER_RESULT: "success",
-  RESOURCES_RESULT: "success",
 };
 
 test("ci passes when every affected lane succeeded", () => {
@@ -83,7 +82,6 @@ test("ci passes when unaffected lanes were skipped", () => {
       SERVER_AREA: "false",
       WORKSPACE_RESULT: "skipped",
       SERVER_RESULT: "skipped",
-      RESOURCES_RESULT: "skipped",
     }),
     0,
   );
@@ -98,11 +96,16 @@ test("ci fails when a lane skipped although its area changed", () => {
 
 test("ci fails when a lane failed or was cancelled", () => {
   assert.equal(exitCode(ciGate, { ...green, SERVER_RESULT: "failure" }), 1);
-  assert.equal(exitCode(ciGate, { ...green, RESOURCES_RESULT: "cancelled" }), 1);
+  assert.equal(exitCode(ciGate, { ...green, WORKSPACE_RESULT: "cancelled" }), 1);
 });
 
 test("ci fails when the selector job did not run", () => {
   assert.equal(exitCode(ciGate, { ...green, CHANGES_RESULT: "failure" }), 1);
+});
+
+test("the ci gate does not read the resource measurement", () => {
+  assert.equal(ciGate.includes("shared-read-resources"), false);
+  assert.equal(source.includes("check shared-read-resources"), false);
 });
 
 const macGreen = {
