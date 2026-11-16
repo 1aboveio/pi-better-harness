@@ -1,0 +1,114 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { validatePairedReports } from '../scripts/measure-full-runtime/paired-report.mjs';
+import { baseline } from '../scripts/measure-full-runtime/incremental-workload.mjs';
+
+// Adversarial schema specimens only. No specimen is a measurement or can qualify:
+// required matrix windows and unimplemented metric coverage are always missing.
+function specimen() {
+  const roles = ['server', 'guardian', 'worker', 'runner', 'command', 'remote-runner', 'remote-command', 'remote-adapters-and-measurement', 'pi', 'legacy-command', 'legacy-command'];
+  const resources = roles.map((role, i) => ({ identity: { pid: i + 1, start: `start-${i}` }, role, generation: '1', at: 600100,
+    cpu: { user: 2000, system: 1000 }, cpuMs: 2, rss: 100, usage: { fsRead: 2, fsWrite: 3 }, fsRead: 1, fsWrite: 2,
+    window: { sampleIntervalMs: 250, diagnostics: { samples: 2400, cpuMicros: 2, sampleWallMs: 1 } } }));
+  const counters = { projections: 1, assignmentProjections: 1, logProjections: 1, healthProjections: 1,
+    logReads: { bytes: 10, reads: 1, parsedEvents: 1, displayFolded: 1, healthFolded: 1 },
+    sourceWork: Object.fromEntries(['entity', 'repair'].map(k => [k, { batches: 1, paths: 1, stats: 1, metadataReads: 1, logBytes: 1, logReads: 1 }])),
+    executor: { restarts: 0, worker: 'running' }, assignments: { generation: 'generation-a' } };
+  const tasks = Array.from({ length: 48 }, (_, i) => ({ id: `task-${i}`, finalText: 'schema-only', costUSD: 1, input: 1, output: 1 }));
+  return { mode: 'resource-matrix', source: { kind: 'git-checkout', head: baseline, dirty: '', manifest: { sha256: 'a'.repeat(64) } },
+    measurement: { schemaVersion: 1, fixedHostId: 'schema-host', hostname: 'schema-hostname', artifact: { contentId: 'b'.repeat(64) }, fixtureSha256: 'c'.repeat(64),
+      diagnosticBudget: { samplerIntervalMs: 250, controlIntervalMs: 100 },
+      activeWorkload: { subagents: 1, durableCommands: 2, legacyCommands: 2, hostedSessions: 2, offline: true }, coverage: {} },
+    machine: { release: 'schema-os', arch: 'arm64', cpus: 1, cpuModel: 'schema-cpu', totalMemory: 1 }, node: 'schema-node', platform: 'darwin',
+    incremental: { history: 4416, clients: 1, group: 48, durationMs: 600000 }, workload: { tasks, seededLogBytes: 1 },
+    incrementalWindows: [{ clients: 1, workloadBefore: { history: 4416, results: tasks }, workloadAfter: { history: 4416, results: tasks } }],
+    scenarios: [{ clients: 1, startedAt: 100, endedAt: 600100, elapsedMs: 600000, resources,
+      requiredProcesses: resources.map(({ identity, role }) => ({ identity: { ...identity }, role })),
+      resourceBefore: resources.map(row => ({ ...row, identity: { ...row.identity }, at: 100, cpu: { user: 1000, system: 0 }, usage: { fsRead: 1, fsWrite: 1 } })),
+      totalCpuMs: 22, totalRss: 1100, countersBefore: structuredClone(counters), metrics: structuredClone(counters) }] };
+}
+const expected = { fixedHostId: 'schema-host', fixtureSha256: 'c'.repeat(64), before: { head: baseline, sourceSha256: 'a'.repeat(64), artifactContentId: 'b'.repeat(64) },
+  after: { head: baseline, sourceSha256: 'a'.repeat(64), artifactContentId: 'b'.repeat(64) } };
+const has = (result: ReturnType<typeof validatePairedReports>, fragment: string, code?: string) => result.issues.some(issue => issue.path.includes(fragment) && (!code || issue.code === code));
+
+test('recorded primary admission refusal and malformed reports cannot qualify or yield CPU comparisons', () => {
+  const recorded = JSON.parse(readFileSync(new URL('../../../docs/evidence/issue-808/transport-r3/native-report.json', import.meta.url), 'utf8'));
+  for (const value of [recorded, null, {}, { scenarios: [null] }, { scenarios: [{ resources: [null], resourceBefore: [null], requiredProcesses: [null] }] }]) {
+    const result = validatePairedReports(value, value, expected);
+    assert.equal(result.qualified, false); assert.equal(result.cpuComparison, null); assert.ok(result.issues.length);
+  }
+});
+
+test('paired validator CLI rejects the retained refused run without invoking measurement code', () => {
+  const report = fileURLToPath(new URL('../../../docs/evidence/issue-808/transport-r3/native-report.json', import.meta.url));
+  const cli = fileURLToPath(new URL('../scripts/measure-full-runtime/paired-report.mjs', import.meta.url));
+  // The refusal report is also deliberately NOT an approved-identity document.
+  const result = spawnSync(process.execPath, ['--import', 'tsx', cli, report, report, report], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 1, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.qualified, false); assert.equal(output.cpuComparison, null);
+  assert.ok(output.issues.some((issue: any) => issue.code === 'failed-or-smoke-report'));
+});
+
+test('valid counter arithmetic does not hide incomplete windows or coverage and invent a CPU threshold', () => {
+  const result = validatePairedReports(specimen(), specimen(), expected);
+  assert.equal(result.qualified, false); assert.equal(result.cpuComparison, null);
+  assert.ok(has(result, 'coverage.workerGc')); assert.ok(has(result, 'coverage.aggregatePeak')); assert.ok(has(result, 'coverage.queueAge'));
+  assert.ok(result.issues.some(issue => issue.code === 'missing-required-window'));
+  assert.ok(!has(result, '.cpuMs')); assert.ok(!has(result, '.totalCpuMs'));
+  assert.equal(result.cpuThreshold.status, 'not-specified');
+});
+
+for (const [name, change, path, code] of [
+  ['host', (r: any) => { r.measurement.fixedHostId = 'other'; }, 'fixed-host', 'mismatch'],
+  ['missing host', (r: any) => { delete r.measurement.fixedHostId; }, '.host', 'missing-fixed-host'],
+  ['workload', (r: any) => { r.incremental.history = 10000; }, '.workload', 'missing-paired-workload'],
+  ['budget', (r: any) => { r.measurement.diagnosticBudget.controlIntervalMs = 50; }, 'diagnosticBudget', 'missing-or-changed-budget'],
+  ['duration', (r: any) => { r.scenarios[0].elapsedMs = 599999; }, '.elapsedMs', 'short-or-missing-duration'],
+  ['missing duration', (r: any) => { delete r.scenarios[0].elapsedMs; }, '.elapsedMs', 'short-or-missing-duration'],
+  ['source', (r: any) => { r.source.head = 'c'.repeat(40); }, '.source.head', 'mismatch'],
+  ['artifact', (r: any) => { r.measurement.artifact.contentId = 'c'.repeat(64); }, '.artifact', 'mismatch'],
+  ['fixture artifact', (r: any) => { r.measurement.fixtureSha256 = 'd'.repeat(64); }, '.fixture', 'mismatch'],
+  ['counter', (r: any) => { r.scenarios[0].resources[0].cpu.user = 0; }, '.cpu', 'missing-or-reset-counter'],
+  ['sum', (r: any) => { r.scenarios[0].totalCpuMs = 0; }, '.totalCpuMs', 'incorrect-aggregate'],
+  ['process generation', (r: any) => { r.scenarios[0].resources[0].identity.start = 'reused-pid'; }, '.process-generation', 'mismatch'],
+  ['worker generation', (r: any) => { r.scenarios[0].metrics.executor.restarts = 1; }, '.metrics', 'missing-reset-or-generation-change'],
+  ['sample generation', (r: any) => { r.scenarios[0].resources[0].generation = 'other'; }, '.generation', 'wrong-sample-generation'],
+  ['duplicate process', (r: any) => { r.scenarios[0].resources[1].identity = { ...r.scenarios[0].resources[0].identity }; }, '.resources', 'duplicate-process'],
+  ['missing related process', (r: any) => { r.scenarios[0].resources.pop(); }, '.related-process-coverage', 'mismatch'],
+  ['missing counter', (r: any) => { delete r.scenarios[0].resources[0].cpu.system; }, '.cpu', 'missing-or-reset-counter'],
+  ['final result', (r: any) => { r.incrementalWindows[0].workloadAfter = { history: 4416, results: [] }; }, '.final-results', 'mismatch'],
+  ['stale sample', (r: any) => { r.scenarios[0].resourceBefore[0].at = 0; r.scenarios[0].startedAt = 1000; }, '.sample-times', 'stale-or-outside-window'],
+  ['short process window', (r: any) => { r.scenarios[0].resources[0].at--; }, '.sample-duration', 'short-process-window'],
+] as const) test(`paired report rejects ${name}`, () => {
+  const after = specimen(); change(after);
+  const result = validatePairedReports(specimen(), after, expected);
+  assert.ok(has(result, path, code), JSON.stringify(result.issues));
+  assert.equal(result.cpuComparison, null); assert.equal(result.qualified, false);
+});
+
+test('duplicate windows and missing approved identities cannot qualify', () => {
+  const report = specimen();
+  const result = validatePairedReports([report, report], report);
+  assert.ok(result.issues.some(issue => issue.code === 'duplicate-window'));
+  assert.ok(result.issues.some(issue => issue.code === 'missing-approved-source-artifact'));
+  assert.ok(result.issues.some(issue => issue.code === 'missing-approved-host'));
+  assert.equal(result.cpuComparison, null);
+});
+
+test('coverage flags cannot replace observations and before duration is independently mandatory', () => {
+  const before = specimen(), after = specimen();
+  before.scenarios[0]!.elapsedMs = 1;
+  const coverage = { workerGc: true, aggregatePeak: true, queueAge: true, eventLatency: true, recovery: true, exit: true };
+  Object.assign(after.measurement.coverage, coverage);
+  Object.assign(after.scenarios[0]!, Object.fromEntries(Object.keys(coverage).map(key => [key, {}])));
+  const result = validatePairedReports(before, after, expected);
+  assert.ok(has(result, 'before[0].scenarios[0].elapsedMs', 'short-or-missing-duration'));
+  assert.ok(has(result, 'after[0].scenarios[0].coverage.workerGc', 'not-qualified'));
+  assert.ok(has(result, 'after[0].scenarios[0].coverage.aggregatePeak', 'not-qualified'));
+  assert.ok(has(result, 'after[0].scenarios[0].coverage.queueAge', 'not-qualified'));
+  assert.equal(result.cpuComparison, null);
+});

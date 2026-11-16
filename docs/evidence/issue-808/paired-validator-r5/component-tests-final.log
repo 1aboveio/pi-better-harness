@@ -1,0 +1,44 @@
+✔ workload transport uses the explicit direct owned directory without a nested suffix (2.839125ms)
+✔ workload transport preserves default selection and enforces socket bytes at the exact boundary (0.421042ms)
+✔ incremental qualification rejects short windows and invalid workload identities (0.412125ms)
+✔ seeded native workload has exact durable history, group logs and expected result bytes (642.160333ms)
+✔ recorded primary admission refusal and malformed reports cannot qualify or yield CPU comparisons (2.177666ms)
+✔ paired validator CLI rejects the retained refused run without invoking measurement code (60.849333ms)
+✔ valid counter arithmetic does not hide incomplete windows or coverage and invent a CPU threshold (1.091167ms)
+✔ paired report rejects host (0.381875ms)
+✔ paired report rejects missing host (0.774917ms)
+✔ paired report rejects workload (0.399958ms)
+✔ paired report rejects budget (0.329792ms)
+✔ paired report rejects duration (0.27475ms)
+✔ paired report rejects missing duration (0.265792ms)
+✔ paired report rejects source (0.271834ms)
+✔ paired report rejects artifact (0.228084ms)
+✔ paired report rejects fixture artifact (0.264667ms)
+✔ paired report rejects counter (0.208042ms)
+✔ paired report rejects sum (0.229625ms)
+✔ paired report rejects process generation (0.291042ms)
+✔ paired report rejects worker generation (1.618791ms)
+✔ paired report rejects sample generation (0.240375ms)
+✔ paired report rejects duplicate process (0.613375ms)
+✔ paired report rejects missing related process (0.238708ms)
+✔ paired report rejects missing counter (0.196667ms)
+✔ paired report rejects final result (0.208125ms)
+✔ paired report rejects stale sample (0.1815ms)
+✔ paired report rejects short process window (0.171375ms)
+✔ duplicate windows and missing approved identities cannot qualify (0.234541ms)
+✔ coverage flags cannot replace observations and before duration is independently mandatory (0.261625ms)
+✔ existing external file writer returns source-byte receipts and preserves its legacy metadata path (142.814667ms)
+✔ 48 workload logs preserve real usage through append, checkpoint restore and source faults (49.401417ms)
+✔ 96 workload logs preserve real usage through append, checkpoint restore and source faults (97.52925ms)
+✔ 192 workload logs preserve real usage through append, checkpoint restore and source faults (205.083041ms)
+✔ settings mutations and exact task identity retain separate actual ordinary/repair counters (1214.169917ms)
+✔ component reconciliation checks real projected identities, complete history pages and final usage (146.237958ms)
+✔ component source changes preserve unrelated scope revisions and historical cursors (167.094291ms)
+ℹ tests 36
+ℹ suites 0
+ℹ pass 36
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2152.625875

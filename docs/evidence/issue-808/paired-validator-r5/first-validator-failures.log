@@ -1,0 +1,63 @@
+✔ recorded primary admission refusal and malformed reports cannot qualify or yield CPU comparisons (2.211292ms)
+✔ valid counter arithmetic does not hide incomplete windows or coverage and invent a CPU threshold (0.906083ms)
+✔ paired report rejects host (0.36925ms)
+✖ paired report rejects workload (1.219417ms)
+✔ paired report rejects budget (0.776792ms)
+✔ paired report rejects duration (0.336458ms)
+✔ paired report rejects missing duration (0.384959ms)
+✔ paired report rejects source (0.258667ms)
+✔ paired report rejects artifact (0.261625ms)
+✔ paired report rejects counter (0.24975ms)
+✔ paired report rejects sum (0.204208ms)
+✖ paired report rejects process generation (0.364542ms)
+✔ paired report rejects worker generation (0.511125ms)
+✔ paired report rejects missing related process (0.229959ms)
+✔ paired report rejects missing counter (0.214417ms)
+✔ paired report rejects final result (0.179125ms)
+✔ paired report rejects stale sample (0.206292ms)
+ℹ tests 17
+ℹ suites 0
+ℹ pass 15
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 165.5685
+
+✖ failing tests:
+
+test at packages/pi-better-server/test/paired-runtime-report.test.ts:1:5403
+✖ paired report rejects workload (1.219417ms)
+  AssertionError [ERR_ASSERTION]: [{"path":"before[0].scenarios[0].coverage.aggregatePeak","code":"not-qualified"},{"path":"before[0].scenarios[0].coverage.workerGc","code":"not-qualified"},{"path":"before[0].scenarios[0].coverage.queueAge","code":"not-qualified"},{"path":"before[0].scenarios[0].coverage.eventLatency","code":"not-qualified"},{"path":"before[0].scenarios[0].coverage.recovery","code":"not-qualified"},{"path":"before[0].scenarios[0].coverage.exit","code":"not-qualified"},{"path":"before.4416/1/96","code":"missing-required-window"},{"path":"before.4416/1/192","code":"missing-required-window"},{"path":"before.4416/5/48","code":"missing-required-window"},{"path":"before.4416/5/96","code":"missing-required-window"},{"path":"before.4416/5/192","code":"missing-required-window"},{"path":"before.4416/10/48","code":"missing-required-window"},{"path":"before.4416/10/96","code":"missing-required-window"},{"path":"before.4416/10/192","code":"missing-required-window"},{"path":"before.10000/1/48","code":"missing-required-window"},{"path":"before.10000/1/96","code":"missing-required-window"},{"path":"before.10000/1/192","code":"missing-required-window"},{"path":"before.10000/5/48","code":"missing-required-window"},{"path":"before.10000/5/96","code":"missing-required-window"},{"path":"before.10000/5/192","code":"missing-required-window"},{"path":"before.10000/10/48","code":"missing-required-window"},{"path":"before.10000/10/96","code":"missing-required-window"},{"path":"before.10000/10/192","code":"missing-required-window"},{"path":"after[0].scenarios[0].reconciliation","code":"wrong-final-counts"},{"path":"after[0].scenarios[0].coverage.aggregatePeak","code":"not-qualified"},{"path":"after[0].scenarios[0].coverage.workerGc","code":"not-qualified"},{"path":"after[0].scenarios[0].coverage.queueAge","code":"not-qualified"},{"path":"after[0].scenarios[0].coverage.eventLatency","code":"not-qualified"},{"path":"after[0].scenarios[0].coverage.recovery","code":"not-qualified"},{"path":"after[0].scenarios[0].coverage.exit","code":"not-qualified"},{"path":"after.4416/1/48","code":"missing-required-window"},{"path":"after.4416/1/96","code":"missing-required-window"},{"path":"after.4416/1/192","code":"missing-required-window"},{"path":"after.4416/5/48","code":"missing-required-window"},{"path":"after.4416/5/96","code":"missing-required-window"},{"path":"after.4416/5/192","code":"missing-required-window"},{"path":"after.4416/10/48","code":"missing-required-window"},{"path":"after.4416/10/96","code":"missing-required-window"},{"path":"after.4416/10/192","code":"missing-required-window"},{"path":"after.10000/1/96","code":"missing-required-window"},{"path":"after.10000/1/192","code":"missing-required-window"},{"path":"after.10000/5/48","code":"missing-required-window"},{"path":"after.10000/5/96","code":"missing-required-window"},{"path":"after.10000/5/192","code":"missing-required-window"},{"path":"after.10000/10/48","code":"missing-required-window"},{"path":"after.10000/10/96","code":"missing-required-window"},{"path":"after.10000/10/192","code":"missing-required-window"}]
+      at TestContext.<anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/test/paired-runtime-report.test.ts:71:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at packages/pi-better-server/test/paired-runtime-report.test.ts:1:5403
+✖ paired report rejects process generation (0.364542ms)
+  AssertionError [ERR_ASSERTION]: [{"path":"before[0].scenarios[0].coverage.aggregatePeak","code":"not-qualified"},{"path":"before[0].scenarios[0].coverage.workerGc","code":"not-qualified"},{"path":"before[0].scenarios[0].coverage.queueAge","code":"not-qualified"},{"path":"before[0].scenarios[0].coverage.eventLatency","code":"not-qualified"},{"path":"before[0].scenarios[0].coverage.recovery","code":"not-qualified"},{"path":"before[0].scenarios[0].coverage.exit","code":"not-qualified"},{"path":"before.4416/1/96","code":"missing-required-window"},{"path":"before.4416/1/192","code":"missing-required-window"},{"path":"before.4416/5/48","code":"missing-required-window"},{"path":"before.4416/5/96","code":"missing-required-window"},{"path":"before.4416/5/192","code":"missing-required-window"},{"path":"before.4416/10/48","code":"missing-required-window"},{"path":"before.4416/10/96","code":"missing-required-window"},{"path":"before.4416/10/192","code":"missing-required-window"},{"path":"before.10000/1/48","code":"missing-required-window"},{"path":"before.10000/1/96","code":"missing-required-window"},{"path":"before.10000/1/192","code":"missing-required-window"},{"path":"before.10000/5/48","code":"missing-required-window"},{"path":"before.10000/5/96","code":"missing-required-window"},{"path":"before.10000/5/192","code":"missing-required-window"},{"path":"before.10000/10/48","code":"missing-required-window"},{"path":"before.10000/10/96","code":"missing-required-window"},{"path":"before.10000/10/192","code":"missing-required-window"},{"path":"after[0].scenarios[0].coverage.aggregatePeak","code":"not-qualified"},{"path":"after[0].scenarios[0].coverage.workerGc","code":"not-qualified"},{"path":"after[0].scenarios[0].coverage.queueAge","code":"not-qualified"},{"path":"after[0].scenarios[0].coverage.eventLatency","code":"not-qualified"},{"path":"after[0].scenarios[0].coverage.recovery","code":"not-qualified"},{"path":"after[0].scenarios[0].coverage.exit","code":"not-qualified"},{"path":"after.4416/1/96","code":"missing-required-window"},{"path":"after.4416/1/192","code":"missing-required-window"},{"path":"after.4416/5/48","code":"missing-required-window"},{"path":"after.4416/5/96","code":"missing-required-window"},{"path":"after.4416/5/192","code":"missing-required-window"},{"path":"after.4416/10/48","code":"missing-required-window"},{"path":"after.4416/10/96","code":"missing-required-window"},{"path":"after.4416/10/192","code":"missing-required-window"},{"path":"after.10000/1/48","code":"missing-required-window"},{"path":"after.10000/1/96","code":"missing-required-window"},{"path":"after.10000/1/192","code":"missing-required-window"},{"path":"after.10000/5/48","code":"missing-required-window"},{"path":"after.10000/5/96","code":"missing-required-window"},{"path":"after.10000/5/192","code":"missing-required-window"},{"path":"after.10000/10/48","code":"missing-required-window"},{"path":"after.10000/10/96","code":"missing-required-window"},{"path":"after.10000/10/192","code":"missing-required-window"}]
+      at TestContext.<anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/test/paired-runtime-report.test.ts:71:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }

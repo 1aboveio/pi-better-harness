@@ -2,7 +2,7 @@
   "issue": 808,
   "baseline": "eec7b3e256a7548bbf67f69cd468f12eb3b91dc8",
   "cwd": "repository root",
-  "environment": ["TMPDIR=<owned .private-808/tmp>", "npm_config_cache=<owned .private-808/npm-cache>", "PI_FULL_RUNTIME_TRANSPORT_DIR=<approved existing canonical owned short directory>", "PI_FULL_RUNTIME_REPORT=<unique retained evidence path outside disposable caches>"],
+  "environment": ["TMPDIR=<owned .private-808/tmp>", "npm_config_cache=<owned .private-808/npm-cache>", "PI_FULL_RUNTIME_TRANSPORT_DIR=<approved existing canonical owned short directory>", "PI_FULL_RUNTIME_REPORT=<unique retained evidence path outside disposable caches>", "PI_FULL_RUNTIME_HOST_ID=<approved actual fixed-host identifier for measurement provenance only>"],
   "transport": "The explicit directory owns pi-server.sock directly, with no random nested suffix. The 103-byte guard and existing startup admission remain mandatory. Bulk data stays in TMPDIR. An admission refusal is not retried through another runtime, authority, path or settings.",
   "nativeLanes": ["macOS actual processes/SQLite/socket", "Linux actual processes/SQLite/socket"],
   "qualification": "notRun; these commands are checkpoints, not acceptance verdicts",
@@ -50,8 +50,11 @@
     {
       "ac": 7,
       "command": "PI_INCREMENTAL_WORKLOAD=1 PI_INCREMENTAL_DURATION_MS=600000 node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs",
+      "pairedValidatorCommand": "node --import tsx packages/pi-better-server/scripts/measure-full-runtime/paired-report.mjs BEFORE-REPORTS.json AFTER-REPORTS.json APPROVED-IDENTITIES.json",
+      "pairedValidatorComponentCommand": "node --import tsx --test packages/pi-better-server/test/paired-runtime-report.test.ts",
       "implemented": "Ten-minute minimum enforced per workload; existing process CPU/RSS/I/O/RPC/lag sampler and source/hardware identity retained. Diagnostic source now records per-process sampled peak RSS/CPU, main-thread GC and sampler CPU/write-time cost; these fields have not been measured natively.",
-      "missing": ["same fixed machine baseline plus exact merged candidate runs >=10 minutes EACH workload", "simultaneous aggregate peak and worker-thread GC/queue age/event/recovery/exit diagnostics", "bounded diagnostic overhead comparison", "baseline fixture parity and paired report validator"]
+      "pairedValidator": "Implemented structural/evidence validation of the existing report shape with approved fixed-host/source/artifact identities, required 4416/10000 x1/5/10 x48/96/192 windows, >=600000ms EACH side/window, workload/budget equality, real related-process inventory/counter arithmetic and explicit missing-coverage rejection. Component specimens are not measurements. Original source has no numeric CPU reduction target; none is invented.",
+      "missing": ["same fixed machine baseline plus exact merged candidate runs >=10 minutes EACH workload", "simultaneous aggregate peak and worker-thread GC/queue age/event/recovery/exit diagnostics", "measured diagnostic overhead comparison", "baseline fixture parity and authorized fixed-host/source/artifact records", "actual paired-report qualification (validator source/components are not native progress)"]
     },
     {
       "ac": 8,

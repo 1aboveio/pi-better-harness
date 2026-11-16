@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { sourceProvenance } from './source-provenance.mjs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { fork } from 'node:child_process';
-import { cpus, totalmem, release, arch, tmpdir } from 'node:os';
+import { cpus, totalmem, release, arch, tmpdir, hostname } from 'node:os';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -37,6 +37,17 @@ writeFileSync(join(agent, 'agents/roles/fixture.md'), '---\nschema: pi-agent/v1\
 let errors = '', seq = 0; const children = [], clients = [];
 const report = { root, transport, socketPath, socketBytes: Buffer.byteLength(socketPath), mode: process.env.PI_FULL_RUNTIME_MATRIX_ONLY ? "mixed-adapter-smoke-not-performance" : "resource-matrix", platform: process.platform, node: process.version, machine:{release:release(),arch:arch(),cpus:cpus().length,cpuModel:cpus()[0]?.model,totalMemory:totalmem()}, source:sourceProvenance(fileURLToPath(new URL('../../..', import.meta.url))), scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two real RemoteClientSession adapters over loopback Unix transport with HostedSessions (not cross-machine SSH); sampler overhead included', scenarios: [] };
 const output = process.env.PI_FULL_RUNTIME_REPORT ?? join(root, 'report.json');
+report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIME_HOST_ID ?? null, hostname: hostname(),
+  artifact: readOwnBuild() ?? null,
+  fixtureSha256: createHash('sha256').update(JSON.stringify([
+    './measure-full-runtime.mjs', './measure-full-runtime/frontend.ts', './measure-full-runtime/hosted-extension.ts',
+    './measure-full-runtime/probe.mjs', './measure-full-runtime/recovery-trace.mjs', './measure-full-runtime/recovery-trace-loader.mjs',
+    './measure-full-runtime/incremental-workload.mjs', './event-publication/writer.mjs', './event-publication/commit.mjs',
+    '../test/support/subagent-offline-model.ts',
+  ].map(path => ({ path, sha256: createHash('sha256').update(readFileSync(new URL(path, import.meta.url))).digest('hex') })))).digest('hex'),
+  diagnosticBudget: { samplerIntervalMs: 250, controlIntervalMs: 100 },
+  activeWorkload: { subagents: 1, durableCommands: 2, legacyCommands: 2, hostedSessions: 2, offline: true },
+  coverage: { workerGc: false, aggregatePeak: false, queueAge: false, eventLatency: false, recovery: false, exit: false } };
 if (incremental) Object.assign(report, { incremental, workload, qualification: 'notRun', missing: ['fault matrix', 'scope/UI matrix', 'native dual-platform runs', 'paired fixed-host comparison', 'GC/peak/queue-age diagnostics', 'natural idle exit'] });
 function start(url, args = []) { const child = fork(url, args, { execPath, execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); children.push(child); child.stdout.resume(); child.stderr.on('data', d => { errors += d; }); return child; }
 async function until(label, fn, timeout = 30000) { const deadline = Date.now()+timeout; while (Date.now()<deadline) { const value = await fn(); if (value) return value; await delay(25); } throw new Error(`${label} timed out: ${errors.slice(-4000)}`); }
@@ -113,15 +124,18 @@ try {
     const legacyPids=[0,1].map(index=>Number(readFileSync(join(cwd,`legacy-pid-${index}`),'utf8')));
     const remoteCommandPid=Number(readFileSync(join(cwd,'remote-command-pid'),'utf8'));
     const required=[process.pid,...legacyPids,remoteClaim.pid,remoteCommandPid,owner.pid,guardian.pid,worker.pid,claim.pid,commandPid,...clients.map(c=>c.pid)];
-    const sampleAll=()=>until('all actual processes sampled in this measurement generation',()=>{const values=observed();return required.every(pid=>values.some(value=>value.identity.pid===pid&&value.generation===String(count)))?values:false;});
-    const before=await sampleAll();
+    const sampleAll=(afterAt = 0)=>until('all actual processes sampled in this measurement generation',()=>{const values=observed();return required.every(pid=>values.some(value=>value.identity.pid===pid&&value.generation===String(count)&&value.at>=afterAt))?values:false;});
+    let before=await sampleAll();
     const role = pid => pid===process.pid?'remote-adapters-and-measurement':pid===remoteClaim.pid?'remote-runner':pid===remoteCommandPid?'remote-command':pid===owner.pid ? 'server' : pid===guardian.pid ? 'guardian' : pid===worker.pid ? 'worker' : pid===claim.pid ? 'runner' : pid===commandPid ? 'command' : legacyPids.includes(pid)?'legacy-command':'pi';
     for(const pid of required) assert.ok(before.some(v=>v.identity.pid===pid),`Missing instrumented actual process ${pid}`);
     const workloadBefore = workload ? await reconcileWorkload(work, cwd, workload) : undefined;
     const countersBefore = await work.request('runtime_get_metrics');
+    before = await sampleAll();
+    const startedAt = Date.now();
     const measurementStart=performance.now(), latencies=[]; const duration=incremental?.durationMs ?? (process.env.PI_FULL_RUNTIME_MATRIX_ONLY?100:count===10?60000:3000);
     while(performance.now()-measurementStart<duration) { const began=performance.now(); await work.request('runtime_get_status'); latencies.push(performance.now()-began); await delay(100); }
-    const after=await sampleAll(), metrics=await work.request('runtime_get_metrics'), status=await work.request('runtime_get_status');
+    const elapsedMs = performance.now() - measurementStart, endedAt = Date.now();
+    const after=await sampleAll(endedAt), metrics=await work.request('runtime_get_metrics'), status=await work.request('runtime_get_status');
     const workloadAfter = workload ? await reconcileWorkload(work, cwd, workload) : undefined;
     if (workload) {
       assert.deepEqual(workloadAfter, workloadBefore, 'Exact authoritative fixture results must survive the observation window');
@@ -139,7 +153,9 @@ try {
     const backgroundAfter=await work.get({background:true,cwd,sessionId:JSON.parse(readFileSync(sessionFile,'utf8').split('\n')[0]).id});
     const managementDelta=Object.fromEntries(['scopeRefreshes','reconciles'].map(key=>[key,managementAfter[key]-managementBefore[key]]));
     const registryDelta=Object.fromEntries(Object.keys(managementAfter.registry).map(key=>[key,managementAfter.registry[key]-managementBefore.registry[key]]));
-    report.scenarios.push({warmup,backgroundBefore:observedLegacy,backgroundAfter,managementBefore,managementAfter,managementDelta,registryDelta,legacyRows:2,clients:count,elapsedMs:performance.now()-measurementStart,resources,connections,metrics,totalCpuMs:resources.reduce((s,v)=>s+v.cpuMs,0),totalRss:resources.reduce((s,v)=>s+v.rss,0),rpcMs:{p50:latencies.sort((a,b)=>a-b)[Math.floor(latencies.length*.5)],p95:latencies[Math.floor(latencies.length*.95)],p99:latencies[Math.floor(latencies.length*.99)]}});
+    report.scenarios.push({warmup,backgroundBefore:observedLegacy,backgroundAfter,managementBefore,managementAfter,managementDelta,registryDelta,legacyRows:2,clients:count,startedAt,endedAt,elapsedMs,
+      requiredProcesses: required.map(pid => ({ identity: before.find(value => value.identity.pid === pid).identity, role: role(pid) })), resourceBefore: before,
+      resources,connections,metrics,countersBefore,totalCpuMs:resources.reduce((s,v)=>s+v.cpuMs,0),totalRss:resources.reduce((s,v)=>s+v.rss,0),rpcMs:{p50:latencies.sort((a,b)=>a-b)[Math.floor(latencies.length*.5)],p95:latencies[Math.floor(latencies.length*.95)],p99:latencies[Math.floor(latencies.length*.99)]}});
     writeFileSync(output,JSON.stringify(report,null,2));
     assert.equal(backgroundAfter.scopeRevision,observedLegacy.scopeRevision,'Workload changed during unchanged-window measurement');
     assert.equal(managementDelta.reconciles,0,'Unchanged same-owner foregrounds must not multiply canonical reconciliation');
