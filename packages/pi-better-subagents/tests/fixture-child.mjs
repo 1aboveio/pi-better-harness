@@ -1,8 +1,20 @@
 const closedChannel = error => ["EPIPE", "ECONNRESET", "ERR_IPC_CHANNEL_CLOSED"].includes(error?.code);
+const observations = new WeakMap();
+
+/** Capture the first failure while stderr is still open, not just at teardown. */
+export function observeFixtureChild(child) {
+    if (observations.has(child)) return observations.get(child);
+    const observation = { pid: child.pid, stderr: "", exitCode: child.exitCode, signal: child.signalCode };
+    child.stderr?.on("data", bytes => { observation.stderr = (observation.stderr + bytes).slice(0, 65536); });
+    child.once("exit", (code, signal) => { observation.exitCode = code; observation.signal = signal; });
+    observations.set(child, observation);
+    return observation;
+}
 
 /** Wait for this exact fixture child, including the disconnect-before-exit gap. */
 export async function stopFixtureChild(child, message = "stop") {
-    const exitError = (code, signal) => code !== 0 ? new Error(`Fixture child ${child.pid} exited (${signal ?? code})`) : undefined;
+    const observation = observeFixtureChild(child);
+    const exitError = (code, signal) => code !== 0 ? Object.assign(new Error(`Fixture child ${child.pid} exited (${signal ?? code}): ${observation.stderr}`), { fixture: { ...observation } }) : undefined;
     if (child.exitCode !== null || child.signalCode !== null) {
         const error = exitError(child.exitCode, child.signalCode);
         if (error) throw error;
