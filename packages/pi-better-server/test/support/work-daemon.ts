@@ -57,10 +57,16 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
   }
 };
 const { startDaemon } = await import("../../src/server.ts");
+const { createRpcEvidence } = await import('./rpc-evidence.ts');
+const evidence = createRpcEvidence();
 
-const daemon = await startDaemon({ serverDir: process.env.PI_SERVER_DIR, sessionIdleMs: 0, daemonIdleMs: 0 });
+const daemon = await startDaemon({ serverDir: process.env.PI_SERVER_DIR, sessionIdleMs: 0, daemonIdleMs: 0, rpcEvidence: evidence });
 process.send?.({ ready: daemon.socketPath });
 process.on("message", async command => {
+  if (command && typeof command === 'object' && 'rpcEvidence' in command) {
+    process.send?.({ rpcEvidence: command.rpcEvidence, snapshot: evidence.snapshot() });
+    return;
+  }
   if (command === "metrics") {
     const domain = "../../src/runtime/domain/subagents/index.domain.mjs";
     const { isHealthTickerActive } = await import(domain);

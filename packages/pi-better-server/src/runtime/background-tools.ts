@@ -7,7 +7,8 @@ import { existsSync } from 'node:fs';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { acquireMutationStore } from './mutation-store.ts';
 /** Fixed canonical adapter. It never owns a native parent transcript. */
-export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>, verificationMs = 30000) {
+export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>, verificationMs = 30000,
+    trace?: (slot: number, phase: 'queued' | 'executing' | 'recovery' | 'read-pending' | 'read-returned' | 'tool-pending' | 'tool-returned' | 'settled') => void) {
     const load = (file: string) => import(`./domain/background-service/${file}.domain.mjs`);
     const [{ createObservedWaitHost }, { registerTools }, { createBackgroundTaskRuntime }, sandbox, authority, permissions, registry, navigator, failures] = await Promise.all([
         load('observed-waits'), load('tools'), load('runtime'), load('sandbox'), load('managed-authority'),
@@ -19,6 +20,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
     let journal: ReturnType<typeof lease.store.backgroundRequests>;
     let pi: any, service: any, session: any, runtime: any, current: any;
     let tail: Promise<unknown> = Promise.resolve(), pending = 0;
+    let traceSlot = 0;
     const projections = new Map<string, any>(), metrics = { scopeRefreshes: 0, exactDetailReads: 0, reconciles: 0 };
     const recoveryVersions = new Map<string, string>();
     const scopes = new Map<string, any>(), deliveries = new Map<string, any>();
@@ -150,7 +152,10 @@ export async function createBackgroundTools(root: string, instance: string, drai
             if (pending >= 64)
                 return Promise.reject(new Error('runtime-overloaded: Background request capacity'));
             pending++;
+            const slot = ++traceSlot;
+            trace?.(slot, 'queued');
             const request = tail.catch(() => undefined).then(async () => {
+                trace?.(slot, 'executing');
                 const record = authority.readBackgroundAuthority(root, instance, command.authority), key = ownerKey(record.owner);
                 // A warmed branch view must not overwrite another foreground's progress.
                 const viewKey = JSON.stringify([key, authority.backgroundDigest(record.branchIds)]);
@@ -201,11 +206,14 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     if (recoveryVersions.get(viewKey) !== recoveryVersion || service.hasPendingParentCallbackRecovery()) {
                         metrics.reconciles++;
                         service.noteParentContext(ctx);
+                        trace?.(slot, 'recovery');
                         await service.reconcileNow();
                         if (!recoveryVersions.has(viewKey) && recoveryVersions.size >= 128) forgetView(recoveryVersions.keys().next().value!);
                         recoveryVersions.set(viewKey, recoveryVersion);
                     }
+                    trace?.(slot, 'read-pending');
                     const snapshot = await observe({ background: true, cwd: record.owner.workspace, sessionId: record.owner.sessionId });
+                    trace?.(slot, 'read-returned');
                     if (snapshot.status !== 'ready')
                         throw new Error(snapshot.reason ?? 'Shared Background observation unverified');
                     const revision = authority.backgroundDigest([snapshot.scopeRevision, record.branchIds]);
@@ -272,7 +280,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
                 assertAdmission();
                 let result;
                 try {
+                    trace?.(slot, 'tool-pending');
                     result = await tool.execute(record.key, record.params, undefined, undefined, ctx);
+                    trace?.(slot, 'tool-returned');
                 }
                 catch (error) {
                     if (mutation)
@@ -291,7 +301,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                 if (mutation)
                     journal.finish(key, record.key, result);
                 return result;
-            }).finally(() => { pending--; });
+            }).finally(() => { pending--; trace?.(slot, 'settled'); });
             tail = request;
             return request;
         },
