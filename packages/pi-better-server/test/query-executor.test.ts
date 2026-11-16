@@ -50,10 +50,15 @@ async function fixture(options: { intervalMs?: number; capacity?: number; timeou
       const listener = (message: any) => { if (message.type === "diagnostic-started") { worker.off("message", listener); resolve(); } };
       worker.on("message", listener);
     });
-    const finished = new Promise<number>(resolve => {
-      const listener = (message: any) => { if (message.type === "diagnostic-finished") { worker.off("message", listener); resolve(message.durationMs); } };
-      worker.on("message", listener);
+    const finished = new Promise<number>((resolve, reject) => {
+      const cleanup = () => { worker.off("message", listener); worker.off("exit", exited); worker.off("error", failed); };
+      const listener = (message: any) => { if (message.type === "diagnostic-finished") { cleanup(); resolve(message.durationMs); } };
+      const exited = (code: number) => { cleanup(); reject(new Error(`diagnostic worker exited before completing SQLite work (code ${code})`)); };
+      const failed = (error: Error) => { cleanup(); reject(error); };
+      worker.on("message", listener); worker.once("exit", exited); worker.once("error", failed);
     });
+    // Some watchdog tests intentionally discard the completion promise.
+    void finished.catch(() => {});
     worker.postMessage({ type: "diagnostic-stall", iterations }); await started;
     return { finished };
   };
@@ -136,6 +141,17 @@ for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query
     assert.equal(changed.eventEncoding.frames - baseline.eventEncoding.frames, count);
     assert.ok(changed.eventEncoding.bytes > baseline.eventEncoding.bytes);
     stops.forEach(stop => stop());
+  } finally { await f.close(); }
+});
+
+test("stalled diagnostic completion rejects when its worker exits", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const client = await f.client(); await ready(client);
+    const busy = await f.stall();
+    const rejected = assert.rejects(busy.finished, /worker exited before completing/);
+    await f.worker.terminate();
+    await rejected;
   } finally { await f.close(); }
 });
 
@@ -624,7 +640,7 @@ test("real runner timeout and canonical result supervision progress during stall
   const { RuntimeResultSupervision } = await import("../src/runtime/result-supervision.ts");
   const { createLocalSupervisor } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
   const { supervisorTaskIdForToken } = await import(new URL("../../pi-better-background-tasks/src/supervisor/store.ts", import.meta.url).href);
-  const f = await fixture();
+  const f = await fixture({ watchdogMs: 15000 });
   const lease = acquireMutationStore(f.root);
   const directory = join(f.root, "supervisor");
   const supervisor = createLocalSupervisor({ directory });
@@ -642,7 +658,7 @@ test("real runner timeout and canonical result supervision progress during stall
     host = new RuntimeResultSupervision(f.root, "slow-read-epoch");
     const busy = await f.stall(12000000);
     let readFinished = false;
-    void busy.finished.then(() => { readFinished = true; });
+    void busy.finished.then(() => { readFinished = true; }, () => {});
     const began = performance.now();
     await supervisor.start({ token, operationId, cwd: f.root, timeoutSeconds: 0.2,
       argv: [process.execPath, "-e", "setInterval(()=>{},1000)"] });
