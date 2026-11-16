@@ -414,7 +414,8 @@ export class ObservedWaitHost {
     recoveryScopeState() {
         if (!this.activeOrigin)
             return this.unscopedCallbackRecovery;
-        const key = JSON.stringify([this.activeOrigin?.cwd, this.activeOrigin?.sessionId]);
+        // Concurrent foregrounds can retain different branch snapshots of one session.
+        const key = JSON.stringify([this.activeOrigin.cwd, this.activeOrigin.sessionId, branchIdsOf(this.activeContext)]);
         let state = this.callbackRecoveryScopes.get(key);
         if (!state) {
             if (this.callbackRecoveryScopes.size >= 128)
