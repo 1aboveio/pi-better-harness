@@ -45,6 +45,10 @@ async function fixture(options: { intervalMs?: number; capacity?: number; timeou
   const clients: WorkClient[] = [];
   const client = async () => { const value = new WorkClient(path, root); clients.push(value); await value.ready; return value; };
   const worker = (executor as unknown as { worker: Worker }).worker;
+  const bootstrapped = new Promise<void>(resolve => {
+    const listener = (message: any) => { if (message.type === "fixture-ready") { worker.off("message", listener); resolve(); } };
+    worker.on("message", listener);
+  });
   const stall = async (iterations = 3000000) => {
     const started = new Promise<void>(resolve => {
       const listener = (message: any) => { if (message.type === "diagnostic-started") { worker.off("message", listener); resolve(); } };
@@ -67,7 +71,7 @@ async function fixture(options: { intervalMs?: number; capacity?: number; timeou
     await new Promise<void>(resolve => server.close(() => resolve())); await executor.close();
     rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
   };
-  return { executor, client, stall, worker, close, root, path };
+  return { executor, client, stall, worker, bootstrapped, close, root, path };
 }
 
 async function ready(client: WorkClient) {
@@ -213,8 +217,12 @@ test("watchdog recovers a genuinely wedged worker while socket control stays res
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   try {
     // The 400 ms read deadline tests the wedge, not cold worker imports.
-    if (f.executor.observation().observedAt === null)
-      await once(f.worker, "message", { signal: AbortSignal.timeout(5000) });
+    let startupTimeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([f.bootstrapped, new Promise<never>((_, reject) => {
+        startupTimeout = setTimeout(() => reject(new Error("query fixture did not bootstrap within budget")), 5000);
+      })]);
+    } finally { clearTimeout(startupTimeout); }
     const a = await f.client(), b = await f.client(); await ready(a); await ready(b);
     const epoch = b.snapshot!.instanceId;
     const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
@@ -234,10 +242,28 @@ test("watchdog recovers a genuinely wedged worker while socket control stays res
   } finally { await f.close(); }
 });
 
+test("cold bootstrap caller deadline does not imply a wedged read worker", { timeout: 10000 }, async t => {
+  const f = await fixture({ timeoutMs: 400, watchdogMs: 2000,
+    workerUrl: new URL("./support/cold-cancellable-query-worker.mjs", import.meta.url) });
+  try {
+    const client = await f.client();
+    const began = performance.now();
+    await assert.rejects(client.subscribe({}), /runtime-timeout: caller read deadline exceeded/);
+    assert.equal((await client.request("ping")).ok, true);
+    assert.equal(f.executor.metrics().executor.callerTimeouts, 1);
+    await f.bootstrapped;
+    await ready(client);
+    assert.equal(client.snapshot?.status, "ready");
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+    t.diagnostic(JSON.stringify({ startupMs: performance.now() - began, metrics: f.executor.metrics() }));
+  } finally { await f.close(); }
+});
+
 test("responsive rebuilding outlives the watchdog without claiming source readiness", { timeout: 10000 }, async t => {
   const f = await fixture({ watchdogMs: 800,
     workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
   try {
+    await f.bootstrapped;
     const a = await f.client(), b = await f.client();
     const began = performance.now();
     for (let i = 0; i < 6; i++) {
@@ -282,13 +308,20 @@ test("an exact-ID client waits for indexing without occupying the shared read qu
     const blocked = new Promise<void>(resolve => {
       f.worker.on("message", message => { if (message.type === "inventory-blocked") resolve(); });
     });
+    const client = await f.client(); await blocked;
+    f.worker.postMessage({ type: "release-inventory" });
+    await ready(client);
+    const indexing = new Promise<void>(resolve => {
+      const listener = (message: any) => { if (message.type === "inventory-blocked") { f.worker.off("message", listener); resolve(); } };
+      f.worker.on("message", listener);
+    });
+    f.worker.postMessage({ type: "block-inventory" }); await indexing;
     const directory = join(f.root, "runs/sa_client_retry"); mkdirSync(directory);
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_client_retry", sessionId: "retry", cwd: f.root,
       status: "completed", startedAt: 1 }));
-    const client = await f.client(); await blocked;
     let completed = false;
     const pending = client.get({ id: "sa_client_retry", limit: 1 }).then(value => { completed = true; return value; });
-    assert.equal((await client.get({ limit: 2 })).status, "rebuilding");
+    assert.equal((await client.get({ limit: 2 })).status, "ready");
     assert.equal(completed, false, "the unrelated read completes while the exact ID is still awaiting inventory");
     f.worker.postMessage({ type: "release-inventory" });
     let result = await pending;
@@ -469,7 +502,7 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
     const after = await b.request("runtime_get_metrics");
     assert.equal(after.queryCount, before, "the worker cache avoids repeated SQLite for a warmed scope");
     assert.ok(after.cacheHits > 0);
-    assert.equal(after.sqlite.active, 1, "only the derived index exists when no coordinator source is present");
+    assert.equal(after.sqlite.active, 1, "the query index owns the attached checkpoint store when no coordinator source is present");
   } finally { await f.close(); }
 });
 
@@ -595,6 +628,7 @@ test('Subagents and Background share one coordinator read connection in the quer
     assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator and one derived connection with the durable inbox attached, regardless of domain');
     assert.equal((f.executor.metrics().sqlite as any).opens, 2, 'both inbox attachments reuse the existing derived handle without another constructor open');
     assert.equal((f.executor.metrics().sqlite as any).maximum, 2, 'Background attachment cannot temporarily exceed the existing handle budget');
+    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator plus one derived index with attached checkpoints, regardless of domain');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
     t.diagnostic(JSON.stringify({ retainedBudget: 2, sqlite: f.executor.metrics().sqlite }));
   } finally { await f.close(); }

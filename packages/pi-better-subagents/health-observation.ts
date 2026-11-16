@@ -254,17 +254,17 @@ export function extractChildEventFacts(events: ReadonlyArray<unknown>): ChildEve
     return createChildEventFactFold()(events);
 }
 
-function createChildEventFactFold(): (events: ReadonlyArray<unknown>) => ChildEventFacts {
-    const openTools = new Map<string, ActiveToolFact>();
-    let anonymous = 0;
-    const meaningful: { last?: number } = {};
-    let lastToolAt: number | undefined;
-    let compacting = false;
-    let compactionStartedAt: number | undefined;
-    let lastCompaction: CompactionEndFact | undefined;
-    let sawAgentSettled = false;
-    let retry: ModelFacts["retry"];
-    const recovery: RetryRecoveryState = {
+function createChildEventFactFold(saved?: any) {
+    const openTools = new Map<string, ActiveToolFact>(saved?.openTools);
+    let anonymous = saved?.anonymous ?? 0;
+    const meaningful: { last?: number } = saved?.meaningful ?? {};
+    let lastToolAt: number | undefined = saved?.lastToolAt;
+    let compacting = saved?.compacting ?? false;
+    let compactionStartedAt: number | undefined = saved?.compactionStartedAt;
+    let lastCompaction: CompactionEndFact | undefined = saved?.lastCompaction;
+    let sawAgentSettled = saved?.sawAgentSettled ?? false;
+    let retry: ModelFacts["retry"] = saved?.retry;
+    const recovery: RetryRecoveryState = saved?.recovery ?? {
         recoveredAfterError: false,
         retrying: false,
         willRetry: undefined,
@@ -272,7 +272,7 @@ function createChildEventFactFold(): (events: ReadonlyArray<unknown>) => ChildEv
         errorHistory: [],
     };
 
-    return (events) => {
+    const fold = (events: ReadonlyArray<unknown>): ChildEventFacts => {
     for (const raw of events) {
         logReadMetrics.healthFolded++;
         if (!raw || typeof raw !== "object") continue;
@@ -438,6 +438,19 @@ function createChildEventFactFold(): (events: ReadonlyArray<unknown>) => ChildEv
         longModelCallSupported: false,
     };
     };
+    return Object.assign(fold, { snapshot: () => ({ openTools: [...openTools], anonymous,
+        meaningful, lastToolAt, compacting, compactionStartedAt, lastCompaction,
+        sawAgentSettled, retry, recovery }) });
+}
+
+export function encodeHealthLogState(state: FactLogState): unknown {
+    return { cursor: state.cursor, truncated: state.truncated, fold: state.fold.snapshot() };
+}
+
+export function decodeHealthLogState(saved: any): FactLogState {
+    if (!saved?.fold?.recovery || !Array.isArray(saved.fold.openTools)
+        || !Number.isSafeInteger(saved.cursor?.offset) || saved.cursor.offset < 0) throw new Error("Invalid health checkpoint");
+    return { cursor: saved.cursor, truncated: saved.truncated, fold: createChildEventFactFold(saved.fold) };
 }
 
 /** Parse the fact-relevant events out of raw NDJSON lines. */

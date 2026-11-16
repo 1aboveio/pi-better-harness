@@ -885,6 +885,15 @@ function peekType(line) {
 /** Runs tracked at once; a backstop against unbounded state, not a policy. */
 const MAX_TRACKED_PARSE_RUNS = 64;
 const parseStates = new Map();
+export function encodeParseLogState(state) {
+    return { ...state, openToolCalls: [...state.openToolCalls] };
+}
+export function decodeParseLogState(saved) {
+    if (!saved?.usage || !Array.isArray(saved.openToolCalls) || !Array.isArray(saved.toolCalls)
+        || !Number.isSafeInteger(saved.cursor?.offset) || saved.cursor.offset < 0)
+        throw new Error("Invalid display checkpoint");
+    return { ...saved, openToolCalls: new Map(saved.openToolCalls) };
+}
 /** Forget a run's accumulated parse (or all of them). */
 export function resetParseRunCursor(id) {
     if (id === undefined)
@@ -1096,9 +1105,18 @@ export function parseRun(id, options = {}) {
     const key = options.logPath ?? id;
     const states = options.states ?? parseStates;
     const previous = states.get(key);
-    const read = readAppendedLines(options.logPath ?? logPathFor(id), previous?.cursor, maxParseBytes());
+    const path = options.logPath ?? logPathFor(id);
+    let catchUp = false;
+    if (options.summaryOnly) {
+        try {
+            catchUp = statSync(path).size > 1024 * 1024;
+        }
+        catch { /* read reports errors */ }
+    }
+    const read = readAppendedLines(path, previous?.cursor, catchUp ? Math.min(maxParseBytes(), 1024 * 1024) : maxParseBytes(), catchUp);
     const state = read.restarted || !previous ? freshState(read.cursor) : previous;
     state.cursor = read.cursor;
+    state.catchingUp = read.more;
     if (read.totalBytes > 0)
         state.totalBytes = read.totalBytes;
     if (read.truncated)
@@ -1117,6 +1135,11 @@ export function parseRun(id, options = {}) {
     }
     for (const { event } of selectParsableLines(read.lines))
         foldParseEvent(state, event);
+    if (options.summaryOnly) {
+        state.finalText = "";
+        state.lastActivity = "";
+        state.toolCalls = state.toolCalls.slice(-256);
+    }
     // A log whose final line was never terminated — a writer mid-event, or one
     // that simply did not end with a newline — still has to be readable. Fold it
     // into a COPY: the cursor has not consumed those bytes, so the same line
@@ -1128,6 +1151,10 @@ export function parseRun(id, options = {}) {
             foldParseEvent(view, event);
     }
     const diagnostics = [];
+    if (state.catchingUp)
+        diagnostics.push(`Usage catch-up pending after byte ${state.cursor.offset} of ${state.totalBytes}.`);
+    if (options.summaryOnly && state.cursor.missing)
+        diagnostics.push(`Incomplete usage: missing bytes [${state.cursor.missing[0]}, ${state.cursor.missing[1]}).`);
     if (view.windowTruncated) {
         diagnostics.push(`Log truncated: this session began reading at the last ${fmtBytes(maxParseBytes())} ` +
             `of ${fmtBytes(view.totalBytes)}. Events before that point are not counted in tokens/tools.`);
