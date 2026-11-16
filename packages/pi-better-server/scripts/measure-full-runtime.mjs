@@ -16,6 +16,7 @@ import { RemoteClientSession } from '../src/remote-client/session.ts';
 import { workloadSettings, seedWorkload, reconcileWorkload, workloadTransport, workloadCounterDelta } from './measure-full-runtime/incremental-workload.mjs';
 import { checkStartupAdmission, startupIntentFromEnv } from '../src/startup/admission.ts';
 import { readOwnBuild } from '../src/startup/artifact.ts';
+import { summarizeCohorts } from './measure-full-runtime/aggregate-samples.mjs';
 const incremental = workloadSettings();
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'p751-full-'))), agent = join(root, 'agent'), cwd = join(root, 'workspace'), samples = join(root, 'samples');
 const { directory: transport, socketPath } = workloadTransport(root);
@@ -43,6 +44,7 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
     './measure-full-runtime.mjs', './measure-full-runtime/frontend.ts', './measure-full-runtime/hosted-extension.ts',
     './measure-full-runtime/probe.mjs', './measure-full-runtime/recovery-trace.mjs', './measure-full-runtime/recovery-trace-loader.mjs',
     './measure-full-runtime/incremental-workload.mjs', './event-publication/writer.mjs', './event-publication/commit.mjs',
+    './measure-full-runtime/aggregate-samples.mjs',
     '../test/support/subagent-offline-model.ts',
   ].map(path => ({ path, sha256: createHash('sha256').update(readFileSync(new URL(path, import.meta.url))).digest('hex') })))).digest('hex'),
   diagnosticBudget: { samplerIntervalMs: 250, controlIntervalMs: 100 },
@@ -53,7 +55,8 @@ function start(url, args = []) { const child = fork(url, args, { execPath, execA
 async function until(label, fn, timeout = 30000) { const deadline = Date.now()+timeout; while (Date.now()<deadline) { const value = await fn(); if (value) return value; await delay(25); } throw new Error(`${label} timed out: ${errors.slice(-4000)}`); }
 function message(child, predicate) { return new Promise((resolve, reject) => { const timer = setTimeout(() => { cleanup(); reject(new Error(`IPC timeout: ${errors.slice(-2000)}`)); }, 30000); const on = value => { if (predicate(value)) { cleanup(); resolve(value); } }; const exit = () => { cleanup(); reject(new Error(`Child exited: ${errors}`)); }; function cleanup() { clearTimeout(timer); child.off('message', on); child.off('exit', exit); } child.on('message', on); child.once('exit', exit); }); }
 async function call(child, tool, params, key = `resource-${++seq}`) { const id = ++seq, pending = message(child, m => m.id === id); child.send({ id, key, tool, params }); const reply = await pending; assert.equal(reply.error, undefined, reply.stack); return reply.result; }
-function observed() { return readdirSync(samples).filter(name => name.endsWith('.json')).flatMap(name => { try { const value = JSON.parse(readFileSync(join(samples,name),'utf8')); return processMatchesStart(value.identity.pid,value.identity.start) ? [value] : []; } catch { return []; } }); }
+function diagnosticSamples() { return readdirSync(samples).filter(name => name.endsWith('.json')).flatMap(name => { try { const value = JSON.parse(readFileSync(join(samples,name),'utf8')); return value && typeof value === 'object' ? [value] : []; } catch { return []; } }); }
+function observed() { return diagnosticSamples().filter(value => value.identity && processMatchesStart(value.identity.pid,value.identity.start)); }
 let guardian, work; const hostedClients=[], remotes=[];
 try {
   report.phase = 'startup-admission-preflight';
@@ -131,11 +134,20 @@ try {
     const workloadBefore = workload ? await reconcileWorkload(work, cwd, workload) : undefined;
     const countersBefore = await work.request('runtime_get_metrics');
     before = await sampleAll();
+    const requiredProcesses = required.map(pid => ({ identity: before.find(value => value.identity.pid === pid).identity, role: role(pid) }));
+    const cohortFrame = values => values.map(({ identity, generation, at, sequence, cpu, rss }) => ({ identity, generation, at, sequence, cpu, rss }));
+    const aggregateCohorts = [cohortFrame(before)];
+    const captureCohort = () => {
+      const frame = cohortFrame(diagnosticSamples());
+      if (JSON.stringify(frame) !== JSON.stringify(aggregateCohorts.at(-1))) aggregateCohorts.push(frame);
+    };
     const startedAt = Date.now();
     const measurementStart=performance.now(), latencies=[]; const duration=incremental?.durationMs ?? (process.env.PI_FULL_RUNTIME_MATRIX_ONLY?100:count===10?60000:3000);
-    while(performance.now()-measurementStart<duration) { const began=performance.now(); await work.request('runtime_get_status'); latencies.push(performance.now()-began); await delay(100); }
+    while(performance.now()-measurementStart<duration) { const began=performance.now(); await work.request('runtime_get_status'); latencies.push(performance.now()-began); captureCohort(); await delay(100); }
     const elapsedMs = performance.now() - measurementStart, endedAt = Date.now();
     const after=await sampleAll(endedAt), metrics=await work.request('runtime_get_metrics'), status=await work.request('runtime_get_status');
+    aggregateCohorts.push(cohortFrame(after));
+    const aggregatePeak = summarizeCohorts(aggregateCohorts, { required: requiredProcesses, generation: String(count) }, { startedAt, endedAt });
     const workloadAfter = workload ? await reconcileWorkload(work, cwd, workload) : undefined;
     if (workload) {
       assert.deepEqual(workloadAfter, workloadBefore, 'Exact authoritative fixture results must survive the observation window');
@@ -154,8 +166,9 @@ try {
     const managementDelta=Object.fromEntries(['scopeRefreshes','reconciles'].map(key=>[key,managementAfter[key]-managementBefore[key]]));
     const registryDelta=Object.fromEntries(Object.keys(managementAfter.registry).map(key=>[key,managementAfter.registry[key]-managementBefore.registry[key]]));
     report.scenarios.push({warmup,backgroundBefore:observedLegacy,backgroundAfter,managementBefore,managementAfter,managementDelta,registryDelta,legacyRows:2,clients:count,startedAt,endedAt,elapsedMs,
-      requiredProcesses: required.map(pid => ({ identity: before.find(value => value.identity.pid === pid).identity, role: role(pid) })), resourceBefore: before,
+      requiredProcesses, resourceBefore: before, aggregateCohorts, aggregatePeak,
       resources,connections,metrics,countersBefore,totalCpuMs:resources.reduce((s,v)=>s+v.cpuMs,0),totalRss:resources.reduce((s,v)=>s+v.rss,0),rpcMs:{p50:latencies.sort((a,b)=>a-b)[Math.floor(latencies.length*.5)],p95:latencies[Math.floor(latencies.length*.95)],p99:latencies[Math.floor(latencies.length*.99)]}});
+    report.measurement.coverage.aggregatePeak = report.scenarios.every(scenario => scenario.aggregatePeak.qualified);
     writeFileSync(output,JSON.stringify(report,null,2));
     assert.equal(backgroundAfter.scopeRevision,observedLegacy.scopeRevision,'Workload changed during unchanged-window measurement');
     assert.equal(managementDelta.reconciles,0,'Unchanged same-owner foregrounds must not multiply canonical reconciliation');

@@ -112,3 +112,12 @@ test('coverage flags cannot replace observations and before duration is independ
   assert.ok(has(result, 'after[0].scenarios[0].coverage.queueAge', 'not-qualified'));
   assert.equal(result.cpuComparison, null);
 });
+
+test('claimed aggregate peak is rejected unless its retained cohort stream reproduces it', () => {
+  const report = specimen();
+  Object.assign(report.measurement.coverage, { aggregatePeak: true });
+  Object.assign(report.scenarios[0]!, { aggregatePeak: { scope: 'simultaneous-related-processes', cpuPercent: 1, rssBytes: 1, samples: 1 }, aggregateCohorts: [] });
+  const result = validatePairedReports(report, report, expected);
+  assert.ok(has(result, '.coverage.aggregatePeak', 'missing-or-inconsistent-cohort-stream'));
+  assert.equal(result.cpuComparison, null); assert.equal(result.qualified, false);
+});

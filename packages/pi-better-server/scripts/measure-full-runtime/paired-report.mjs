@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { baseline, workloadCounterDelta } from './incremental-workload.mjs';
+import { summarizeCohorts } from './aggregate-samples.mjs';
 
 export const requiredWindows = [4416, 10000].flatMap(history => [1, 5, 10].flatMap(clients =>
   [48, 96, 192].map(group => ({ history, clients, group }))));
@@ -102,6 +103,8 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
         // The current collector explicitly lacks these observations. Flags alone cannot fill them.
         const peak = scenario.aggregatePeak;
         if (report.measurement?.coverage?.aggregatePeak !== true || peak?.scope !== 'simultaneous-related-processes' || !finite(peak.cpuPercent) || !finite(peak.rssBytes) || !Number.isSafeInteger(peak.samples) || peak.samples < 1) issue(p + '.coverage.aggregatePeak', 'not-qualified');
+        const rebuiltPeak = summarizeCohorts(scenario.aggregateCohorts, { required, generation: String(scenario.clients) }, { startedAt: scenario.startedAt, endedAt: scenario.endedAt });
+        if (!rebuiltPeak.qualified || !isDeepStrictEqual(peak, rebuiltPeak)) issue(p + '.coverage.aggregatePeak', 'missing-or-inconsistent-cohort-stream');
         const gc = scenario.workerGc;
         if (report.measurement?.coverage?.workerGc !== true || gc?.threadCoverage !== 'all' || !Array.isArray(gc.processes)
           || gc.processes.some(value => !value?.identity || !finite(value.count) || !finite(value.durationMs))
