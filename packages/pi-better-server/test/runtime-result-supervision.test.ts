@@ -151,6 +151,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       assert.equal(store.listOutbox({ recipient: operation.owner }).length, 1);
       assert.equal(readFileSync(join(root, "executions"), "utf8"), executions);
       if (guarded) {
+        let detachedAt = Date.now();
         if (crash === "idle-guardian-held") {
           store.transitionWaitPhase({ waitId: wait.waitId, generation: wait.generation,
             from: "ready", to: "held", reason: "User decision required; no automatic continuation" });
@@ -184,15 +185,18 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
         assert.equal((await call({ entries: true })).filter((entry: any) => entry.type === "custom_message"
           && entry.details?.completionEventIds?.includes(events[0].eventId)).length, 1);
         recipient.child.send({ stop: true }); await recipient.exited;
+        detachedAt = Date.now();
         }
         const [code, signal] = await server.exited;
         assert.equal(code, 0);
         assert.equal(signal, null);
+        assert.ok(Date.now() - detachedAt < 5000, "idle exit must remain within the existing shutdown budget");
         const checkpoint = JSON.parse(readFileSync(join(transport, "clean-stop.json"), "utf8"));
         assert.equal(checkpoint.reason, "clean-stop");
         assert.equal(checkpoint.idleEvidence.lifecycle.runtimeIdleMs, 1000);
         assert.deepEqual(checkpoint.idleEvidence.obligations, []);
         assert.ok(checkpoint.idleEvidence.at >= checkpoint.idleEvidence.deadline);
+        assert.ok(checkpoint.idleEvidence.at - checkpoint.idleEvidence.deadline < 2000, "idle deadline must not wait for derived read rebuilding");
         const { inspectDaemonOwner } = await import("../src/daemon-owner.ts");
         assert.equal(inspectDaemonOwner(transport).status, "missing");
         assert.equal(inspectDaemonOwner(transport, "guardian-owner").status, "missing");
