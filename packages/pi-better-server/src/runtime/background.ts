@@ -399,7 +399,7 @@ export class BackgroundObservation {
     if (this.history) return this.history.close().then(() => { this.ownDb?.close(); });
     this.ownDb?.close(); return Promise.resolve();
   }
-  get historyStatus() { return this.history?.status ?? "degraded"; }
+  get historyStatus() { return this.history?.queryStatus ?? "degraded"; }
   get historyReason() { return this.history?.reason; }
   get historyMetrics() { return this.history?.metrics; }
   historyIndex(scope: WorkScope) {

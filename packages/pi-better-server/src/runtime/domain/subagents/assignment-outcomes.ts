@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { join, relative, isAbsolute, dirname, resolve } from "node:path";
 import { openSync, closeSync, fstatSync, readSync, realpathSync, constants } from "node:fs";
-import { openStore, ownerDiff, StoreError, type OwnerIdentity, type AssignmentOutcomeRecord } from "./shared-operation-coordinator/index.ts";
+import { openStore, ownerDiff, type OwnerIdentity, type AssignmentOutcomeRecord } from "./shared-operation-coordinator/index.ts";
 import type { RunMeta } from "./registry.ts";
 import { processStartToken, readMeta } from "./registry.ts";
 import type { PermissionSnapshot } from "./permission-policy.ts";
@@ -91,11 +91,15 @@ export function commitAssignmentTerminal(meta: RunMeta, recoveryFailure = false)
         catch { if (meta.status === "completed") invalidReport = "Assignment completion is unverified: retained report evidence is unavailable or changed."; }
         const complete = meta.status === "completed" && (report ? report.status === "complete"
             : !invalidReport && waits.some((w) => w.acknowledgement?.disposition === "assignment-complete"));
+        const reportReason = report?.status === "incomplete" ? `Assignment incomplete: ${report.reason}`
+            + (report.blocker ? ` Blocked (${report.blocker.kind}): ${report.blocker.reason}.` : "")
+            + (report.remainingWork ? ` Remaining work: ${report.remainingWork.join("; ")}.` : "") : report?.reason;
         try { return store.recordAssignmentOutcome({ ...binding, revision: 1,
             outcome: complete ? "succeeded" : meta.status === "killed" ? "cancelled" : "failed",
-            reason: meta.failureReason || invalidReport || (meta.status === "completed" && report ? report.reason : complete ? "Assigned work and required interpretation are complete."
+            reason: (meta.failureReason || invalidReport || (meta.status === "completed" && report ? reportReason : complete ? "Assigned work and required interpretation are complete."
+                : meta.status === "completed" && meta.assignmentReportRejection ? `Assignment report rejected: ${meta.assignmentReportRejection.reason}`
                 : meta.status === "completed" ? "Assignment completion is unverified: the attempt exited without an evidence-backed completion decision. Inspect retained output and continue unfinished work or report a concrete blocker."
-                : `Assignment ended ${meta.status}; retained attempt evidence is available.`),
+                : `Assignment ended ${meta.status}; retained attempt evidence is available.`)).slice(0, 8192),
             processUncertain: meta.status === "lost" || typeof meta.exitCode !== "number"
                 || waits.some((w) => w.dependencies.some((d) => d.terminalRevision === 0)
                     || store.listResumeClaims({ waitId: w.waitId, generation: w.generation, state: "published" }).length > 0),
@@ -106,10 +110,13 @@ export function commitAssignmentTerminal(meta: RunMeta, recoveryFailure = false)
         }); } catch (error) {
             // A competing finalizer may commit after our initial read. The store
             // still refuses rewrites; return only the same captured binding's winner.
-            if (error instanceof StoreError && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
+            // A borrowed server store uses its canonical coordinator module,
+            // whose StoreError constructor differs from this embedded copy.
+            if (error instanceof Error && error.name === "StoreError" && "code" in error
+                && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
                 const winner = store.getAssignmentOutcome(binding.assignmentId);
                 const current = readMeta(meta.id);
-                if (winner && winner.assignmentId === binding.assignmentId && ownerDiff(winner.owner, binding.owner) === "none"
+                if (winner && winner.assignmentId === binding.assignmentId && winner.revision === 1 && ownerDiff(winner.owner, binding.owner) === "none"
                     && ownerDiff(winner.recipient, binding.recipient) === "none"
                     && current?.assignment?.assignmentId === binding.assignmentId
                     && ownerDiff(current.assignment.owner, binding.owner) === "none" && ownerDiff(current.assignment.recipient, binding.recipient) === "none"

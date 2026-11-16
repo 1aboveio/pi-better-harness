@@ -2,10 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { once } from "node:events";
-import { stopFixtureChild } from "./fixture-child.mjs";
+import { observeFixtureChild, stopFixtureChild } from "./fixture-child.mjs";
 
 const launch = async () => {
-    const child = fork(new URL("./fixtures/fixture-child-process.mjs", import.meta.url), [], { execArgv: [], stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    const child = fork(new URL("./fixtures/fixture-child-process.mjs", import.meta.url), [], { execArgv: [], stdio: ["ignore", "ignore", "pipe", "ipc"] });
+    observeFixtureChild(child);
     await once(child, "message");
     return child;
 };
@@ -47,4 +48,27 @@ test("already exited fixture crashes are reported rather than hidden as closed I
     const exited = once(child, "exit");
     child.send("fail"); await exited;
     await assert.rejects(stopFixtureChild(child), /exited \(2\)/);
+});
+
+test("exit-one fixture evidence survives the exit-before-cleanup gap", { timeout: 5000 }, async t => {
+    const child = await launch();
+    const closed = once(child, "close");
+    child.send("crash"); await closed;
+    const check = error => {
+        assert.match(error.message, /exited \(1\): first fixture failure before cleanup/);
+        assert.deepEqual(error.fixture, { pid: child.pid, stderr: "first fixture failure before cleanup\n", exitCode: 1, signal: null });
+        t.diagnostic(JSON.stringify(error.fixture));
+        return true;
+    };
+    await assert.rejects(stopFixtureChild(child), check);
+    await assert.rejects(stopFixtureChild(child), check);
+});
+
+test("fixture evidence also accompanies an exit during the shutdown request", { timeout: 5000 }, async () => {
+    const child = await launch();
+    await assert.rejects(stopFixtureChild(child, "crash"), error => {
+        assert.equal(error.fixture.exitCode, 1);
+        assert.equal(error.fixture.stderr, "first fixture failure before cleanup\n");
+        return true;
+    });
 });
