@@ -10,6 +10,8 @@ sqlite.DatabaseSync = class extends Original {
   }
 };
 const { LogCheckpoints } = await import("../../src/runtime/log-checkpoints.ts");
-const store = new LogCheckpoints(process.argv[2]!);
+const owner = process.argv[3] === "shared" ? new sqlite.DatabaseSync(":memory:") : undefined;
+const store = new LogCheckpoints(process.argv[2]!, owner);
 store.save("log", { display: { offset: 20, usage: 2 }, health: { offset: 20, tools: 0 } });
 store.close();
+owner?.close();

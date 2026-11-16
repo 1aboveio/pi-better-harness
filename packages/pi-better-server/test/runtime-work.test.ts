@@ -64,7 +64,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
         maximum: main.maximum + worker.maximum };
     };
     const sqliteBefore = await actualConnections();
-    assert.equal(sqliteBefore.active, 3, "one query index, one derived checkpoint store and one coordinator connection are retained by the daemon");
+    assert.equal(sqliteBefore.active, 2, "one query index with attached checkpoints and one coordinator connection are retained by the daemon");
     assert.equal(first.snapshot!.rows.length, 50);
     for (const count of [1, 5, 10]) {
       while (clients.length < count) {

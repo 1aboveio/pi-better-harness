@@ -6,6 +6,15 @@ line-boundary offset, head sample, observed size and modification time, fold sta
 and coverage. The store version invalidates both parser and health reducer state.
 Deletion or eviction replays source evidence; it never deletes logs.
 
+The read model attaches this file as `log_checkpoints` on its existing in-memory
+derived connection. It does not open another retained SQLite handle. Query and
+Background history tables stay transient in the owner's main database. Closing
+the checkpoint borrower detaches only its own file before the owner closes. A
+separate derived inbox can attach to the same owner under its own schema name;
+each consumer commits its own durable state without borrowing authority handles.
+The original resource gates remain unchanged: at most two read-worker handles,
+and at most two coordinator plus two derived handles in the full-root scenario.
+
 The server retains 64 hot states per consumer. The disk payload budget is 32 MiB,
 with a 256 KiB per-entry ceiling, 4096-entry limit and oldest-commit eviction. SQLite uses FULL
 auto-vacuum and DELETE journaling; schema/page overhead and the transient rollback

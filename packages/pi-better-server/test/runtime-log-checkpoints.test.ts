@@ -14,7 +14,7 @@ const usage = event({ type: "message_end", message: { role: "assistant", usage: 
 const tool = event({ type: "tool_execution_start", toolCallId: "tool", toolName: "bash", at: 100 });
 const padding = event({ type: "message_update", message: { role: "assistant", content: "x".repeat(67000) } });
 
-for (const count of [48, 96, 144]) test(`${count} tasks recover socket summaries after eviction and restart`, { timeout: 30000 }, async () => {
+for (const count of [48, 96, 144]) test(`${count} tasks recover socket summaries after eviction and restart`, { timeout: 30000 }, async t => {
   const parent = resolve("../../.work/801"); mkdirSync(parent, { recursive: true });
   const root = realpathSync(mkdtempSync(join(parent, "recovery-"))), agent = join(root, "agent"), runs = join(root, "pi-better-subagents/runs");
   mkdirSync(agent); mkdirSync(runs, { recursive: true });
@@ -61,6 +61,12 @@ for (const count of [48, 96, 144]) test(`${count} tasks recover socket summaries
     navigator = new WorkClient(daemon.socketPath, agent); activity = new WorkClient(daemon.socketPath, agent);
     await ready(); await verify("0.03");
     const recovered = await navigator.request("runtime_get_metrics");
+    assert.ok(recovered.sqlite.active <= 2, "read worker must retain the original root database budget");
+    assert.equal(recovered.indexConnections, 1);
+    assert.equal(recovered.sqlite.active - recovered.indexConnections, recovered.coordinatorConnections,
+      "every retained handle is either the real derived owner or the real coordinator reader");
+    t.diagnostic(JSON.stringify({ tasks: count, sqlite: recovered.sqlite, derived: recovered.indexConnections,
+      coordinator: recovered.coordinatorConnections, restored: recovered.checkpoints.restores, bytes: recovered.logReads.bytes }));
     assert.ok(recovered.logReads.bytes <= count * 512, JSON.stringify(recovered));
     assert.ok(recovered.checkpoints.hotDisplay <= 64); assert.ok(recovered.checkpoints.hotHealth <= 64);
     assert.equal(recovered.checkpoints.restores, count);
@@ -86,18 +92,40 @@ test("checkpoint transaction rolls back, versions invalidate, and oversized fold
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-for (const phase of ["before", "after"]) test(`process death ${phase} checkpoint commit preserves one matching fold and offset`, () => {
+for (const mode of ["standalone", "shared"]) for (const phase of ["before", "after"]) test(`process death ${phase} ${mode} checkpoint commit preserves one matching fold and offset`, () => {
   const parent = resolve("../../.work/801"); mkdirSync(parent, { recursive: true });
   const root = mkdtempSync(join(parent, "crash-")), path = join(root, "index.sqlite");
   const before = { display: { offset: 10, usage: 1 }, health: { offset: 10, tools: 1 } };
   let store = new LogCheckpoints(path); store.save("log", before); store.close();
   try {
-    const child = spawnSync(process.execPath, ["--import", "tsx", new URL("./support/log-checkpoint-crash.ts", import.meta.url).pathname, path],
+    const child = spawnSync(process.execPath, ["--import", "tsx", new URL("./support/log-checkpoint-crash.ts", import.meta.url).pathname, path, mode],
       { env: { ...process.env, CHECKPOINT_CRASH: phase }, encoding: "utf8", timeout: 10000 });
     assert.equal(child.signal, "SIGKILL", child.stderr);
     store = new LogCheckpoints(path);
     assert.deepEqual(store.load("log"), phase === "before" ? before : { display: { offset: 20, usage: 2 }, health: { offset: 20, tools: 0 } });
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("borrowed derived owner keeps query tables transient and independent durable attachments atomic", () => {
+  const parent = resolve("../../.work/801"); mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, "shared-owner-")), path = join(root, "checkpoints.sqlite");
+  const owner = new DatabaseSync(":memory:");
+  owner.prepare("ATTACH DATABASE ? AS assignment_inbox").run(join(root, "inbox.sqlite"));
+  owner.exec("CREATE TABLE query_rows(id TEXT); CREATE TABLE assignment_inbox.pending(id TEXT)");
+  const store = new LogCheckpoints(path, owner);
+  try {
+    owner.exec("BEGIN IMMEDIATE; INSERT INTO assignment_inbox.pending VALUES('pending'); COMMIT");
+    store.save("log", { display: { offset: 10, usage: 1 }, health: { offset: 10 } });
+    assert.equal(owner.prepare("SELECT count(*) AS n FROM assignment_inbox.pending").get()!.n, 1);
+    store.close();
+    assert.equal(owner.prepare("SELECT count(*) AS n FROM query_rows").get()!.n, 0, "borrower must not close the owner");
+    const reopened = new LogCheckpoints(path, owner);
+    assert.equal(reopened.load("log").display.usage, 1);
+    reopened.close();
+    const disk = new DatabaseSync(path, { readOnly: true });
+    assert.equal(disk.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='query_rows'").get()!.n, 0);
+    disk.close();
+  } finally { owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("disk payload eviction keeps the physical derived working set bounded", () => {

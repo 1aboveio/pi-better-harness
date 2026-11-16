@@ -443,7 +443,7 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
     const after = await b.request("runtime_get_metrics");
     assert.equal(after.queryCount, before, "the worker cache avoids repeated SQLite for a warmed scope");
     assert.ok(after.cacheHits > 0);
-    assert.equal(after.sqlite.active, 2, "the query index and checkpoint store exist when no coordinator source is present");
+    assert.equal(after.sqlite.active, 1, "the query index owns the attached checkpoint store when no coordinator source is present");
   } finally { await f.close(); }
 });
 
@@ -566,7 +566,7 @@ test('Subagents and Background share one coordinator read connection in the quer
     await f.executor.livenessReasons();
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
-    assert.equal((f.executor.metrics().sqlite as any).active, 3, 'one coordinator, one query index and one checkpoint store, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator plus one derived index with attached checkpoints, regardless of domain');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
   } finally { await f.close(); }
 });

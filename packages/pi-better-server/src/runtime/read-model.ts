@@ -116,9 +116,9 @@ export class WorkReadModel {
 
   constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number } = {}) {
     this.agentDir = agentDir; this.instanceId = instanceId;
-    this.checkpoints = new LogCheckpoints(join(agentDir, "runtime-log-checkpoints.sqlite"));
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
+    this.checkpoints = new LogCheckpoints(join(agentDir, "runtime-log-checkpoints.sqlite"), this.db);
     this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"));
     this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(true), refresh => this.reader.connection(refresh));
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
@@ -689,6 +689,6 @@ export class WorkReadModel {
     this.closed = true; if (this.timer) clearInterval(this.timer);
     for (const watcher of this.watchers.values()) watcher.close();
     this.watchers.clear(); this.rootWatchIdentities.clear();
-    await this.pending; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close(); this.checkpoints.close();
+    await this.pending; this.listeners.clear(); await this.background.close(); this.reader.close(); this.checkpoints.close(); this.db.close();
   }
 }
