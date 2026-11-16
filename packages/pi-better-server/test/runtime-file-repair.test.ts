@@ -174,6 +174,31 @@ test("failed-source deletion repair keeps its 128-path budget and does not clear
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("retired root watcher callbacks cannot act on replacement descriptors", async () => {
+  const f = fixture(); f.put("sa_retired");
+  const model = new WorkReadModel(f.agent, "retired-watch", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    const watchers = (model as any).watchers;
+    const retired = watchers.get(model.runs);
+    const retiredParent = (model as any).rootParents.get(model.runs).watcher;
+    renameSync(f.base, f.base + "-old"); f.put("sa_replacement");
+    await model.reconcile(); await settleHints(model);
+    const replacement = watchers.get(model.runs);
+    const child = watchers.get(join(model.runs, "sa_replacement"));
+    const parent = (model as any).rootParents.get(model.runs).watcher;
+    assert.notEqual(replacement, retired); assert.notEqual(parent, retiredParent);
+    const before = model.metrics.inventories;
+    retired.emit("change", "rename", "sa_replacement");
+    retiredParent.emit("change", "rename", "runs");
+    assert.equal(watchers.get(model.runs), replacement);
+    assert.equal(watchers.get(join(model.runs, "sa_replacement")), child);
+    assert.equal((model as any).rootParents.get(model.runs).watcher, parent);
+    assert.equal(model.metrics.inventories, before);
+    assert.equal(model.metrics.scheduling.queued, 0);
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("empty Subagent repair still publishes independent Background coordinator progress", async () => {
   const f = fixture();
   const model = new WorkReadModel(f.agent, "empty-background", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });

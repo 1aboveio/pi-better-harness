@@ -1,11 +1,11 @@
 import { fork } from "node:child_process";
-import { once } from "node:events";
 import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 import { startContinuationModel, continuationModels } from "../../pi-better-server/test/support/subagent-offline-model.ts";
 import { WorkClient } from "../../pi-better-server/src/runtime/work-client.mjs";
+import { stopFixtureChild } from "./fixture-child.mjs";
 
 /** Real SDK foregrounds share a real daemon. Only the remote model is substituted. */
 export async function continuationFixture({ root, artifacts, workspace }) {
@@ -89,7 +89,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
             get sessionFile() { return actualSessionFile; },
             async inspect() { await ready; const id = ++sequence; return new Promise((resolve, reject) => { requests.set(id, { resolve, reject }); child.send({ id, inspect: true }, error => { if (error) { requests.delete(id); reject(new Error(`${error.message}: ${errors}`)); } }); }); },
             publishPolicy(next) { policy = next; },
-            shutdown() { return stopped ??= (async () => { await ready; if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); if (child.connected) child.send({ stop: true }, error => { if (error) errors += `\nShutdown IPC: ${error.message}`; }); await exited; } })(); },
+            shutdown() { return stopped ??= stopFixtureChild(child, { stop: true }); },
         };
     }
     return { makeHarness, restart: () => stopDaemon.restart(), pauseRuntime: () => stopDaemon.pause(), resumeRuntime: () => stopDaemon.resume(),
@@ -98,8 +98,12 @@ export async function continuationFixture({ root, artifacts, workspace }) {
         const row = value.rows[0];
         return row && !["running", "orphaned"].includes(row.meta.status);
     }, async close() {
-        for (const child of actors) { const exited = once(child, "exit"); if (child.connected) child.send({ stop: true }, () => {}); await exited; }
-        observation.close(); await stopDaemon(); await model.close();
+        try {
+            await Promise.all([...actors].map(child => stopFixtureChild(child, { stop: true })));
+        } finally {
+            observation.close();
+            try { await stopDaemon(); } finally { await model.close(); }
+        }
         if (process.env.PI_CONTINUATION_EVIDENCE_DIR) {
             mkdirSync(process.env.PI_CONTINUATION_EVIDENCE_DIR, { recursive: true });
             cpSync(root, mkdtempSync(join(process.env.PI_CONTINUATION_EVIDENCE_DIR, "continuation-")), { recursive: true });
