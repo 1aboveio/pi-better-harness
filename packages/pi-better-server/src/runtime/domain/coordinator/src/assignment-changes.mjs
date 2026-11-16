@@ -14,9 +14,13 @@ export function ensureAssignmentChanges(ctx) {
             CREATE INDEX IF NOT EXISTS resume_claims_wait_observation ON resume_claims(wait_id,generation,attempt_id);
             CREATE TABLE IF NOT EXISTS background_input_versions (
                 operation_id TEXT PRIMARY KEY, revision INTEGER NOT NULL);
-            CREATE INDEX IF NOT EXISTS background_operation_repair ON operations(observer_kind,operation_id);
             CREATE TRIGGER IF NOT EXISTS assignment_changes_retention AFTER INSERT ON assignment_changes
             BEGIN DELETE FROM assignment_changes WHERE seq <= NEW.seq - 4096; END;`);
+        // Repair is an operation-ID keyset, not an observer equality lookup.
+        // A leading observer column competes with the ordered recent-terminal index.
+        if (ctx.db.prepare("PRAGMA index_info(background_operation_repair)").all().length > 1)
+            ctx.db.exec("DROP INDEX background_operation_repair");
+        ctx.db.exec("CREATE INDEX IF NOT EXISTS background_operation_repair ON operations(operation_id) WHERE observer_kind='local-supervisor'");
         const sources = [
             { table: "waits", select: (r) => `SELECT 'wait', ${r}.wait_id || ':' || ${r}.generation, json_extract(${r}.origin_json,'$.assignmentRef'), ${r}.owner_session_id, ${r}.owner_workspace WHERE ${r}.owner_kind='worker-conversation'` },
             { table: "resume_claims", select: (r) => `SELECT 'claim', ${r}.claim_id, json_extract(w.origin_json,'$.assignmentRef'), w.owner_session_id, w.owner_workspace FROM waits w WHERE w.wait_id=${r}.wait_id AND w.generation=${r}.generation AND w.owner_kind='worker-conversation'` },
