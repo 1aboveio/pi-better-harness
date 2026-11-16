@@ -2,6 +2,7 @@ import { fork } from 'node:child_process';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { WorkClient } from '../../src/runtime/work-client.mjs';
+import { publicationObservation } from './commit.mjs';
 
 export function distribution(values) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -41,12 +42,14 @@ export async function measureEventPublication({ socketPath, agentDir, scope, met
         const committed = once(writer, 'message');
         writer.send({ marker });
         const [message, visible] = await deadline(Promise.all([committed.then(([value]) => value), Promise.all(visibility)]), 'committed change through subscription');
-        observations.push({ commit, committedNs: message.committedNs, recipients: visible.map(value => ({ ...value,
-          latencyMs: Number(BigInt(value.visibleNs) - BigInt(message.committedNs)) / 1e6 })) });
+        if (message.marker !== marker) throw new Error('External writer acknowledged a different source commit');
+        observations.push({ commit, marker, commitStartedNs: message.commitStartedNs, committedNs: message.committedNs,
+          recipients: visible.map(value => publicationObservation(message, value)) });
       } finally { removers.forEach(remove => remove()); }
     }
     const values = observations.flatMap(item => item.recipients.map(value => value.latencyMs));
-    return { boundary: 'external atomic metadata commit to matching real Unix subscription event', subscribers, commits,
+    return { boundary: 'external atomic metadata commit to matching real Unix subscription event',
+      latencyBound: 'conservative upper bound from immediately before atomic rename; completionDeltaMs retains the signed post-rename timestamp delta', subscribers, commits,
       healthyBudgetMs: 1000, ms: distribution(values), observations };
   } finally {
     clients.forEach(client => client.close());
