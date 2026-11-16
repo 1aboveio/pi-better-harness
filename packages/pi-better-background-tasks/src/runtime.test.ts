@@ -4,7 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { failurePath } from "./failures.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir, writeMeta } from "./registry.js";
-import { resumeRunningTask, resumeScheduledWork, spawnTask, startWatchTask, stopTask, suspendScheduledWork } from "./runtime.js";
+import { createBackgroundTaskRuntime, resumeRunningTask, resumeScheduledWork, spawnTask, startWatchTask, stopTask, suspendScheduledWork } from "./runtime.js";
 import { actionableFailures, readFailureState } from "./shared-failure-observations.js";
 import { formatLaunch } from "./tools.js";
 import type { CommandResult } from "./types.js";
@@ -1150,6 +1150,33 @@ describe("command watch progress evidence", () => {
   function incidents(id: string) {
     return actionableFailures(readFailureState(failurePath(id)));
   }
+
+  it("charges the actual watch and retention callbacks without repeating a poll or moving its deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(watchStartedAt);
+    const performed: Array<{ kind: string; id: string }> = [];
+    const runtime = createBackgroundTaskRuntime(undefined, undefined, undefined, (kind, id, work) => {
+      performed.push({ kind, id });
+      return work();
+    });
+    const scripted = scriptedWatch([{ stdout: "pending" }]);
+    const meta = runtime.startWatchTask(fakePi, {
+      command: "check deployment", interval_seconds: 60, timeout_seconds: 2, callback: false,
+      success_when: { type: "stdout_contains", value: "done" },
+    }, process.cwd(), undefined, undefined, { watchPollRunner: scripted.runner });
+    ids.push(meta.id);
+    try {
+      await advance(0);
+      expect(scripted.calls()).toBe(1);
+      expect(performed.filter(item => item.kind === "watch")).toEqual([{ kind: "watch", id: meta.id }]);
+      await advance(1_000);
+      expect(performed.filter(item => item.kind === "log-retention")).toEqual([{ kind: "log-retention", id: meta.id }]);
+      expect(scripted.calls()).toBe(1);
+      await advance(1_000);
+      expect(readMeta(meta.id)).toMatchObject({ status: "timed_out", deadlineAt: watchStartedAt + 2_000 });
+      expect(scripted.calls()).toBe(1);
+    } finally { runtime.suspendScheduledWork(); }
+  });
 
   it("holds the state clock while polls keep reporting the same outcome", async () => {
     vi.useFakeTimers();
