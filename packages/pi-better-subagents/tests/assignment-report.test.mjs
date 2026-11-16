@@ -153,11 +153,46 @@ test("incomplete reports preserve remaining work and concrete blockers for the p
     const report = readAssignmentReport(readMeta(f.id));
     assert.deepEqual(report.remainingWork, ["Run native compatibility checks"]);
     assert.deepEqual(report.blocker, { kind: "permission", reason: "ADB access has not been granted" });
+    await f.send({ ...f.report, status: "incomplete", reason: "Native validation is blocked", remaining_work: report.remainingWork,
+      blocker: { reason: "ADB access has not been granted", kind: "permission" } });
     const terminal = { ...readMeta(f.id), status: "completed", exitCode: 0 };
     writeMeta(terminal);
     const outcome = commitAssignmentTerminal(terminal);
     assert.equal(outcome.outcome, "failed");
     assert.match(outcome.reason, /Assignment incomplete:.*ADB access.*Run native compatibility/);
+  } finally { await f.close(); }
+});
+
+test("authenticated schema refusals retain the latest diagnostic without accepting a report", async () => {
+  const f = await fixture("report-schema-rejected");
+  try {
+    await assert.rejects(() => f.send({ ...f.report, evidence: [{ ...f.report.evidence[0], offset: -1, max_bytes: 1 }] }), /less than 0/);
+    assert.match(readMeta(f.id).assignmentReportRejection.reason, /offset.*less than 0/);
+    await assert.rejects(() => f.send({ ...f.report, evidence: [{ ...f.report.evidence[0], max_bytes: 65537 }] }), /greater than 65536/);
+    assert.match(readMeta(f.id).assignmentReportRejection.reason, /max_bytes.*greater than 65536/);
+    assert.equal(readMeta(f.id).assignmentReport, undefined);
+    const terminal = { ...readMeta(f.id), status: "completed", exitCode: 0 };
+    writeMeta(terminal);
+    assert.match(commitAssignmentTerminal(terminal).reason, /Assignment report rejected:.*max_bytes/);
+    const rejection = readMeta(f.id).assignmentReportRejection;
+    await assert.rejects(() => f.send({ ...f.report, evidence: [] }), /authoritative/);
+    assert.deepEqual(readMeta(f.id).assignmentReportRejection, rejection);
+  } finally { await f.close(); }
+});
+
+test("unavailable current permission evidence is retained and can be corrected without widening access", async () => {
+  const f = await fixture("report-policy-rejected");
+  let projectFiles = "invalid";
+  f.pi.events.on("pi-better-sandbox:policy-request", () => f.pi.events.emit("pi-better-sandbox:policy", {
+    state: "enabled", permissions: { enabled: true, projectFiles, outsideProject: "off", storedCredentials: "off", commands: true, network: false },
+  }));
+  try {
+    await assert.rejects(() => f.send(), /Invalid/);
+    assert.match(readMeta(f.id).assignmentReportRejection.reason, /Invalid/);
+    assert.equal(readMeta(f.id).assignmentReport, undefined);
+    projectFiles = "read";
+    await f.send();
+    assert.equal(readMeta(f.id).assignmentReportRejection, undefined);
   } finally { await f.close(); }
 });
 
