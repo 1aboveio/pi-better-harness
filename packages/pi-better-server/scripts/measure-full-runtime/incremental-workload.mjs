@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, realpathSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync, realpathSync, statSync, readFileSync, appendFileSync, renameSync, truncateSync, unlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import { socketPathFor } from '../../src/runtime/socket.ts';
 
@@ -52,9 +53,71 @@ export function seedWorkload({ root, agent, cwd, settings }) {
       content: [{ type: 'text', text: finalText }], usage: { input: 3, output: 7, cost: { total: 0.01 } } } };
     const bytes = JSON.stringify(event) + '\n';
     writeFileSync(join(directory, 'output.log'), bytes);
-    tasks.push({ id, finalText, costUSD: 0.01, bytes: Buffer.byteLength(bytes) });
+    tasks.push({ id, finalText, costUSD: 0.01, input: 3, output: 7, bytes: Buffer.byteLength(bytes) });
   }
-  return { durable, tasks, history: settings.history, seededLogBytes: tasks.reduce((sum, task) => sum + task.bytes, 0) };
+  return { agent, cwd, runs, durable, tasks, history: settings.history, seededLogBytes: tasks.reduce((sum, task) => sum + task.bytes, 0) };
+}
+
+/** Used by the existing external writer; receipts describe actual source bytes, not runtime work. */
+export function mutateWorkload(manifest, command) {
+  const settings = ['theme', 'same-settings'].includes(command.kind);
+  const allowed = ['theme', 'same-settings', 'append', 'replace-log', 'truncate-log', 'delete-log'];
+  assert.ok(allowed.includes(command.kind), 'Unknown workload mutation');
+  const task = manifest.tasks.find(task => task.id === command.id);
+  if (!settings) assert.ok(task, 'Mutation requires an exact fixture task identity');
+  const path = settings ? join(manifest.agent, 'settings.json') : join(manifest.runs, task.id, 'output.log');
+  if (!settings) {
+    const meta = JSON.parse(readFileSync(join(manifest.runs, task.id, 'meta.json'), 'utf8'));
+    assert.equal(meta.id, task.id); assert.equal(meta.cwd, manifest.cwd); assert.equal(meta.sessionId, '808-group');
+  }
+  const before = readFileSync(path);
+  let appended;
+  let expected;
+  if (command.kind === 'theme' || command.kind === 'same-settings') {
+    if (command.kind === 'theme') assert.equal(typeof command.theme, 'string', 'Theme mutation requires a theme name');
+    const next = command.kind === 'same-settings' ? before : Buffer.from(JSON.stringify({ ...JSON.parse(before), theme: command.theme }));
+    const staged = `${path}.${process.pid}.mutation.tmp`;
+    writeFileSync(staged, next, { flag: 'wx' }); renameSync(staged, path);
+  } else if (command.kind === 'append' || command.kind === 'replace-log') {
+    assert.ok(Number.isSafeInteger(command.cents) && command.cents > 0, 'Usage cost requires positive integer cents');
+    assert.equal(typeof command.text, 'string');
+    const event = { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: command.text }],
+      usage: { input: 11, output: 13, cost: { total: command.cents / 100 } } } };
+    appended = Buffer.from(JSON.stringify(event) + '\n');
+    if (command.kind === 'append') appendFileSync(path, appended);
+    else { const staged = `${path}.${process.pid}.mutation.tmp`; writeFileSync(staged, appended, { flag: 'wx' }); renameSync(staged, path); }
+    expected = { finalText: command.text, costUSD: ((command.kind === 'append' ? Math.round(task.costUSD * 100) : 0) + command.cents) / 100,
+      input: (command.kind === 'append' ? task.input : 0) + 11, output: (command.kind === 'append' ? task.output : 0) + 13 };
+  } else {
+    if (command.kind === 'truncate-log') truncateSync(path, 0);
+    else unlinkSync(path);
+    expected = { finalText: '', costUSD: 0, input: 0, output: 0 };
+  }
+  const after = command.kind === 'delete-log' ? null : readFileSync(path);
+  const digest = bytes => bytes === null ? null : createHash('sha256').update(bytes).digest('hex');
+  return { kind: command.kind, id: task?.id, beforeBytes: before.length, afterBytes: after?.length ?? 0,
+    appendedBytes: appended?.length ?? 0, beforeDigest: digest(before), afterDigest: digest(after), expected };
+}
+
+export function workloadCounterDelta(before, after) {
+  if (before.executor || after.executor) {
+    assert.equal(before.executor?.restarts, after.executor?.restarts, 'Worker generation changed; recovery must be reported separately');
+    assert.equal(after.executor?.worker, 'running', 'Read worker is not running');
+  }
+  if (before.assignments?.generation || after.assignments?.generation) {
+    assert.equal(before.assignments?.generation, after.assignments?.generation, 'Coordinator generation changed; ordinary counters cannot be compared');
+  }
+  const delta = (a, b, name) => {
+    assert.ok(Number.isFinite(a) && Number.isFinite(b) && a >= 0 && b >= a, `Missing/reset counter: ${name}`);
+    return b - a;
+  };
+  const fields = (a, b, names) => Object.fromEntries(names.map(name => [name, delta(a?.[name], b?.[name], name)]));
+  return {
+    projections: fields(before, after, ['projections', 'assignmentProjections', 'logProjections', 'healthProjections']),
+    logs: fields(before.logReads, after.logReads, ['bytes', 'reads', 'parsedEvents', 'displayFolded', 'healthFolded']),
+    ordinary: fields(before.sourceWork?.entity, after.sourceWork?.entity, ['batches', 'paths', 'stats', 'metadataReads', 'logBytes', 'logReads']),
+    repair: fields(before.sourceWork?.repair, after.sourceWork?.repair, ['batches', 'paths', 'stats', 'metadataReads', 'logBytes', 'logReads']),
+  };
 }
 
 export async function reconcileWorkload(work, cwd, manifest) {
@@ -68,22 +131,32 @@ export async function reconcileWorkload(work, cwd, manifest) {
     assert.equal(detail.status, 'ready', detail.reason);
     assert.equal(detail.rows.length, 1, `Missing exact task ${task.id}`);
     const row = detail.rows[0];
+    assert.equal(row.meta.id, task.id);
+    assert.equal(row.meta.cwd, cwd);
+    assert.equal(row.meta.sessionId, '808-group');
     assert.equal(row.meta.status, 'completed');
     assert.equal(row.detail.parsed.finalText, task.finalText);
     assert.equal(row.detail.parsed.usage.costUSD, task.costUSD);
-    results.push({ id: task.id, finalText: row.detail.parsed.finalText, costUSD: row.detail.parsed.usage.costUSD });
+    assert.equal(row.detail.parsed.usage.input, task.input);
+    assert.equal(row.detail.parsed.usage.output, task.output);
+    results.push({ id: task.id, finalText: row.detail.parsed.finalText, costUSD: row.detail.parsed.usage.costUSD,
+      input: row.detail.parsed.usage.input, output: row.detail.parsed.usage.output });
   }
   const history = new Set();
+  const cursors = new Set();
   let cursor;
   do {
     const page = await work.get({ cwd, active: false, limit: 200, ...(cursor ? { cursor } : {}) });
     assert.equal(page.status, 'ready', page.reason);
     for (const row of page.rows) if (row.meta.id.startsWith('sa_808_history_')) {
       assert.equal(row.meta.status, 'completed');
+      assert.equal(row.meta.cwd, cwd);
+      assert.equal(row.meta.sessionId, row.meta.id);
       assert.ok(!history.has(row.meta.id), `Repeated historical row ${row.meta.id}`);
       history.add(row.meta.id);
     }
     cursor = page.nextCursor;
+    if (cursor) { assert.ok(!cursors.has(cursor), 'Historical cursor repeated without progress'); cursors.add(cursor); }
   } while (cursor);
   assert.equal(history.size, manifest.history);
   for (let i = 0; i < manifest.history; i++) assert.ok(history.has(`sa_808_history_${i}`));

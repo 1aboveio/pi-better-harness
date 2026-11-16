@@ -1,0 +1,19 @@
+✔ workload transport uses the explicit direct owned directory without a nested suffix (3.122792ms)
+✔ workload transport preserves default selection and enforces socket bytes at the exact boundary (0.460791ms)
+✔ incremental qualification rejects short windows and invalid workload identities (0.462958ms)
+✔ seeded native workload has exact durable history, group logs and expected result bytes (631.622ms)
+✔ existing external file writer returns source-byte receipts and preserves its legacy metadata path (139.391292ms)
+✔ 48 workload logs preserve real usage through append, checkpoint restore and source faults (53.452417ms)
+✔ 96 workload logs preserve real usage through append, checkpoint restore and source faults (107.769708ms)
+✔ 192 workload logs preserve real usage through append, checkpoint restore and source faults (180.21775ms)
+✔ settings mutations and exact task identity retain separate actual ordinary/repair counters (1121.364041ms)
+✔ component reconciliation checks real projected identities, complete history pages and final usage (238.673375ms)
+✔ component source changes preserve unrelated scope revisions and historical cursors (263.906791ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2209.656958

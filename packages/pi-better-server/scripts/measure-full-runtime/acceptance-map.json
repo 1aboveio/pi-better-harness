@@ -6,30 +6,33 @@
   "transport": "The explicit directory owns pi-server.sock directly, with no random nested suffix. The 103-byte guard and existing startup admission remain mandatory. Bulk data stays in TMPDIR. An admission refusal is not retried through another runtime, authority, path or settings.",
   "nativeLanes": ["macOS actual processes/SQLite/socket", "Linux actual processes/SQLite/socket"],
   "qualification": "notRun; these commands are checkpoints, not acceptance verdicts",
+  "permittedComponentCommand": "node --import tsx --test packages/pi-better-server/test/incremental-workload.test.ts packages/pi-better-server/test/workload-mutations.test.ts",
+  "componentBoundary": "Real files, parser/checkpoint state and in-process projections are component evidence only. The external file-writer regression starts no runtime services. None substitutes for real Pi/Server/guardian/runner/socket sessions or qualifies CPU.",
   "criteria": [
     {
       "ac": 1,
       "command": "PI_INCREMENTAL_WORKLOAD=1 PI_INCREMENTAL_HISTORY=4416 PI_INCREMENTAL_CLIENTS=1 PI_INCREMENTAL_GROUP=48 node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs",
       "matrix": {"history": [4416, 10000], "clients": [1, 5, 10], "group": [48, 96, 192]},
       "implemented": "Existing real process workload, source counters before/after, unchanged log/projection assertions, exact final result and historical identity reconciliation",
-      "missing": ["actual native runs", "ordinary versus repair fold/byte accounting across matrix", "fixed active-workload parity proof"]
+      "missing": ["actual native runs", "ordinary versus repair fold/byte accounting across native matrix (structured counter separation implemented)", "fixed active-workload parity proof"]
     },
     {
       "ac": 2,
       "command": "node --import tsx --test packages/pi-better-server/test/runtime-health-config.test.ts packages/pi-better-server/test/runtime-incremental-log.test.ts packages/pi-better-server/test/runtime-log-checkpoints.test.ts packages/pi-better-server/test/runtime-log-checkpoint-folds.test.ts",
-      "implemented": "Existing parent regression checkpoints; same-group seed and expected final results in full workload",
-      "missing": ["external writer changes/settings rewrite/append/eviction/restart integrated with full process workload", "actual bytes/folds/projections for every 48/96/larger group"]
+      "nativeMutationCommand": "PI_INCREMENTAL_WORKLOAD=1 PI_INCREMENTAL_MUTATIONS=1 node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs",
+      "implemented": "Existing external writer extended for theme/same-settings/append/replacement/truncation/deletion; primary opt-in theme/rewrite/append sequence with actual-byte receipts, counter deltas and final reconciliation. Component parser/checkpoint tests cover 48/96/192 records and real final usage.",
+      "missing": ["actual authorized native mutation run", "parser eviction/restart orchestration in full process workload", "actual native bytes/folds/projections for every 48/96/larger group"]
     },
     {
       "ac": 3,
       "command": "node --import tsx --test packages/pi-better-server/test/runtime-scope-boundaries.test.ts packages/pi-better-server/test/runtime-local-client.test.ts",
-      "implemented": "Existing scoped socket regression checkpoints",
+      "implemented": "Existing scoped socket regression checkpoints plus component two-scope mutation preserving unrelated revision/cursor and exact single-log fold counts",
       "missing": ["two concurrent scopes/pages in full workload", "zero-I/O unchanged list/detail drawing", "slow subscriber backpressure/resync qualification"]
     },
     {
       "ac": 4,
       "command": "node --import tsx --test packages/pi-better-server/test/runtime-file-repair.test.ts packages/pi-better-server/test/runtime-snapshot-progress.test.ts packages/pi-better-server/test/runtime-assignment-crashes.test.ts",
-      "implemented": "Existing parent fault checkpoints plus real coordinator replacement and external-writer bounded snapshot progress; adapted metadata publication races",
+      "implemented": "Existing parent fault checkpoints plus real coordinator replacement and external-writer bounded snapshot progress; adapted metadata publication races; file replacement/truncation/deletion mutation commands and parser reset component checks",
       "missing": ["continuous commits during initial build/repair in full workload", "dropped hints/replacement/truncation/deletion/journal gaps/out-of-order completion/crash qualification", "watermark/completeness/progress assertions across real processes"]
     },
     {
@@ -47,8 +50,8 @@
     {
       "ac": 7,
       "command": "PI_INCREMENTAL_WORKLOAD=1 PI_INCREMENTAL_DURATION_MS=600000 node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs",
-      "implemented": "Ten-minute minimum enforced per workload; existing process CPU/RSS/I/O/RPC/lag sampler and source/hardware identity retained",
-      "missing": ["same fixed machine baseline plus exact merged candidate runs >=10 minutes EACH workload", "aggregate peak/RSS/GC/queue age/event/recovery/exit diagnostics", "bounded diagnostic overhead comparison", "baseline fixture parity and paired report validator"]
+      "implemented": "Ten-minute minimum enforced per workload; existing process CPU/RSS/I/O/RPC/lag sampler and source/hardware identity retained. Diagnostic source now records per-process sampled peak RSS/CPU, main-thread GC and sampler CPU/write-time cost; these fields have not been measured natively.",
+      "missing": ["same fixed machine baseline plus exact merged candidate runs >=10 minutes EACH workload", "simultaneous aggregate peak and worker-thread GC/queue age/event/recovery/exit diagnostics", "bounded diagnostic overhead comparison", "baseline fixture parity and paired report validator"]
     },
     {
       "ac": 8,

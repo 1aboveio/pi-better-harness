@@ -13,7 +13,7 @@ import { inspectDaemonOwner, processMatchesStart } from '../src/daemon-owner.ts'
 import { WorkClient } from '../src/runtime/work-client.mjs';
 import { DaemonClient } from '../src/client.ts';
 import { RemoteClientSession } from '../src/remote-client/session.ts';
-import { workloadSettings, seedWorkload, reconcileWorkload, workloadTransport } from './measure-full-runtime/incremental-workload.mjs';
+import { workloadSettings, seedWorkload, reconcileWorkload, workloadTransport, workloadCounterDelta } from './measure-full-runtime/incremental-workload.mjs';
 import { checkStartupAdmission, startupIntentFromEnv } from '../src/startup/admission.ts';
 import { readOwnBuild } from '../src/startup/artifact.ts';
 const incremental = workloadSettings();
@@ -38,7 +38,7 @@ let errors = '', seq = 0; const children = [], clients = [];
 const report = { root, transport, socketPath, socketBytes: Buffer.byteLength(socketPath), mode: process.env.PI_FULL_RUNTIME_MATRIX_ONLY ? "mixed-adapter-smoke-not-performance" : "resource-matrix", platform: process.platform, node: process.version, machine:{release:release(),arch:arch(),cpus:cpus().length,cpuModel:cpus()[0]?.model,totalMemory:totalmem()}, source:sourceProvenance(fileURLToPath(new URL('../../..', import.meta.url))), scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two real RemoteClientSession adapters over loopback Unix transport with HostedSessions (not cross-machine SSH); sampler overhead included', scenarios: [] };
 const output = process.env.PI_FULL_RUNTIME_REPORT ?? join(root, 'report.json');
 if (incremental) Object.assign(report, { incremental, workload, qualification: 'notRun', missing: ['fault matrix', 'scope/UI matrix', 'native dual-platform runs', 'paired fixed-host comparison', 'GC/peak/queue-age diagnostics', 'natural idle exit'] });
-function start(url) { const child = fork(url, [], { execPath, execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); children.push(child); child.stdout.resume(); child.stderr.on('data', d => { errors += d; }); return child; }
+function start(url, args = []) { const child = fork(url, args, { execPath, execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); children.push(child); child.stdout.resume(); child.stderr.on('data', d => { errors += d; }); return child; }
 async function until(label, fn, timeout = 30000) { const deadline = Date.now()+timeout; while (Date.now()<deadline) { const value = await fn(); if (value) return value; await delay(25); } throw new Error(`${label} timed out: ${errors.slice(-4000)}`); }
 function message(child, predicate) { return new Promise((resolve, reject) => { const timer = setTimeout(() => { cleanup(); reject(new Error(`IPC timeout: ${errors.slice(-2000)}`)); }, 30000); const on = value => { if (predicate(value)) { cleanup(); resolve(value); } }; const exit = () => { cleanup(); reject(new Error(`Child exited: ${errors}`)); }; function cleanup() { clearTimeout(timer); child.off('message', on); child.off('exit', exit); } child.on('message', on); child.once('exit', exit); }); }
 async function call(child, tool, params, key = `resource-${++seq}`) { const id = ++seq, pending = message(child, m => m.id === id); child.send({ id, key, tool, params }); const reply = await pending; assert.equal(reply.error, undefined, reply.stack); return reply.result; }
@@ -127,7 +127,7 @@ try {
       assert.deepEqual(workloadAfter, workloadBefore, 'Exact authoritative fixture results must survive the observation window');
       assert.equal(metrics.projections, countersBefore.projections, 'Unchanged work must not be reprojected');
       assert.equal(metrics.logReads.bytes, countersBefore.logReads.bytes, 'Ordinary observation must not reread unchanged logs');
-      (report.incrementalWindows ??= []).push({ clients: count, countersBefore, countersAfter: metrics, workloadBefore, workloadAfter });
+      (report.incrementalWindows ??= []).push({ clients: count, countersBefore, countersAfter: metrics, delta: workloadCounterDelta(countersBefore, metrics), workloadBefore, workloadAfter });
     }
     assert.equal(status.hostedSessions,2); assert.equal(inspectDaemonOwner(transport).owner.pid,owner.pid);
     const resources=after.map(value=>{ const prior=before.find(v=>v.identity.pid===value.identity.pid); assert.ok(prior,'Unexpected process appeared during steady measurement'); return { ...value, role: role(value.identity.pid), cpuMs:((value.cpu.user-prior.cpu.user)+(value.cpu.system-prior.cpu.system))/1000,fsRead:value.usage.fsRead-prior.usage.fsRead,fsWrite:value.usage.fsWrite-prior.usage.fsWrite }; });
@@ -145,6 +145,47 @@ try {
     assert.equal(managementDelta.reconciles,0,'Unchanged same-owner foregrounds must not multiply canonical reconciliation');
     assert.equal(registryDelta.fullDirectoryReads,0);assert.equal(registryDelta.terminalMetadataFileReads,0);
     assert.ok(connections.coordinator<=2,`Root coordinator budget exceeded: ${JSON.stringify(connections)}`); assert.ok(connections.derived<=2);
+  }
+  if (workload && process.env.PI_INCREMENTAL_MUTATIONS === '1') {
+    const manifestPath = join(root, 'mutation-manifest.json');
+    writeFileSync(manifestPath, JSON.stringify(workload));
+    const writer = start(new URL('./event-publication/writer.mjs', import.meta.url), [manifestPath, '--incremental-workload']);
+    await message(writer, value => value.ready);
+    report.mutations = [];
+    for (const mutation of [{ kind: 'theme', theme: 'dark' }, { kind: 'same-settings' },
+      { kind: 'append', id: workload.tasks[0].id, cents: 2, text: `appended ${workload.tasks[0].id}` }]) {
+      const before = await work.request('runtime_get_metrics');
+      const id = ++seq, pending = message(writer, value => value.id === id);
+      writer.send({ id, mutation });
+      const receipt = await pending; assert.equal(receipt.error, undefined, receipt.error);
+      if (receipt.result.expected) Object.assign(workload.tasks[0], receipt.result.expected);
+      await until('external mutation observed by actual source inventory', async () => {
+        await work.get({ cwd, active: false, limit: 1 });
+        const metrics = await work.request('runtime_get_metrics');
+        if (metrics.inventories <= before.inventories) return false;
+        if (mutation.kind !== 'append') return true;
+        try { const snapshot = await work.get({ id: mutation.id });
+          const coverage = snapshot.rows[0]?.display?.coverage;
+          return snapshot.status === 'ready' && coverage?.complete && coverage.offset === receipt.result.afterBytes;
+        } catch (error) { if (!/resync|state-degraded/.test(String(error))) throw error; return false; }
+      });
+      const after = await work.request('runtime_get_metrics');
+      assert.equal(inspectDaemonOwner(transport).owner?.token, owner.token, 'Mutation must retain the exact management instance');
+      const delta = workloadCounterDelta(before, after);
+      if (mutation.kind !== 'append') {
+        assert.equal(delta.logs.bytes, 0, 'Settings-only changes must not read task logs');
+        assert.equal(delta.projections.logProjections, 0);
+      } else {
+        assert.equal(delta.projections.logProjections, 1, 'Only the appended fixture log may be projected');
+        assert.equal(delta.logs.displayFolded, 1); assert.equal(delta.logs.healthFolded, 1);
+        assert.ok(delta.logs.bytes >= receipt.result.appendedBytes && delta.logs.bytes <= receipt.result.appendedBytes + 256,
+          'Single append reads only new bytes plus the existing identity probe budget');
+      }
+      const final = await reconcileWorkload(work, cwd, workload);
+      report.mutations.push({ mutation, receipt: receipt.result, before, after, delta, final });
+      writeFileSync(manifestPath, JSON.stringify(workload));
+      writeFileSync(output, JSON.stringify(report, null, 2));
+    }
   }
   writeFileSync(join(cwd,'finish'),'done');
   const receipt=`background-terminal:${remoteLaunch.operationId}`;
