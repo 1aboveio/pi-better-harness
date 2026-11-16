@@ -81,6 +81,7 @@ export class RuntimeResultSupervision {
     this.metrics.passes++;
     try {
       this.reason = undefined;
+      try {
       const page = this.store.resultSupervisionChanges(this.position);
       this.metrics.feedPages++;
       if (page.reset) {
@@ -98,6 +99,10 @@ export class RuntimeResultSupervision {
       // Restart always restores authority; this in-memory position never authorizes work.
       this.position = { generation: page.generation, seq: page.seq };
       if (page.more) this.schedule();
+      } catch (error) {
+        // Feed recovery must not suppress deadlines for already captured work.
+        this.reason = String(error);
+      }
       const now = Date.now();
       for (const [id, entry] of this.active) if (entry.due <= now) this.dirty.add(id);
       for (const id of [...this.dirty].slice(0, ENTITY_BUDGET)) {
@@ -119,6 +124,7 @@ export class RuntimeResultSupervision {
             nextDeadline: entry.uncertainSince + this.verificationMs, recovery: reason,
           };
           else entry.due = Infinity;
+          if (entry.reason) entry.due = Math.min(entry.due, entry.uncertainSince + this.verificationMs);
         };
         try {
         if (grant.capability?.adapter !== "background-results-v1" || !grant.capability.captured || !grant.capability.current) {
@@ -135,6 +141,10 @@ export class RuntimeResultSupervision {
         const inspection = createLocalSupervisor({ directory: grant.directory }).inspect(operation.taskId);
         if (!inspection || inspection.token !== grant.launchToken) {
           uncertain("reconciling: exact runner evidence unavailable; no replacement command is permitted");
+          continue;
+        }
+        if (!inspection.terminal && (inspection.fenceBusy || !inspection.claim?.pidStartTime)) {
+          uncertain("reconciling: runner start identity or state fence is unverified; no takeover is permitted");
           continue;
         }
         if (inspection.terminal) {
@@ -158,7 +168,8 @@ export class RuntimeResultSupervision {
       if (this.dirty.size) this.schedule();
       // A cheap journal page repairs missed database hints; task inspections are
       // charged only to exact dirty identities or their liveness deadline.
-      this.timer = setTimeout(() => this.reconcile(), 1000);
+      const next = [...this.active.values()].reduce((deadline, entry) => Math.min(deadline, entry.due), Date.now() + 1000);
+      this.timer = setTimeout(() => this.reconcile(), Math.max(1, next - Date.now()));
       this.timer.unref();
     }
   }
