@@ -42,6 +42,7 @@ export class ManagedSubagentHost {
     closeJournal;
     epoch;
     pending = 0;
+    acceptedRequestLive = false;
     continuationWindow = { started: 0, admitted: 0 };
     continuationFailures = new Map();
     workerHost;
@@ -65,7 +66,9 @@ export class ManagedSubagentHost {
                     recovery: proof.verified ? "current-managed-writer-supervision" : "writer-unverified-no-takeover",
                 }];
         });
-        return [...writers, ...(this.workerHost?.advancingWaits?.() ?? [])];
+        return [...(this.acceptedRequestLive ? this.journal.lifecycleReasons(this.current.ownerKey, this.current.key) : []).map(reason => ({ ...reason,
+                management: { ...reason.management, instance: this.instance }, writerFence: 'current-managed-launch-epoch' })),
+            ...writers, ...(this.workerHost?.advancingWaits?.() ?? [])];
     }
     observeHealth(reconcile) {
         this.healthClose?.();
@@ -438,6 +441,7 @@ export class ManagedSubagentHost {
                 capturedPermissions: saved.permissions, permissions,
                 ownerKey: JSON.stringify([saved.owner.workspace, saved.owner.sessionId]),
                 digest: launchDigest({ key, runId: park.runId }) };
+            this.acceptedRequestLive = true;
             this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...permissions });
             const outcome = await run();
             if (outcome === "resumed")
@@ -450,7 +454,7 @@ export class ManagedSubagentHost {
                 this.continuationFailures.delete(this.continuationFailures.keys().next().value);
             this.continuationFailures.set(retryKey, { failures, retryAt: Date.now() + Math.min(30000, 1000 * 2 ** (failures - 1)), reason: String(error).slice(0, 500) });
             return "skipped";
-        }).finally(() => { this.pending--; });
+        }).finally(() => { this.acceptedRequestLive = false; this.pending--; });
         this.tail = result;
         return result;
     }
@@ -479,6 +483,7 @@ export class ManagedSubagentHost {
             }
             try {
                 this.current = { ...record, authority: command.authority, ownerKey, grantDigest: launchDigest(record) };
+                this.acceptedRequestLive = true;
                 await this.initialize();
                 this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...record.permissions });
                 const context = this.executionContext(record);
@@ -496,7 +501,7 @@ export class ManagedSubagentHost {
                 }
                 throw error;
             }
-        }).finally(() => { this.pending--; });
+        }).finally(() => { this.acceptedRequestLive = false; this.pending--; });
         this.tail = result;
         return result;
     }

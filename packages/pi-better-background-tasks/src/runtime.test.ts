@@ -1,4 +1,5 @@
 import { readFileSync, rmSync, statSync } from "node:fs";
+import { createWorkBudget } from "../../pi-better-server/src/runtime/work-budget.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { failurePath } from "./failures.js";
@@ -1150,6 +1151,30 @@ describe("command watch progress evidence", () => {
   function incidents(id: string) {
     return actionableFailures(readFailureState(failurePath(id)));
   }
+
+  it("defers an actual watch at root capacity without polling after its original deadline", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(watchStartedAt);
+    const budget = createWorkBudget(), peer = createWorkBudget(budget.buffer);
+    const runtime = createBackgroundTaskRuntime(undefined, undefined, undefined,
+      (kind, id, work) => budget.scheduleSource(`legacy-${kind}`, id, work));
+    const held = Array.from({ length: 16 }, () => peer.enter('control')!);
+    const scripted = scriptedWatch([{ stdout: 'pending' }]);
+    const meta = runtime.startWatchTask(fakePi, {
+      command: 'check deployment', interval_seconds: 60, timeout_seconds: 2, callback: false,
+      success_when: { type: 'stdout_contains', value: 'done' },
+    }, process.cwd(), undefined, undefined, { watchPollRunner: scripted.runner });
+    ids.push(meta.id);
+    try {
+      await advance(0); expect(scripted.calls()).toBe(0);
+      await advance(2_000); expect(scripted.calls()).toBe(0);
+      held.forEach(release => release());
+      await advance(10);
+      expect(readMeta(meta.id)).toMatchObject({ status: 'timed_out', deadlineAt: watchStartedAt + 2_000 });
+      expect(scripted.calls()).toBe(0);
+      expect(peer.metrics().sources['legacy-watch']!.completed).toBe(1);
+      expect(peer.metrics().lanes.control!.active).toBe(0);
+    } finally { held.forEach(release => release()); runtime.suspendScheduledWork(); }
+  });
 
   it("charges the actual watch and retention callbacks without repeating a poll or moving its deadline", async () => {
     vi.useFakeTimers();

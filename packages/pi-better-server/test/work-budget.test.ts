@@ -2,6 +2,44 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createWorkBudget } from "../src/runtime/work-budget.ts";
 
+test("legacy dispatch reserves shared control capacity and queued identities progress once capacity returns", async () => {
+  const root = createWorkBudget(), peer = createWorkBudget(root.buffer);
+  const held = Array.from({ length: 16 }, () => peer.enter("control")!);
+  let calls = 0;
+  const first = root.scheduleSource("legacy-watch", "one", () => ++calls);
+  const duplicate = root.scheduleSource("legacy-watch", "one", () => ++calls);
+  const second = root.scheduleSource("legacy-watch", "two", () => ++calls);
+  assert.equal(calls, 0);
+  assert.equal(first, duplicate);
+  held.forEach(release => release());
+  await new Promise(resolve => setTimeout(resolve, 15));
+  const keepAlive = setTimeout(() => {}, 1000);
+  try { assert.deepEqual(await Promise.all([first, second]), [1, 2]); }
+  finally { clearTimeout(keepAlive); }
+  assert.equal(peer.metrics().lanes.control!.active, 0);
+});
+
+test('nested source dispatch reuses its reservation and shared peers see actual completions', async () => {
+  const root = createWorkBudget(), peer = createWorkBudget(root.buffer);
+  const value = await root.scheduleSource('legacy-watch','outer', () => root.scheduleSource('legacy-handoff','inner', () => 42));
+  assert.equal(value,42);
+  assert.equal(peer.metrics().sources['legacy-watch']!.completed,1);
+  assert.equal(peer.metrics().sources['legacy-handoff']!.completed,1);
+  assert.equal(peer.metrics().lanes.control!.admitted,1);
+});
+
+test('a later timer cannot inherit a settled reservation', async () => {
+  const budget = createWorkBudget();
+  let later!: Promise<number>;
+  await budget.scheduleSource('legacy-watch','first', () => {
+    later = new Promise(resolve => setTimeout(() => {
+      void budget.scheduleSource('legacy-watch','later', () => 7).then(resolve);
+    }, 1));
+  });
+  assert.equal(await later, 7);
+  assert.equal(budget.metrics().lanes.control!.admitted, 2);
+});
+
 test("one total source capacity reserves independent control, query and repair progress", () => {
   const root = createWorkBudget();
   const reads = createWorkBudget(root.buffer);

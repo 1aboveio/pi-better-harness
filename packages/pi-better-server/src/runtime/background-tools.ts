@@ -73,7 +73,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     runtime = createBackgroundTaskRuntime(failures.createFailureAttention((origin:any,event:any)=>new Promise<boolean>(resolve=>notifyParent({origin,taskId:event.inspectId??event.id,status:event.status,urgent:true,event:{...event,isDelivered:undefined,getSuppressionReason:undefined,onDelivered:undefined}},
               {receiptId:event.receiptId,delivered:()=>{event.onDelivered?.(Date.now());resolve(true);},defer:()=>resolve(false)}))), (origin: any, event: any) => notifyParent({ origin, taskId: event.id, status: event.status, outcome: event.outcome, event: { ...event, isDelivered: undefined, getSuppressionReason: undefined, onDelivered: undefined, onSuppressed: undefined } }, { receiptId: event.receiptId, delivered: () => event.onDelivered?.(Date.now()), defer: () => undefined }), { assert: assertAdmission,
                         prepared: (id: string) => journal.operation(current.ownerKey, current.record.key, { operationId: `legacy:${id}`, taskId: id, token: current.record.key }) },
-                        (kind: string, _id: string, work: () => unknown) => lease.budget.source(`legacy-${kind}`, work));
+                        (kind: string, id: string, work: () => unknown) => lease.budget.scheduleSource(`legacy-${kind}`, `background:${id}`, work));
                     service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, 'operation-coordinator.sqlite'), serverOwnedResults: true, pollMs: 0,
                         enterControl: () => lease.budget.enter('control'),
                         notifyParent, assertAdmission,
@@ -118,7 +118,8 @@ export async function createBackgroundTools(root: string, instance: string, drai
     return {
         get busy() { return pending > 0; },
         lifecycleReasons() {
-            const now = Date.now(), reasons: any[] = [];
+            const now = Date.now(), reasons: any[] = journal.lifecycleReasons().map((reason: any) => ({ ...reason,
+                management: { instance } }));
             for (const scope of scopes.values()) for (const meta of registry.listActiveMetasForOrigin({ cwd: scope.owner.workspace, sessionId: scope.owner.sessionId })) {
                 if (meta.status !== 'running') continue;
                 const watch = meta.kind === 'command_watch' || Boolean(meta.remote);
@@ -258,7 +259,8 @@ export async function createBackgroundTools(root: string, instance: string, drai
                 if (admission && draining() && !prior)
                     throw new Error('runtime-draining: new Background execution deferred for upgrade');
                 if (mutation) {
-                    const accepted = journal.accept(key, record.key, authority.backgroundDigest({ tool: record.tool, params: record.params }));
+                    const accepted = journal.accept(key, record.key, authority.backgroundDigest({ tool: record.tool, params: record.params }),
+                        { instance, pid: record.pid, start: record.start });
                     if (accepted.prior)
                         return accepted.record.result ?? { content: [{ type: 'text', text: 'Accepted Background request has an uncertain outcome; inspect its exact operations before issuing new work.' }], details: { status: 'outcome_unknown', operations: accepted.record.operations } };
                     journal.dispatch(key, record.key);

@@ -432,7 +432,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         clearRemoteSessionTimer(id);
         if (scheduledWorkSuspended)
             return;
-        const timer = setTimeout(() => void sourceWork("remote-poll", id, () => pollRemoteSession(pi, id, getActiveSession)), delayMs);
+        const timer = setTimeout(() => void sourceWork("remote-poll", id, () => scheduledWorkSuspended ? undefined : pollRemoteSession(pi, id, getActiveSession)), delayMs);
         timer.unref();
         remoteSessionTimers.set(id, timer);
     }
@@ -714,7 +714,8 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         const arm = () => {
             if (scheduledWorkSuspended)
                 return;
-            const timer = setTimeout(() => sourceWork("handoff", id, check), delayMs);
+            const timer = setTimeout(() => sourceWork("handoff", id, () => { if (!scheduledWorkSuspended)
+                check(); }), delayMs);
             timer.unref();
             handoffTimers.set(id, timer);
         };
@@ -847,7 +848,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         clearWatchTimer(id);
         if (scheduledWorkSuspended)
             return;
-        const timer = setTimeout(() => void sourceWork("watch", id, () => pollWatch(pi, id, getActiveSession, runOnce)), delayMs);
+        const timer = setTimeout(() => void sourceWork("watch", id, () => scheduledWorkSuspended ? undefined : pollWatch(pi, id, getActiveSession, runOnce)), delayMs);
         timer.unref();
         watcherTimers.set(id, timer);
     }
@@ -1135,7 +1136,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         if (scheduledWorkSuspended)
             return;
         const delay = Math.max(0, deadlineAt - Date.now());
-        const timer = setTimeout(() => void sourceWork("process-deadline", id, () => timeoutProcess(pi, id, getActiveSession)), delay);
+        const timer = setTimeout(() => void sourceWork("process-deadline", id, () => scheduledWorkSuspended ? undefined : timeoutProcess(pi, id, getActiveSession)), delay);
         timer.unref();
         processTimeoutTimers.set(id, timer);
     }
@@ -1330,6 +1331,8 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         if (scheduledWorkSuspended)
             return;
         const timer = setInterval(() => sourceWork("log-retention", id, () => {
+            if (scheduledWorkSuspended)
+                return;
             const meta = readMeta(id);
             if (!meta || meta.status !== "running") {
                 stopLogRetention(id);

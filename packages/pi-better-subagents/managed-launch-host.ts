@@ -37,6 +37,7 @@ export class ManagedSubagentHost {
     private closeJournal: () => void;
     private epoch: number;
     private pending = 0;
+    private acceptedRequestLive = false;
     private continuationWindow = { started: 0, admitted: 0 };
     private continuationFailures = new Map<string, { failures: number; retryAt: number; reason: string }>();
     private workerHost?: { start(ctx?: unknown): void; close(): void; advancingWaits?(): any[]; service: { continuationReady: boolean } };
@@ -58,7 +59,9 @@ export class ManagedSubagentHost {
             nextDeadline: proof.verified ? this.healthDue.get(meta.id) ?? null : proof.unknownSince + this.verificationMs,
             recovery: proof.verified ? "current-managed-writer-supervision" : "writer-unverified-no-takeover",
         }]; });
-        return [...writers, ...(this.workerHost?.advancingWaits?.() ?? [])];
+        return [...(this.acceptedRequestLive ? this.journal.lifecycleReasons(this.current.ownerKey, this.current.key) : []).map(reason => ({ ...reason,
+            management: { ...reason.management, instance: this.instance }, writerFence: 'current-managed-launch-epoch' })),
+            ...writers, ...(this.workerHost?.advancingWaits?.() ?? [])];
     }
     private observeHealth(reconcile: (ids: readonly string[]) => void) {
         this.healthClose?.();
@@ -350,6 +353,7 @@ export class ManagedSubagentHost {
                 capturedPermissions: saved.permissions, permissions,
                 ownerKey: JSON.stringify([saved.owner.workspace, saved.owner.sessionId]),
                 digest: launchDigest({ key, runId: park.runId }) };
+            this.acceptedRequestLive = true;
             this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...permissions });
             const outcome = await run();
             if (outcome === "resumed") this.journal.finish(this.current.ownerKey, this.current.key, this.epoch, { status: outcome });
@@ -360,7 +364,7 @@ export class ManagedSubagentHost {
             if (this.continuationFailures.size >= 128 && !this.continuationFailures.has(retryKey)) this.continuationFailures.delete(this.continuationFailures.keys().next().value!);
             this.continuationFailures.set(retryKey, { failures, retryAt: Date.now() + Math.min(30000, 1000 * 2 ** (failures - 1)), reason: String(error).slice(0, 500) });
             return "skipped" as const;
-        }).finally(() => { this.pending--; });
+        }).finally(() => { this.acceptedRequestLive = false; this.pending--; });
         this.tail = result;
         return result;
     }
@@ -387,6 +391,7 @@ export class ManagedSubagentHost {
             }
             try {
                 this.current = { ...record, authority: command.authority, ownerKey, grantDigest: launchDigest(record) };
+                this.acceptedRequestLive = true;
                 await this.initialize();
                 this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...record.permissions });
                 const context = this.executionContext(record);
@@ -402,7 +407,7 @@ export class ManagedSubagentHost {
                 }
                 throw error;
             }
-        }).finally(() => { this.pending--; });
+        }).finally(() => { this.acceptedRequestLive = false; this.pending--; });
         this.tail = result;
         return result;
     }
