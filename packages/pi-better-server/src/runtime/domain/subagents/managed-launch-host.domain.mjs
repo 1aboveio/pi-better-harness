@@ -42,6 +42,9 @@ export class ManagedSubagentHost {
     closeJournal;
     epoch;
     pending = 0;
+    requestSequence = 0;
+    requestRecords = new Map();
+    foldRecord;
     acceptedRequestLive = false;
     continuationWindow = { started: 0, admitted: 0 };
     continuationFailures = new Map();
@@ -66,7 +69,8 @@ export class ManagedSubagentHost {
                     recovery: proof.verified ? "current-managed-writer-supervision" : "writer-unverified-no-takeover",
                 }];
         });
-        return [...(this.acceptedRequestLive ? this.journal.lifecycleReasons(this.current.ownerKey, this.current.key) : []).map(reason => ({ ...reason,
+        return [...this.requestRecords.values(), ...(this.foldRecord ? [{ ...this.foldRecord }] : []),
+            ...(this.acceptedRequestLive ? this.journal.lifecycleReasons(this.current.ownerKey, this.current.key) : []).map(reason => ({ ...reason,
                 management: { ...reason.management, instance: this.instance }, writerFence: 'current-managed-launch-epoch' })),
             ...writers, ...(this.workerHost?.advancingWaits?.() ?? [])];
     }
@@ -431,6 +435,10 @@ export class ManagedSubagentHost {
             return Promise.resolve("skipped");
         this.continuationWindow.admitted++;
         this.pending++;
+        const requestId = ++this.requestSequence;
+        this.requestRecords.set(requestId, { kind: 'continuation-request', id: requestId, waitId: park.waitId, runId: park.runId,
+            generation: park.generation, lastProgressAt: now, executionDeadline: null, nextDeadline: null,
+            recovery: 'captured-continuation-serialized-by-current-launch-journal-owner' });
         const result = this.tail.catch(() => undefined).then(async () => {
             const saved = this.journal.attempt(park.runId)?.launchAuthority;
             if (!saved)
@@ -454,7 +462,7 @@ export class ManagedSubagentHost {
                 this.continuationFailures.delete(this.continuationFailures.keys().next().value);
             this.continuationFailures.set(retryKey, { failures, retryAt: Date.now() + Math.min(30000, 1000 * 2 ** (failures - 1)), reason: String(error).slice(0, 500) });
             return "skipped";
-        }).finally(() => { this.acceptedRequestLive = false; this.pending--; });
+        }).finally(() => { this.requestRecords.delete(requestId); this.acceptedRequestLive = false; this.pending--; });
         this.tail = result;
         return result;
     }
@@ -470,6 +478,10 @@ export class ManagedSubagentHost {
         if (Object.keys(command).some(key => !["id", "type", "authority"].includes(key)))
             return Promise.reject(new Error("unsupported launch field"));
         this.pending++;
+        const requestId = ++this.requestSequence;
+        this.requestRecords.set(requestId, { kind: 'launch-request', id: requestId, phase: 'queued-unaccepted',
+            lastProgressAt: Date.now(), executionDeadline: null, nextDeadline: null,
+            recovery: 'validate-captured-native-authority-before-admission-no-detached-execution-lease' });
         const result = this.tail.catch(() => undefined).then(async () => {
             const record = this.grant(command.authority);
             // A retried tool call keeps its accepted recipient even after Goal/branch edits.
@@ -477,6 +489,8 @@ export class ManagedSubagentHost {
             const digest = launchDigest({ tool: record.tool, params: record.params });
             const intent = this.journal.accept(ownerKey, record.key, digest, this.epoch);
             onAccepted?.(`launch-progress:${launchDigest([ownerKey, record.key])}`);
+            this.requestRecords.set(requestId, { ...this.requestRecords.get(requestId), phase: 'accepted',
+                operation: `launch-progress:${launchDigest([ownerKey, record.key])}`, lastProgressAt: Date.now() });
             if (intent.prior) {
                 if (intent.result)
                     return JSON.parse(intent.result);
@@ -502,13 +516,14 @@ export class ManagedSubagentHost {
                 }
                 throw error;
             }
-        }).finally(() => { this.acceptedRequestLive = false; this.pending--; });
+        }).finally(() => { this.requestRecords.delete(requestId); this.acceptedRequestLive = false; this.pending--; });
         this.tail = result;
         return result;
     }
     /** One root mechanical worker; no coordinator connection or query mutations. */
     foldTerminalFailures(ids) {
         let release;
+        let physicalExit;
         const result = this.tail.catch(() => undefined).then(async () => {
             release = this.enterControl?.();
             if (this.enterControl && !release)
@@ -545,22 +560,30 @@ export class ManagedSubagentHost {
             try {
                 await new Promise((resolve, reject) => {
                     this.failureResponse = { resolve, reject };
+                    this.foldRecord = { kind: 'failure-fold', ids: [...ids], lastProgressAt: Date.now(), nextDeadline: Date.now() + this.verificationMs,
+                        recovery: 'revoke-unacknowledged-fold-generation-at-existing-verification-deadline' };
                     timer = setTimeout(() => {
                         const error = new Error("failure-fold-verification-deadline: source worker did not acknowledge");
                         Atomics.store(this.foldRevocation, 0, 1);
                         this.failureWorkerError = error;
                         this.failureResponse = undefined;
-                        void this.failureWorker?.terminate();
+                        physicalExit = this.failureWorker?.terminate();
                         reject(error);
                     }, this.verificationMs);
                     this.failureWorker.postMessage({ ids });
                 });
             }
             finally {
+                this.foldRecord = undefined;
                 if (timer)
                     clearTimeout(timer);
             }
-        }).finally(() => release?.());
+        }).finally(() => {
+            if (physicalExit)
+                void physicalExit.then(() => release?.(), () => undefined);
+            else
+                release?.();
+        });
         this.tail = result;
         return result;
     }

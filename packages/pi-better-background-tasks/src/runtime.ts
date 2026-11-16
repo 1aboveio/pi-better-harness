@@ -1264,7 +1264,7 @@ function scheduleProcessTimeout(
   clearProcessTimeout(id);
   if (scheduledWorkSuspended) return;
   const delay = Math.max(0, deadlineAt - Date.now());
-  const dueAt = Date.now() + delay;
+  const dueAt = deadlineAt;
   const timer = setTimeout(() => void sourceWork("process-deadline", id, () => scheduledWorkSuspended ? undefined : timeoutProcess(pi, id, getActiveSession), dueAt), delay);
   timer.unref();
   processTimeoutTimers.set(id, timer);
@@ -1465,7 +1465,7 @@ function scheduleLogRetention(pi: ExtensionAPI, id: string, getActiveSession?: A
   stopLogRetention(id);
   if (scheduledWorkSuspended) return;
   let dueAt = Date.now() + LOG_RETENTION_CHECK_MS;
-  const timer = setInterval(() => { const due = dueAt; dueAt += LOG_RETENTION_CHECK_MS; return sourceWork("log-retention", id, () => {
+  const timer = setInterval(() => { const due = dueAt; dueAt = Date.now() + LOG_RETENTION_CHECK_MS; return sourceWork("log-retention", id, () => {
     if (scheduledWorkSuspended) return;
     const meta = readMeta(id);
     if (!meta || meta.status !== "running") {
