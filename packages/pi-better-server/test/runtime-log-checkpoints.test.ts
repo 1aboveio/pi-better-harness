@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { LogCheckpoints, LOG_CHECKPOINT_ENTRY_BUDGET, LOG_CHECKPOINT_BUDGET } from "../src/runtime/log-checkpoints.ts";
 import { DatabaseSync } from "node:sqlite";
@@ -18,7 +19,7 @@ const tool = event({ type: "tool_execution_start", toolCallId: "tool", toolName:
 const padding = event({ type: "message_update", message: { role: "assistant", content: "x".repeat(67000) } });
 
 test("checkpoint readers open under another derived owner's reservation without hiding write contention", () => {
-  const root = mkdtempSync(join(resolve("../../.work/801"), "checkpoint-lock-"));
+  const root = mkdtempSync(join(tmpdir(), "checkpoint-lock-"));
   const path = join(root, "checkpoints.sqlite");
   const firstOwner = new DatabaseSync(":memory:"), secondOwner = new DatabaseSync(":memory:");
   const first = new LogCheckpoints(path, firstOwner);
@@ -44,7 +45,7 @@ test("checkpoint readers open under another derived owner's reservation without 
 });
 
 test("actual checkpoint read models open under a derived reservation and refresh under a coordinator WAL writer", async () => {
-  const root = mkdtempSync(join(resolve("../../.work/801"), "model-lock-"));
+  const root = mkdtempSync(join(tmpdir(), "model-lock-"));
   const source = openDatabase(join(root, "operation-coordinator.sqlite"), { busyTimeoutMs: 0 });
   ensureSchema(createContext(source));
   const options = { baseDir: join(root, "runs"), durableDir: join(root, "archive"), intervalMs: 60000 };
