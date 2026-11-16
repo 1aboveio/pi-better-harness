@@ -139,6 +139,8 @@ export interface OperationRunRegistration {
      * against the parent's own records before the checkpoint handler runs.
      */
     checkpointEvidenceValidator?: OperationCheckpointEvidenceCheck;
+    /** Synchronous parent diagnostic hook after authentication, before handler dispatch. */
+    onToolRejected?: (error: OperationBridgeErrorBody, context: OperationRequestContext) => void;
     handlers: OperationRunHandlers;
     /** Test-only or pre-provisioned token. Production should omit this and use the generated value. */
     token?: string;
@@ -209,6 +211,7 @@ interface FrozenRegistration {
     tools: readonly OperationToolDescriptor[];
     ownership: OperationOwnershipCheck;
     checkpointEvidenceValidator?: OperationCheckpointEvidenceCheck;
+    onToolRejected?: OperationRunRegistration["onToolRejected"];
     handlers: OperationRunHandlers;
     descriptor: OperationBridgeDescriptor;
 }
@@ -401,6 +404,7 @@ export async function createOperationBridgeHost(
                 ? { checkpointEvidenceValidator: registration.checkpointEvidenceValidator }
                 : {}),
             handlers: Object.freeze({ ...registration.handlers }),
+            onToolRejected: registration.onToolRejected,
             descriptor,
         });
         runs.set(registration.runId, {
@@ -698,13 +702,17 @@ export async function createOperationBridgeHost(
             return;
         }
         const params = (envelope.params ?? {}) as JsonRecord;
+        const reject = (error: OperationBridgeErrorBody): void => {
+            run.registration.onToolRejected?.(error, makeContext(run, envelope, new AbortController().signal));
+            sendError(socket, envelope.id, error);
+        };
         if (findSecretField(params)) {
-            sendError(socket, envelope.id, { code: "authority-field", message: "request contains a credential-shaped field" });
+            reject({ code: "authority-field", message: "request contains a credential-shaped field" });
             return;
         }
         const bridgeEnvironmentField = findBridgeEnvironmentKey(params);
         if (bridgeEnvironmentField) {
-            sendError(socket, envelope.id, {
+            reject({
                 code: "bridge-env-leak",
                 message: `${bridgeEnvironmentField} is a parent bridge credential and cannot be passed to a launched task`,
             });
@@ -713,7 +721,7 @@ export async function createOperationBridgeHost(
         }
         const authorityField = findAuthorityField(params);
         if (authorityField) {
-            sendError(socket, envelope.id, {
+            reject({
                 code: "authority-field",
                 message: `caller field ${authorityField} would override parent authority`,
             });
@@ -722,7 +730,7 @@ export async function createOperationBridgeHost(
         }
         const schema = validateJsonSchema(descriptor.parameters, params);
         if (!schema.ok) {
-            sendError(socket, envelope.id, {
+            reject({
                 code: "schema-invalid",
                 message: `${schema.path}: ${schema.message}`,
             });

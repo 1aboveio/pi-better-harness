@@ -55,12 +55,14 @@ import {
     type OperationBridgeLogger,
     type OperationRunHandlers,
     type OperationRunInfo,
+    type OperationRequestContext,
+    type OperationRunRegistration,
 } from "./worker-operations-host.ts";
 import { captureParkCheckpoint, verifyParkCheckpoint, type ParkCheckpoint } from "./park-checkpoint.ts";
 import { findSavedConversation, readConversationLease } from "./continuation.ts";
 import { commitAssignmentTerminal, readOutcome, coordinatorPath, type AssignmentBinding } from "./assignment-outcomes.ts";
 import { openStore } from "./shared-operation-coordinator/index.ts";
-import { recordAssignmentReport } from "./assignment-report.ts";
+import { recordAssignmentReport, recordAssignmentReportRejection } from "./assignment-report.ts";
 import { currentSandboxPermissions } from "./permission-policy.ts";
 import {
     effectiveStatus,
@@ -988,8 +990,9 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             }
         };
         const handlers: OperationRunHandlers = {};
+        let onToolRejected: OperationRunRegistration["onToolRejected"];
         if (registration.capabilities.reportAssignment && registration.assignment) {
-            handlers.report_assignment_result = async (params, context) => recordAssignmentReport(registration.runId, params, () => {
+            const assertReportAuthority = (context: OperationRequestContext): RunMeta => {
                 const live = host.getRun(registration.runId);
                 const meta = readMeta(registration.runId);
                 if (!live || live.revoked || live.tokenGeneration !== context.tokenGeneration || context.signal.aborted
@@ -1013,7 +1016,20 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
                     } finally { store.close(); }
                 }
                 return meta;
-            }, currentSandboxPermissions(options.pi as never)) as unknown as JsonRecord;
+            };
+            handlers.report_assignment_result = async (params, context) => {
+                let permissions: ReturnType<typeof currentSandboxPermissions>;
+                try { permissions = currentSandboxPermissions(options.pi as never); }
+                catch (error) {
+                    recordAssignmentReportRejection(reasonOf(error), () => assertReportAuthority(context));
+                    throw error;
+                }
+                return recordAssignmentReport(registration.runId, params,
+                    () => assertReportAuthority(context), permissions) as unknown as JsonRecord;
+            };
+            onToolRejected = (error, context) => {
+                if (context.tool === "report_assignment_result") recordAssignmentReportRejection(error.message, () => assertReportAuthority(context));
+            };
         }
         const execute = (tool: string, params: JsonRecord): Promise<JsonRecord> => rpc.call("execute-tool", {
             runId: registration.runId,
@@ -1192,6 +1208,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             tools: normalizeToolDescriptors(registration.schemas, registration.capabilities),
             ownership: (taskId) => ownsTask(taskId),
             handlers,
+            onToolRejected,
         });
         durable?.save(registration, handle.token);
         return {
