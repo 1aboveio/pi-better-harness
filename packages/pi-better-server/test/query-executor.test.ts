@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Socket } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -10,7 +10,7 @@ import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 
-async function fixture(options: { capacity?: number; timeoutMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
+async function fixture(options: { capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
   mkdirSync(join(root, "runs"));
   const transport = mkdtempSync("/tmp/query-socket-");
@@ -73,6 +73,167 @@ async function ready(client: WorkClient) {
     const stop = client.onChange(snapshot => { if (snapshot.status === "ready") { clearTimeout(timeout); stop(); resolve(); } });
   });
 }
+
+test("identical Work identities do not share visible results across admitted roots", { timeout: 10000 }, async () => {
+  const left = await fixture(), right = await fixture();
+  try {
+    const clients = [await left.client(), await right.client()];
+    await Promise.all(clients.map(ready));
+    for (const [index, f] of [left, right].entries()) {
+      mkdirSync(join(f.root, "runs/sa_same"));
+      writeFileSync(join(f.root, "runs/sa_same/meta.json"), JSON.stringify({ id: "sa_same", cwd: "/same-workspace",
+        callbackOrigin: { cwd: "/same-workspace", sessionId: "same-session" }, status: "completed", startedAt: 1, name: `root-${index}` }));
+      await f.executor.livenessReasons();
+    }
+    const scope = { cwd: "/same-workspace", sessionId: "same-session", id: "sa_same" };
+    assert.equal((await clients[0]!.get(scope)).rows[0]!.meta.name, "root-0");
+    assert.equal((await clients[1]!.get(scope)).rows[0]!.meta.name, "root-1");
+    assert.equal((await clients[0]!.get({ ...scope, sessionId: "other" })).rows.length, 0);
+  } finally { await left.close(); await right.close(); }
+});
+
+for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query and encoding work`, { timeout: 15000 }, async () => {
+  const f = await fixture();
+  const scope = { cwd: join(f.root, "b"), limit: 1 };
+  const write = (id: string, cwd: string, name: string) => {
+    mkdirSync(join(f.root, "runs", id), { recursive: true });
+    writeFileSync(join(f.root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, name, status: "completed", startedAt: 1 }));
+  };
+  try {
+    const first = await f.client(); await ready(first);
+    write("sa_a", join(f.root, "a"), "a"); write("sa_b1", scope.cwd, "b1"); write("sa_b2", scope.cwd, "b2");
+    await f.executor.livenessReasons();
+    const clients = [first, ...await Promise.all(Array.from({ length: count - 1 }, () => f.client()))];
+    for (const client of clients) await client.subscribe(scope);
+    const page = await first.get(scope);
+    const before = f.executor.metrics() as any;
+    let events = 0;
+    const stops = clients.map(client => client.onChange(() => events++));
+    write("sa_a", join(f.root, "a"), "unrelated"); await f.executor.livenessReasons();
+    appendFileSync(join(f.root, "runs/sa_a/output.log"), '{"type":"agent_end"}\n'); await f.executor.livenessReasons();
+    write("sa_a", join(f.root, "c"), "moved"); await f.executor.livenessReasons();
+    const meta = join(f.root, "runs/sa_a/meta.json");
+    writeFileSync(meta, JSON.stringify({ id: "sa_a", cwd: join(f.root, "c"), status: "failed", startedAt: 1 }));
+    await f.executor.livenessReasons();
+    rmSync(join(f.root, "runs/sa_a"), { recursive: true }); await f.executor.livenessReasons();
+    for (const client of clients) await client.get(scope);
+    const unchanged = f.executor.metrics() as any;
+    assert.equal(events, 0, "unrelated content sends no scoped frames");
+    assert.equal(unchanged.queryCount, before.queryCount, "unrelated content retains the cached page");
+    assert.equal(unchanged.serializationCount, before.serializationCount);
+    const next = await first.get({ ...scope, cursor: page.nextCursor });
+    assert.equal(next.rows.length, 1);
+    const baseline = f.executor.metrics() as any;
+    const received = clients.map(client => new Promise<void>(resolve => {
+      const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) { stop(); resolve(); } });
+    }));
+    write("sa_b2", scope.cwd, "changed"); await f.executor.livenessReasons(); await Promise.all(received);
+    await first.get(scope);
+    const changed = f.executor.metrics() as any;
+    assert.equal(changed.queryCount - baseline.queryCount, 1);
+    assert.equal(changed.serializationCount - baseline.serializationCount, 1);
+    assert.equal(changed.eventEncoding.serializations - baseline.eventEncoding.serializations, 1);
+    assert.equal(changed.eventEncoding.frames - baseline.eventEncoding.frames, count);
+    assert.ok(changed.eventEncoding.bytes > baseline.eventEncoding.bytes);
+    stops.forEach(stop => stop());
+  } finally { await f.close(); }
+});
+
+test("slow caller cancellation preserves other clients and ignores late replies", { timeout: 10000 }, async t => {
+  const f = await fixture({ timeoutMs: 700, watchdogMs: 2000,
+    workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
+  try {
+    const a = await f.client(), b = await f.client(); await ready(b);
+    const epoch = b.snapshot!.instanceId;
+    const blocked = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "query-blocked") resolve(); }));
+    const began = performance.now();
+    const slow = assert.rejects(a.request("runtime_get_snapshot", { scope: { id: "sa_slow" } }), /runtime-timeout: caller/);
+    await blocked;
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const queued = b.request("runtime_get_snapshot", { scope: { limit: 2 } });
+    const controlStart = performance.now();
+    assert.equal((await b.request("ping")).ok, true);
+    assert.deepEqual(await a.request("runtime_unsubscribe"), { unsubscribed: true });
+    const controlMs = performance.now() - controlStart;
+    await slow;
+    const timeoutMs = performance.now() - began;
+    assert.equal((await queued).status, "ready", "cancellation frees execution without waiting for the slow source");
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+    assert.equal(b.snapshot!.instanceId, epoch);
+    f.worker.postMessage({ type: "release-query" });
+    const fresh = await b.get({ limit: 3 });
+    assert.equal(fresh.status, "ready");
+    assert.equal(f.executor.metrics().executor.worker, "running");
+    assert.equal(f.executor.metrics().executor.active, 0);
+    assert.ok(controlMs < 500);
+    t.diagnostic(JSON.stringify({ timeoutMs, controlMs, rebuilding: fresh.status, restart: f.executor.metrics().executor.restarts,
+      queueMs: f.executor.metrics().executor.waitMs, executionMs: f.executor.metrics().executor.readMs }));
+  } finally { await f.close(); }
+});
+
+test("shared callers have separate deadlines and queue timeouts retain bounded admission", { timeout: 10000 }, async () => {
+  const f = await fixture({ timeoutMs: 800, watchdogMs: 2500, capacity: 2,
+    workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
+  try {
+    const a = await f.client(), b = await f.client(), c = await f.client(); await ready(a);
+    const first = assert.rejects(a.request("runtime_get_snapshot", { scope: { id: "sa_slow" } }), /runtime-timeout/);
+    const queued = assert.rejects(c.request("runtime_get_snapshot", { scope: { limit: 2 } }), /runtime-overloaded: queued/);
+    await new Promise(resolve => setTimeout(resolve, 450));
+    const survivor = b.request("runtime_get_snapshot", { scope: { id: "sa_slow" } });
+    await assert.rejects(c.get({ limit: 3 }), /queue is full/);
+    await Promise.all([first, queued]);
+    assert.equal(f.executor.metrics().executor.queued, 0);
+    f.worker.postMessage({ type: "release-query" });
+    assert.equal((await survivor).status, "ready");
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+    assert.equal(f.executor.metrics().executor.singleflightHits, 1);
+    assert.equal(f.executor.metrics().executor.queueTimeouts, 1);
+    assert.equal(f.executor.metrics().executor.callerTimeouts, 1);
+  } finally { await f.close(); }
+});
+
+test("watchdog recovers a genuinely wedged worker while socket control stays responsive", { timeout: 10000 }, async t => {
+  const f = await fixture({ timeoutMs: 400, watchdogMs: 1200,
+    workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
+  try {
+    const a = await f.client(), b = await f.client(); await ready(a); await ready(b);
+    const epoch = b.snapshot!.instanceId;
+    const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
+    f.worker.postMessage({ type: "wedge" }); await wedged;
+    const began = performance.now();
+    await assert.rejects(a.get({ limit: 1 }), /deadline exceeded/);
+    const control = performance.now(); assert.equal((await b.request("ping")).ok, true);
+    const controlMs = performance.now() - control;
+    const until = Date.now() + 5000;
+    while (b.snapshot?.instanceId === epoch || b.snapshot?.status !== "ready") {
+      assert.ok(Date.now() < until, "wedged worker did not recover within budget");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(f.executor.metrics().executor.restarts, 1);
+    assert.ok(controlMs < 500);
+    t.diagnostic(JSON.stringify({ restartMs: performance.now() - began, controlMs, metrics: f.executor.metrics() }));
+  } finally { await f.close(); }
+});
+
+test("responsive rebuilding outlives the watchdog without claiming source readiness", { timeout: 10000 }, async t => {
+  const f = await fixture({ watchdogMs: 800,
+    workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
+  try {
+    const a = await f.client(), b = await f.client();
+    const began = performance.now();
+    for (let i = 0; i < 6; i++) {
+      assert.equal((await a.get({ limit: 1 })).status, "rebuilding");
+      assert.equal((await b.request("ping")).ok, true);
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+    assert.equal(f.executor.metrics().executor.timeouts, 0);
+    assert.equal(f.executor.observation().status, "rebuilding");
+    t.diagnostic(JSON.stringify({ rebuildingMs: performance.now() - began, metrics: f.executor.metrics() }));
+    f.worker.postMessage({ type: "release-inventory" });
+    await ready(b);
+  } finally { await f.close(); }
+});
 
 test("an exact-ID query returns rebuilding without blocking all reads on the initial inventory", { timeout: 10000 }, async () => {
   const f = await fixture({ timeoutMs: 500, workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
@@ -282,12 +443,12 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
     const after = await b.request("runtime_get_metrics");
     assert.equal(after.queryCount, before, "the worker cache avoids repeated SQLite for a warmed scope");
     assert.ok(after.cacheHits > 0);
-    assert.equal(after.sqlite.active, 1, "only the derived index exists when no coordinator source is present");
+    assert.equal(after.sqlite.active, 2, "the query index and checkpoint store exist when no coordinator source is present");
   } finally { await f.close(); }
 });
 
-test("an active read deadline rejects readers and bounds close while native SQLite finishes before worker exit", { timeout: 60000 }, async t => {
-  const f = await fixture();
+test("the worker watchdog rejects readers and bounds close while native SQLite finishes before worker exit", { timeout: 60000 }, async t => {
+  const f = await fixture({ watchdogMs: 3000 });
   try {
     const client = await f.client();
     await ready(client);
@@ -405,7 +566,7 @@ test('Subagents and Background share one coordinator read connection in the quer
     await f.executor.livenessReasons();
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
-    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator plus one derived index, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).active, 3, 'one coordinator, one query index and one checkpoint store, regardless of domain');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
   } finally { await f.close(); }
 });
