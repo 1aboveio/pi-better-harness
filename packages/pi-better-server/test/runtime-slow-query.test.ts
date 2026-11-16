@@ -2,10 +2,40 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { privateRuntimeNode } from "./private-runtime-node.ts";
+
+test("a wedged reader cannot delay the configured idle fence after the last client disconnects", { timeout: 10000 }, async () => {
+  const root = realpathSync(mkdtempSync("/tmp/idle-wedge-runtime-"));
+  const agent = join(root, "agent"); mkdirSync(agent);
+  const child = fork(new URL("./support/slow-query-daemon.ts", import.meta.url), [], {
+    execPath: privateRuntimeNode().node, execArgv: ["--import", "tsx"],
+    env: { ...process.env, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: join(root, "server"), TMPDIR: root,
+      PI_SERVER_RUNTIME_IDLE_MS: "100", PI_TEST_EXIT_ON_IDLE: "1" }, stdio: ["ignore", "ignore", "pipe", "ipc"],
+  });
+  let client: WorkClient | undefined;
+  const exited = once(child, "exit");
+  let errors = ""; child.stderr!.on("data", chunk => { errors += chunk; });
+  try {
+    const [started] = await Promise.race([once(child, "message"), exited.then(() => { throw new Error(errors); })]);
+    client = new WorkClient(started.socket, agent); await client.ready; await client.get({});
+    const wedged = once(child, "message"); child.send("wedge");
+    assert.equal((await wedged)[0].type, "wedged");
+    client.close();
+    const [code, signal] = await exited;
+    assert.equal(code, 0, errors); assert.equal(signal, null);
+    const checkpoint = JSON.parse(readFileSync(join(root, "server", "clean-stop.json"), "utf8"));
+    assert.equal(checkpoint.idleEvidence.lifecycle.runtimeIdleMs, 100);
+    assert.deepEqual(checkpoint.idleEvidence.obligations, []);
+    assert.ok(checkpoint.idleEvidence.at >= checkpoint.idleEvidence.deadline);
+  } finally {
+    client?.close();
+    if (child.exitCode === null && child.signalCode === null) { child.send("stop"); await exited; }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("real daemon isolates caller timeout, controls and worker recovery for two socket clients", { timeout: 20000 }, async t => {
   const root = realpathSync(mkdtempSync("/tmp/slow-runtime-"));

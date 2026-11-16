@@ -793,6 +793,7 @@ function stopTicker() {
 /** How often supervision is reconciled. Independent of TUI render scheduling. */
 const HEALTH_TICK_MS = 15_000;
 let healthTicker;
+let managedHealthClose;
 /** ExtensionAPI retained so health transitions can deliver coordinator follow-ups (#65). */
 let healthPi;
 /**
@@ -1214,7 +1215,7 @@ function enforceTiming(pi, meta, now) {
     return false;
 }
 /** One reconciliation + durable health-callback recovery pass. */
-function reconcileHealth() {
+function reconcileHealth(ids) {
     if (!managementPort)
         return;
     try {
@@ -1226,7 +1227,8 @@ function reconcileHealth() {
     }
     const ctx = uiCtx;
     const pi = healthPi;
-    for (const summary of supervisedMetas()) {
+    const selected = ids ? ids.map(id => readMeta(id)).filter((meta) => Boolean(meta)) : supervisedMetas();
+    for (const summary of selected) {
         if (!ownedByThisParent(summary))
             continue;
         // running/orphaned: process reconcile. lost: durable callback recovery only.
@@ -1307,7 +1309,7 @@ function reconcileHealth() {
     // is the human's own interrupted work, not another session's live run, and
     // `finalizeInterruptedRunFromLog` still requires all process evidence to be
     // absent, so a live writer is never touched.
-    for (const summary of listMetas({ includeArchived: false })) {
+    for (const summary of ids ? selected : listMetas({ includeArchived: false })) {
         if (summary.status !== "running" && summary.status !== "orphaned")
             continue;
         if (ownedByThisParent(summary) || !ownsInterruptedSupervision(summary))
@@ -1321,7 +1323,7 @@ function reconcileHealth() {
         catch { /* the next tick retries */ }
     }
     // Completed runs can still have failed completion handoffs to retry.
-    for (const summary of supervisedMetas()) {
+    for (const summary of selected) {
         if (!pi || !ownedByThisParent(summary) || summary.status === "running" || summary.status === "orphaned" || summary.status === "lost")
             continue;
         const meta = readMeta(summary.id);
@@ -1423,6 +1425,10 @@ function syncHealthTicker() {
         stopHealthTicker();
         return;
     }
+    if (managementPort.observeHealth) {
+        ensureHealthTicker();
+        return;
+    }
     if (needsMonitoring(supervisedMetas()) || needsInterruptedSupervision())
         ensureHealthTicker();
     else
@@ -1432,6 +1438,10 @@ function syncHealthTicker() {
 function ensureHealthTicker() {
     if (!managementPort)
         return;
+    if (managementPort.observeHealth) {
+        managedHealthClose ??= managementPort.observeHealth(ids => reconcileHealth(ids));
+        return;
+    }
     // Not gated on `sessionTornDown`: a spawn always means the current session is
     // doing new work. Only `syncHealthTicker` — the path a late child finalizer
     // takes — stays closed in a replaced instance.
@@ -1441,6 +1451,8 @@ function ensureHealthTicker() {
     healthTicker.unref?.(); // never keep the process alive on our account
 }
 function stopHealthTicker() {
+    managedHealthClose?.();
+    managedHealthClose = undefined;
     if (healthTicker) {
         clearInterval(healthTicker);
         healthTicker = undefined;
@@ -1448,7 +1460,7 @@ function stopHealthTicker() {
 }
 /** Test/diagnostic seam: whether the periodic reconciliation loop is active. */
 export function isHealthTickerActive() {
-    return healthTicker !== undefined;
+    return healthTicker !== undefined || managedHealthClose !== undefined;
 }
 /**
  * Spawn-time identity probe. Production uses the OS-backed probe; extension-

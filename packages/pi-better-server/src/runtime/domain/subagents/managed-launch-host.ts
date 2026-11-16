@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, statSync, watch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -9,7 +9,7 @@ import extension from "./index.ts";
 import { bindRuntimeOutcomeStore } from "./assignment-outcomes.ts";
 import { catalogSnapshotFromWire } from "./catalog-store.ts";
 import { openLaunchJournal, launchDigest } from "./managed-launch-journal.mjs";
-import { nextRunId, processStartToken, listMetas, writeMeta, listActiveMetasForParent, effectiveStatus, readMeta, readParkRecord, updateParkRecord } from "./registry.ts";
+import { baseDir, nextRunId, processStartToken, listMetas, writeMeta, listActiveMetasForParent, effectiveStatus, readMeta, readParkRecord, updateParkRecord } from "./registry.ts";
 import { recoverLaunchMetadata } from "./managed-launch-recovery.ts";
 import { assertSubagentHandoff } from "./managed-launch-ownership.ts";
 import { createOwnerCapacityGates } from "./capacity.mjs";
@@ -39,8 +39,106 @@ export class ManagedSubagentHost {
     private pending = 0;
     private continuationWindow = { started: 0, admitted: 0 };
     private continuationFailures = new Map<string, { failures: number; retryAt: number; reason: string }>();
-    private workerHost?: { start(ctx?: unknown): void; close(): void; service: { continuationReady: boolean } };
+    private workerHost?: { start(ctx?: unknown): void; close(): void; advancingWaits?(): any[]; service: { continuationReady: boolean } };
     private path: string;
+    private known = new Map<string, any>();
+    private healthClose?: () => void;
+    private healthChanged?: (id: string) => void;
+    private lifecycleMetrics = { passes: 0, entities: 0, deadlineLatenessMs: 0 };
+    private healthDue = new Map<string, number>();
+    private writerProofs = new Map<string, { verified: boolean; checkedAt: number; unknownSince: number }>();
+    lifecycleReasons() {
+        const now = Date.now();
+        const writers = [...this.known.values()].filter(meta => ["running", "orphaned"].includes(meta.status)).flatMap(meta => {
+            const proof = this.writerProofs.get(meta.id);
+            if (!proof || !proof.verified && now >= proof.unknownSince + this.verificationMs) return [];
+            return [{
+            kind: proof.verified ? "worker" : "verification", id: meta.id, owner: meta.callbackOrigin, writer: { pid: meta.pid, start: meta.pidStartTime },
+            management: meta.management, lastProgressAt: meta.timing?.lastProgressAt ?? meta.startedAt,
+            nextDeadline: proof.verified ? this.healthDue.get(meta.id) ?? null : proof.unknownSince + this.verificationMs,
+            recovery: proof.verified ? "current-managed-writer-supervision" : "writer-unverified-no-takeover",
+        }]; });
+        return [...writers, ...(this.workerHost?.advancingWaits?.() ?? [])];
+    }
+    private observeHealth(reconcile: (ids: readonly string[]) => void) {
+        this.healthClose?.();
+        let closed = false, scheduled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const watchers: FSWatcher[] = [], dirty = new Set(this.known.keys()), signatures = new Map<string, string>();
+        const signature = (meta: any) => {
+            let log = "missing";
+            try { const info = statSync(meta.logPath, { bigint: true }); log = `${info.ino}:${info.size}:${info.mtimeNs}`; } catch { /* No log yet. */ }
+            return JSON.stringify(meta) + log;
+        };
+        const schedule = () => {
+            if (closed || scheduled) return;
+            scheduled = true;
+            setImmediate(() => { scheduled = false; if (!closed) pass(); });
+        };
+        const hint = (id: string) => {
+            const meta = readMeta(id);
+            if (meta?.management?.root === this.root && meta.management.instance === this.instance && meta.management.epoch === this.epoch) {
+                if (signatures.get(id) === signature(meta)) return;
+                this.known.set(id, meta); dirty.add(id); schedule();
+            }
+        };
+        this.healthChanged = hint;
+        const pass = () => {
+            const now = Date.now();
+            for (const [id, due] of this.healthDue) if (due <= now) dirty.add(id);
+            const ids = [...dirty].slice(0, 32);
+            ids.forEach(id => dirty.delete(id));
+            if (ids.length) {
+                const release = this.enterControl?.();
+                if (this.enterControl && !release) {
+                    ids.forEach(id => dirty.add(id));
+                    timer = setTimeout(schedule, 1); timer.unref(); return;
+                }
+                this.lifecycleMetrics.passes++; this.lifecycleMetrics.entities += ids.length;
+                for (const id of ids) this.lifecycleMetrics.deadlineLatenessMs = Math.max(this.lifecycleMetrics.deadlineLatenessMs, now - (this.healthDue.get(id) ?? now));
+                try { reconcile(ids); } finally { release?.(); }
+                for (const id of ids) {
+                    const meta = readMeta(id);
+                    if (meta) this.known.set(id, meta); else this.known.delete(id);
+                    if (meta) signatures.set(id, signature(meta));
+                    this.healthDue.delete(id);
+                    if (!meta || !["running", "orphaned"].includes(meta.status)) {
+                        this.writerProofs.delete(id);
+                        if (meta?.completionCallbackPendingAt && !meta.completionCallbackSentAt && !meta.completionCallbackSuppressedAt) this.healthDue.set(id, now + 15000);
+                        else { this.known.delete(id); signatures.delete(id); }
+                        continue;
+                    }
+                    const verified = Boolean(meta.pidStartTime && processStartToken(meta.pid) === meta.pidStartTime && processExists(meta.pid));
+                    const prior = this.writerProofs.get(id);
+                    this.writerProofs.set(id, { verified, checkedAt: now, unknownSince: verified ? now : prior?.unknownSince ?? now });
+                    const timing = meta.timing;
+                    const deadlines = [now + 15000, timing?.ceilingAt,
+                        !timing?.deadlineWakeSentAt ? timing?.deadlineAt : undefined,
+                        timing?.steerDeliveredAt ? timing.steerDeliveredAt + timing.graceMs : undefined]
+                        .filter((value): value is number => typeof value === "number" && value > now);
+                    this.healthDue.set(id, Math.min(...deadlines));
+                }
+            }
+            if (dirty.size) schedule();
+            if (timer) clearTimeout(timer);
+            if (this.healthDue.size) {
+                const next = [...this.healthDue.values()].reduce((a, b) => Math.min(a, b), Infinity);
+                timer = setTimeout(schedule, Math.max(1, next - Date.now())); timer.unref();
+            }
+        };
+        try {
+            const watcher = watch(join(baseDir(), "runs"), { recursive: true }, (_event, file) => {
+                const id = file && String(file).split(/[/\\]/)[0];
+                if (id && /^[A-Za-z0-9_-]+$/.test(id)) hint(id);
+            });
+            watcher.on("error", () => watcher.close()); watchers.push(watcher);
+        } catch { /* Known active writers still have independent liveness deadlines. */ }
+        schedule();
+        return this.healthClose = () => {
+            closed = true; if (timer) clearTimeout(timer); watchers.forEach(watcher => watcher.close());
+            this.healthChanged = undefined; this.healthDue.clear();
+        };
+    }
     private capacityFor = createOwnerCapacityGates(({ pid, start }: { pid: number; start: string }) =>
         listActiveMetasForParent(pid).filter(meta => meta.spawnPidStartTime === start && effectiveStatus(meta) === "running").length
         + this.journal.unresolvedAttempts().filter((attempt: any) => attempt.capacityOwner?.pid === pid && attempt.capacityOwner?.start === start && !readMeta(attempt.id)).length);
@@ -49,7 +147,7 @@ export class ManagedSubagentHost {
         return { owner: "server", instanceId: this.instance, runtimeEpoch: this.epoch,
             inFlight: this.pending, failureFold: { worker: Boolean(this.failureWorker), inFlight: Boolean(this.failureResponse) }, continuationReady: this.workerHost?.service.continuationReady ?? false, continuationUnavailable: [...this.continuationFailures].map(([key, value]) => ({ key, ...value })), unresolvedAttempts: this.journal.unresolvedAttempts().filter((attempt: any) => !readMeta(attempt.id)).length };
     }
-    constructor(private root: string, private instance: string, private catalog: any, sharedStore?: unknown, private createWorkerHost?: (pi: ExtensionAPI) => NonNullable<ManagedSubagentHost["workerHost"]>, private readPermissions?: () => unknown) {
+    constructor(private root: string, private instance: string, private catalog: any, sharedStore?: unknown, private createWorkerHost?: (pi: ExtensionAPI) => NonNullable<ManagedSubagentHost["workerHost"]>, private readPermissions?: () => unknown, private verificationMs = 30000, private enterControl?: () => (() => void) | undefined) {
         this.current = { pid: process.pid, start: processStartToken(process.pid), owner: { workspace: root, sessionId: "runtime-recovery" } };
         this.path = join(root, "operation-coordinator.sqlite");
         const active = listMetas({ includeArchived: false });
@@ -125,6 +223,7 @@ export class ManagedSubagentHost {
         }
     }
     async recover() {
+        for (const meta of listMetas({ includeArchived: false })) if (meta.management?.root === this.root) this.known.set(meta.id, meta);
         if (listMetas({ includeArchived: false }).some(meta => meta.management?.root === this.root)) await this.initialize();
     }
     private grant(authority: any) {
@@ -152,12 +251,13 @@ export class ManagedSubagentHost {
         return this.initializing ??= (async () => {
             const host = this;
             const port: ManagedLaunchPort = {
+                observeHealth: reconcile => host.observeHealth(reconcile),
                 backgroundTools: () => host.current.background?.available === true ? host.current.background.tools : [],
                 get owner() { return { pid: host.current.pid, start: host.current.start }; },
                 get identity() { return { root: host.root, instance: host.instance, epoch: host.epoch }; },
                 continuationContext: () => host.executionContext(host.current),
                 dispatchContinuation: (park, run) => host.dispatchContinuation(park, run),
-                supervised: () => listMetas({ includeArchived: false }).filter(meta => port.owns(meta)),
+                supervised: () => [...host.known.values()].filter(meta => port.owns(meta)),
                 owns: meta => meta.management?.root === host.root && meta.management?.instance === host.instance && meta.management?.epoch === host.epoch,
                 assertCurrent: () => host.journal.current(host.epoch),
                 capacity: () => host.capacityFor(host.current),
@@ -189,7 +289,7 @@ export class ManagedSubagentHost {
                     return { PI_MANAGED_SUBAGENT: JSON.stringify({ path: host.path, owner: host.current.ownerKey,
                         key: host.current.key, epoch: host.epoch, id: input.id, token: attempt.token }) };
                 },
-                spawned: (id, pid) => host.journal.spawned(host.current.ownerKey, host.current.key, host.epoch, id, pid, processStartToken(pid)),
+                spawned: (id, pid) => { host.journal.spawned(host.current.ownerKey, host.current.key, host.epoch, id, pid, processStartToken(pid)); setImmediate(() => host.healthChanged?.(id)); },
             };
             const cwd = this.root;
             const settingsManager = SettingsManager.inMemory({});
@@ -332,6 +432,7 @@ export class ManagedSubagentHost {
         return result;
     }
     async close() {
+        this.healthClose?.();
         Atomics.store(this.foldRevocation, 0, 1);
         await this.tail.catch(() => undefined);
         await this.failureWorker?.terminate(); this.failureWorker = undefined;

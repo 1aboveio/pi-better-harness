@@ -14,7 +14,7 @@ export function hasSubagentManagement(root: string): boolean {
 }
 
 /** Fixed bundled domain adapter. No client module paths reach this boundary. */
-export async function createSubagentLaunch(root: string, instance: string, catalog: unknown) {
+export async function createSubagentLaunch(root: string, instance: string, catalog: unknown, verificationMs = 30000) {
   if (Number(process.versions.node.split(".")[0]) < 24) throw new Error("Managed subagents require Node 24 or newer");
   const path = "./domain/subagents/managed-launch-host.domain.mjs";
   const { ManagedSubagentHost } = await import(path);
@@ -32,7 +32,8 @@ export async function createSubagentLaunch(root: string, instance: string, catal
     const sandboxPath="./domain/background-service/sandbox.domain.mjs";
     const sandbox=await import(sandboxPath);
     host = new ManagedSubagentHost(root, instance, catalog, lease.store, (pi: any) => {
-      const service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, "operation-coordinator.sqlite"), serverOwnedResults: true,
+      const service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, "operation-coordinator.sqlite"), serverOwnedResults: true, pollMs: 0,
+        enterControl: () => lease.budget.enter("control"), verificationMs,
         prepareWorkerPolicy(run:any){
           const resolve=()=>{
             const attempt=lease.store.subagentLaunchJournal().attempt(run.runId);
@@ -52,7 +53,7 @@ export async function createSubagentLaunch(root: string, instance: string, catal
       const close = service.close.bind(service);
       service.close = () => { try { close(); } finally { runtime.suspendScheduledWork(); } };
       return service;
-    }, () => readPermissionSettings({ agentDir: () => root }));
+    }, () => readPermissionSettings({ agentDir: () => root }), verificationMs, () => lease.budget.enter("control"));
     await host.recover();
     const close = host.close.bind(host);
     host.close = async () => {

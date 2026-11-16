@@ -25,6 +25,8 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
   }
 };
 const { WorkReadModel } = await import("./read-model.ts");
+const { createWorkBudget } = await import("./work-budget.ts");
+const budget = createWorkBudget(workerData.modelOptions?.budgetBuffer);
 const { WorkQueries, workScope, queryEncodingMetrics, snapshotJSON } = await import("./queries.ts");
 const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);
 // One bounded in-flight batch. Remaining obligations stay in the reconstructable
@@ -138,7 +140,9 @@ parentPort.on("message", async message => {
   if (message.type !== "query") return;
   const request = { connection: message.connection, cancelled: false };
   requests.set(message.id, request);
+  const release = budget.enter("query");
   try {
+    if (!release) throw new Error("runtime-overloaded: shared source query budget exhausted");
     const command = message.command;
     if (["runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(command.type)) {
       await model.reconcile();
@@ -158,6 +162,6 @@ parentPort.on("message", async message => {
   } catch (error) {
     if (request.cancelled) return;
     parentPort.postMessage({ type: "reply", id: message.id, error: String(error).slice(0, 512), metrics: metrics() });
-  } finally { requests.delete(message.id); }
+  } finally { release?.(); requests.delete(message.id); }
 });
 void model.reconcile();

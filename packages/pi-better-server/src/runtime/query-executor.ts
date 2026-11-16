@@ -17,6 +17,7 @@ interface WorkerMetrics { sourceWatchers?: number; inventories?: number; coordin
 export interface QueryExecutorOptions {
   capacity?: number; timeoutMs?: number; maxConnections?: number; watchdogMs?: number;
   workerUrl?: URL;
+  budgetBuffer?: SharedArrayBuffer;
   onTerminalLogsChanged?: (ids: string[]) => Promise<void>;
   modelOptions?: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number };
 }
@@ -73,9 +74,15 @@ export class WorkQueryExecutor {
   }
 
   private startWorker() {
+    if (this.options.budgetBuffer) {
+      // startWorker runs only initially or after the preceding thread exited.
+      // A dead generation cannot retain source credits in the shared budget.
+      const counts = new Int32Array(this.options.budgetBuffer);
+      Atomics.store(counts, 1, 0); Atomics.store(counts, 2, 0);
+    }
     const instanceId = this.workerGeneration ? `${this.instanceId}:reads:${this.workerGeneration}` : this.instanceId;
     const worker = new Worker(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url), {
-      execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: this.options.modelOptions },
+      execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: { ...this.options.modelOptions, budgetBuffer: this.options.budgetBuffer } },
     });
     worker.on("message", message => { if (worker === this.worker) this.receive(message); });
     worker.on("error", error => { if (worker === this.worker) this.fail(new Error(`runtime-unhealthy: read worker failed: ${String(error)}`)); });

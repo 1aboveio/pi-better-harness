@@ -11,7 +11,7 @@ import { WorkClient } from "../src/runtime/work-client.mjs";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 const { createLocalSupervisor, supervisorPaths } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
 
-for (const crash of ["none", "concurrent-frontends", "published-permissions", "before-terminal", "after-terminal", "missing-current-authority", "missing-captured-authority", "missing-launch-evidence"]) {
+for (const crash of ["none", "idle-guardian", "concurrent-frontends", "published-permissions", "before-terminal", "after-terminal", "missing-current-authority", "missing-captured-authority", "missing-launch-evidence"]) {
 test(`SDK frontend exits; server imports independent evidence with ${crash} server crash and retains exact delivery`, { timeout: 30000 }, async () => {
   mkdirSync(resolve(".work/760"), { recursive: true });
   const root = mkdtempSync(resolve(".work/760/flow-"));
@@ -25,14 +25,14 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
   const taskIds: string[] = [];
   const start = async (file: string) => {
     const child = fork(new URL(file, import.meta.url), [], { execArgv: ["--import", "tsx"],
-      env: { ...process.env, PI_TEST_PERMISSION_PUBLISHER: crash === "published-permissions" ? "1" : "0", TMPDIR: file.includes("result-frontend") ? runnerRoot : root, PI_CODING_AGENT_DIR: root, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+      env: { ...process.env, ...(crash === "idle-guardian" ? { PI_SERVER_RUNTIME_IDLE_MS: "1000" } : {}), PI_TEST_PERMISSION_PUBLISHER: crash === "published-permissions" ? "1" : "0", TMPDIR: file.includes("result-frontend") ? runnerRoot : root, PI_CODING_AGENT_DIR: root, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
     children.push(child);
     let errors = ""; child.stderr!.on("data", chunk => { errors += chunk; });
     const [ready] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(errors); })]);
     return { child, ready };
   };
   try {
-    let server = await start("./support/work-daemon.ts");
+    let server = await start(crash === "idle-guardian" ? "./support/guarded-work-daemon.ts" : "./support/work-daemon.ts");
     const frontends = await Promise.all(Array.from({ length: crash === "concurrent-frontends" ? 2 : 1 }, () => start("./support/result-frontend.ts")));
     const frontend = frontends[0]!;
     taskIds.push(...frontends.map(frontend => frontend.ready.taskId));
@@ -51,7 +51,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       const exited = once(frontend.child, "exit"); frontend.child.kill("SIGKILL"); await exited;
     }
     const executions = "start\n".repeat(frontends.length);
-    if (crash === "none") {
+    if (crash === "none" || crash === "idle-guardian") {
       const client = new WorkClient(server.ready.ready, root); clients.push(client); await client.ready;
       const scope = { background: true, cwd: root, sessionId: frontend.ready.sessionId };
       const deadline = Date.now() + 5000;
@@ -142,6 +142,19 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       assert.equal(store.getOperation(operation.operationId)?.terminalRevision, 1);
       assert.equal(store.listOutbox({ recipient: operation.owner }).length, 1);
       assert.equal(readFileSync(join(root, "executions"), "utf8"), executions);
+      if (crash === "idle-guardian") {
+        const [code, signal] = await once(server.child, "exit");
+        assert.equal(code, 0);
+        assert.equal(signal, null);
+        const checkpoint = JSON.parse(readFileSync(join(transport, "clean-stop.json"), "utf8"));
+        assert.equal(checkpoint.reason, "clean-stop");
+        assert.equal(checkpoint.idleEvidence.lifecycle.runtimeIdleMs, 1000);
+        assert.deepEqual(checkpoint.idleEvidence.obligations, []);
+        assert.ok(checkpoint.idleEvidence.at >= checkpoint.idleEvidence.deadline);
+        const { inspectDaemonOwner } = await import("../src/daemon-owner.ts");
+        assert.equal(inspectDaemonOwner(transport).status, "missing");
+        assert.equal(inspectDaemonOwner(transport, "guardian-owner").status, "missing");
+      }
     } finally { store.close(); }
   } finally {
     for (const client of clients) client.close();

@@ -20,6 +20,7 @@ export function hasResultSupervision(root: string): boolean {
 /** Mechanical observation only. Never launches, stops, claims resumes or consumes results. */
 export class RuntimeResultSupervision {
   private store: any;
+  private budget: ReturnType<typeof acquireMutationStore>["budget"];
   private releaseStore: () => void;
   private timer?: NodeJS.Timeout;
   private watcher?: FSWatcher;
@@ -40,6 +41,7 @@ export class RuntimeResultSupervision {
     this.hostId = `server:${epoch}`;
     const lease = acquireMutationStore(root);
     this.store = lease.store;
+    this.budget = lease.budget;
     this.releaseStore = lease.release;
     this.watcher = watch(root, (_event, file) => {
       if (!file || String(file).startsWith("operation-coordinator.sqlite")) this.schedule();
@@ -78,6 +80,8 @@ export class RuntimeResultSupervision {
   manages(operationId: string) { return this.active.has(operationId); }
   reconcile() {
     if (this.closed) return;
+    const release = this.budget.enter("control");
+    if (!release) { this.schedule(); return; }
     this.metrics.passes++;
     try {
       this.reason = undefined;
@@ -164,6 +168,7 @@ export class RuntimeResultSupervision {
       this.reason ??= [...this.active.values()].find(entry => entry.failure)?.failure;
     } catch (error) { this.reason = String(error); }
     finally {
+      release();
       if (this.timer) clearTimeout(this.timer);
       if (this.dirty.size) this.schedule();
       // A cheap journal page repairs missed database hints; task inspections are

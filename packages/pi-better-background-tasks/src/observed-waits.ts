@@ -21,7 +21,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, watch, type FSWatcher } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -566,6 +566,8 @@ export interface ObservedWaitHostOptions {
   beforeParentOperation?: (operation: { operationId: string; taskId: string; token: string }) => void;
   /** Runtime-owned coordinator handle. The caller retains its lifetime lease. */
   sharedStore?: Store;
+  enterControl?: () => (() => void) | undefined;
+  verificationMs?: number;
   /** Production adapters leave global discovery and terminal import to the server. */
   serverOwnedResults?: boolean;
   /** SQLite path. Defaults under the Pi agent directory. */
@@ -875,6 +877,43 @@ export class ObservedWaitHost {
   private readonly pollMs: number;
   private readonly options: ObservedWaitHostOptions;
   private timer?: NodeJS.Timeout;
+  private changeWatcher?: FSWatcher;
+  private changeRepair?: NodeJS.Timeout;
+  private changePosition?: { generation: string; seq: number };
+  private changeScheduled = false;
+  private managedDirty = false;
+  private managedAfter = 0;
+  private observeManagedChanges() {
+    const schedule = () => {
+      if (this.closed || this.changeScheduled) return;
+      this.changeScheduled = true;
+      setImmediate(() => {
+        this.changeScheduled = false;
+        if (this.closed || !this.store) return;
+        try {
+          const page = this.store.resultSupervisionChanges(this.changePosition);
+          const changed = page.reset || page.seq !== this.changePosition?.seq;
+          this.changePosition = { generation: page.generation, seq: page.seq };
+          this.managedDirty ||= changed;
+          if (this.managedDirty && Date.now() >= this.managedAfter) {
+            this.managedDirty = false; this.managedAfter = Date.now() + 1000;
+            void this.reconcileNow();
+          }
+          if (page.more) schedule();
+        } catch { /* Existing authority remains unchanged; the bounded feed repair retries. */ }
+      });
+    };
+    this.changeWatcher = watch(dirname(this.storePath), (_event, file) => {
+      if (!file || String(file).startsWith("operation-coordinator.sqlite")) schedule();
+    });
+    this.changeWatcher.on("error", () => { this.changeWatcher?.close(); this.changeWatcher = undefined; });
+    const repair = () => {
+      if (this.closed) return;
+      schedule();
+      this.changeRepair = setTimeout(repair, 1000); this.changeRepair.unref();
+    };
+    repair();
+  }
   private closed = false;
   private activationAttempted = false;
   private unavailableReason?: string;
@@ -1012,6 +1051,16 @@ export class ObservedWaitHost {
   get usesServerResults(): boolean { return this.options.serverOwnedResults === true; }
   get hasActivated(): boolean { return this.activationAttempted; }
 
+  /** Ready worker continuations can advance; held decisions and unread results cannot. */
+  advancingWaits() {
+    if (!this.store || !this.continuation) return [];
+    return this.store.listWaits({ phase: ["ready", "resuming"], pendingOnly: true })
+      .filter(wait => wait.owner.kind === "worker-conversation")
+      .map(wait => ({ kind: "advancing-wait", id: wait.waitId, generation: wait.generation, owner: wait.owner,
+        lastProgressAt: wait.updatedAt, nextDeadline: wait.updatedAt + (this.options.verificationMs ?? 30000), recovery: "captured-worker-continuation" }))
+      .filter(wait => wait.nextDeadline > Date.now());
+  }
+
   get reason(): string | undefined {
     return this.unavailableReason;
   }
@@ -1054,7 +1103,9 @@ export class ObservedWaitHost {
     void this.reconcileNow();
     this.recoverTerminalNotifications();
     this.terminalRecoveryNeeded = false;
-    if (this.pollMs > 0) {
+    if (this.options.serverOwnedResults && this.options.sharedStore) {
+      this.observeManagedChanges();
+    } else if (this.pollMs > 0) {
       this.timer = setInterval(() => { void this.reconcileNow(); }, this.pollMs);
       this.timer.unref?.();
     }
@@ -1065,6 +1116,9 @@ export class ObservedWaitHost {
     this.closed = true;
     HOST_INSTANCE_STATE.closed.add(this.hostId);
     if (this.timer) clearInterval(this.timer);
+    this.changeWatcher?.close(); this.changeWatcher = undefined;
+    if (this.changeRepair) clearTimeout(this.changeRepair);
+    this.changeRepair = undefined; this.changePosition = undefined;
     this.timer = undefined;
     this.releaseDiscoveryAuthority();
     this.releaseSupervisionAuthority();
@@ -1202,7 +1256,9 @@ export class ObservedWaitHost {
   /** A deterministic, awaitable reconciliation pass for tests and session activation. */
   async reconcileNow(): Promise<void> {
     if (this.reconcileInFlight) return this.reconcileInFlight;
-    const pass = this.reconcilePass();
+    const release = this.options.enterControl?.();
+    if (this.options.enterControl && !release) { this.managedDirty = true; return; }
+    const pass = this.reconcilePass().finally(() => release?.());
     this.reconcileInFlight = pass;
     try {
       await pass;

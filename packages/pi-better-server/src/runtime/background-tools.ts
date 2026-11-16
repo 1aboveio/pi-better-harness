@@ -71,6 +71,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     runtime = createBackgroundTaskRuntime(failures.createFailureAttention((origin:any,event:any)=>new Promise<boolean>(resolve=>notifyParent({origin,taskId:event.inspectId??event.id,status:event.status,urgent:true,event:{...event,isDelivered:undefined,getSuppressionReason:undefined,onDelivered:undefined}},
               {receiptId:event.receiptId,delivered:()=>{event.onDelivered?.(Date.now());resolve(true);},defer:()=>resolve(false)}))), (origin: any, event: any) => notifyParent({ origin, taskId: event.id, status: event.status, outcome: event.outcome, event: { ...event, isDelivered: undefined, getSuppressionReason: undefined, onDelivered: undefined, onSuppressed: undefined } }, { receiptId: event.receiptId, delivered: () => event.onDelivered?.(Date.now()), defer: () => undefined }), { assert: assertAdmission, prepared: (id: string) => journal.operation(current.ownerKey, current.record.key, { operationId: `legacy:${id}`, taskId: id, token: current.record.key }) });
                     service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, 'operation-coordinator.sqlite'), serverOwnedResults: true, pollMs: 0,
+                        enterControl: () => lease.budget.enter('control'),
                         notifyParent, assertAdmission,
                         authorizeParentCancellation: ({requester, operation, requestId}: any) => {
                             assertAdmission();
