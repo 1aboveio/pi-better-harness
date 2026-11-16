@@ -11,8 +11,9 @@ import { WorkClient } from "../src/runtime/work-client.mjs";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 const { createLocalSupervisor, supervisorPaths } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
 
-for (const crash of ["none", "idle-guardian", "concurrent-frontends", "published-permissions", "before-terminal", "after-terminal", "missing-current-authority", "missing-captured-authority", "missing-launch-evidence"]) {
+for (const crash of ["none", "idle-guardian", "idle-guardian-held", "concurrent-frontends", "published-permissions", "before-terminal", "after-terminal", "missing-current-authority", "missing-captured-authority", "missing-launch-evidence"]) {
 test(`SDK frontend exits; server imports independent evidence with ${crash} server crash and retains exact delivery`, { timeout: 30000 }, async () => {
+  const guarded = crash.startsWith("idle-guardian");
   mkdirSync(resolve(".work/760"), { recursive: true });
   const root = mkdtempSync(resolve(".work/760/flow-"));
   const runnerRoot = join(root, "frontend-volatile");
@@ -27,7 +28,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
   const taskIds: string[] = [];
   const start = async (file: string) => {
     const child = fork(new URL(file, import.meta.url), [], { execArgv: ["--import", "tsx"],
-      env: { ...process.env, ...(crash === "idle-guardian" ? { PI_SERVER_RUNTIME_IDLE_MS: "1000", PI_TEST_PERSIST_RECIPIENT: "1" } : {}),
+      env: { ...process.env, ...(guarded ? { PI_SERVER_RUNTIME_IDLE_MS: "1000", PI_TEST_PERSIST_RECIPIENT: "1" } : {}),
         LAUNCH_WORKSPACE: root, BACKGROUND_ONLY: "1", BACKGROUND_SESSION_FILE: nativeSessionFile,
         PI_TEST_PERMISSION_PUBLISHER: crash === "published-permissions" ? "1" : "0", TMPDIR: file.includes("result-frontend") ? runnerRoot : root, PI_CODING_AGENT_DIR: root, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
     children.push(child);
@@ -38,7 +39,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
     return { child, ready, exited };
   };
   try {
-    let server = await start(crash === "idle-guardian" ? "./support/guarded-work-daemon.ts" : "./support/work-daemon.ts");
+    let server = await start(guarded ? "./support/guarded-work-daemon.ts" : "./support/work-daemon.ts");
     const frontends = await Promise.all(Array.from({ length: crash === "concurrent-frontends" ? 2 : 1 }, () => start("./support/result-frontend.ts")));
     const frontend = frontends[0]!;
     nativeSessionFile = frontend.ready.sessionFile;
@@ -58,7 +59,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       const exited = once(frontend.child, "exit"); frontend.child.kill("SIGKILL"); await exited;
     }
     const executions = "start\n".repeat(frontends.length);
-    if (crash === "none" || crash === "idle-guardian") {
+    if (crash === "none" || guarded) {
       const client = new WorkClient(server.ready.ready, root); clients.push(client); await client.ready;
       const scope = { background: true, cwd: root, sessionId: frontend.ready.sessionId };
       const deadline = Date.now() + 5000;
@@ -149,7 +150,12 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       assert.equal(store.getOperation(operation.operationId)?.terminalRevision, 1);
       assert.equal(store.listOutbox({ recipient: operation.owner }).length, 1);
       assert.equal(readFileSync(join(root, "executions"), "utf8"), executions);
-      if (crash === "idle-guardian") {
+      if (guarded) {
+        if (crash === "idle-guardian-held") {
+          store.transitionWaitPhase({ waitId: wait.waitId, generation: wait.generation,
+            from: "ready", to: "held", reason: "User decision required; no automatic continuation" });
+          assert.equal(store.getWait({ waitId: wait.waitId })?.phase, "held");
+        } else {
         const handoff = new WorkClient(server.ready.ready, root); clients.push(handoff); await handoff.ready;
         writeFileSync(join(root, "server-registration-v1.json"), JSON.stringify({ version: 1, agentDir: root, serverDir: transport }));
         const recipient = await start("../scripts/measure-full-runtime/frontend.ts");
@@ -178,6 +184,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
         assert.equal((await call({ entries: true })).filter((entry: any) => entry.type === "custom_message"
           && entry.details?.completionEventIds?.includes(events[0].eventId)).length, 1);
         recipient.child.send({ stop: true }); await recipient.exited;
+        }
         const [code, signal] = await server.exited;
         assert.equal(code, 0);
         assert.equal(signal, null);
@@ -189,6 +196,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
         const { inspectDaemonOwner } = await import("../src/daemon-owner.ts");
         assert.equal(inspectDaemonOwner(transport).status, "missing");
         assert.equal(inspectDaemonOwner(transport, "guardian-owner").status, "missing");
+        if (crash === "idle-guardian-held") assert.equal(store.getWait({ waitId: wait.waitId })?.phase, "held");
       }
     } finally { store.close(); }
   } finally {
