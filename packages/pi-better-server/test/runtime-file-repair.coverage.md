@@ -11,6 +11,11 @@ Failed first observations of metadata, archives and markers remain eligible for
 repair after a missed deletion hint. Tests retain degradation while the source
 root is unavailable, clear it after verified absence under an available root,
 and check the 128-path budget across 130 never-imported failed sources.
+The idle-timer case observes three real timer batches over 512 unchanged tasks
+and checks path/stat budgets without rereading metadata. Additional regressions
+cover raw-over-archive precedence regardless of arrival order, coordinator-race
+hint retries, malformed siblings, corruption after staging, and display cursors
+that retain incremental usage without historical response text or tool arrays.
 
 The existing `runtime-event-publication.test.ts` measures external atomic
 metadata commits through real socket subscriptions for 1, 5, and 10 clients.
