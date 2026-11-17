@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createServer, type Socket } from "node:net";
+import { createServer, connect, type Socket } from "node:net";
 import { once } from "node:events";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync, openSync, closeSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -83,6 +83,63 @@ async function ready(client: WorkClient) {
     const stop = client.onChange(snapshot => { if (snapshot.status === "ready") { clearTimeout(timeout); stop(); resolve(); } });
   });
 }
+
+test("a dropped same-consumer snapshot reports a gap while unrelated global commits do not", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const peers = new Set<Socket>();
+  let dropped = false;
+  const proxy = createServer(downstream => {
+    const upstream = connect(f.path); peers.add(upstream); peers.add(downstream);
+    downstream.pipe(upstream); upstream.setEncoding("utf8");
+    let buffer = "";
+    upstream.on("data", chunk => {
+      buffer += chunk;
+      while (buffer.includes("\n")) {
+        const end = buffer.indexOf("\n"), line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+        const frame = JSON.parse(line);
+        if (frame.event?.type === "runtime_snapshot" && frame.event.snapshot.rows[0]?.meta.name === "gap-one") {
+          dropped = true; continue;
+        }
+        downstream.write(line + "\n");
+      }
+    });
+    upstream.on("error", () => downstream.destroy()); downstream.on("error", () => upstream.destroy());
+  });
+  let consumer: WorkClient | undefined;
+  const write = (id: string, cwd: string, name: string) => {
+    mkdirSync(join(f.root, "runs", id), { recursive: true });
+    const path = join(f.root, "runs", id, "meta.json");
+    writeFileSync(path + ".tmp", JSON.stringify({ id, cwd, name, status: "completed", startedAt: 1 }));
+    renameSync(path + ".tmp", path);
+  };
+  const wait = async (condition: () => boolean) => {
+    const deadline = Date.now() + 1000;
+    while (!condition()) { assert.ok(Date.now() < deadline, "controlled scoped publication missing"); await new Promise(resolve => setTimeout(resolve, 10)); }
+  };
+  try {
+    const control = await f.client(); await ready(control);
+    const scope = { cwd: join(f.root, "b"), limit: 10 };
+    write("sa_b", scope.cwd, "before"); await f.executor.livenessReasons(); await control.subscribe(scope);
+    const path = f.path + ".gap"; proxy.listen(path); await once(proxy, "listening");
+    consumer = new WorkClient(path, f.root); await consumer.subscribe(scope);
+    const seen: any[] = []; consumer.onChange(value => seen.push(value));
+    write("sa_a", join(f.root, "a"), "unrelated"); await f.executor.livenessReasons();
+    write("sa_b", scope.cwd, "after-unrelated"); await f.executor.livenessReasons();
+    await wait(() => consumer!.snapshot?.rows[0]?.meta.name === "after-unrelated");
+    assert.equal(seen.some(value => value.resyncReason === "sequence-gap"), false);
+    seen.length = 0;
+    write("sa_b", scope.cwd, "gap-one"); await f.executor.livenessReasons(); await wait(() => dropped);
+    write("sa_b", scope.cwd, "gap-two"); await f.executor.livenessReasons();
+    await wait(() => consumer!.snapshot?.rows[0]?.meta.name === "gap-two");
+    assert.equal(dropped, true);
+    assert.equal(consumer.snapshot!.resyncRequired, true, "the first complete snapshot after the dropped event reports the gap");
+    assert.equal(consumer.snapshot!.resyncReason, "sequence-gap");
+    assert.equal(consumer.snapshot!.status, "ready");
+  } finally {
+    consumer?.close(); peers.forEach(peer => peer.destroy());
+    await new Promise<void>(resolve => proxy.close(() => resolve())); await f.close();
+  }
+});
 
 test("identical Work identities do not share visible results across admitted roots", { timeout: 10000 }, async () => {
   const left = await fixture(), right = await fixture();
@@ -214,17 +271,36 @@ test("10 socket clients share each truthful partial-write and recovery epoch", {
     const clients = [first, ...await Promise.all(Array.from({ length: 9 }, () => f.client()))];
     for (const client of clients) await client.subscribe(scope);
     const initial = await first.get(scope), baseline = f.executor.metrics() as any;
+    const frames: any[] = [];
+    const sourceWrites: unknown[] = [];
+    const stamp = (phase: string) => {
+      const info = statSync(path, { bigint: true });
+      sourceWrites.push({ phase, identity: `${info.dev}:${info.ino}`, bytes: String(info.size),
+        mtimeNs: String(info.mtimeNs), ctimeNs: String(info.ctimeNs) });
+    };
+    clients.forEach((client, subscriber) => client.onChange(value => {
+      if (frames.length < 40) frames.push({ subscriber, status: value.status, reason: value.reason,
+        seq: value.seq, scopeRevision: value.scopeRevision, instanceId: value.instanceId,
+        observedRevisionVector: value.observedRevisionVector,
+        rows: value.rows.map((row: any) => ({ id: row.meta.id, name: row.meta.name, sourceRevision: row.sourceRevision })) });
+    }));
     const awaiting = (status: string) => Promise.all(clients.map(client => new Promise<void>(resolve => {
       const stop = client.onChange(value => { if (value.status === status) { stop(); resolve(); } });
     })));
     const assertSharedEpoch = (before: any, after: any) => {
-      assert.equal(after.queryCount - before.queryCount, 1);
-      assert.equal(after.serializationCount - before.serializationCount, 1);
-      assert.equal(after.eventEncoding.serializations - before.eventEncoding.serializations, 1);
-      assert.equal(after.eventEncoding.frames - before.eventEncoding.frames, clients.length);
+      try {
+        assert.equal(after.queryCount - before.queryCount, 1);
+        assert.equal(after.serializationCount - before.serializationCount, 1);
+        assert.equal(after.eventEncoding.serializations - before.eventEncoding.serializations, 1);
+        assert.equal(after.eventEncoding.frames - before.eventEncoding.frames, clients.length);
+      } catch (error) {
+        console.error(`Partial-write epoch failure: ${JSON.stringify({ scope, sourceWrites, before, after, frames })}`);
+        throw error;
+      }
     };
     const degradedFrames = awaiting("degraded");
     held = openSync(path, "w"); writeSync(held, '{"id":');
+    stamp("partial-write");
     await f.executor.livenessReasons(); await degradedFrames;
     const degraded = await Promise.all(clients.map(client => client.get(scope)));
     for (const value of degraded) {
@@ -239,6 +315,7 @@ test("10 socket clients share each truthful partial-write and recovery epoch", {
     const readyFrames = awaiting("ready");
     writeSync(held, JSON.stringify({ ...meta, name: "changed" }), 0, "utf8");
     closeSync(held); held = undefined;
+    stamp("complete-write-and-close");
     await f.executor.livenessReasons(); await readyFrames;
     const recovered = await Promise.all(clients.map(client => client.get(scope)));
     for (const value of recovered) {

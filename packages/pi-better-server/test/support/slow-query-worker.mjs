@@ -31,6 +31,7 @@ parentPort.on("message", message => {
     const model = latestModel;
     parentPort.postMessage({ type: "diagnostic-source-state", id: message.id, state: model && {
       configured: workerData, imported: model.imported,
+      staged: Boolean(model.staged),
       eventOwnership: traces.get(model)?.(),
       roots: { agentDir: model.agentDir, runs: model.runs, archives: model.archives, markers: model.markers },
       watchers: [...model.watchers.keys()], rootIdentities: [...model.rootWatchIdentities],
