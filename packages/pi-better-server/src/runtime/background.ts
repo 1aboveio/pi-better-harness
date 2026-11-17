@@ -384,6 +384,9 @@ export class BackgroundObservation {
     if (!this.enabled || newlyGlobal) { this.enabled = true; this.refresh(); }
     const legacy = this.legacyScope(scope);
     if (scope.backgroundHistory) { this.metrics.historyQueries++; return index.records.map((record: any) => record.meta); }
+    // Retained terminals stay visible by default, but a sidecar dismissal must
+    // be observed even before its watcher notification is delivered.
+    if (this.status !== "degraded" && this.db) this.refreshRecent(legacy, legacy.recentRevision ?? 0);
     const legacyRows = legacy.rows;
     const rows = [...new Map([...this.pendingRows(legacy), ...(scope.backgroundAll ? this.rows : [...this.rows, ...legacy.recent])].map(row => [row.id, row])).values()];
     return [...rows.filter(row => row.owner.kind === "parent-session" && row.dismissedAt === undefined

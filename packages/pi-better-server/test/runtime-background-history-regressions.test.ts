@@ -21,8 +21,15 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
     observer: { kind: "local-supervisor", version: "1" } });
   lease.store.recordTerminalOutcome({ operationId: "component-op", eventId: "component-terminal", owner,
     outcome: "succeeded", evidence: [{ kind: "terminal-record", ref: join(root, "terminal") }] });
-  const [{ registerTools }, { createObservedWaitHost }, { closeBackgroundObservation }, registry] = await Promise.all([
-    load("tools"), load("observed-waits"), load("work-observation"), load("registry"),
+  if (legacyCount === 0) for (let i = 0; i < 104; i++) {
+    const operationId = `foreign-${i}`, recipient = { ...owner, sessionId: "foreign" };
+    lease.store.registerOperation({ operationId, taskId: `bgs_${String(i + 2).padStart(20, "0")}`,
+      launchToken: operationId, owner: recipient, observer: { kind: "local-supervisor", version: "1" } });
+    if (i >= 4) lease.store.recordTerminalOutcome({ operationId, eventId: operationId, owner: recipient,
+      outcome: "succeeded", evidence: [{ kind: "terminal-record", ref: operationId }] });
+  }
+  const [{ registerTools }, { createObservedWaitHost }, { closeBackgroundObservation }, registry, { registerBackgroundTasksGoalProvider }] = await Promise.all([
+    load("tools"), load("observed-waits"), load("work-observation"), load("registry"), load("goal-provider"),
   ]);
   const legacyIds = Array.from({ length: legacyCount }, (_, i) => `bg_history_retained_${i}`);
   legacyIds.forEach((task, i) => registry.writeMeta({ id: task, kind: "process", status: "succeeded", startedAt: i + 1,
@@ -32,7 +39,12 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
     modelOptions: { baseDir: join(root, "raw"), durableDir: join(root, "archive"), supervisorDirectory: join(root, "supervisor"), intervalMs: 60000 } });
   const events = new EventEmitter(), tools = new Map<string, any>();
   const pi: any = { events, on() {}, registerTool(tool: any) { tools.set(tool.name, tool); } };
-  events.on("pi-better-runtime:connect", request => request.accept(createLocalWorkClient(executor, root)));
+  let provider: any;
+  events.on("pi-better-goal:register-provider", value => { provider = value; });
+  registerBackgroundTasksGoalProvider(pi);
+  const client = createLocalWorkClient(executor, root), scopes: any[] = [], get = client.get.bind(client);
+  client.get = (scope: any) => { scopes.push(scope); return get(scope); };
+  events.on("pi-better-runtime:connect", request => request.accept(client));
   const host = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, "operation-coordinator.sqlite"),
     supervisorDirectory: join(root, "supervisor"), serverOwnedResults: true, pollMs: 0 });
   const ctx: any = { cwd: root, hasUI: false, sessionManager: { getSessionId: () => owner.sessionId,
@@ -44,8 +56,28 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([(async () => {
+      for (const scope of [{ cwd: root, sessionId: owner.sessionId }, { cwd: root + "-other", sessionId: owner.sessionId },
+        { cwd: root, sessionId: "other" }]) await client.get({ background: true, ...scope });
       assert.match((await run("bg_task_status")).content[0].text, /succeeded/);
-      assert.match((await run("bg_task_list")).content[0].text, new RegExp(id));
+      const activity = await provider.getActivity(ctx);
+      assert.equal(activity.items.find((item: any) => item.id === id)?.status, "succeeded");
+      assert.ok(activity.items.every((item: any) => !item.active));
+      const listed = (await run("bg_task_list")).content[0].text;
+      assert.match(listed, new RegExp(id));
+      const cursor = /statusCursor=(\S+)/.exec(listed)?.[1];
+      assert.ok(cursor);
+      await tools.get("bg_task_list").execute("unchanged-list", { cursor }, undefined, undefined, ctx);
+      assert.equal((await client.request("runtime_get_metrics")).background.history.inventories, 0,
+        "default list preserves recent completed visibility without activating history");
+      assert.ok(scopes.every(scope => !scope.backgroundHistory), "prior scope queries and default lists never request history");
+      await tools.get("bg_task_list").execute("explicit-history", { all: true }, undefined, undefined, ctx);
+      assert.ok((await client.request("runtime_get_metrics")).background.history.inventories > 0,
+        "explicit cross-session history still builds the archive");
+      if (legacyCount) {
+        const historical = await tools.get("bg_task_list").execute("filtered-history", { status: ["succeeded"], limit: 2, max_bytes: 4096 }, undefined, undefined, ctx);
+        assert.match(historical.content[0].text, new RegExp(legacyIds.at(-1)!));
+      }
+      t.diagnostic(JSON.stringify({ firstHistoryRequest: scopes.find(scope => scope.backgroundHistory) }));
       assert.equal(host.dismissDurableTask({ cwd: root, sessionId: owner.sessionId }, id), true);
       assert.doesNotMatch((await run("bg_task_list")).content[0].text, new RegExp(id));
       assert.match((await run("bg_task_status")).content[0].text, /succeeded/);
@@ -54,7 +86,7 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
     })(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("public component read exceeded original 5000ms boundary")), 5000); })]);
   } finally {
     if (timer) clearTimeout(timer);
-    closeBackgroundObservation(pi); host.close(); await executor.close(); lease.release();
+    closeBackgroundObservation(pi); client.close(); host.close(); await executor.close(); lease.release();
     for (const task of legacyIds) rmSync(registry.taskDir(task), { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
