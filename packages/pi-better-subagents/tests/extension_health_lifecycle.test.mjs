@@ -106,6 +106,7 @@ process.env.PATH = `${binDir}:${originalPath}`;
 
 // ---- harness ---------------------------------------------------------------
 const liveRuns = []; // { id, pid } — children to reap and dirs to remove
+const ownedExits = new Map();
 const dirOnly = []; // ids with no child (metadata-only fixtures)
 
 async function makeHarness(options = {}) {
@@ -131,7 +132,20 @@ async function makeHarness(options = {}) {
         model: undefined,
         sessionManager: { getSessionId: () => sessionId },
     };
-    betterSubagents(pi, managedDomainPort());
+    const port = managedDomainPort();
+    const spawned = port.spawned;
+    port.spawned = (id, pid) => {
+        spawned(id, pid);
+        ownedExits.set(id, { pid, start: processStartToken(pid), pi });
+    };
+    port.observeExit = (id, completion) => {
+        const owned = ownedExits.get(id);
+        assert.ok(owned, "exit acknowledgement belongs to a child this fixture spawned");
+        owned.completion = completion;
+        // Retain the rejected acknowledgement for reapRun, not an unhandled rejection.
+        void completion.catch(() => {});
+    };
+    betterSubagents(pi, port);
     await Promise.all(recipients.map(recipient => recipient.close()));
     let recipient = await sdkRecipient({ cwd, sessionId, sent, notes, sendMessage: options.sendMessage, batchWindowMs: 5000 });
     recipients.push(recipient);
@@ -199,13 +213,27 @@ async function waitFor(fn, { timeoutMs = 5000, intervalMs = 20 } = {}) {
  * backstop for failures.
  */
 async function reapRun({ id, pid }) {
-    if (!readMeta(id)) return;
-    killProcessTree(pid, "SIGKILL");
-    await waitFor(() => {
-        const m = readMeta(id);
-        return m && m.status !== "running" && m.status !== "orphaned" ? m : undefined;
-    }, { timeoutMs: 2000 });
+    const owned = ownedExits.get(id);
+    if (!owned && !readMeta(id)) return;
+    assert.ok(owned?.completion && owned.pid === pid, "removal requires this fixture's exact child exit acknowledgement");
+    const batcher = getCallbackBatcher(owned.pi);
+    batcher.cancel();
+    if (realProcessProbe.pidExists(pid)) {
+        assert.ok(owned.start && processStartToken(pid) === owned.start && realProcessProbe.groupId(pid) === pid,
+            "never signal an unverified or recycled child owner");
+        killProcessTree(pid, "SIGKILL");
+    }
+    let timeout;
+    try {
+        await Promise.race([owned.completion, new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error(`Owned finalizer did not settle for ${id}`)), 2000);
+        })]);
+        batcher.cancel();
+        await batcher.settled();
+        assert.equal(realProcessProbe.groupAlive(pid), false, "child process group must be quiescent before removal");
+    } finally { clearTimeout(timeout); }
     rmSync(runDir(id), { recursive: true, force: true });
+    ownedExits.delete(id);
 }
 
 /**
@@ -234,10 +262,7 @@ afterEach(async () => {
 after(async () => {
     await Promise.all(recipients.map(recipient => recipient.close()));
     process.env.PATH = originalPath;
-    for (const { id, pid } of liveRuns) {
-        killProcessTree(pid, "SIGKILL");
-        rmSync(runDir(id), { recursive: true, force: true });
-    }
+    for (const run of liveRuns) await reapRun(run);
     for (const id of dirOnly) rmSync(runDir(id), { recursive: true, force: true });
     rmSync(binDir, { recursive: true, force: true });
 });
