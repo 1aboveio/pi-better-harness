@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { Worker } from "node:worker_threads";
 import { fixture } from "./support/query-fixture.ts";
+import { HostSourceWatches, nativeWatch } from "../src/runtime/source-watch.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 const { commitMetadata } = await import(String("../scripts/event-publication/commit.mjs"));
 
@@ -33,6 +34,43 @@ test("query fixture cancellation closes live and already-ended resources without
     assert.match(child.stdout, /test timed out after 1000ms/);
     assert.match(child.stdout, /"workerStopped":true,"clientDestroyed":true,"transportRemoved":true,"rootRemoved":true/);
   }
+});
+
+test("host-owned native streams survive forced read worker termination during actual writes", { timeout: 15000 }, async () => {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const f = await fixture();
+    let writes: ReturnType<typeof setInterval> | undefined;
+    try {
+      const client = await f.client(); await ready(client);
+      const directory = join(f.root, "runs", "sa_native_exit"); mkdirSync(directory);
+      const put = () => writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_native_exit", cwd: f.root, status: "completed", startedAt: 1, name: "writing" }));
+      put(); writes = setInterval(put, 2);
+      await f.stall();
+      await f.worker.terminate();
+      clearInterval(writes); writes = undefined;
+      assert.equal((await client.request("ping")).ok, true);
+    } finally { clearInterval(writes); await f.close(); }
+    assert.equal(f.executor.metrics().sourceSubscriptions.allocated, 0, "dead workers cannot retain native streams");
+  }
+});
+
+test("executor close retains delayed native stops within its existing bounded shutdown", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const host = new HostSourceWatches((path, changed, failed) => {
+    const stop = nativeWatch(path, changed, failed);
+    return async () => { await stop(); await gate; };
+  });
+  (f.executor as any).sourceWatches = host;
+  try {
+    const client = await f.client(); await ready(client);
+    const began = performance.now(); await f.executor.close();
+    assert.ok(performance.now() - began < 1500);
+    assert.ok(host.metrics().retiring > 0);
+    release(); await host.close();
+    assert.equal(host.metrics().allocated, 0);
+  } finally { release(); await f.close(); }
 });
 
 test("a dropped same-consumer snapshot reports a gap while unrelated global commits do not", { timeout: 10000 }, async () => {

@@ -25,8 +25,11 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
   }
 };
 const { WorkReadModel } = await import("./read-model.ts");
+const { workerSourceWatch } = await import("./source-watch.ts");
 const { WorkQueries, workScope, queryEncodingMetrics, snapshotJSON } = await import("./queries.ts");
-const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);
+const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, {
+  ...workerData.modelOptions, watch: workerSourceWatch(parentPort),
+});
 // One bounded in-flight batch. Remaining obligations stay in the reconstructable
 // inventory index; an acknowledgement cannot erase a newer revision of an ID.
 let terminalLogsPending;
