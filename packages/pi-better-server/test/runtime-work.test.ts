@@ -47,10 +47,37 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
   const readers: ReturnType<typeof fork>[] = [];
   let proxy: ReturnType<typeof createServer> | undefined;
   const proxySockets = new Set<Socket>();
+  let phase = "daemon-startup";
+  let lastToolRequest: unknown;
+  let capturedPage: any;
+  let suppliedCursor: string | undefined;
+  const requests: unknown[] = [];
+  const cursorIdentity = (cursor?: string) => {
+    if (!cursor) return undefined;
+    try {
+      const [scopeKey, instanceId, tokenRevision, startedAt, id] = JSON.parse(Buffer.from(cursor, "base64url").toString());
+      return { cursor, scopeKey, instanceId, tokenRevision, startedAt, id };
+    } catch (error) { return { cursor, decodeError: String(error) }; }
+  };
+  const snapshotIdentity = (snapshot: any) => snapshot && ({ instanceId: snapshot.instanceId, seq: snapshot.seq,
+    scopeRevision: snapshot.scopeRevision, status: snapshot.status, reason: snapshot.reason,
+    observedRevisionVector: snapshot.observedRevisionVector, totalMatching: snapshot.totalMatching,
+    nextCursor: cursorIdentity(snapshot.nextCursor), rows: snapshot.rows?.slice(0, 4).map((row: any) => ({
+      id: row.meta.id, sourceRevision: row.sourceRevision, assignmentRevision: row.assignment?.revision,
+      cursor: cursorIdentity(row.cursor) })) });
+  const track = (client: WorkClient) => {
+    const request = client.request.bind(client);
+    client.request = (type, params) => {
+      requests.push({ phase, type, params }); if (requests.length > 8) requests.shift();
+      return request(type, params);
+    };
+    return client;
+  };
   try {
     const message = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(`daemon startup failed: ${errors}`); })]);
     const socket = (message[0] as { ready: string }).ready;
-    const first = new WorkClient(socket, agent); clients.push(first);
+    const first = track(new WorkClient(socket, agent)); clients.push(first);
+    phase = "initial-subscribe";
     await first.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
     if (first.snapshot?.status !== "ready") await new Promise<void>(resolve => {
       const stop = first.onChange(snapshot => { if (snapshot.status === "ready") { stop(); resolve(); } });
@@ -67,8 +94,9 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     assert.equal(sqliteBefore.active, 2, "one query index with attached checkpoints and one coordinator connection are retained by the daemon");
     assert.equal(first.snapshot!.rows.length, 50);
     for (const count of [1, 5, 10]) {
+      phase = `shared-scope-clients-${count}`;
       while (clients.length < count) {
-        const client = new WorkClient(socket, agent); clients.push(client);
+        const client = track(new WorkClient(socket, agent)); clients.push(client);
         await client.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
       }
       for (const client of clients) {
@@ -91,6 +119,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.deepEqual(await actualConnections(), sqliteBefore, "queries do not open extra SQLite connections");
     }
     for (const count of [1, 5, 10]) {
+      phase = `independent-readers-${count}`;
       while (readers.length < count) {
         const reader = fork(new URL("./support/work-reader.mjs", import.meta.url), [], {
           execArgv: [], env: { ...process.env, WORK_SOCKET: socket, WORK_AGENT_DIR: agent,
@@ -124,6 +153,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     let localConnections = 0;
     try {
       extension({ on: (key: string, fn: Function) => handlers.set(key, fn), registerTool: (tool: any) => tools.set(tool.name, tool), sendMessage() {} } as never);
+      phase = "extension-session-start";
       await handlers.get("session_start")!({}, ctx);
       sqlite.DatabaseSync = class extends OriginalDatabase { constructor(...args: any[]) { super(...args); localConnections++; } };
       const hooks = (globalThis as any)[Symbol.for("pi-better-subagents.acceptance-hooks")];
@@ -133,6 +163,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.match(displayed.tokens, /120/);
       assert.ok(displayed.facts.some((fact: string) => /bash/.test(fact)), "cached health facts preserve configured long-tool diagnostics without client I/O");
       const logBefore = await first.request("runtime_get_metrics");
+      phase = "navigator-log-publication";
       appendFileSync(join(runs, "sa_shared_0", "output.log"), JSON.stringify({ type: "tool_execution_start", toolCallId: "new-tool", toolName: "read", at: Date.now() - 1000 }) + "\n");
       for (let retry = 0; hooks.listRows().find((row: any) => row.id === "sa_shared_0")?.tool !== "read"; retry++) {
         assert.ok(retry < 200, "Navigator did not consume the changed log snapshot");
@@ -142,6 +173,8 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.equal(logAfter.logProjections - logBefore.logProjections, 1);
       assert.equal(logAfter.assignmentProjections - logBefore.assignmentProjections, 0);
       assert.equal(localConnections, 0, "actual registered provider paints never open the coordinator");
+      phase = "subagent-result";
+      lastToolRequest = { tool: "subagent_result", call: "result", params: { id: "sa_shared_0", all: true } };
       const result = await tools.get("subagent_result").execute("result", { id: "sa_shared_0", all: true }, undefined, undefined, ctx);
       assert.equal(result.details.assignment.revision, first.snapshot!.rows.find(row => row.meta.id === "sa_shared_0")!.assignment.revision);
       assert.equal(result.details.snapshot.instanceId, first.snapshot!.instanceId);
@@ -149,14 +182,21 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.deepEqual(result.details.snapshot.observedRevisionVector, first.snapshot!.observedRevisionVector);
       assert.equal(localConnections, 0, "actual result observation uses the server batch, not a new local projector");
       const list = tools.get("subagent_list");
+      phase = "list-first-page";
+      lastToolRequest = { tool: "subagent_list", call: "list", params: { all: true, limit: 2, max_bytes: 4096, status: ["completed"] } };
       const page = await list.execute("list", { all: true, limit: 2, max_bytes: 4096, status: ["completed"] }, undefined, undefined, ctx);
+      capturedPage = snapshotIdentity(page.details.snapshot);
       assert.equal(page.details.snapshot.totalMatching, 50);
       assert.equal(page.details.snapshot.rows.length, 2);
       const cursor = page.content[0].text.match(/nextCursor=(\S+)/)[1];
+      suppliedCursor = cursor;
+      phase = "list-next-page";
+      lastToolRequest = { tool: "subagent_list", call: "list-next", params: { all: true, limit: 2, max_bytes: 4096, status: ["completed"], cursor } };
       const next = await list.execute("list-next", { all: true, limit: 2, max_bytes: 4096, status: ["completed"], cursor }, undefined, undefined, ctx);
       assert.notEqual(page.details.snapshot.rows[0].meta.id, next.details.snapshot.rows[0].meta.id);
       assert.equal(localConnections, 0, "actual list handler consumes the server index without opening local SQLite");
       let detail;
+      phase = "cached-detail";
       for (let attempt = 0; attempt < 100; attempt++) {
         detail = hooks.renderDetail("sa_shared_0").detail;
         if (detail.status !== "rebuilding") break;
@@ -183,12 +223,15 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.equal(registryIo.getRegistryIoMetrics().metadataFileReads, 0, "registered detail draws consume the cached server snapshot");
       assert.equal(localConnections, 0, "registered detail draws never open a local coordinator");
       assert.ok(displayed.facts.some((fact: string) => /long bash/.test(fact)));
+      phase = "health-threshold-publication";
       writeFileSync(join(agent, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: { healthLongToolMs: 600000 } } }));
       const thresholdDeadline = Date.now() + 10000;
       while (hooks.listRows().find((row: any) => row.id === "sa_shared_0").facts.some((fact: string) => /long (bash|read)/.test(fact))) {
         assert.ok(Date.now() < thresholdDeadline, "Navigator did not observe new health thresholds");
         await new Promise(resolve => setTimeout(resolve, 20));
       }
+      phase = "health-list";
+      lastToolRequest = { tool: "subagent_list", call: "health-list", params: { all: true, limit: 100 } };
       const refreshed = await tools.get("subagent_list").execute("health-list", { all: true, limit: 100 }, undefined, undefined, ctx);
       assert.ok(refreshed.details.snapshot.rows.length > 0);
       assert.ok(refreshed.details.snapshot.rows.every((row: any) => row.health.thresholds.longToolMs === 600000), "tool and Navigator share the updated judgment");
@@ -197,12 +240,15 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       await handlers.get("session_shutdown")?.({}, ctx);
       for (const [key, value] of saved) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     }
+    phase = "explicit-replay-resync";
     const replay = await first.request("runtime_subscribe", { scope: { cwd: root }, sinceSeq: -1, instanceId: first.snapshot!.instanceId });
     assert.equal(replay.resyncRequired, true);
     assert.equal(replay.resyncReason, "replay-truncated");
+    phase = "explicit-instance-resync";
     const epoch = await first.request("runtime_subscribe", { scope: { cwd: root }, sinceSeq: 0, instanceId: "old-instance" });
     assert.equal(epoch.resyncReason, "instance-changed");
     await first.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
+    phase = "external-assignment-publication";
     const changed = new Promise<void>(resolve => {
       const stop = first.onChange(snapshot => {
         if (snapshot.rows.find(row => row.meta.id === "sa_shared_0")?.assignment.state === "waiting") { stop(); resolve(); }
@@ -241,7 +287,8 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       downstream.on("error", () => upstream.destroy());
     });
     const proxyPath = join(transport, "gap.sock"); proxy.listen(proxyPath); await once(proxy, "listening");
-    const gapped = new WorkClient(proxyPath, agent); clients.push(gapped);
+    phase = "dropped-event-subscribe";
+    const gapped = track(new WorkClient(proxyPath, agent)); clients.push(gapped);
     await gapped.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
     let observedGap = false;
     const stopGapObservation = gapped.onChange(snapshot => {
@@ -256,24 +303,32 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     const { readFileSync } = await import("node:fs");
     const original = JSON.parse(readFileSync(path, "utf8"));
     dropNext = true;
+    phase = "dropped-event-gap-one";
     const intermediate = waitName(first, "gap-one");
     writeFileSync(path, JSON.stringify({ ...original, name: "gap-one" })); await intermediate;
+    phase = "dropped-event-gap-two";
     const resumed = waitName(gapped, "gap-two");
     writeFileSync(path, JSON.stringify({ ...original, name: "gap-two" })); await resumed;
     assert.equal(dropped, true);
     assert.equal(observedGap, true, "the first complete snapshot after the dropped event reports the gap");
     stopGapObservation();
+    phase = "disconnect-and-reconnect";
     const disconnected = clients.at(-1)!;
     disconnected.close();
     assert.equal(disconnected.snapshot!.status, "degraded");
     assert.ok(disconnected.snapshot!.rows.length > 0, "disconnect preserves stale observations rather than faking an empty scope");
     await assert.rejects(disconnected.resync(), /disconnected/);
-    const reconnected = new WorkClient(socket, agent); clients.push(reconnected);
+    const reconnected = track(new WorkClient(socket, agent)); clients.push(reconnected);
     const fresh = await reconnected.subscribe({ cwd: root, sessionId: "parent", limit: 100 });
     assert.equal(fresh.status, "ready");
     assert.equal(fresh.instanceId, first.snapshot!.instanceId);
     assert.equal(fresh.seq, first.snapshot!.seq, "a new transport takes a fresh atomic snapshot after disconnect");
     assert.equal(fresh.rows.find(row => row.meta.id === "sa_shared_0")!.meta.name, "gap-two");
+  } catch (error) {
+    console.error(`Runtime work cursor failure: ${JSON.stringify({ phase, error: String(error), lastToolRequest,
+      requests, suppliedCursor: cursorIdentity(suppliedCursor), capturedPage,
+      cachedClients: clients.slice(0, 12).map(client => snapshotIdentity(client.snapshot)) })}`);
+    throw error;
   } finally {
     await Promise.all(readers.map(async reader => {
       if (reader.exitCode !== null) return;
