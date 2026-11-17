@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 // @ts-expect-error Generated canonical passive runner observation.
 import { snapshot } from "./domain/background/snapshot.mjs";
 // @ts-expect-error Generated canonical registry queries.
-import { observeMetasForOrigin, belongsToOrigin, readMeta, getRegistryIoMetrics } from "./domain/background/registry.mjs";
+import { observeMetasForOrigin, observeRecentMetasForOrigin, recentMetaDeadline, belongsToOrigin, readMeta, getRegistryIoMetrics } from "./domain/background/registry.mjs";
 import { BackgroundHistory } from "./background-history.ts";
 import type { WorkScope } from "./read-model.ts";
 import { ENTITY_BUDGET } from "./work-budget.ts";
@@ -224,10 +224,10 @@ export class BackgroundObservation {
         const scopedRevision = this.hasInputVersions ? this.scopeVersions.get(JSON.stringify([entry.origin.cwd, entry.origin.sessionId])) ?? 0 : revision;
         if (hasPendingIndex) this.refreshPending(entry, scopedRevision);
         this.refreshRecent(entry, scopedRevision);
-        const active = observeMetasForOrigin(entry.origin);
+        const active = this.visibleLegacy(entry.origin);
         const retained = entry.rows.map(row => readMeta(row.id)).filter((row: any) => row && row.dismissedAt === undefined
           && row.status !== "running" && (!row.endedAt || Date.now() - row.endedAt < 30000));
-        entry.rows = [...active, ...retained];
+        entry.rows = [...new Map([...retained, ...active].map(row => [row.id, row])).values()];
       }
       const signature = JSON.stringify([rows, [...this.legacy.values()].flatMap(entry => [...entry.rows, ...entry.recent, ...this.pendingRows(entry)]).sort((a, b) => a.id.localeCompare(b.id))]);
       const changed = signature !== this.signature || this.status !== "ready";
@@ -239,7 +239,9 @@ export class BackgroundObservation {
       this.dirtyOperations.clear();
       if (this.inbox.metrics.more || this.inbox.metrics.pending) this.schedule();
       if (this.expiry) clearTimeout(this.expiry);
-      const deadlines = [...this.recent.map(op => op.terminal_at + 30000), ...[...this.legacy.values()].flatMap(entry => entry.recent.map(row => row.endedAt + 30000))].filter(Number.isFinite);
+      const deadlines = [...this.recent.map(op => op.terminal_at + 30000), ...[...this.legacy.values()].flatMap(entry => [
+        ...entry.recent.map(row => row.endedAt + 30000), ...recentMetaDeadline(entry.origin),
+        ...(entry.origin.sessionId ? recentMetaDeadline({ cwd: entry.origin.cwd }) : [])])].filter(Number.isFinite);
       if (deadlines.length) { this.expiry = setTimeout(() => this.schedule(), Math.max(1, Math.min(...deadlines) - Date.now())); this.expiry.unref(); }
       return changed;
     } catch (error) {
@@ -364,13 +366,18 @@ export class BackgroundObservation {
         this.legacy.delete(oldest[0]);
       }
       const origin = { cwd: scope.cwd, sessionId: scope.sessionId };
-      entry = { origin, rows: observeMetasForOrigin(origin), references: 0, pending: [], recent: [] };
+      entry = { origin, rows: this.visibleLegacy(origin), references: 0, pending: [], recent: [] };
       if (this.status !== "degraded" && this.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_parent_callbacks'").get())
         this.refreshPending(entry, Number(this.db.prepare("SELECT value FROM coordinator_state WHERE key='change_revision'").get()?.value ?? 0));
       if (this.status !== "degraded" && this.db) this.refreshRecent(entry, Number(this.db.prepare("SELECT value FROM coordinator_state WHERE key='change_revision'").get()?.value ?? 0));
     }
     this.legacy.delete(key); this.legacy.set(key, entry);
     return entry;
+  }
+  private visibleLegacy(origin: { cwd: string; sessionId?: string }): any[] {
+    return [...new Map([...observeMetasForOrigin(origin), ...observeRecentMetasForOrigin(origin),
+      ...(origin.sessionId ? observeRecentMetasForOrigin({ cwd: origin.cwd }).filter((row: any) => !row.callbackOrigin) : [])]
+      .map((row: any) => [row.id, row])).values()];
   }
   retain(scope: { cwd?: string; sessionId?: string }) {
     const entry = this.legacyScope(scope);
@@ -387,11 +394,11 @@ export class BackgroundObservation {
     // Retained terminals stay visible by default, but a sidecar dismissal must
     // be observed even before its watcher notification is delivered.
     if (this.status !== "degraded" && this.db) this.refreshRecent(legacy, legacy.recentRevision ?? 0);
-    const legacyRows = legacy.rows;
+    const legacyRows = this.status === "degraded" ? legacy.rows : this.visibleLegacy(legacy.origin);
     const rows = [...new Map([...this.pendingRows(legacy), ...(scope.backgroundAll ? this.rows : [...this.rows, ...legacy.recent])].map(row => [row.id, row])).values()];
     return [...rows.filter(row => row.owner.kind === "parent-session" && row.dismissedAt === undefined
       && (scope.backgroundAll || row.owner.workspace === scope.cwd && row.owner.sessionId === scope.sessionId) && (!scope.active || row.active)),
-      ...legacyRows.filter((row: any) => (scope.backgroundAll || row.callbackOrigin && belongsToOrigin(row, legacy.origin)
+      ...legacyRows.filter((row: any) => (scope.backgroundAll || !row.callbackOrigin || row.callbackOrigin && belongsToOrigin(row, legacy.origin)
         && (scope.sessionId || row.spawnPid === scope.processId)) && (!scope.active || row.status === "running"))];
   }
   close(): Promise<void> {

@@ -35,6 +35,10 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
   legacyIds.forEach((task, i) => registry.writeMeta({ id: task, kind: "process", status: "succeeded", startedAt: i + 1,
     endedAt: i + 2, cwd: root, logPath: join(root, `log-${i}`), spawnPid: process.pid, callback: false,
     callbackOrigin: { cwd: root, sessionId: owner.sessionId } }));
+  const capturedIds = ["bg_output_owned", "bg_output_foreign", "bg_output_unknown"];
+  capturedIds.forEach((task, i) => registry.writeMeta({ id: task, kind: "command_watch", status: "succeeded",
+    startedAt: Date.now() + 50000, endedAt: 2, cwd: root, logPath: join(root, `captured-${i}`), spawnPid: process.pid, callback: false,
+    callbackOrigin: i === 2 ? undefined : { cwd: root, sessionId: i === 0 ? owner.sessionId : "foreign" } }));
   const executor = new WorkQueryExecutor(root, "history-component", {
     modelOptions: { baseDir: join(root, "raw"), durableDir: join(root, "archive"), supervisorDirectory: join(root, "supervisor"), intervalMs: 60000 } });
   const events = new EventEmitter(), tools = new Map<string, any>();
@@ -56,6 +60,7 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([(async () => {
+      const fullDirectoryReads = registry.getRegistryIoMetrics().fullDirectoryReads;
       for (const scope of [{ cwd: root, sessionId: owner.sessionId }, { cwd: root + "-other", sessionId: owner.sessionId },
         { cwd: root, sessionId: "other" }]) await client.get({ background: true, ...scope });
       assert.match((await run("bg_task_status")).content[0].text, /succeeded/);
@@ -64,12 +69,23 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
       assert.ok(activity.items.every((item: any) => !item.active));
       const listed = (await run("bg_task_list")).content[0].text;
       assert.match(listed, new RegExp(id));
+      assert.match(listed, /bg_output_owned/);
+      assert.doesNotMatch(listed, /bg_output_foreign/);
+      assert.match(listed, /unavailable ownership/);
+      assert.doesNotMatch(listed, /^bg_output_unknown /m);
       const cursor = /statusCursor=(\S+)/.exec(listed)?.[1];
       assert.ok(cursor);
       await tools.get("bg_task_list").execute("unchanged-list", { cursor }, undefined, undefined, ctx);
       assert.equal((await client.request("runtime_get_metrics")).background.history.inventories, 0,
         "default list preserves recent completed visibility without activating history");
       assert.ok(scopes.every(scope => !scope.backgroundHistory), "prior scope queries and default lists never request history");
+      assert.equal(registry.getRegistryIoMetrics().fullDirectoryReads, fullDirectoryReads,
+        "default visibility does not fall back to a full registry scan");
+      const foreignList = await tools.get("bg_task_list").execute("foreign-list", {}, undefined, undefined,
+        { ...ctx, sessionManager: { ...ctx.sessionManager, getSessionId: () => "foreign" } });
+      assert.match(foreignList.content[0].text, /bg_output_foreign/);
+      assert.doesNotMatch(foreignList.content[0].text, /bg_output_owned/);
+      for (const task of capturedIds) registry.removeMeta(registry.readMeta(task));
       await tools.get("bg_task_list").execute("explicit-history", { all: true }, undefined, undefined, ctx);
       assert.ok((await client.request("runtime_get_metrics")).background.history.inventories > 0,
         "explicit cross-session history still builds the archive");
@@ -87,7 +103,7 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
   } finally {
     if (timer) clearTimeout(timer);
     closeBackgroundObservation(pi); client.close(); host.close(); await executor.close(); lease.release();
-    for (const task of legacyIds) rmSync(registry.taskDir(task), { recursive: true, force: true });
+    for (const task of [...legacyIds, ...capturedIds]) rmSync(registry.taskDir(task), { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
 });

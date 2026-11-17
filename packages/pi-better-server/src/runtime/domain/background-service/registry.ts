@@ -190,6 +190,7 @@ export function removeMeta(meta: BackgroundTaskMeta): boolean {
     metaCache.delete(meta.id);
     removeIndexEntry(originIndexDir(originOf(meta)), meta.id);
     removeIndexEntry(originActiveIndexDir(originOf(meta)), meta.id);
+    removeIndexEntry(recentPath(originOf(meta)), meta.id);
     for (const listener of metaChangedListeners) {
       try { listener(); } catch { /* best effort */ }
     }
@@ -262,6 +263,37 @@ export function observeMetasForOrigin(origin: BackgroundTaskCallbackOrigin, acti
     && (!activeOnly || meta.status === "running")).sort((a, b) => b.startedAt - a.startedAt);
 }
 
+const RECENT_LIMIT = 256;
+const RECENT_MS = 30000;
+function recentPath(origin: BackgroundTaskCallbackOrigin): string {
+  return join(baseDir(), "by-origin-recent", originKey(origin));
+}
+function recentEntries(origin: BackgroundTaskCallbackOrigin): Array<{ id: string; observedAt: number }> {
+  const directory = recentPath(origin);
+  try {
+    registryIo.indexDirectoryReads++;
+    const entries = readdirSync(directory).flatMap(id => {
+      try { registryIo.indexRevisionChecks++; return [{ id, observedAt: statSync(join(directory, id)).mtimeMs }]; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    }).sort((a, b) => b.observedAt - a.observedAt || b.id.localeCompare(a.id));
+    return entries.filter(entry => Date.now() - entry.observedAt < RECENT_MS).slice(0, RECENT_LIMIT);
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+}
+
+export function recentMetaDeadline(origin: BackgroundTaskCallbackOrigin): number[] {
+  return recentEntries(origin).map(entry => entry.observedAt + RECENT_MS);
+}
+
+/** Bounded cooperative writes, including results written before the first reader. */
+export function observeRecentMetasForOrigin(origin: BackgroundTaskCallbackOrigin): BackgroundTaskMeta[] {
+  return recentEntries(origin).map(entry => {
+    const record = inspectMeta(entry.id);
+    if (record.found && !record.meta) throw new Error(`Unverified background task ${entry.id}: ${record.error}`);
+    return record.meta;
+  }).filter((meta): meta is BackgroundTaskMeta =>
+    !!meta && belongsToOrigin(meta, origin) && meta.dismissedAt === undefined);
+}
+
 function readMetaForSweep(id: string): BackgroundTaskMeta | undefined {
   const cached = metaCache.get(id);
   if (cached && isTerminalStatus(cached.status)) return cached;
@@ -309,6 +341,14 @@ function indexMeta(meta: BackgroundTaskMeta): void {
     const activeDirectory = originActiveIndexDir(originOf(meta));
     if (meta.status === "running") writeIndexEntry(activeDirectory, meta.id);
     else removeIndexEntry(activeDirectory, meta.id);
+    const origin = originOf(meta), recentDirectory = recentPath(origin);
+    mkdirSync(recentDirectory, { recursive: true });
+    // Independent pointers preserve concurrent writers; prune only this bounded
+    // recent-write accelerator, never the authoritative metadata or history.
+    const candidates = readdirSync(recentDirectory);
+    const retained = new Set(recentEntries(origin).filter(entry => entry.id !== meta.id).slice(0, RECENT_LIMIT - 1).map(entry => entry.id));
+    for (const id of candidates) if (id !== meta.id && !retained.has(id)) removeIndexEntry(recentDirectory, id);
+    writeFileSync(join(recentDirectory, meta.id), "");
   } catch {
     // Indexes are accelerators; meta.json remains authoritative.
   }
