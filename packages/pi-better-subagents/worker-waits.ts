@@ -32,6 +32,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
     OPERATIONS_ATTEMPT_ID_ENV,
     OPERATIONS_CHILD_ID_ENV,
+    OPERATIONS_DEADLINE_AT_ENV,
     OPERATIONS_CONVERSATION_ID_ENV,
     OPERATIONS_ENABLED_ENV,
     OPERATIONS_ENDPOINT_ENV,
@@ -39,6 +40,7 @@ import {
     OPERATIONS_TOKEN_ENV,
     OPERATIONS_WRITER_LEASE_ID_ENV,
     WAIT_OPERATIONS_TOOL,
+    assertWaitToolDependencies,
     createToolDescriptor,
     extractResultTaskIds,
     normalizeWaitForOperationsResult,
@@ -653,22 +655,22 @@ export function planWorkerBridgeTools(input: {
         }
         tools.push(name);
     }
+    if (tools.includes(WAIT_OPERATIONS_TOOL)
+        && (!tools.includes("acknowledge_operation_result") || !tools.some(name => name === "bg_task_status" || name === "bg_task_log"))
+        && !(input.explicitTools && allow.has(WAIT_OPERATIONS_TOOL))) {
+        tools.splice(tools.indexOf(WAIT_OPERATIONS_TOOL), 1);
+        withheld.push({ name: WAIT_OPERATIONS_TOOL, reason: "the authorized tools cannot read and acknowledge terminal evidence" });
+    }
     const has = (name: OperationBridgeToolName): boolean => tools.includes(name);
+    const capabilities = {
+        background: { spawn: has("bg_task_spawn"), watch: has("bg_task_watch"), status: has("bg_task_status"), log: has("bg_task_log") },
+        wait: has(WAIT_OPERATIONS_TOOL), acknowledge: has("acknowledge_operation_result"), parking: has(WAIT_OPERATIONS_TOOL),
+    };
+    assertWaitToolDependencies(capabilities, tools);
     return {
         tools,
         withheld,
-        capabilities: {
-            background: {
-                spawn: has("bg_task_spawn"),
-                watch: has("bg_task_watch"),
-                status: has("bg_task_status"),
-                log: has("bg_task_log"),
-            },
-            wait: has(WAIT_OPERATIONS_TOOL),
-            acknowledge: has("acknowledge_operation_result"),
-            // The bridge derives `wait_for_operations` from `wait && parking`.
-            parking: has(WAIT_OPERATIONS_TOOL),
-        },
+        capabilities,
     };
 }
 
@@ -939,6 +941,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
     };
 
     const register = async (registration: WorkerOperationRegistration): Promise<WorkerOperationHandle> => {
+        assertWaitToolDependencies(registration.capabilities, registration.tools);
         const supervised = registration.tools.some((name) => name !== "report_assignment_result");
         if (supervised && !capability.available) {
             const ready = await start();
@@ -1264,7 +1267,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
 export function childEnvironment(
     token: string,
     endpoint: string,
-    registration: { runId: string; conversationId: string; attemptId: string },
+    registration: { runId: string; conversationId: string; attemptId: string; policy?: { deadlineAt: number | null } },
 ): Record<string, string> {
     return {
         [OPERATIONS_ENABLED_ENV]: "1",
@@ -1274,6 +1277,7 @@ export function childEnvironment(
         [OPERATIONS_CONVERSATION_ID_ENV]: registration.conversationId,
         [OPERATIONS_ATTEMPT_ID_ENV]: registration.attemptId,
         [OPERATIONS_CHILD_ID_ENV]: `${registration.runId}:${randomUUID()}`,
+        ...(registration.policy ? { [OPERATIONS_DEADLINE_AT_ENV]: String(registration.policy.deadlineAt ?? 0) } : {}),
     };
 }
 

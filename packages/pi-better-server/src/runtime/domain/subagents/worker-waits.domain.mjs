@@ -29,7 +29,7 @@ import { randomUUID } from "node:crypto";
 import { managedWorkerBridge } from "./managed-worker-bridge.domain.mjs";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
-import { OPERATIONS_ATTEMPT_ID_ENV, OPERATIONS_CHILD_ID_ENV, OPERATIONS_CONVERSATION_ID_ENV, OPERATIONS_ENABLED_ENV, OPERATIONS_ENDPOINT_ENV, OPERATIONS_RUN_ID_ENV, OPERATIONS_TOKEN_ENV, OPERATIONS_WRITER_LEASE_ID_ENV, WAIT_OPERATIONS_TOOL, createToolDescriptor, extractResultTaskIds, normalizeWaitForOperationsResult, normalizeToolDescriptors, OperationBridgeError, } from "./operation-bridge-types.domain.mjs";
+import { OPERATIONS_ATTEMPT_ID_ENV, OPERATIONS_CHILD_ID_ENV, OPERATIONS_DEADLINE_AT_ENV, OPERATIONS_CONVERSATION_ID_ENV, OPERATIONS_ENABLED_ENV, OPERATIONS_ENDPOINT_ENV, OPERATIONS_RUN_ID_ENV, OPERATIONS_TOKEN_ENV, OPERATIONS_WRITER_LEASE_ID_ENV, WAIT_OPERATIONS_TOOL, assertWaitToolDependencies, createToolDescriptor, extractResultTaskIds, normalizeWaitForOperationsResult, normalizeToolDescriptors, OperationBridgeError, } from "./operation-bridge-types.domain.mjs";
 import { createOperationBridgeHost, } from "./worker-operations-host.domain.mjs";
 import { captureParkCheckpoint, verifyParkCheckpoint } from "./park-checkpoint.domain.mjs";
 import { findSavedConversation, readConversationLease } from "./continuation.domain.mjs";
@@ -327,22 +327,22 @@ export function planWorkerBridgeTools(input) {
         }
         tools.push(name);
     }
+    if (tools.includes(WAIT_OPERATIONS_TOOL)
+        && (!tools.includes("acknowledge_operation_result") || !tools.some(name => name === "bg_task_status" || name === "bg_task_log"))
+        && !(input.explicitTools && allow.has(WAIT_OPERATIONS_TOOL))) {
+        tools.splice(tools.indexOf(WAIT_OPERATIONS_TOOL), 1);
+        withheld.push({ name: WAIT_OPERATIONS_TOOL, reason: "the authorized tools cannot read and acknowledge terminal evidence" });
+    }
     const has = (name) => tools.includes(name);
+    const capabilities = {
+        background: { spawn: has("bg_task_spawn"), watch: has("bg_task_watch"), status: has("bg_task_status"), log: has("bg_task_log") },
+        wait: has(WAIT_OPERATIONS_TOOL), acknowledge: has("acknowledge_operation_result"), parking: has(WAIT_OPERATIONS_TOOL),
+    };
+    assertWaitToolDependencies(capabilities, tools);
     return {
         tools,
         withheld,
-        capabilities: {
-            background: {
-                spawn: has("bg_task_spawn"),
-                watch: has("bg_task_watch"),
-                status: has("bg_task_status"),
-                log: has("bg_task_log"),
-            },
-            wait: has(WAIT_OPERATIONS_TOOL),
-            acknowledge: has("acknowledge_operation_result"),
-            // The bridge derives `wait_for_operations` from `wait && parking`.
-            parking: has(WAIT_OPERATIONS_TOOL),
-        },
+        capabilities,
     };
 }
 /** Production tool descriptors for bridge tools, from the parent's registrations. */
@@ -506,6 +506,7 @@ export function createWorkerOperationsHost(options) {
         return capability.service;
     };
     const register = async (registration) => {
+        assertWaitToolDependencies(registration.capabilities, registration.tools);
         const supervised = registration.tools.some((name) => name !== "report_assignment_result");
         if (supervised && !capability.available) {
             const ready = await start();
@@ -859,6 +860,7 @@ export function childEnvironment(token, endpoint, registration) {
         [OPERATIONS_CONVERSATION_ID_ENV]: registration.conversationId,
         [OPERATIONS_ATTEMPT_ID_ENV]: registration.attemptId,
         [OPERATIONS_CHILD_ID_ENV]: `${registration.runId}:${randomUUID()}`,
+        ...(registration.policy ? { [OPERATIONS_DEADLINE_AT_ENV]: String(registration.policy.deadlineAt ?? 0) } : {}),
     };
 }
 /** Writer-lease id for a parked attempt, when the continuation path holds one. */
