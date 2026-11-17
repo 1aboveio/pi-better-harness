@@ -639,26 +639,58 @@ test("an exact-ID client stops retrying a stalled inventory within its retry bud
   } finally { await f.close(); }
 });
 
-test("a failed worker recovers existing subscriptions under a new observation epoch", { timeout: 10000 }, async () => {
+test("a failed worker recovers existing subscriptions under a new observation epoch", { timeout: 10000 }, async t => {
   const f = await fixture();
   try {
     const directory = join(f.root, "runs", "sa_recovery");
+    const scope = { id: "sa_recovery", limit: 1 };
+    const sourceWrites: any[] = [], frames: any[] = [], workerFrames: any[] = [];
+    const record = (target: any[], value: any) => { if (target.length < 32) target.push(value); };
+    const captureSource = () => new Promise(resolve => {
+      const timer = setTimeout(() => { f.worker.off("message", listener); resolve({ error: "source diagnostic unavailable" }); }, 500);
+      const listener = (message: any) => {
+        if (message.type === "diagnostic-source-state" && message.id === "recovery-before-exit") {
+          clearTimeout(timer); f.worker.off("message", listener); resolve(message.state);
+        }
+      };
+      f.worker.on("message", listener);
+      f.worker.postMessage({ type: "diagnostic-source-state", id: "recovery-before-exit", scope });
+    });
+    f.worker.on("message", message => {
+      if (message.type === "event") {
+        const event = JSON.parse(message.line).event;
+        record(workerFrames, { connection: message.connection, generation: message.generation,
+          serial: message.serial, type: event.type, previousSeq: event.previousSeq, snapshot: event.snapshot });
+      }
+    });
     mkdirSync(directory);
-    const write = (name: string) => writeFileSync(join(directory, "meta.json"), JSON.stringify({
-      id: "sa_recovery", cwd: f.root, status: "completed", startedAt: 1, name,
-    }));
+    const write = (name: string) => {
+      const path = join(directory, "meta.json");
+      writeFileSync(path, JSON.stringify({ id: "sa_recovery", cwd: f.root, status: "completed", startedAt: 1, name }));
+      const info = statSync(path, { bigint: true });
+      sourceWrites.push({ name, identity: `${info.dev}:${info.ino}`, bytes: String(info.size),
+        mtimeNs: String(info.mtimeNs), ctimeNs: String(info.ctimeNs) });
+    };
     write("first");
     const client = await f.client();
+    client.onChange(snapshot => record(frames, snapshot));
     await ready(client);
-    await client.subscribe({ id: "sa_recovery", limit: 1 });
+    await client.subscribe(scope);
     write("latest");
     const until = Date.now() + 3000;
     while (client.snapshot?.rows[0]?.meta.name !== "latest") {
+      if (Date.now() >= until) {
+        t.diagnostic(JSON.stringify({ phase: "original-publication-before-exit", sourceWrites, frames,
+          workerFrames, metrics: f.executor.metrics(), disk: JSON.parse(readFileSync(join(directory, "meta.json"), "utf8")),
+          source: await captureSource() }).slice(0, 65536));
+      }
       assert.ok(Date.now() < until, "the original subscription did not observe the source update");
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     const previous = client.snapshot!;
     assert.ok(previous.seq > 1);
+    t.diagnostic(JSON.stringify({ phase: "observed-original-publication-before-exit", sourceWrites,
+      frames, workerFrames, source: await captureSource() }).slice(0, 65536));
     let resynced = false;
     const recovered = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { stop(); reject(new Error("read worker never recovered the existing subscription")); }, 3000);
