@@ -2,12 +2,26 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { completeOwnedExit } from "../owned-exit.ts";
 import { createCallbackBatcher } from "../shared-callback-batcher.ts";
+import { registerFixtureRun } from "./fixture-run-ownership.mjs";
 
 const deferred = () => {
     let resolve;
     const promise = new Promise(done => { resolve = done; });
     return { promise, resolve };
 };
+
+test("fixture cleanup registration follows the actual exit observer, not the tool caller", () => {
+    const run = { id: "local", pid: 123 }, liveRuns = [];
+    const owned = new Map([[run.id, { pid: run.pid, completion: Promise.resolve() }]]);
+    registerFixtureRun(run, owned, liveRuns);
+    assert.deepEqual(liveRuns, [run]);
+    registerFixtureRun({ id: "remote", pid: 456 }, owned, liveRuns, "continuation-fixture");
+    assert.deepEqual(liveRuns, [run], "remote fixture close, not the local reaper, owns its managed child");
+    assert.throws(() => registerFixtureRun({ id: "unknown", pid: 789 }, owned, liveRuns), /exact owned exit/);
+    assert.throws(() => registerFixtureRun({ ...run, pid: 999 }, owned, liveRuns), /exact owned exit/);
+    assert.throws(() => registerFixtureRun(run, owned, liveRuns, "continuation-fixture"), /two fixture teardown owners/);
+    assert.deepEqual(liveRuns, [run], "refused ownership must not register a kill or deletion");
+});
 
 test("owned exit acknowledgement waits beyond lease release and rejects failed finalization", async () => {
     const exit = deferred(), settlement = deferred();

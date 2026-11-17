@@ -49,6 +49,7 @@
 import { describe, it, after, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { continuationFixture } from "./managed-continuation-fixture.mjs";
+import { registerFixtureRun } from "./fixture-run-ownership.mjs";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { register } from "node:module";
@@ -164,7 +165,7 @@ async function makeHarness(options = {}) {
     return { pi, tools, handlers, sent, notes, ctx, shutdown, get recipient() { return recipient; } };
 }
 
-async function spawnRun({ tools, ctx }, overrides = {}) {
+async function spawnRun({ tools, ctx, runTeardownOwner }, overrides = {}) {
     const res = await tools.get("subagent_spawn").execute(
         "tc", { prompt: "lifecycle test task", clean: true, sandbox: false, cwd: tmpdir(), ...overrides },
         undefined, undefined, ctx,
@@ -172,7 +173,7 @@ async function spawnRun({ tools, ctx }, overrides = {}) {
     const out = res.content[0].text;
     const id = out.match(/id=(\S+)/)[1];
     const pid = Number(out.match(/\(pid (\d+)\)/)[1]);
-    liveRuns.push({ id, pid });
+    registerFixtureRun({ id, pid }, ownedExits, liveRuns, runTeardownOwner);
     return { id, pid, out };
 }
 
@@ -641,6 +642,7 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
         process.env.PI_CONTINUATION_SLEEP_MS = "30000";
         const fixture = await continuationFixture({ root, artifacts, workspace: root });
         const h = fixture.makeHarness(); await h.ready;
+        let workerStopped = false;
         try {
             const { id, pid } = await spawnRun(h, { cwd: root });
             const meta = readMeta(id);
@@ -660,9 +662,18 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
             await h.shutdown();
             assert.equal(realProcessProbe.pidExists(pid), true, "foreground exit retains the captured worker");
             assert.equal((await fixture.healthOwner()).subagentHealthActive, true, "daemon retains health ownership after foreground exit");
-            await reapRun({ id, pid });
+            // This child belongs to the separate canonical fixture, not the
+            // local exit observer. Stop its verified group; fixture.close below
+            // acknowledges owner/recipient process exit before any root removal.
+            assert.ok(token && processStartToken(pid) === token && pgid === pid,
+                "remote fixture cleanup must verify the original live child identity");
+            killProcessTree(pid, "SIGKILL");
+            assert.ok(await waitFor(() => !realProcessProbe.groupAlive(pid), { timeoutMs: 2000 }),
+                "remote fixture child group must be quiescent before owner shutdown and removal");
+            workerStopped = true;
         } finally {
-            await h.shutdown(); await fixture.close(); rmSync(root, { recursive: true, force: true });
+            await h.shutdown(); await fixture.close();
+            if (workerStopped) rmSync(root, { recursive: true, force: true });
             for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
         }
     });
