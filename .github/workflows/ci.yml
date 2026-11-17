@@ -64,7 +64,9 @@ jobs:
         if: ${{ matrix.group == 'runtime' && !cancelled() && steps.install.outcome == 'success' }}
         env:
           PI_FULL_RUNTIME_REPORT: ${{ runner.temp }}/full-runtime-resources.json
-        run: node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs
+        # Preserve this required job's original short resource assertions. Full
+        # fixed-host qualification is the default CLI campaign, not this smoke.
+        run: node --import tsx packages/pi-better-server/scripts/measure-full-runtime.mjs --smoke
       - name: Qualify packed standalone domains and cached offline restart
         if: ${{ matrix.group == 'runtime' && !cancelled() && steps.install.outcome == 'success' }}
         working-directory: packages/pi-better-server

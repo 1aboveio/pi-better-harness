@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import { observeGcThread } from './owned-fixture.mjs';
+export function initialize(data) { observeGcThread(`loader-${data.resourceParentThreadId}`); }
 
 const target = new URL('../../src/runtime/background-tools.ts', import.meta.url).href;
 const recorder = new URL('./recovery-trace.mjs', import.meta.url).href;
@@ -43,6 +45,23 @@ export function instrumentRecoveryTrace(source) {
 }
 
 export async function load(url, context, nextLoad) {
+  const helper = new URL('./owned-fixture.mjs', import.meta.url).href;
+  if (url === new URL('../../src/runtime/query-executor.ts', import.meta.url).href) {
+    let source = readFileSync(new URL(url), 'utf8');
+    const anchor = 'this.lag.enable();\n    this.worker = this.startWorker();';
+    if (source.split(anchor).length !== 2) throw Error('Fixture executor creation anchor changed');
+    source = source.replace(anchor, anchor + '\n    bindOwnedExecutor(this);');
+    source = source.replace('this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url)', 'ownedWorkerUrl(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url))');
+    return { format: 'module', shortCircuit: true, source: ts.transpileModule(`import {bindOwnedExecutor,ownedWorkerUrl} from ${JSON.stringify(helper)};\n${source}`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText };
+  }
+  if (url === new URL('../../src/runtime/query-worker.mjs', import.meta.url).href) {
+    let source = readFileSync(new URL(url), 'utf8');
+    const anchor = 'const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);';
+    if (source.split(anchor).length !== 2) throw Error('Fixture model creation anchor changed');
+    source = source.replace(anchor, anchor + '\nbindOwnedModel(model,parentPort);');
+    source = source.replace('...model.metrics, background:', '...model.metrics, workerGc: threadGc(), background:');
+    return { format: 'module', shortCircuit: true, source: `import {bindOwnedModel,threadGc} from ${JSON.stringify(helper)};\n${source}` };
+  }
   if (url !== target) return nextLoad(url, context);
   const source = instrumentRecoveryTrace(readFileSync(new URL(url), 'utf8'));
   return { format: 'module', shortCircuit: true, source: ts.transpileModule(source, {

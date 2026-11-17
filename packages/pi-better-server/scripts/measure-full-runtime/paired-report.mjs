@@ -100,11 +100,15 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
             equal(final.results, wanted, p + '.reconciliation.tasks');
           }
         }
-        // The current collector explicitly lacks these observations. Flags alone cannot fill them.
+        // Coverage requires the observations, never flags alone.
         const peak = scenario.aggregatePeak;
         if (report.measurement?.coverage?.aggregatePeak !== true || peak?.scope !== 'simultaneous-related-processes' || !finite(peak.cpuPercent) || !finite(peak.rssBytes) || !Number.isSafeInteger(peak.samples) || peak.samples < 1) issue(p + '.coverage.aggregatePeak', 'not-qualified');
         const rebuiltPeak = summarizeCohorts(scenario.aggregateCohorts, { required, generation: String(scenario.clients) }, { startedAt: scenario.startedAt, endedAt: scenario.endedAt });
         if (!rebuiltPeak.qualified || !isDeepStrictEqual(peak, rebuiltPeak)) issue(p + '.coverage.aggregatePeak', 'missing-or-inconsistent-cohort-stream');
+        if (Array.isArray(scenario.aggregateCohorts) && scenario.aggregateCohorts.some(frame => Array.isArray(frame) && frame.some(sample => sample?.cpu?.totalMicros !== undefined
+          && (sample.sourceCohort?.diagnosticCost?.coverage !== 'complete-no-child-process'
+            || !finite(sample.sourceCohort?.diagnosticCost?.ownerCpuMicros)
+            || sample.sourceCohort?.diagnosticCost?.childCpuMicros !== 0)))) issue(p + '.diagnostics.batch', 'unobserved-external-capture-cost');
         const gc = scenario.workerGc;
         if (report.measurement?.coverage?.workerGc !== true || gc?.threadCoverage !== 'all' || !Array.isArray(gc.processes)
           || gc.processes.some(value => !value?.identity || !finite(value.count) || !finite(value.durationMs))

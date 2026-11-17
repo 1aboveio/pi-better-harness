@@ -1,0 +1,10 @@
+export function bindOwnedExecutor(value: any): void;
+export function ownedWorkerUrl(original: URL): URL;
+export function bindOwnedModel(model: any, port: any): void;
+export function controlOwnedExecutor(executor: any, action: string): Promise<{ action?: string; scope: string; elapsedMs?: number }>;
+export function installOwnedRouter(): (pid: number, action: string) => Promise<unknown>;
+export function registerOwnedLoader(): void;
+export function observeGcThread(key?: string): void;
+export function gcThreads(): { expected: string[]; records: any[]; complete: boolean };
+export function threadGc(): { observed: boolean; count: number; durationMs: number; startedAt: number; observedAt: number };
+export function distribution(values: number[]): { samples: number; p50: number; p95: number; p99: number; max: number };

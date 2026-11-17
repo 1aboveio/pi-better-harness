@@ -121,3 +121,13 @@ test('claimed aggregate peak is rejected unless its retained cohort stream repro
   assert.ok(has(result, '.coverage.aggregatePeak', 'missing-or-inconsistent-cohort-stream'));
   assert.equal(result.cpuComparison, null); assert.equal(result.qualified, false);
 });
+
+test('batch capture cannot hide unobserved external observer cost behind coverage flags', () => {
+  const report = specimen() as any;
+  report.scenarios[0].aggregateCohorts = [[{ cpu: { totalMicros: 1 }, sourceCohort: {
+    diagnosticCost: { coverage: 'incomplete-external-child-cost', ownerCpuMicros: 1, childCpuMicros: null },
+  } }]];
+  const result = validatePairedReports(report, report, expected);
+  assert.ok(has(result,'.diagnostics.batch','unobserved-external-capture-cost'));
+  assert.equal(result.qualified,false); assert.equal(result.cpuComparison,null);
+});

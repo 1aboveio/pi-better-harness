@@ -175,6 +175,7 @@ export class WorkQueryExecutor {
 
   metrics() {
     return { ...this.workerMetrics, executor: { active: this.active ? 1 : 0, queued: this.queue.length,
+      oldestQueuedAgeMs: this.queue.length ? Math.max(0, performance.now() - this.queue[0]!.enqueued) : 0,
       clients: this.streams.size, completed: this.completed, singleflightHits: this.coalesced, rejected: this.rejected,
       cancelled: this.cancelled, timeouts: this.timeouts, queueTimeouts: this.queueTimeouts, callerTimeouts: this.callerTimeouts,
       capacity: this.options.capacity ?? 64, waitMs: [...this.waits], readMs: [...this.durations],
