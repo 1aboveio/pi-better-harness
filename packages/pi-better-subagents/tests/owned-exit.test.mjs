@@ -17,7 +17,7 @@ test("owned exit acknowledgement waits beyond lease release and rejects failed f
     let removable = false;
     void completion.then(() => { removable = true; });
     exit.resolve(0);
-    await Promise.resolve();
+    await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(order, ["finalize:0", "release"]);
     assert.equal(removable, false, "released lease is not permission to remove the directory");
     settlement.resolve();
@@ -29,15 +29,20 @@ test("owned exit acknowledgement waits beyond lease release and rejects failed f
         () => { released = true; }, async () => { settled = true; }), /terminal refused/);
     assert.equal(released, true);
     assert.equal(settled, false, "failed finalization must not acknowledge quiescence");
+    await assert.rejects(completeOwnedExit(Promise.resolve(0), () => {}, () => {},
+        async () => { throw new Error("park settlement refused"); }), /park settlement refused/);
 });
 
-test("cancelled callback owner waits for its already-started handoff acknowledgement", async () => {
+for (const urgent of [true, false]) test(`cancelled callback owner waits for its ${urgent ? "urgent" : "ordinary"} handoff acknowledgement`, async () => {
     const handoff = deferred();
     const batcher = createCallbackBatcher({ sendMessage: () => handoff.promise });
     // Urgent handoffs write their durable delivery marker after sendMessage resolves.
     let delivered = false;
-    const pending = batcher.deliverUrgent({ id: "owned", source: "subagent", label: "owned", status: "orphaned", customType: "health", content: "health",
-        onDelivered: () => { delivered = true; } });
+    const event = { id: "owned", source: "subagent", label: "owned", status: "orphaned", customType: "health", content: "health",
+        onDelivered: () => { delivered = true; } };
+    let pending;
+    if (urgent) pending = batcher.deliverUrgent(event);
+    else { batcher.enqueue(event); pending = batcher.flush(); }
     batcher.cancel();
     let quiescent = false;
     const completion = batcher.settled().then(() => { quiescent = true; });

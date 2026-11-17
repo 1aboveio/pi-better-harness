@@ -169,6 +169,7 @@ for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query
     const received = clients.map(client => new Promise<void>(resolve => {
       const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) { stop(); resolve(); } });
     }));
+    // Observe one committed replacement; partial writes have separate truthful epochs.
     await commitMetadata(join(f.root, "runs/sa_b2/meta.json"), "changed");
     await f.executor.livenessReasons(); await Promise.all(received);
     await first.get(scope);

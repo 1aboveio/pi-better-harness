@@ -205,8 +205,8 @@ async function waitFor(fn, { timeoutMs = 5000, intervalMs = 20 } = {}) {
 }
 
 /**
- * Reap a spawned run inside the test that created it: kill the child, wait
- * for the close handler to write a terminal status, and remove the run dir.
+ * Reap only this fixture's child, then await its full close/finalizer and
+ * callback acknowledgements before removing the owned run directory.
  * A still-running meta would keep `needsMonitoring` true for LATER tests in
  * this process (they share the module-level health ticker), so per-test
  * reaping is required for isolation — the file-level after() is only a
@@ -225,12 +225,16 @@ async function reapRun({ id, pid }) {
     }
     let timeout;
     try {
-        await Promise.race([owned.completion, new Promise((_, reject) => {
+        const quiescence = (async () => {
+            await owned.completion;
+            batcher.cancel();
+            await batcher.settled();
+            batcher.cancel();
+            assert.equal(realProcessProbe.groupAlive(pid), false, "child process group must be quiescent before removal");
+        })();
+        await Promise.race([quiescence, new Promise((_, reject) => {
             timeout = setTimeout(() => reject(new Error(`Owned finalizer did not settle for ${id}`)), 2000);
         })]);
-        batcher.cancel();
-        await batcher.settled();
-        assert.equal(realProcessProbe.groupAlive(pid), false, "child process group must be quiescent before removal");
     } finally { clearTimeout(timeout); }
     rmSync(runDir(id), { recursive: true, force: true });
     ownedExits.delete(id);

@@ -91,6 +91,9 @@ const { killProcessTree, processExists } = await import("../spawn.ts");
 const { readOutcome, outcomeTranscriptReceipt } = await import("../assignment-outcomes.ts");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// This provider deliberately returns prose without reporting, so each completed
+// attempt also saves the answer to its one completion correction.
+const correctionAnswer = { role: "assistant", text: "FOLLOWUP:The assignment has no accepted report. This is the one completion correction for this execution attempt, within its original authority and deadline. Finish available remaining work, inspect and acknowledge any outstanding operation evidence, then call report_assignment_result with workspace evidence. If progress is blocked or work remains, report incomplete with remaining_work and the concrete blocker. Do not claim completion from process exit or final prose." };
 const WORKSPACE = join(RUNTIME, "workspace");
 mkdirSync(WORKSPACE, { recursive: true });
 
@@ -247,7 +250,11 @@ describe("completed-subagent continuation", () => {
             });
             assert.equal(initialConversation.kind, "ok", JSON.stringify(initialConversation));
             const sessionPath = initialConversation.conversation.path;
-            assert.deepEqual(sessionMessages(sessionPath).map((m) => m.role), ["user", "assistant"]);
+            assert.deepEqual(sessionMessages(sessionPath), [
+                { role: "user", text: "INITIAL TASK" },
+                { role: "assistant", text: "INITIAL ANSWER" },
+                correctionAnswer,
+            ]);
             // The fresh child allocated a new session and never used --session.
             const freshChild = childRecord(root.pid);
             assert.ok(freshChild.argv.includes("--session-id"));
@@ -281,7 +288,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(resumed.recipe.sandbox, false);
 
             // Real context continuation: the SAME file, same header id, and the
-            // real SessionManager saw the prior two messages before appending.
+            // real SessionManager saw the prior three messages before appending.
             const continued = findSavedConversation({
                 sessionDir: root.recipe.sessionDir, sessionId: root.sessionId, expectedCwd: root.cwd,
             });
@@ -291,15 +298,17 @@ describe("completed-subagent continuation", () => {
             assert.deepEqual(sessionMessages(sessionPath), [
                 { role: "user", text: "INITIAL TASK" },
                 { role: "assistant", text: "INITIAL ANSWER" },
+                correctionAnswer,
                 { role: "user", text: "FIX IT" },
                 { role: "assistant", text: "FOLLOWUP:FIX IT" },
+                correctionAnswer,
             ]);
             const resumedChild = childRecord(resumed.pid);
             assert.ok(resumedChild.argv.includes("--session"), "continuation opens an explicit saved session");
             assert.equal(resumedChild.argv[resumedChild.argv.indexOf("--session") + 1], sessionPath);
             assert.ok(!resumedChild.argv.includes("--session-id"), "Pi rejects --session with --session-id");
-            assert.equal(resumedChild.before, 2, "the child loaded the prior conversation before appending");
-            assert.equal(resumedChild.after, 4);
+            assert.equal(resumedChild.before, 3, "the child loaded the prior conversation before appending");
+            assert.equal(resumedChild.after, 6);
 
             // Old attempt evidence is untouched.
             assert.equal(readFileSync(logPathFor(rootId), "utf-8"), rootLog);
@@ -379,6 +388,13 @@ describe("completed-subagent continuation", () => {
             // only thing this test observes changing later is continuation's work.
             await deliveredOutcome(h, killedId, 6000);
             await waitTerminal(killedId);
+            const interruptedHistory = sessionMessages(sessionPath);
+            assert.deepEqual(interruptedHistory.slice(0, 2), [
+                { role: "user", text: "INITIAL TASK" },
+                { role: "assistant", text: "INITIAL ANSWER" },
+            ]);
+            assert.deepEqual(interruptedHistory.slice(2), interruptedHistory.length === 3 ? [correctionAnswer] : [],
+                "the stop may interrupt before or after the one correction answer");
 
             // The killed attempt is now a saved conversation, while the other
             // terminal outcomes keep their existing refusal.
@@ -456,13 +472,13 @@ describe("completed-subagent continuation", () => {
             assert.equal(continued.kind, "ok");
             assert.equal(continued.conversation.path, sessionPath, "the continuation reopens the same session file");
             assert.deepEqual(sessionMessages(sessionPath), [
-                { role: "user", text: "INITIAL TASK" },
-                { role: "assistant", text: "INITIAL ANSWER" },
+                ...interruptedHistory,
                 { role: "user", text: "RECOVER THE WORK" },
                 { role: "assistant", text: "FOLLOWUP:RECOVER THE WORK" },
+                correctionAnswer,
             ]);
             const child = childRecord(resumed.pid);
-            assert.equal(child.before, 2, "the new attempt loaded the interrupted history before appending");
+            assert.equal(child.before, interruptedHistory.length, "the new attempt loaded the interrupted history before appending");
 
             // The interrupted attempt is evidence, not a draft to rewrite.
             assert.equal(JSON.stringify(readMeta(killedId)), killedSnapshot, "the killed attempt is not mutated by continuation");
@@ -748,19 +764,21 @@ describe("completed-subagent continuation", () => {
             assert.equal(completionCallbacks(successor, resumedId).length, 1, "the invoking foreground was notified");
             assert.equal(completionCallbacks(owner, resumedId).length, 0, "the original owner was not notified again");
 
-            // Full history retained: the prior two messages are still in the same
+            // Full history retained: the prior three messages are still in the same
             // file and the follow-up was appended to it.
             assert.equal(sessionHeader(sessionPath).id, rootId);
             assert.deepEqual(sessionMessages(sessionPath), [
                 { role: "user", text: "INITIAL TASK" },
                 { role: "assistant", text: "INITIAL ANSWER" },
+                correctionAnswer,
                 { role: "user", text: "PICK UP THE WORK" },
                 { role: "assistant", text: "FOLLOWUP:PICK UP THE WORK" },
+                correctionAnswer,
             ]);
             const child = childRecord(resumed.pid);
             assert.equal(child.argv[child.argv.indexOf("--session") + 1], sessionPath,
                 "the successor's child reopened the retained session file");
-            assert.equal(child.before, 2, "the successor's child loaded the prior history before appending");
+            assert.equal(child.before, 3, "the successor's child loaded the prior history before appending");
 
             // Prior evidence is untouched by a cross-foreground continuation.
             assert.equal(readFileSync(logPathFor(rootId), "utf-8"), rootLog);
@@ -1243,7 +1261,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(continued.status, "completed");
             assert.equal(continued.sessionId, rootId);
             const child = childRecord(continued.pid);
-            assert.equal(child.before, 2, "the batch continuation reopened the saved history");
+            assert.equal(child.before, 3, "the batch continuation reopened the saved history");
             assert.equal(child.sessionId, null, "a continuation reopens --session, not a new session id");
             assert.equal(readMeta(rootId).status, "completed", "the prior attempt is unchanged");
 
