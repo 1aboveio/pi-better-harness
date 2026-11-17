@@ -74,9 +74,15 @@ test("read-only identity is available with outside files Off and shell scripts O
     const f = fixture(t);
     f.policy.permissions!.outsideProject = "off";
     f.policy.permissions!.shell = false;
-    let output = "";
-    const result = await f.run({ kind: "argv", execPath: process.execPath, execArgs: ["-e", caller] }, f.root, { onData: chunk => { output += chunk; } });
-    assert.equal(result.exitCode, 0, output);
+    // CI may install Node outside the OS runtime roots. Outside Off must keep
+    // denying that path; exercise the admitted helper directly instead.
+    const child = spawn("/bin/sleep", ["30"]); await once(child, "spawn");
+    try {
+        let output = "";
+        const result = await f.run({ kind: "argv", execPath: "ps", execArgs: ["-p", String(child.pid), "-o", "lstart=", "-o", "comm="] }, f.root, { onData: chunk => { output += chunk; } });
+        assert.equal(result.exitCode, 0, output);
+        assert.match(output.trim(), /\/bin\/sleep$/);
+    } finally { const exited = once(child, "exit"); child.kill(); await exited; }
 });
 
 test("helper refuses unsupported argv, invalid, other-user and exited PIDs without identity output", { skip: !mac }, async t => {
