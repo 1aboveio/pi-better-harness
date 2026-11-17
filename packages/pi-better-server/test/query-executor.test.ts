@@ -373,10 +373,52 @@ test("slow caller cancellation preserves other clients and ignores late replies"
   } finally { await f.close(); }
 });
 
+test("an 800 ms setup subscription cannot verify a source while fixture bootstrap is held", { timeout: 10000 }, async t => {
+  const implementation = new URL("./support/cancellable-query-worker.mjs", import.meta.url).href;
+  const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(`
+    import { parentPort } from "node:worker_threads";
+    const deferred = [];
+    const buffer = message => {
+      if (["query", "cancel"].includes(message.type)) deferred.push(message);
+    };
+    parentPort.on("message", buffer);
+    await new Promise(resolve => {
+      const release = message => {
+        if (message.type !== "release-bootstrap") return;
+        parentPort.off("message", release); resolve();
+      };
+      parentPort.on("message", release);
+    });
+    await import(${JSON.stringify(implementation)});
+    parentPort.off("message", buffer);
+    for (const message of deferred) parentPort.emit("message", message);
+  `)}`);
+  const f = await fixture({ timeoutMs: 800, watchdogMs: 2500, capacity: 2, workerUrl });
+  try {
+    const client = await f.client();
+    await assert.rejects(ready(client), /runtime-timeout: caller read deadline exceeded; source was not verified/);
+    const cold = f.executor.metrics().executor;
+    assert.equal(cold.callerTimeouts, 1, "the eager setup subscription owns this deadline");
+    assert.equal(cold.queueTimeouts, 0);
+    assert.equal(cold.singleflightHits, 0, "shared-caller work has not begun");
+    assert.equal(f.executor.observation().status, "rebuilding", "an expired setup read cannot verify the source");
+    f.worker.postMessage({ type: "release-bootstrap" });
+    await f.bootstrapped;
+    await ready(client);
+    assert.equal(client.snapshot?.status, "ready");
+    assert.equal(f.executor.metrics().executor.callerTimeouts, 1);
+    assert.equal(f.executor.metrics().executor.restarts, 0, "a setup deadline does not require a worker restart");
+    t.diagnostic(JSON.stringify({ coldCallerTimeouts: cold.callerTimeouts, coldQueueTimeouts: cold.queueTimeouts,
+      coldSharedHits: cold.singleflightHits, verifiedAfterBootstrap: client.snapshot?.status }));
+  } finally { f.worker.postMessage({ type: "release-bootstrap" }); await f.close(); }
+});
+
 test("shared callers have separate deadlines and queue timeouts retain bounded admission", { timeout: 10000 }, async () => {
   const f = await fixture({ timeoutMs: 800, watchdogMs: 2500, capacity: 2,
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   try {
+    // Measure caller/queue lifetimes, not cold imports before the fixture owns RPCs.
+    await f.bootstrapped;
     const a = await f.client(), b = await f.client(), c = await f.client(); await ready(a);
     const first = assert.rejects(a.request("runtime_get_snapshot", { scope: { id: "sa_slow" } }), /runtime-timeout/);
     const queued = assert.rejects(c.request("runtime_get_snapshot", { scope: { limit: 2 } }), /runtime-overloaded: queued/);
