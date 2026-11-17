@@ -3,9 +3,50 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireMutationStore } from '../src/runtime/mutation-store.ts';
+import { acquireMutationStore, mutationStoreMetrics } from '../src/runtime/mutation-store.ts';
 import { RuntimeCancellation } from '../src/runtime/cancellation.ts';
+import { RuntimeResultSupervision } from '../src/runtime/result-supervision.ts';
 const { cancellationCredential } = await import(new URL('../../operation-coordinator/index.ts', import.meta.url).href);
+
+test('root control, cancellation and result owners retain exactly three logical references to one physical store', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'cancellation-store-owners-'));
+  const control = acquireMutationStore(root);
+  let cancellation: RuntimeCancellation | undefined, results: RuntimeResultSupervision | undefined;
+  const check = (owner: string, leases: number) => {
+    const metrics = mutationStoreMetrics(root);
+    assert.deepEqual(metrics, { active: leases ? 1 : 0, leases });
+    t.diagnostic(JSON.stringify({ owner, ...metrics }));
+  };
+  try {
+    check('root-control', 1);
+    cancellation = new RuntimeCancellation(root, 'store-owners');
+    check('cancellation', 2);
+    results = new RuntimeResultSupervision(root, 'store-owners');
+    check('result-supervision', 3);
+    for (let i = 0; i < 5; i++) {
+      await cancellation.handle({ type: 'runtime_cancellation_status' });
+      results.reconcile();
+      check('status-no-growth', 3);
+    }
+    const unexpected = acquireMutationStore(root);
+    try {
+      assert.equal(unexpected.store, control.store);
+      assert.equal(unexpected.budget, control.budget);
+      check('unexpected-reference-remains-visible', 4);
+    } finally { unexpected.release(); unexpected.release(); }
+    check('required-owners-only', 3);
+    await cancellation.close(); cancellation = undefined;
+    check('cancellation-closed', 2);
+    results.close(); results = undefined;
+    check('results-closed', 1);
+    assert.ok(control.store.cancellationRuntimeEpoch('remaining-control') > 0);
+    control.release();
+    check('control-closed', 0);
+  } finally {
+    await cancellation?.close(); results?.close(); control.release();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('durable cancellation recovery waits for root control capacity and accounts each exact intent', async () => {
   const root = mkdtempSync(join(tmpdir(), 'cancellation-budget-'));
