@@ -2021,9 +2021,10 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
 
     it("failed callback handoff is not permanently suppressed; reload delivers one later success", async () => {
         await withFakeClock(async () => {
-            let failNext = true;
+            let unavailable = true;
+            let rejectedHandoffs = 0;
             const h = await makeHarness({ sendMessage(message, options, sent) {
-                if (failNext) { failNext = false; throw new Error("simulated host delivery failure"); }
+                if (unavailable) { rejectedHandoffs++; throw new Error("simulated host delivery failure"); }
                 sent.push({ message, options });
             } });
             const { tools, handlers, sent, notes, pi, ctx } = h;
@@ -2053,7 +2054,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 await handlers.get("session_start")({}, ctx);
                 mock.timers.tick(HEALTH_TICK_MS);
 
-                if (!await waitFor(() => !failNext)) throw new Error(`first handoff was never attempted: ${JSON.stringify({ runtime: stopWorkRuntime.diagnostics(), recipient: await h.recipient.diagnostics(id) })}`);
+                if (!await waitFor(() => rejectedHandoffs > 0)) throw new Error(`first handoff was never attempted: ${JSON.stringify({ runtime: stopWorkRuntime.diagnostics(), recipient: await h.recipient.diagnostics(id) })}`);
                 assert.equal(healthMsgsFor(sent, id).length, 0, "failed handoff must not count as delivered");
                 assert.equal(
                     readMeta(id).lostCallbackSentAt,
@@ -2063,6 +2064,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 assert.equal(isHealthTickerActive(), false, "recipient delivery does not keep runtime supervision alive");
 
                 // Simulate /reload after the host recovered: next handoff succeeds once.
+                unavailable = false;
                 await handlers.get("session_start")({}, ctx);
                 mock.timers.tick(HEALTH_TICK_MS);
 
