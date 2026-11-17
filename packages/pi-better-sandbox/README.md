@@ -253,7 +253,23 @@ hidden-root profiles without `/proc` fail rather than gaining a new host mount.
 
 On macOS, `/bin/ps` is setuid and can be refused at execution by Seatbelt even
 when process information reads are allowed. Enabling Process access provides
-`process_list`; it does not authorize raw `/bin/ps` or an unconfined workaround.
+`process_list`. With Run applications enabled, Main and Subagents also prepend
+a runtime-owned `ps` compatibility entry to task command PATH. It supports only
+`ps -p PID -o lstart= -o comm=` for a current-user process, preserving the system
+command's timestamp/path output. Unsupported arguments fail explicitly; callers
+that reset PATH or use absolute `/bin/ps` retain the OS restriction.
+
+The compatibility entry is compiled once per session control directory from
+fixed harness source with `/usr/bin/clang` (Xcode Command Line Tools required).
+It is non-setuid, protected from task writes, integrity-checked before reuse,
+and runs inside the same sandbox. It checks UID, executable path and stable
+kernel start time before emitting output; no argv, environment or process control
+is exposed. The legacy text format has second-level start-time precision and is
+not a durable process handle. Process Off does not install the entry; it remains
+an adapter control, not a syscall-wide prohibition. Compiler failure leaves an
+explicitly unavailable entry and does not block unrelated commands. Install the
+toolchain and restart the session to retry. Linux and Background execution are
+unchanged. No raw `/bin/ps` or unconfined fallback is authorized.
 
 File and shell operations use the kernel: macOS uses Seatbelt (`sandbox-exec`)
 and Linux uses Bubblewrap (`bwrap`). `read`, `write`, and `edit` keep Pi's normal

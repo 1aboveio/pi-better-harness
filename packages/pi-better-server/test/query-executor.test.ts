@@ -234,6 +234,7 @@ for (const { count, readOnEvent } of [
       } });
     }));
     phase = "in-scope-update";
+    // A committed replacement has one epoch; partial writes are tested separately.
     await commitMetadata(join(f.root, "runs/sa_b2/meta.json"), "changed");
     await f.executor.livenessReasons(); await Promise.all(received);
     const overlapping = await Promise.all(eventReads);
