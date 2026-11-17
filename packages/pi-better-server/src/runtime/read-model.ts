@@ -2,7 +2,7 @@ import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
 import { opendir, readFile, stat, writeFile, mkdir, rename } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
-import { dirname, relative, join, resolve, sep } from "node:path";
+import { basename, dirname, relative, join, resolve, sep } from "node:path";
 import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -225,6 +225,11 @@ export class WorkReadModel {
 
   /** File notifications are hints, never authority. Unknown names owe scoped repair. */
   fileHint(directory: string, name?: string) {
+    // Some fs.watch backends report the watched directory's own name for a
+    // contained write. It identifies a source to verify, not a child entry.
+    if (name === basename(directory)) {
+      name = directory.startsWith(this.runs + sep) ? "meta.json" : undefined;
+    }
     let path: string | undefined;
     if (directory === this.runs && name && safeId.test(name)) path = join(directory, name, "meta.json");
     else if ([this.archives, this.markers].includes(directory) && name && /^[A-Za-z0-9_-]+\.json$/.test(name)) path = join(directory, name);

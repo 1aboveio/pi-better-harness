@@ -66,6 +66,34 @@ test("late compact archives cannot replace live recipient markers or reset its c
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("directory self-name callbacks verify their owned source instead of a fictitious child", async () => {
+  const f = fixture();
+  const id = "sa_self_name";
+  f.put(id, { status: "completed", name: "first" });
+  const model = new WorkReadModel(f.agent, "directory-self-name", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile(); await settleHints(model);
+    const trace = sourceEventTrace(model);
+    f.put(id, { status: "completed", name: "latest" });
+    const before = trace().total;
+    (model as any).watchers.get(join(f.runs, id)).emit("change", "change", id);
+    const admitted = trace().records.filter((entry: any) => entry.sequence > before);
+    assert.ok(admitted.some((entry: any) => entry.stage === "raw-callback" && entry.owned === true));
+    assert.ok(admitted.some((entry: any) => entry.stage === "queue-admit" && entry.path === join(f.runs, id, "meta.json")),
+      "a self-name child event must admit its actual metadata path");
+    await settleHints(model);
+    assert.equal(model.snapshot({ id }).rows[0]?.meta.name, "latest");
+    f.put("sa_root_self", { status: "completed", name: "from-root" });
+    const rootBefore = trace().total;
+    (model as any).watchers.get(f.runs).emit("change", "change", "runs");
+    const rootEvents = trace().records.filter((entry: any) => entry.sequence > rootBefore);
+    assert.equal(rootEvents.some((entry: any) => entry.stage === "queue-admit" && entry.path === join(f.runs, "runs", "meta.json")), false,
+      "a source-root self event is not a run named runs");
+    await model.reconcile(); await settleHints(model);
+    assert.equal(model.snapshot({ id: "sa_root_self" }).rows[0]?.meta.name, "from-root");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("retired and current raw callbacks cross only their owned source boundaries", async t => {
   const f = fixture();
   const model = new WorkReadModel(f.agent, "callback-ownership", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
