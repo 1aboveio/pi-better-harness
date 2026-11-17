@@ -6,7 +6,7 @@ import { once } from "node:events";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync, openSync, closeSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import type { Worker } from "node:worker_threads";
+import { MessageChannel, receiveMessageOnPort, type Worker } from "node:worker_threads";
 import { fixture } from "./support/query-fixture.ts";
 import { HostSourceWatches, nativeWatch } from "../src/runtime/source-watch.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
@@ -527,6 +527,14 @@ test("cold bootstrap caller deadline does not imply a wedged read worker", { tim
 });
 
 test("responsive rebuilding outlives the watchdog without claiming source readiness", { timeout: 10000 }, async t => {
+  const { bootstrapHeartbeat } = await import(String("./support/bootstrap-heartbeat.mjs"));
+  const { port1, port2 } = new MessageChannel();
+  const stop = bootstrapHeartbeat(port1);
+  try {
+    assert.deepEqual(receiveMessageOnPort(port2)?.message, { type: "heartbeat" },
+      "bootstrap must report control liveness before waiting for the first interval or importing the model");
+    assert.equal(receiveMessageOnPort(port2), undefined, "one in-flight bootstrap heartbeat");
+  } finally { stop(); port1.close(); port2.close(); }
   const f = await fixture({ watchdogMs: 800,
     workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
   try {
