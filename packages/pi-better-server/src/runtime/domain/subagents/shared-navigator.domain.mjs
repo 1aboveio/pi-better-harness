@@ -6,6 +6,79 @@ export default function navigatorExtension() {
     // Internal shared package. Pi may scan its symlink in the extension directory
     // for sibling relative imports; loading it directly should be harmless.
 }
+/** UI time is independent of worker time; repeated refreshes never renew it. */
+export function createTerminalRowRetention(retentionMs = 30_000) {
+    const held = new Map();
+    const dismissed = new Set();
+    return {
+        clear() { held.clear(); dismissed.clear(); },
+        dismiss(id) { held.delete(id); dismissed.add(id); },
+        merge(rows, now) {
+            const result = [];
+            const present = new Set(rows.map(row => row.id));
+            for (const id of dismissed)
+                if (!present.has(id))
+                    dismissed.delete(id);
+            for (const row of rows) {
+                if (dismissed.has(row.id))
+                    continue;
+                const terminal = ["completed", "succeeded", "failed", "cancelled", "killed", "lost", "timed_out"].includes(row.status);
+                if (!terminal) {
+                    held.delete(row.id);
+                    result.push(row);
+                    continue;
+                }
+                let entry = held.get(row.id);
+                if (!entry) {
+                    entry = { row, until: now + retentionMs };
+                    held.set(row.id, entry);
+                }
+                entry.row = { ...row, expiresAt: entry.until };
+                if (now < entry.until)
+                    result.push(entry.row);
+            }
+            for (const [id, entry] of held) {
+                if (present.has(id))
+                    continue;
+                if (now < entry.until)
+                    result.push(entry.row);
+                else
+                    held.delete(id);
+            }
+            return result;
+        },
+    };
+}
+/** A frontend-only diagnostic, never an execution record or authority to retry. */
+export async function observeNavigatorLaunch(ctx, providerId, key, name, launch) {
+    const scope = JSON.stringify([ctx.cwd, ctx.sessionManager?.getSessionId?.()]);
+    const report = (error) => {
+        const s = state();
+        if (!isNavigatorUiAvailable(s.uiCtx) || s.observationScope !== scope)
+            return;
+        const id = `launch-error-${key}`;
+        const primary = error instanceof Error ? error.message : String(error);
+        const failures = s.launchFailures ??= new Map();
+        const identity = rowKey(providerId, id);
+        failures.set(identity, { providerId, id, name, status: "failed", statusTone: "failed", kind: "launch-error", elapsed: "", primary,
+            secondary: "Launch failed or was not confirmed; inspect before retrying.", sortStartedAt: Date.now() });
+        // Diagnostics are session-local and bounded, including expired tombstones.
+        if (failures.size > 128)
+            failures.delete(failures.keys().next().value);
+        refreshBackgroundWorkNavigator();
+    };
+    try {
+        const result = await launch();
+        const response = result;
+        if (response?.isError)
+            report(response.content?.filter(item => item.type === "text").map(item => item.text).join("\n") || "Launch request failed");
+        return result;
+    }
+    catch (error) {
+        report(error);
+        throw error;
+    }
+}
 const GLOBAL_KEY = Symbol.for("pi-better-harness.navigator.state");
 const FACTORY_MARK = "__piBetterHarnessNavigatorFactory";
 const FACTORY_REFRESH = "__piBetterHarnessNavigatorRefresh";
@@ -96,6 +169,12 @@ export function ensureBackgroundWorkNavigator(ctx, deps, owner) {
     if (!isNavigatorUiAvailable(ctx))
         return;
     const s = state();
+    const scope = JSON.stringify([ctx.cwd, ctx.sessionManager?.getSessionId?.()]);
+    if (s.observationScope !== scope) {
+        s.terminalRows?.clear();
+        s.launchFailures?.clear();
+    }
+    s.observationScope = scope;
     s.uiCtx = ctx;
     s.uiOwner = owner;
     s.deps = {
@@ -142,6 +221,9 @@ export function disposeBackgroundWorkNavigator(ctx, owner) {
     stopMainListWidget();
     const activeCtx = ctx ?? s.uiCtx;
     s.uiCtx = undefined;
+    s.terminalRows?.clear();
+    s.launchFailures?.clear();
+    s.observationScope = undefined;
     s.uiOwner = undefined;
     if (activeCtx && isNavigatorUiAvailable(activeCtx)) {
         try {
@@ -398,6 +480,12 @@ function listRows(now = Date.now()) {
         catch {
             providerRows = [];
         }
+        providerRows = [...providerRows, ...[...(state().launchFailures?.values() ?? [])].filter(row => row.providerId === provider.id)];
+        const retention = state().terminalRows ??= new Map();
+        if (!retention.has(provider.id))
+            retention.set(provider.id, createTerminalRowRetention());
+        if (isNavigatorUiAvailable(state().uiCtx))
+            providerRows = retention.get(provider.id).merge(providerRows, now);
         const orderedProviderRows = [...providerRows].sort((a, b) => b.sortStartedAt - a.sortStartedAt || rowDisplayName(a).localeCompare(rowDisplayName(b)));
         let showSection = orderedProviderRows.length > 0 || provider.parentRow !== undefined;
         try {
@@ -661,6 +749,9 @@ function prepareDetail(navigatorId, options) {
 }
 function detailFor(navigatorId, now = Date.now(), options) {
     const { providerId, id } = splitRowKey(navigatorId);
+    const failed = state().launchFailures?.get(navigatorId);
+    if (failed)
+        return { providerId, id, title: failed.name ?? "Launch failed", status: "failed", statusTone: "failed", metadata: [], evidence: { label: "Launch error", text: failed.primary } };
     const provider = state().providers.get(providerId);
     if (!provider)
         return null;
@@ -675,10 +766,19 @@ function closeFor(row) {
     if (row.parentRow)
         return { action: "not-closable", providerId: row.providerId, id: row.id };
     const provider = state().providers.get(row.providerId);
+    if (state().launchFailures?.delete(row.navigatorId)) {
+        state().terminalRows?.get(row.providerId)?.dismiss(row.id);
+        return { action: "dismissed", providerId: row.providerId, id: row.id };
+    }
     if (!provider)
         return { action: "missing", providerId: row.providerId, id: row.id };
     try {
-        return provider.close(row.id);
+        const outcome = provider.close(row.id);
+        if (["dismissed", "stopped-and-dismissed"].includes(outcome.action)
+            || outcome.action === "requested" && ["completed", "succeeded", "failed", "cancelled", "killed", "lost", "timed_out"].includes(row.status)) {
+            state().terminalRows?.get(row.providerId)?.dismiss(row.id);
+        }
+        return outcome;
     }
     catch {
         return { action: "missing", providerId: row.providerId, id: row.id };

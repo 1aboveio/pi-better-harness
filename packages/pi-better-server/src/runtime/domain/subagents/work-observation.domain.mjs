@@ -70,7 +70,10 @@ async function collect(candidate, current) {
                         rows.push(...page.rows);
                         cursor = page.nextCursor;
                     }
-                    const history = await candidate.get({ ...context.origin, active: false, endedAfter: Date.now() - TERMINAL_NAVIGATOR_RETENTION_MS, limit: 200 });
+                    // Cover the disconnect interval, not merely the last 30 s of
+                    // worker time. The navigator starts its own visibility clock.
+                    const endedAfter = Math.min(Date.now() - TERMINAL_NAVIGATOR_RETENTION_MS, snapshot?.observedAtLocal ?? Date.now());
+                    const history = await candidate.get({ ...context.origin, active: false, endedAfter, limit: 200 });
                     if (history.instanceId !== first.instanceId)
                         throw new Error("resync_required: history changed");
                     if (current !== generation || candidate !== client)
@@ -86,13 +89,25 @@ async function collect(candidate, current) {
                     } while (owedCursor);
                     if (current !== generation || candidate !== client)
                         return;
+                    const historyRows = [...history.rows];
+                    let historyCursor = history.nextCursor;
+                    while (historyCursor) {
+                        const page = await candidate.get({ ...context.origin, active: false, endedAfter, limit: 200, cursor: historyCursor });
+                        if (page.scopeRevision !== history.scopeRevision || page.instanceId !== first.instanceId)
+                            throw new Error("resync_required: history pages changed");
+                        historyRows.push(...page.rows);
+                        historyCursor = page.nextCursor;
+                    }
+                    if (current !== generation || candidate !== client)
+                        return;
                     const confirmed = await candidate.get(anchorScope);
                     if (current !== generation || candidate !== client)
                         return;
                     if (confirmed.instanceId !== anchor.instanceId || confirmed.scopeRevision !== anchor.scopeRevision)
                         throw new Error("resync_required: conversation changed during collection");
-                    const allRows = [...new Map([...rows, ...history.rows, ...owed].map(row => [row.meta.id, row])).values()];
+                    const allRows = [...new Map([...rows, ...historyRows, ...owed].map(row => [row.meta.id, row])).values()];
                     snapshot = { ...first, seq: anchor.seq, observedRevisionVector: anchor.observedRevisionVector, rows: allRows, nextCursor: undefined,
+                        observedAtLocal: Date.now(),
                         totalMatching: first.totalMatching + history.totalMatching, activity: { active: rows.length } };
                     completed = true;
                     refresh();

@@ -191,7 +191,19 @@ export async function createBackgroundTools(root: string, instance: string, drai
                             forgetView(projections.keys().next().value!);
                         projections.set(viewKey, projection);
                     }
-                    return { ...projection, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: [...deliveries.values()].filter(item => ownerKey(item.scope.owner) === key).map(({ token, notification, receiptId }) => ({ token, notification, receiptId })) };
+                    // A task may finish while the client is disconnected, then
+                    // age out of the recent index before reconnect. Resolve only
+                    // the client's bounded, previously active IDs in this owner.
+                    const tasks = [...projection.tasks];
+                    const present = new Set(tasks.map((task: any) => task.id));
+                    if (Array.isArray(record.params.knownActiveIds)) {
+                        for (const id of new Set(record.params.knownActiveIds.slice(0, 200))) {
+                            if (typeof id !== 'string' || present.has(id)) continue;
+                            const task = service.readDurableTask({cwd: record.owner.workspace, sessionId: record.owner.sessionId}, id);
+                            if (task && task.dismissedAt === undefined) { tasks.push(task); present.add(id); }
+                        }
+                    }
+                    return { ...projection, tasks, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: [...deliveries.values()].filter(item => ownerKey(item.scope.owner) === key).map(({ token, notification, receiptId }) => ({ token, notification, receiptId })) };
                 }
                 const origin = { cwd: record.owner.workspace, sessionId: record.owner.sessionId };
                 if (record.tool === '__background_detail' || record.tool === '__background_action') {

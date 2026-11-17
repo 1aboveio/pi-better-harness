@@ -7,6 +7,21 @@ import { createManagedBackgroundFrontend } from './managed-frontend.js';
 const context = (branch: any[] = []) => ({ cwd: '/workspace', sessionManager: { getSessionId: () => 'native', getBranch: () => branch } } as any);
 beforeEach(() => { fixture.request.mockReset(); fixture.enqueue.mockReset();fixture.urgent.mockReset(); fixture.observe = undefined; });
 describe('managed native UI boundary', () => {
+    it('passes late terminal observations to the navigator and keeps rows through rebuilding and request failure', async () => {
+      const origin = {cwd:'/workspace',sessionId:'native'};
+      const terminal = {id:'finished',terminal:true,endedAt:Date.now()-60000};
+      fixture.request.mockResolvedValue({tasks:[terminal],legacyRows:[{id:'legacy',status:'failed',expiresAt:1}],deliveries:[]});
+      const frontend=createManagedBackgroundFrontend({registerTool(){}} as any);
+      frontend.host.start(context());await frontend.host.reconcileNow();
+      expect(frontend.host.listDurableTasks(origin,{retentionMs:30000})).toEqual([terminal]);
+      expect(frontend.ui.rows()).toHaveLength(1);
+      fixture.request.mockResolvedValue({status:'rebuilding',tasks:[],legacyRows:[]});
+      await frontend.host.reconcileNow();expect(frontend.ui.rows()).toHaveLength(1);
+      fixture.request.mockRejectedValue(new Error('disconnected'));
+      await expect(frontend.host.reconcileNow()).rejects.toThrow('disconnected');
+      expect(frontend.host.listDurableTasks(origin)).toEqual([terminal]);
+      frontend.host.close();expect(frontend.ui.rows()).toHaveLength(0);
+    });
     it('keeps 60 render reads free of provider requests and fetches evidence only on explicit selection', async () => {
         fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => tool === '__background_poll' ? { tasks: [{ id: 'durable', active: true }], legacyRows: [{ id: 'legacy', status: 'running' }], deliveries: [] } : tool === '__background_log' ? { stdout: 'evidence' } : { id: 'legacy' });
         const frontend = createManagedBackgroundFrontend({ registerTool() { } } as any), ctx = context();

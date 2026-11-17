@@ -29,7 +29,7 @@ import { withAssignmentObservations } from "./assignment-projection.mjs";
 import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { disposeBackgroundWorkNavigator, ensureBackgroundWorkNavigator, isNavigatorUiAvailable, refreshBackgroundWorkNavigator, registerBackgroundWorkProvider, renderRegisteredWorkDetail, } from "./shared-navigator.domain.mjs";
+import { disposeBackgroundWorkNavigator, ensureBackgroundWorkNavigator, isNavigatorUiAvailable, refreshBackgroundWorkNavigator, registerBackgroundWorkProvider, observeNavigatorLaunch, renderRegisteredWorkDetail, } from "./shared-navigator.domain.mjs";
 import { spawnDetached } from "./spawn.domain.mjs";
 import { abortUncommittedLaunch } from "./launch-abort.domain.mjs";
 import { parseRun, parseRunForLifecycle, resetParseRunCursor } from "./parse.domain.mjs";
@@ -1617,9 +1617,7 @@ function subagentWorkRows(now) {
             if (!undismissed.has(id))
                 pendingNavigatorDismissals.delete(id);
     }
-    const rows = sourceRows.filter((row) => !pendingNavigatorDismissals.has(row.meta.id) && !row.meta.dismissedAt &&
-        (["running", "waiting"].includes(row.assignment.state) || typeof (row.meta.endedAt ?? row.meta.lostAt) !== "number" ||
-            now - (row.meta.endedAt ?? row.meta.lostAt) < TERMINAL_NAVIGATOR_RETENTION_MS)).map((row) => {
+    const rows = sourceRows.filter((row) => !pendingNavigatorDismissals.has(row.meta.id) && !row.meta.dismissedAt).map((row) => {
         const meta = row.meta;
         const health = row.health ? observeRunHealth({ ...row.health, status: row.assignment.processStatus === "exited" ? meta.status : row.assignment.processStatus, now, startedAt: meta.startedAt }) : undefined;
         const terminal = !["running", "waiting"].includes(row.assignment.state);
@@ -1816,7 +1814,8 @@ function ensureSubagentProvider() {
         label: "Subagents",
         priority: 10,
         visibleCount: () => navigatorRunningCount(),
-        showSection: (rows) => rows.some((row) => row.status === "running" || ["parking", "waiting", "ready", "resuming", "held", "degraded", "rebuilding"].includes(row.status)),
+        // The last worker becoming terminal must not hide its retained result.
+        showSection: (rows) => rows.length > 0,
         parentRow: (now) => mainAgentWorkRow(now),
         listRows: (now) => subagentWorkRows(now),
         detail: (id, now, options) => subagentWorkDetail(id, now, options),
@@ -2656,7 +2655,7 @@ export default function (pi, managed) {
             } } : { ...definition, async execute(key, params, _signal, _onUpdate, ctx) {
                 catalogHostFrom(ctx);
                 const { submitManagedLaunch } = await import("./managed-launch-client.domain.mjs");
-                return await submitManagedLaunch(pi, ctx, key, definition.name, params);
+                return await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, params));
             } });
     };
     announceExecutionAdapter(pi, {

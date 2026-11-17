@@ -4,6 +4,7 @@ import { requestBackgroundTool } from "./managed-client.domain.mjs";
 import { onBackgroundObservation } from "./work-observation.domain.mjs";
 import { getCallbackBatcher } from "./shared-callback-batcher.domain.mjs";
 import { registerObservedWaitClient } from "./observed-waits.domain.mjs";
+import { observeNavigatorLaunch } from "./shared-navigator.domain.mjs";
 /** Native transcript delivery and cached UI projections; no coordinator or supervisor. */
 export function createManagedBackgroundFrontend(pi) {
     let ctx, generation = 0, refresh, dirty = false;
@@ -55,13 +56,16 @@ export function createManagedBackgroundFrontend(pi) {
         dirty = false;
         const captured = ctx, version = generation;
         refresh = (async () => {
-            const snapshot = await request('__background_poll', {});
+            const snapshot = await request('__background_poll', { knownActiveIds: rows.filter(row => row.active).map(row => row.id).slice(0, 200) });
             if (version !== generation)
                 return;
             if (snapshot.recoveryPending === true)
                 dirty = true;
-            rows = snapshot.tasks ?? [];
-            legacyRows = snapshot.legacyRows ?? [];
+            // A rebuilding snapshot is not evidence that visible tasks vanished.
+            if (snapshot.status !== 'rebuilding' && snapshot.status !== 'degraded') {
+                rows = snapshot.tasks ?? [];
+                legacyRows = snapshot.legacyRows ?? [];
+            }
             notify();
             for (const item of snapshot.deliveries ?? []) {
                 if (queued.has(item.token))
@@ -100,7 +104,7 @@ export function createManagedBackgroundFrontend(pi) {
         close() { ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); queued.clear(); ownership.clear(); },
         isParentOriginActive: active,
         onDurableTaskChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-        listDurableTasks(origin, options = {}) { return active(origin) ? rows.filter(row => !options.retentionMs || !row.terminal || Date.now() - (row.endedAt ?? Date.now()) < options.retentionMs) : []; },
+        listDurableTasks(origin, _options = {}) { return active(origin) ? rows : []; },
         readDurableTask(origin, id) { return active(origin) ? rows.find(row => row.id === id) : undefined; },
         ownsDurableTask(id) { if (!ctx || adoptedScope !== scopeOf(ctx))
             return false; return ownership.has(id) || rows.some(row => row.id === id); },
@@ -135,7 +139,10 @@ export function createManagedBackgroundFrontend(pi) {
                             throw new Error('Native Background context unavailable');
                         adoptContext(context);
                         const capturedGeneration = generation, capturedScope = adoptedScope;
-                        const result = await requestBackgroundTool(pi, context, id, definition.name, params, definition.parameters, signal);
+                        const launch = () => requestBackgroundTool(pi, context, id, definition.name, params, definition.parameters, signal);
+                        const spawning = ['bg_task_spawn', 'bg_task_spawn_batch', 'bg_task_watch'].includes(definition.name)
+                            || definition.name === 'bg_task' && ['spawn', 'watch'].includes(params?.action);
+                        const result = spawning ? await observeNavigatorLaunch(context, 'background-tasks', id, params?.name || 'Background task launch', launch) : await launch();
                         if (ctx === context && generation === capturedGeneration && adoptedScope === capturedScope)
                             rememberOwnership(result.details?.backgroundOwnership, context);
                         await host.reconcileNow().catch(() => undefined);
@@ -146,7 +153,7 @@ export function createManagedBackgroundFrontend(pi) {
         } });
     registerObservedWaitClient(proxy, host);
     const ui = {
-        rows: () => legacyRows.filter(row => !row.expiresAt || row.expiresAt > Date.now()),
+        rows: () => legacyRows,
         prepareDetail(id, options) {
             const lines = options?.logTailLines ?? 40, key = `${id}:${lines}`;
             const durable = rows.some(row => row.id === id), cache = durable ? logs : details;
