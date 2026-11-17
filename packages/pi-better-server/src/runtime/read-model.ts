@@ -109,6 +109,7 @@ export class WorkReadModel {
   private coordinator = "unknown";
   private assignmentBaseline?: { key: string; seq: string };
   private assignmentFault?: { state: WorkSnapshot["status"]; reason?: string };
+  private unsupportedAssignmentRevision?: string;
   private revision = 0;
   private scopeSequence = 0;
   private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number; status: string }>();
@@ -410,8 +411,12 @@ export class WorkReadModel {
   private refreshAssignments(baselineOnly = false) {
     if ((!this.imported && !baselineOnly) || this.staged) return;
     let release: (() => void) | undefined;
+    let revision: string | undefined;
     try {
+      if (this.unsupportedAssignmentRevision && this.unsupportedAssignmentRevision === this.reader.revision()) return;
+      this.unsupportedAssignmentRevision = undefined;
       const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
+      revision = snapshot.revision;
       const changes = this.reader.changes();
       if (changes.has("*")) {
         const key = `${this.reader.changeMetrics.generation}:${changes.get("*")}`;
@@ -475,6 +480,7 @@ export class WorkReadModel {
       // A coordinator has never been required for plain archived/log-only runs.
       // Losing an already observed database still degrades the existing coverage.
       if ((error as NodeJS.ErrnoException).code === "ENOENT" && this.coordinator === "unknown") return;
+      if (error instanceof Error && error.message === "Unsupported assignment source schema") this.unsupportedAssignmentRevision = revision;
       this.assignmentFault ??= { state: this.state, reason: this.reason };
       if (String(error).includes("no such table: assignment_change_source")) {
         // Old sources have no feed. Finish one budgeted compatibility pass;
@@ -503,12 +509,15 @@ export class WorkReadModel {
       return drain ? this.pending.then(() => this.reconcile()) : this.pending;
     }
     this.pending = (async () => {
-      if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
+      if (drain && this.repair && !this.unsupportedAssignmentRevision) { await this.repair.return(undefined); this.repair = undefined; }
       do {
         this.dirty = false;
         // Background progress is independent of whether Subagent repair finds files.
         if (this.background.refresh()) this.publish(true);
         this.refreshAssignments();
+        // Metadata repair cannot verify an incompatible coordinator. Keep its
+        // obligations and last verified rows until a different source revision.
+        if (this.unsupportedAssignmentRevision) break;
         if (this.hints.size) {
           const entries = [...this.hints].slice(0, 32);
           for (const [path, queued] of entries) { this.hints.delete(path); this.scheduling.maxQueueAgeMs = Math.max(this.scheduling.maxQueueAgeMs, Date.now() - queued); }
@@ -545,7 +554,7 @@ export class WorkReadModel {
       this.repair = undefined; this.state = "degraded"; this.reason = String(error).slice(0, 512); this.publish();
     }).finally(() => {
       this.pending = undefined;
-      if ((this.hints.size || this.dirty) && !this.closed) { this.dirty = false; void this.reconcile(false); }
+      if ((this.hints.size || this.dirty) && !this.closed && !this.unsupportedAssignmentRevision) { this.dirty = false; void this.reconcile(false); }
     });
     return this.pending;
   }
@@ -1025,6 +1034,7 @@ export class WorkReadModel {
     const now = Date.now();
     const rows = page.map((record: any) => {
       const row = JSON.parse(record.payload);
+      if (this.unsupportedAssignmentRevision) row.assignment = { ...row.assignment, verified: false, reason: this.reason };
       if (row.health) row.health.nextDeadline = nextHealthDeadline(row.health, row.meta, now);
       return row;
     });
