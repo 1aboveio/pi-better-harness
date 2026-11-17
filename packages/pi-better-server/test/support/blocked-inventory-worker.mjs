@@ -13,7 +13,9 @@ const { WorkReadModel } = await import("../../src/runtime/read-model.ts");
 
 const reconcile = WorkReadModel.prototype.reconcile;
 let model;
+let inventoryHeld = false;
 function blockInventory() {
+  inventoryHeld = true;
   let release;
   const inventory = new Promise(resolve => { release = resolve; });
   let initial;
@@ -22,13 +24,17 @@ function blockInventory() {
     initial ??= inventory.then(() => reconcile.call(this));
     return initial;
   };
-  return release;
+  return () => { inventoryHeld = false; release(); };
 }
 let release = blockInventory();
 let rpcInstalled = false;
 let releaseScanTail;
 const earlyMessages = [];
 parentPort.on("message", async message => {
+  if (message.type === "inventory-status") {
+    parentPort.postMessage({ type: "inventory-status", rpcInstalled, held: inventoryHeld, imported: model.imported });
+    return;
+  }
   if (!rpcInstalled && ["query", "cancel"].includes(message.type) && earlyMessages.length < 4) {
     earlyMessages.push({ messageType: message.type, id: message.id });
   }

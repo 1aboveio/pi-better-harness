@@ -769,6 +769,15 @@ test("an exact-ID client stops retrying a stalled inventory within its retry bud
   };
   f.worker.on("message", phase);
   try {
+    await f.bootstrapped;
+    const state = new Promise<any>(resolve => {
+      const listener = (message: any) => { if (message.type === "inventory-status") { f.worker.off("message", listener); resolve(message); } };
+      f.worker.on("message", listener);
+    });
+    f.worker.postMessage({ type: "inventory-status" });
+    const inventory = await state;
+    assert.deepEqual(inventory, { type: "inventory-status", rpcInstalled: true, held: true, imported: false });
+    inventoryBlocked = true;
     const client = await f.client();
     const began = performance.now();
     assert.equal((await client.get({ id: "sa_pending", limit: 1 })).status, "rebuilding");
