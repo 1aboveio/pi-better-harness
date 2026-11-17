@@ -174,6 +174,7 @@ import {
     buildNavigatorDetail,
 } from "./navigator.ts";
 import { enforceRegistrySizeCapOnce, runDailyCleanupOnce } from "./cleanup.ts";
+import { managedRuntimeRoot, selectContinuationRuntime } from "./continuation-runtime.ts";
 import {
     ContinuationError,
     acquireConversationLease,
@@ -3077,12 +3078,19 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             // Candidates for the task-tool plan: exclusions and bridge-supplied
             // names never reach extension admission.
             const plannedTools = allow.split(",").filter((name) => name && !requestedExcludes.has(name) && !bridgeToolNames.has(name));
+            const continuationRuntime = selectContinuationRuntime({ currentDir: selfDir(), recipe: resume?.recipe });
+            const workerPath = (path: string) => continuationRuntime?.mapPath(path) ?? path;
+            const workerArgs = (args: string[]) => continuationRuntime?.mapArgs(args) ?? args;
+            const workerResolvePath = (spec: string) => {
+                const path = resolveExtensionPath(spec);
+                return path ? workerPath(path) : path;
+            };
             const taskTools = sandboxEnabled ? planTaskTools({
                 requested: plannedTools,
                 settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
                 processAccess: permissionPlan.permissions?.processAccess ?? "off",
                 builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
-                toolExtensions: cfg.toolExtensions, resolvePath: resolveExtensionPath,
+                toolExtensions: cfg.toolExtensions, resolvePath: workerResolvePath,
             }) : undefined;
             // One effective selection feeds the task policy, child preflight, worker
             // bridge and frozen recipe, so a refused tool cannot leak into any of them
@@ -3120,8 +3128,8 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 model, virtual: (() => {
                     const slash = model?.indexOf("/") ?? -1;
                     return slash > 0 && ctx.modelRegistry?.find?.(model!.slice(0, slash), model!.slice(slash + 1))?.api === "pi-virtual";
-                })(), config: cfg, resolvePath: resolveExtensionPath,
-                configPaths: [configPath(), join(selfDir(), "config.json")],
+                })(), config: cfg, resolvePath: workerResolvePath,
+                configPaths: [configPath(), workerPath(join(selfDir(), "config.json"))],
             };
             // Bridge tools are supplied by the worker bridge extension, not by a
             // configured toolExtensions mapping: keep them out of extension
@@ -3136,19 +3144,19 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : extensionAllowlist(),
                 model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
             }) }, taskTools?.trusted.map(tool => tool.loadPath) ?? []);
-            const { args: resolvedExtArgs, missing } = extensionArgs(resolution, (spec) => resolution.paths[spec] ?? resolveExtensionPath(spec));
+            const { args: resolvedExtArgs, missing } = extensionArgs(resolution, (spec) => resolution.paths[spec] ?? workerResolvePath(spec));
             const trustedExtArgs = fullResolution.specs.map(spec => fullResolution.paths[spec])
                 .filter(path => !resolvedExtArgs.includes(path)).flatMap(path => ["--extension", path]);
             // Harness child controls ride along in every mode, including clean and unsandboxed runs.
             // They deliver deadline steers and keep external monitoring with the coordinator.
             const codemodeArgs = !sandboxEnabled && allow.split(",").includes("codemode") && !requestedExcludes.has("codemode")
                 ? ["--extension", join(selfDir(), "child-codemode.ts")] : [];
-            const extArgs = [...resolvedExtArgs, ...trustedExtArgs, ...codemodeArgs,
+            const extArgs = workerArgs([...resolvedExtArgs, ...trustedExtArgs, ...codemodeArgs,
                 "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
-                .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
-            const baseExtensionArgs = [...resolvedExtArgs, ...codemodeArgs,
+                .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value));
+            const baseExtensionArgs = workerArgs([...resolvedExtArgs, ...codemodeArgs,
                 "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
-                .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
+                .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value));
             if (resume?.recipe.extensionArgs) {
                 // A model escalation may change provider auth, but an unchanged tool
                 // must not silently switch implementations with current configuration.
@@ -3157,12 +3165,12 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                     tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : extensionAllowlist(),
                     model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
                 }) });
-                const referenceArgs = [...extensionArgs(reference, (spec) => reference.paths[spec] ?? resolveExtensionPath(spec)).args, ...codemodeArgs,
+                const referenceArgs = [...extensionArgs(reference, (spec) => reference.paths[spec] ?? workerResolvePath(spec)).args, ...codemodeArgs,
                     ...(!resume.recipe.baseExtensionArgs ? trustedExtArgs : []),
                     "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
                     .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
                 assertContinuationExtensions(resume.prior.id, resume.recipe,
-                    referenceArgs, taskTools?.trusted ?? []);
+                    workerArgs(referenceArgs), (taskTools?.trusted ?? []).map(tool => ({ ...tool, loadPath: workerPath(tool.loadPath) })));
             }
             if (sandboxEnabled && resolution.mode === "inherit") {
                 throw new Error("Task confinement requires explicit extensions; inheritExtensions is unsupported while sandboxing is enabled.");
@@ -3191,7 +3199,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             // supervision capability, not a tool implementation, so it must not
             // invalidate a conversation's saved recipe when it appears later.
             const commandExtArgs = bridgeEnabled
-                ? [...extArgs, "--extension", childBridgeExtensionPath(selfDir())]
+                ? [...extArgs, "--extension", workerPath(childBridgeExtensionPath(selfDir()))]
                 : extArgs;
             const args = [
                 "-p", "--mode", "json",
@@ -3213,14 +3221,15 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 tools: selectedTools,
                 permissions: permissionPlan.permissions && { ...permissionPlan.permissions, ...commandSettings },
                 applyPatch: taskTools?.applyPatch === true,
-                extensionTools: taskTools?.trusted.map(({ loadPath: _loadPath, ...tool }) => tool) ?? [],
+                extensionTools: taskTools?.trusted.map(({ loadPath: _loadPath, ...tool }) => ({ ...tool, root: workerPath(tool.root) })) ?? [],
                 // The sandboxed child's policy enables the guarded operation bridge
                 // only when the fixed bridge adapter path is among its extension
                 // paths; the task guard then admits those tools by exact source.
                 extensionPaths: [
                     ...extArgs.flatMap((arg, index) => arg === "--extension" && extArgs[index + 1] ? [extArgs[index + 1]!] : []),
-                    ...(bridgeEnabled ? [childBridgeExtensionPath(selfDir())] : []),
+                    ...(bridgeEnabled ? [workerPath(childBridgeExtensionPath(selfDir()))] : []),
                 ],
+                operationBridgePath: workerPath(childBridgeExtensionPath(selfDir())),
                 runtimeRoots: [baseDir()],
                 capturedDenyWrite: internal?.resumeWait
                     ? (resume?.prior.operations?.policy.sandbox as WorkerSandboxAuthority | null)?.denyWrite
@@ -3241,9 +3250,10 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                     try { ctx.ui?.notify?.(`Subagent ${id}: recovery snapshot failed (run continues): ${outcome.detail}`, "warning"); } catch { /* ignore */ }
                 });
             }
-            const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] }
+            const currentCommand = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] }
                 : managed ? managed.workerCommand(args)
                 : { file: process.execPath, fileArgs: [join(selfDir(), "child-runtime.mjs"), resolvePiBinary(), ...args] };
+            const cmd = continuationRuntime?.command(currentCommand) ?? currentCommand;
             const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
 
             // Reservations prevent competing admissions, but do not grandfather
@@ -3354,6 +3364,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 sandbox: sandboxEnabled, sandboxDir: requestedSandboxDir, gitCloneWorkspace, callback: callbackEnabled, name: launchName,
                 agent: resume ? resume.recipe.agent : p.agent, role: resume ? resume.recipe.role : p.role,
                 alias: resume ? resume.recipe.alias : p.alias, catalog: launchCatalog, extensionArgs: extArgs, baseExtensionArgs,
+                runtimeRoot: continuationRuntime?.root ?? managedRuntimeRoot(selfDir()),
                 trustedExtensions: resume?.recipe.trustedExtensions ?? taskTools?.trusted.map(({ name, package: owner, loadPath }) => ({ name, package: owner, loadPath })),
             });
             const startedAt = Date.now();
