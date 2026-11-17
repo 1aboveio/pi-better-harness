@@ -37,7 +37,9 @@ test("installed native bootstrap loads without a TypeScript loader, including un
     assert.match(task.stderr, /Missing trusted runtime paths/);
     const worker = run("managed-worker.mjs");
     assert.equal(worker.status, 1);
-    assert.match(worker.stderr, /Managed worker has no admitted launch intent/);
+    assert.match(worker.stderr, Number(process.versions.node.split(".")[0]) < 24
+        ? /Managed subagents require Node 24 or newer/
+        : /Managed worker has no admitted launch intent/);
 });
 
 test("installed native bootstrap verifies admission and records exactly one writer", async t => {
