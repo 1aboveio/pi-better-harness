@@ -272,7 +272,7 @@ export class BackgroundObservation {
           return "missing";
         });
         let waits = cached?.row.waits;
-        if (dependencyVersion === undefined || !cached || cached.dependencyVersion !== dependencyVersion) {
+        if (dependencyVersion === undefined || !cached || cached.authority !== authority || cached.dependencyVersion !== dependencyVersion) {
           this.metrics.dependencyQueries++;
           work.waits++;
           waits = this.db.prepare(`SELECT w.wait_id, w.generation, w.phase FROM waits w JOIN wait_dependencies d
@@ -283,7 +283,9 @@ export class BackgroundObservation {
             .map((w: any) => ({ waitId: w.wait_id, generation: w.generation, phase: w.phase }));
         }
         const version = JSON.stringify([op, directory, identities, waits]);
-        if (useCache && cached?.version === version) { cached.dependencyVersion = dependencyVersion; this.metrics.projectionHits++; return cached.row; }
+        // Both paths validate authority, file identities and dependencies above.
+        // History mode changes accounting/invalidation, not projection identity.
+        if (cached?.version === version) { cached.dependencyVersion = dependencyVersion; this.metrics.projectionHits++; return cached.row; }
         if (useCache) this.history?.invalidateOperation(op.operation_id);
         this.metrics.runnerSnapshots++;
         work.snapshots++;
@@ -300,11 +302,9 @@ export class BackgroundObservation {
           endedAt: inspection?.result?.endedAt ?? op.terminal_at ?? undefined,
           cwd: inspection?.launch.cwd ?? op.owner_workspace, name: context.name, command: context.command, argv: context.argv,
           dismissedAt: context.dismissedAt, exitCode: inspection?.result?.exitCode ?? null, logPaths: inspection?.logs ?? {} };
-        if (useCache) {
-          this.terminalProjections.delete(op.operation_id);
-          this.terminalProjections.set(op.operation_id, { version, authority, operation: op, inspection, row, dependencyVersion });
-          if (this.terminalProjections.size > 4096) this.terminalProjections.delete(this.terminalProjections.keys().next().value!);
-        }
+        this.terminalProjections.delete(op.operation_id);
+        this.terminalProjections.set(op.operation_id, { version, authority, operation: op, inspection, row, dependencyVersion });
+        if (this.terminalProjections.size > 4096) this.terminalProjections.delete(this.terminalProjections.keys().next().value!);
         return row;
         } catch (error) { this.dirtyOperations.add(op.operation_id); throw error; }
       }).filter(Boolean);

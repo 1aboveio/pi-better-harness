@@ -35,10 +35,12 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, sessionId: `worker-${i}`, cwd: root,
       status: "completed", startedAt: i, endedAt: Date.now(), callbackOrigin: { cwd: root, sessionId: "parent" },
       operations: { conversationId: `worker-${i}`, workspace: root } }));
+    writeFileSync(join(runs, id, "output.log"), JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
   }
   writeFileSync(join(runs, "sa_shared_0", "output.log"), [
     { type: "tool_execution_start", toolCallId: "display-proof", toolName: "bash", at: Date.now() - 1000, args: {} },
     { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], usage: { input: 100, output: 20, cost: { total: 0.01 } } } },
+    { type: "agent_end", messages: [] },
   ].map(event => JSON.stringify(event)).join("\n") + "\n");
   const child = fork(new URL("./support/work-daemon.ts", import.meta.url), [], {
     execPath: privateRuntimeNode().node, execArgv: ["--import", "tsx"], env: { ...process.env, TMPDIR: root, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport }, stdio: ["ignore", "pipe", "pipe", "ipc"],

@@ -1,4 +1,5 @@
 import { appendTimingWake, removeTimingReceipt, receiptTimingWake, timingWakeReceipt } from "./timing-notifications.ts";
+import { captureLaunchContext } from "./launch-context.ts";
 /**
  * pi-better-subagents — Claude Code-style async subagents for pi.
  *
@@ -2668,10 +2669,12 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
     const registerSpawnTool: ExtensionAPI["registerTool"] = (definition) => {
         registeredSpawnSchemas.set(definition.name, definition.parameters);
         pi.registerTool(managed ? { ...definition, async execute(key, params, signal, onUpdate, ctx) {
+            ctx = captureLaunchContext(ctx);
             restoreDelegationMode(ctx);
             await workerOperations.start();
             return definition.execute(key, params, signal, onUpdate, ctx);
         } } : { ...definition, async execute(key, params, _signal, _onUpdate, ctx) {
+            ctx = captureLaunchContext(ctx);
             catalogHostFrom(ctx);
             const { submitManagedLaunch } = await import("./managed-launch-client.ts");
             return await submitManagedLaunch(pi, ctx, key, definition.name, params) as never;
