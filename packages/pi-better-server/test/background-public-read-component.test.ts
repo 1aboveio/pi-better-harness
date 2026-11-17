@@ -12,6 +12,7 @@ const load = (name: string) => import(new URL(`../src/runtime/domain/background-
 
 for (const legacyCount of [0, 160]) test(`public durable status and list complete with ${legacyCount} retained legacy rows without a native runtime`, { timeout: 10000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'background-public-read-'));
+  const { waitForPublicStatus } = await import(new URL('../../pi-better-background-tasks/src/test-support/public-status.ts', import.meta.url).href);
   const previousTmp = process.env.TMPDIR;
   process.env.TMPDIR = root;
   const lease = acquireMutationStore(root);
@@ -29,6 +30,7 @@ for (const legacyCount of [0, 160]) test(`public durable status and list complet
     callback: false, callbackOrigin: { cwd: root, sessionId: owner.sessionId } });
   const executor = new WorkQueryExecutor(root, 'private-component', { budgetBuffer: lease.budget.buffer,
     modelOptions: { baseDir: join(root, 'raw'), durableDir: join(root, 'archive'), supervisorDirectory: join(root, 'supervisor'), intervalMs: 60000 } });
+  const frontendReader = createLocalWorkClient(executor, root);
   const events = new EventEmitter(), tools = new Map<string, any>();
   const pi: any = { events, on() {}, registerTool(definition: any) { tools.set(definition.name, definition); } };
   events.on('pi-better-runtime:connect', request => request.accept(createLocalWorkClient(executor, root)));
@@ -49,6 +51,25 @@ for (const legacyCount of [0, 160]) test(`public durable status and list complet
         assert.match(status.content[0].text, /succeeded/);
         const list = await run('bg_task_list', {});
         assert.match(list.content[0].text, new RegExp(id));
+        let frontendTask: any, capturedObservation = false;
+        const committed = await waitForPublicStatus({
+          async execute(name: string, params: Record<string, unknown>) {
+            const result = await run(name, params);
+            const snapshot = await frontendReader.get({ background: true, cwd: root, sessionId: owner.sessionId });
+            frontendTask = snapshot.rows.find((row: any) => row.meta.id === id)?.meta;
+            if (!capturedObservation) {
+              capturedObservation = true;
+              t.diagnostic(JSON.stringify({ observation: snapshot.status, found: Boolean(frontendTask),
+                status: frontendTask?.status, terminalRevision: frontendTask?.terminalRevision ?? null,
+                terminalOutcome: frontendTask?.terminalOutcome ?? null, signalPresent: frontendTask?.signal !== undefined }));
+            }
+            return result.content[0].text;
+          },
+          readDurableTask: () => frontendTask,
+        }, id, (status: any) => status.status === 'succeeded');
+        assert.equal(committed.terminalOutcome, 'succeeded');
+        assert.equal(committed.signal, null);
+        assert.equal(committed.exitCode, null, 'no runner result must not invent exit zero');
         assert.equal(host.dismissDurableTask({ cwd: root, sessionId: owner.sessionId }, id), true);
         const afterDismissal = await run('bg_task_list', {});
         assert.doesNotMatch(afterDismissal.content[0].text, new RegExp(id));
@@ -62,7 +83,7 @@ for (const legacyCount of [0, 160]) test(`public durable status and list complet
     ]);
   } finally {
     if (deadline) clearTimeout(deadline);
-    closeBackgroundObservation(pi); host.close(); await executor.close(); lease.release();
+    closeBackgroundObservation(pi); frontendReader.close(); host.close(); await executor.close(); lease.release();
     if (previousTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmp;
     rmSync(root, { recursive: true, force: true });
   }

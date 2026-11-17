@@ -295,11 +295,13 @@ export class BackgroundObservation {
         const status = inspection?.terminal ? inspection.status : op.terminal_revision > 0 ? op.terminal_outcome : inspection?.status ?? "running";
         const row = { durable: true, id: op.task_id, operationId: op.operation_id, kind: context.kind ?? inspection?.kind ?? "process",
           status, active: !terminal, terminal, attention: terminal && status !== "succeeded", waits,
+          terminalRevision: op.terminal_revision, terminalOutcome: op.terminal_outcome,
           owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace },
           startedAt: inspection?.result?.startedAt ?? inspection?.launch.createdAt ?? op.created_at,
           endedAt: inspection?.result?.endedAt ?? op.terminal_at ?? undefined,
           cwd: inspection?.launch.cwd ?? op.owner_workspace, name: context.name, command: context.command, argv: context.argv,
-          dismissedAt: context.dismissedAt, exitCode: inspection?.result?.exitCode ?? null, logPaths: inspection?.logs ?? {} };
+          dismissedAt: context.dismissedAt, exitCode: inspection?.result?.exitCode ?? null,
+          signal: inspection?.result?.signal ?? null, logPaths: inspection?.logs ?? {} };
         if (useCache) {
           this.terminalProjections.delete(op.operation_id);
           this.terminalProjections.set(op.operation_id, { version, authority, operation: op, inspection, row, dependencyVersion });

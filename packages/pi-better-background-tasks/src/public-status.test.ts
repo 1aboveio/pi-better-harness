@@ -41,6 +41,7 @@ it('public status observation waits for structured authoritative terminal eviden
 
 it('does not accept uncommitted structured terminal state or exceed the original 5000ms window', async () => {
   vi.useFakeTimers();
+  const capture = vi.spyOn(console, 'error').mockImplementation(() => {});
   try {
     const task = { id: 'component', status: 'succeeded', terminalRevision: 0 } as DurableTaskProjection;
     const harness = { execute: vi.fn(async () => 'Terminal runner evidence is awaiting authoritative server import; supervision is unavailable.'),
@@ -50,7 +51,13 @@ it('does not accept uncommitted structured terminal state or exceed the original
     await vi.advanceTimersByTimeAsync(5000);
     await rejected;
     expect(harness.execute).toHaveBeenCalledTimes(100);
-  } finally { vi.useRealTimers(); }
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(capture.mock.calls[0]![0]).toBe('[background-golden-observation-failure]');
+    const evidence = JSON.parse(capture.mock.calls[0]![1]);
+    expect(evidence).toMatchObject({ attempts: 100, phase: 'projection-returned', publicText: true,
+      found: true, status: 'succeeded', terminalRevision: 0 });
+    expect(JSON.stringify(evidence)).not.toContain('supervision is unavailable');
+  } finally { capture.mockRestore(); vi.useRealTimers(); }
 });
 
 it('retains an actual public request failure rather than returning a cached successful projection', async () => {
