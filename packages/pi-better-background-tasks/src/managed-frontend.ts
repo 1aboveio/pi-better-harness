@@ -10,12 +10,14 @@ import { observeNavigatorLaunch } from './shared-navigator.ts';
 export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
     let ctx: ExtensionContext | undefined, generation = 0, refresh: Promise<void> | undefined, dirty=false;
     let rows: any[] = [], legacyRows: any[] = [], details = new Map<string, any>(), logs = new Map<string, any>();
+    const retainedTasks = new Map<string, any>();
+    const cachedTask = (id: string) => rows.find(row => row.id === id) ?? retainedTasks.get(id);
     let adoptedScope: string | undefined;
     const scopeOf = (context: ExtensionContext) => JSON.stringify([context.cwd, context.sessionManager.getSessionId()]);
     const ownership = new Map<string, { operationId: string; owner: { kind: string; sessionId: string; workspace: string } }>();
     const adoptContext = (context: ExtensionContext) => {
         if (adoptedScope !== undefined && adoptedScope !== scopeOf(context)) {
-            ownership.clear(); rows = []; legacyRows = []; details.clear(); logs.clear(); generation++;
+            ownership.clear(); rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); generation++;
         }
         ctx = context; adoptedScope = scopeOf(context);
     };
@@ -50,6 +52,11 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
             // A rebuilding snapshot is not evidence that visible tasks vanished.
             if (snapshot.status !== 'rebuilding' && snapshot.status !== 'degraded') {
                 rows = snapshot.tasks ?? [];
+                // Detail remains inspectable while Navigator retains a terminal row.
+                for (const task of rows) {
+                    retainedTasks.delete(task.id); retainedTasks.set(task.id, task);
+                    if (retainedTasks.size > 256) retainedTasks.delete(retainedTasks.keys().next().value!);
+                }
                 legacyRows = snapshot.legacyRows ?? [];
             }
             notify();
@@ -81,12 +88,12 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
         async reconcileNow() { await reconcile(); while (refresh) await refresh; },
         start(context: ExtensionContext) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
         noteParentContext(context: ExtensionContext) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
-        close() { ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); queued.clear(); ownership.clear(); },
+        close() { ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
         isParentOriginActive: active,
         onDurableTaskChange(listener: (change: any) => void) { listeners.add(listener); return () => listeners.delete(listener); },
         listDurableTasks(origin: any, _options: any = {}) { return active(origin) ? rows : []; },
-        readDurableTask(origin: any, id: string) { return active(origin) ? rows.find(row => row.id === id) : undefined; },
-        ownsDurableTask(id: string) { if (!ctx || adoptedScope !== scopeOf(ctx)) return false; return ownership.has(id) || rows.some(row => row.id === id); },
+        readDurableTask(origin: any, id: string) { const task = cachedTask(id); return active(origin, task?.parentRecipient?.branchId) ? task : undefined; },
+        ownsDurableTask(id: string) { if (!ctx || adoptedScope !== scopeOf(ctx)) return false; return ownership.has(id) || rows.some(row => row.id === id && !row.readOnly); },
         readDurableTaskLog(origin: any, id: string, lines = 40) {
             if (!active(origin))
                 return;
@@ -124,7 +131,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
         rows: () => legacyRows,
         prepareDetail(id, options) {
             const lines = options?.logTailLines ?? 40, key = `${id}:${lines}`;
-            const durable = rows.some(row => row.id === id), cache = durable ? logs : details;
+            const durable = Boolean(cachedTask(id)), cache = durable ? logs : details;
             const version=generation;
             if (cache.has(key))
                 return;
@@ -132,7 +139,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
             void request(durable ? '__background_log' : '__background_detail', { id, lines }).then(value => { if(version===generation){cache.set(key, value); notify();} }, () => {if(version===generation)cache.delete(key);});
         },
         detail(id, now, options) { return details.get(`${id}:${options?.logTailLines ?? 40}`) ?? null; },
-        close(id) { void request('__background_action', { id, action: rows.find(row => row.id === id)?.active || legacyRows.find(row => row.id === id)?.status === 'running' ? 'stop' : 'dismiss' }).then(() => reconcile()).catch(() => undefined); return { action: 'requested', providerId: 'background-tasks', id }; }
+        close(id) { if (cachedTask(id)?.readOnly) return {action: 'not-closable', providerId: 'background-tasks', id}; void request('__background_action', { id, action: rows.find(row => row.id === id)?.active || legacyRows.find(row => row.id === id)?.status === 'running' ? 'stop' : 'dismiss' }).then(() => reconcile()).catch(() => undefined); return { action: 'requested', providerId: 'background-tasks', id }; }
     };
     return { host, proxy, ui };
 }

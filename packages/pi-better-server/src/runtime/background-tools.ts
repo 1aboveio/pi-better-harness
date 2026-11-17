@@ -3,7 +3,7 @@ import { Check } from 'typebox/value';
 import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, openSync, closeSync, readSync, fstatSync } from 'node:fs';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { acquireMutationStore } from './mutation-store.ts';
 /** Fixed canonical adapter. It never owns a native parent transcript. */
@@ -177,16 +177,17 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     const snapshot = await observe({ background: true, cwd: record.owner.workspace, sessionId: record.owner.sessionId });
                     if (snapshot.status !== 'ready')
                         throw new Error(snapshot.reason ?? 'Shared Background observation unverified');
+                    const visibleRows = snapshot.rows.filter((row: any) => !row.meta.parentRecipient?.branchId || record.branchIds.includes(row.meta.parentRecipient.branchId));
                     const revision = authority.backgroundDigest([snapshot.scopeRevision, record.branchIds]);
                     let projection = projections.get(viewKey);
                     if (projection?.revision !== revision) {
                         metrics.scopeRefreshes++;
-                        const legacy = snapshot.rows.filter((row: any) => !row.meta.durable).map((row: any) => row.meta);
+                        const legacy = visibleRows.filter((row: any) => !row.meta.durable).map((row: any) => row.meta);
                         const recovery=new Map([...legacy,...registry.listPendingCallbackMetasForOrigin({cwd:record.owner.workspace,sessionId:record.owner.sessionId})].map((meta:any)=>[meta.id,meta]));
                         for (const meta of recovery.values())
                             if (meta.status === 'running' || meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)
                                 runtime.resumeRunningTask(pi, meta, () => ({ cwd: record.owner.workspace, sessionId: record.owner.sessionId }));
-                        projection = { revision, tasks: snapshot.rows.filter((row: any) => row.meta.durable).map((row: any) => row.meta), legacyRows: legacy.filter((meta: any) => !meta.dismissedAt).map((meta: any) => navigator.rowFromMeta(meta, Date.now())) };
+                        projection = { revision, tasks: visibleRows.filter((row: any) => row.meta.durable).map((row: any) => row.meta), legacyRows: legacy.filter((meta: any) => !meta.dismissedAt).map((meta: any) => navigator.rowFromMeta(meta, Date.now())) };
                         if (projections.size >= 128 && !projections.has(viewKey))
                             forgetView(projections.keys().next().value!);
                         projections.set(viewKey, projection);
@@ -199,8 +200,12 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     if (Array.isArray(record.params.knownActiveIds)) {
                         for (const id of new Set(record.params.knownActiveIds.slice(0, 200))) {
                             if (typeof id !== 'string' || present.has(id)) continue;
-                            const task = service.readDurableTask({cwd: record.owner.workspace, sessionId: record.owner.sessionId}, id);
-                            if (task && task.dismissedAt === undefined) { tasks.push(task); present.add(id); }
+                            let task = service.readDurableTask({cwd: record.owner.workspace, sessionId: record.owner.sessionId}, id);
+                            if (!task) {
+                                const exact = await observe({background: true, cwd: record.owner.workspace, sessionId: record.owner.sessionId, id});
+                                task = exact.rows.find((row: any) => row.meta.id === id)?.meta;
+                            }
+                            if (task && task.dismissedAt === undefined && (!task.parentRecipient?.branchId || record.branchIds.includes(task.parentRecipient.branchId))) { tasks.push(task); present.add(id); }
                         }
                     }
                     return { ...projection, tasks, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: [...deliveries.values()].filter(item => ownerKey(item.scope.owner) === key).map(({ token, notification, receiptId }) => ({ token, notification, receiptId })) };
@@ -226,8 +231,28 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     registry.writeMeta(meta);
                     return true;
                 }
-                if (record.tool === '__background_log')
-                    return service.readDurableTaskLog(origin, record.params.id, record.params.lines);
+                if (record.tool === '__background_log') {
+                    const owned = service.readDurableTaskLog(origin, record.params.id, record.params.lines);
+                    if (owned) return owned;
+                    const snapshot = await observe?.({background: true, ...origin, id: record.params.id});
+                    if (snapshot?.status !== 'ready') throw new Error('Background task observation unavailable; retry after recovery');
+                    const task = snapshot.rows.find((row: any) => row.meta.id === record.params.id)?.meta;
+                    if (!task?.readOnly || task.parentRecipient?.branchId && !record.branchIds.includes(task.parentRecipient.branchId))
+                        throw new Error('Background task is outside the captured scope');
+                    const count = Math.max(1, Math.min(200, Number(record.params.lines) || 40));
+                    let truncated = false;
+                    const tail = (path: string) => {
+                        const fd = openSync(path, 'r');
+                        try {
+                            const size = fstatSync(fd).size, bytes = Math.min(size, 65536);
+                            truncated ||= size > bytes;
+                            const buffer = Buffer.alloc(bytes); const read = readSync(fd, buffer, 0, bytes, size - bytes);
+                            return buffer.subarray(0, read).toString('utf8').split('\n').slice(-count).join('\n');
+                        } finally { closeSync(fd); }
+                    };
+                    return {taskId: task.id, status: task.status, stdout: tail(task.logPaths.stdout),
+                        stderr: tail(task.logPaths.stderr), events: tail(task.logPaths.events), truncated};
+                }
                 if (record.tool === '__background_stop')
                     return service.stopDurableTask(origin, record.params.id);
                 if (record.tool === '__background_dismiss')

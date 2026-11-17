@@ -1,10 +1,23 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/shared-navigator.ts. Do not edit directly.
 import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth } from "@earendil-works/pi-tui";
+import { readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.domain.mjs";
 import { createRenderScheduler } from "./shared-render-scheduler.domain.mjs";
 import { setNavigatorPanel } from "./shared-navigator-panels.domain.mjs";
 export default function navigatorExtension() {
     // Internal shared package. Pi may scan its symlink in the extension directory
     // for sibling relative imports; loading it directly should be harmless.
+}
+export function getNavigatorView() { return state().view ?? "flatten"; }
+export function loadNavigatorView() {
+    const value = readHarnessSetting("navigatorView");
+    state().view = value === "tree" ? "tree" : "flatten";
+}
+export function setNavigatorView(value) {
+    if (value !== "tree" && value !== "flatten")
+        throw new Error("View must be tree or flatten.");
+    updateHarnessSetting("navigatorView", () => value);
+    state().view = value;
+    refreshBackgroundWorkNavigator();
 }
 /** UI time is independent of worker time; repeated refreshes never renew it. */
 export function createTerminalRowRetention(retentionMs = 30_000) {
@@ -169,6 +182,14 @@ export function ensureBackgroundWorkNavigator(ctx, deps, owner) {
     if (!isNavigatorUiAvailable(ctx))
         return;
     const s = state();
+    if (s.view === undefined) {
+        try {
+            loadNavigatorView();
+        }
+        catch {
+            s.view = "flatten";
+        }
+    }
     const scope = JSON.stringify([ctx.cwd, ctx.sessionManager?.getSessionId?.()]);
     if (s.observationScope !== scope) {
         s.terminalRows?.clear();
@@ -494,7 +515,7 @@ function listRows(now = Date.now()) {
         catch {
             showSection = false;
         }
-        if (!showSection)
+        if (!showSection && !(getNavigatorView() === "tree" && provider.parentRow))
             continue;
         let parentRow = null;
         try {
@@ -515,7 +536,37 @@ function listRows(now = Date.now()) {
             rows.push({ ...row, navigatorId: rowKey(provider.id, row.id), providerLabel: provider.label });
         }
     }
-    return rows;
+    return getNavigatorView() === "tree" ? treeRows(rows) : rows;
+}
+/** Two levels only: agents are peers, tasks attach by captured conversation. */
+export function treeRows(rows) {
+    const agents = new Map();
+    for (const row of rows.filter(row => row.providerId === "subagents")) {
+        const key = row.agentId ?? row.id;
+        const prior = agents.get(key);
+        if (!prior || row.sortStartedAt > prior.sortStartedAt)
+            agents.set(key, row);
+    }
+    const tasks = rows.filter(row => row.providerId !== "subagents");
+    const ordered = [...agents.entries()].sort(([a], [b]) => a === "main" ? -1 : b === "main" ? 1 : 0);
+    const result = [], attached = new Set();
+    for (const [key, agent] of ordered) {
+        const children = tasks.filter(row => (row.parentAgentId ?? "main") === key);
+        result.push({ ...agent, treeDepth: 0, groupStart: result.length > 0 });
+        children.forEach((row, i) => { result.push({ ...row, treeDepth: 1, lastChild: i === children.length - 1 }); attached.add(row); });
+    }
+    // Never hide live work when its owner's observation has not arrived yet.
+    const missing = new Map();
+    for (const row of tasks)
+        if (!attached.has(row)) {
+            const key = row.parentAgentId ?? "main";
+            missing.set(key, [...(missing.get(key) ?? []), row]);
+        }
+    for (const [key, children] of missing)
+        children.forEach((row, i) => result.push({ ...row,
+            treeDepth: 1, groupStart: i === 0, lastChild: i === children.length - 1,
+            ownerGroupLabel: i === 0 ? (key === "main" ? "Main" : `Agent ${key} · not running`) : undefined }));
+    return result;
 }
 function rowDisplayName(row) {
     return singleLine(row.name || row.id);
@@ -579,6 +630,19 @@ function buildMainListLayout(rows, width, truncate, fg, options = {}) {
         lines.push(line);
         owners.push(owner);
     };
+    if (getNavigatorView() === "tree") {
+        push(providerGroupLabel("work", fg));
+        for (const row of rows) {
+            if (row.groupStart)
+                push("");
+            if (row.ownerGroupLabel)
+                push(`  ${dim(row.ownerGroupLabel, fg)}`);
+            push(formatMainListRow(row, options.focused === true && row.navigatorId === options.selectedId, fg, width), row.navigatorId);
+        }
+        push("");
+        push(shortcutsLine(options.focused === true, fg));
+        return { lines: lines.map(line => safeTruncate(line, width, truncate)), owners };
+    }
     const grouped = new Map();
     for (const row of rows) {
         const existing = grouped.get(row.providerLabel) ?? [];
@@ -605,8 +669,9 @@ function buildMainListLayout(rows, width, truncate, fg, options = {}) {
     return { lines: lines.map((line) => safeTruncate(line, width, truncate)), owners };
 }
 function shortcutsLine(focused, fg) {
+    const selected = state().mainListRows?.find(row => row.navigatorId === state().mainListSelectedId);
     const keys = focused
-        ? "↑↓ switch · Enter detail · x stop · Esc unfocus"
+        ? `↑↓ switch · Enter detail${selected?.readOnly || selected?.parentRow ? "" : " · x stop"} · Esc unfocus`
         : "← work navigator";
     return dim(keys, fg);
 }
@@ -615,7 +680,7 @@ function providerGroupLabel(label, fg) {
     return fg("warning", normalized);
 }
 function formatMainListRow(row, selected, fg, width) {
-    const prefix = selected ? fg("accent", "› ") : "  ";
+    const prefix = (selected ? fg("accent", "› ") : "  ") + (row.treeDepth === 1 ? dim(`    ${row.lastChild ? "└─" : "├─"} `, fg) : "");
     const name = row.name || row.id;
     const indicator = statusIndicator(row);
     const status = fg(indicator.color, indicator.glyph);
@@ -652,12 +717,15 @@ function statusIndicator(row, now = Date.now()) {
 }
 function mainListSignature(rows, options = {}) {
     return JSON.stringify({
+        view: getNavigatorView(),
         focused: options.focused === true,
         closeHint: options.closeHint ?? null,
         selectedId: options.focused === true ? options.selectedId ?? null : null,
         rows: rows.map((row) => ({
             navigatorId: row.navigatorId,
             providerLabel: row.providerLabel,
+            parentAgentId: row.parentAgentId,
+            agentId: row.agentId,
             parentRow: row.parentRow === true,
             providerId: row.providerId,
             id: row.id,
@@ -681,6 +749,9 @@ function stableFacts(facts) {
     return (facts ?? []).filter((fact) => !/\bleft$/.test(singleLine(fact)));
 }
 function rowSummary(row) {
+    if (getNavigatorView() === "tree" && row.providerId === "background-tasks") {
+        return [singleLine(row.status).replaceAll("_", " "), ...(row.facts ?? []).map(singleLine)].join(" · ");
+    }
     if (row.providerId === "subagents") {
         const attention = row.facts?.map(singleLine).filter(Boolean);
         if (attention?.length)
@@ -763,7 +834,7 @@ function detailFor(navigatorId, now = Date.now(), options) {
     }
 }
 function closeFor(row) {
-    if (row.parentRow)
+    if (row.parentRow || row.readOnly)
         return { action: "not-closable", providerId: row.providerId, id: row.id };
     const provider = state().providers.get(row.providerId);
     if (state().launchFailures?.delete(row.navigatorId)) {
@@ -785,7 +856,7 @@ function closeFor(row) {
     }
 }
 function closeHintFor(row) {
-    if (!row || row.parentRow)
+    if (!row || row.parentRow || row.readOnly)
         return null;
     const provider = state().providers.get(row.providerId);
     if (!provider)
@@ -928,7 +999,7 @@ function dismissOverlay() {
 }
 function handleMainListCloseKey() {
     const row = selectedMainListRow();
-    if (!row || row.parentRow)
+    if (!row || row.parentRow || row.readOnly)
         return;
     const s = state();
     const now = Date.now();
@@ -1171,7 +1242,7 @@ function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, i
     }
     function handleCloseKey() {
         const row = selectedRow();
-        if (!row || row.parentRow)
+        if (!row || row.parentRow || row.readOnly)
             return;
         const now = Date.now();
         if (closeArm?.id === row.navigatorId && now >= closeArm.armedAt && now < closeArm.armedAt + CLOSE_ARM_MS) {

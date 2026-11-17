@@ -1724,6 +1724,7 @@ export class ObservedWaitHost {
             intentRef: typeof input.params.operation_id === "string" ? input.params.operation_id : null,
         });
         const launchContext = {
+            workerAttemptId: run.runId,
             kind: input.kind,
             parentOrigin: this.parentOrigin,
             gated: prepared.gated,

@@ -140,6 +140,27 @@ export class BackgroundObservation {
       return changed;
     }
   }
+  /** Captured assignment, never the newest assignment in a reused conversation. */
+  private workerParent(op: any, context: any): any {
+    if (op.owner_kind !== "worker-conversation") return undefined;
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='assignment_bindings'").get()) return undefined;
+    let bindings: any[];
+    if (typeof context.workerAttemptId === "string") {
+      bindings = this.db.prepare(`SELECT b.* FROM assignment_bindings b JOIN assignment_attempts a
+        ON a.assignment_id=b.assignment_id WHERE a.attempt_id=?`).all(context.workerAttemptId);
+    } else {
+      // Older launches are visible only when a durable wait proves the assignment.
+      bindings = this.db.prepare(`SELECT DISTINCT b.* FROM assignment_bindings b JOIN waits w
+        ON json_extract(w.origin_json,'$.assignmentRef')=b.assignment_id
+        JOIN wait_dependencies d ON d.wait_id=w.wait_id AND d.generation=w.generation
+        WHERE d.operation_id=?`).all(op.operation_id);
+    }
+    if (bindings.length !== 1) return undefined;
+    const owner = JSON.parse(bindings[0].owner_json), recipient = JSON.parse(bindings[0].recipient_json);
+    if (owner.kind !== op.owner_kind || owner.sessionId !== op.owner_session_id || owner.workspace !== op.owner_workspace
+      || (owner.branchId ?? null) !== (op.owner_branch_id ?? null) || (owner.goalId ?? null) !== (op.owner_goal_id ?? null) || recipient.kind !== "parent-session") return undefined;
+    return {parentAgentId: owner.sessionId, parentRecipient: recipient, readOnly: true};
+  }
   private project(operations: any[], useCache = true) {
       const revision = this.db?.prepare("SELECT value FROM coordinator_state WHERE key = 'change_revision'").get()?.value;
       const directories = new Map<string, string>();
@@ -165,7 +186,8 @@ export class BackgroundObservation {
           AND w.owner_kind = ? AND w.owner_session_id = ? AND w.owner_workspace = ?
           AND w.phase NOT IN ('consumed', 'cancelled') AND w.dispatch_disarmed = 0`).all(op.operation_id, op.owner_kind, op.owner_session_id, op.owner_workspace)
           .map((w: any) => ({ waitId: w.wait_id, generation: w.generation, phase: w.phase }));
-        const row = { durable: true, id: op.task_id, operationId: op.operation_id, kind: context.kind ?? inspection?.kind ?? "process",
+        const parent = this.workerParent(op, context);
+        const row = { ...parent, durable: true, id: op.task_id, operationId: op.operation_id, kind: context.kind ?? inspection?.kind ?? "process",
           status, active: !terminal, terminal, attention: terminal && status !== "succeeded", waits,
           owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace },
           startedAt: inspection?.result?.startedAt ?? inspection?.launch.createdAt ?? op.created_at,
@@ -198,9 +220,13 @@ export class BackgroundObservation {
   private refreshRecent(entry: BackgroundScope, revision: number): void {
     if (!this.db) return;
     if (entry.recentRevision !== revision) {
-      const operations = this.db.prepare(`SELECT * FROM operations WHERE owner_kind='parent-session'
-        AND owner_workspace=? AND owner_session_id=? AND observer_kind='local-supervisor'
-        AND terminal_revision>0 AND terminal_at>=? ORDER BY terminal_at DESC,operation_id DESC LIMIT ?`)
+      const operations = this.db.prepare(`SELECT * FROM operations o WHERE observer_kind='local-supervisor' AND (
+          (owner_kind='parent-session' AND owner_workspace=?1 AND owner_session_id=?2) OR
+          ${this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='assignment_bindings'").get() ? `(owner_kind='worker-conversation' AND EXISTS (SELECT 1 FROM assignment_bindings b
+            WHERE json_extract(b.owner_json,'$.sessionId')=o.owner_session_id
+              AND json_extract(b.owner_json,'$.workspace')=o.owner_workspace
+              AND json_extract(b.recipient_json,'$.workspace')=?1 AND json_extract(b.recipient_json,'$.sessionId')=?2))` : '0'})
+        AND terminal_revision>0 AND terminal_at>=?3 ORDER BY terminal_at DESC,operation_id DESC LIMIT ?4`)
         .all(entry.origin.cwd, entry.origin.sessionId ?? "", Date.now() - 30000, DISCOVERY_PAGE_SIZE);
       entry.recent = this.project(operations);
       entry.recentRevision = revision;
@@ -244,9 +270,12 @@ export class BackgroundObservation {
     const legacy = this.legacyScope(scope);
     if (scope.backgroundHistory) { this.metrics.historyQueries++; return index.records.map((record: any) => record.meta); }
     const legacyRows = legacy.rows;
-    const rows = [...new Map([...this.pendingRows(legacy), ...(scope.backgroundAll ? this.rows : [...this.rows, ...legacy.recent])].map(row => [row.id, row])).values()];
-    return [...rows.filter(row => row.owner.kind === "parent-session" && row.dismissedAt === undefined
-      && (scope.backgroundAll || row.owner.workspace === scope.cwd && row.owner.sessionId === scope.sessionId) && (!scope.active || row.active)),
+    const exact = scope.id && this.db ? this.project(this.db.prepare("SELECT * FROM operations WHERE task_id=? AND observer_kind='local-supervisor'").all(scope.id)) : [];
+    const rows = [...new Map([...exact, ...this.pendingRows(legacy), ...(scope.backgroundAll ? this.rows : [...this.rows, ...legacy.recent])].map(row => [row.id, row])).values()];
+    return [...rows.filter(row => (!scope.id || row.id === scope.id) && row.dismissedAt === undefined && (
+      row.owner.kind === "parent-session" && (scope.backgroundAll || row.owner.workspace === scope.cwd && row.owner.sessionId === scope.sessionId)
+      || !scope.backgroundAll && row.parentRecipient?.workspace === scope.cwd && row.parentRecipient?.sessionId === scope.sessionId)
+      && (!scope.active || row.active)),
       ...legacyRows.filter((row: any) => (scope.backgroundAll || row.callbackOrigin && belongsToOrigin(row, legacy.origin)
         && (scope.sessionId || row.spawnPid === scope.processId)) && (!scope.active || row.status === "running"))];
   }

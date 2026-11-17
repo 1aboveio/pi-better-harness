@@ -22,6 +22,18 @@ describe('managed native UI boundary', () => {
       expect(frontend.host.listDurableTasks(origin)).toEqual([terminal]);
       frontend.host.close();expect(frontend.ui.rows()).toHaveLength(0);
     });
+    it('shows worker-owned tasks without adopting their stop authority', async () => {
+      const origin={cwd:'/workspace',sessionId:'native'};
+      fixture.request.mockResolvedValue({tasks:[{id:'child',active:true,readOnly:true,parentAgentId:'worker'}],legacyRows:[],deliveries:[]});
+      const frontend=createManagedBackgroundFrontend({registerTool(){}} as any);
+      frontend.host.start(context()); await frontend.host.reconcileNow();
+      expect(frontend.host.listDurableTasks(origin)[0].parentAgentId).toBe('worker');
+      expect(frontend.host.ownsDurableTask('child')).toBe(false);
+      fixture.request.mockClear();
+      expect(frontend.ui.close('child').action).toBe('not-closable');
+      expect(fixture.request).not.toHaveBeenCalled();
+      frontend.host.close();
+    });
     it('keeps 60 render reads free of provider requests and fetches evidence only on explicit selection', async () => {
         fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => tool === '__background_poll' ? { tasks: [{ id: 'durable', active: true }], legacyRows: [{ id: 'legacy', status: 'running' }], deliveries: [] } : tool === '__background_log' ? { stdout: 'evidence' } : { id: 'legacy' });
         const frontend = createManagedBackgroundFrontend({ registerTool() { } } as any), ctx = context();

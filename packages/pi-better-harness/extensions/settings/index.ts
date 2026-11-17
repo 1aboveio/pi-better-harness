@@ -3,8 +3,13 @@ import { chooseHarnessSetting } from "./page.ts";
 import { createSettingsRegistry } from "./registry.ts";
 import { changeCallbackSetting, getCallbackSettings, saveCallbackDefault } from "pi-better-background-tasks/src/shared-callback-batcher.ts";
 
+import { getNavigatorView, loadNavigatorView, setNavigatorView } from "pi-better-background-tasks/src/shared-navigator.ts";
+
 export default function harnessSettingsExtension(pi: ExtensionAPI): void {
   const registry = createSettingsRegistry(pi);
+  const view = { id: "navigator-view", label: "View", values: ["tree", "flatten"],
+    get: getNavigatorView, change: (value: string) => setNavigatorView(value) };
+  pi.on("session_start", () => { try { loadNavigatorView(); } catch { /* settings command reports read errors */ } });
   pi.on("session_start", () => registry.refresh());
   pi.on("session_shutdown", () => registry.dispose());
 
@@ -12,6 +17,7 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
     description: "Open loaded package settings",
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") { ctx.ui.notify("Harness settings requires the interactive TUI.", "warning"); return; }
+      loadNavigatorView();
       registry.refresh();
       let selected: string | undefined;
       const reported = new Set<string>();
@@ -30,7 +36,7 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
             get: readSettings,
             change: mode => changeCallbackSetting(pi, ctx, mode),
             save: () => saveCallbackDefault(readSettings().mode),
-          }, registry.controls());
+          }, [view, ...registry.controls()]);
         } catch (error) {
           ctx.ui.notify(`Settings unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
           return;

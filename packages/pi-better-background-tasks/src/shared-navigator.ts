@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth } from "@earendil-works/pi-tui";
+import { readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.ts";
 import type { Component } from "@earendil-works/pi-tui";
 import { createRenderScheduler, type RenderScheduler } from "./shared-render-scheduler.ts";
 import { setNavigatorPanel, type NavigatorPanelLayout } from "./shared-navigator-panels.ts";
@@ -9,11 +10,32 @@ export default function navigatorExtension(): void {
   // for sibling relative imports; loading it directly should be harmless.
 }
 
+export type NavigatorView = "tree" | "flatten";
+export function getNavigatorView(): NavigatorView { return state().view ?? "flatten"; }
+export function loadNavigatorView(): void {
+  const value = readHarnessSetting("navigatorView");
+  state().view = value === "tree" ? "tree" : "flatten";
+}
+export function setNavigatorView(value: string): void {
+  if (value !== "tree" && value !== "flatten") throw new Error("View must be tree or flatten.");
+  updateHarnessSetting("navigatorView", () => value);
+  state().view = value;
+  refreshBackgroundWorkNavigator();
+}
+
 export type BackgroundWorkStatusTone = "running" | "success" | "failed" | "warning" | "muted";
 
 export type BackgroundWorkRow = {
   providerId: string;
   id: string;
+  /** Stable worker conversation identity, independent of execution attempts. */
+  agentId?: string;
+  parentAgentId?: string;
+  readOnly?: boolean;
+  treeDepth?: number;
+  lastChild?: boolean;
+  groupStart?: boolean;
+  ownerGroupLabel?: string;
   name?: string;
   model?: string;
   effort?: string;
@@ -137,6 +159,7 @@ type HostDeps = {
 
 type NavigatorState = {
   providers: Map<string, BackgroundWorkProvider>;
+  view?: NavigatorView;
   terminalRows?: Map<string, ReturnType<typeof createTerminalRowRetention>>;
   launchFailures?: Map<string, BackgroundWorkRow>;
   observationScope?: string;
@@ -259,6 +282,7 @@ export function applyCloseConfirmFooter(ui: { setStatus(key: string, value: stri
 export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostDeps, owner?: symbol): void {
   if (!isNavigatorUiAvailable(ctx)) return;
   const s = state();
+  if (s.view === undefined) { try { loadNavigatorView(); } catch { s.view = "flatten"; } }
   const scope = JSON.stringify([ctx.cwd, ctx.sessionManager?.getSessionId?.()]);
   if (s.observationScope !== scope) { s.terminalRows?.clear(); s.launchFailures?.clear(); }
   s.observationScope = scope;
@@ -568,7 +592,7 @@ function listRows(now = Date.now()): InternalRow[] {
     const orderedProviderRows = [...providerRows].sort((a, b) => b.sortStartedAt - a.sortStartedAt || rowDisplayName(a).localeCompare(rowDisplayName(b)));
     let showSection = orderedProviderRows.length > 0 || provider.parentRow !== undefined;
     try { showSection = provider.showSection?.(orderedProviderRows, now) ?? showSection; } catch { showSection = false; }
-    if (!showSection) continue;
+    if (!showSection && !(getNavigatorView() === "tree" && provider.parentRow)) continue;
     let parentRow: BackgroundWorkRow | null = null;
     try { parentRow = provider.parentRow?.(now) ?? null; } catch { parentRow = null; }
     if (parentRow) {
@@ -583,7 +607,35 @@ function listRows(now = Date.now()): InternalRow[] {
       rows.push({ ...row, navigatorId: rowKey(provider.id, row.id), providerLabel: provider.label });
     }
   }
-  return rows;
+  return getNavigatorView() === "tree" ? treeRows(rows) : rows;
+}
+
+/** Two levels only: agents are peers, tasks attach by captured conversation. */
+export function treeRows<T extends BackgroundWorkRow>(rows: T[]): T[] {
+  const agents = new Map<string, T>();
+  for (const row of rows.filter(row => row.providerId === "subagents")) {
+    const key = row.agentId ?? row.id;
+    const prior = agents.get(key);
+    if (!prior || row.sortStartedAt > prior.sortStartedAt) agents.set(key, row);
+  }
+  const tasks = rows.filter(row => row.providerId !== "subagents");
+  const ordered = [...agents.entries()].sort(([a], [b]) => a === "main" ? -1 : b === "main" ? 1 : 0);
+  const result: T[] = [], attached = new Set<T>();
+  for (const [key, agent] of ordered) {
+    const children = tasks.filter(row => (row.parentAgentId ?? "main") === key);
+    result.push({...agent, treeDepth: 0, groupStart: result.length > 0});
+    children.forEach((row, i) => { result.push({...row, treeDepth: 1, lastChild: i === children.length - 1}); attached.add(row); });
+  }
+  // Never hide live work when its owner's observation has not arrived yet.
+  const missing = new Map<string, T[]>();
+  for (const row of tasks) if (!attached.has(row)) {
+    const key = row.parentAgentId ?? "main";
+    missing.set(key, [...(missing.get(key) ?? []), row]);
+  }
+  for (const [key, children] of missing) children.forEach((row, i) => result.push({...row,
+    treeDepth: 1, groupStart: i === 0, lastChild: i === children.length - 1,
+    ownerGroupLabel: i === 0 ? (key === "main" ? "Main" : `Agent ${key} · not running`) : undefined}));
+  return result;
 }
 
 function rowDisplayName(row: Pick<BackgroundWorkRow, "name" | "id">): string {
@@ -664,6 +716,16 @@ function buildMainListLayout(
     lines.push(line);
     owners.push(owner);
   };
+  if (getNavigatorView() === "tree") {
+    push(providerGroupLabel("work", fg));
+    for (const row of rows) {
+      if (row.groupStart) push("");
+      if (row.ownerGroupLabel) push(`  ${dim(row.ownerGroupLabel, fg)}`);
+      push(formatMainListRow(row, options.focused === true && row.navigatorId === options.selectedId, fg, width), row.navigatorId);
+    }
+    push(""); push(shortcutsLine(options.focused === true, fg));
+    return {lines: lines.map(line => safeTruncate(line, width, truncate)), owners};
+  }
   const grouped = new Map<string, InternalRow[]>();
   for (const row of rows) {
     const existing = grouped.get(row.providerLabel) ?? [];
@@ -688,8 +750,9 @@ function buildMainListLayout(
 }
 
 function shortcutsLine(focused: boolean, fg: (color: string, value: string) => string): string {
+  const selected = state().mainListRows?.find(row => row.navigatorId === state().mainListSelectedId);
   const keys = focused
-    ? "↑↓ switch · Enter detail · x stop · Esc unfocus"
+    ? `↑↓ switch · Enter detail${selected?.readOnly || selected?.parentRow ? "" : " · x stop"} · Esc unfocus`
     : "← work navigator";
   return dim(keys, fg);
 }
@@ -700,7 +763,7 @@ function providerGroupLabel(label: string, fg: (color: string, value: string) =>
 }
 
 function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
-  const prefix = selected ? fg("accent", "› ") : "  ";
+  const prefix = (selected ? fg("accent", "› ") : "  ") + (row.treeDepth === 1 ? dim(`    ${row.lastChild ? "└─" : "├─"} `, fg) : "");
   const name = row.name || row.id;
   const indicator = statusIndicator(row);
   const status = fg(indicator.color, indicator.glyph);
@@ -735,12 +798,15 @@ function statusIndicator(row: InternalRow, now = Date.now()): { glyph: string; c
 
 function mainListSignature(rows: InternalRow[], options: { selectedId?: string; focused?: boolean; closeHint?: string | null } = {}): string {
   return JSON.stringify({
+    view: getNavigatorView(),
     focused: options.focused === true,
     closeHint: options.closeHint ?? null,
     selectedId: options.focused === true ? options.selectedId ?? null : null,
     rows: rows.map((row) => ({
       navigatorId: row.navigatorId,
       providerLabel: row.providerLabel,
+      parentAgentId: row.parentAgentId,
+      agentId: row.agentId,
       parentRow: row.parentRow === true,
       providerId: row.providerId,
       id: row.id,
@@ -766,6 +832,9 @@ function stableFacts(facts: string[] | undefined): string[] {
 }
 
 function rowSummary(row: InternalRow): string {
+  if (getNavigatorView() === "tree" && row.providerId === "background-tasks") {
+    return [singleLine(row.status).replaceAll("_", " "), ...(row.facts ?? []).map(singleLine)].join(" · ");
+  }
   if (row.providerId === "subagents") {
     const attention = row.facts?.map(singleLine).filter(Boolean);
     if (attention?.length) return `${singleLine(row.status)} · ${attention.join(" · ")}`;
@@ -826,7 +895,7 @@ function detailFor(navigatorId: string, now = Date.now(), options?: { logTailLin
 }
 
 function closeFor(row: InternalRow): BackgroundWorkCloseOutcome {
-  if (row.parentRow) return { action: "not-closable", providerId: row.providerId, id: row.id };
+  if (row.parentRow || row.readOnly) return { action: "not-closable", providerId: row.providerId, id: row.id };
   const provider = state().providers.get(row.providerId);
   if (state().launchFailures?.delete(row.navigatorId)) {
     state().terminalRows?.get(row.providerId)?.dismiss(row.id);
@@ -844,7 +913,7 @@ function closeFor(row: InternalRow): BackgroundWorkCloseOutcome {
 }
 
 function closeHintFor(row: InternalRow | undefined): string | null {
-  if (!row || row.parentRow) return null;
+  if (!row || row.parentRow || row.readOnly) return null;
   const provider = state().providers.get(row.providerId);
   if (!provider) return null;
   try { return `${provider.armCloseLabel(row)} ${row.name || row.id}`; } catch { return null; }
@@ -971,7 +1040,7 @@ function dismissOverlay(): void {
 
 function handleMainListCloseKey(): void {
   const row = selectedMainListRow();
-  if (!row || row.parentRow) return;
+  if (!row || row.parentRow || row.readOnly) return;
   const s = state();
   const now = Date.now();
   const arm = s.mainListCloseArm;
@@ -1208,7 +1277,7 @@ function createOverlayComponent(
 
   function handleCloseKey(): void {
     const row = selectedRow();
-    if (!row || row.parentRow) return;
+    if (!row || row.parentRow || row.readOnly) return;
     const now = Date.now();
     if (closeArm?.id === row.navigatorId && now >= closeArm.armedAt && now < closeArm.armedAt + CLOSE_ARM_MS) {
       clearCloseArm();

@@ -414,6 +414,9 @@ export interface StatusView {
 
 /** Read-only projection of one supervised durable task for list/navigator/Goal. */
 export interface DurableTaskProjection {
+  readonly parentAgentId?: string;
+  readonly parentRecipient?: { sessionId: string; workspace: string; branchId?: string | null };
+  readonly readOnly?: boolean;
   readonly id: string;
   readonly operationId: string;
   readonly kind: DurableTaskKind;
@@ -662,6 +665,7 @@ export function getObservedWaitHost(pi: unknown): ObservedWaitHost | undefined {
 }
 
 interface LaunchContext {
+  readonly workerAttemptId?: string;
   readonly kind: DurableTaskKind;
   readonly parentOrigin?: BackgroundTaskCallbackOrigin;
   readonly gated: boolean;
@@ -2220,6 +2224,7 @@ export class ObservedWaitHost {
       intentRef: typeof input.params.operation_id === "string" ? input.params.operation_id : null,
     });
     const launchContext: LaunchContext = {
+      workerAttemptId: run.runId,
       kind: input.kind,
       parentOrigin: this.parentOrigin,
       gated: prepared.gated,
