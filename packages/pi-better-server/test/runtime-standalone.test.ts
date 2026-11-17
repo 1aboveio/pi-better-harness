@@ -194,6 +194,15 @@ test("packed standalone packages use one pinned socket runtime, including cached
   const recoveryScript = entryScript + `
     import {readFileSync,appendFileSync,existsSync} from 'node:fs';
     import {connect} from 'node:net';
+    import {createRequire as fixtureRequire,syncBuiltinESMExports as syncFixtureNet} from 'node:module';
+    const fixtureNet=fixtureRequire(${JSON.stringify(packedApi)})('node:net');
+    const originalConnect=fixtureNet.connect,originalWrite=fixtureNet.Socket.prototype.write;
+    const ownerSockets=new WeakSet();let requestWritten;
+    fixtureNet.connect=function(...args){const socket=Reflect.apply(originalConnect,this,args);if((typeof args[0]==='string'?args[0]:args[0]?.path)===process.env.PI_SERVER_DIR+'/pi-server.sock')ownerSockets.add(socket);return socket};
+    fixtureNet.Socket.prototype.write=function(chunk,...args){const result=Reflect.apply(originalWrite,this,[chunk,...args]);
+      if(requestWritten&&ownerSockets.has(this)){let frame;try{frame=JSON.parse(String(chunk))}catch{}
+        if(frame?.type==='runtime_get_snapshot'){const resolve=requestWritten;requestWritten=undefined;resolve({id:frame.id,type:frame.type,socket:this})}}
+      return result;};syncFixtureNet();
     const {WorkClient,ensureRuntime}=await import(${JSON.stringify(packedApi)});
     const {inspectDaemonOwner}=await import(${JSON.stringify(new URL("../daemon-owner.mjs", pathToFileURL(clients[1]!)).href)});
     const transport=process.env.PI_SERVER_DIR;
@@ -232,8 +241,13 @@ test("packed standalone packages use one pinned socket runtime, including cached
       trace('foreground-ready');await probe();const first=owner().pid;
       await stop();trace('clean-stop');assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
       assert.deepEqual((await provider.getActivity(ctx)).items,[]);trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
-      const crashed=owner().pid;process.kill(crashed,'SIGSTOP');
-      const interrupted=provider.getActivity(ctx);await new Promise(r=>setImmediate(r));trace('before-kill');process.kill(crashed,'SIGKILL');trace('kill-sent');
+      const crashed=owner().pid;paused=crashed;process.kill(crashed,'SIGSTOP');
+      const written=new Promise(resolve=>{requestWritten=resolve});
+      const interrupted=listed().then(()=>provider.getActivity(ctx));
+      const pendingRequest=await Promise.race([written,interrupted.then(()=>{throw Error('Crash witness operation completed before its real request was written')})]);
+      assert.equal(pendingRequest.socket.destroyed,false);assert.equal(owner().pid,crashed);
+      appendFileSync(${JSON.stringify(join(evidence, "recovery-timeline.jsonl"))},JSON.stringify({phase:'interrupted-request-written',id:pendingRequest.id,type:pendingRequest.type,owner:owner()})+'\\n');
+      trace('before-kill');process.kill(crashed,'SIGKILL');paused=undefined;trace('kill-sent');
       assert.deepEqual((await interrupted).items,[]);trace('crash-recovery-ready');assert.notEqual(owner().pid,crashed);await listed();
       await stop();closeBackgroundObservation(pi);await listed('bg_status');
       assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
@@ -243,7 +257,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
       assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
       console.log(JSON.stringify({healthyRecovery:true,cachedDisconnectRecovered:true,interruptedQueryRecovered:true,liveOwnerRefused:true}));
     } catch(error) {trace('failure:'+String(error));await probe();throw error}
-    finally {startupClient?.close();if(paused)process.kill(paused,'SIGCONT');closeBackgroundObservation(pi)}
+    finally {startupClient?.close();if(paused)process.kill(paused,'SIGCONT');closeBackgroundObservation(pi);fixtureNet.connect=originalConnect;fixtureNet.Socket.prototype.write=originalWrite;syncFixtureNet()}
   `;
   const recovery = await execute(process.execPath, ["--input-type=module", "-e", recoveryScript], workspace, env);
   writeFileSync(join(evidence, "background-recovery.log"), recovery.stdout + recovery.stderr);

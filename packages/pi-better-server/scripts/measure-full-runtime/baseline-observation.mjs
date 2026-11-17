@@ -9,25 +9,41 @@ let fsTotals;
 export function installBaselineFsObservation() {
   assert.equal(fsTotals, undefined, 'Baseline filesystem observer already installed');
   fsTotals = { paths: 0, stats: 0, directories: 0, canonicalizations: 0, bytes: 0, reads: 0, unobserved: {} };
+  const totals = fsTotals;
+  let active = true;
   const require = createRequire(import.meta.url), fs = require('node:fs'), promises = require('node:fs/promises');
   const restore = [];
+  const remember = (namespace, name, original) => {
+    const installed = namespace[name];
+    restore.push(() => {
+      // A later wrapper (for example graceful-fs) may still own this export.
+      if (namespace[name] === installed) namespace[name] = original;
+    });
+  };
+  const boundTotals = () => {
+    if (active) return totals;
+    if (fsTotals && fsTotals !== totals) fsTotals.unobserved['retired-observer-alias'] = (fsTotals.unobserved['retired-observer-alias'] ?? 0) + 1;
+    return undefined;
+  };
   let fileReadDepth = 0;
   const count = (name, result, completion = false, args = []) => {
+    const current = boundTotals();
+    if (!current) return;
     if (name === 'readSync' && fileReadDepth) return;
     if (completion) {
       if (/readFile/.test(name) && typeof result === 'string') {
         const encoding = typeof args[1] === 'string' ? args[1] : args[1]?.encoding;
-        if (!['utf8', 'utf-8'].includes(String(encoding).toLowerCase()) || result.includes('\uFFFD')) fsTotals.unobserved['file-byte-encoding'] = (fsTotals.unobserved['file-byte-encoding'] ?? 0) + 1;
+        if (!['utf8', 'utf-8'].includes(String(encoding).toLowerCase()) || result.includes('\uFFFD')) current.unobserved['file-byte-encoding'] = (current.unobserved['file-byte-encoding'] ?? 0) + 1;
       }
-      if (/read/.test(name) && !/readdir|readlink/.test(name) && result !== undefined) fsTotals.bytes += typeof result === 'number' ? result : typeof result === 'string' ? Buffer.byteLength(result) : result.byteLength;
+      if (/read/.test(name) && !/readdir|readlink/.test(name) && result !== undefined) current.bytes += typeof result === 'number' ? result : typeof result === 'string' ? Buffer.byteLength(result) : result.byteLength;
       return;
     }
-    fsTotals.paths++;
-    if (/stat|exists|access/i.test(name)) fsTotals.stats++;
-    else if (/readdir/.test(name)) fsTotals.directories++;
-    else if (/realpath/.test(name)) fsTotals.canonicalizations++;
+    current.paths++;
+    if (/stat|exists|access/i.test(name)) current.stats++;
+    else if (/readdir/.test(name)) current.directories++;
+    else if (/realpath/.test(name)) current.canonicalizations++;
     else if (/read/.test(name) && !/readlink/.test(name)) {
-      fsTotals.reads++;
+      current.reads++;
     }
   };
   const wrapSync = (name, original) => {
@@ -45,7 +61,7 @@ export function installBaselineFsObservation() {
   for (const name of ['statSync', 'lstatSync', 'fstatSync', 'existsSync', 'accessSync', 'realpathSync', 'readlinkSync', 'openSync', 'closeSync', 'readdirSync', 'readFileSync', 'readSync']) {
     const original = fs[name];
     fs[name] = wrapSync(name, original);
-    restore.push(() => { fs[name] = original; });
+    remember(fs, name, original);
   }
   for (const name of ['stat', 'lstat', 'access', 'realpath', 'readlink', 'readdir', 'readFile']) {
     const original = promises[name];
@@ -56,21 +72,30 @@ export function installBaselineFsObservation() {
       finally { count(name, result, true, args); }
     };
     Object.defineProperties(promises[name], Object.getOwnPropertyDescriptors(original));
-    restore.push(() => { promises[name] = original; });
+    remember(promises, name, original);
   }
   for (const [namespace, names] of [[fs, ['read', 'readv', 'readvSync', 'readFile', 'stat', 'lstat', 'fstat', 'readdir', 'opendir', 'opendirSync']], [promises, ['open', 'opendir']]]) {
     for (const name of names) {
       const original = namespace[name];
       namespace[name] = function(...args) {
-        fsTotals.unobserved[name] = (fsTotals.unobserved[name] ?? 0) + 1;
+        const current = boundTotals();
+        if (current) current.unobserved[name] = (current.unobserved[name] ?? 0) + 1;
         return Reflect.apply(original, this, args);
       };
       Object.defineProperties(namespace[name], Object.getOwnPropertyDescriptors(original));
-      restore.push(() => { namespace[name] = original; });
+      remember(namespace, name, original);
     }
   }
   syncBuiltinESMExports();
-  return () => { for (const reset of restore) reset(); syncBuiltinESMExports(); fsTotals = undefined; };
+  return () => {
+    if (!active) return;
+    active = false;
+    const errors = [];
+    for (const reset of restore) { try { reset(); } catch (error) { errors.push(error); } }
+    try { syncBuiltinESMExports(); } catch (error) { errors.push(error); }
+    if (fsTotals === totals) fsTotals = undefined;
+    if (errors.length) throw new AggregateError(errors, 'Baseline observer cleanup failed');
+  };
 }
 export function registerBaselineModule(url, kind, controls) {
   assert.ok(kinds.includes(kind) && !modules.has(url), 'Ambiguous baseline module observation');

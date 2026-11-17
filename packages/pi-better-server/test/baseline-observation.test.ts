@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { workloadCounterDelta, reconcileWorkload } from '../scripts/measure-full-runtime/incremental-workload.mjs';
 import { threadId } from 'node:worker_threads';
+import { createRequire } from 'node:module';
 import ts from 'typescript';
 
 test('approved baseline real parser modules reread and refold after eviction of their exact loaded caches', async () => {
@@ -91,7 +92,7 @@ test('approved baseline real parser modules reread and refold after eviction of 
 
 test('original executor queue observations use actual queued timestamps and observed empty membership', async () => {
   const { instrumentBaselineQueue } = await import('../scripts/measure-full-runtime/baseline-observation.mjs');
-  const source = instrumentBaselineQueue(execFileSync('git', ['show', 'eec7b3e2:packages/pi-better-server/src/runtime/query-executor.ts'], { encoding: 'utf8' }));
+  const source = instrumentBaselineQueue(execFileSync('git', ['show', 'eec7b3e256a7548bbf67f69cd468f12eb3b91dc8:packages/pi-better-server/src/runtime/query-executor.ts'], { encoding: 'utf8' }));
   const tree = ts.createSourceFile('executor.ts', source, ts.ScriptTarget.Latest, true);
   let method = '';
   const visit = (node: ts.Node) => { if (ts.isMethodDeclaration(node) && node.name.getText(tree) === 'metrics') method = node.getText(tree); ts.forEachChild(node, visit); };
@@ -100,4 +101,27 @@ test('original executor queue observations use actual queued timestamps and obse
   const owner = { queue: [{ enqueued: 900 }, { enqueued: 700 }], options: {}, streams: new Map(), waits: [], durations: [], lag: { percentile: () => 0 } };
   assert.equal(metrics.call(owner).executor.oldestQueuedAgeMs, 300);
   owner.queue.length = 0; assert.equal(metrics.call(owner).executor.oldestQueuedAgeMs, 0);
+});
+
+test('retiring the baseline observer preserves filesystem aliases captured by existing readers', async () => {
+  const { installBaselineFsObservation } = await import('../scripts/measure-full-runtime/baseline-observation.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'baseline-observer-alias-')), path = join(root, 'source.json');
+  writeFileSync(path, 'actual reader');
+  const restore = installBaselineFsObservation();
+  const captured = createRequire(import.meta.url)('node:fs').readFileSync;
+  restore();
+  try { assert.equal(captured(path, 'utf8'), 'actual reader'); }
+  finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a retired observer cannot unregister a newer bound observer', async () => {
+  const { installBaselineFsObservation } = await import('../scripts/measure-full-runtime/baseline-observation.mjs');
+  const fs = createRequire(import.meta.url)('node:fs');
+  const first = installBaselineFsObservation(); first();
+  const second = installBaselineFsObservation(), actualBoundRead = fs.readFileSync;
+  try {
+    first();
+    assert.equal(fs.readFileSync, actualBoundRead, 'old cleanup must not replace the actual current observer');
+    assert.throws(() => installBaselineFsObservation(), /already installed/, 'current instrumentation remains registered');
+  } finally { second(); }
 });

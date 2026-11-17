@@ -4,6 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
+import { LogCheckpoints } from "../src/runtime/log-checkpoints.ts";
+import { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
 const { openDatabase, createContext } = await import(new URL("../../operation-coordinator/src/sqlite.ts", import.meta.url).href);
 const { ensureSchema } = await import(new URL("../../operation-coordinator/src/schema.ts", import.meta.url).href);
 const { ensureAssignmentChanges } = await import(new URL("../../operation-coordinator/src/assignment-changes.ts", import.meta.url).href);
@@ -34,4 +37,32 @@ test("actual read models open under a derived reservation and refresh under a co
     await second?.close(); await first.close(); source.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("checkpoint initialization rejects an unknown schema without retaining another handle or attachment", () => {
+  const root = mkdtempSync(join(tmpdir(), "checkpoint-schema-"));
+  const path = join(root, "checkpoints.sqlite"), seed = new DatabaseSync(path);
+  seed.exec("CREATE TABLE checkpoints(path TEXT PRIMARY KEY)"); seed.close();
+  const owner = new DatabaseSync(":memory:");
+  try {
+    assert.throws(() => new LogCheckpoints(path), /Unsupported checkpoint schema/);
+    assert.throws(() => new LogCheckpoints(path, owner), /Unsupported checkpoint schema/);
+    assert.deepEqual(owner.prepare("PRAGMA database_list").all().map(row => row.name), ["main"]);
+  } finally { owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("failed checkpoint construction releases the new model's physical owner", () => {
+  const root = mkdtempSync(join(tmpdir(), "checkpoint-owner-failure-"));
+  const seed = new DatabaseSync(join(root, "runtime-log-checkpoints.sqlite"));
+  seed.exec("CREATE TABLE checkpoints(path TEXT PRIMARY KEY)"); seed.close();
+  const sqlite = createRequire(import.meta.url)("node:sqlite"), Original = sqlite.DatabaseSync;
+  let active = 0;
+  sqlite.DatabaseSync = class extends Original {
+    constructor(...args: any[]) { super(...args); active++; }
+    close() { super.close(); active--; }
+  };
+  try {
+    assert.throws(() => new WorkReadModel(root, "bad-schema"), /Unsupported checkpoint schema/);
+    assert.equal(active, 0);
+  } finally { sqlite.DatabaseSync = Original; rmSync(root, { recursive: true, force: true }); }
 });

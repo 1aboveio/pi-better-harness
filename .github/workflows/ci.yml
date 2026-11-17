@@ -529,6 +529,9 @@ jobs:
         shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Baseline component observers read exact approved historical blobs.
+          fetch-depth: 0
 
       - name: Provision private runtime test Node
         uses: actions/setup-node@v4

@@ -134,7 +134,12 @@ export class WorkReadModel {
     this.agentDir = agentDir; this.instanceId = instanceId;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
-    this.checkpoints = new LogCheckpoints(join(agentDir, "runtime-log-checkpoints.sqlite"), this.db);
+    try { this.checkpoints = new LogCheckpoints(join(agentDir, "runtime-log-checkpoints.sqlite"), this.db); }
+    catch (error) {
+      try { this.db.close(); }
+      catch (cleanup) { throw new AggregateError([error, cleanup], "Checkpoint initialization and derived owner cleanup failed", { cause: error }); }
+      throw error;
+    }
     mkdirSync(join(agentDir, "runtime-read-repair"), { recursive: true });
     this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"), join(agentDir, "runtime-read-repair", "assignments.sqlite"), this.db);
     this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(true), refresh => this.reader.connection(refresh));
@@ -528,14 +533,22 @@ export class WorkReadModel {
   }
 
   private async measuredScan(kind: "entity" | "repair", paths: string[]) {
-    const before = { stats: this.sourceStats, metadataReads: this.counters.metadataReads, logBytes: logReadMetrics.bytes, logReads: logReadMetrics.reads };
-    await this.scan(paths);
+    const before = { stats: this.sourceStats, metadataReads: this.counters.metadataReads };
+    await this.scan(paths, kind);
     const counter = this.sourceWork[kind]; counter.batches++; counter.paths += paths.length;
     counter.stats += this.sourceStats - before.stats; counter.metadataReads += this.counters.metadataReads - before.metadataReads;
-    counter.logBytes += logReadMetrics.bytes - before.logBytes; counter.logReads += logReadMetrics.reads - before.logReads;
   }
 
-  private async scan(paths: string[]) {
+  private measuredLogRead<T>(kind: "entity" | "repair", read: () => T): T {
+    const bytes = logReadMetrics.bytes, reads = logReadMetrics.reads;
+    try { return read(); }
+    finally {
+      this.sourceWork[kind].logBytes += logReadMetrics.bytes - bytes;
+      this.sourceWork[kind].logReads += logReadMetrics.reads - reads;
+    }
+  }
+
+  private async scan(paths: string[], kind: "entity" | "repair" = "repair") {
     this.assignmentFault = undefined;
     const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
@@ -765,7 +778,7 @@ export class WorkReadModel {
           if (assignmentChanged) this.counters.assignmentProjections++;
           const assignment = assignmentChanged ? project(meta, processes.get(meta.id) ?? meta.status) : row!.assignment;
           let display = row?.display, health = row?.health;
-          if (logChanged) withLogReadBatch(() => {
+          if (logChanged) this.measuredLogRead(kind, () => withLogReadBatch(() => {
             this.counters.logProjections++; this.counters.healthProjections++;
             const logPath = join(this.runs, meta.id, "output.log");
             const unavailable = (reason: string) => {
@@ -813,7 +826,7 @@ export class WorkReadModel {
             });
             while (this.parseStates.size > 64) this.parseStates.delete(this.parseStates.keys().next().value);
             while (this.healthStates.size > 64) this.healthStates.delete(this.healthStates.keys().next().value);
-          });
+          }));
           if (logChanged || assignmentChanged || deadlineChanged || healthConfig.revision !== baseline.healthRevision) {
             this.counters.healthRecomputations++;
             health = healthWithThresholds(health, healthConfig.config, meta);
@@ -1001,14 +1014,16 @@ export class WorkReadModel {
         if (scope.detail && scope.id) {
           let cached = this.details.get(row.meta.id);
           if (!cached || cached.revision !== row.sourceRevision) {
+            this.sourceWork.entity.batches++; this.sourceWork.entity.paths++;
             const logPath = join(this.runs, row.meta.id, "output.log");
             const expectedLog = this.logs.get(row.meta.id) ?? "missing";
             const signature = () => {
+              this.sourceWork.entity.stats++;
               try { const info = statSync(logPath, { bigint: true }); return `${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`; }
               catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unverified"; }
             };
             if (signature() !== expectedLog) throw new Error("state-degraded: log changed since the indexed observation; resync required");
-            const value = { parsed: parseRun(row.meta.id, { logPath }), transcript: readRunTranscript(row.meta.id, { logPath }) };
+            const value = this.measuredLogRead("entity", () => ({ parsed: parseRun(row.meta.id, { logPath }), transcript: readRunTranscript(row.meta.id, { logPath }) }));
             if (signature() !== expectedLog) throw new Error("state-degraded: log changed during detail observation; resync required");
             if (Buffer.byteLength(JSON.stringify(value)) > 3 * 1024 * 1024) throw new Error("state-degraded: detail exceeds the bounded snapshot allowance");
             cached = { revision: row.sourceRevision, value }; this.details.set(row.meta.id, cached);

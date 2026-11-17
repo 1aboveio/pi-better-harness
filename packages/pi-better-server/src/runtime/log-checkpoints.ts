@@ -21,6 +21,16 @@ export class LogCheckpoints {
     this.prefix = connection ? "log_checkpoints." : "";
     // Keep durable folds on the query owner's handle; query tables stay in memory.
     if (connection) this.db.prepare("ATTACH DATABASE ? AS log_checkpoints").run(path);
+    const existing = this.db.prepare(`SELECT type FROM ${this.prefix}sqlite_master WHERE name='checkpoints'`).get();
+    if (existing) {
+      const columns = this.db.prepare(`PRAGMA ${this.prefix}table_info(checkpoints)`).all();
+      const expected = [["path", "TEXT", 1], ["version", "INTEGER", 0], ["payload", "TEXT", 0], ["bytes", "INTEGER", 0], ["used", "INTEGER", 0]];
+      if (existing.type !== "table" || columns.length !== expected.length || columns.some((column: any, i: number) => column.name !== expected[i]![0] || column.type !== expected[i]![1] || column.pk !== expected[i]![2])) {
+        if (this.shared) this.db.exec("DETACH DATABASE log_checkpoints"); else this.db.close();
+        throw new Error("Unsupported checkpoint schema");
+      }
+      return;
+    }
     this.db.exec(`PRAGMA ${this.prefix}journal_mode=DELETE; PRAGMA ${this.prefix}auto_vacuum=FULL;
       CREATE TABLE IF NOT EXISTS ${this.prefix}checkpoints(path TEXT PRIMARY KEY, version INTEGER, payload TEXT, bytes INTEGER, used INTEGER);`);
   }

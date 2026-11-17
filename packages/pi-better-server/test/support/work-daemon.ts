@@ -22,11 +22,13 @@ if (process.env.CONTINUATION_CRASH_POINT === "lease") {
 const sqlite = createRequire(import.meta.url)("node:sqlite");
 const OriginalDatabase = sqlite.DatabaseSync;
 const metrics = { opens: 0, active: 0, maximum: 0 };
+const handles = new Map<object, { path: string; active: boolean }>();
 sqlite.DatabaseSync = class extends OriginalDatabase {
   private counted = true;
   private crashAfterCommit = false;
   constructor(...args: any[]) {
     super(...args); metrics.opens++; metrics.active++; metrics.maximum = Math.max(metrics.maximum, metrics.active);
+    handles.set(this, { path: String(args[0]), active: true });
   }
   prepare(sql: string) {
     const statement = super.prepare(sql);
@@ -53,7 +55,7 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
   }
   close() {
     super.close();
-    if (this.counted) { metrics.active--; this.counted = false; }
+    if (this.counted) { metrics.active--; this.counted = false; handles.get(this)!.active = false; }
   }
 };
 const { startDaemon } = await import("../../src/server.ts");
@@ -71,7 +73,7 @@ process.on("message", async command => {
   if (command === "metrics") {
     const domain = "../../src/runtime/domain/subagents/index.domain.mjs";
     const { isHealthTickerActive } = await import(domain);
-    process.send?.({ sqlite: metrics, subagentHealthActive: isHealthTickerActive(), catalog: catalogMetrics });
+    process.send?.({ sqlite: metrics, sqliteHandles: [...handles.values()], subagentHealthActive: isHealthTickerActive(), catalog: catalogMetrics });
   }
   else void daemon.stop().then(() => process.exit(0));
 });

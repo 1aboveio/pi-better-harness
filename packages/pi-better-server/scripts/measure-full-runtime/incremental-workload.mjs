@@ -157,10 +157,13 @@ export function workloadCounterDelta(before, after) {
   }
   const ordinary = fields(before.sourceWork?.entity, after.sourceWork?.entity, ['batches', 'paths', 'stats', 'metadataReads', 'logBytes', 'logReads']);
   const repair = fields(before.sourceWork?.repair, after.sourceWork?.repair, ['batches', 'paths', 'stats', 'metadataReads', 'logBytes', 'logReads']);
+  const logs = fields(before.logReads, after.logReads, ['bytes', 'reads', 'parsedEvents', 'displayFolded', 'healthFolded']);
+  assert.equal(ordinary.logBytes + repair.logBytes, logs.bytes, 'Unaccounted candidate log bytes');
+  assert.equal(ordinary.logReads + repair.logReads, logs.reads, 'Unaccounted candidate log reads');
   return {
     accounting: 'ordinary-plus-repair', total: Object.fromEntries(Object.keys(ordinary).map(key => [key, ordinary[key] + repair[key]])),
     projections: fields(before, after, ['projections', 'assignmentProjections', 'logProjections', 'healthProjections']),
-    logs: fields(before.logReads, after.logReads, ['bytes', 'reads', 'parsedEvents', 'displayFolded', 'healthFolded']),
+    logs,
     ordinary, repair,
   };
 }

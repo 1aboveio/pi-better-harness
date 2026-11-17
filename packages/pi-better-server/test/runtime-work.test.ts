@@ -60,12 +60,20 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     const before = await first.request("runtime_get_metrics");
     const actualConnections = async () => {
       const reply = once(child, "message"); child.send("metrics");
-      const main = (await reply)[0].sqlite;
-      const worker = (await first.request("runtime_get_metrics")).sqlite;
-      return { opens: main.opens + worker.opens, active: main.active + worker.active,
-        maximum: main.maximum + worker.maximum };
+      const observed = (await reply)[0], main = observed.sqlite;
+      const workerMetrics = await first.request("runtime_get_metrics"), worker = workerMetrics.sqlite;
+      assert.equal(main.active, 1, "main control/mutation borrowers share one retained physical coordinator handle");
+      assert.deepEqual(observed.sqliteHandles.filter((handle: any) => handle.active).map((handle: any) => handle.path), [join(agent, "operation-coordinator.sqlite")]);
+      assert.equal(workerMetrics.mutationSqlite.active, 1);
+      assert.equal(workerMetrics.coordinatorConnections, 1);
+      assert.equal(workerMetrics.indexConnections, 1);
+      return { ...worker, main, total: { opens: main.opens + worker.opens, active: main.active + worker.active,
+        maximum: main.maximum + worker.maximum } };
     };
     const sqliteBefore = await actualConnections();
+    assert.equal(sqliteBefore.opens, 2, "query owns exactly one coordinator reader and one shared derived handle");
+    assert.equal(sqliteBefore.maximum, 2, "query peak physical handle budget remains two");
+    assert.equal(sqliteBefore.total.active, sqliteBefore.main.active + sqliteBefore.active, "all main and query physical handles remain visible");
     assert.equal(sqliteBefore.active, 2, "one coordinator and one derived connection retain the query index and attached durable inbox");
     assert.equal(sqliteBefore.active, 2, "one query index with attached checkpoints and one coordinator connection are retained by the daemon");
     assert.equal(first.snapshot!.rows.length, 50);
