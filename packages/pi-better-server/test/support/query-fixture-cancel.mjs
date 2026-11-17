@@ -12,15 +12,22 @@ test("cancelled query fixture releases its owned resources", { timeout: 1000 }, 
     parentPort.on("message", () => {});
   `)}`) });
   const client = await f.client();
-  if (process.env.PI_QUERY_FIXTURE_CANCEL_MODE === "already-ended") {
-    await f.worker.terminate();
-    client.close();
-  }
+  const mode = process.env.PI_QUERY_FIXTURE_CANCEL_MODE;
+  assert.equal(f.sockets.size, 1, "this child owns exactly one accepted peer");
+  const [peer] = f.sockets;
   t.after(() => {
     t.diagnostic(JSON.stringify({ workerStopped: f.worker.threadId === -1,
       clientDestroyed: client.socket.destroyed, transportRemoved: !existsSync(dirname(f.path)),
-      rootRemoved: !existsSync(f.root) }));
+      rootRemoved: !existsSync(f.root), mode, peerErrors: f.peerErrors }));
   });
+  if (mode !== "bootstrap-held") {
+    await f.worker.terminate();
+    if (mode !== "unannounced-reset") await client.request("fixture_close");
+    client.close();
+    // Exercise the external transport error boundary after this exact peer closes.
+    const code = mode === "unexpected-error" ? "EIO" : "ECONNRESET";
+    peer.emit("error", Object.assign(new Error(`fixture peer ${code}`), { code }));
+  }
   // Cancellation must run the fixture's hook even though this body never unwinds.
   await new Promise(() => {});
 });

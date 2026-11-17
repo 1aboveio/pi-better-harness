@@ -26,8 +26,16 @@ export async function fixture(options: { capacity?: number; timeoutMs?: number; 
   // Most fixtures do not need a bootstrap receipt, but awaited receipts must fail on exit.
   void bootstrapped.catch(() => {});
   const sockets = new Set<Socket>();
+  let closingFixture = false;
+  const peerErrors: Array<{ role: string; phase: string; code?: string; expected: boolean }> = [];
   const server = createServer(socket => {
     sockets.add(socket); socket.on("close", () => sockets.delete(socket));
+    let closingPeer = false;
+    socket.on("error", (error: NodeJS.ErrnoException) => {
+      const expected = error.code === "ECONNRESET" && (closingPeer || closingFixture);
+      if (peerErrors.length < 16) peerErrors.push({ role: "accepted-peer", phase: closingPeer ? "announced-close" : closingFixture ? "fixture-close" : "active", code: error.code, expected });
+      if (!expected) throw error;
+    });
     const queries = executor.connect(socket);
     socket.setEncoding("utf8");
     let buffer = "";
@@ -41,6 +49,11 @@ export async function fixture(options: { capacity?: number; timeoutMs?: number; 
             success: !error, data, error: error ? String(error) : undefined }) + "\n");
         };
         if (["hello", "ping"].includes(command.type)) { reply({ ok: true }); continue; }
+        if (command.type === "fixture_close") {
+          closingPeer = true;
+          reply({ ok: true });
+          continue;
+        }
         try { void queries.handle(command).then(data => {
           if (!socket.destroyed) socket.write(JSON.stringify({ type: "response", id: command.id, success: true }).slice(0, -1) + ',"data":' + data.json + "}\n");
         }, error => reply(undefined, error)); }
@@ -70,6 +83,7 @@ export async function fixture(options: { capacity?: number; timeoutMs?: number; 
   };
   let closing: Promise<void> | undefined;
   const close = () => closing ??= (async () => {
+    closingFixture = true;
     clients.forEach(client => client.close()); sockets.forEach(socket => socket.destroy());
     try { await new Promise<void>(resolve => server.close(() => resolve())); }
     finally {
@@ -80,5 +94,5 @@ export async function fixture(options: { capacity?: number; timeoutMs?: number; 
   // A test timeout does not unwind a suspended body into its finally block.
   after(close);
   server.listen(path); await once(server, "listening");
-  return { executor, client, stall, worker, bootstrapped, close, root, path };
+  return { executor, client, stall, worker, bootstrapped, close, root, path, sockets, peerErrors };
 }

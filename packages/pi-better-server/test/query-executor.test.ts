@@ -37,6 +37,24 @@ test("query fixture cancellation closes live and already-ended resources without
     assert.equal(child.status, 1, `the deliberate test timeout remains a failure, not a waived assertion\n${child.stdout}\n${child.stderr}`);
     assert.match(child.stdout, /test timed out after 1000ms/);
     assert.match(child.stdout, /"workerStopped":true,"clientDestroyed":true,"transportRemoved":true,"rootRemoved":true/);
+    if (mode === "already-ended") assert.match(child.stdout, /"code":"ECONNRESET","expected":true/);
+  }
+});
+
+test("unexpected accepted-peer errors cannot stand in for the intentional cancellation timeout", { timeout: 20000 }, () => {
+  const runtime = Number(process.versions.node.split(".")[0]) < 24 ? process.env.PI_TEST_PRIVATE_RUNTIME_NODE : process.execPath;
+  assert.ok(runtime);
+  for (const mode of ["unannounced-reset", "unexpected-error"]) {
+    const env = { ...process.env, PI_QUERY_FIXTURE_CANCEL_MODE: mode } as NodeJS.ProcessEnv;
+    delete env.NODE_TEST_CONTEXT;
+    const child: SpawnSyncReturns<string> = spawnSync(runtime, ["--import", "tsx", "--test", "--test-isolation=none", "--test-reporter=tap",
+      new URL("./support/query-fixture-cancel.mjs", import.meta.url).pathname], { env, encoding: "utf8", timeout: 8000 });
+    assert.equal(child.error, undefined);
+    assert.equal(child.status, 1, child.stderr);
+    assert.doesNotMatch(child.stdout, /test timed out after 1000ms/);
+    assert.match(child.stdout, mode === "unannounced-reset" ? /code: 'ECONNRESET'/ : /code: 'EIO'/);
+    assert.match(child.stdout, /"expected":false/);
+    assert.match(child.stdout, /"workerStopped":true,"clientDestroyed":true,"transportRemoved":true,"rootRemoved":true/);
   }
 });
 
@@ -647,6 +665,28 @@ test("an exact-ID query returns rebuilding without blocking all reads on the ini
     f.worker.postMessage({ type: "release-inventory" });
     await ready(client);
     assert.equal((await client.get({ id: "sa_initial_inventory", limit: 1 })).status, "ready");
+  } finally { await f.close(); }
+});
+
+test("inventory block receipt waits for already-running source work", { timeout: 10000 }, async () => {
+  const f = await fixture({ workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
+  const message = (type: string) => new Promise<any>(resolve => {
+    const listener = (value: any) => { if (value.type === type) { f.worker.off("message", listener); resolve(value); } };
+    f.worker.on("message", listener);
+  });
+  try {
+    const client = await f.client(); await f.bootstrapped;
+    f.worker.postMessage({ type: "release-inventory" }); await ready(client);
+    const directory = join(f.root, "runs/sa_block_boundary"); mkdirSync(directory);
+    writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_block_boundary", cwd: f.root, status: "completed", startedAt: 1 }));
+    const held = message("scan-tail-held");
+    f.worker.postMessage({ type: "hold-scan-tail", id: "sa_block_boundary" }); await held;
+    const requested = message("block-requested"), blocked = message("inventory-blocked");
+    f.worker.postMessage({ type: "block-inventory" });
+    assert.equal((await requested).pending, true, "the control must overlap actual source work");
+    f.worker.postMessage({ type: "release-scan-tail" });
+    assert.equal((await blocked).pending, false, "a blocked receipt cannot leave earlier reconciliation running");
+    f.worker.postMessage({ type: "release-inventory" });
   } finally { await f.close(); }
 });
 

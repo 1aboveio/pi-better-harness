@@ -26,8 +26,9 @@ function blockInventory() {
 }
 let release = blockInventory();
 let rpcInstalled = false;
+let releaseScanTail;
 const earlyMessages = [];
-parentPort.on("message", message => {
+parentPort.on("message", async message => {
   if (!rpcInstalled && ["query", "cancel"].includes(message.type) && earlyMessages.length < 4) {
     earlyMessages.push({ messageType: message.type, id: message.id });
   }
@@ -41,8 +42,26 @@ parentPort.on("message", message => {
     return;
   }
   if (message.type === "block-inventory") {
+    parentPort.postMessage({ type: "block-requested", pending: Boolean(model.pending) });
+    // Drain only already-owned work: replacing reconcile cannot stop a call
+    // that entered the original method before this control message arrived.
+    while (model.pending) await model.pending;
     release = blockInventory();
-    parentPort.postMessage({ type: "inventory-blocked" });
+    parentPort.postMessage({ type: "inventory-blocked", pending: Boolean(model.pending) });
+  }
+  if (message.type === "hold-scan-tail") {
+    const scan = WorkReadModel.prototype.scan;
+    const tail = new Promise(resolve => { releaseScanTail = resolve; });
+    WorkReadModel.prototype.scan = async function(...args) {
+      WorkReadModel.prototype.scan = scan;
+      await scan.apply(this, args);
+      parentPort.postMessage({ type: "scan-tail-held" });
+      await tail;
+    };
+    model.fileHint(model.runs, message.id);
+  }
+  if (message.type === "release-scan-tail") {
+    releaseScanTail?.();
   }
   if (message.type === "release-inventory") {
     WorkReadModel.prototype.reconcile = reconcile;
