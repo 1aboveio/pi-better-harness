@@ -128,7 +128,14 @@ Parent delivery and exact-revision disposition remain separate from worker judgm
 The existing callback batcher uses the stable outcome event as its notification
 identity and the attempt as its retrieval identity. Recipient transcript entries
 are reconciled before replay; a callback receipt remains distinct from inspection
-and exact-revision consumption through `subagent_result`. Recorded branch anchors
+and exact-revision consumption through `subagent_result`. Parent execution admission
+controls automatic model continuation, not visibility of a committed outcome. If
+admission is refused while the captured session and branch are attached, append a
+visible notification with `triggerTurn: false` and retain its transcript receipt.
+A paused, completed or replaced Goal must not silently hide success or failure.
+Notification does not resume the Goal, consume the outcome, or retry the task;
+receipt reconciliation prevents later reload or Goal changes from duplicating it.
+Recorded branch anchors
 must remain on the recipient's branch. Current file-read permissions apply to
 bounded dependency evidence reads; neither foreign-session overrides nor outcome
 inspection confer worker acknowledgement or mutation authority. Standalone

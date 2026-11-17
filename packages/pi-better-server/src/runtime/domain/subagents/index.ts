@@ -144,7 +144,7 @@ import {
     getSharedCapacityGate,
 } from "./capacity.mjs";
 import { buildHealthCallbackDelivery } from "./completion.ts";
-import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.ts";
+import { cancelCallbackBatch, getCallbackBatcher, packCallbackBatch, setCallbackBatchContext } from "./shared-callback-batcher.ts";
 let managementPort: import("./managed-launch-port.ts").ManagedLaunchPort | undefined;
 const ownedByThisParent = (meta: Partial<RunMeta>) => managementPort ? managementPort.owns(meta) : ownedByFrontend(meta as RunMeta);
 const supervisedMetas = () => managementPort ? managementPort.supervised() : listMetasForParent(process.pid);
@@ -645,7 +645,43 @@ async function tryEnqueueAssignmentOutcome(pi: ExtensionAPI, meta: RunMeta): Pro
     const gate = await requestResumeAdmission(pi, active, { timeoutMs: 50 });
     outcomeAdmission.set(outcome.eventId, () => gate.allowed ? gate.isCurrent?.() !== false : !active.goalId && !outcome.recipient.goalId && gate.revision === -1);
     if (!gate.allowed && (active.goalId || outcome.recipient.goalId || gate.revision !== -1)) {
-        deferOutcome(meta, gate.reason ?? "Parent admission refused; automatic reconciliation will retry.");
+        // Admission controls model execution, not delivery of an already
+        // committed result. Paused Goals still owe their human a notification.
+        if (sessionTornDown || outcomeHost !== deliveryHost || uiCtx !== ctx || callbackSuppressionReason(meta)
+            || (outcome.recipient.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === outcome.recipient.branchId))) {
+            deferOutcome(meta, "Recorded parent delivery scope changed; automatic reconciliation will retry.");
+            return;
+        }
+        // Native Pi queues messages during a turn even with triggerTurn:false.
+        // Wait for idle so replay cannot enqueue the same unreceipted message.
+        if (!ctx.isIdle()) {
+            deferOutcome(meta, "Waiting for an idle parent to append the outcome without starting a turn.");
+            return;
+        }
+        if (!claimOutcome(meta, deliveryHost)) {
+            deferOutcome(meta, "Outcome dispatch is owned by another host; automatic reconciliation will retry.");
+            return;
+        }
+        const details = { completionEventIds: [outcome.eventId] };
+        const packed = packCallbackBatch([{
+            source: "subagent", id: outcome.eventId, inspectId: meta.id, receiptId: outcome.eventId,
+            label: meta.name ?? meta.id, status: outcome.outcome, outcome: outcome.reason,
+            detailTool: "subagent_result", callback: true,
+        }]);
+        try {
+            await pi.sendMessage({ customType: "background-completion-batch", display: true,
+                content: packed.text, details }, { triggerTurn: false });
+        } catch (error) {
+            // A failed persistence must not look like a durable transcript receipt.
+            details.completionEventIds.length = 0;
+            throw error;
+        }
+        const entry = outcomeTranscriptReceipt(ctx.sessionManager.getBranch(), outcome.eventId);
+        if (!entry) throw new Error("Awaiting durable recipient transcript receipt.");
+        receiptOutcome(meta, entry);
+        markCompletionCallbackSent(meta.id, Date.now());
+        deferOutcome(meta);
+        try { ctx.ui?.notify(`${meta.name ?? meta.id}: ${outcome.outcome}. Automatic continuation is paused or unavailable; inspect subagent_result.`, outcome.outcome === "failed" ? "warning" : "info"); } catch { /* transcript remains visible */ }
         return;
     }
     // Admission may yield across a session switch or Goal/workflow change.
