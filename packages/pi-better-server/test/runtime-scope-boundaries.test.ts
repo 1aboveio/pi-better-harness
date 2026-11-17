@@ -1,4 +1,5 @@
 import test from "node:test";
+import { openSync, writeSync, closeSync } from "node:fs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,6 +35,8 @@ test("A staged source race degrades A but preserves verified B frames and cursor
     assert.match(aFrames[0]?.reason, /Source changed during observation/);
     assert.equal(aFrames[0]?.rows[0].meta.name, "old", "unpublished staging is not visible");
     assert.equal(bFrames, 0, "unrelated content sends no scoped frames");
+    assert.match(model.snapshot({ cwd: a }).reason!, /Source changed during observation/);
+    assert.equal(model.snapshot({ cwd: a }).rows[0]!.meta.name, "old");
     assert.equal(model.snapshot(scope).status, "ready");
     assert.equal(model.snapshot(scope).scopeRevision, first.scopeRevision);
     assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
@@ -63,6 +66,7 @@ test("A partial JSON write degrades only its retained namespace and never publis
   const a = join(root, "a"), b = join(root, "b");
   put("sa_a", a); put("sa_b1", b); put("sa_b2", b);
   const model = new WorkReadModel(root, "partial-json", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  let held: number | undefined;
   try {
     await model.reconcile();
     for (const watcher of (model as any).watchers.values()) watcher.close();
@@ -70,8 +74,9 @@ test("A partial JSON write degrades only its retained namespace and never publis
     const scope = { cwd: b, limit: 1 }, first = model.snapshot(scope);
     let frames = 0;
     model.onChange(() => frames++, scope);
-    writeFileSync(join(root, "runs/sa_a/meta.json"), '{"id":');
-    await (model as any).scan([join(root, "runs/sa_a/meta.json")]);
+    const path = join(root, "runs/sa_a/meta.json");
+    held = openSync(path, "w"); writeSync(held, '{"id":');
+    await (model as any).scan([path]);
     assert.equal(model.observation().status, "degraded");
     assert.equal(model.snapshot({ cwd: a }).status, "degraded");
     assert.match(model.snapshot({ cwd: a }).reason!, /SyntaxError/);
@@ -79,17 +84,22 @@ test("A partial JSON write degrades only its retained namespace and never publis
     assert.equal(frames, 0, "unrelated content sends no scoped frames");
     assert.equal(model.snapshot(scope).status, "ready");
     assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
-    put("sa_a", b);
+    writeFileSync(join(root, "settings.json"), "{");
+    await (model as any).scan([path]);
+    assert.equal(model.snapshot(scope).status, "degraded", "a global health source failure cannot be hidden by attributed A");
+    rmSync(join(root, "settings.json"));
+    writeSync(held, JSON.stringify({ id: "sa_a", cwd: b, status: "completed", startedAt: 1 }), 0, "utf8");
+    closeSync(held); held = undefined;
     await model.reconcile();
     assert.equal(model.snapshot({ cwd: b }).totalMatching, 3, "a valid move affects its destination");
     assert.ok(frames > 0);
     assert.throws(() => model.snapshot({ ...scope, cursor: first.nextCursor }), /resync_required/);
-    writeFileSync(join(root, "runs/sa_b1/meta.json"), '{');
+    writeFileSync(join(root, "runs/sa_b1/meta.json"), "{");
     await (model as any).scan([join(root, "runs/sa_b1/meta.json")]);
     assert.equal(model.snapshot(scope).status, "degraded", "B's own parse failure remains visible");
     model.invalidate("Unknown source root failure");
     assert.equal(model.snapshot({ cwd: a }).status, "degraded");
-  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+  } finally { if (held !== undefined) closeSync(held); await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("A health deadlines advance without invalidating B subscription or cursor", async t => {

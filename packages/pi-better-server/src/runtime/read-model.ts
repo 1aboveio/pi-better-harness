@@ -780,6 +780,7 @@ export class WorkReadModel {
           await yieldTurn(); sliceStarted = performance.now();
         }
       }
+      const globallyUnverified = !!healthConfig.reason || rows.some(row => !row.assignment.verified);
       let after: string;
       try { after = this.reader.revision(); } catch { after = "unknown"; }
       if (after !== coordinator) {
@@ -807,7 +808,7 @@ export class WorkReadModel {
           if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
             this.dirty = true;
             const error = new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
-            if ((this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
+            if (!globallyUnverified && (this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
                 && path.startsWith(this.runs + sep) && info.size <= 1024n * 1024n && !failedPaths.size && [...this.sourceErrors].every(([path, reason]) =>
               this.sourceRace?.paths.has(path) && reason === this.sourceRace.reason)) {
               // Recheck only for error routing: a concurrent move can affect a
@@ -870,7 +871,8 @@ export class WorkReadModel {
       }
       // Incomplete raw writes retain their verified namespace, not partial JSON.
       // New/unknown records and mixed failures cannot be narrowed this way.
-      if (failedPaths.size && failedPaths.size === malformedPaths.size
+      if (globallyUnverified) this.sourceRace = undefined;
+      if (!globallyUnverified && failedPaths.size && failedPaths.size === malformedPaths.size
           && (previousState === "ready" || this.sourceRace && previousReason === this.sourceRace.reason)
           && [...this.sourceErrors.keys()].every(path => malformedPaths.has(path))) {
         this.sourceRace = { reason: failedPaths.values().next().value!, paths: malformedPaths,

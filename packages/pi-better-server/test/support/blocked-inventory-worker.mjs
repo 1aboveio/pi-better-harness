@@ -34,7 +34,12 @@ function blockInventory() {
   return release;
 }
 let release = blockInventory();
+let rpcInstalled = false;
+const earlyMessages = [];
 parentPort.on("message", message => {
+  if (!rpcInstalled && ["query", "cancel"].includes(message.type) && earlyMessages.length < 4) {
+    earlyMessages.push({ messageType: message.type, id: message.id });
+  }
   if (message.type === "initial-source-state") {
     const path = join(model.runs, message.id, "meta.json");
     const info = statSync(path);
@@ -56,5 +61,6 @@ parentPort.on("message", message => {
 await import("../../src/runtime/query-worker.mjs");
 clearInterval(bootstrapHeartbeat);
 parentPort.off("message", acknowledgeBootstrap);
+rpcInstalled = true;
 parentPort.postMessage({ type: "fixture-ready" });
-parentPort.postMessage({ type: "inventory-blocked" });
+parentPort.postMessage({ type: "inventory-blocked", earlyMessages });
