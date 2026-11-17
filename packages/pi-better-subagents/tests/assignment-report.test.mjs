@@ -47,9 +47,9 @@ test("report-only bridge retains actual bytes, retries identically, and rejects 
     await assert.rejects(() => f.send({ ...f.report, evidence: [{ path: "missing", explanation: "missing" }] }), /ENOENT|no such file/);
     await assert.rejects(() => f.send({ ...f.report, assignmentId: "foreign" }), (error) => error.code === "schema-invalid" || error.code === "authority-field");
     const foreign = join(tmpdir(), "foreign-report.txt"); writeFileSync(foreign, "foreign");
-    await assert.rejects(() => f.send({ ...f.report, evidence: [{ path: foreign, explanation: "foreign" }] }), /Foreign/);
+    await assert.rejects(() => f.send({ ...f.report, evidence: [{ path: foreign, explanation: "foreign" }] }), /Foreign.*assigned workspace.*retry/);
     symlinkSync(foreign, join(f.workspace, "foreign-link"));
-    await assert.rejects(() => f.send({ ...f.report, evidence: [{ path: "foreign-link", explanation: "foreign symlink" }] }), /Foreign/);
+    await assert.rejects(() => f.send({ ...f.report, evidence: [{ path: "foreign-link", explanation: "foreign symlink" }] }), /Foreign.*assigned workspace.*retry/);
     writeFileSync(join(f.workspace, "oversized"), Buffer.alloc(65537));
     await assert.rejects(() => f.send({ ...f.report, evidence: [{ path: "oversized", explanation: "too large" }] }), /65536/);
     assert.equal(readMeta(f.id).assignmentReport, undefined, "refused evidence cannot publish a report reference");

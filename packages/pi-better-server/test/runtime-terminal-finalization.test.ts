@@ -11,6 +11,7 @@ const { bindRuntimeOutcomeStore } = await import(new URL("assignment-outcomes.do
 const { StoreError: SubagentStoreError } = await import(new URL("shared-operation-coordinator/index.domain.mjs", domain).href);
 const { writeMeta, readMeta, runDir, logPathFor } = await import(new URL("registry.domain.mjs", domain).href);
 
+// Ported from 802/4ec3a5ee: real borrowed transactions with an interleaved winner.
 const conflicts = ["same-attempt", "writer", "token", "recipient", "evidence", "revision", "other-validation"];
 for (const [index, conflict] of conflicts.entries()) {
   test(`borrowed canonical finalizer preserves terminal winner and fences ${conflict}`, () => {

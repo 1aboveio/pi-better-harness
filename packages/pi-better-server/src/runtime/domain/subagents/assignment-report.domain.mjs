@@ -113,8 +113,10 @@ function captureEvidence(root, e) {
         if (!e.path || !e.explanation?.trim() || e.explanation.length > 1024)
             throw new Error("Evidence needs a bounded explanation.");
         const source = realpathSync(resolve(root, e.path));
-        if (!inside(root, source) || credentialFilePaths(homedir()).some((p) => inside(p, source)))
+        if (credentialFilePaths(homedir()).some((p) => inside(p, source)))
             throw new Error("Foreign or credential assignment evidence refused.");
+        if (!inside(root, source))
+            throw new Error(`Foreign assignment evidence refused: the source must resolve inside the assigned workspace ${JSON.stringify(root)}. A sibling directory is outside this boundary. Use an existing workspace file or place the reportable artifact inside the workspace, then retry.`);
         const fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW);
         try {
             const stat = fstatSync(fd);

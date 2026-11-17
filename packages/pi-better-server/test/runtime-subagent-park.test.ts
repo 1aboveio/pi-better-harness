@@ -10,8 +10,12 @@ import { defaultSandboxPermissions } from "../../pi-better-sandbox/permissions.t
 import { connect } from "node:net";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { inspectDaemonOwner, ownerIdentityVerified, ownerIsAlive, processMatchesStart, type DaemonOwnerIdentity } from "../src/daemon-owner.ts";
+import { parkPhaseTrace } from "./support/park-phase-trace.ts";
 
-for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", "spawn", "result", "bootstrap", "published", "lease", "tools"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: scenario === "unavailable" ? 90000 : 60000 }, async () => {
+for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", "spawn", "result", "bootstrap", "published", "lease", "tools"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: scenario === "unavailable" ? 90000 : 60000 }, async t => {
+  const trace = scenario === "unavailable" ? parkPhaseTrace(t.signal, record => console.error(JSON.stringify(record))) : undefined;
+  trace?.mark("fixture-setup");
+  t.after(() => trace?.close());
   const restart = scenario === "park";
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, "launch-")), transport = realpathSync(mkdtempSync("/tmp/p761-"));
@@ -58,17 +62,21 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
     try { while (!existsSync(path)) await once(watcher, "change"); } finally { watcher.close(); }
   };
   try {
+    trace?.mark("initial-daemon-ready");
     await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
     writeFileSync(join(agent, "server-registration-v1.json"), JSON.stringify({ version: 1, agentDir: agent, serverDir: transport }));
     if (scenario === "unavailable") {
       // Exercise the fixed-artifact successor deterministically. A source fixture
       // clock cannot control the runtime installed by the real SDK parent.
       const probe = new WorkClient(connect(join(transport, "pi-server.sock")), agent);
+      trace?.mark("initial-daemon-hello");
       try { initialInstance = (await probe.ready).instanceId; } finally { probe.close(); }
+      trace?.mark("initial-daemon-stop");
       const stopped = once(daemon, "exit"); daemon.send("stop"); await stopped;
     }
     parent = fork(new URL("./support/subagent-launch-sdk.mjs", import.meta.url), [], { execPath: process.execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
     parent.stderr!.on("data", data => { errors += data; });
+    trace?.mark("sdk-parent-ready");
     const [ready] = await Promise.race([once(parent, "message"), once(parent, "exit").then(() => { throw new Error(errors); })]);
     const launch = async (params: object, key = "same-launch", child = parent!, goalComplete = false) => {
       const reply = once(child, "message"); child.send({ key, params, goalComplete }); const [message] = await reply;
@@ -76,12 +84,15 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
       assert.equal(message.error, undefined, `${message.stack ?? message.error}\n${errors}`); return message.result;
     };
     const params = { prompt: "Execute fixture", role: "fixture", model: "openai/gpt-4.1", callback: false, tools: "read,bg_task_spawn,bg_task_status,bg_task_log,wait_for_operations,acknowledge_operation_result", skills: [] };
+    trace?.mark("authoritative-launch-receipt");
     const first = await launch(params);
     if (scenario === "standalone") { assert.equal(first.denied, true); return; }
     assert.equal(first.details.launched, true);
     attempts.push(first.details.runId);
+    trace?.mark("sdk-parent-stop");
     const exited = once(parent, "exit"); parent.send({ stop: true }); await exited; parent = undefined;
     const parkedDeadline = Date.now() + 20000;
+    trace?.mark("authoritative-park-file");
     while (!existsSync(join(root, "pi-better-subagents/runs", first.details.runId, "park.json"))) {
       assert.ok(Date.now() < parkedDeadline, `Worker did not park: ${errors}`);
       await delay(50);
@@ -105,6 +116,7 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
     }
     writeFileSync(release, "release");
     if (scenario === "unavailable") {
+      trace?.mark("successor-hello");
       const observer = new WorkClient(join(transport, "pi-server.sock"), agent);
       let observedInstance: string;
       try {
@@ -124,6 +136,7 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
           runtimeOwners.push(inspection.owner);
         }
         const deadline = Date.now() + 10000;
+        trace?.mark("unavailable-control-status");
         let state: any;
         do {
           state = (await observer.request("runtime_get_status")).subagentManagement;
@@ -133,11 +146,14 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
         assert.match(state.continuationUnavailable[0].reason, /permission/i);
         assert.equal(state.inFlight, 0);
       } finally { observer.close(); }
+      trace?.mark("original-attempt-terminal");
       await terminal(first.details.runId);
+      trace?.mark("sqlite-dependencies-terminal");
       const completedDependencies = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
       try { assert.equal(completedDependencies.prepare("SELECT count(*) AS n FROM operations WHERE terminal_revision=0").get()?.n, 0, "all accepted dependencies have durable terminal facts before testing idle shutdown"); }
       finally { completedDependencies.close(); }
       const terminalObservedAt = Date.now();
+      trace?.mark("diagnostic-hello");
       // Use the SDK-free runtime handshake, including exact-root/capability
       // validation. A supplied socket does not register runtime-client retention.
       // Hosted-session SDK negotiation is a different protocol and can reject
@@ -160,6 +176,7 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
       })();
       let lastStatus: any;
       if (diagnostic) try {
+        trace?.mark("runtime-clients-detached");
         const detachedBy = Date.now() + 10000;
         do {
           lastStatus = await diagnostic.request("runtime_get_status");
@@ -178,6 +195,7 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
         // Measure the current successor's real 30-second idle + five-second
         // shutdown contract. Never advance the preceding fixture daemon's clock.
         const idleStarted = Date.now(), idleDeadline = idleStarted + 35000;
+        trace?.mark("idle-socket-close");
         if (lastStatus.nextIdleDeadline !== null) assert.ok(lastStatus.nextIdleDeadline <= idleStarted + 30000);
         while (existsSync(join(transport, "pi-server.sock"))) {
           assert.ok(Date.now() < idleDeadline, `Unavailable wait kept runtime management active: ${JSON.stringify(lastStatus)}`);
@@ -194,12 +212,14 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
         }
         // Socket close is the start of shutdown; the fixed CLI can still write
         // its clean-stop checkpoint and release leases before actually exiting.
+        trace?.mark("exact-runtime-owner-exit");
         await awaitRuntimeExit(idleDeadline);
         console.log(JSON.stringify({ unavailableIdle: { instanceId: observedInstance, initialInstance,
           runtimeIdleMs: 30000, shutdownBudgetMs: 5000, elapsedMs: Date.now() - idleStarted,
           exitedOwners: runtimeOwners } }));
       } finally { diagnostic.close(); }
       else await awaitRuntimeExit(Date.now() + 5000);
+      trace?.mark("continuation-remains-unlaunched");
       assert.equal(existsSync(`${entered}.continued`), false);
       return;
     }
@@ -267,9 +287,11 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
     } finally { db.close(); }
     assert.notEqual(JSON.parse(readFileSync(`${entered}.continued`, "utf8")).pid, metaFor(first.details.runId).pid);
   } catch (error) {
+    trace?.report("failure");
     console.error("Managed launch scenario failed:", error, errors);
     throw error;
   } finally {
+    trace?.mark("cleanup");
     writeFileSync(release, "release");
     if (parent?.exitCode === null) { const exit = once(parent, "exit"); parent.send({ stop: true }); await exit; }
     if (sibling?.exitCode === null) { const exit = once(sibling, "exit"); sibling.send({ stop: true }); await exit; }
