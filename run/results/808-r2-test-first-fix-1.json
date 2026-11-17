@@ -2,14 +2,18 @@
   "unit": "808",
   "status": "incomplete",
   "sourceSHA": "4b7556af7843e70a595999442c586658a4dbfc0e",
-  "sha": "773f4a8ade0a94468434d360f1b179ec289bc698",
+  "sha": "1798ddd7d435e7f61eaa1103857ca2395755017b",
+  "resultPath": "/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/results/808-r2-test-first-fix-1.json",
+  "workspace": "/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808",
+  "localReportRole": "Workspace evidence mirror; resultPath is the coordinator-requested canonical report.",
   "actualSelection": { "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "source": "PI_PROVIDER, PI_MODEL, PI_REASONING_LEVEL readback" },
   "standingOrders": [],
   "decision": "808-common-driver-unmodified-approved-subjects",
   "decisionNeeded": {
     "owner": "Architect/coordinator",
-    "incompatibility": "Original baseline read-model has neither checkpoint/logReads metrics nor parseStates/healthStates parser maps used by the current owned eviction observer. The common driver now targets that actual subject and explicitly refuses missing observations. Source inspection establishes the mismatch; no native baseline capture was attempted.",
-    "options": ["Implement a baseline-specific external observation adapter for real read/fold counts and the baseline's actual parser-cache eviction boundary, without changing tracked baseline or inventing checkpoints.", "Clarify how the original baseline's absence of checkpoints is represented in comparison evidence while retaining every real before/after observation and all candidate acceptance budgets. This requires an Architect decision, not an implementer waiver."],
+    "incompatibility": "The parser-cache/read/fold choice is answered and implemented under plan466. The remaining original baseline interface lacks per-source projection and ordinary-versus-repair work breakdowns. Actual bytes, reads, parsed events and folds are observed; unavailable breakdowns remain null and the validator rejects qualification with unavailable-source-work-breakdown.",
+    "options": ["Approve a separately named baseline-inventory breakdown from the original inventory boundaries, retaining all measured baseline work and every existing candidate ordinary/repair budget.", "Define an exact baseline inventory-to-ordinary/repair mapping, then add narrowly scoped observation hooks to those original inventory/stat/metadata boundaries. Do not infer the classification or turn unavailable fields into zero."],
+    "recommendation": "Use a separately named baseline-inventory breakdown. It describes the original algorithm without assigning labels its implementation did not have. Keep qualification rejected until the representation and its required observations are approved and implemented.",
     "unchanged": "No new baseline, tracked fixture backport, dirty baseline, fabricated capability, retagged report or provenance/acceptance relaxation is authorized or applied."
   },
   "resolvedRulePaths": [
@@ -75,7 +79,32 @@
     ]
   },
   "generated": { "status": "not-regenerated", "reason": "Tests and external measurement scripts changed. No canonical generated runtime owner changed. Prior 623-output comparison remains inherited evidence, not a fresh pass." },
-  "currentCheckpoint": "Local fixture, named-owner and common-driver binding corrections committed. R3 packed startup hold has an explicit registered-client handoff, with native qualification still pending. R2 actual original-baseline observation compatibility remains unqualified; missing capabilities are explicitly refused. R4 native five-stage execution remains pending.",
+  "baselineAdapter": {
+    "decision": "808-baseline-real-parser-module-adapter (plan466), option1",
+    "commit": "1798ddd7d435e7f61eaa1103857ca2395755017b",
+    "preservedHistory": ["d8a03901", "773f4a8a", "3f7f963e"],
+    "baseline": "eec7b3e256a7548bbf67f69cd468f12eb3b91dc8",
+    "sourceProof": "Fresh git show confirms parse.mjs parseStates/resetParseRunCursor and health-observation.mjs factLogStates/resetChildEventLogCursor. These module caches replace the earlier incorrect assumption that baseline parsers were model fields.",
+    "implementation": "The same external loader instruments only exact approved artifact module URLs. Module-local callbacks invoke the existing reset exports inside their actual loaded reader context. Only the derived detail cache is also cleared. FS wrappers retain the original read return values; counters observe actual readSync/readFileSync bytes, successful JSON parses and actual display/health fold iterations. Runtime eviction requires observed parser thread identity to match the actual owned Worker handle, then verifies cold detail bytes and folds after eviction. No controller-process or second-source import resets native caches.",
+    "checkpointCapability": { "durableCheckpoints": false, "note": "Verified original-baseline capability fact, separate from measured counters. No checkpoints, hits, restores or zero-I/O claims are manufactured. Candidate checkpoint contracts and restoration checks remain unchanged." },
+    "fixtureClosure": "baseline-observation.mjs is included in fixtureSha256; approved driver source identity also covers all new adapter files. Existing common-driver/source/artifact/cleanliness guards remain strict.",
+    "componentBoundary": "The test loads exact approved git blobs as in-process modules with their real dependency reader and actual filesystem log. Resets close over those same loaded modules; the test asserts module origins, current thread identity, hot caches, final parsed result, real cold bytes and both real folds. This is component proof, not native artifact/worker qualification.",
+    "redGreen": [
+      { "command": "node --import tsx --test packages/pi-better-server/test/baseline-observation.test.ts", "relativecwd": ".", "redExit": 1, "redError": "Baseline observation adapter module unavailable", "redEvidence": ".private-808/tmp/baseline-adapter-red.log" },
+      { "command": "node --import tsx --test packages/pi-better-server/test/baseline-observation.test.ts", "relativecwd": ".", "redExit": 1, "redError": "Missing/reset counter: assignmentProjections after the real eviction/read/fold assertions passed", "redEvidence": ".private-808/tmp/baseline-delta-red.log", "correction": "Retain actual baseline deltas and explicit unavailable source breakdowns; never fill missing counters with zero." }
+    ],
+    "verification": [
+      { "command": "node --import tsx --test packages/pi-better-server/test/baseline-observation.test.ts packages/pi-better-server/test/campaign-subject.test.ts packages/pi-better-server/test/aggregate-runtime-samples.test.ts packages/pi-better-server/test/paired-runtime-report.test.ts packages/pi-better-server/test/owned-runtime-producers.test.ts packages/pi-better-server/test/workload-recovery-sequence.test.ts", "relativecwd": ".", "exit": 0, "passed": 67, "evidence": ".private-808/tmp/baseline-adapter-verified-components.log" },
+      { "command": "npm run typecheck --workspace pi-better-server", "relativecwd": ".", "exit": 0, "evidence": ".private-808/tmp/baseline-adapter-verified-types.log" },
+      { "command": "node .private-808/tmp/assertion-preservation-r2.mjs", "relativecwd": ".", "exit": 0, "preserved": 403, "evidence": ".private-808/tmp/baseline-adapter-403.log" },
+      { "command": "node --check packages/pi-better-server/scripts/measure-full-runtime/baseline-observation.mjs", "relativecwd": ".", "exit": 0 },
+      { "command": "node --check packages/pi-better-server/scripts/measure-full-runtime/recovery-trace-loader.mjs", "relativecwd": ".", "exit": 0 },
+      { "command": "git diff --cached --check", "relativecwd": ".", "exit": 0 }
+    ],
+    "fixturePremiseCorrection": { "error": "Initial test used an assistant event type ignored by the real baseline; displayFolded correctly stayed zero.", "evidence": ".private-808/tmp/baseline-adapter-green.log", "correction": "Use the baseline's supported message_end event. Read/fold assertions were retained." },
+    "unexplainedWatchdog": "Earlier watchdog RED remains separate in continuation.firstFailures; no timeout change, native progress claim, or convergence reset."
+  },
+  "currentCheckpoint": "Supported baseline module eviction and actual read/fold adapter implemented and committed; 67 focused tests/types/syntax pass. Baseline source-work classification is explicitly unavailable and rejects qualification pending the concrete decision above. Native actual subject/module/worker composition, R3 LIVE handoff and R4 five-stage SIGKILL remain pending.",
   "pendingNative": {
     "status": "UNQUALIFIED",
     "localNode": "v24.21.0",
@@ -86,9 +115,9 @@
   "failure": {
     "case": "R2 approved original baseline measurement",
     "step": "External driver now selects the approved subject; source-backed baseline observation compatibility assessment",
-    "error": "Baseline read-model does not expose checkpoint or logReads metrics or the current parser map eviction boundary. Driver explicitly refuses missing actual log-read/checkpoint observations. No native attempt, fabricated capability or provenance relaxation applied.",
+    "error": "Read/fold and exact module reset boundaries are now supported by the external adapter. Baseline projection-source and ordinary-versus-repair breakdowns remain unavailable, reported as null rather than zero, and explicitly reject qualification. Native composition has not been attempted.",
     "evidenceDir": ".private-808/tmp",
-    "evidence": "r2-red-baseline.log",
+    "evidence": "baseline-delta-red.log",
     "cleanupErrors": []
   },
   "retainedNativeFailure": {
@@ -100,7 +129,7 @@
     "status": "not-rerun"
   },
   "remainingWork": [
-    "Resolve the concrete original-baseline log-read/checkpoint/parser-eviction observation incompatibility described in decisionNeeded without fabricating observations or changing the baseline.",
+    "Resolve the new baseline-inventory versus ordinary/repair representation choice in decisionNeeded, then implement its exact observation boundaries without fabricating observations or changing the baseline.",
     "Coordinator qualifies actual common-driver/module/artifact composition, including complete baseline observations, rather than treating binding component tests as native evidence.",
     "Coordinator verifies the packed fixture's actual registered startup-to-foreground handoff and all original LIVE/owner/deadline checks under the corrected fixture.",
     "Coordinator runs native qualification through the existing approved channels; no local denial replay or external delivery performed."
