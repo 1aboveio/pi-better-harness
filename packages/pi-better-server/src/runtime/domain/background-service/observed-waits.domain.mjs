@@ -1610,6 +1610,10 @@ export class ObservedWaitHost {
         const client = await this.resultSupervisionClient();
         try {
             const manager = await client.request("runtime_result_supervision");
+            // Already granted dependencies need no discovery scope transfer. Legacy
+            // holders may keep supervising unrelated work beside server-owned tasks.
+            if (operations.every(operation => this.requireStore().resultSupervision(operation.operationId)))
+                return;
             const discovery = this.requireStore().readDiscoveryClaim(this.discoveryScope);
             if (!newManaged && discovery && discovery.hostId !== this.hostId && this.discoveryHolderState(discovery.hostId) !== "dead") {
                 throw new Error("permission-unavailable: live or unknown original discovery holder prevents scope handoff");
