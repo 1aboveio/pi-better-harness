@@ -1,3 +1,4 @@
+import { affectedAttempts } from "./attempt-invalidation.ts";
 import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -469,33 +470,19 @@ export class WorkReadModel {
         metas.set(entry.meta.id, entry.meta);
       }
       const attempts = [...metas.values()];
-      const affected = new Set<string>();
-      const family = (meta: any) => JSON.stringify([meta.sessionId, meta.cwd]);
-      const invalidateAttempt = (meta: any) => {
-        const related = [...baseline.projected.values()].map(row => row.meta).concat(attempts);
-        const ids = new Set([meta.id]);
-        let grew = true;
-        while (grew) {
-          grew = false;
-          for (const candidate of related) {
-            if (!candidate.operations?.resumeLaunchToken || family(candidate) !== family(meta)
-                || (meta.assignment && candidate.assignment?.assignmentId !== meta.assignment.assignmentId)) continue;
-            if (ids.has(candidate.id) || ids.has(candidate.resumedFrom)) {
-              for (const id of [candidate.id, candidate.resumedFrom]) if (id && !ids.has(id)) { ids.add(id); grew = true; }
-            }
-          }
-        }
-        for (const id of ids) affected.add(id);
-      };
+      const changedAttempts: any[] = [];
       for (const [path, entry] of [...baseline.files, ...next]) {
-        if (baseline.files.get(path)?.signature !== next.get(path)?.signature) invalidateAttempt(entry.meta);
+        if (baseline.files.get(path)?.signature !== next.get(path)?.signature) changedAttempts.push(entry.meta);
       }
       if (coordinator !== baseline.coordinator) for (const meta of attempts) {
         if (!(meta.assignment || meta.operations || meta.park)) continue;
         const owner = JSON.stringify([meta.operations?.conversationId ?? meta.sessionId, meta.operations?.workspace ?? meta.cwd]);
         if (!coordinatorConversations || !baseline.coordinatorConversations ||
-            coordinatorConversations.get(owner) !== baseline.coordinatorConversations.get(owner)) invalidateAttempt(meta);
+            coordinatorConversations.get(owner) !== baseline.coordinatorConversations.get(owner)) changedAttempts.push(meta);
       }
+      const affected = await affectedAttempts(
+        [...baseline.projected.values()].map(row => row.meta).concat(attempts), changedAttempts);
+      if (this.closed) return;
       const project = createAssignmentProjector({ attempts, observe: (owner: any) => this.reader.read(owner) });
       const rows = [];
       for (const meta of attempts) {
