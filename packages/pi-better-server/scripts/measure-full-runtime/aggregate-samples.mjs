@@ -39,8 +39,8 @@ export function aggregateCohort(previous, current, { required, generation, sampl
   const at = current[0].at;
   let cpuMicros = 0;
   if (previous !== null) {
-    if (current[0].cpu.totalMicros !== undefined && JSON.stringify(['kind','platform','cpuResolutionMs'].map(key => current[0].sourceCohort?.[key]))
-      !== JSON.stringify(['kind','platform','cpuResolutionMs'].map(key => previous[0].sourceCohort?.[key]))) issues.push('changed-counter-source');
+    if (current[0].cpu.totalMicros !== undefined && JSON.stringify(['kind','platform','cpuResolutionMs','nativeBindingId'].map(key => current[0].sourceCohort?.[key]))
+      !== JSON.stringify(['kind','platform','cpuResolutionMs','nativeBindingId'].map(key => previous[0].sourceCohort?.[key]))) issues.push('changed-counter-source');
     if (at <= previous[0].at) issues.push('non-increasing-timestamp');
     if (!nonnegative(sampleIntervalMs) || sampleIntervalMs === 0 || at - previous[0].at > sampleIntervalMs) issues.push('missing-cohort-interval');
     for (const sample of current) {

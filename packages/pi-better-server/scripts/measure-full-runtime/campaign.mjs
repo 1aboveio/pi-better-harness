@@ -8,6 +8,7 @@ import { baseline } from './incremental-workload.mjs';
 /** Fixed-host sequential campaign; no checkout/build/authority changes or synthetic baseline fallback. */
 export async function runCampaign(config, { run = executeWindow, save = (path, value) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, JSON.stringify(value, null, 2)); } } = {}) {
   assert.ok(config?.approved?.fixedHostId && config.outputDirectory, 'Approved host/source/artifact/fixture identities required');
+  const outputDirectory = resolve(config.outputDirectory);
   for (const side of ['before','after']) {
     const approved = config.approved[side];
     assert.ok(/^[a-f0-9]{40}$/.test(approved?.head ?? '') && ['sourceSha256','artifactContentId'].every(key => /^[a-f0-9]{64}$/.test(approved?.[key] ?? '')), 'Approved source and artifact identity missing');
@@ -15,14 +16,14 @@ export async function runCampaign(config, { run = executeWindow, save = (path, v
   assert.equal(config.approved.before.head, baseline, 'Original baseline identity changed');
   assert.ok(/^[a-f0-9]{64}$/.test(config.approved.fixtureSha256 ?? ''), 'Approved fixture identity missing');
   const result = { status: 'running', nativeQualification: 'notRun', before: [], after: [], steps: [] };
-  const persist = () => save(join(config.outputDirectory, 'campaign.json'), result);
+  const persist = () => save(join(outputDirectory, 'campaign.json'), result);
   for (const side of ['before', 'after']) {
     assert.ok(config[side]?.checkout && config.approved[side], `${side} source/artifact missing; original AC7 applies, no zero baseline`);
     for (const workload of requiredWindows) {
       const step = { side, workload, status: 'running' }; result.steps.push(step); persist();
       try {
-        const report = await run({ side, workload, checkout: config[side].checkout,
-          approved: config.approved, outputDirectory: config.outputDirectory, durationMs: 600000 });
+        const report = await run({ side, workload, checkout: resolve(config[side].checkout),
+          approved: config.approved, outputDirectory, durationMs: 600000 });
         assert.ok(!report.failure && report.incremental?.durationMs >= 600000, 'Missing or short actual workload');
         assert.equal(report.source?.head, config.approved[side].head, 'Observed source differs from approved source');
         assert.equal(report.source?.manifest?.sha256, config.approved[side].sourceSha256, 'Observed source manifest differs');

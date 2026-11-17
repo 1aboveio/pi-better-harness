@@ -109,6 +109,9 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
           && (sample.sourceCohort?.diagnosticCost?.coverage !== 'complete-no-child-process'
             || !finite(sample.sourceCohort?.diagnosticCost?.ownerCpuMicros)
             || sample.sourceCohort?.diagnosticCost?.childCpuMicros !== 0)))) issue(p + '.diagnostics.batch', 'unobserved-external-capture-cost');
+        if (Array.isArray(scenario.aggregateCohorts) && scenario.aggregateCohorts.some(frame => Array.isArray(frame) && frame.some(sample => sample?.sourceCohort?.kind === 'darwin-libproc-batch'
+          && (!digest(report.measurement?.nativeCapture?.binarySha256) || !digest(report.measurement?.nativeCapture?.sourceSha256)
+            || sample.sourceCohort.nativeBindingId !== report.measurement.nativeCapture.binarySha256)))) issue(p + '.native-capture-binding', 'missing-or-mismatched-native-binding');
         const gc = scenario.workerGc;
         if (report.measurement?.coverage?.workerGc !== true || gc?.threadCoverage !== 'all' || !Array.isArray(gc.processes)
           || gc.processes.some(value => !value?.identity || !finite(value.count) || !finite(value.durationMs))
@@ -131,6 +134,7 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
     equal(a.report.machine, b.report.machine, windowKey + '.machine');
     for (const field of ['fixedHostId', 'hostname', 'fixtureSha256', 'diagnosticBudget', 'activeWorkload']) equal(a.report.measurement?.[field], b.report.measurement?.[field], windowKey + '.' + field);
     for (const field of ['platform', 'node', 'incremental']) equal(a.report[field], b.report[field], windowKey + '.' + field);
+    equal(a.report.measurement?.nativeCapture, b.report.measurement?.nativeCapture, windowKey + '.native-capture-binding');
     equal(a.report.workload?.tasks, b.report.workload?.tasks, windowKey + '.task-workload');
     equal(a.report.workload?.seededLogBytes, b.report.workload?.seededLogBytes, windowKey + '.seededLogBytes');
     pairs.push({ window: windowKey, beforeCpuMs: a.scenario.totalCpuMs, afterCpuMs: b.scenario.totalCpuMs });

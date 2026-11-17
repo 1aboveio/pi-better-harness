@@ -218,8 +218,9 @@ test("packed standalone packages use one pinned socket runtime, including cached
     let paused;
     try {
       registerTools(pi);registerBackgroundTasksGoalProvider(pi);
-      trace('before-first-list');await listed();trace('first-list-ready');await probe();const first=owner().pid;
-      await provider.getActivity(ctx); // retain this exact production client's connection
+      trace('before-first-list');await listed();trace('first-list-ready');
+      await provider.getActivity(ctx); // retain the actual foreground client before inspecting its manager
+      trace('foreground-ready');await probe();const first=owner().pid;
       await stop();trace('clean-stop');assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
       assert.deepEqual((await provider.getActivity(ctx)).items,[]);trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
       const crashed=owner().pid;process.kill(crashed,'SIGSTOP');

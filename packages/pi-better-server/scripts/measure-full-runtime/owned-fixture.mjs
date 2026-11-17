@@ -25,9 +25,10 @@ export function observeGcThread(key = `worker-${threadId}`) {
 export function gcThreads() {
   const names = readdirSync(process.env.PI_RESOURCE_REPORT_DIR).filter(name => name.startsWith(`${process.pid}-`));
   const read = name => JSON.parse(readFileSync(join(process.env.PI_RESOURCE_REPORT_DIR, name), 'utf8'));
-  const expected = names.filter(name => name.endsWith('.expected')).map(read).filter(value => !value.exitedAt);
+  const lifecycle = names.filter(name => name.endsWith('.expected')).map(read).sort((a,b) => a.thread.localeCompare(b.thread));
+  const expected = lifecycle.filter(value => !value.exitedAt);
   const records = names.filter(name => name.endsWith('.gc')).map(read).filter(value => expected.some(item => item.thread === value.thread));
-  return { expected: expected.map(value => value.thread), records,
+  return { expected: expected.map(value => value.thread), lifecycle, records,
     complete: expected.every(value => records.some(record => record.thread === value.thread && record.observedAt >= Date.now() - 250)) };
 }
 export function threadGc() {
@@ -43,8 +44,8 @@ export function bindOwnedExecutor(value) {
   assert.ok(!executor || executor === value, 'Ambiguous fixture executor owner');
   executor = value;
 }
-export function ownedWorkerUrl(original) {
-  assert.equal(String(original), String(new URL('../../src/runtime/query-worker.mjs', import.meta.url)), 'No fixture binding for foreign worker');
+export function ownedWorkerUrl(original, expected = new URL('../../src/runtime/query-worker.mjs', import.meta.url)) {
+  assert.equal(String(original), String(expected), 'No fixture binding for foreign worker');
   return new URL('./owned-query-worker.mjs', import.meta.url);
 }
 export function bindOwnedModel(model, port) {
@@ -58,7 +59,7 @@ export function bindOwnedModel(model, port) {
 export async function controlOwnedExecutor(executor, action) {
   assert.ok(executor && !executor.closed, 'Missing live fixture-owned executor');
   if (action === 'describe') return { actions: ['evict', 'restart'], scope: 'runtime', pid: process.pid };
-  const began = performance.now(), previous = executor.worker;
+  const began = performance.now(), previous = executor.worker, beforeThreadId = previous.threadId;
   if (action === 'evict') {
     const nonce = randomUUID();
     await new Promise((resolve, reject) => {
@@ -82,7 +83,8 @@ export async function controlOwnedExecutor(executor, action) {
     }
     assert.notEqual(executor.worker, previous, 'Restart did not create a physical reader handle');
   } else throw Error(`Unsupported fixture action: ${action}`);
-  return { action, scope: 'runtime', elapsedMs: performance.now() - began };
+  return { action, scope: 'runtime', elapsedMs: performance.now() - began,
+    physical: { managerPid: process.pid, beforeThreadId, afterThreadId: executor.worker.threadId } };
 }
 
 // Private IPC follows only ChildProcess handles CREATED by this fixture tree.
@@ -97,8 +99,9 @@ export function installOwnedRouter() {
   };
   cp.fork = (...args) => { const child = fork(...args); children.add(child); child.once('exit', () => children.delete(child)); return child; };
   cp.spawn = (command, args, options) => {
-    const ownedNode = [process.execPath, process.env.PI_TEST_PRIVATE_RUNTIME_NODE].includes(command)
-      && options?.env?.PI_RESOURCE_REPORT_DIR === process.env.PI_RESOURCE_REPORT_DIR && Array.isArray(options.stdio);
+    const childEnv = options?.env ?? process.env;
+    const ownedNode = childEnv.PI_RESOURCE_REPORT_DIR === process.env.PI_RESOURCE_REPORT_DIR
+      && childEnv.NODE_OPTIONS?.includes(new URL('./probe.mjs', import.meta.url).href) && Array.isArray(options?.stdio);
     const child = spawn(command, args, ownedNode && !options.stdio.includes('ipc') ? { ...options, stdio: [...options.stdio, 'ipc'] } : options);
     if (ownedNode) { children.add(child); child.once('exit', () => children.delete(child)); child.channel?.unref(); }
     return child;

@@ -39,9 +39,15 @@ export async function runMutationSequence({ manifest, client, write, observe, re
       if (step.capability) {
         const previousSnapshot = await client.get({ cwd: manifest.cwd, limit: 1 });
         const receipt = await control.run();
-        step.control = { action: receipt?.action, scope: receipt?.scope };
+        step.control = { action: receipt?.action, scope: receipt?.scope, ...(receipt?.physical ? { physical: receipt.physical } : {}) };
         assert.equal(receipt?.action, step.capability, 'Recovery receipt must identify the performed fixture action');
         assert.equal(receipt?.scope, evidenceScope, 'Recovery receipt scope changed');
+        if (evidenceScope === 'runtime') {
+          const physical = receipt?.physical;
+          assert.ok(physical && ['managerPid','beforeThreadId','afterThreadId'].every(key => Number.isSafeInteger(physical[key]) && physical[key] > 0), 'Runtime recovery requires actual manager and thread identities');
+          if (step.capability === 'restart') assert.notEqual(physical.beforeThreadId,physical.afterThreadId,'Restart must replace the physical reader');
+          else assert.equal(physical.beforeThreadId,physical.afterThreadId,'Eviction must retain the same physical reader');
+        }
         if (step.capability === 'restart') {
           assert.ok(receipt.client, 'Restart must return the fixture client for the recovered reader'); client = receipt.client;
         }

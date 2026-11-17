@@ -30,7 +30,7 @@ test('batch owner refuses changed birth identity, missing PID and malformed plat
   const capture = createBatchCapture({ pids: [11], generation: '1', capture: () => ({ captureStartedAt: 1, capturedAt: 2, records: rows }) });
   capture(); rows = [{ ...rows[0]!, identity: { pid: 11, start: 'b' } }]; assert.throws(capture, /start identity/);
   rows = []; assert.throws(capture, /PID set/);
-  assert.throws(() => platformCapture([11], { platform: 'darwin', now: () => 1, run: () => 'broken' }), /Unusable/);
+  assert.throws(() => platformCapture([11], { platform: 'darwin', now: () => 1 }), /binding required/);
 });
 
 test('batch producer cannot relabel previously timestamped independent records as a new capture', () => {
@@ -39,13 +39,38 @@ test('batch producer cannot relabel previously timestamped independent records a
   assert.throws(capture, /independent|timestamp/i);
 });
 
-test('OS boundary decodes Darwin cumulative CPU without inventing user/system zeros', () => {
+test('batch producer rejects observations outside the acquisition and fences native binding changes', () => {
+  let time = 1000, observedAt = 999, nativeBindingId = 'first-binding';
+  const capture = createBatchCapture({ pids: [11], generation: '1', capture: () => ({
+    captureStartedAt: time, capturedAt: time + 2,
+    source: { kind: 'darwin-libproc-batch', platform: 'darwin', nativeBindingId, cpuResolutionMs: .000041 },
+    records: [{ identity: { pid: 11, start: 'kernel-birth' }, observedAt, cpu: { totalMicros: time }, rss: 100 }],
+  }) });
+  assert.throws(capture, /outside actual acquisition span/);
+  observedAt = 1003;
+  assert.throws(capture, /outside actual acquisition span/);
+  observedAt = 1001;
+  const first = capture();
+  time = 1200; observedAt = 1201; nativeBindingId = 'replacement-binding';
+  const second = capture();
+  const result = summarizeCohorts([first, second], { required: first, generation: '1' }, { startedAt: 1002, endedAt: 1202 });
+  assert.equal(result.qualified, false);
+  assert.ok(result.issues.includes('changed-counter-source'));
+  assert.equal(result.cpuPercent, null);
+  assert.equal(result.rssBytes, null);
+});
+
+test('Darwin in-process boundary preserves native batch and accounts for an absent helper process, never a PS fallback', () => {
   let calls = 0;
-  const result = platformCapture([11], { platform: 'darwin', now: () => 1000, run: () => { calls++; return '11 Mon Nov 16 01:02:03 2026 1:02.50 42\n'; } });
+  const result = platformCapture([11], { platform: 'darwin', now: () => 1000,
+    run: () => { throw Error('A per-capture helper process must not be launched'); },
+    nativeCapture: pids => { calls++; return { captureStartedAt:1000,capturedAt:1002,cpuResolutionMs:.000041,
+      records:pids.map(pid=>({identity:{pid,start:'kernel-birth',boot:'boot-time'},cpu:{totalMicros:62500000},rss:43008,observedAt:1001})) }; } });
   assert.equal(calls, 1); assert.deepEqual(result.records[0]!.cpu, { totalMicros: 62500000 });
   assert.equal(result.records[0]!.rss, 43008);
-  assert.equal(result.source.diagnosticCost.coverage,'incomplete-external-child-cost');
-  assert.equal(result.source.diagnosticCost.childCpuMicros,null);
+  assert.equal(result.records[0]!.observedAt,1001); assert.equal(result.capturedAt,1002);
+  assert.equal(result.source.diagnosticCost.coverage,'complete-no-child-process');
+  assert.equal(result.source.diagnosticCost.childCpuMicros,0);
 });
 
 test('owned executor controls use only its captured physical worker, acknowledge real cache clearing and reject unbound ownership', async () => {

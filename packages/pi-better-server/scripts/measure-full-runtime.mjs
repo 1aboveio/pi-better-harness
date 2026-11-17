@@ -18,10 +18,12 @@ import { checkStartupAdmission, startupIntentFromEnv } from '../src/startup/admi
 import { readOwnBuild } from '../src/startup/artifact.ts';
 import { summarizeCohorts } from './measure-full-runtime/aggregate-samples.mjs';
 import { runMutationSequence } from './measure-full-runtime/mutation-sequence.mjs';
-import { createBatchCapture } from './measure-full-runtime/batch-capture.mjs';
+import { createBatchCapture, platformCapture } from './measure-full-runtime/batch-capture.mjs';
 import { distribution } from './measure-full-runtime/owned-fixture.mjs';
 import { measureEventPublication } from './event-publication/measure.mjs';
 import { readLifecycleConfig } from '../src/lifecycle-config.ts';
+import { createRequire } from 'node:module';
+import { buildDarwinCapture } from './measure-full-runtime/build-darwin-capture.mjs';
 if (process.argv.includes('--campaign') || (!process.argv.includes('--smoke') && process.env.PI_INCREMENTAL_WORKLOAD !== '1' && !process.env.PI_FULL_RUNTIME_MATRIX_ONLY)) {
   const { runCampaign } = await import('./measure-full-runtime/campaign.mjs');
   const configPath = process.argv.includes('--campaign') ? process.argv[process.argv.indexOf('--campaign') + 1] : process.env.PI_FULL_RUNTIME_CAMPAIGN_APPROVAL;
@@ -37,7 +39,7 @@ const sessionFile=join(root,'resource-session.jsonl');
 writeFileSync(sessionFile,JSON.stringify({type:'session',version:3,id:randomUUID(),timestamp:new Date().toISOString(),cwd})+'\n');
 const probe = new URL('./measure-full-runtime/probe.mjs', import.meta.url).href;
 const execPath = process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath;
-process.env.PI_RESOURCE_REPORT_DIR=samples;let fixtureControl;
+process.env.PI_RESOURCE_REPORT_DIR=samples;let fixtureControl, nativeCapture;
 const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root, TMP: root, TEMP: root, PI_RESOURCE_REPORT_DIR: samples,
   BACKGROUND_SESSION_FILE:sessionFile,NODE_OPTIONS: `--import ${probe}`, LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: join(cwd, 'entered'), LAUNCH_RELEASE: join(cwd, 'release'), PI_OFFLINE: '1' };
 const workload = incremental ? seedWorkload({ root, agent, cwd, settings: incremental }) : undefined;
@@ -59,6 +61,7 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
     './measure-full-runtime/aggregate-samples.mjs',
     './measure-full-runtime/mutation-sequence.mjs',
     './measure-full-runtime/batch-capture.mjs', './measure-full-runtime/owned-fixture.mjs', './measure-full-runtime/owned-query-worker.mjs',
+    './measure-full-runtime/darwin-capture.cc', './measure-full-runtime/build-darwin-capture.mjs',
     '../test/support/subagent-offline-model.ts',
   ].map(path => ({ path, sha256: createHash('sha256').update(readFileSync(new URL(path, import.meta.url))).digest('hex') })))).digest('hex'),
   diagnosticBudget: { samplerIntervalMs: 250, controlIntervalMs: 100 },
@@ -78,6 +81,12 @@ try {
   report.startup = { intent: intent.kind, inheritedGuardedChild: Boolean(env.PI_SERVER_GUARDED_CHILD), inheritedRebind: Boolean(env.PI_SERVER_GUARDIAN_REBIND) };
   checkStartupAdmission({ canonicalServerDir: transport, agentDir: agent, build: readOwnBuild(), intent });
   assert.ok(!env.PI_SERVER_GUARDED_CHILD && !env.PI_SERVER_GUARDIAN_REBIND, 'Primary workload requires its own legitimate guardian bootstrap; inherited guardian authority cannot be reused');
+  if (process.platform === 'darwin') {
+    const built = buildDarwinCapture(samples);
+    const binding = createRequire(import.meta.url)(built.path);
+    report.measurement.nativeCapture = { sourceSha256: built.sourceSha256, binarySha256: built.binarySha256, napiVersion: built.napiVersion };
+    nativeCapture = pids => platformCapture(pids, { nativeCapture: binding.capture, nativeBindingId: built.binarySha256 });
+  }
   ({ fixtureControl } = await import(probe));
   report.phase = 'start-primary-guardian';
   guardian = start(new URL('../src/cli.ts', import.meta.url));
@@ -150,7 +159,7 @@ try {
     const workloadBefore = workload ? await reconcileWorkload(work, cwd, workload) : undefined;
     const countersBefore = await work.request('runtime_get_metrics');
     before = await sampleAll();
-    const batchCapture = createBatchCapture({ pids: required, generation: String(count) });
+    const batchCapture = createBatchCapture({ pids: required, generation: String(count), ...(nativeCapture ? { capture: nativeCapture } : {}) });
     const aggregateCohorts = [batchCapture()];
     const requiredProcesses = aggregateCohorts[0].map(row => ({ identity: row.identity, role: role(row.identity.pid) }));
     const batchIdentity = value => ({ ...value, observedIdentity: value.identity, observedAt: value.at,
@@ -194,7 +203,8 @@ try {
     const workerGc = resources.map(value => {
       const prior = before.find(row => row.identity.pid === value.identity.pid);
       const startThreads = prior.gcThreads, endThreads = value.gcThreads;
-      const complete = startThreads?.complete && endThreads?.complete && JSON.stringify(startThreads.expected.slice().sort()) === JSON.stringify(endThreads.expected.slice().sort());
+      const complete = startThreads?.complete && endThreads?.complete && JSON.stringify(startThreads.lifecycle) === JSON.stringify(endThreads.lifecycle)
+        && JSON.stringify(startThreads.expected.slice().sort()) === JSON.stringify(endThreads.expected.slice().sort());
       if (!complete) return null;
       let gcCount = value.window.gc.count - prior.window.gc.count, durationMs = value.window.gc.durationMs - prior.window.gc.durationMs;
       for (const record of endThreads.records) {
@@ -235,6 +245,7 @@ try {
     const recoveryTimes = [];
     const recovery = Object.fromEntries(capabilities.actions.map(action => [action, { scope: 'runtime', run: async () => {
       const receipt = await fixtureControl(owner.pid, action);
+      assert.equal(receipt.physical?.managerPid, owner.pid, 'Recovery must act in the admitted fixture manager');
       if (action === 'restart') recoveryTimes.push(receipt.elapsedMs);
       return { ...receipt, ...(action === 'restart' ? { client: work } : {}) };
     } }]));
@@ -269,6 +280,10 @@ try {
     assert.ok(mutationState.complete, 'Required owned recovery capabilities are missing; dependent phases did not execute');
     report.scenarios.at(-1).recovery = distribution(recoveryTimes);
     report.measurement.coverage.recovery = report.scenarios.every(value => value.recovery?.samples > 0);
+    if (writer.exitCode === null && writer.signalCode === null) {
+      if (writer.connected) writer.disconnect();
+      await until('owned mutation writer exit after its IPC lifetime ends', () => writer.exitCode !== null || writer.signalCode !== null);
+    }
   }
   writeFileSync(join(cwd,'finish'),'done');
   const receipt=`background-terminal:${remoteLaunch.operationId}`;
@@ -278,6 +293,7 @@ try {
   assert.equal(localEntries.some(entry=>entry.type==='custom_message'&&entry.details?.completionEventIds?.includes(receipt)),false,'ordinary local recipient must not consume remote completion');
   report.mixed.exactRecipientReceipt=receipt;report.mixed.isolation=true;
   if (incremental) {
+    const teardownIdentities = observed().map(value => value.identity).filter(value => value.pid !== process.pid);
     writeFileSync(join(cwd, 'release'), 'done');
     for (const remote of remotes) await remote.dispose();
     for (const [index, client] of hostedClients.entries()) await client.call({ type: 'close_session', sessionId: remotes[index].sessionId });
@@ -286,7 +302,7 @@ try {
     const lifecycle = readLifecycleConfig(transport);
     assert.ok(lifecycle.daemonIdleMs > 0, 'Natural hosted-runtime exit is disabled by actual lifecycle policy');
     const exitStarted = performance.now();
-    const exitIdentities = report.scenarios.at(-1).resourceBefore.map(value => value.observedIdentity).filter(value => value.pid !== process.pid);
+    const exitIdentities = [...teardownIdentities, ...report.scenarios.at(-1).resourceBefore.map(value => value.observedIdentity).filter(value => value.pid !== process.pid)];
     await until('natural exit of every owned related process including Server and guardian', () => exitIdentities.every(value => !processMatchesStart(value.pid,value.start)), lifecycle.daemonIdleMs + 30000);
     report.scenarios.at(-1).exit = distribution([performance.now() - exitStarted]);
     report.measurement.coverage.exit = report.scenarios.every(value => value.exit?.samples > 0);

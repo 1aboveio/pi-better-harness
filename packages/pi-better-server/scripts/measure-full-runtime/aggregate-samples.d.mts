@@ -1,5 +1,5 @@
-export interface ProcessSample { identity: { pid: number; start: string }; generation: string; at: number; observedAt?: number; sequence: number; cpu: { user: number; system: number }; rss: number;
-  sourceCohort?: { id: string; kind?: string; platform?: string; cpuResolutionMs?: number; captureStartedAt: number; capturedAt: number; pids: number[] } }
+export interface ProcessSample { identity: { pid: number; start: string; boot?: string }; generation: string; at: number; observedAt?: number; sequence: number; cpu: { user: number; system: number }; rss: number;
+  sourceCohort?: { id: string; kind?: string; platform?: string; cpuResolutionMs?: number; nativeBindingId?: string; captureStartedAt: number; capturedAt: number; pids: number[] } }
 export interface CohortOptions { required: { identity: { pid: number; start: string } }[]; generation: string; sampleIntervalMs?: number }
 export interface BatchSample extends Omit<ProcessSample, 'cpu'> { cpu: { totalMicros: number } }
 export function aggregateCohort(previous: (ProcessSample | BatchSample)[] | null, current: (ProcessSample | BatchSample)[], options: CohortOptions): { qualified: boolean; issues: string[]; cpuPercent: number | null; rssBytes: number | null; at: number | null };

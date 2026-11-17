@@ -46,15 +46,19 @@ export function instrumentRecoveryTrace(source) {
 
 export async function load(url, context, nextLoad) {
   const helper = new URL('./owned-fixture.mjs', import.meta.url).href;
-  if (url === new URL('../../src/runtime/query-executor.ts', import.meta.url).href) {
+  if (url.startsWith('file:') && new URL(url).pathname.endsWith('/src/runtime/query-executor.ts')) {
     let source = readFileSync(new URL(url), 'utf8');
     const anchor = 'this.lag.enable();\n    this.worker = this.startWorker();';
     if (source.split(anchor).length !== 2) throw Error('Fixture executor creation anchor changed');
     source = source.replace(anchor, anchor + '\n    bindOwnedExecutor(this);');
-    source = source.replace('this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url)', 'ownedWorkerUrl(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url))');
+    const workerAnchor = 'this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url)';
+    const dataAnchor = 'workerData: { agentDir:';
+    if (source.split(workerAnchor).length !== 2 || source.split(dataAnchor).length !== 2) throw Error('Fixture worker factory anchor changed');
+    source = source.replace(workerAnchor, 'ownedWorkerUrl(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url),new URL("./query-worker.mjs", import.meta.url))');
+    source = source.replace(dataAnchor, 'workerData: { resourceFixtureSource: new URL("./query-worker.mjs", import.meta.url).href, agentDir:');
     return { format: 'module', shortCircuit: true, source: ts.transpileModule(`import {bindOwnedExecutor,ownedWorkerUrl} from ${JSON.stringify(helper)};\n${source}`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText };
   }
-  if (url === new URL('../../src/runtime/query-worker.mjs', import.meta.url).href) {
+  if (url.startsWith('file:') && new URL(url).pathname.endsWith('/src/runtime/query-worker.mjs')) {
     let source = readFileSync(new URL(url), 'utf8');
     const anchor = 'const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);';
     if (source.split(anchor).length !== 2) throw Error('Fixture model creation anchor changed');
