@@ -30,6 +30,12 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
       equal(report.source?.head, approved?.head, path + '.source.head');
       equal(report.source?.manifest?.sha256, approved?.sourceSha256, path + '.source.manifest');
       equal(report.measurement?.artifact?.contentId, approved?.artifactContentId, path + '.artifact');
+      if (expected.driver || report.subject || report.driver) {
+        if (!/^[a-f0-9]{40}$/.test(expected.driver?.head ?? '') || !digest(expected.driver?.sourceSha256)) issue(path + '.driver', 'missing-approved-driver');
+        equal(report.driver?.head, expected.driver?.head, path + '.driver.head');
+        equal(report.driver?.manifest?.sha256, expected.driver?.sourceSha256, path + '.driver.manifest');
+        if (report.driver?.kind !== 'git-checkout' || typeof report.driver?.dirty !== 'string' || report.driver.dirty.split('\n').some(line => line && !line.startsWith('?? '))) issue(path + '.driver', 'unclean-driver');
+      }
       if (report.source?.kind !== 'git-checkout' || !digest(report.source?.manifest?.sha256)) issue(path + '.source', 'missing-source-identity');
       // The approved content manifest covers source files, including untracked
       // source. Private caches/evidence outside its scope are not code changes.

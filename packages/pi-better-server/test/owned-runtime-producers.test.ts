@@ -106,7 +106,7 @@ test('Linux batch owner retains kernel birth/tick/page units and individual acqu
 test('campaign retains required workload duration and original baseline applicability; missing observations fail closed', async () => {
   const calls: any[] = [], states: any[] = [];
   const before = {head:'eec7b3e256a7548bbf67f69cd468f12eb3b91dc8',sourceSha256:'a'.repeat(64),artifactContentId:'b'.repeat(64)};
-  await assert.rejects(runCampaign({ outputDirectory: 'unit-output', approved: { fixedHostId: 'owned', fixtureSha256:'c'.repeat(64), before, after:{...before,head:'d'.repeat(40)} }, before: { checkout: 'before' } }, {
+  await assert.rejects(runCampaign({ driver: { checkout: 'driver' }, outputDirectory: 'unit-output', approved: { driver: { head: 'e'.repeat(40), sourceSha256: 'f'.repeat(64) }, fixedHostId: 'owned', fixtureSha256:'c'.repeat(64), before, after:{...before,head:'d'.repeat(40)} }, before: { checkout: 'before', artifactRoot: 'before-artifact' } }, {
     save: (_path,value) => states.push(structuredClone(value)), run: async value => { calls.push(value); throw Error('baseline capture unavailable'); },
   }), /baseline capture unavailable/);
   assert.equal(calls.length,1); assert.equal(calls[0].durationMs,600000);
@@ -116,11 +116,11 @@ test('campaign retains required workload duration and original baseline applicab
 
 test('default campaign requests every paired workload but cannot qualify injected incomplete reports', async () => {
   const before = {head:'eec7b3e256a7548bbf67f69cd468f12eb3b91dc8',sourceSha256:'a'.repeat(64),artifactContentId:'b'.repeat(64)};
-  const approved = { fixedHostId:'component-host',fixtureSha256:'c'.repeat(64),before,after:{...before,head:'d'.repeat(40)} };
+  const approved = { driver: { head: 'e'.repeat(40), sourceSha256: 'f'.repeat(64) }, fixedHostId:'component-host',fixtureSha256:'c'.repeat(64),before,after:{...before,head:'d'.repeat(40)} };
   const calls: any[] = [], states: any[] = [];
-  await assert.rejects(runCampaign({approved,outputDirectory:'unit',before:{checkout:'before'},after:{checkout:'after'}},{
+  await assert.rejects(runCampaign({driver:{checkout:'driver'},approved,outputDirectory:'unit',before:{checkout:'before',artifactRoot:'before-artifact'},after:{checkout:'after',artifactRoot:'after-artifact'}},{
     save: (_path,value) => states.push(structuredClone(value)), run: async value => {
-      calls.push(value); return {incremental:{...value.workload,durationMs:value.durationMs},source:{head:approved[value.side].head,manifest:{sha256:approved[value.side].sourceSha256}},
+      calls.push(value); return {driver:{head:approved.driver.head,manifest:{sha256:approved.driver.sourceSha256}},incremental:{...value.workload,durationMs:value.durationMs},source:{head:approved[value.side].head,manifest:{sha256:approved[value.side].sourceSha256}},
         measurement:{artifact:{contentId:approved[value.side].artifactContentId},fixtureSha256:approved.fixtureSha256}};
     },
   }), /unchanged qualification/);

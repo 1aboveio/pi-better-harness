@@ -194,6 +194,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
   const recoveryScript = entryScript + `
     import {readFileSync,appendFileSync,existsSync} from 'node:fs';
     import {connect} from 'node:net';
+    const {WorkClient,ensureRuntime}=await import(${JSON.stringify(packedApi)});
     const {inspectDaemonOwner}=await import(${JSON.stringify(new URL("../daemon-owner.mjs", pathToFileURL(clients[1]!)).href)});
     const transport=process.env.PI_SERVER_DIR;
     const registration=readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8');
@@ -215,11 +216,19 @@ test("packed standalone packages use one pinned socket runtime, including cached
       while(inspectDaemonOwner(transport).status==='live'&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));
       assert.notEqual(inspectDaemonOwner(transport).status,'live');return previous.pid;};
     const listed=async(name='bg_task_list')=>{const result=await tools.get(name).execute('recovery',{action:'list'},undefined,undefined,ctx);assert.match(result.content[0].text,/No background tasks found/);};
-    let paused;
+    let paused,startupClient;
     try {
+      await ensureRuntime({agentDir:process.env.PI_CODING_AGENT_DIR,serverDir:transport});
+      startupClient=new WorkClient(transport+'/pi-server.sock',process.env.PI_CODING_AGENT_DIR,['runtime-client-retention-v1']);
+      await startupClient.ready;
+      await startupClient.request('runtime_register_client',{clientId:'packed-startup-handoff'});
       registerTools(pi);registerBackgroundTasksGoalProvider(pi);
       trace('before-first-list');await listed();trace('first-list-ready');
-      await provider.getActivity(ctx); // retain the actual foreground client before inspecting its manager
+      await provider.getActivity(ctx);
+      const handoff=await startupClient.request('runtime_get_status');
+      assert.ok(handoff.livenessReasons.some(reason=>reason.kind==='connection'&&reason.id==='work-'+process.pid),'extension foreground must register its own live connection before startup handoff');
+      appendFileSync(${JSON.stringify(join(evidence, "recovery-timeline.jsonl"))},JSON.stringify({phase:'foreground-handoff',at:Date.now(),instanceId:handoff.instanceId,livenessReasons:handoff.livenessReasons})+'\\n');
+      startupClient.close();startupClient=undefined;
       trace('foreground-ready');await probe();const first=owner().pid;
       await stop();trace('clean-stop');assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
       assert.deepEqual((await provider.getActivity(ctx)).items,[]);trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
@@ -234,7 +243,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
       assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
       console.log(JSON.stringify({healthyRecovery:true,cachedDisconnectRecovered:true,interruptedQueryRecovered:true,liveOwnerRefused:true}));
     } catch(error) {trace('failure:'+String(error));await probe();throw error}
-    finally {if(paused)process.kill(paused,'SIGCONT');closeBackgroundObservation(pi)}
+    finally {startupClient?.close();if(paused)process.kill(paused,'SIGCONT');closeBackgroundObservation(pi)}
   `;
   const recovery = await execute(process.execPath, ["--input-type=module", "-e", recoveryScript], workspace, env);
   writeFileSync(join(evidence, "background-recovery.log"), recovery.stdout + recovery.stderr);

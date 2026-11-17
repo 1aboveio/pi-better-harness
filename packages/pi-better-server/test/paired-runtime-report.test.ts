@@ -34,6 +34,15 @@ const expected = { fixedHostId: 'schema-host', fixtureSha256: 'c'.repeat(64), be
   after: { head: baseline, sourceSha256: 'a'.repeat(64), artifactContentId: 'b'.repeat(64) } };
 const has = (result: ReturnType<typeof validatePairedReports>, fragment: string, code?: string) => result.issues.some(issue => issue.path.includes(fragment) && (!code || issue.code === code));
 
+test('external measurements cannot substitute driver identity for approved subject identity', () => {
+  const value: any = specimen();
+  value.subject = { checkout: '/subject', artifactRoot: '/artifact' };
+  value.driver = { kind: 'git-checkout', head: 'd'.repeat(40), dirty: '', manifest: { sha256: 'e'.repeat(64) } };
+  const approval = { ...expected, driver: { head: 'f'.repeat(40), sourceSha256: 'e'.repeat(64) } };
+  assert.ok(has(validatePairedReports(value, value, approval), '.driver.head', 'mismatch'));
+  assert.ok(has(validatePairedReports(value, value, expected), '.driver', 'missing-approved-driver'));
+});
+
 test('recorded primary admission refusal and malformed reports cannot qualify or yield CPU comparisons', () => {
   const recorded = JSON.parse(readFileSync(new URL('../../../docs/evidence/issue-808/transport-r3/native-report.json', import.meta.url), 'utf8'));
   for (const value of [recorded, null, {}, { scenarios: [null] }, { scenarios: [{ resources: [null], resourceBefore: [null], requiredProcesses: [null] }] }]) {

@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { observeGcThread } from './owned-fixture.mjs';
+import { parseSubjectBinding, subjectModuleUrl } from './subject-binding.mjs';
 export function initialize(data) { observeGcThread(`loader-${data.resourceParentThreadId}`); }
 
-const target = new URL('../../src/runtime/background-tools.ts', import.meta.url).href;
+const originalTarget = new URL('../../src/runtime/background-tools.ts', import.meta.url).href;
+const target = process.env.PI_FULL_RUNTIME_SUBJECT ? subjectModuleUrl(originalTarget, parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT)) : originalTarget;
 const recorder = new URL('./recovery-trace.mjs', import.meta.url).href;
 
 export function instrumentRecoveryTrace(source) {

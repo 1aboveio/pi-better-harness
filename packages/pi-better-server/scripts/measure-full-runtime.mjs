@@ -24,6 +24,8 @@ import { measureEventPublication } from './event-publication/measure.mjs';
 import { readLifecycleConfig } from '../src/lifecycle-config.ts';
 import { createRequire } from 'node:module';
 import { buildDarwinCapture } from './measure-full-runtime/build-darwin-capture.mjs';
+import { parseSubjectBinding, subjectModuleUrl } from './measure-full-runtime/subject-binding.mjs';
+const subject = process.env.PI_FULL_RUNTIME_SUBJECT ? parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT) : undefined;
 if (process.argv.includes('--campaign') || (!process.argv.includes('--smoke') && process.env.PI_INCREMENTAL_WORKLOAD !== '1' && !process.env.PI_FULL_RUNTIME_MATRIX_ONLY)) {
   const { runCampaign } = await import('./measure-full-runtime/campaign.mjs');
   const configPath = process.argv.includes('--campaign') ? process.argv[process.argv.indexOf('--campaign') + 1] : process.env.PI_FULL_RUNTIME_CAMPAIGN_APPROVAL;
@@ -38,10 +40,11 @@ for (const path of [agent, transport, cwd, samples, join(agent, 'agents/roles')]
 const sessionFile=join(root,'resource-session.jsonl');
 writeFileSync(sessionFile,JSON.stringify({type:'session',version:3,id:randomUUID(),timestamp:new Date().toISOString(),cwd})+'\n');
 const probe = new URL('./measure-full-runtime/probe.mjs', import.meta.url).href;
+const preload = subject ? new URL('./measure-full-runtime/subject-probe.mjs', import.meta.url).href : probe;
 const execPath = process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath;
 process.env.PI_RESOURCE_REPORT_DIR=samples;let fixtureControl, nativeCapture;
 const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root, TMP: root, TEMP: root, PI_RESOURCE_REPORT_DIR: samples,
-  BACKGROUND_SESSION_FILE:sessionFile,NODE_OPTIONS: `--import ${probe}`, LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: join(cwd, 'entered'), LAUNCH_RELEASE: join(cwd, 'release'), PI_OFFLINE: '1' };
+  BACKGROUND_SESSION_FILE:sessionFile,NODE_OPTIONS: `--import ${preload}`, LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: join(cwd, 'entered'), LAUNCH_RELEASE: join(cwd, 'release'), PI_OFFLINE: '1' };
 const workload = incremental ? seedWorkload({ root, agent, cwd, settings: incremental }) : undefined;
 if (workload) env.PI_SUBAGENT_DURABLE_DIR = workload.durable;
 mkdirSync(join(agent,'extensions'),{recursive:true});
@@ -52,6 +55,13 @@ writeFileSync(join(agent, 'agents/roles/fixture.md'), '---\nschema: pi-agent/v1\
 let errors = '', seq = 0; const children = [], clients = [];
 const report = { root, transport, socketPath, socketBytes: Buffer.byteLength(socketPath), mode: process.env.PI_FULL_RUNTIME_MATRIX_ONLY ? "mixed-adapter-smoke-not-performance" : incremental ? "resource-matrix" : "resource-smoke-not-qualified", platform: process.platform, node: process.version, machine:{release:release(),arch:arch(),cpus:cpus().length,cpuModel:cpus()[0]?.model,totalMemory:totalmem()}, source:sourceProvenance(fileURLToPath(new URL('../../..', import.meta.url))), scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two real RemoteClientSession adapters over loopback Unix transport with HostedSessions (not cross-machine SSH); sampler overhead included', scenarios: [] };
 const output = process.env.PI_FULL_RUNTIME_REPORT ?? join(root, 'report.json');
+if (subject) {
+  report.driver = report.source;
+  report.source = sourceProvenance(subject.checkout);
+  report.subject = { ...subject, entry: subjectModuleUrl(new URL('../src/cli.ts', import.meta.url).href, subject),
+    moduleOrigins: Object.fromEntries(['../src/daemon-owner.ts', '../src/runtime/work-client.mjs', '../src/client.ts',
+      '../src/remote-client/session.ts', '../src/startup/admission.ts', '../src/startup/artifact.ts'].map(path => [path, import.meta.resolve(path)])) };
+}
 report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIME_HOST_ID ?? null, hostname: hostname(),
   artifact: readOwnBuild() ?? null,
   fixtureSha256: createHash('sha256').update(JSON.stringify([
@@ -62,13 +72,15 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
     './measure-full-runtime/mutation-sequence.mjs',
     './measure-full-runtime/batch-capture.mjs', './measure-full-runtime/owned-fixture.mjs', './measure-full-runtime/owned-query-worker.mjs',
     './measure-full-runtime/darwin-capture.cc', './measure-full-runtime/build-darwin-capture.mjs',
+    './measure-full-runtime/subject-binding.mjs', './measure-full-runtime/measure-subject.mjs',
+    './measure-full-runtime/subject-probe.mjs',
     '../test/support/subagent-offline-model.ts',
   ].map(path => ({ path, sha256: createHash('sha256').update(readFileSync(new URL(path, import.meta.url))).digest('hex') })))).digest('hex'),
   diagnosticBudget: { samplerIntervalMs: 250, controlIntervalMs: 100 },
   activeWorkload: { subagents: 1, durableCommands: 2, legacyCommands: 2, hostedSessions: 2, offline: true },
   coverage: { workerGc: false, aggregatePeak: false, queueAge: false, eventLatency: false, recovery: false, exit: false } };
 if (incremental) Object.assign(report, { incremental, workload: structuredClone(workload), qualification: 'notRun', missing: ['fault matrix', 'scope/UI matrix', 'native dual-platform runs', 'paired fixed-host comparison'] });
-function start(url, args = []) { const child = fork(url, args, { execPath, execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); children.push(child); child.stdout.resume(); child.stderr.on('data', d => { errors += d; }); return child; }
+function start(url, args = []) { const target = subject ? new URL(subjectModuleUrl(url.href, subject)) : url; const child = fork(target, args, { execPath, execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); children.push(child); child.stdout.resume(); child.stderr.on('data', d => { errors += d; }); return child; }
 async function until(label, fn, timeout = 30000) { const deadline = Date.now()+timeout; while (Date.now()<deadline) { const value = await fn(); if (value) return value; await delay(25); } throw new Error(`${label} timed out: ${errors.slice(-4000)}`); }
 function message(child, predicate) { return new Promise((resolve, reject) => { const timer = setTimeout(() => { cleanup(); reject(new Error(`IPC timeout: ${errors.slice(-2000)}`)); }, 30000); const on = value => { if (predicate(value)) { cleanup(); resolve(value); } }; const exit = () => { cleanup(); reject(new Error(`Child exited: ${errors}`)); }; function cleanup() { clearTimeout(timer); child.off('message', on); child.off('exit', exit); } child.on('message', on); child.once('exit', exit); }); }
 async function call(child, tool, params, key = `resource-${++seq}`) { const id = ++seq, pending = message(child, m => m.id === id); child.send({ id, key, tool, params }); const reply = await pending; assert.equal(reply.error, undefined, reply.stack); return reply.result; }
@@ -92,6 +104,11 @@ try {
   guardian = start(new URL('../src/cli.ts', import.meta.url));
   const owner = await until('server owner', () => { const v = inspectDaemonOwner(transport); return v.status === 'live' && v.owner; });
   await until('socket', async () => { try { work = new WorkClient(join(transport,'pi-server.sock'), agent); await work.ready; return true; } catch { work?.close(); return false; } });
+  if (subject) {
+    const actual = await work.request('runtime_get_metrics');
+    report.subject.observations = { logReads: Boolean(actual.logReads), checkpoints: Boolean(actual.checkpoints) };
+    assert.ok(actual.logReads && actual.checkpoints, 'Approved subject lacks required log-read/checkpoint observations; external fixture compatibility remains unqualified');
+  }
   writeFileSync(join(agent,'server-registration-v1.json'), JSON.stringify({ version:1, agentDir:agent, serverDir:transport }));
   for (let i=0;i<2;i++) {
     const client=await DaemonClient.connect(join(transport,'pi-server.sock'));hostedClients.push(client);
