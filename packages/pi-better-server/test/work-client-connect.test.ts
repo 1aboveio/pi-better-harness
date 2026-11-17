@@ -57,3 +57,15 @@ test('cancelled waiter does not cancel a shared recovery needed by another calle
  await entered;controller.abort();await rejected;
  const client=await second;assert.equal(count,1);client.close();
 });
+
+test('connection observes a replacement while owner recovery is still pending', async t => {
+ const f=await fixture(t,reply);
+ let recoverySignal: AbortSignal | undefined;
+ let finish!:()=>void;
+ const recoveryPending=new Promise<void>(resolve=>{finish=resolve});
+ t.after(()=>finish());
+ const client=await transport.connectWorkClient(f.path,f.root,[],{timeoutMs:1500,recover:async({signal})=>{
+  recoverySignal=signal;await f.listen();await recoveryPending;
+ }});
+ assert.equal(client.closed,false);assert.equal(recoverySignal?.aborted,true);finish();client.close();
+});

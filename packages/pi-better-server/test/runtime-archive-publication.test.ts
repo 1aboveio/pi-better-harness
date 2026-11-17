@@ -57,12 +57,27 @@ test("a redundant terminal publication during verification preserves the first v
     calls = 0;
     observations.length = 0;
     await model.reconcile();
-    assert.equal(observations[0]!.status, "degraded");
-    assert.match(observations[0]!.reason!, /Source changed during observation/);
-    assert.equal(observations[0]!.rows[0]!.meta.endedAt, 2);
-    assert.equal(observations.at(-1)!.status, "ready");
-    assert.equal(observations.at(-1)!.rows[0]!.meta.endedAt, 4);
-    assert.ok(observations.at(-1)!.seq > observations[0]!.seq);
+    assert.deepEqual(observations.map(snapshot => snapshot.status), ["ready"], "one recoverable source race stays internal");
+    assert.equal(observations[0]!.rows[0]!.meta.endedAt, 4);
+    // Continuous publications are surfaced, but cannot spin inventories or leak staged rows.
+    let writes = 5;
+    archiveCompletedAttempt({ ...meta, endedAt: writes } as never);
+    reader.revision = () => { archiveCompletedAttempt({ ...meta, endedAt: ++writes } as never); return revision(); };
+    observations.length = 0;
+    await model.reconcile();
+    assert.equal(model.snapshot({ id: meta.id }).status, "degraded");
+    assert.equal(model.snapshot({ id: meta.id }).rows[0]!.meta.endedAt, 4);
+    const before = writes;
+    for (let i = 0; i < 20; i++) await model.reconcile();
+    assert.equal(writes, before, "watcher bursts respect the conflict cooldown");
+    assert.ok(observations.length <= 1, "persistent churn does not spam identical errors");
+    reader.revision = revision;
+    const deadline = Date.now() + 3000;
+    while (model.snapshot().status !== "ready" && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(model.snapshot().status, "ready");
+    assert.equal(model.snapshot({ id: meta.id }).rows[0]!.meta.endedAt, writes);
+
+
   } finally {
     off(); queries.close(); socket.destroy(); await model.close();
     if (saved === undefined) delete process.env.PI_SUBAGENT_DURABLE_DIR; else process.env.PI_SUBAGENT_DURABLE_DIR = saved;

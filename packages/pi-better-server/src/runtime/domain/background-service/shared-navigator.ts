@@ -607,7 +607,20 @@ function listRows(now = Date.now()): InternalRow[] {
       rows.push({ ...row, navigatorId: rowKey(provider.id, row.id), providerLabel: provider.label });
     }
   }
-  return getNavigatorView() === "tree" ? treeRows(rows) : rows;
+  const conversations = mergeAgentAttempts(rows);
+  return getNavigatorView() === "tree" ? treeRows(conversations) : conversations;
+}
+
+/** A resumed execution is still the same agent in either layout. */
+export function mergeAgentAttempts<T extends BackgroundWorkRow>(rows: T[]): T[] {
+  const latest = new Map<string, T>();
+  for (const row of rows) {
+    if (row.providerId !== "subagents" || !row.agentId) continue;
+    const previous = latest.get(row.agentId);
+    if (!previous || row.sortStartedAt > previous.sortStartedAt
+        || (row.sortStartedAt === previous.sortStartedAt && row.id > previous.id)) latest.set(row.agentId, row);
+  }
+  return rows.filter(row => row.providerId !== "subagents" || !row.agentId || latest.get(row.agentId) === row);
 }
 
 /** Two levels only: agents are peers, tasks attach by captured conversation. */

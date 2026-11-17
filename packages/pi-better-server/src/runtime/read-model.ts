@@ -90,6 +90,9 @@ export class WorkReadModel {
   private timer?: ReturnType<typeof setInterval>;
   private pending?: Promise<void>;
   private dirty = false;
+  private sourceConflicts = 0;
+  private conflictRetry?: ReturnType<typeof setTimeout>;
+  private conflictDelay = 100;
   private closed = false;
   private inventory = 0;
   private coordinator = "unknown";
@@ -300,17 +303,40 @@ export class WorkReadModel {
   reconcile(): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.pending) { this.dirty = true; return this.pending; }
+    if (this.conflictRetry) return Promise.resolve();
     this.pending = (async () => {
       for (let pass = 0; pass < 2; pass++) {
         this.dirty = false;
         await this.scan();
-        if (!this.dirty || this.closed) break;
+        if (!this.dirty || this.closed || this.sourceConflicts > 1) break;
       }
     })().finally(() => {
       this.pending = undefined;
-      if (this.dirty && !this.closed) { this.dirty = false; void this.reconcile(); }
+      if (this.dirty && !this.closed) {
+        this.dirty = false;
+        if (this.sourceConflicts > 1) {
+          this.conflictRetry = setTimeout(() => {
+            this.conflictRetry = undefined;
+            void this.reconcile();
+          }, this.conflictDelay);
+          this.conflictRetry.unref();
+          this.conflictDelay = Math.min(1000, this.conflictDelay * 2);
+        } else void this.reconcile();
+      }
     });
     return this.pending;
+  }
+
+  private sourceChanged() {
+    this.dirty = true;
+    this.sourceConflicts++;
+    // Keep the committed rows, but never certify a stale snapshot as ready.
+    // One conflict gets an internal retry; sustained churn is visible and paced.
+    const state = this.sourceConflicts === 1 ? "rebuilding" : "degraded";
+    const reason = "Task state is changing; retaining the last verified snapshot while retrying.";
+    const changed = this.state !== state || this.reason !== reason;
+    this.state = state; this.reason = reason;
+    if (this.sourceConflicts > 1 && changed) this.publish();
   }
 
   private async scan() {
@@ -529,7 +555,7 @@ export class WorkReadModel {
       }
       let after: string;
       try { after = this.reader.revision(); } catch { after = "unknown"; }
-      if (after !== coordinator) { this.state = "degraded"; this.reason = "Coordinator changed during observation; retrying."; this.dirty = true; this.publish(); return; }
+      if (after !== coordinator) { this.sourceChanged(); return; }
       // Retry caches are never queryable. Validate all unpublished families again before committing them.
       this.staged = { files: next, projected: new Map(rows.map(row => [row.meta.id, row])), logs, failureJournals, processes,
         healthRevision: healthConfig.revision, coordinator, coordinatorConversations };
@@ -549,8 +575,8 @@ export class WorkReadModel {
           if (!observation.info) throw observation.error;
           const info = observation.info;
           if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
-            this.dirty = true;
-            throw new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
+            this.sourceChanged();
+            return;
           }
           if (++batch % 256 === 0 || performance.now() - sliceStarted >= 8) {
             await yieldTurn(); sliceStarted = performance.now();
@@ -584,6 +610,7 @@ export class WorkReadModel {
         if (!metas.has(path.slice(this.runs.length + 1).split(sep)[0])) states.delete(path);
       }
       this.staged = undefined;
+      this.sourceConflicts = 0; this.conflictDelay = 100;
       if (terminalLogChanges.length) this.onTerminalLogsChanged?.();
       const previousState = this.state;
       const previousReason = this.reason;
@@ -691,6 +718,7 @@ export class WorkReadModel {
 
   async close() {
     this.closed = true; if (this.timer) clearInterval(this.timer);
+    if (this.conflictRetry) clearTimeout(this.conflictRetry);
     for (const watcher of this.watchers.values()) watcher.close();
     for (const { watcher } of this.rootParents.values()) watcher.close();
     this.rootParents.clear();

@@ -1670,8 +1670,8 @@ function subagentWorkRows(now) {
             expiresAt: terminal && typeof meta.endedAt === "number" ? meta.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS : undefined };
     });
     if (!snapshot || snapshot.status !== "ready")
-        rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Subagents",
-            status: snapshot?.status ?? "degraded", statusTone: "warning", kind: "observation", elapsed: "", primary: workObservationFailure(), sortStartedAt: now });
+        rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Status sync",
+            status: snapshot?.status ?? "degraded", statusTone: "warning", kind: "observation", readOnly: true, elapsed: "", primary: "Task status unconfirmed · enter for details", sortStartedAt: now });
     return rows;
 }
 const DELEGATION_BLURB = {
@@ -1754,6 +1754,14 @@ function mainAgentWorkDetail(now) {
 function subagentWorkDetail(id, now, options) {
     if (id === "main")
         return mainAgentWorkDetail(now);
+    if (id === "runtime-observation")
+        return {
+            providerId: "subagents", id, title: "Subagent status sync", status: workObservation()?.status ?? "rebuilding", statusTone: "warning",
+            subtitle: "Shared status service · task status unconfirmed",
+            metadata: [{ label: "scope", value: "Subagent status reads; not an individual task" }],
+            evidence: { label: "Full diagnostic", text: workObservationFailure() },
+            footerActions: [],
+        };
     const row = requestWorkDetail(id);
     if (!row?.detail)
         return { providerId: "subagents", id, title: id, status: row?.observationError ? "degraded" : "rebuilding", statusTone: "warning", metadata: [], evidence: { label: "observation", text: row?.observationError ?? workObservationFailure() } };
@@ -1874,6 +1882,8 @@ function ensureSubagentProvider() {
         },
         armCloseLabel: (row) => pendingNavigatorPark(workObservation()?.rows.find((observed) => observed.meta.id === row.id)?.meta) ? "x again to cancel resume" : row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",
         close: (id) => {
+            if (id === "runtime-observation")
+                return { action: "not-closable", providerId: "subagents", id };
             const outcome = navigatorCloseRun(id);
             return { ...outcome, providerId: "subagents" };
         },

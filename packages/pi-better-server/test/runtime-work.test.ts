@@ -288,7 +288,8 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
   }
 });
 
-test("registered Navigator preserves older active rows and the same consumers recover across daemon replacement", { timeout: 30000 }, async () => {
+// Two graceful daemon shutdowns and reconnects share this end-to-end budget.
+test("registered Navigator preserves older active rows and the same consumers recover across daemon replacement", { timeout: 60000 }, async () => {
   const root = fixtureRoot("consumer");
   const transport = mkdtempSync("/tmp/p753-");
   const agent = join(root, "agent"), runs = join(root, "pi-better-subagents/runs");
@@ -341,6 +342,14 @@ test("registered Navigator preserves older active rows and the same consumers re
       const previous = observation.workObservation().instanceId;
       await stop();
       await until(() => observation.workObservation()?.status === "degraded");
+      const syncRow = hooks.listRows().find((row: any) => row.id === "runtime-observation");
+      assert.equal(syncRow.name, "Status sync");
+      assert.equal(syncRow.readOnly, true);
+      assert.match(syncRow.primary, /Task status unconfirmed/);
+      const syncDetail = provider.detail("runtime-observation", Date.now());
+      assert.equal(syncDetail.title, "Subagent status sync");
+      assert.match(syncDetail.evidence.text, /disconnect|unavailable|ENOENT/);
+      assert.equal(provider.close("runtime-observation").action, "not-closable");
       assert.ok(observation.workObservation().rows.some((row: any) => row.meta.id === "sa_review_0"));
       child = await launch();
       if (mode === "tool-retry") {
