@@ -550,6 +550,28 @@ test("empty Subagent repair still publishes independent Background coordinator p
   } finally { off(); await model.close(); store.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("a repair pass visits each known, failed, or discovered path once and retains deleted paths", async () => {
+  const f = fixture(); f.put("sa_known"); f.put("sa_deleted"); f.put("sa_failed");
+  writeFileSync(join(f.runs, "sa_failed", "meta.json"), "broken");
+  const model = new WorkReadModel(f.agent, "repair-unique", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    rmSync(join(f.runs, "sa_deleted"), { recursive: true });
+    f.put("sa_discovered");
+    const paths: string[] = [];
+    for await (const batch of (model as any).repairPaths()) {
+      assert.ok(batch.length <= 128);
+      paths.push(...batch);
+    }
+    const expected = ["sa_known", "sa_deleted", "sa_failed", "sa_discovered"].map(id => join(f.runs, id, "meta.json"));
+    assert.deepEqual(paths.slice().sort(), expected.sort(), "known and failed paths must not be scheduled again by discovery");
+    f.put("sa_failed");
+    await model.reconcile();
+    assert.equal(model.observation().status, "ready", "the next pass still repairs a formerly failed path");
+    assert.deepEqual(model.snapshot().rows.map(row => row.meta.id).sort(), ["sa_discovered", "sa_failed", "sa_known"]);
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("initial repair retains health configuration degradation until valid settings recover", async () => {
   const f = fixture(); f.put("sa_health_import");
   writeFileSync(join(f.agent, "settings.json"), "invalid json");
