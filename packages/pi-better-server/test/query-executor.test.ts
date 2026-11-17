@@ -1,79 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createServer, connect, type Socket } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync, openSync, closeSync, writeSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync, openSync, closeSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { Worker } from "node:worker_threads";
-import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
+import { fixture } from "./support/query-fixture.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 const { commitMetadata } = await import(String("../scripts/event-publication/commit.mjs"));
-
-async function fixture(options: { capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "query-root-"));
-  mkdirSync(join(root, "runs"));
-  const transport = mkdtempSync("/tmp/query-socket-");
-  const executor = new WorkQueryExecutor(root, "query-instance", { ...options,
-    workerUrl: options.workerUrl ?? new URL("./support/slow-query-worker.mjs", import.meta.url),
-    modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 } });
-  const sockets = new Set<Socket>();
-  const server = createServer(socket => {
-    sockets.add(socket); socket.on("close", () => sockets.delete(socket));
-    const queries = executor.connect(socket);
-    socket.setEncoding("utf8");
-    let buffer = "";
-    socket.on("data", chunk => {
-      buffer += chunk;
-      while (buffer.includes("\n")) {
-        const end = buffer.indexOf("\n"), line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
-        const command = JSON.parse(line);
-        const reply = (data: unknown, error?: unknown) => {
-          if (!socket.destroyed) socket.write(JSON.stringify({ type: "response", id: command.id,
-            success: !error, data, error: error ? String(error) : undefined }) + "\n");
-        };
-        if (["hello", "ping"].includes(command.type)) { reply({ ok: true }); continue; }
-        try { void queries.handle(command).then(data => {
-          if (!socket.destroyed) socket.write(JSON.stringify({ type: "response", id: command.id, success: true }).slice(0, -1) + ',"data":' + data.json + "}\n");
-        }, error => reply(undefined, error)); }
-        catch (error) { reply(undefined, error); }
-      }
-    });
-  });
-  const path = join(transport, "query.sock");
-  server.listen(path); await once(server, "listening");
-  const clients: WorkClient[] = [];
-  const client = async () => { const value = new WorkClient(path, root); clients.push(value); await value.ready; return value; };
-  const worker = (executor as unknown as { worker: Worker }).worker;
-  const bootstrapped = new Promise<void>(resolve => {
-    const listener = (message: any) => { if (message.type === "fixture-ready") { worker.off("message", listener); resolve(); } };
-    worker.on("message", listener);
-  });
-  const stall = async (iterations = 3000000) => {
-    const started = new Promise<void>(resolve => {
-      const listener = (message: any) => { if (message.type === "diagnostic-started") { worker.off("message", listener); resolve(); } };
-      worker.on("message", listener);
-    });
-    const finished = new Promise<number>((resolve, reject) => {
-      const cleanup = () => { worker.off("message", listener); worker.off("exit", exited); worker.off("error", failed); };
-      const listener = (message: any) => { if (message.type === "diagnostic-finished") { cleanup(); resolve(message.durationMs); } };
-      const exited = (code: number) => { cleanup(); reject(new Error(`diagnostic worker exited before completing SQLite work (code ${code})`)); };
-      const failed = (error: Error) => { cleanup(); reject(error); };
-      worker.on("message", listener); worker.once("exit", exited); worker.once("error", failed);
-    });
-    // Some watchdog tests intentionally discard the completion promise.
-    void finished.catch(() => {});
-    worker.postMessage({ type: "diagnostic-stall", iterations }); await started;
-    return { finished };
-  };
-  const close = async () => {
-    clients.forEach(client => client.close()); sockets.forEach(socket => socket.destroy());
-    await new Promise<void>(resolve => server.close(() => resolve())); await executor.close();
-    rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
-  };
-  return { executor, client, stall, worker, bootstrapped, close, root, path };
-}
 
 async function ready(client: WorkClient) {
   await client.subscribe({});
@@ -83,6 +19,21 @@ async function ready(client: WorkClient) {
     const stop = client.onChange(snapshot => { if (snapshot.status === "ready") { clearTimeout(timeout); stop(); resolve(); } });
   });
 }
+
+test("query fixture cancellation closes live and already-ended resources without retaining the process", { timeout: 20000 }, () => {
+  for (const mode of ["bootstrap-held", "already-ended"]) {
+    const env: NodeJS.ProcessEnv = { ...process.env, PI_QUERY_FIXTURE_CANCEL_MODE: mode };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--test", "--test-isolation=none", "--test-reporter=tap",
+      new URL("./support/query-fixture-cancel.mjs", import.meta.url).pathname], {
+      env, encoding: "utf8", timeout: 8000,
+    });
+    assert.equal(child.error, undefined, `${mode}: ${child.error}\n${child.stdout}\n${child.stderr}`);
+    assert.equal(child.status, 1, "the deliberate test timeout remains a failure, not a waived assertion");
+    assert.match(child.stdout, /test timed out after 1000ms/);
+    assert.match(child.stdout, /"workerStopped":true,"clientDestroyed":true,"transportRemoved":true,"rootRemoved":true/);
+  }
+});
 
 test("a dropped same-consumer snapshot reports a gap while unrelated global commits do not", { timeout: 10000 }, async () => {
   const f = await fixture();
@@ -345,6 +296,7 @@ test("slow caller cancellation preserves other clients and ignores late replies"
   const f = await fixture({ timeoutMs: 700, watchdogMs: 2000,
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   try {
+    await f.bootstrapped;
     const a = await f.client(), b = await f.client(); await ready(b);
     const epoch = b.snapshot!.instanceId;
     const blocked = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "query-blocked") resolve(); }));
@@ -502,6 +454,31 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
     f.worker.postMessage({ type: "release-inventory" });
     await ready(b);
   } finally { await f.close(); }
+});
+
+test("fixture bootstrap rejects when its worker exits before installing RPC", { timeout: 10000 }, async () => {
+  const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(`
+    import { parentPort } from "node:worker_threads";
+    parentPort.on("message", message => {
+      if (message.type === "check-gate") parentPort.postMessage({ type: "gate-installed" });
+      else process.exit(0);
+    });
+  `)}`);
+  const f = await fixture({ workerUrl });
+  try {
+    const installed = (async () => { for (;;) { const [message] = await once(f.worker, "message"); if (message.type === "gate-installed") return; } })();
+    f.worker.postMessage({ type: "check-gate" });
+    await installed;
+    const exited = once(f.worker, "exit");
+    f.worker.postMessage({ type: "exit-before-bootstrap" });
+    await exited;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await assert.rejects(Promise.race([f.bootstrapped, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("bootstrap remained pending after worker exit")), 250);
+      })]), /query fixture worker exited before bootstrap/);
+    } finally { clearTimeout(timer); }
+  } finally { await f.close(); await f.close(); }
 });
 
 test("the original before-root setup observes disk and worker roots without requesting repair", { timeout: 10000 }, async t => {
