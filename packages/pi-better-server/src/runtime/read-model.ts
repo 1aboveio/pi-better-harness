@@ -262,14 +262,19 @@ export class WorkReadModel {
 
   private async *repairPaths(): AsyncGenerator<string[]> {
     // Check known paths too: an incomplete walk never deletes unseen records.
+    // Discovery and failed-source repair can overlap these paths. Retry each
+    // source once per pass, not once per inventory route.
+    const seen = new Set<string>();
     let batch: string[] = [];
     for (const path of this.files.keys()) {
+      seen.add(path);
       batch.push(path);
       if (batch.length === 128) { yield batch; batch = []; }
     }
     // Failed first reads have no verified file entry, but still owe repair.
     for (const path of this.sourceErrors.keys()) {
-      if (this.files.has(path)) continue;
+      if (seen.has(path)) continue;
+      seen.add(path);
       batch.push(path);
       if (batch.length === 128) { yield batch; batch = []; }
     }
@@ -293,7 +298,10 @@ export class WorkReadModel {
       }
       for await (const entry of handle) {
         if (directory === this.runs ? safeId.test(entry.name) : /^[A-Za-z0-9_-]+\.json$/.test(entry.name)) {
-          batch.push(directory === this.runs ? join(directory, entry.name, "meta.json") : join(directory, entry.name));
+          const path = directory === this.runs ? join(directory, entry.name, "meta.json") : join(directory, entry.name);
+          if (seen.has(path)) continue;
+          seen.add(path);
+          batch.push(path);
           if (batch.length === 128) { yield batch; batch = []; }
         }
       }

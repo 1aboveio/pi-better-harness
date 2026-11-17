@@ -448,7 +448,13 @@ test("registered Navigator preserves older active rows and the same consumers re
   }
 });
 
-test("10000 durable records use bounded indexed history pages; a single archive replacement projects only its family", { timeout: 60000 }, async () => {
+test("10000 durable records use bounded indexed history pages; a single archive replacement projects only its family", { timeout: 60000 }, async t => {
+  const began = performance.now();
+  const phase = (name: string) => {
+    const { inventories, assignmentProjections, scheduling } = model.metrics;
+    t.diagnostic(JSON.stringify({ historyPhase: name, elapsedMs: performance.now() - began,
+      inventories, assignmentProjections, repairEntries: scheduling.repairEntries }));
+  };
   const root = fixtureRoot("history");
   const durable = join(root, "durable"), archives = join(durable, "attempts"), sessions = join(durable, "sessions");
   mkdirSync(archives, { recursive: true });
@@ -466,7 +472,9 @@ test("10000 durable records use bounded indexed history pages; a single archive 
   const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
   const model = new WorkReadModel(root, "history-instance", { baseDir: root, durableDir: durable, intervalMs: 60000 });
   try {
+    phase("seeded");
     await model.reconcile();
+    phase("initial-indexed");
     assert.equal(model.snapshot().status, "ready");
     const before = { ...model.metrics };
     for (let i = 0; i < 60; i++) assert.equal(model.snapshot({ active: true }).rows.length, 7);
@@ -479,6 +487,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     const changed = { ...meta(9999), name: "external replacement" };
     execFileSync(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1], process.argv[2])", join(archives, "sa_history_9999.json"), JSON.stringify({ version: 1, meta: changed })]);
     await model.reconcile();
+    phase("archive-replaced");
     assert.equal(model.snapshot({ id: changed.id }).rows[0]!.meta.name, "external replacement");
     assert.equal(model.metrics.metadataReads - before.metadataReads, 1);
     assert.equal(model.metrics.projections - before.projections, 1);
@@ -486,6 +495,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     const markers = join(durable, "session-state"); mkdirSync(markers);
     writeFileSync(join(markers, "conversation-9999.json"), JSON.stringify({ version: 1, sessionId: "conversation-9999", attemptId: "sa_newer_failed", status: "failed", startedAt: 30000, at: Date.now() }));
     await model.reconcile();
+    phase("marker-imported");
     assert.equal(model.snapshot({ id: changed.id }).rows.length, 0, "a later failed conversation marker hides the stale completed archive");
     const projected = model.metrics.projections;
     const owner = { kind: "worker-conversation" as const, sessionId: "conversation-9998", workspace: root };
@@ -494,6 +504,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     writer.registerWait({ waitId: "history-wait", owner, dependencies: [{ operationId: "history-op" }],
       origin: { attemptId: "sa_history_9998", assignmentRef: "history-assignment-9998" }, continuationNote: "Interpret evidence." });
     await model.reconcile();
+    phase("wait-imported");
     assert.equal(model.snapshot({ id: "sa_history_9998" }).rows[0]!.assignment.state, "waiting");
     assert.equal(model.metrics.projections - projected, 1, "one coordinator change must not reproject unrelated historical conversations");
     const beforeOutcome = model.metrics.projections;
@@ -503,6 +514,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     writer.registerAssignment(decision);
     writer.recordAssignmentOutcome(decision);
     await model.reconcile();
+    phase("outcome-imported");
     assert.equal(model.snapshot({ id: "sa_history_9997" }).rows[0]!.assignment.state, "failed");
     assert.equal(model.metrics.projections - beforeOutcome, 1, "outcome-only changes invalidate their own conversation");
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
@@ -510,10 +522,12 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     try {
       external.exec("UPDATE schema_meta SET value = 'unsupported' WHERE key = 'schema_version'");
       await model.reconcile();
+      phase("unsupported-schema");
       assert.equal(model.snapshot().status, "degraded", "a schema-only change invalidates previously verified observations");
       assert.equal(model.snapshot({ id: "sa_history_9997" }).rows[0]!.assignment.verified, false);
       external.exec("UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'");
       await model.reconcile();
+      phase("schema-restored");
       assert.equal(model.snapshot().status, "ready", "compatible coordinator state recovers without restarting the read model");
     } finally { external.close(); }
   } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
