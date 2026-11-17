@@ -43,12 +43,32 @@ test('external measurements cannot substitute driver identity for approved subje
   assert.ok(has(validatePairedReports(value, value, expected), '.driver', 'missing-approved-driver'));
 });
 
-test('observed baseline parser work cannot qualify an unavailable ordinary versus repair breakdown', () => {
+test('observed baseline parser work cannot qualify an unmeasured total source-work breakdown', () => {
   const value: any = specimen();
   for (const metrics of [value.scenarios[0].countersBefore, value.scenarios[0].metrics]) {
     metrics.baselineObservation = { complete: true, threadId: 1, moduleUrls: ['parse', 'health', 'cursor', 'tail'], durableCheckpoints: false };
   }
   assert.ok(has(validatePairedReports(value, value, expected), '.metrics', 'unavailable-source-work-breakdown'));
+});
+
+test('baseline inventory totals accept measured source sums but reject hidden work and candidate relabeling', () => {
+  const before: any = specimen(), after: any = specimen();
+  const zero = { batches: 0, paths: 0, stats: 0, metadataReads: 0, logBytes: 0, logReads: 0, projections: 0, directories: 0, metadataBytes: 0, canonicalizations: 0, otherReadBytes: 0, otherReadCalls: 0, assignmentCalls: 0, displayCalls: 0, healthCalls: 0 };
+  const total = { ...zero, batches: 1, paths: 3, stats: 2, metadataReads: 1, logBytes: 10, logReads: 1, projections: 1 };
+  for (const metrics of [before.scenarios[0].countersBefore, before.scenarios[0].metrics]) {
+    metrics.inventories = 1; metrics.metadataReads = 1;
+    metrics.baselineObservation = { complete: true, threadId: 1, moduleUrls: ['parse', 'health', 'cursor', 'tail', 'model'], durableCheckpoints: false,
+      sourceWork: { kind: 'baseline-inventory', complete: true, total: { ...total }, sources: {
+        'read-model': { ...total, logBytes: 0, logReads: 0 }, 'parse': { ...zero, logBytes: 10, logReads: 1 },
+        'health-observation': { ...zero }, 'log-cursor': { ...zero }, 'shared-log-utils': { ...zero }, uncategorized: { ...zero } } } };
+  }
+  const observed = validatePairedReports(before, after, expected);
+  assert.equal(observed.issues.some(issue => issue.path.startsWith('before') && issue.path.endsWith('.metrics')), false);
+  assert.equal(observed.qualified, false, 'Schema specimens still lack native coverage and all matrix windows');
+  before.scenarios[0].metrics.baselineObservation.sourceWork.total.stats++;
+  assert.ok(has(validatePairedReports(before, after, expected), '.metrics', 'missing-reset-or-generation-change'));
+  after.scenarios[0].metrics.baselineObservation = before.scenarios[0].countersBefore.baselineObservation;
+  assert.ok(has(validatePairedReports(before, after, expected), '.metrics', 'candidate-requires-ordinary-and-repair'));
 });
 
 test('recorded primary admission refusal and malformed reports cannot qualify or yield CPU comparisons', () => {

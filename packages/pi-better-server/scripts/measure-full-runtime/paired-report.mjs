@@ -91,7 +91,9 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
           if (value.window?.sampleIntervalMs !== 250) issue(p + '.diagnostics', 'changed-process-sampler-budget');
         }
         for (const [total, field] of [['totalCpuMs', 'cpuMs'], ['totalRss', 'rss']]) if (!finite(scenario[total]) || resources.some(value => !finite(value[field])) || Math.abs(resources.reduce((sum, value) => sum + value[field], 0) - scenario[total]) > 0.000001) issue(p + '.' + total, 'incorrect-aggregate');
-        try { if (workloadCounterDelta(scenario.countersBefore, scenario.metrics).complete === false) issue(p + '.metrics', 'unavailable-source-work-breakdown'); } catch { issue(p + '.metrics', 'missing-reset-or-generation-change'); }
+        if (scenario.metrics?.baselineObservation && !scenario.metrics.baselineObservation.sourceWork?.complete) issue(p + '.metrics', 'unavailable-source-work-breakdown');
+        if (side === 'after' && scenario.metrics?.baselineObservation) issue(p + '.metrics', 'candidate-requires-ordinary-and-repair');
+        try { workloadCounterDelta(scenario.countersBefore, scenario.metrics); } catch { issue(p + '.metrics', 'missing-reset-or-generation-change'); }
         const reconciliation = Array.isArray(report.incrementalWindows) ? report.incrementalWindows.find(value => value?.clients === scenario.clients) : undefined;
         if (!reconciliation?.workloadBefore || !reconciliation?.workloadAfter) issue(p + '.reconciliation', 'missing-final-results');
         else {
@@ -143,7 +145,10 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
     equal(a.report.measurement?.nativeCapture, b.report.measurement?.nativeCapture, windowKey + '.native-capture-binding');
     equal(a.report.workload?.tasks, b.report.workload?.tasks, windowKey + '.task-workload');
     equal(a.report.workload?.seededLogBytes, b.report.workload?.seededLogBytes, windowKey + '.seededLogBytes');
-    pairs.push({ window: windowKey, beforeCpuMs: a.scenario.totalCpuMs, afterCpuMs: b.scenario.totalCpuMs });
+    let sourceWork;
+    try { sourceWork = { before: workloadCounterDelta(a.scenario.countersBefore, a.scenario.metrics), after: workloadCounterDelta(b.scenario.countersBefore, b.scenario.metrics) }; }
+    catch { issue(windowKey + '.sourceWork', 'unmeasured-required-total'); }
+    pairs.push({ window: windowKey, beforeCpuMs: a.scenario.totalCpuMs, afterCpuMs: b.scenario.totalCpuMs, sourceWork });
   }
   // Source808/796 specify duration and complete reporting, not a numeric CPU reduction target.
   return { schemaVersion: 1, qualified: issues.length === 0, issues,

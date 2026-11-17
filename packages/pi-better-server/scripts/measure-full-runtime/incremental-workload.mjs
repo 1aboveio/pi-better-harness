@@ -126,18 +126,42 @@ export function workloadCounterDelta(before, after) {
   if (before.baselineObservation || after.baselineObservation) {
     assert.equal(before.baselineObservation?.complete, true, 'Missing baseline observation coverage');
     assert.equal(after.baselineObservation?.complete, true, 'Missing baseline observation coverage');
+    for (const observation of [before.baselineObservation, after.baselineObservation]) {
+      assert.ok(Number.isSafeInteger(observation.threadId) && observation.threadId >= 0, 'Missing baseline reader identity');
+      assert.ok(Array.isArray(observation.moduleUrls) && observation.moduleUrls.length === 5 && new Set(observation.moduleUrls).size === 5 && observation.moduleUrls.every(url => typeof url === 'string' && url), 'Missing baseline loaded module origins');
+    }
     assert.equal(before.baselineObservation.threadId, after.baselineObservation.threadId, 'Baseline reader generation changed');
     assert.deepEqual(before.baselineObservation.moduleUrls, after.baselineObservation.moduleUrls, 'Baseline module origins changed');
-    return { complete: false, unavailable: ['projection-source-breakdown', 'ordinary-versus-repair-source-work'],
+    for (const metric of [before, after]) {
+      const work = metric.baselineObservation.sourceWork;
+      assert.equal(work?.kind, 'baseline-inventory', 'Missing baseline inventory total');
+      assert.equal(work.complete, true, 'Incomplete baseline inventory total');
+      assert.deepEqual(Object.keys(work.sources).sort(), ['health-observation', 'log-cursor', 'parse', 'read-model', 'shared-log-utils', 'uncategorized']);
+      for (const key of ['batches', 'paths', 'stats', 'metadataReads', 'logBytes', 'logReads', 'projections', 'directories', 'metadataBytes', 'canonicalizations', 'otherReadBytes', 'otherReadCalls', 'assignmentCalls', 'displayCalls', 'healthCalls']) {
+        const counts = Object.values(work.sources).map(source => source[key]);
+        assert.ok(counts.every(value => Number.isFinite(value) && value >= 0), `Missing baseline source counter: ${key}`);
+        assert.equal(work.total[key], counts.reduce((sum, value) => sum + value, 0), `Hidden baseline source work: ${key}`);
+      }
+      assert.equal(work.total.projections, metric.projections, 'Unobserved baseline projections');
+      assert.equal(work.total.batches, metric.inventories, 'Unobserved baseline inventory passes');
+      assert.equal(work.total.metadataReads, metric.metadataReads, 'Unobserved baseline metadata reads');
+      assert.equal(work.total.logBytes, metric.logReads.bytes, 'Unobserved baseline log bytes');
+      assert.equal(work.total.logReads, metric.logReads.reads, 'Unobserved baseline log reads');
+    }
+    return { complete: true, accounting: 'baseline-inventory',
+      total: fields(before.baselineObservation.sourceWork.total, after.baselineObservation.sourceWork.total, Object.keys(after.baselineObservation.sourceWork.total)),
+      sources: Object.fromEntries(Object.keys(after.baselineObservation.sourceWork.sources).map(name => [name, fields(before.baselineObservation.sourceWork.sources[name], after.baselineObservation.sourceWork.sources[name], Object.keys(after.baselineObservation.sourceWork.total))])),
       projections: fields(before, after, ['projections']),
       logs: fields(before.logReads, after.logReads, ['bytes', 'reads', 'parsedEvents', 'displayFolded', 'healthFolded']),
       ordinary: null, repair: null };
   }
+  const ordinary = fields(before.sourceWork?.entity, after.sourceWork?.entity, ['batches', 'paths', 'stats', 'metadataReads', 'logBytes', 'logReads']);
+  const repair = fields(before.sourceWork?.repair, after.sourceWork?.repair, ['batches', 'paths', 'stats', 'metadataReads', 'logBytes', 'logReads']);
   return {
+    accounting: 'ordinary-plus-repair', total: Object.fromEntries(Object.keys(ordinary).map(key => [key, ordinary[key] + repair[key]])),
     projections: fields(before, after, ['projections', 'assignmentProjections', 'logProjections', 'healthProjections']),
     logs: fields(before.logReads, after.logReads, ['bytes', 'reads', 'parsedEvents', 'displayFolded', 'healthFolded']),
-    ordinary: fields(before.sourceWork?.entity, after.sourceWork?.entity, ['batches', 'paths', 'stats', 'metadataReads', 'logBytes', 'logReads']),
-    repair: fields(before.sourceWork?.repair, after.sourceWork?.repair, ['batches', 'paths', 'stats', 'metadataReads', 'logBytes', 'logReads']),
+    ordinary, repair,
   };
 }
 
@@ -163,12 +187,15 @@ export function reconcileTask(task, row, cwd) {
     input: unavailable ? null : row.detail.parsed.usage.input, output: unavailable ? null : row.detail.parsed.usage.output };
 }
 
-export async function reconcileWorkload(work, cwd, manifest) {
+export async function reconcileWorkload(work, cwd, manifest, { baseline: originalBaseline = false } = {}) {
   const missingSource = manifest.tasks.some(task => task.logState === 'missing');
   const verifyStatus = snapshot => {
     if (missingSource) {
-      assert.equal(snapshot.status, 'degraded', 'Missing log evidence must remain degraded');
-      assert.match(snapshot.reason ?? '', /Log source unavailable/, 'Only the expected missing-log degradation is admissible');
+      if (originalBaseline) assert.equal(snapshot.status, 'ready', 'Original baseline missing-source truth is verified by detail diagnostics, not an invented degraded status');
+      else {
+        assert.equal(snapshot.status, 'degraded', 'Missing log evidence must remain degraded');
+        assert.match(snapshot.reason ?? '', /Log source unavailable/, 'Only the expected missing-log degradation is admissible');
+      }
     } else assert.equal(snapshot.status, 'ready', snapshot.reason);
   };
   const snapshot = await work.get({ cwd, active: false, limit: 1 });

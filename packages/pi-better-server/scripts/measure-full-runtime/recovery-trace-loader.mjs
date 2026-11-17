@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { observeGcThread } from './owned-fixture.mjs';
 import { parseSubjectBinding, subjectModuleUrl } from './subject-binding.mjs';
-import { baselineModuleUrls, instrumentBaselineModule } from './baseline-observation.mjs';
+import { baselineModuleUrls, instrumentBaselineModule, instrumentBaselineQueue } from './baseline-observation.mjs';
 export function initialize(data) { observeGcThread(`loader-${data.resourceParentThreadId}`); }
 
 const originalTarget = new URL('../../src/runtime/background-tools.ts', import.meta.url).href;
@@ -12,6 +12,7 @@ const target = process.env.PI_FULL_RUNTIME_SUBJECT ? subjectModuleUrl(originalTa
 const recorder = new URL('./recovery-trace.mjs', import.meta.url).href;
 
 export function instrumentRecoveryTrace(source) {
+  const baselineScope = source.includes('scopes.delete(oldest); recoveryVersions.delete(oldest);');
   const replace = (from, to) => {
     if (source.split(from).length !== 2) throw new Error(`Resource trace source anchor changed: ${from}`);
     source = source.replace(from, to);
@@ -29,7 +30,7 @@ export function instrumentRecoveryTrace(source) {
   replace('metrics.reconciles++;', `
     const traceAfterContext = traceRecoveryState();
     recordRecoveryTrace({ event: 'reconcile', owner: record.owner, branchDigest: authority.backgroundDigest(record.branchIds),
-      coordinatorRevision: traceCoordinatorRevision, cachedRecoveryDigest: recoveryVersions.get(viewKey) ?? null,
+      coordinatorRevision: traceCoordinatorRevision, cachedRecoveryDigest: recoveryVersions.get(${baselineScope ? 'key' : 'viewKey'}) ?? null,
       recoveryDigest: recoveryVersion, pending: !traceAfterContext || traceAfterContext.revision < 0 || traceAfterContext.delivery !== undefined || traceAfterContext.claims !== undefined,
       beforeContext: traceBeforeContext, afterContext: traceAfterContext });
     metrics.reconciles++;`);
@@ -43,9 +44,10 @@ export function instrumentRecoveryTrace(source) {
   replace('deliveries.delete(record.params.token);', `
     recordRecoveryTrace({ event: 'invalidate', owner: record.owner, reason: record.params.delivered === true ? 'receipt-delivered' : 'receipt-deferred' });
     deliveries.delete(record.params.token);`);
-  replace('scopes.delete(oldest); forgetOwner(oldest);', `
+  const eviction = baselineScope ? 'scopes.delete(oldest); recoveryVersions.delete(oldest);' : 'scopes.delete(oldest); forgetOwner(oldest);';
+  replace(eviction, `
     recordRecoveryTrace({ event: 'invalidate', ownerKey: oldest, reason: 'scope-evicted' });
-    scopes.delete(oldest); forgetOwner(oldest);`);
+    ${eviction}`);
   return `import { recordRecoveryTrace } from ${JSON.stringify(recorder)};\n${source}`;
 }
 
@@ -55,8 +57,11 @@ export async function load(url, context, nextLoad) {
   if (baseline && process.env.PI_FULL_RUNTIME_SUBJECT) {
     const binding = parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT);
     const worker = pathToFileURL(join(binding.artifactRoot, 'src/runtime/query-worker.mjs'));
-    if (baselineModuleUrls(worker).includes(url)) return { format: 'module', shortCircuit: true,
-      source: instrumentBaselineModule(readFileSync(new URL(url), 'utf8'), new URL(url).pathname.split('/').at(-1).slice(0, -4)) };
+    if (baselineModuleUrls(worker).includes(url)) {
+      const model = url.endsWith('/read-model.ts');
+      const observed = instrumentBaselineModule(readFileSync(new URL(url), 'utf8'), model ? 'read-model' : new URL(url).pathname.split('/').at(-1).slice(0, -4));
+      return { format: 'module', shortCircuit: true, source: model ? ts.transpileModule(observed, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText : observed };
+    }
   }
   if (url.startsWith('file:') && new URL(url).pathname.endsWith('/src/runtime/query-executor.ts')) {
     let source = readFileSync(new URL(url), 'utf8');
@@ -68,6 +73,7 @@ export async function load(url, context, nextLoad) {
     if (source.split(workerAnchor).length !== 2 || source.split(dataAnchor).length !== 2) throw Error('Fixture worker factory anchor changed');
     source = source.replace(workerAnchor, 'ownedWorkerUrl(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url),new URL("./query-worker.mjs", import.meta.url))');
     source = source.replace(dataAnchor, 'workerData: { resourceFixtureSource: new URL("./query-worker.mjs", import.meta.url).href, agentDir:');
+    if (baseline) source = instrumentBaselineQueue(source);
     return { format: 'module', shortCircuit: true, source: ts.transpileModule(`import {bindOwnedExecutor,ownedWorkerUrl} from ${JSON.stringify(helper)};\n${source}`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText };
   }
   if (url.startsWith('file:') && new URL(url).pathname.endsWith('/src/runtime/query-worker.mjs')) {

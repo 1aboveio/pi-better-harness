@@ -174,7 +174,7 @@ try {
     let before=await sampleAll();
     const role = pid => pid===process.pid?'remote-adapters-and-measurement':pid===remoteClaim.pid?'remote-runner':pid===remoteCommandPid?'remote-command':pid===owner.pid ? 'server' : pid===guardian.pid ? 'guardian' : pid===worker.pid ? 'worker' : pid===claim.pid ? 'runner' : pid===commandPid ? 'command' : legacyPids.includes(pid)?'legacy-command':'pi';
     for(const pid of required) assert.ok(before.some(v=>v.identity.pid===pid),`Missing instrumented actual process ${pid}`);
-    const workloadBefore = workload ? await reconcileWorkload(work, cwd, workload) : undefined;
+    const workloadBefore = workload ? await reconcileWorkload(work, cwd, workload, { baseline: Boolean(report.subject?.observations?.baseline) }) : undefined;
     const countersBefore = await work.request('runtime_get_metrics');
     before = await sampleAll();
     const batchCapture = createBatchCapture({ pids: required, generation: String(count), ...(nativeCapture ? { capture: nativeCapture } : {}) });
@@ -196,7 +196,7 @@ try {
     captureCohort();
     const after=(await sampleAll(endedAt)).map(batchIdentity), metrics=await work.request('runtime_get_metrics'), status=await work.request('runtime_get_status');
     const aggregatePeak = summarizeCohorts(aggregateCohorts, { required: requiredProcesses, generation: String(count) }, { startedAt, endedAt });
-    const workloadAfter = workload ? await reconcileWorkload(work, cwd, workload) : undefined;
+    const workloadAfter = workload ? await reconcileWorkload(work, cwd, workload, { baseline: Boolean(metrics.baselineObservation) }) : undefined;
     if (workload) {
       assert.deepEqual(workloadAfter, workloadBefore, 'Exact authoritative fixture results must survive the observation window');
       if (!metrics.baselineObservation) {
@@ -282,7 +282,7 @@ try {
           if (metrics.inventories <= before.inventories) return false;
           if (['theme', 'same-settings'].includes(mutation.kind)) return true;
           if (metrics.baselineObservation) {
-            try { await reconcileWorkload(client, cwd, workload); return true; }
+            try { await reconcileWorkload(client, cwd, workload, { baseline: true }); return true; }
             catch { return false; }
           }
           try {

@@ -108,7 +108,7 @@ export async function runMutationSequence({ manifest, client, write, observe, re
           assert.ok(delta.logs.bytes >= bytes && delta.logs.bytes <= bytes + (event ? 256 : 0), 'Log bytes must stay within actual content plus existing identity probe budget');
         }
       }
-      step.final = await reconcileWorkload(client, manifest.cwd, manifest);
+      step.final = await reconcileWorkload(client, manifest.cwd, manifest, { baseline: Boolean(step.before.baselineObservation) });
       if (step.capability === 'evict' && step.after.baselineObservation) {
         step.recoveryObservation = (await client.request('runtime_get_metrics')).baselineObservation;
         assert.equal(step.recoveryObservation?.complete, true);

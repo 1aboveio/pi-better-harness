@@ -5,7 +5,7 @@ export const baseline: string;
 export function workloadTransport(root: string, env?: Record<string, string | undefined>): { directory: string; socketPath: string };
 export function workloadSettings(env?: Record<string, string | undefined>): WorkloadSettings | undefined;
 export function seedWorkload(input: { root: string; agent: string; cwd: string; settings: WorkloadSettings }): WorkloadManifest;
-export function reconcileWorkload(work: { get(scope: unknown): Promise<any> }, cwd: string, manifest: WorkloadManifest): Promise<unknown>;
+export function reconcileWorkload(work: { get(scope: unknown): Promise<any> }, cwd: string, manifest: WorkloadManifest, options?: { baseline?: boolean }): Promise<unknown>;
 export function reconcileTask(task: WorkloadTask, row: any, cwd: string): any;
 export function mutateWorkload(manifest: WorkloadManifest, command: { kind: string; id?: string; cents?: number; text?: string; theme?: string }): { kind: string; id?: string; beforeBytes: number; afterBytes: number; appendedBytes: number; beforeDigest: string; afterDigest: string | null; expected?: Pick<WorkloadTask, 'finalText' | 'costUSD' | 'input' | 'output' | 'logState'> };
 export function workloadCounterDelta(before: any, after: any): any;

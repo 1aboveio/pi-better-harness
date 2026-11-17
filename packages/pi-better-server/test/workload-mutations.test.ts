@@ -103,6 +103,10 @@ test('settings mutations and exact task identity retain separate actual ordinary
     const delta = workloadCounterDelta(before, model.metrics);
     assert.equal(delta.logs.bytes, 0); assert.equal(delta.projections.logProjections, 0);
     assert.ok(delta.repair.batches > 0, 'explicit source reconciliation remains separately measured repair work');
+    for (const key of ['batches', 'paths', 'stats', 'metadataReads', 'logBytes', 'logReads']) {
+      const afterWork = model.metrics.sourceWork as any, beforeWork = before.sourceWork as any;
+      assert.equal(delta.total[key], afterWork.entity[key] + afterWork.repair[key] - beforeWork.entity[key] - beforeWork.repair[key]);
+    }
     assert.throws(() => workloadCounterDelta({}, model.metrics), /Missing\/reset counter/);
     assert.throws(() => mutateWorkload(manifest, { kind: 'append', id: 'foreign-task', cents: 1, text: 'no' }), /exact fixture task/);
     assert.throws(() => mutateWorkload(manifest, { kind: 'append', id: manifest.tasks[0]!.id, cents: -1, text: 'no' }), /positive integer cents/);
