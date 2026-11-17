@@ -206,6 +206,12 @@ supervised local commands. The bridge retains the worker's captured permissions
 and applies the current Background Tasks policy as well. Explicit tool exclusions
 and clean loadouts can withhold the bridge.
 
+An explicit tool list containing `wait_for_operations` must also contain
+`acknowledge_operation_result` and either `bg_task_status` or `bg_task_log`.
+The launcher checks this after permission filtering and refuses an incomplete
+combination. A default loadout with no authorized evidence reader withholds
+waiting instead of adding permissions.
+
 A worker starts a long validation command, continues independent work, then calls
 `wait_for_operations` with its owned task ids. Call this tool directly as the only
 tool call in its assistant message. A nested codemode call cannot deliver the
@@ -229,6 +235,23 @@ Capacity, Goal, workflow, permissions, writer ownership and cancellation are
 checked again. Full capacity leaves the wait ready. Missing or conflicting
 recovery evidence leaves it held with a reason. The runner survives worker and Pi
 exit, but v1 does not run an unattended model after Pi shuts down.
+
+## Reporting completion
+
+Bound assignments use `report_assignment_result` with evidence from inside the
+assigned workspace. A sibling results directory is outside that boundary. An
+existing workspace source file can be evidence; read-only workers need not write
+a new artifact. Use `offset` and `max_bytes` to retain an excerpt from a file
+larger than 65,536 bytes.
+
+Before accepting an unblocked incomplete report with concrete `remaining_work`,
+the child allows one chance to continue that work. A normal model stop without
+an accepted report can use the same correction allowance to submit or correct
+the report. The allowance belongs to the current attempt, survives reload, and
+keeps the original deadline and permissions. Concrete blockers, aborted/error
+stops, parked work and expired deadlines do not trigger correction. Accepted
+reports remain immutable; exhausted correction retains the incomplete or
+unverified result for the coordinator.
 
 ## Codemode batch launches
 

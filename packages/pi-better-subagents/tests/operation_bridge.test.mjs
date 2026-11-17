@@ -546,14 +546,16 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false, s
         workspace: root,
         authorityReference: "test:real-sdk",
         capabilities: {
-            background: { spawn: false, watch: false, status: false, log: false },
+            background: { spawn: false, watch: false, status: true, log: false },
             wait: true,
-            acknowledge: false,
+            acknowledge: true,
             parking: true,
         },
-        tools: [createToolDescriptor("wait_for_operations")],
+        tools: [createToolDescriptor("wait_for_operations"), createToolDescriptor("bg_task_status"), createToolDescriptor("acknowledge_operation_result")],
         ownership: (taskId) => taskId === "bg_1",
         handlers: {
+            bg_task_status: async () => ({ taskId: "bg_1", text: "retained terminal evidence" }),
+            acknowledge_operation_result: async () => ({ phase: "consumed" }),
             wait_for_operations: async () => ({
                 waitId: "wait-real",
                 generation: 1,

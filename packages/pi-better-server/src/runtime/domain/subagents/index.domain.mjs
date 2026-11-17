@@ -16,7 +16,7 @@ import { createAssignmentProjector } from "./assignment-projection.mjs";
 import { historicalWaits, attentionRevision, attentionDismissed, dismissAttention } from "./historical-attention.domain.mjs";
 import { registerAssignmentAttempt, commitAssignmentTerminal, readOutcome, receiptOutcome, outcomeTranscriptReceipt, inspectOutcome, createOutcomeHost, closeOutcomeHost, claimOutcome } from "./assignment-outcomes.domain.mjs";
 import { currentSandboxPermissions } from "./permission-policy.domain.mjs";
-import { createToolDescriptor } from "./operation-bridge-types.domain.mjs";
+import { assertWaitToolDependencies, createToolDescriptor } from "./operation-bridge-types.domain.mjs";
 import { requestResumeAdmission } from "./worker-waits.domain.mjs";
 import { execSync } from "node:child_process";
 import { writeFileSync, mkdirSync, renameSync, statSync } from "node:fs";
@@ -2961,6 +2961,7 @@ export default function (pi, managed) {
                 bridgePlan.capabilities = { ...bridgePlan.capabilities, reportAssignment: true };
                 productionBridgeSchemas.schemas.set("report_assignment_result", createToolDescriptor("report_assignment_result"));
             }
+            assertWaitToolDependencies(bridgePlan.capabilities, bridgePlan.tools);
             const bridgeEnabled = bridgePlan.tools.length > 0;
             if (bridgeEnabled) {
                 allow = [...new Set([...allow.split(",").filter(Boolean), ...bridgePlan.tools])].join(",");
