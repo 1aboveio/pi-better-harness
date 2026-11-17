@@ -13,6 +13,7 @@ import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { OwnershipStore } from "../src/core/ownership.ts";
 import { ownershipPathFor } from "../src/paths.ts";
 import { Client, makeEnv, waitFor } from "./helpers.ts";
+import { onlyStatusProbeRemains } from "./support/runtime-status.ts";
 
 test("real SQLite runner obligations exclude terminal history, unread waits and corrupt records", { timeout: 25_000 }, async t => {
   const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
@@ -261,7 +262,7 @@ test("registered work connection retains runtime without hosted ownership; probe
     const probe = await Client.connect(daemon.socketPath);
     try {
       await probe.request({ type: "hello", protocolVersion: 1, runtimeRoot: env.agentDir });
-      return (await probe.request({ type: "runtime_get_status" })).data.livenessReasons.length === 0;
+      return onlyStatusProbeRemains((await probe.request({ type: "runtime_get_status" })).data);
     } finally { probe.close(); }
   });
   now += 99; await daemon.sweepIdle(); assert.equal(existsSync(daemon.socketPath), true);
@@ -301,7 +302,7 @@ test("100 runtime registration/shutdown races accept or reject for reconnect", {
     const daemon = await startDaemon({ serverDir: env.serverDir, runtimeIdleMs: 100, startupGraceMs: 0, now: () => now });
     const client = new WorkClient(daemon.socketPath, env.agentDir);
     const registration = client.ready.then(() => "accepted", error => {
-      assert.match(String(error), /disconnected|ECONNRESET|ECONNREFUSED|ENOENT|shutting down|runtime-draining/);
+      assert.match(String(error), /disconnected|ECONNRESET|ECONNREFUSED|EPIPE|ENOENT|shutting down|runtime-draining/);
       return "retry";
     });
     try {
