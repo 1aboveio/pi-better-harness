@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createServer, connect, type Socket } from "node:net";
 import { once } from "node:events";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync, openSync, closeSync, writeSync } from "node:fs";
@@ -22,15 +22,19 @@ async function ready(client: WorkClient) {
 }
 
 test("query fixture cancellation closes live and already-ended resources without retaining the process", { timeout: 20000 }, () => {
+  // The host supports Node 22; this no-isolation control uses the already
+  // provisioned private Node 24, as does the managed mutation-store test.
+  const runtime = Number(process.versions.node.split(".")[0]) < 24 ? process.env.PI_TEST_PRIVATE_RUNTIME_NODE : process.execPath;
+  assert.ok(runtime, "Set PI_TEST_PRIVATE_RUNTIME_NODE to the verified private Node 24 binary");
   for (const mode of ["bootstrap-held", "already-ended"]) {
     const env: NodeJS.ProcessEnv = { ...process.env, PI_QUERY_FIXTURE_CANCEL_MODE: mode };
     delete env.NODE_TEST_CONTEXT;
-    const child = spawnSync(process.execPath, ["--import", "tsx", "--test", "--test-isolation=none", "--test-reporter=tap",
+    const child: SpawnSyncReturns<string> = spawnSync(runtime, ["--import", "tsx", "--test", "--test-isolation=none", "--test-reporter=tap",
       new URL("./support/query-fixture-cancel.mjs", import.meta.url).pathname], {
       env, encoding: "utf8", timeout: 8000,
     });
     assert.equal(child.error, undefined, `${mode}: ${child.error}\n${child.stdout}\n${child.stderr}`);
-    assert.equal(child.status, 1, "the deliberate test timeout remains a failure, not a waived assertion");
+    assert.equal(child.status, 1, `the deliberate test timeout remains a failure, not a waived assertion\n${child.stdout}\n${child.stderr}`);
     assert.match(child.stdout, /test timed out after 1000ms/);
     assert.match(child.stdout, /"workerStopped":true,"clientDestroyed":true,"transportRemoved":true,"rootRemoved":true/);
   }
@@ -424,6 +428,34 @@ test("shared callers have separate deadlines and queue timeouts retain bounded a
     assert.equal(f.executor.metrics().executor.queueTimeouts, 1);
     assert.equal(f.executor.metrics().executor.callerTimeouts, 1);
   } finally { await f.close(); }
+});
+
+test("responsive fixture imports outlive the wedge watchdog without source readiness", { timeout: 10000 }, async () => {
+  const implementation = new URL("./support/cancellable-query-worker.mjs", import.meta.url).href;
+  const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(`
+    import { workerData } from "node:worker_threads";
+    workerData.fixtureHoldBootstrap = true;
+    await import(${JSON.stringify(implementation)});
+  `)}`);
+  const f = await fixture({ timeoutMs: 400, watchdogMs: 1200, workerUrl });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let heartbeats = 0;
+      const cleanup = () => { clearTimeout(timeout); f.worker.off("message", message); f.worker.off("exit", exit); };
+      const message = (value: any) => { if (value.type === "heartbeat" && ++heartbeats === 6) { cleanup(); resolve(); } };
+      const exit = () => { cleanup(); reject(new Error("responsive fixture worker exited before bootstrap")); };
+      f.worker.on("message", message); f.worker.once("exit", exit);
+      timeout = setTimeout(() => { cleanup(); reject(new Error("fixture bootstrap heartbeat did not progress")); }, 3000);
+    });
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+    assert.equal(f.executor.observation().status, "rebuilding");
+    f.worker.postMessage({ type: "release-bootstrap" });
+    await f.bootstrapped;
+    const client = await f.client(); await ready(client);
+    assert.equal(client.snapshot?.status, "ready");
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+  } finally { clearTimeout(timeout); await f.close(); }
 });
 
 test("watchdog recovers a genuinely wedged worker while socket control stays responsive", { timeout: 10000 }, async t => {

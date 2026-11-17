@@ -1,7 +1,10 @@
 import test from "node:test";
+import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { fixture } from "./query-fixture.ts";
+
+assert.ok(Number(process.versions.node.split(".")[0]) >= 24, "Cancellation control requires private Node 24");
 
 test("cancelled query fixture releases its owned resources", { timeout: 1000 }, async t => {
   const f = await fixture({ workerUrl: new URL(`data:text/javascript,${encodeURIComponent(`
