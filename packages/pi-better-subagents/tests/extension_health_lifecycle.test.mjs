@@ -49,7 +49,7 @@
 import { describe, it, after, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { continuationFixture } from "./managed-continuation-fixture.mjs";
-import { registerFixtureRun } from "./fixture-run-ownership.mjs";
+import { registerFixtureRun, retireFixtureRun } from "./fixture-run-ownership.mjs";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { register } from "node:module";
@@ -238,7 +238,7 @@ async function reapRun({ id, pid }) {
         })]);
     } finally { clearTimeout(timeout); }
     rmSync(runDir(id), { recursive: true, force: true });
-    ownedExits.delete(id);
+    retireFixtureRun({ id, pid }, owned, ownedExits, liveRuns);
 }
 
 /**

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { completeOwnedExit } from "../owned-exit.ts";
 import { createCallbackBatcher } from "../shared-callback-batcher.ts";
-import { registerFixtureRun } from "./fixture-run-ownership.mjs";
+import { registerFixtureRun, retireFixtureRun } from "./fixture-run-ownership.mjs";
 
 const deferred = () => {
     let resolve;
@@ -21,6 +21,11 @@ test("fixture cleanup registration follows the actual exit observer, not the too
     assert.throws(() => registerFixtureRun({ ...run, pid: 999 }, owned, liveRuns), /exact owned exit/);
     assert.throws(() => registerFixtureRun(run, owned, liveRuns, "continuation-fixture"), /two fixture teardown owners/);
     assert.deepEqual(liveRuns, [run], "refused ownership must not register a kill or deletion");
+    assert.throws(() => retireFixtureRun(run, { pid: run.pid, completion: Promise.resolve() }, owned, liveRuns), /exact exit owner receipt/);
+    assert.deepEqual(liveRuns, [run], "a different receipt cannot retire scheduled cleanup");
+    retireFixtureRun(run, owned.get(run.id), owned, liveRuns);
+    assert.equal(owned.size, 0);
+    assert.deepEqual(liveRuns, []);
 });
 
 test("owned exit acknowledgement waits beyond lease release and rejects failed finalization", async () => {
