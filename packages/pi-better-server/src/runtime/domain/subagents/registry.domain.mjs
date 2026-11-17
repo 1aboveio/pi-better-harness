@@ -13,7 +13,8 @@
  * run directory does not delete them.
  */
 import { assignmentRetainsEvidence } from "./assignment-outcomes.domain.mjs";
-import { execFileSync } from "node:child_process";
+import { processStartToken } from "./process-identity.mjs";
+export { processStartToken } from "./process-identity.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -473,36 +474,6 @@ function lockTimeout(id) {
 let ownStartKnown = false;
 let ownStartCache;
 const foreignStartCache = new Map();
-/** Best-effort process start identity. Unavailable does not prove the pid is dead. */
-export function processStartToken(pid) {
-    if (process.platform === "linux") {
-        try {
-            const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-            const close = stat.lastIndexOf(") ");
-            if (close >= 0) {
-                const starttime = stat.slice(close + 2).split(" ")[19];
-                if (starttime && /^\d+$/.test(starttime))
-                    return starttime;
-            }
-        }
-        catch (error) {
-            if (errnoOf(error) !== "ENOENT" && errnoOf(error) !== "EACCES")
-                return undefined;
-        }
-    }
-    try {
-        const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-            encoding: "utf-8",
-            timeout: 1_000,
-            env: { ...process.env, LC_ALL: "C" },
-            stdio: ["ignore", "pipe", "ignore"],
-        }).trim().replace(/\s+/g, " ");
-        return out === "" ? undefined : out;
-    }
-    catch {
-        return undefined;
-    }
-}
 function ownStartToken() {
     if (ownStartKnown)
         return ownStartCache;

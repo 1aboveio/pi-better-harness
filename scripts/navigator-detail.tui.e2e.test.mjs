@@ -81,6 +81,8 @@ after(async () => {
   for (const worker of dummyWorkers) {
     try { process.kill(-worker.pid, "SIGKILL"); } catch { /* already stopped */ }
   }
+  // Stop the registry writer before removing the state it supervises.
+  await stopOwnedRuntime(serverDir, runtimeOwner);
   // The registries live under the private TMPDIR from scripts/isolate-registry.mjs,
   // which removes it at exit. Never touch registries in any other TMPDIR (the tests
   // refuse to seed without the preload, so there is nothing of ours there).
@@ -88,7 +90,6 @@ after(async () => {
     rmSync(join(tmpdir(), "pi-better-subagents"), { recursive: true, force: true });
     rmSync(join(tmpdir(), "pi-better-background-tasks"), { recursive: true, force: true });
   }
-  await stopOwnedRuntime(serverDir, runtimeOwner);
   removeOwnedFixture(fixtures);
 });
 
