@@ -1,9 +1,17 @@
 import type { AgentSessionOverrides } from "./agent-session-settings.mjs";
+import { readCatalogPreferences } from "./catalog-preferences.mjs";
 import { CATALOG_SCHEMA_VERSION, type CatalogDefinition, type AgentDefinition, type CatalogKind, type CatalogScope, type Diagnostic, type ParseResult } from "./catalog-schema.mjs";
 export type { CatalogScope, CatalogKind, CatalogDefinition, Diagnostic, ParseResult };
 export declare const DEFAULT_PROJECT_CONFIG_DIR_NAME = ".pi";
 export declare const SOURCE_PRECEDENCE: readonly ["project", "user", "bundled"];
 export interface LoadCatalogInput {
+    /** Server-owned, bounded source reuse. Admission and discovery still run first. */
+    sources?: {
+        read(path: string): string;
+        parse(raw: string, path: string): ParseResult;
+        entry?(entry: CatalogEntry): CatalogEntry;
+        preferences?(root: string): ReturnType<typeof readCatalogPreferences>;
+    };
     cwd: string;
     /** Host trust decision. Untrusted projects do not contribute definitions. */
     projectTrusted: boolean;
@@ -103,7 +111,7 @@ export declare function listScopedAgents(input: LoadCatalogInput, scope: "user" 
     }[];
     diagnostics: Diagnostic[];
 };
-/** Read every source again. Identical bytes produce the same digest and a new object. */
+/** Discover authorized sources. Identical bytes produce the same content digest. */
 export declare function loadCatalog(input: LoadCatalogInput): CatalogSnapshot;
 export declare function refreshCatalog(input: LoadCatalogInput): CatalogSnapshot;
 export declare function createDefinition(input: SaveDefinitionInput): SaveResult;

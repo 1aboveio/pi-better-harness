@@ -34,6 +34,7 @@ export function workScope(input: unknown): WorkScope {
 export class WorkQueries {
   private dispose?: () => void;
   private paused = false;
+  private lastSnapshotSeq?: number;
   private model: WorkReadModel;
   private socket: Socket;
   private maxQueuedBytes: number;
@@ -52,17 +53,22 @@ export class WorkQueries {
     if (this.socket.destroyed || this.paused) return;
     if (this.socket.writableLength > this.maxQueuedBytes) { this.paused = true; return; }
     const snapshot = (event as any)?.type === "runtime_snapshot" ? (event as any).snapshot : undefined;
-    let line = snapshot && eventEncodings.get(snapshot);
-    if (!line) {
-      line = snapshot ? '{"type":"event","event":{"type":"runtime_snapshot","snapshot":' + snapshotJSON(snapshot) + '}}\n'
-        : JSON.stringify({ type: "event", event }) + "\n";
-      if (snapshot) { eventEncodings.set(snapshot, line); queryEncodingMetrics.serializations++; }
-    }
+    let line: string;
+    if (snapshot) {
+      let prefix = eventEncodings.get(snapshot);
+      if (!prefix) {
+        prefix = '{"type":"event","event":{"type":"runtime_snapshot","snapshot":' + snapshotJSON(snapshot);
+        eventEncodings.set(snapshot, prefix); queryEncodingMetrics.serializations++;
+      }
+      // The snapshot is shared; its predecessor belongs to this subscription.
+      line = prefix + ',"previousSeq":' + (this.lastSnapshotSeq ?? snapshot.seq) + '}}\n';
+    } else line = JSON.stringify({ type: "event", event }) + "\n";
     if (Buffer.byteLength(line) > 4 * 1024 * 1024) {
       this.close();
       this.socket.write(JSON.stringify({ type: "event", event: { type: "resync_required", reason: "snapshot-too-large: narrow the scope or limit" } }) + "\n");
       return;
     }
+    if (snapshot) this.lastSnapshotSeq = snapshot.seq;
     this.socket.write(line);
     queryEncodingMetrics.frames++; queryEncodingMetrics.bytes += Buffer.byteLength(line);
   }
@@ -74,6 +80,7 @@ export class WorkQueries {
     if (Buffer.byteLength(snapshotJSON(snapshot)) > 4 * 1024 * 1024 - 1024) throw new Error("state-degraded: snapshot exceeds the 4 MiB frame allowance; narrow the scope or limit");
     if (command.type === "runtime_subscribe") {
       this.close();
+      this.lastSnapshotSeq = snapshot.seq;
       this.dispose = this.model.onChange(() => {
         try {
           this.event({ type: "runtime_snapshot", snapshot: this.model.snapshot({ ...scope, cursor: undefined }) });

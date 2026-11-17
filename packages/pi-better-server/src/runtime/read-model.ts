@@ -101,6 +101,7 @@ export class WorkReadModel {
   private repairWrite: Promise<void> = Promise.resolve();
   private repairPersistencePending = false;
   private sourceErrors = new Map<string, string>();
+  private sourceRace?: { reason: string; paths: Set<string>; rows: any[] };
   private sourceStats = 0;
   private sourceWork = { entity: { batches: 0, paths: 0, stats: 0, metadataReads: 0, logBytes: 0, logReads: 0 }, repair: { batches: 0, paths: 0, stats: 0, metadataReads: 0, logBytes: 0, logReads: 0 } };
   private scheduling = { entityBatches: 0, repairBatches: 0, repairEntries: 0, overflows: 0, maxQueueAgeMs: 0, maxPublicationMs: 0 };
@@ -109,9 +110,10 @@ export class WorkReadModel {
   private coordinator = "unknown";
   private assignmentBaseline?: { key: string; seq: string };
   private assignmentFault?: { state: WorkSnapshot["status"]; reason?: string };
+  private unsupportedAssignmentRevision?: string;
   private revision = 0;
   private scopeSequence = 0;
-  private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number }>();
+  private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number; status: string }>();
   private changedRows: Array<{ before?: any; after?: any }> = [];
   private foldQueueSequence = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
@@ -120,8 +122,7 @@ export class WorkReadModel {
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, healthDeadline: 0, unverified: 0, initial: 0 };
   get metrics() {
     return { ...this.counters, assignments: this.reader.changeMetrics, checkpoints: { ...this.checkpoints.metrics, hotDisplay: this.parseStates.size, hotHealth: this.healthStates.size }, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
-      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size,
-      sourceParentWatchers: this.rootParents.size, rootParentWatchers: this.rootParents.size };
+      indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size, sourceParentWatchers: this.rootParents.size, rootParentWatchers: this.rootParents.size };
   }
   readonly runs: string;
   readonly archives: string;
@@ -191,7 +192,22 @@ export class WorkReadModel {
     }
   }
   private watchDirectory(path: string) {
-    if (this.closed || this.watchers.has(path)) return;
+    if (this.closed) return;
+    let identity: string | undefined;
+    if ([this.runs, this.archives, this.markers].includes(path)) {
+      try {
+        const info = statSync(path, { bigint: true });
+        identity = `${info.dev}:${info.ino}`;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
+      }
+      if (!identity || this.rootWatchIdentities.get(path) !== identity) {
+        this.unwatchDirectory(path); this.rootWatchIdentities.delete(path);
+        if (path === this.runs) for (const child of this.watchers.keys()) if (child.startsWith(this.runs + sep)) this.unwatchDirectory(child);
+      }
+      if (!identity) return;
+    }
+    if (this.watchers.has(path)) return;
     try {
       const watcher = watch(path, (_event, filename) => {
         if (this.closed || this.watchers.get(path) !== watcher) return;
@@ -209,6 +225,7 @@ export class WorkReadModel {
         this.invalidate("Watcher overflow or failure; reconciling source inventory.");
       });
       this.watchers.set(path, watcher);
+      if (identity) this.rootWatchIdentities.set(path, identity);
     } catch { /* Missing roots are discovered by the existing compatibility inventory. */ }
   }
 
@@ -267,7 +284,7 @@ export class WorkReadModel {
           this.unwatchDirectory(directory);
           if (directory === this.runs) for (const path of this.watchers.keys()) if (path.startsWith(this.runs + sep)) this.unwatchDirectory(path);
         }
-        this.rootWatchIdentities.set(directory, identity); this.watchDirectory(directory);
+        this.watchDirectory(directory);
         handle = await opendir(directory);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -350,7 +367,7 @@ export class WorkReadModel {
     if (!entry) {
       if (scope.cursor) throw new Error("resync_required: cursor retention expired");
       if (this.scopes.size >= 128) this.scopes.delete(this.scopes.keys().next().value!);
-      entry = { scope: { ...scope, cursor: undefined }, token: ++this.scopeSequence, revision: 0, used: now };
+      entry = { scope: { ...scope, cursor: undefined }, token: ++this.scopeSequence, revision: 0, used: now, status: hash(this.scopeStatus(scope)) };
       this.scopes.set(key, entry);
     }
     entry.used = now;
@@ -382,9 +399,11 @@ export class WorkReadModel {
     this.revision++;
     for (const entry of this.scopes.values()) {
       if (backgroundOnly) continue;
-      if (!this.changedRows.length || this.changedRows.some(({ before, after }) =>
+      const status = hash(this.scopeStatus(entry.scope));
+      if (entry.status !== status || this.changedRows.some(({ before, after }) =>
         this.matchesScope(entry.scope, before) || this.matchesScope(entry.scope, after)
         || this.matchesScope(entry.scope, before, true) !== this.matchesScope(entry.scope, after, true))) entry.revision++;
+      entry.status = status;
     }
     this.changedRows = [];
     for (const listener of this.listeners) listener();
@@ -394,8 +413,12 @@ export class WorkReadModel {
   private refreshAssignments(baselineOnly = false) {
     if ((!this.imported && !baselineOnly) || this.staged) return;
     let release: (() => void) | undefined;
+    let revision: string | undefined;
     try {
+      if (this.unsupportedAssignmentRevision && this.unsupportedAssignmentRevision === this.reader.revision()) return;
+      this.unsupportedAssignmentRevision = undefined;
       const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
+      revision = snapshot.revision;
       const changes = this.reader.changes();
       if (changes.has("*")) {
         const key = `${this.reader.changeMetrics.generation}:${changes.get("*")}`;
@@ -459,6 +482,7 @@ export class WorkReadModel {
       // A coordinator has never been required for plain archived/log-only runs.
       // Losing an already observed database still degrades the existing coverage.
       if ((error as NodeJS.ErrnoException).code === "ENOENT" && this.coordinator === "unknown") return;
+      if (error instanceof Error && error.message === "Unsupported assignment source schema") this.unsupportedAssignmentRevision = revision;
       this.assignmentFault ??= { state: this.state, reason: this.reason };
       if (String(error).includes("no such table: assignment_change_source")) {
         // Old sources have no feed. Finish one budgeted compatibility pass;
@@ -469,18 +493,33 @@ export class WorkReadModel {
     } finally { release?.(); }
   }
 
+  private scopeStatus(scope: WorkScope): { status: WorkSnapshot["status"]; reason?: string } {
+    const race = this.sourceRace;
+    // Only a validated, entity-attributed retry can leave another scope ready.
+    // Root, coordinator, unattributed and initial-import failures stay global.
+    if (this.imported && this.state === "degraded" && race && this.reason === race.reason
+        && [...this.sourceErrors.keys()].every(path => race.paths.has(path))
+        && !race.rows.some(row => this.matchesScope({ id: scope.id, cwd: scope.cwd, sessionId: scope.sessionId }, row))) {
+      return { status: "ready" };
+    }
+    return { status: this.state, reason: this.reason };
+  }
+
   reconcile(drain = true): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.pending) {
       return drain ? this.pending.then(() => this.reconcile()) : this.pending;
     }
     this.pending = (async () => {
-      if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
+      if (drain && this.repair && !this.unsupportedAssignmentRevision) { await this.repair.return(undefined); this.repair = undefined; }
       do {
         this.dirty = false;
         // Background progress is independent of whether Subagent repair finds files.
         if (this.background.refresh()) this.publish(true);
         this.refreshAssignments();
+        // Metadata repair cannot verify an incompatible coordinator. Keep its
+        // obligations and last verified rows until a different source revision.
+        if (this.unsupportedAssignmentRevision) break;
         if (this.hints.size) {
           const entries = workPage(this.hints);
           for (const [path, queued] of entries) { this.hints.delete(path); this.scheduling.maxQueueAgeMs = Math.max(this.scheduling.maxQueueAgeMs, Date.now() - queued); }
@@ -517,7 +556,7 @@ export class WorkReadModel {
       this.repair = undefined; this.state = "degraded"; this.reason = String(error).slice(0, 512); this.publish();
     }).finally(() => {
       this.pending = undefined;
-      if ((this.hints.size || this.dirty) && !this.closed) { this.dirty = false; void this.reconcile(false); }
+      if ((this.hints.size || this.dirty) && !this.closed && !this.unsupportedAssignmentRevision) { this.dirty = false; void this.reconcile(false); }
     });
     return this.pending;
   }
@@ -535,11 +574,13 @@ export class WorkReadModel {
     const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
     let releaseCoordinator: (() => void) | undefined;
+    let sourceRace: WorkReadModel["sourceRace"];
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
       healthRevision: this.healthRevision, coordinator: this.coordinator };
     try {
       const next = new Map(baseline.files);
       const failedPaths = new Map<string, string>();
+      const malformedPaths = new Set<string>();
       let batch = 0;
       let sliceStarted = performance.now();
       for (const [directory, archived] of [[this.markers, true], [this.archives, true], [this.runs, false]] as const) {
@@ -582,6 +623,7 @@ export class WorkReadModel {
               }
               next.set(path, entry!);
             } catch (error) {
+              if (!archived && error instanceof SyntaxError && this.files.has(path)) malformedPaths.add(path);
               if ((error as NodeJS.ErrnoException).code === "ENOENT") {
                 try {
                   await sourceStat(directory);
@@ -678,10 +720,14 @@ export class WorkReadModel {
       const changed = next.size !== baseline.files.size || [...next].some(([path, entry]) => baseline.files.get(path)?.signature !== entry.signature);
       const now = Date.now();
       const deadlineExpired = [...baseline.projected.values()].some(row => healthDeadlineExpired(row, now));
+      const rawDirectories = [...new Set(paths.filter(path => path.startsWith(this.runs + sep) && next.has(path)).map(path => dirname(path)))];
+      const rearmRawDirectories = () => {
+        if (!rawDirectories.length) return;
+        this.watchDirectory(this.runs);
+        for (const directory of rawDirectories) this.watchDirectory(directory);
+      };
       // A delayed mkdir notification may retire a watch during the awaited reads.
-      for (const path of paths) if (path.startsWith(this.runs + sep) && next.has(path)) {
-        this.watchDirectory(this.runs); this.watchDirectory(dirname(path));
-      }
+      rearmRawDirectories();
       if (!this.staged && !changed && !failedPaths.size && !this.sourceErrors.size && !logFamilies.size && !assignmentChanges?.size && !deadlineExpired && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && !healthConfig.reason && this.state === "ready") return;
       const metas = new Map<string, any>();
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
@@ -846,13 +892,32 @@ export class WorkReadModel {
           try { return { info: await sourceStat(path, { bigint: true }) }; }
           catch (error) { return { error }; }
         }));
-        for (const [index, [, entry]] of group.entries()) {
+        for (const [index, [path, entry]] of group.entries()) {
           const observation = observations[index]!;
           if (!observation.info) throw observation.error;
           const info = observation.info;
           if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
             this.dirty = true;
-            throw new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
+            const error = new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
+            if ((this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
+                && path.startsWith(this.runs + sep) && info.size <= 1024n * 1024n && !failedPaths.size && [...this.sourceErrors].every(([path, reason]) =>
+              this.sourceRace?.paths.has(path) && reason === this.sourceRace.reason)) {
+              // Recheck only for error routing: a concurrent move can affect a
+              // new workspace/recipient. Never publish this uncommitted row.
+              try {
+                this.counters.metadataReads++;
+                const current = JSON.parse(await readFile(path, "utf8"));
+                const checked = await sourceStat(path, { bigint: true });
+                if (current?.id === entry.meta.id && typeof current.cwd === "string" && Number.isFinite(current.startedAt)
+                    && typeof current.status === "string" && checked.size <= 1024n * 1024n
+                    && `${checked.dev}:${checked.ino}:${checked.size}:${checked.mtimeNs}:${checked.ctimeNs}` === `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`) {
+                  sourceRace = { reason: String(error), paths: new Set(paths), rows: [
+                    ...[...uncommitted].flatMap(id => [this.projected.get(id), this.staged?.projected.get(id)].filter(Boolean)),
+                    { meta: current, assignment: { state: current.status } }] };
+                }
+              } catch { /* Unreadable/unstable routing evidence keeps degradation global. */ }
+            }
+            throw error;
           }
           if (++batch % 256 === 0 || performance.now() - sliceStarted >= 8) {
             await yieldTurn(); sliceStarted = performance.now();
@@ -860,9 +925,7 @@ export class WorkReadModel {
         }
       }
       if (this.closed) return;
-      for (const path of paths) if (path.startsWith(this.runs + sep) && next.has(path)) {
-        this.watchDirectory(this.runs); this.watchDirectory(dirname(path));
-      }
+      rearmRawDirectories();
       this.db.exec("BEGIN");
       const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");
@@ -902,15 +965,25 @@ export class WorkReadModel {
         if (error) this.sourceErrors.set(path, error);
         else this.sourceErrors.delete(path);
       }
+      // Incomplete raw writes retain their verified namespace, not partial JSON.
+      // New/unknown records and mixed failures cannot be narrowed this way.
+      if (failedPaths.size && failedPaths.size === malformedPaths.size
+          && (previousState === "ready" || this.sourceRace && previousReason === this.sourceRace.reason)
+          && [...this.sourceErrors.keys()].every(path => malformedPaths.has(path))) {
+        this.sourceRace = { reason: failedPaths.values().next().value!, paths: malformedPaths,
+          rows: [...malformedPaths].map(path => this.projected.get(this.files.get(path)!.meta.id)) };
+      }
+      if (!this.sourceErrors.size) this.sourceRace = undefined;
       this.state = this.sourceErrors.size || healthConfig.reason ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
       this.reason = this.sourceErrors.values().next().value ?? healthConfig.reason ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
       if ((this.imported || paths.length === 128) && (semanticChange || previousState !== this.state || previousReason !== this.reason)) {
-        this.changedRows = previousState === this.state && previousReason === this.reason ? changedRows : [];
+        this.changedRows = changedRows;
         this.publish();
       }
     } catch (error) {
       if (this.closed) return;
       const reason = String(error).slice(0, 512);
+      this.sourceRace = sourceRace;
       if (this.dirty) for (const path of paths) if (!this.hints.has(path)) this.hints.set(path, Date.now());
       for (const path of paths) this.sourceErrors.set(path, reason);
       const changed = this.state !== "degraded" || this.reason !== reason;
@@ -973,12 +1046,13 @@ export class WorkReadModel {
     const now = Date.now();
     const rows = page.map((record: any) => {
       const row = JSON.parse(record.payload);
+      if (this.unsupportedAssignmentRevision) row.assignment = { ...row.assignment, verified: false, reason: this.reason };
       if (row.health) row.health.nextDeadline = nextHealthDeadline(row.health, row.meta, now);
       return row;
     });
     const deadlines = rows.map((row: any) => row.health?.nextDeadline).filter((deadline: any) => typeof deadline === "number");
     return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([key, entry.token, entry.revision]), seq: this.revision,
-      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, status: this.state, reason: this.reason,
+      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, ...this.scopeStatus(scope),
       totalMatching,
       rows: page.map((record: any, index: number) => {
         const row = rows[index];

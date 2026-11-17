@@ -14,13 +14,32 @@ function fixture(Client = WorkClient) {
   reply(requests[0], {});
   const event = () => socket.emit('data', JSON.stringify({type:'event',event:{type:'resync_required',reason:'read-worker-recovered'}})+'\n');
   const disconnect = () => socket.emit('close');
-  return {client, requests, reply, event, disconnect};
+  const publish = (value: any) => socket.emit('data', JSON.stringify({type:'event',event:{type:'runtime_snapshot',snapshot:value}})+'\n');
+  return {client, requests, reply, event, disconnect, publish};
 }
 async function until(predicate: () => boolean) {
   const deadline = Date.now()+3000;
   while (!predicate()) { assert.ok(Date.now()<deadline, 'client did not retry recovery'); await new Promise(r=>setTimeout(r,10)); }
 }
 const snapshot = (epoch: string) => ({instanceId:epoch,seq:1,status:'ready',rows:[]});
+
+test('global sequence gaps between full scoped snapshots do not synthesize degraded frames', async () => {
+  const f = fixture(); await f.client.ready;
+  try {
+    f.publish({ ...snapshot('same'), seq: 2, scopeRevision: 'scope-before' });
+    const seen: any[] = [];
+    f.client.onChange(value => seen.push(value));
+    f.publish({ ...snapshot('same'), seq: 7, scopeRevision: 'scope-after' });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].status, 'ready');
+    assert.equal(seen[0].resyncRequired, undefined);
+    f.publish({ ...snapshot('same'), seq: 6, scopeRevision: 'stale' });
+    assert.equal(seen.length, 1, 'older observations still fail the sequence fence');
+    f.publish(snapshot('replacement'));
+    assert.equal(seen[1].status, 'degraded', 'runtime replacement still requires resync');
+    assert.equal(seen[2].resyncReason, 'instance-changed');
+  } finally { f.client.close(); }
+});
 
 for (const [name, path] of Object.entries({ canonical: '../src/runtime/work-client.mjs',
   subagent: '../../pi-better-subagents/shared-work-client.mjs', background: '../../pi-better-background-tasks/src/shared-work-client.mjs',

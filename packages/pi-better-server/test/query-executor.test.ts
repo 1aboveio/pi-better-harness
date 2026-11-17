@@ -1,14 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createServer, type Socket } from "node:net";
+import { createServer, connect, type Socket } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync, appendFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync, openSync, closeSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+const { commitMetadata } = await import(String("../scripts/event-publication/commit.mjs"));
 
 async function fixture(options: { intervalMs?: number; capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
@@ -83,6 +84,63 @@ async function ready(client: WorkClient) {
   });
 }
 
+test("a dropped same-consumer snapshot reports a gap while unrelated global commits do not", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const peers = new Set<Socket>();
+  let dropped = false;
+  const proxy = createServer(downstream => {
+    const upstream = connect(f.path); peers.add(upstream); peers.add(downstream);
+    downstream.pipe(upstream); upstream.setEncoding("utf8");
+    let buffer = "";
+    upstream.on("data", chunk => {
+      buffer += chunk;
+      while (buffer.includes("\n")) {
+        const end = buffer.indexOf("\n"), line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+        const frame = JSON.parse(line);
+        if (frame.event?.type === "runtime_snapshot" && frame.event.snapshot.rows[0]?.meta.name === "gap-one") {
+          dropped = true; continue;
+        }
+        downstream.write(line + "\n");
+      }
+    });
+    upstream.on("error", () => downstream.destroy()); downstream.on("error", () => upstream.destroy());
+  });
+  let consumer: WorkClient | undefined;
+  const write = (id: string, cwd: string, name: string) => {
+    mkdirSync(join(f.root, "runs", id), { recursive: true });
+    const path = join(f.root, "runs", id, "meta.json");
+    writeFileSync(path + ".tmp", JSON.stringify({ id, cwd, name, status: "completed", startedAt: 1 }));
+    renameSync(path + ".tmp", path);
+  };
+  const wait = async (condition: () => boolean) => {
+    const deadline = Date.now() + 1000;
+    while (!condition()) { assert.ok(Date.now() < deadline, "controlled scoped publication missing"); await new Promise(resolve => setTimeout(resolve, 10)); }
+  };
+  try {
+    const control = await f.client(); await ready(control);
+    const scope = { cwd: join(f.root, "b"), limit: 10 };
+    write("sa_b", scope.cwd, "before"); await f.executor.livenessReasons(); await control.subscribe(scope);
+    const path = f.path + ".gap"; proxy.listen(path); await once(proxy, "listening");
+    consumer = new WorkClient(path, f.root); await consumer.subscribe(scope);
+    const seen: any[] = []; consumer.onChange(value => seen.push(value));
+    write("sa_a", join(f.root, "a"), "unrelated"); await f.executor.livenessReasons();
+    write("sa_b", scope.cwd, "after-unrelated"); await f.executor.livenessReasons();
+    await wait(() => consumer!.snapshot?.rows[0]?.meta.name === "after-unrelated");
+    assert.equal(seen.some(value => value.resyncReason === "sequence-gap"), false);
+    seen.length = 0;
+    write("sa_b", scope.cwd, "gap-one"); await f.executor.livenessReasons(); await wait(() => dropped);
+    write("sa_b", scope.cwd, "gap-two"); await f.executor.livenessReasons();
+    await wait(() => consumer!.snapshot?.rows[0]?.meta.name === "gap-two");
+    assert.equal(dropped, true);
+    assert.equal(consumer.snapshot!.resyncRequired, true, "the first complete snapshot after the dropped event reports the gap");
+    assert.equal(consumer.snapshot!.resyncReason, "sequence-gap");
+    assert.equal(consumer.snapshot!.status, "ready");
+  } finally {
+    consumer?.close(); peers.forEach(peer => peer.destroy());
+    await new Promise<void>(resolve => proxy.close(() => resolve())); await f.close();
+  }
+});
+
 test("identical Work identities do not share visible results across admitted roots", { timeout: 10000 }, async () => {
   const left = await fixture(), right = await fixture();
   try {
@@ -101,7 +159,10 @@ test("identical Work identities do not share visible results across admitted roo
   } finally { await left.close(); await right.close(); }
 });
 
-for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query and encoding work`, { timeout: 15000 }, async () => {
+for (const { count, readOnEvent } of [
+  ...[1, 5, 10].map(count => ({ count, readOnEvent: false })),
+  { count: 10, readOnEvent: true },
+]) test(readOnEvent ? "10 socket clients share publication with concurrent event-triggered reads" : `${count} socket clients share scoped query and encoding work`, { timeout: 15000 }, async () => {
   const f = await fixture();
   const scope = { cwd: join(f.root, "b"), limit: 1 };
   const write = (id: string, cwd: string, name: string) => {
@@ -117,35 +178,134 @@ for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query
     const page = await first.get(scope);
     const before = f.executor.metrics() as any;
     let events = 0;
-    const stops = clients.map(client => client.onChange(() => events++));
+    let phase = "metadata-update";
+    const frameSummary = (value: any) => {
+      const cursor = value.nextCursor ?? value.rows?.[0]?.cursor;
+      let publicationScope;
+      if (cursor) {
+        try {
+          const [key, instanceId, tokenRevision] = JSON.parse(Buffer.from(cursor, "base64url").toString());
+          publicationScope = { key, instanceId, tokenRevision };
+        } catch (error) { publicationScope = { decodeError: String(error) }; }
+      }
+      return { status: value.status, reason: value.reason, seq: value.seq, scopeRevision: value.scopeRevision,
+        instanceId: value.instanceId, publicationScope, observedRevisionVector: value.observedRevisionVector,
+        resyncRequired: value.resyncRequired, resyncReason: value.resyncReason,
+        totalMatching: value.totalMatching, activity: value.activity, nextDeadline: value.nextDeadline,
+        rows: value.rows?.map((row: any) => ({ id: row.meta.id, cwd: row.meta.cwd, name: row.meta.name,
+          origin: row.meta.callbackOrigin, state: row.assignment.state, sourceRevision: row.sourceRevision })) };
+    };
+    const frames: Array<{ subscriber: number; phase: string; snapshot: ReturnType<typeof frameSummary> }> = [];
+    const stops = clients.map((client, subscriber) => client.onChange(value => {
+      events++;
+      if (frames.length < 32) frames.push({ subscriber, phase, snapshot: frameSummary(value) });
+    }));
     write("sa_a", join(f.root, "a"), "unrelated"); await f.executor.livenessReasons();
+    phase = "log-append";
     appendFileSync(join(f.root, "runs/sa_a/output.log"), '{"type":"agent_end"}\n'); await f.executor.livenessReasons();
+    phase = "workspace-move";
     write("sa_a", join(f.root, "c"), "moved"); await f.executor.livenessReasons();
+    phase = "terminal-update";
     const meta = join(f.root, "runs/sa_a/meta.json");
     writeFileSync(meta, JSON.stringify({ id: "sa_a", cwd: join(f.root, "c"), status: "failed", startedAt: 1 }));
     await f.executor.livenessReasons();
+    phase = "deletion";
     rmSync(join(f.root, "runs/sa_a"), { recursive: true }); await f.executor.livenessReasons();
+    phase = "final-scoped-read";
     for (const client of clients) await client.get(scope);
     const unchanged = f.executor.metrics() as any;
-    assert.equal(events, 0, "unrelated content sends no scoped frames");
+    try { assert.equal(events, 0, "unrelated content sends no scoped frames"); }
+    catch (error) {
+      console.error(`Scoped publication failure: ${JSON.stringify({ scope, clients: count, events,
+        omittedFrames: events - frames.length, baseline: frameSummary(page), frames,
+        final: clients.map(client => frameSummary(client.snapshot)), before, after: unchanged })}`);
+      throw error;
+    }
     assert.equal(unchanged.queryCount, before.queryCount, "unrelated content retains the cached page");
     assert.equal(unchanged.serializationCount, before.serializationCount);
     const next = await first.get({ ...scope, cursor: page.nextCursor });
     assert.equal(next.rows.length, 1);
     const baseline = f.executor.metrics() as any;
+    const eventReads: Array<Promise<any>> = [];
     const received = clients.map(client => new Promise<void>(resolve => {
-      const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) { stop(); resolve(); } });
+      const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) {
+        if (readOnEvent) eventReads.push(client.get(scope));
+        stop(); resolve();
+      } });
     }));
-    write("sa_b2", scope.cwd, "changed"); await f.executor.livenessReasons(); await Promise.all(received);
+    phase = "in-scope-update";
+    await commitMetadata(join(f.root, "runs/sa_b2/meta.json"), "changed");
+    await f.executor.livenessReasons(); await Promise.all(received);
+    const overlapping = await Promise.all(eventReads);
+    if (readOnEvent) {
+      assert.equal(overlapping.length, count);
+      for (const value of overlapping) assert.equal(value.rows[0]?.meta.name, "changed");
+    }
     await first.get(scope);
     const changed = f.executor.metrics() as any;
-    assert.equal(changed.queryCount - baseline.queryCount, 1);
-    assert.equal(changed.serializationCount - baseline.serializationCount, 1);
-    assert.equal(changed.eventEncoding.serializations - baseline.eventEncoding.serializations, 1);
-    assert.equal(changed.eventEncoding.frames - baseline.eventEncoding.frames, count);
+    try {
+      assert.equal(changed.queryCount - baseline.queryCount, 1);
+      assert.equal(changed.serializationCount - baseline.serializationCount, 1);
+      assert.equal(changed.eventEncoding.serializations - baseline.eventEncoding.serializations, 1);
+      assert.equal(changed.eventEncoding.frames - baseline.eventEncoding.frames, count);
+    } catch (error) {
+      console.error(`Shared query failure: ${JSON.stringify({ scope, clients: count, baseline, changed,
+        frames, final: clients.map(client => frameSummary(client.snapshot)) })}`);
+      throw error;
+    }
     assert.ok(changed.eventEncoding.bytes > baseline.eventEncoding.bytes);
     stops.forEach(stop => stop());
   } finally { await f.close(); }
+});
+
+test("10 socket clients share each truthful partial-write and recovery epoch", { timeout: 15000 }, async () => {
+  const f = await fixture();
+  const scope = { cwd: join(f.root, "b"), limit: 1 };
+  const directory = join(f.root, "runs/sa_partial_b"), path = join(directory, "meta.json");
+  const meta = { id: "sa_partial_b", cwd: scope.cwd, name: "verified", status: "completed", startedAt: 1 };
+  let held: number | undefined;
+  try {
+    const first = await f.client(); await ready(first);
+    mkdirSync(directory); writeFileSync(path, JSON.stringify(meta));
+    await f.executor.livenessReasons();
+    const clients = [first, ...await Promise.all(Array.from({ length: 9 }, () => f.client()))];
+    for (const client of clients) await client.subscribe(scope);
+    const initial = await first.get(scope), baseline = f.executor.metrics() as any;
+    const awaiting = (status: string) => Promise.all(clients.map(client => new Promise<void>(resolve => {
+      const stop = client.onChange(value => { if (value.status === status) { stop(); resolve(); } });
+    })));
+    const assertSharedEpoch = (before: any, after: any) => {
+      assert.equal(after.queryCount - before.queryCount, 1);
+      assert.equal(after.serializationCount - before.serializationCount, 1);
+      assert.equal(after.eventEncoding.serializations - before.eventEncoding.serializations, 1);
+      assert.equal(after.eventEncoding.frames - before.eventEncoding.frames, clients.length);
+    };
+    const degradedFrames = awaiting("degraded");
+    held = openSync(path, "w"); writeSync(held, '{"id":');
+    await f.executor.livenessReasons(); await degradedFrames;
+    const degraded = await Promise.all(clients.map(client => client.get(scope)));
+    for (const value of degraded) {
+      assert.equal(value.status, "degraded");
+      assert.match(value.reason!, /SyntaxError/);
+      assert.deepEqual(value.rows[0]!.meta, initial.rows[0]!.meta, "partial metadata is never published");
+      assert.equal(value.rows[0]!.sourceRevision, initial.rows[0]!.sourceRevision);
+      assert.equal(value.scopeRevision, degraded[0]!.scopeRevision);
+    }
+    const afterFailure = f.executor.metrics() as any;
+    assertSharedEpoch(baseline, afterFailure);
+    const readyFrames = awaiting("ready");
+    writeSync(held, JSON.stringify({ ...meta, name: "changed" }), 0, "utf8");
+    closeSync(held); held = undefined;
+    await f.executor.livenessReasons(); await readyFrames;
+    const recovered = await Promise.all(clients.map(client => client.get(scope)));
+    for (const value of recovered) {
+      assert.equal(value.status, "ready");
+      assert.equal(value.rows[0]!.meta.name, "changed");
+      assert.notEqual(value.scopeRevision, degraded[0]!.scopeRevision);
+      assert.equal(value.scopeRevision, recovered[0]!.scopeRevision);
+    }
+    assertSharedEpoch(afterFailure, f.executor.metrics());
+  } finally { if (held !== undefined) closeSync(held); await f.close(); }
 });
 
 test("stalled diagnostic completion rejects when its worker exits", { timeout: 10000 }, async () => {
@@ -277,6 +437,83 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
     t.diagnostic(JSON.stringify({ rebuildingMs: performance.now() - began, metrics: f.executor.metrics() }));
     f.worker.postMessage({ type: "release-inventory" });
     await ready(b);
+  } finally { await f.close(); }
+});
+
+test("the original before-root setup observes disk and worker roots without requesting repair", { timeout: 10000 }, async t => {
+  const f = await fixture();
+  try {
+    const client = await f.client(); await ready(client);
+    const firstReady = client.snapshot;
+    const id = "sa_metadata_gap", path = join(f.root, "runs", id, "meta.json");
+    const scope = { cwd: f.root, sessionId: "parent", limit: 10 };
+    await client.subscribe(scope);
+    mkdirSync(join(f.root, "runs", id));
+    writeFileSync(path, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1,
+      callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "before-root" }));
+    const until = Date.now() + 1000;
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).name, "before-root");
+    const capture = new Promise<any>(resolve => {
+      const timer = setTimeout(() => { f.worker.off("message", listener); resolve(undefined); }, 500);
+      const listener = (message: any) => { if (message.type === "diagnostic-source-state" && message.id === "initial-setup") { clearTimeout(timer); f.worker.off("message", listener); resolve(message.state); } };
+      f.worker.on("message", listener);
+    });
+    f.worker.postMessage({ type: "diagnostic-source-state", id: "initial-setup", scope });
+    const state = await capture;
+    assert.ok(state, "initial source observation was acknowledged");
+    assert.equal(state.configured.agentDir, f.root);
+    assert.equal(state.configured.modelOptions.baseDir, f.root);
+    assert.equal(state.roots.runs, join(f.root, "runs"));
+    assert.equal(state.imported, true, "first ready follows initial inventory completion");
+    assert.ok(state.rawEntries.some((entry: any) => entry.meta?.id === id && entry.meta.name === "before-root"));
+    while (client.snapshot?.rows[0]?.meta.name !== "before-root") {
+      if (Date.now() >= until) {
+        const terminal = await new Promise<any>(resolve => {
+          const timer = setTimeout(() => { f.worker.off("message", listener); resolve(undefined); }, 500);
+          const listener = (message: any) => { if (message.type === "diagnostic-source-state" && message.id === "initial-terminal") { clearTimeout(timer); f.worker.off("message", listener); resolve(message.state); } };
+          f.worker.on("message", listener);
+          f.worker.postMessage({ type: "diagnostic-source-state", id: "initial-terminal", scope });
+        });
+        t.diagnostic(JSON.stringify({ afterOriginalFailure: true, firstReady, setup: state, terminal }).slice(0, 32768));
+      }
+      assert.ok(Date.now() < until, "root gap publication missing");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  } finally { await f.close(); }
+});
+
+test("metadata present before the held initial inventory is included in the first ready publication", { timeout: 10000 }, async t => {
+  const f = await fixture({ workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
+  try {
+    const id = "sa_initial_source", path = join(f.root, "runs", id, "meta.json");
+    mkdirSync(join(f.root, "runs", id));
+    writeFileSync(path, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1, name: "present-before-inventory" }));
+    const client = await f.client();
+    const initial = await client.subscribe({});
+    assert.equal(initial.status, "rebuilding", "source readiness cannot precede the held first inventory");
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).name, "present-before-inventory");
+    const capture = new Promise<any>(resolve => {
+      const listener = (message: any) => { if (message.type === "initial-source-state") { f.worker.off("message", listener); resolve(message); } };
+      f.worker.on("message", listener);
+    });
+    f.worker.postMessage({ type: "initial-source-state", id, scope: {} });
+    const state = await capture;
+    assert.equal(state.imported, false);
+    assert.equal(state.configured.agentDir, f.root);
+    assert.equal(state.configured.modelOptions.baseDir, f.root);
+    assert.equal(state.runs, join(f.root, "runs"));
+    assert.equal(state.path, path);
+    assert.equal(state.meta.name, "present-before-inventory");
+    assert.ok(state.watchers.includes(state.runs), "root watcher installation precedes inventory release");
+    assert.equal(state.snapshot.status, "rebuilding");
+    const firstReady = new Promise<any>(resolve => {
+      const stop = client.onChange(snapshot => { if (snapshot.status === "ready") { stop(); resolve(snapshot); } });
+    });
+    f.worker.postMessage({ type: "release-inventory" });
+    const observed = await firstReady;
+    assert.equal(observed.rows[0]?.meta.name, "present-before-inventory");
+    assert.ok(f.executor.metrics().inventories! >= 1);
+    t.diagnostic(JSON.stringify({ beforeRelease: state, firstReady: observed }));
   } finally { await f.close(); }
 });
 
@@ -778,7 +1015,7 @@ for (const outcome of ["success", "failure"]) test(`old fold ${outcome} cannot a
 });
 
 
-for (const rootRecreated of [false, true]) test(`a raw directory observed before metadata still publishes the original atomic writer commit (${rootRecreated ? "recreated root" : "existing root"})`, { timeout: 15000 }, async () => {
+for (const rootRecreated of [false, true]) test(`a raw directory observed before metadata still publishes the original atomic writer commit (${rootRecreated ? "recreated root" : "existing root"})`, { timeout: 15000 }, async t => {
   const f = await fixture();
   const { measureEventPublication } = await import(new URL("../scripts/event-publication/measure.mjs", import.meta.url).href);
   try {
@@ -790,16 +1027,26 @@ for (const rootRecreated of [false, true]) test(`a raw directory observed before
       mkdirSync(directory);
       writeFileSync(metaPath, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1,
         callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "before-root" }));
-      const wait = async (condition: () => boolean) => {
+      const wait = async (condition: () => boolean, phase: string) => {
         const until = Date.now() + 1000;
         while (!condition()) {
+          if (Date.now() >= until) {
+            t.diagnostic(JSON.stringify({ phase, snapshot: client.snapshot, metrics: f.executor.metrics() }).slice(0, 32768));
+            const state = new Promise(resolve => {
+              const timer = setTimeout(() => { f.worker.off("message", listener); resolve({ error: "source diagnostic unavailable" }); }, 500);
+              const listener = (message: any) => { if (message.type === "diagnostic-source-state" && message.id === phase) { clearTimeout(timer); f.worker.off("message", listener); resolve(message.state); } };
+              f.worker.on("message", listener);
+              f.worker.postMessage({ type: "diagnostic-source-state", id: phase, scope });
+            });
+            t.diagnostic(JSON.stringify({ phase, source: await state }).slice(0, 32768));
+          }
           assert.ok(Date.now() < until, "root gap publication missing");
           await new Promise(resolve => setTimeout(resolve, 10));
         }
       };
-      await wait(() => client.snapshot?.rows[0]?.meta.name === "before-root");
+      await wait(() => client.snapshot?.rows[0]?.meta.name === "before-root", "initial-before-root");
       renameSync(join(f.root, "runs"), join(f.root, "retired-runs"));
-      await wait(() => client.snapshot?.status === "degraded");
+      await wait(() => client.snapshot?.status === "degraded", "root-absent");
       assert.equal(client.snapshot?.rows[0]?.meta.name, "before-root");
     }
     const before = f.executor.metrics().inventories ?? 0;

@@ -199,11 +199,35 @@ test("shared query observes real runner and wait without taking supervision auth
     await model.reconcile();
     assert.equal((await clients[0]!.get(scope)).status, "ready");
     const beforeWait = { ...model.backgroundMetrics };
-    store.registerWait({ waitId: "754-wait", owner, dependencies: [{ operationId: "754-operation" }], continuationNote: "Interpret the exact runner result" });
-    await model.reconcile();
-    assert.equal((await clients[0]!.get(scope)).rows[0]!.meta.waits[0].waitId, "754-wait");
-    assert.equal(model.backgroundMetrics.dependencyQueries - beforeWait.dependencyQueries, 1, "only the exact task's dependent waits are read");
-    assert.equal(model.backgroundMetrics.runnerSnapshots - beforeWait.runnerSnapshots, 1, "unrelated active and terminal tasks retain their projections");
+    const waitDiagnosticBefore = structuredClone(beforeWait);
+    const background = (model as any).background, project = background.project;
+    const projectionTrace: any[] = [];
+    const describe = (operations: any[]) => operations.slice(0, 8).map(op => {
+      const cached = background.terminalProjections.get(op.operation_id);
+      const version = cached && JSON.parse(cached.version);
+      return { operationId: op.operation_id, phase: op.phase, dirty: background.dirtyOperations.has(op.operation_id),
+        repair: background.repairIds.has(op.operation_id), dependencyVersion: cached?.dependencyVersion,
+        files: version?.[2], waits: version?.[3] };
+    });
+    background.project = function(operations: any[], useCache = true) {
+      const before = describe(operations), count = this.metrics.runnerSnapshots;
+      try { return project.call(this, operations, useCache); }
+      finally {
+        const delta = this.metrics.runnerSnapshots - count;
+        if (delta && projectionTrace.length < 32) projectionTrace.push({ useCache, delta, before, after: describe(operations) });
+      }
+    };
+    try {
+      store.registerWait({ waitId: "754-wait", owner, dependencies: [{ operationId: "754-operation" }], continuationNote: "Interpret the exact runner result" });
+      await model.reconcile();
+      assert.equal((await clients[0]!.get(scope)).rows[0]!.meta.waits[0].waitId, "754-wait");
+      assert.equal(model.backgroundMetrics.dependencyQueries - beforeWait.dependencyQueries, 1, "only the exact task's dependent waits are read");
+      assert.equal(model.backgroundMetrics.runnerSnapshots - beforeWait.runnerSnapshots, 1, "unrelated active and terminal tasks retain their projections");
+    } catch (error) {
+      console.error(`Background wait projection failure: ${JSON.stringify({ beforeWait: waitDiagnosticBefore,
+        afterWait: model.backgroundMetrics, status: background.status, reason: background.reason, projectionTrace })}`);
+      throw error;
+    } finally { background.project = project; }
     assert.equal(model.backgroundMetrics.history!.inventories, 0, "tools and activity never activate historical inventory");
     for (let i = 0; i < hosts.length; i++) {
       await hosts[i]!.refreshActivity();
