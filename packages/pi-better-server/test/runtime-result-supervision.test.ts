@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { withFixtureCleanup } from "./support/fixture-outcome.ts";
+import { assertGuardedServerReleased } from "./support/guardian-owner-outcome.ts";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 const { createLocalSupervisor, supervisorPaths } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
 
@@ -199,7 +200,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
         assert.ok(checkpoint.idleEvidence.at >= checkpoint.idleEvidence.deadline);
         assert.ok(checkpoint.idleEvidence.at - checkpoint.idleEvidence.deadline < 2000, "idle deadline must not wait for derived read rebuilding");
         const { inspectDaemonOwner } = await import("../src/daemon-owner.ts");
-        assert.equal(inspectDaemonOwner(transport).status, "missing");
+        assertGuardedServerReleased(inspectDaemonOwner(transport), checkpoint);
         assert.equal(inspectDaemonOwner(transport, "guardian-owner").status, "missing");
         if (crash === "idle-guardian-held") assert.equal(store.getWait({ waitId: wait.waitId })?.phase, "held");
       }
