@@ -59,7 +59,10 @@ export function finalizeRun(id, code, hooks = {}) {
     // and the recorded wait is held for its owner.
     const park = evaluateParkDisposition({
         runId: id,
-        cleanExit: code === 0 && !outcome.incomplete && !outcome.diagnostics.modelError,
+        // Preserve a verified staged checkpoint for post-restart park recovery.
+        // The coordinator still requires writer-exit and lease-release proof.
+        cleanExit: (code === 0 || (code === null && hooks.recoveredWriterExit === true))
+            && completed && !outcome.incomplete && !outcome.diagnostics.modelError,
     });
     const parked = park.parked && park.record !== undefined;
     if (parked && park.record) {

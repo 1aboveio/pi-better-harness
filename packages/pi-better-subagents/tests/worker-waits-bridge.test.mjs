@@ -262,11 +262,11 @@ function capacityStub(result = true) {
     };
 }
 
-test("a real worker parks, the exit proof finalizes the wait, and the ready task resumes it once", async () => {
+for (const recovered of [false, true]) test(`a real worker parks and resumes once (${recovered ? "recovered exit observer" : "direct exit observer"})`, async () => {
     const stack = await startStack();
     assert.equal(stack.started, true, "the Subagents bridge host must resolve the real Background service");
 
-    const attemptId = "sa_worker_live";
+    const attemptId = recovered ? "sa_worker_recovered" : "sa_worker_live";
     const { sessionDirectory, sessionFile } = sessionFixture(durableRoot, attemptId);
     writeAttemptRecord(stack, { attemptId, sessionDirectory, sessionFile });
 
@@ -303,7 +303,9 @@ test("a real worker parks, the exit proof finalizes the wait, and the ready task
 
     // Clean exit + verified checkpoint: finalization records a park, not a result.
     writeCoherentLog(registry.logPathFor(attemptId));
-    const finalized = finalizeRun(attemptId, 0);
+    if (recovered) registry.writeMeta({ ...registry.readMeta(attemptId),
+        supervisionInterruptedAt: Date.now(), supervisionInterruptedReason: "runtime-recovery" });
+    const finalized = finalizeRun(attemptId, recovered ? null : 0, { recoveredWriterExit: recovered });
     assert.equal(finalized.park.parked, true);
     assert.equal(finalized.meta.park.phase, "parking");
 
@@ -313,6 +315,7 @@ test("a real worker parks, the exit proof finalizes the wait, and the ready task
         service: stack.service,
         writerLeaseReleased: true,
         writerPidGone: true,
+        interrupted: recovered,
     });
     assert.equal(finalization.outcome, "parked", JSON.stringify(finalization));
     assert.equal(finalization.wait.phase, "waiting");

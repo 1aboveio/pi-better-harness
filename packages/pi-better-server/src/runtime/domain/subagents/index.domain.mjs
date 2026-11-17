@@ -795,6 +795,7 @@ const HEALTH_TICK_MS = 15_000;
 let healthTicker;
 /** ExtensionAPI retained so health transitions can deliver coordinator follow-ups (#65). */
 let healthPi;
+let recoverWorkerWaitsAfterExit;
 /**
  * Deliver a durable, deduped coordinator follow-up for orphaned/lost (#65).
  *
@@ -1957,13 +1958,14 @@ function resolvePiBinary() {
  * first-party finalizer (finalization.ts) so tests can exercise the durable
  * path without importing the pi package.
  */
-function finalizeRun(pi, ctx, id, code) {
+function finalizeRun(pi, ctx, id, code, recoveredWriterExit = false) {
     progressCache.delete(id);
     directlySupervisedRunIds.delete(id);
     // Host-facing wrapper around first-party finalizer (finalization.ts).
     // Coherent child-exit evidence may supersede provisional orphaned/lost
     // reconciliation; finalization.ts enforces canExitFinalize + lifecycle authority.
-    finalizeRunCore(id, code, {
+    const result = finalizeRunCore(id, code, {
+        recoveredWriterExit,
         renderWidget,
         notify: (message, level) => {
             try {
@@ -1973,6 +1975,11 @@ function finalizeRun(pi, ctx, id, code) {
         },
         sendMessage: () => enqueueCompletionCallback(pi, id),
     });
+    if (recoveredWriterExit && result.applied) {
+        // The old exit callback is gone. Finish its durable wait handoff after
+        // recovery, including the independent writer and lease proof checks.
+        void recoverWorkerWaitsAfterExit?.().catch(() => undefined);
+    }
     syncHealthTicker();
 }
 /**
@@ -2009,7 +2016,7 @@ function finalizeInterruptedRunFromLog(pi, meta, now) {
         return false;
     // Exit code is unknown after the observer is gone; the lifecycle authority
     // classifies from the coherent stream instead of inventing one.
-    finalizeRun(pi, uiCtx, meta.id, null);
+    finalizeRun(pi, uiCtx, meta.id, null, true);
     return true;
 }
 /**
@@ -2640,6 +2647,7 @@ export default function (pi, managed) {
     // Capture for the health ticker (module-level); needed for orphaned/lost
     // coordinator follow-ups that fire outside a tool-call stack (#65).
     healthPi = pi;
+    recoverWorkerWaitsAfterExit = reconcileWorkerWaits;
     ensureSubagentProvider();
     registerSubagentsGoalProvider(pi);
     observeSandboxPermissions(pi);
@@ -3644,11 +3652,7 @@ export default function (pi, managed) {
         }
         catch { /* a host that refuses the adapter leaves parking unavailable */ }
         try {
-            const reconciliation = reconcileParkedWaits(service, {
-                resume: (park) => orchestration.resume(park),
-                notifyWhen: (meta) => Boolean(activeCallbackOrigin && belongsToOrigin(meta, activeCallbackOrigin)),
-                notify: notifyOwnedWait,
-            });
+            const reconciliation = reconcileWorkerWaits();
             if (managed) {
                 void reconciliation.catch(() => undefined);
                 return;
@@ -3660,6 +3664,17 @@ export default function (pi, managed) {
             }
         }
         catch { /* reconciliation retries on the next session start */ }
+    }
+    async function reconcileWorkerWaits() {
+        const service = workerOperations.service;
+        if (!service)
+            return;
+        const orchestration = ensureResumeOrchestration();
+        await reconcileParkedWaits(service, {
+            resume: (park) => orchestration.resume(park),
+            notifyWhen: (meta) => Boolean(activeCallbackOrigin && belongsToOrigin(meta, activeCallbackOrigin)),
+            notify: notifyOwnedWait,
+        });
     }
     // ---- subagent_spawn -------------------------------------------------
     //

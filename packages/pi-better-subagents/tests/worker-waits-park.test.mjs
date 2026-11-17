@@ -198,6 +198,20 @@ function dispositionFor(id) {
 }
 });
 
+test("an unknown exit without recovered writer proof still holds the park", () => {
+    const fixture = parkedRunFixture("sa_park_unknown");
+    const result = finalizeRun(fixture.id, null);
+    assert.equal(result.park.parked, false);
+    assert.equal(registry.readMeta(fixture.id).park.phase, "held");
+});
+
+test("recovered writer proof cannot turn a nonzero exit into a park", () => {
+    const fixture = parkedRunFixture("sa_park_recovered_failure");
+    const result = finalizeRun(fixture.id, 1, { recoveredWriterExit: true });
+    assert.equal(result.park.parked, false);
+    assert.equal(registry.readMeta(fixture.id).park.phase, "held");
+});
+
 test("a rewritten saved conversation cannot certify a park", () => {
     const fixture = parkedRunFixture("sa_park_3");
     // Tamper with the persisted prefix the checkpoint proved.

@@ -11,7 +11,7 @@ import { connect } from "node:net";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { inspectDaemonOwner, ownerIdentityVerified, ownerIsAlive, processMatchesStart, type DaemonOwnerIdentity } from "../src/daemon-owner.ts";
 
-for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", "spawn", "result", "bootstrap", "published", "lease", "tools"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: scenario === "unavailable" ? 90000 : 60000 }, async () => {
+for (const scenario of ["standalone", "unavailable", "parent", "park", "writer", "claim", "spawn", "result", "bootstrap", "published", "lease", "tools"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: scenario === "unavailable" ? 90000 : 60000 }, async () => {
   const restart = scenario === "park";
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
   const root = mkdtempSync(join(base, "launch-")), transport = realpathSync(mkdtempSync("/tmp/p761-"));
@@ -26,6 +26,7 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
     ...(scenario === "tools" ? { LAUNCH_POLICY: JSON.stringify({ state: "disabled", permissions: toolPolicy.main, subagentPermissions: toolPolicy.subagents, subagentTools: toolPolicy.subagentTools }) } : {}), PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root,
     LAUNCH_BACKGROUND: scenario === "standalone" ? "0" : "1", LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: entered, LAUNCH_RELEASE: release,
     ...(scenario === "bootstrap" ? { CONTINUATION_BOOTSTRAP_GATE: join(cwd, "resume-release") } : {}),
+    ...(scenario === "writer" ? { CONTINUATION_WRITER_GATE: join(cwd, "writer-release") } : {}),
     ...(["claim", "spawn", "result", "published", "lease"].includes(scenario) ? { CONTINUATION_CRASH_POINT: scenario, CONTINUATION_CRASH_MARKER: join(cwd, "crashed") } : {}) };
   const execPath = process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath;
   let daemon = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
@@ -81,6 +82,26 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
     assert.equal(first.details.launched, true);
     attempts.push(first.details.runId);
     const exited = once(parent, "exit"); parent.send({ stop: true }); await exited; parent = undefined;
+    if (scenario === "writer") {
+      const marker = join(cwd, "writer-release.entered");
+      const deadline = Date.now() + 15000;
+      while (!existsSync(marker)) { assert.ok(Date.now() < deadline, "Live writer barrier not reached"); await delay(25); }
+      const writer = JSON.parse(readFileSync(marker, "utf8"));
+      assert.equal(writer.pid, metaFor(first.details.runId).pid);
+      const death = once(daemon, "exit"); daemon.kill("SIGKILL"); await death;
+      daemon = fork(new URL("./support/work-daemon.ts", import.meta.url), [], { execPath, execArgv: ["--import", "tsx"], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+      daemon.stderr!.on("data", data => { errors += data; });
+      await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
+      const observer = new WorkClient(join(transport, "pi-server.sock"), agent);
+      try {
+        await observer.ready;
+        const readyBy = Date.now() + 10000;
+        while (!(await observer.request("runtime_get_status")).subagentManagement?.continuationReady) {
+          assert.ok(Date.now() < readyBy, `Recovered writer bridge unavailable: ${errors}`); await delay(25);
+        }
+      } finally { observer.close(); }
+      writeFileSync(join(cwd, "writer-release"), "release");
+    }
     const parkedDeadline = Date.now() + 20000;
     while (!existsSync(join(root, "pi-better-subagents/runs", first.details.runId, "park.json"))) {
       assert.ok(Date.now() < parkedDeadline, `Worker did not park: ${errors}`);
