@@ -1,0 +1,30 @@
+✖ source retry invalidates cached assignments when a newer journal position arrives (1003.799333ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5052.514208
+
+✖ failing tests:
+
+test at test/runtime-work.test.ts:1:34220
+✖ source retry invalidates cached assignments when a newer journal position arrives (1003.799333ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+
+  + 'degraded'
+  - 'ready'
+
+      at TestContext.<anonymous> (/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/packages/pi-better-server/test/runtime-work.test.ts:584:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'degraded',
+    expected: 'ready',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

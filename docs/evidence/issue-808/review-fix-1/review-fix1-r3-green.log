@@ -1,0 +1,14 @@
+✔ 10000 durable records use bounded indexed history pages; a single archive replacement projects only its family (31220.092083ms)
+✔ concurrent coordinator writes cannot starve an initial inventory or hide later assignment changes (383.927167ms)
+✔ source churn retries reuse completed historical parsing without publishing an inconsistent snapshot (519.343208ms)
+✔ source retry invalidates cached assignments when a newer journal position arrives (84.699208ms)
+✔ pending recipient query retains old terminal obligations with scoped bounded pages (1112.443917ms)
+✔ old handled terminal records re-enter pending scope for new failure journal attention (27.724959ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 34661.337583

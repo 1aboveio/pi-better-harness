@@ -31,6 +31,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
   for (let i = 0; i < 50; i++) {
     const id = `sa_shared_${i}`;
     mkdirSync(join(runs, id));
+    writeFileSync(join(runs, id, "output.log"), "");
     writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, sessionId: `worker-${i}`, cwd: root,
       status: "completed", startedAt: i, endedAt: Date.now(), callbackOrigin: { cwd: root, sessionId: "parent" },
       operations: { conversationId: `worker-${i}`, workspace: root } }));
@@ -356,6 +357,7 @@ test("registered Navigator preserves older active rows and the same consumers re
     assert.equal(provider.visibleCount(), 1, "expired terminal history never hides the older active row or its count");
     for (let i = 0; i < 201; i++) {
       const id = `sa_active_page_${i}`; mkdirSync(join(runs, id));
+      writeFileSync(join(runs, id, "output.log"), "");
       writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, sessionId: `active-${i}`,
         callbackOrigin: { cwd: root, sessionId: "parent" }, spawnPid: process.pid, pid: process.pid, status: "running", startedAt: 1000 + i }));
     }
@@ -422,6 +424,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
   const runs = join(root, "runs"); mkdirSync(runs);
   for (let i = 0; i < 7; i++) {
     const id = `sa_active_${i}`; mkdirSync(join(runs, id));
+    writeFileSync(join(runs, id, "output.log"), "");
     writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, status: "running", startedAt: 20000 + i }));
   }
   const coordinatorPath = new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href;
@@ -485,6 +488,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
 test("concurrent coordinator writes cannot starve an initial inventory or hide later assignment changes", { timeout: 10000 }, async () => {
   const root = fixtureRoot("coordinator-churn");
   const run = join(root, "runs/sa_churn"); mkdirSync(run, { recursive: true });
+  writeFileSync(join(run, "output.log"), "");
   writeFileSync(join(run, "meta.json"), JSON.stringify({ id: "sa_churn", sessionId: "worker", cwd: root,
     status: "completed", startedAt: 1, operations: { conversationId: "worker", workspace: root } }));
   const { openStore } = await import(new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href);
@@ -522,6 +526,7 @@ test("source churn retries reuse completed historical parsing without publishing
     status: "completed", startedAt: 1, operations: { conversationId: name, workspace: root } }));
   for (const meta of metas) {
     mkdirSync(join(root, "runs", meta.id), { recursive: true });
+    writeFileSync(join(root, "runs", meta.id, "output.log"), "");
     writeFileSync(join(root, "runs", meta.id, "meta.json"), JSON.stringify(meta));
   }
   const { openStore } = await import(new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href);
@@ -553,6 +558,7 @@ test("source retry invalidates cached assignments when a newer journal position 
     status: "completed", startedAt: 1, operations: { conversationId: name, workspace: root } }));
   for (const meta of metas) {
     mkdirSync(join(root, "runs", meta.id), { recursive: true });
+    writeFileSync(join(root, "runs", meta.id, "output.log"), "");
     writeFileSync(join(root, "runs", meta.id, "meta.json"), JSON.stringify(meta));
   }
   const { openStore } = await import(new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href);
@@ -592,6 +598,7 @@ test("watch overflow and lost notifications reconcile external writes once and r
   const meta = { id: "sa_external", cwd: root, sessionId: "worker", status: "completed", startedAt: 1 };
   mkdirSync(join(runs, meta.id));
   const path = join(runs, meta.id, "meta.json");
+  writeFileSync(join(runs, meta.id, "output.log"), "");
   writeFileSync(path, JSON.stringify(meta));
   try {
     await model.reconcile();
@@ -643,6 +650,7 @@ test("a paused real socket has bounded queued snapshots and receives explicit re
   const root = fixtureRoot("slow");
   const transport = mkdtempSync("/tmp/p753-");
   const runs = join(root, "runs", "sa_slow"); mkdirSync(runs, { recursive: true });
+  writeFileSync(join(runs, "output.log"), "");
   writeFileSync(join(runs, "meta.json"), JSON.stringify({ id: "sa_slow", cwd: root, status: "completed", startedAt: 1, promptPreview: "x".repeat(100000) }));
   const model = new WorkReadModel(root, "slow-instance", { baseDir: root, intervalMs: 60000 });
   let accepted!: Socket;
@@ -686,6 +694,7 @@ test("pending recipient query retains old terminal obligations with scoped bound
   const runs = join(root, "runs"); mkdirSync(runs);
   for (let i = 0; i < 205; i++) {
     const id = `sa_owed_${i}`; mkdirSync(join(runs, id));
+    writeFileSync(join(runs, id, "output.log"), "");
     writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, sessionId: id, cwd: root,
       callbackOrigin: { cwd: root, sessionId: i === 204 ? "foreign" : "parent" }, status: "completed",
       startedAt: i, endedAt: 1, callback: true, completionCallbackPendingAt: 1,
@@ -713,6 +722,7 @@ test("pending recipient query retains old terminal obligations with scoped bound
 test("old handled terminal records re-enter pending scope for new failure journal attention", async () => {
   const root = fixtureRoot("pending-failure");
   const id = "sa_old_lost", directory = join(root, "runs", id); mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "output.log"), "");
   writeFileSync(join(directory, "meta.json"), JSON.stringify({ id, sessionId: id, cwd: root,
     callbackOrigin: { cwd: root, sessionId: "parent" }, status: "lost", startedAt: 1, endedAt: 2,
     lostCallbackSentAt: 3, completionCallbackSentAt: 3, callback: true }));

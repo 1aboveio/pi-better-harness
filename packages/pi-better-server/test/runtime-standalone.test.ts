@@ -118,6 +118,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
   const coldStartMs = performance.now() - started;
   const snapshotRun = join(env.TMPDIR, "pi-better-subagents/runs/sa_packed_snapshot"); mkdirSync(snapshotRun, { recursive: true });
   const snapshotMeta = { id: "sa_packed_snapshot", cwd: evidence, sessionId: "packed-worker", status: "completed", startedAt: Date.now(), name: "packed snapshot" };
+  writeFileSync(join(snapshotRun, "output.log"), "");
   const snapshotPath = join(snapshotRun, "meta.json"); writeFileSync(snapshotPath, JSON.stringify(snapshotMeta));
   const packedApi = pathToFileURL(clients[0]!.replace("status-cli.mjs", "client.mjs")).href;
   const snapshotScript = `

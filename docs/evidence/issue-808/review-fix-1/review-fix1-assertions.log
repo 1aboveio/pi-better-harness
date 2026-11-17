@@ -1,0 +1,6 @@
+{"path":"packages/pi-better-server/scripts/measure-shared-reads.mjs","originalAssertionCalls":17,"preserved":true}
+{"path":"packages/pi-better-server/test/event-publication-clock.test.ts","originalAssertionCalls":8,"preserved":true}
+{"path":"packages/pi-better-server/test/query-executor.test.ts","originalAssertionCalls":172,"preserved":true}
+{"path":"packages/pi-better-server/test/runtime-standalone.test.ts","originalAssertionCalls":60,"preserved":true}
+{"path":"packages/pi-better-server/test/runtime-work.test.ts","originalAssertionCalls":146,"preserved":true}
+{"path":"packages/pi-better-server/test/support/assignment-observation-crash.ts","originalAssertionCalls":0,"preserved":true}

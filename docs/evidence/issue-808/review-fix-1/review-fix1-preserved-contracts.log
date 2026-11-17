@@ -1,0 +1,36 @@
+✔ controlled common-time cohorts aggregate CPU/RSS, not the sum of separate peaks (8.090959ms)
+✔ baseline RSS and repeated atomic-file reads are accounted without inventing CPU intervals (0.7425ms)
+✔ controlled CPU arithmetic includes system time and permits multi-core aggregate percentages (0.077833ms)
+✔ controlled cohort rejects missing process (0.070333ms)
+✔ controlled cohort rejects extra process (0.081125ms)
+✔ controlled cohort rejects PID reuse (0.065042ms)
+✔ controlled cohort rejects duplicate process (0.064833ms)
+✔ controlled cohort rejects generation change (0.046416ms)
+✔ controlled cohort rejects mixed capture timestamp (0.059916ms)
+✔ controlled cohort rejects missing sample sequence (0.093459ms)
+✔ controlled cohort rejects replayed sample sequence (0.055833ms)
+✔ controlled cohort rejects negative CPU (0.05425ms)
+✔ controlled cohort rejects missing RSS (0.047459ms)
+✔ controlled cohort rejects NaN CPU (0.041708ms)
+✔ controlled cohort rejects clock reversal (0.05775ms)
+✔ controlled cohort rejects whole missing cohort (0.053291ms)
+✔ counter resets, changed bytes under replayed sequence and missing boundaries cannot qualify (0.119209ms)
+✔ gaps are retained after subsequent aligned samples and deltas never bridge them (0.114542ms)
+✔ malformed or absent sample/cohort identity input is rejected, not filled with zero (0.09775ms)
+✔ deleted empty log is unavailable, never complete; verified facts and recovery survive (584.709708ms)
+ℹ {"empty":true,"complete":false,"status":"degraded","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-TfN6iT/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✔ deleted nonempty log is unavailable, never complete; verified facts and recovery survive (49.817ms)
+ℹ {"empty":false,"complete":false,"status":"degraded","detailDiagnostics":["Log unreadable: ENOENT: no such file or directory, stat '/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808/.private-808/tmp/p808-coverage-ujN4R9/pi-better-subagents/runs/sa_808_group_0/output.log'"]}
+✔ unreadable log retains last verified row, empty truncation and inode replacement still recover (33.521417ms)
+✔ unavailable source cannot rewrite a durable fold across derived-reader reopen (58.956417ms)
+✔ never-observed missing source is degraded and does not create a complete checkpoint (23.985166ms)
+✔ verified archive-only membership does not promise or require deleted raw-log coverage (31.758334ms)
+✔ missing-source reconciliation accepts only the expected degradation, never unrelated malformed metadata (30.679083ms)
+ℹ tests 26
+ℹ suites 0
+ℹ pass 26
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 938.076541

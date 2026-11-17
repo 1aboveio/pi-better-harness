@@ -4,6 +4,7 @@ import { WorkReadModel } from "../../src/runtime/read-model.ts";
 const { openStore } = await import(new URL("../../../operation-coordinator/index.ts", import.meta.url).href);
 const [root, boundary] = process.argv.slice(2) as [string, string];
 mkdirSync(join(root, "runs", "attempt"), { recursive: true });
+writeFileSync(join(root, "runs", "attempt", "output.log"), "");
 const owner = { kind: "worker-conversation", sessionId: "worker", workspace: root };
 const recipient = { kind: "parent-session", sessionId: "parent", workspace: root };
 const store = openStore({ path: join(root, "operation-coordinator.sqlite") });

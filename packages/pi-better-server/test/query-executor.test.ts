@@ -90,6 +90,7 @@ test("identical Work identities do not share visible results across admitted roo
     await Promise.all(clients.map(ready));
     for (const [index, f] of [left, right].entries()) {
       mkdirSync(join(f.root, "runs/sa_same"));
+      writeFileSync(join(f.root, "runs/sa_same/output.log"), "");
       writeFileSync(join(f.root, "runs/sa_same/meta.json"), JSON.stringify({ id: "sa_same", cwd: "/same-workspace",
         callbackOrigin: { cwd: "/same-workspace", sessionId: "same-session" }, status: "completed", startedAt: 1, name: `root-${index}` }));
       await f.executor.livenessReasons();
@@ -105,7 +106,8 @@ for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query
   const f = await fixture();
   const scope = { cwd: join(f.root, "b"), limit: 1 };
   const write = (id: string, cwd: string, name: string) => {
-    mkdirSync(join(f.root, "runs", id), { recursive: true });
+    const created = mkdirSync(join(f.root, "runs", id), { recursive: true });
+    if (created) writeFileSync(join(f.root, "runs", id, "output.log"), "");
     writeFileSync(join(f.root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, name, status: "completed", startedAt: 1 }));
   };
   try {
@@ -317,6 +319,7 @@ test("an exact-ID client waits for indexing without occupying the shared read qu
     });
     f.worker.postMessage({ type: "block-inventory" }); await indexing;
     const directory = join(f.root, "runs/sa_client_retry"); mkdirSync(directory);
+    writeFileSync(join(directory, "output.log"), "");
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_client_retry", sessionId: "retry", cwd: f.root,
       status: "completed", startedAt: 1 }));
     let completed = false;
@@ -347,6 +350,7 @@ test("an exact-ID client retries indexing even when another assignment makes the
   try {
     const initial = blocked();
     const directory = join(f.root, "runs/sa_unverified"); mkdirSync(directory);
+    writeFileSync(join(directory, "output.log"), "");
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_unverified", sessionId: "unverified", cwd: f.root,
       status: "completed", startedAt: 1, operations: { conversationId: "unverified", workspace: f.root } }));
     const client = await f.client(); await initial;
@@ -357,6 +361,7 @@ test("an exact-ID client retries indexing even when another assignment makes the
     await client.subscribe({}); f.worker.postMessage({ type: "release-inventory" }); await degraded;
     const held = blocked(); f.worker.postMessage({ type: "block-inventory" }); await held;
     const next = join(f.root, "runs/sa_degraded_retry"); mkdirSync(next);
+    writeFileSync(join(next, "output.log"), "");
     writeFileSync(join(next, "meta.json"), JSON.stringify({ id: "sa_degraded_retry", sessionId: "new", cwd: f.root,
       status: "lost", startedAt: 2 }));
     const pending = client.get({ id: "sa_degraded_retry", limit: 1 });
@@ -387,6 +392,7 @@ test("a failed worker recovers existing subscriptions under a new observation ep
   try {
     const directory = join(f.root, "runs", "sa_recovery");
     mkdirSync(directory);
+    writeFileSync(join(directory, "output.log"), "");
     const write = (name: string) => writeFileSync(join(directory, "meta.json"), JSON.stringify({
       id: "sa_recovery", cwd: f.root, status: "completed", startedAt: 1, name,
     }));
@@ -551,7 +557,8 @@ test("worker events coalesce behind one acknowledgment and scope changes discard
       else post(message);
     };
     const write = (name: string) => {
-      const dir = join(f.root, "runs", "sa_credit"); mkdirSync(dir, { recursive: true });
+      const dir = join(f.root, "runs", "sa_credit");
+      if (mkdirSync(dir, { recursive: true })) writeFileSync(join(dir, "output.log"), "");
       writeFileSync(join(dir, "meta.json"), JSON.stringify({ id: "sa_credit", cwd: f.root, status: "completed", startedAt: 1, name }));
     };
     const until = async (name: string) => {
@@ -642,6 +649,7 @@ test("assignment wait, resume claim, cancellation, outcome and receipt cross the
   const recipient = { kind: "parent-session", sessionId: "parent", workspace: f.root };
   store.registerAssignment({ assignmentId: "assignment", owner, recipient });
   mkdirSync(join(f.root, "runs", "attempt"));
+  writeFileSync(join(f.root, "runs", "attempt", "output.log"), "");
   writeFileSync(join(f.root, "runs", "attempt", "meta.json"), JSON.stringify({ id: "attempt", sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1,
     assignment: { assignmentId: "assignment", owner, recipient }, callbackOrigin: { cwd: f.root, sessionId: "parent" } }));
   const client = await f.client();
@@ -785,6 +793,7 @@ test("directory entry watchers publish repeated atomic commits without the inven
   try {
     const id = "sa_atomic", directory = join(f.root, "runs", id), metaPath = join(directory, "meta.json");
     mkdirSync(directory);
+    writeFileSync(join(directory, "output.log"), "");
     const meta = { id, sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1, endedAt: Date.now(),
       callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "original" };
     writeFileSync(metaPath, JSON.stringify(meta));
@@ -797,6 +806,7 @@ test("directory entry watchers publish repeated atomic commits without the inven
     }
     // Replacing the directory itself must retire its old inode watcher.
     renameSync(directory, join(f.root, "old-run")); mkdirSync(directory);
+    writeFileSync(join(directory, "output.log"), "");
     writeFileSync(metaPath, JSON.stringify({ ...meta, name: "replaced-directory" }));
     await client.subscribe(scope);
     const until = Date.now() + 1000;
@@ -809,6 +819,7 @@ test("directory entry watchers publish repeated atomic commits without the inven
     // recreated. Identity checks must rebind both root and child watchers.
     renameSync(join(f.root, "runs"), join(f.root, "old-runs-root"));
     mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "output.log"), "");
     writeFileSync(metaPath, JSON.stringify({ ...meta, name: "replaced-root" }));
     const rootBy = Date.now() + 1000;
     while (client.snapshot?.rows[0]?.meta.name !== "replaced-root") {
@@ -838,7 +849,7 @@ for (const source of ["runs", "attempts", "session-state"]) test(`source ${sourc
   const archive = () => { mkdirSync(join(durable, "attempts"), { recursive: true }); writeFileSync(join(durable, "attempts", `${id}.json`), JSON.stringify({ version: 1, meta })); };
   const writeSource = (name: string) => {
     mkdirSync(root, { recursive: true });
-    if (source === "runs") { mkdirSync(join(root, id)); writeFileSync(join(root, id, "meta.json"), JSON.stringify({ ...meta, name })); }
+    if (source === "runs") { mkdirSync(join(root, id)); writeFileSync(join(root, id, "output.log"), ""); writeFileSync(join(root, id, "meta.json"), JSON.stringify({ ...meta, name })); }
     else if (source === "attempts") writeFileSync(join(root, `${id}.json`), JSON.stringify({ version: 1, meta: { ...meta, name } }));
     else writeFileSync(join(root, "worker.json"), JSON.stringify({ version: 1, sessionId: "worker", attemptId: "sa_newer", status: "killed", startedAt: 3 }));
   };
@@ -885,6 +896,7 @@ test("root recreation after an observed absence publishes without inventory fall
     const meta = { id, sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1,
       endedAt: Date.now(), callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "original" };
     mkdirSync(directory);
+    writeFileSync(join(directory, "output.log"), "");
     writeFileSync(join(directory, "meta.json"), JSON.stringify(meta));
     const client = await f.client(); await ready(client);
     await client.subscribe({ cwd: f.root, sessionId: "parent", limit: 10 });
@@ -908,6 +920,7 @@ test("root recreation after an observed absence publishes without inventory fall
       return f.executor.metrics().sourceWatchers === 0;
     });
     mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "output.log"), "");
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ ...meta, name: "recreated" }));
     await waitForEvent(() => client.snapshot?.rows[0]?.meta.name === "recreated");
     assert.equal(client.snapshot!.status, "ready");

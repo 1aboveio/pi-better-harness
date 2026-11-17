@@ -1,0 +1,16 @@
+{
+  "status": "incomplete",
+  "review": "808-r1.fix.json, canonical808-r1.json, retained808-r1-repro.mjs",
+  "base": "596b01dec45d2d6027c34891e55ef3d08732c80d",
+  "R1": {"status": "open", "producerFixed": false, "actualCompatibleCohorts": "not produced", "validator": "Preserved correct refusal; retained reproducer passes with mixed timestamps rejected. This is not producer GREEN."},
+  "R2": {"status": "open", "runtimeRecoveryBound": false, "requiredProducersComplete": false, "campaignAutomationComplete": false, "nativeMissingCapabilities": "Still explicit; no control RPC or authority workaround invented"},
+  "R3": {"sourceStatus": "corrected across six named paths and their related ready seeds", "nativeEntrypoints": "notRun; execution prohibition preserved", "assertions": "All403 original assert.* call expressions unchanged; static preservation audit, not behavioral test coverage"},
+  "controlledR3": {"red": "Original journal-churn seed: degraded != ready", "green": "Same original assertions with actual empty logs: passed", "sourceCasesPassed": 6, "evidence": "review-fix1-r3-green.log"},
+  "preservedContracts": {"passed": 26, "scope": "7 actual file/parser/model availability cases and19 controlled strict cohort validator cases; not actual multi-process producer proof"},
+  "typecheck": "npm run typecheck -w packages/pi-better-server passed",
+  "syntax": "node --check measure-shared-reads.mjs passed",
+  "ciEvidence": {"head": "596b01dec45d2d6027c34891e55ef3d08732c80d", "linux": "831-596-linux-reads-api.log:183 missing output.log", "macOS": "831-596-mac-reads-api.log:186 missing output.log", "candidateBothOSRun": "notRun; old logs remain baseline evidence"},
+  "scope": "Source/components only. No native/probe/Server/guardian/admission retry, new service/transport/tool, guard/identity/settings/activation change, timestamp alignment, interpolation or independent-peak summation.",
+  "nativeQualification": "pending; all eight original criteria, fixed-host/source/artifact match, both OS and EACH workload/window >=600000ms retained",
+  "logCopies": "Trailing whitespace normalized in committed copies only; raw private logs retained"
+}

@@ -16,6 +16,7 @@ test('unique committed content reaches real socket subscribers before a deschedu
   const root = mkdtempSync(join(parent, 'publication-'));
   const id = 'sa_controlled_commit', run = join(root, 'runs', id), path = join(run, 'meta.json');
   mkdirSync(run, { recursive: true });
+  writeFileSync(join(run, 'output.log'), '');
   writeFileSync(path, JSON.stringify({ id, cwd: root, status: 'completed', startedAt: 1, endedAt: 2, name: 'original' }));
   const model = new WorkReadModel(root, 'controlled-publication', { baseDir: root, durableDir: join(root, 'durable'), intervalMs: 60000 });
   const peers: Socket[] = [], queries: WorkQueries[] = [];

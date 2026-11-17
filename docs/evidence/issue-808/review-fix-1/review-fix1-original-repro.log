@@ -1,0 +1,2 @@
+R1: {"scope":"simultaneous-related-processes","method":"exact-capture-timestamp-cohorts","qualified":false,"generation":"1","processIdentities":[{"pid":1,"start":"start"},{"pid":2,"start":"start"}],"firstAt":null,"lastAt":null,"samples":0,"issues":["current:mixed-timestamps","incomplete-window-coverage","missing-cpu-intervals"],"cpuPercent":null,"rssBytes":null,"intervals":[]}
+R3: metadata-only = degraded; real empty output.log = ready/complete

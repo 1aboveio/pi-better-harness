@@ -79,6 +79,7 @@ try {
     const work = track(fork(new URL('./measure-shared-reads/probe.mjs', import.meta.url), [], { env, execArgv: [], stdio: ['ignore','ignore','inherit','ipc'] }));
     for (let i = 0; i < 2; i++) {
       const id = `sa_resource_active_${i}`; mkdirSync(join(runs, id));
+      writeFileSync(join(runs, id, 'output.log'), '');
       writeFileSync(join(runs, id, 'meta.json'), JSON.stringify({ id, cwd: root, status: 'running',
         pid: work.pid, spawnPid: process.pid, startedAt: Date.now(), sessionId: id, callback: false, callbackOrigin: { cwd: root, sessionId }, name: `resource-work-${i}` }));
     }
