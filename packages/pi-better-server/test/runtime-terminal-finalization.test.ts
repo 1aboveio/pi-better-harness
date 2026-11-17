@@ -35,6 +35,8 @@ for (const [index, conflict] of conflicts.entries()) {
         pid: 4194304, pidStartTime: "captured-child", spawnPid: 4194304,
         logPath: logPathFor(id), callback: false,
         management: { root, instanceId: "captured-manager" }, operations: { resumeLaunchToken: "captured-token" } });
+      // Two finalizers interleave after the first read sees no outcome. Both
+      // writes below execute the real canonical coordinator transaction.
       store.recordAssignmentOutcome = (input: any) => {
         if (conflict === "other-validation") return record({ ...input, reason: "" });
         winner = record({ ...input, outcome: "cancelled", reason: "Parent stopped the attempt",
@@ -51,7 +53,7 @@ for (const [index, conflict] of conflicts.entries()) {
         assert.equal(result.applied, true);
         assert.equal(result.meta.status, "failed", "the child exit is not invented assignment success");
         assert.equal((rejected as Error).name, "StoreError");
-        assert.equal(rejected instanceof SubagentStoreError, false, "the borrowed store has a distinct error constructor");
+        assert.equal(rejected instanceof SubagentStoreError, false, "the production borrowed store has a distinct error constructor");
         assert.deepEqual(store.getAssignmentOutcome(id), winner);
         assert.equal(finalizeRun(id, 1).applied, false);
         store.receiptAssignmentOutcome({ assignmentId: id, recipient, revision: 1, entryId: "durable-entry" });

@@ -1,14 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createServer, type Socket } from "node:net";
+import { createServer, connect, type Socket } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileSync, statSync, openSync, closeSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+const { commitMetadata } = await import(String("../scripts/event-publication/commit.mjs"));
 
 async function fixture(options: { capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
@@ -83,6 +84,63 @@ async function ready(client: WorkClient) {
   });
 }
 
+test("a dropped same-consumer snapshot reports a gap while unrelated global commits do not", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const peers = new Set<Socket>();
+  let dropped = false;
+  const proxy = createServer(downstream => {
+    const upstream = connect(f.path); peers.add(upstream); peers.add(downstream);
+    downstream.pipe(upstream); upstream.setEncoding("utf8");
+    let buffer = "";
+    upstream.on("data", chunk => {
+      buffer += chunk;
+      while (buffer.includes("\n")) {
+        const end = buffer.indexOf("\n"), line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+        const frame = JSON.parse(line);
+        if (frame.event?.type === "runtime_snapshot" && frame.event.snapshot.rows[0]?.meta.name === "gap-one") {
+          dropped = true; continue;
+        }
+        downstream.write(line + "\n");
+      }
+    });
+    upstream.on("error", () => downstream.destroy()); downstream.on("error", () => upstream.destroy());
+  });
+  let consumer: WorkClient | undefined;
+  const write = (id: string, cwd: string, name: string) => {
+    mkdirSync(join(f.root, "runs", id), { recursive: true });
+    const path = join(f.root, "runs", id, "meta.json");
+    writeFileSync(path + ".tmp", JSON.stringify({ id, cwd, name, status: "completed", startedAt: 1 }));
+    renameSync(path + ".tmp", path);
+  };
+  const wait = async (condition: () => boolean) => {
+    const deadline = Date.now() + 1000;
+    while (!condition()) { assert.ok(Date.now() < deadline, "controlled scoped publication missing"); await new Promise(resolve => setTimeout(resolve, 10)); }
+  };
+  try {
+    const control = await f.client(); await ready(control);
+    const scope = { cwd: join(f.root, "b"), limit: 10 };
+    write("sa_b", scope.cwd, "before"); await f.executor.livenessReasons(); await control.subscribe(scope);
+    const path = f.path + ".gap"; proxy.listen(path); await once(proxy, "listening");
+    consumer = new WorkClient(path, f.root); await consumer.subscribe(scope);
+    const seen: any[] = []; consumer.onChange(value => seen.push(value));
+    write("sa_a", join(f.root, "a"), "unrelated"); await f.executor.livenessReasons();
+    write("sa_b", scope.cwd, "after-unrelated"); await f.executor.livenessReasons();
+    await wait(() => consumer!.snapshot?.rows[0]?.meta.name === "after-unrelated");
+    assert.equal(seen.some(value => value.resyncReason === "sequence-gap"), false);
+    seen.length = 0;
+    write("sa_b", scope.cwd, "gap-one"); await f.executor.livenessReasons(); await wait(() => dropped);
+    write("sa_b", scope.cwd, "gap-two"); await f.executor.livenessReasons();
+    await wait(() => consumer!.snapshot?.rows[0]?.meta.name === "gap-two");
+    assert.equal(dropped, true);
+    assert.equal(consumer.snapshot!.resyncRequired, true, "the first complete snapshot after the dropped event reports the gap");
+    assert.equal(consumer.snapshot!.resyncReason, "sequence-gap");
+    assert.equal(consumer.snapshot!.status, "ready");
+  } finally {
+    consumer?.close(); peers.forEach(peer => peer.destroy());
+    await new Promise<void>(resolve => proxy.close(() => resolve())); await f.close();
+  }
+});
+
 test("identical Work identities do not share visible results across admitted roots", { timeout: 10000 }, async () => {
   const left = await fixture(), right = await fixture();
   try {
@@ -101,7 +159,10 @@ test("identical Work identities do not share visible results across admitted roo
   } finally { await left.close(); await right.close(); }
 });
 
-for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query and encoding work`, { timeout: 15000 }, async () => {
+for (const { count, readOnEvent } of [
+  ...[1, 5, 10].map(count => ({ count, readOnEvent: false })),
+  { count: 10, readOnEvent: true },
+]) test(readOnEvent ? "10 socket clients share publication with concurrent event-triggered reads" : `${count} socket clients share scoped query and encoding work`, { timeout: 15000 }, async () => {
   const f = await fixture();
   const scope = { cwd: join(f.root, "b"), limit: 1 };
   const write = (id: string, cwd: string, name: string) => {
@@ -117,41 +178,156 @@ for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query
     const page = await first.get(scope);
     const before = f.executor.metrics() as any;
     let events = 0;
-    const stops = clients.map(client => client.onChange(() => events++));
+    let phase = "metadata-update";
+    const frameSummary = (value: any) => {
+      const cursor = value.nextCursor ?? value.rows?.[0]?.cursor;
+      let publicationScope;
+      if (cursor) {
+        try {
+          const [key, instanceId, tokenRevision] = JSON.parse(Buffer.from(cursor, "base64url").toString());
+          publicationScope = { key, instanceId, tokenRevision };
+        } catch (error) { publicationScope = { decodeError: String(error) }; }
+      }
+      return { status: value.status, reason: value.reason, seq: value.seq, scopeRevision: value.scopeRevision,
+        instanceId: value.instanceId, publicationScope, observedRevisionVector: value.observedRevisionVector,
+        resyncRequired: value.resyncRequired, resyncReason: value.resyncReason,
+        totalMatching: value.totalMatching, activity: value.activity, nextDeadline: value.nextDeadline,
+        rows: value.rows?.map((row: any) => ({ id: row.meta.id, cwd: row.meta.cwd, name: row.meta.name,
+          origin: row.meta.callbackOrigin, state: row.assignment.state, sourceRevision: row.sourceRevision })) };
+    };
+    const frames: Array<{ subscriber: number; phase: string; snapshot: ReturnType<typeof frameSummary> }> = [];
+    const stops = clients.map((client, subscriber) => client.onChange(value => {
+      events++;
+      if (frames.length < 32) frames.push({ subscriber, phase, snapshot: frameSummary(value) });
+    }));
     write("sa_a", join(f.root, "a"), "unrelated"); await f.executor.livenessReasons();
+    phase = "log-append";
     appendFileSync(join(f.root, "runs/sa_a/output.log"), '{"type":"agent_end"}\n'); await f.executor.livenessReasons();
+    phase = "workspace-move";
     write("sa_a", join(f.root, "c"), "moved"); await f.executor.livenessReasons();
+    phase = "terminal-update";
     const meta = join(f.root, "runs/sa_a/meta.json");
     writeFileSync(meta, JSON.stringify({ id: "sa_a", cwd: join(f.root, "c"), status: "failed", startedAt: 1 }));
     await f.executor.livenessReasons();
+    phase = "deletion";
     rmSync(join(f.root, "runs/sa_a"), { recursive: true }); await f.executor.livenessReasons();
+    phase = "final-scoped-read";
     for (const client of clients) await client.get(scope);
     const unchanged = f.executor.metrics() as any;
-    assert.equal(events, 0, "unrelated content sends no scoped frames");
+    try { assert.equal(events, 0, "unrelated content sends no scoped frames"); }
+    catch (error) {
+      console.error(`Scoped publication failure: ${JSON.stringify({ scope, clients: count, events,
+        omittedFrames: events - frames.length, baseline: frameSummary(page), frames,
+        final: clients.map(client => frameSummary(client.snapshot)), before, after: unchanged })}`);
+      throw error;
+    }
     assert.equal(unchanged.queryCount, before.queryCount, "unrelated content retains the cached page");
     assert.equal(unchanged.serializationCount, before.serializationCount);
     const next = await first.get({ ...scope, cursor: page.nextCursor });
     assert.equal(next.rows.length, 1);
     const baseline = f.executor.metrics() as any;
+    const eventReads: Array<Promise<any>> = [];
     const received = clients.map(client => new Promise<void>(resolve => {
-      const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) { stop(); resolve(); } });
+      const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) {
+        if (readOnEvent) eventReads.push(client.get(scope));
+        stop(); resolve();
+      } });
     }));
     // One committed replacement, as in the metadata writer; in-place writes can
     // legitimately publish both a malformed-input epoch and a recovery epoch.
-    const committed = join(f.root, "runs/sa_b2/meta.json");
-    const staged = `${committed}.sharing.tmp`;
-    writeFileSync(staged, JSON.stringify({ ...JSON.parse(readFileSync(committed, "utf8")), name: "changed" }));
-    renameSync(staged, committed);
+    phase = "in-scope-update";
+    await commitMetadata(join(f.root, "runs/sa_b2/meta.json"), "changed");
     await f.executor.livenessReasons(); await Promise.all(received);
+    const overlapping = await Promise.all(eventReads);
+    if (readOnEvent) {
+      assert.equal(overlapping.length, count);
+      for (const value of overlapping) assert.equal(value.rows[0]?.meta.name, "changed");
+    }
     await first.get(scope);
     const changed = f.executor.metrics() as any;
-    assert.equal(changed.queryCount - baseline.queryCount, 1);
-    assert.equal(changed.serializationCount - baseline.serializationCount, 1);
-    assert.equal(changed.eventEncoding.serializations - baseline.eventEncoding.serializations, 1);
-    assert.equal(changed.eventEncoding.frames - baseline.eventEncoding.frames, count);
+    try {
+      assert.equal(changed.queryCount - baseline.queryCount, 1);
+      assert.equal(changed.serializationCount - baseline.serializationCount, 1);
+      assert.equal(changed.eventEncoding.serializations - baseline.eventEncoding.serializations, 1);
+      assert.equal(changed.eventEncoding.frames - baseline.eventEncoding.frames, count);
+    } catch (error) {
+      console.error(`Shared query failure: ${JSON.stringify({ scope, clients: count, baseline, changed,
+        frames, final: clients.map(client => frameSummary(client.snapshot)) })}`);
+      throw error;
+    }
     assert.ok(changed.eventEncoding.bytes > baseline.eventEncoding.bytes);
     stops.forEach(stop => stop());
   } finally { await f.close(); }
+});
+
+test("10 socket clients share each truthful partial-write and recovery epoch", { timeout: 15000 }, async () => {
+  const f = await fixture();
+  const scope = { cwd: join(f.root, "b"), limit: 1 };
+  const directory = join(f.root, "runs/sa_partial_b"), path = join(directory, "meta.json");
+  const meta = { id: "sa_partial_b", cwd: scope.cwd, name: "verified", status: "completed", startedAt: 1 };
+  let held: number | undefined;
+  try {
+    const first = await f.client(); await ready(first);
+    mkdirSync(directory); writeFileSync(path, JSON.stringify(meta));
+    await f.executor.livenessReasons();
+    const clients = [first, ...await Promise.all(Array.from({ length: 9 }, () => f.client()))];
+    for (const client of clients) await client.subscribe(scope);
+    const initial = await first.get(scope), baseline = f.executor.metrics() as any;
+    const frames: any[] = [];
+    const sourceWrites: unknown[] = [];
+    const stamp = (phase: string) => {
+      const info = statSync(path, { bigint: true });
+      sourceWrites.push({ phase, identity: `${info.dev}:${info.ino}`, bytes: String(info.size),
+        mtimeNs: String(info.mtimeNs), ctimeNs: String(info.ctimeNs) });
+    };
+    clients.forEach((client, subscriber) => client.onChange(value => {
+      if (frames.length < 40) frames.push({ subscriber, status: value.status, reason: value.reason,
+        seq: value.seq, scopeRevision: value.scopeRevision, instanceId: value.instanceId,
+        observedRevisionVector: value.observedRevisionVector,
+        rows: value.rows.map((row: any) => ({ id: row.meta.id, name: row.meta.name, sourceRevision: row.sourceRevision })) });
+    }));
+    const awaiting = (status: string) => Promise.all(clients.map(client => new Promise<void>(resolve => {
+      const stop = client.onChange(value => { if (value.status === status) { stop(); resolve(); } });
+    })));
+    const assertSharedEpoch = (before: any, after: any) => {
+      try {
+        assert.equal(after.queryCount - before.queryCount, 1);
+        assert.equal(after.serializationCount - before.serializationCount, 1);
+        assert.equal(after.eventEncoding.serializations - before.eventEncoding.serializations, 1);
+        assert.equal(after.eventEncoding.frames - before.eventEncoding.frames, clients.length);
+      } catch (error) {
+        console.error(`Partial-write epoch failure: ${JSON.stringify({ scope, sourceWrites, before, after, frames })}`);
+        throw error;
+      }
+    };
+    const degradedFrames = awaiting("degraded");
+    held = openSync(path, "w"); writeSync(held, '{"id":');
+    stamp("partial-write");
+    await f.executor.livenessReasons(); await degradedFrames;
+    const degraded = await Promise.all(clients.map(client => client.get(scope)));
+    for (const value of degraded) {
+      assert.equal(value.status, "degraded");
+      assert.match(value.reason!, /SyntaxError/);
+      assert.deepEqual(value.rows[0]!.meta, initial.rows[0]!.meta, "partial metadata is never published");
+      assert.equal(value.rows[0]!.sourceRevision, initial.rows[0]!.sourceRevision);
+      assert.equal(value.scopeRevision, degraded[0]!.scopeRevision);
+    }
+    const afterFailure = f.executor.metrics() as any;
+    assertSharedEpoch(baseline, afterFailure);
+    const readyFrames = awaiting("ready");
+    writeSync(held, JSON.stringify({ ...meta, name: "changed" }), 0, "utf8");
+    closeSync(held); held = undefined;
+    stamp("complete-write-and-close");
+    await f.executor.livenessReasons(); await readyFrames;
+    const recovered = await Promise.all(clients.map(client => client.get(scope)));
+    for (const value of recovered) {
+      assert.equal(value.status, "ready");
+      assert.equal(value.rows[0]!.meta.name, "changed");
+      assert.notEqual(value.scopeRevision, degraded[0]!.scopeRevision);
+      assert.equal(value.scopeRevision, recovered[0]!.scopeRevision);
+    }
+    assertSharedEpoch(afterFailure, f.executor.metrics());
+  } finally { if (held !== undefined) closeSync(held); await f.close(); }
 });
 
 test("stalled diagnostic completion rejects when its worker exits", { timeout: 10000 }, async () => {
@@ -269,6 +445,7 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
   const f = await fixture({ watchdogMs: 800,
     workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
   try {
+    await f.bootstrapped;
     const a = await f.client(), b = await f.client();
     const began = performance.now();
     for (let i = 0; i < 6; i++) {
@@ -477,26 +654,58 @@ test("an exact-ID client stops retrying a stalled inventory within its retry bud
   } finally { f.worker.off("message", phase); await f.close(); }
 });
 
-test("a failed worker recovers existing subscriptions under a new observation epoch", { timeout: 10000 }, async () => {
+test("a failed worker recovers existing subscriptions under a new observation epoch", { timeout: 10000 }, async t => {
   const f = await fixture();
   try {
     const directory = join(f.root, "runs", "sa_recovery");
+    const scope = { id: "sa_recovery", limit: 1 };
+    const sourceWrites: any[] = [], frames: any[] = [], workerFrames: any[] = [];
+    const record = (target: any[], value: any) => { if (target.length < 32) target.push(value); };
+    const captureSource = () => new Promise(resolve => {
+      const timer = setTimeout(() => { f.worker.off("message", listener); resolve({ error: "source diagnostic unavailable" }); }, 500);
+      const listener = (message: any) => {
+        if (message.type === "diagnostic-source-state" && message.id === "recovery-before-exit") {
+          clearTimeout(timer); f.worker.off("message", listener); resolve(message.state);
+        }
+      };
+      f.worker.on("message", listener);
+      f.worker.postMessage({ type: "diagnostic-source-state", id: "recovery-before-exit", scope });
+    });
+    f.worker.on("message", message => {
+      if (message.type === "event") {
+        const event = JSON.parse(message.line).event;
+        record(workerFrames, { connection: message.connection, generation: message.generation,
+          serial: message.serial, type: event.type, previousSeq: event.previousSeq, snapshot: event.snapshot });
+      }
+    });
     mkdirSync(directory);
-    const write = (name: string) => writeFileSync(join(directory, "meta.json"), JSON.stringify({
-      id: "sa_recovery", cwd: f.root, status: "completed", startedAt: 1, name,
-    }));
+    const write = (name: string) => {
+      const path = join(directory, "meta.json");
+      writeFileSync(path, JSON.stringify({ id: "sa_recovery", cwd: f.root, status: "completed", startedAt: 1, name }));
+      const info = statSync(path, { bigint: true });
+      sourceWrites.push({ name, identity: `${info.dev}:${info.ino}`, bytes: String(info.size),
+        mtimeNs: String(info.mtimeNs), ctimeNs: String(info.ctimeNs) });
+    };
     write("first");
     const client = await f.client();
+    client.onChange(snapshot => record(frames, snapshot));
     await ready(client);
-    await client.subscribe({ id: "sa_recovery", limit: 1 });
+    await client.subscribe(scope);
     write("latest");
     const until = Date.now() + 3000;
     while (client.snapshot?.rows[0]?.meta.name !== "latest") {
+      if (Date.now() >= until) {
+        t.diagnostic(JSON.stringify({ phase: "original-publication-before-exit", sourceWrites, frames,
+          workerFrames, metrics: f.executor.metrics(), disk: JSON.parse(readFileSync(join(directory, "meta.json"), "utf8")),
+          source: await captureSource() }).slice(0, 65536));
+      }
       assert.ok(Date.now() < until, "the original subscription did not observe the source update");
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     const previous = client.snapshot!;
     assert.ok(previous.seq > 1);
+    t.diagnostic(JSON.stringify({ phase: "observed-original-publication-before-exit", sourceWrites,
+      frames, workerFrames, source: await captureSource() }).slice(0, 65536));
     let resynced = false;
     const recovered = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { stop(); reject(new Error("read worker never recovered the existing subscription")); }, 3000);
@@ -597,7 +806,7 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
     const after = await b.request("runtime_get_metrics");
     assert.equal(after.queryCount, before, "the worker cache avoids repeated SQLite for a warmed scope");
     assert.ok(after.cacheHits > 0);
-    assert.equal(after.sqlite.active, 1, "only the derived index exists when no coordinator source is present");
+    assert.equal(after.sqlite.active, 1, "the query index owns the attached checkpoint store when no coordinator source is present");
   } finally { await f.close(); }
 });
 
@@ -720,7 +929,7 @@ test('Subagents and Background share one coordinator read connection in the quer
     await f.executor.livenessReasons();
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
-    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator plus one derived index, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator plus one derived index with attached checkpoints, regardless of domain');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
   } finally { await f.close(); }
 });

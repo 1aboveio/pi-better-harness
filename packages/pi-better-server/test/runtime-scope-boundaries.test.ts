@@ -9,7 +9,7 @@ import type { Socket } from "node:net";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
 
-test("a staged A verification race retains A truth and preserves B until a verified move", async () => {
+test("A staged source race degrades A but preserves verified B frames and cursor", async () => {
   const root = mkdtempSync(join(tmpdir(), "scope-source-race-"));
   const write = (id: string, cwd: string, name: string) => {
     mkdirSync(join(root, "runs", id), { recursive: true });
@@ -23,34 +23,39 @@ test("a staged A verification race retains A truth and preserves B until a verif
     for (const watcher of (model as any).watchers.values()) watcher.close();
     for (const entry of (model as any).rootParents.values()) entry.watcher.close();
     const scope = { cwd: b, limit: 1 }, first = model.snapshot(scope);
-    let frames = 0;
-    model.onChange(() => frames++, scope);
+    let bFrames = 0;
+    const aFrames: any[] = [];
+    model.onChange(() => bFrames++, scope);
+    model.onChange(() => aFrames.push(model.snapshot({ cwd: a })), { cwd: a });
     write("sa_a", a, "staged");
     const reader = (model as any).reader, revision = reader.revision.bind(reader);
     reader.revision = () => { write("sa_a", a, "committed-during-verification"); reader.revision = revision; return revision(); };
     await (model as any).scan([join(root, "runs/sa_a/meta.json")]);
-    assert.equal(model.observation().status, "degraded");
-    assert.match(model.snapshot({ cwd: a }).reason!, /Source changed during observation/);
-    assert.equal(model.snapshot({ cwd: a }).rows[0]!.meta.name, "old");
-    assert.equal(frames, 0);
+    assert.equal(model.observation().status, "degraded", "aggregate observation retains the failure");
+    assert.match(aFrames[0]?.reason, /Source changed during observation/);
+    assert.equal(aFrames[0]?.rows[0].meta.name, "old", "unpublished staging is not visible");
+    assert.equal(bFrames, 0, "unrelated content sends no scoped frames");
     assert.equal(model.snapshot(scope).status, "ready");
     assert.equal(model.snapshot(scope).scopeRevision, first.scopeRevision);
     assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
     await model.reconcile();
+    assert.equal(model.snapshot({ cwd: a }).status, "ready");
     assert.equal(model.snapshot({ cwd: a }).rows[0]!.meta.name, "committed-during-verification");
-    assert.equal(frames, 0);
+    assert.equal(bFrames, 0);
+    assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
     write("sa_a", a, "staged-move");
-    reader.revision = () => { write("sa_a", b, "moved-into-B"); reader.revision = revision; return revision(); };
+    reader.revision = () => { write("sa_a", b, "moved-into-B-during-verification"); reader.revision = revision; return revision(); };
     await (model as any).scan([join(root, "runs/sa_a/meta.json")]);
-    assert.equal(model.snapshot(scope).status, "degraded", "a concurrent destination membership affects B");
-    assert.ok(frames > 0);
+    assert.equal(model.snapshot(scope).status, "degraded", "concurrent destination membership affects B");
+    assert.ok(bFrames > 0);
     await model.reconcile();
     model.invalidate("Source root unavailable");
-    assert.equal(model.snapshot(scope).status, "degraded");
+    assert.equal(model.snapshot(scope).status, "degraded", "unknown root failures still affect B");
+    assert.ok(bFrames > 0);
   } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("a held partial A write degrades A but sends no unrelated B frames", async () => {
+test("A partial JSON write degrades only its retained namespace and never publishes partial metadata", async () => {
   const root = mkdtempSync(join(tmpdir(), "scope-malformed-"));
   const put = (id: string, cwd: string) => {
     mkdirSync(join(root, "runs", id), { recursive: true });

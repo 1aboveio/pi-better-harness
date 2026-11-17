@@ -2,7 +2,7 @@ import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
 import { opendir, readFile, stat, writeFile, mkdir, rename } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
-import { dirname, relative, join, resolve, sep } from "node:path";
+import { basename, dirname, relative, join, resolve, sep } from "node:path";
 import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -11,11 +11,12 @@ import { performance } from "node:perf_hooks";
 import { createAssignmentProjector } from "./domain/assignment-projection.mjs";
 import { createAssignmentReader } from "./domain/assignment-observation.mjs";
 import { parseArchivedAttempt, parseArchivedSessionState } from "./domain/session-store.mjs";
-import { parseRun, parseRunDisplay, readRunTranscript } from "./domain/parse.mjs";
+import { parseRun, parseRunDisplay, readRunTranscript, encodeParseLogState, decodeParseLogState } from "./domain/parse.mjs";
 import { withLogReadBatch, logReadMetrics } from "./domain/log-cursor.mjs";
 import { fmtSpend } from "./domain/widget.mjs";
 import { effectiveStatus } from "./domain/process-status.mjs";
-import { extractChildEventFactsFromLog, healthThresholdsForConfig } from "./domain/health-observation.mjs";
+import { extractChildEventFactsFromLog, healthThresholdsForConfig, encodeHealthLogState, decodeHealthLogState } from "./domain/health-observation.mjs";
+import { LogCheckpoints } from "./log-checkpoints.ts";
 import { BackgroundObservation } from "./background.ts";
 // @ts-expect-error Generated canonical read-only failure projection.
 import { readFailureStateReadOnly, pendingFailureAttention } from "./domain/subagents/shared-failure-observations.domain.mjs";
@@ -70,10 +71,11 @@ export class WorkReadModel {
   private db: any;
   private reader: ReturnType<typeof createAssignmentReader>;
   private files = new Map<string, { signature: string; meta: any }>();
-  private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string }; health?: any; recipientPending?: boolean; failurePending?: boolean }>();
+  private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string; diagnostics?: string[]; coverage?: any }; health?: any; recipientPending?: boolean; failurePending?: boolean }>();
   private logs = new Map<string, string>();
   private parseStates = new Map();
   private healthStates = new Map();
+  private checkpoints: LogCheckpoints;
   private failureJournals = new Map<string, string>();
   private processes = new Map<string, string>();
   private staged?: {
@@ -115,7 +117,7 @@ export class WorkReadModel {
   private counters = { inventories: 0, metadataReads: 0, projections: 0, assignmentProjections: 0, logProjections: 0, healthProjections: 0, failureProjections: 0, healthRecomputations: 0, healthConfigInvalidations: 0 };
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, healthDeadline: 0, unverified: 0, initial: 0 };
   get metrics() {
-    return { ...this.counters, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
+    return { ...this.counters, checkpoints: { ...this.checkpoints.metrics, hotDisplay: this.parseStates.size, hotHealth: this.healthStates.size }, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
       indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size,
       sourceParentWatchers: this.rootParents.size, rootParentWatchers: this.rootParents.size };
   }
@@ -129,6 +131,7 @@ export class WorkReadModel {
     this.agentDir = agentDir; this.instanceId = instanceId;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
+    this.checkpoints = new LogCheckpoints(join(agentDir, "runtime-log-checkpoints.sqlite"), this.db);
     this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"));
     this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(true), refresh => this.reader.connection(refresh));
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
@@ -222,6 +225,11 @@ export class WorkReadModel {
 
   /** File notifications are hints, never authority. Unknown names owe scoped repair. */
   fileHint(directory: string, name?: string) {
+    // Some fs.watch backends report the watched directory's own name for a
+    // contained write. It identifies a source to verify, not a child entry.
+    if (name === basename(directory)) {
+      name = directory.startsWith(this.runs + sep) ? "meta.json" : undefined;
+    }
     let path: string | undefined;
     if (directory === this.runs && name && safeId.test(name)) path = join(directory, name, "meta.json");
     else if ([this.archives, this.markers].includes(directory) && name && /^[A-Za-z0-9_-]+\.json$/.test(name)) path = join(directory, name);
@@ -409,7 +417,8 @@ export class WorkReadModel {
 
   private scopeStatus(scope: WorkScope): { status: WorkSnapshot["status"]; reason?: string } {
     const race = this.sourceRace;
-    // Only verified attribution can narrow degradation; unknown failures stay global.
+    // Only a validated, entity-attributed retry can leave another scope ready.
+    // Root, coordinator, unattributed and initial-import failures stay global.
     if (this.imported && this.state === "degraded" && race && this.reason === race.reason
         && [...this.sourceErrors.keys()].every(path => race.paths.has(path))
         && !race.rows.some(row => this.matchesScope({ id: scope.id, cwd: scope.cwd, sessionId: scope.sessionId }, row))) {
@@ -625,10 +634,12 @@ export class WorkReadModel {
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
       for (const [path, entry] of next) {
         if (path.startsWith(this.markers + sep)) continue;
+        // Compact archives omit volatile delivery markers; discovery order must
+        // never let them replace a retained, verified live record.
+        if (path.startsWith(this.archives + sep) && next.has(join(this.runs, entry.meta.id, "meta.json"))) continue;
         const marker = markers.get(entry.meta.sessionId);
         if (path.startsWith(this.archives + sep) && marker && marker.attemptId !== entry.meta.id && marker.startedAt >= entry.meta.startedAt) continue;
-        // Live metadata remains authoritative regardless of source arrival order.
-        if (!path.startsWith(this.archives + sep) || !next.has(join(this.runs, entry.meta.id, "meta.json"))) metas.set(entry.meta.id, entry.meta);
+        metas.set(entry.meta.id, entry.meta);
       }
       const attempts = [...metas.values()];
       const affected = new Set<string>();
@@ -701,9 +712,33 @@ export class WorkReadModel {
           if (logChanged) withLogReadBatch(() => {
             this.counters.logProjections++; this.counters.healthProjections++;
             const logPath = join(this.runs, meta.id, "output.log");
-            const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRunDisplay(meta.id, { logPath, states: this.parseStates }) : undefined;
+            if (!this.parseStates.has(logPath) || !this.healthStates.has(logPath)) {
+              const saved = this.checkpoints.load(logPath);
+              if (saved) {
+                try {
+                  if (!Number.isSafeInteger(saved.display.cursor.offset) || !Number.isSafeInteger(saved.health.cursor.offset)) throw new Error("Invalid checkpoint offset");
+                  this.parseStates.set(logPath, decodeParseLogState(saved.display));
+                  this.healthStates.set(logPath, decodeHealthLogState(saved.health));
+                } catch { this.parseStates.delete(logPath); this.healthStates.delete(logPath); }
+              }
+            }
+            const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRunDisplay(meta.id, { logPath, states: this.parseStates, summaryOnly: true }) : undefined;
             display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.tool ?? "" };
             health = logs.has(meta.id) ? extractChildEventFactsFromLog(meta.id, { logPath, states: this.healthStates }) : undefined;
+            const displayState = this.parseStates.get(logPath), healthState = this.healthStates.get(logPath);
+            display = { ...display!, diagnostics: parsed?.diagnostics, coverage: displayState ? {
+              start: displayState.cursor.coverageStart ?? 0, offset: displayState.cursor.offset,
+              totalBytes: displayState.totalBytes, missing: displayState.cursor.missing,
+              complete: !displayState.catchingUp && !displayState.windowTruncated && displayState.cursor.offset === displayState.totalBytes,
+            } : undefined };
+            if (health && healthState) health = { ...health, coverage: { start: healthState.cursor.coverageStart ?? 0,
+              offset: healthState.cursor.offset, missing: healthState.cursor.missing } };
+            if (displayState?.catchingUp) logs.set(meta.id, `${logs.get(meta.id)}:catching-up`);
+            if (displayState && healthState) this.checkpoints.save(logPath, {
+              display: encodeParseLogState(displayState), health: encodeHealthLogState(healthState),
+            });
+            while (this.parseStates.size > 64) this.parseStates.delete(this.parseStates.keys().next().value);
+            while (this.healthStates.size > 64) this.healthStates.delete(this.healthStates.keys().next().value);
           });
           if (logChanged || assignmentChanged || deadlineChanged || healthConfig.revision !== baseline.healthRevision) {
             this.counters.healthRecomputations++;
@@ -757,7 +792,8 @@ export class WorkReadModel {
             if (!globallyUnverified && (this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
                 && path.startsWith(this.runs + sep) && info.size <= 1024n * 1024n && !failedPaths.size && [...this.sourceErrors].every(([path, reason]) =>
               this.sourceRace?.paths.has(path) && reason === this.sourceRace.reason)) {
-              // Validate routing only; the uncommitted row remains unqueryable.
+              // Recheck only for error routing: a concurrent move can affect a
+              // new workspace/recipient. Never publish this uncommitted row.
               try {
                 this.counters.metadataReads++;
                 const current = JSON.parse(await readFile(path, "utf8"));
@@ -769,7 +805,7 @@ export class WorkReadModel {
                     ...[...uncommitted].flatMap(id => [this.projected.get(id), this.staged?.projected.get(id)].filter(Boolean)),
                     { meta: current, assignment: { state: current.status } }] };
                 }
-              } catch { /* Unstable attribution keeps degradation global. */ }
+              } catch { /* Unreadable/unstable routing evidence keeps degradation global. */ }
             }
             throw error;
           }
@@ -814,7 +850,8 @@ export class WorkReadModel {
         if (error) this.sourceErrors.set(path, error);
         else this.sourceErrors.delete(path);
       }
-      // Retained raw parse failures keep their verified namespace, never partial JSON.
+      // Incomplete raw writes retain their verified namespace, not partial JSON.
+      // New/unknown records and mixed failures cannot be narrowed this way.
       if (globallyUnverified) this.sourceRace = undefined;
       if (!globallyUnverified && failedPaths.size && failedPaths.size === malformedPaths.size
           && (previousState === "ready" || this.sourceRace && previousReason === this.sourceRace.reason)
@@ -934,7 +971,7 @@ export class WorkReadModel {
     for (const { watcher } of this.rootParents.values()) watcher.close();
     this.rootParents.clear();
     this.watchers.clear(); this.rootWatchIdentities.clear();
-    await this.pending; await this.repairWrite; this.listeners.clear(); await this.background.close(); this.reader.close(); this.db.close();
+    await this.pending; await this.repairWrite; this.listeners.clear(); await this.background.close(); this.reader.close(); this.checkpoints.close(); this.db.close();
     await this.repair?.return(undefined);
   }
 }

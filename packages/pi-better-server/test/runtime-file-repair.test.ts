@@ -30,6 +30,70 @@ async function settleHints(model: WorkReadModel) {
   assert.equal(model.metrics.scheduling.queued, 0, "hint obligations must be drained");
 }
 
+test("late compact archives cannot replace live recipient markers or reset its cursor", async () => {
+  const f = fixture();
+  const model = new WorkReadModel(f.agent, "source-precedence", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  const id = "sa_pending";
+  const meta = f.put(id, { status: "completed", callback: true, completionCallbackPendingAt: 1,
+    recipe: { version: 1, sessionId: id, sessionDir: join(f.root, "durable/sessions"), cwd: f.root } });
+  f.put("sa_other", { status: "completed" });
+  const scope = { cwd: f.root, sessionId: "parent", limit: 1 };
+  try {
+    await model.reconcile();
+    const first = model.snapshot(scope);
+    assert.equal(model.snapshot({ ...scope, pendingRecipient: true }).rows[0]!.meta.id, id);
+    // Completed archives omit the volatile completion markers by design.
+    const compact: Record<string, unknown> = { ...meta };
+    delete compact.completionCallbackPendingAt;
+    delete compact.callbackOrigin;
+    mkdirSync(model.archives, { recursive: true });
+    writeFileSync(join(model.archives, `${id}.json`), JSON.stringify({ version: 1, meta: compact }));
+    model.fileHint(model.archives, `${id}.json`);
+    await settleHints(model);
+    assert.equal(model.snapshot({ id }).rows[0]!.meta.completionCallbackPendingAt, 1);
+    assert.equal(model.snapshot({ ...scope, pendingRecipient: true }).rows[0]!.meta.id, id);
+    assert.equal(model.snapshot(scope).scopeRevision, first.scopeRevision);
+    assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
+    writeFileSync(join(f.runs, id, "meta.json"), JSON.stringify({ ...meta, completionCallbackSentAt: 2 }));
+    model.fileHint(join(f.runs, id), "meta.json"); await settleHints(model);
+    assert.equal(model.snapshot({ ...scope, pendingRecipient: true }).rows.length, 0);
+    assert.throws(() => model.snapshot({ ...scope, cursor: first.nextCursor }), /resync_required/);
+    // Losing volatile storage still exposes the verified archive for history.
+    rmSync(join(f.runs, id), { recursive: true });
+    model.fileHint(f.runs, id); await settleHints(model);
+    assert.equal(model.snapshot({ id }).rows[0]!.meta.id, id);
+    assert.equal(model.snapshot({ id }).rows[0]!.meta.completionCallbackPendingAt, undefined);
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("directory self-name callbacks verify their owned source instead of a fictitious child", async () => {
+  const f = fixture();
+  const id = "sa_self_name";
+  f.put(id, { status: "completed", name: "first" });
+  const model = new WorkReadModel(f.agent, "directory-self-name", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile(); await settleHints(model);
+    const trace = sourceEventTrace(model);
+    f.put(id, { status: "completed", name: "latest" });
+    const before = trace().total;
+    (model as any).watchers.get(join(f.runs, id)).emit("change", "change", id);
+    const admitted = trace().records.filter((entry: any) => entry.sequence > before);
+    assert.ok(admitted.some((entry: any) => entry.stage === "raw-callback" && entry.owned === true));
+    assert.ok(admitted.some((entry: any) => entry.stage === "queue-admit" && entry.path === join(f.runs, id, "meta.json")),
+      "a self-name child event must admit its actual metadata path");
+    await settleHints(model);
+    assert.equal(model.snapshot({ id }).rows[0]?.meta.name, "latest");
+    f.put("sa_root_self", { status: "completed", name: "from-root" });
+    const rootBefore = trace().total;
+    (model as any).watchers.get(f.runs).emit("change", "change", "runs");
+    const rootEvents = trace().records.filter((entry: any) => entry.sequence > rootBefore);
+    assert.equal(rootEvents.some((entry: any) => entry.stage === "queue-admit" && entry.path === join(f.runs, "runs", "meta.json")), false,
+      "a source-root self event is not a run named runs");
+    await model.reconcile(); await settleHints(model);
+    assert.equal(model.snapshot({ id: "sa_root_self" }).rows[0]?.meta.name, "from-root");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("retired and current raw callbacks cross only their owned source boundaries", async t => {
   const f = fixture();
   const model = new WorkReadModel(f.agent, "callback-ownership", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
@@ -475,6 +539,28 @@ test("exact deletion hints settle a follow-up turn scheduled when the first turn
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("a repair pass visits each known, failed, or discovered path once and retains deleted paths", async () => {
+  const f = fixture(); f.put("sa_known"); f.put("sa_deleted"); f.put("sa_failed");
+  writeFileSync(join(f.runs, "sa_failed", "meta.json"), "broken");
+  const model = new WorkReadModel(f.agent, "repair-unique", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    rmSync(join(f.runs, "sa_deleted"), { recursive: true });
+    f.put("sa_discovered");
+    const paths: string[] = [];
+    for await (const batch of (model as any).repairPaths()) {
+      assert.ok(batch.length <= 128);
+      paths.push(...batch);
+    }
+    const expected = ["sa_known", "sa_deleted", "sa_failed", "sa_discovered"].map(id => join(f.runs, id, "meta.json"));
+    assert.deepEqual(paths.slice().sort(), expected.sort(), "known and failed paths must not be scheduled again by discovery");
+    f.put("sa_failed");
+    await model.reconcile();
+    assert.equal(model.observation().status, "ready", "the next pass still repairs a formerly failed path");
+    assert.deepEqual(model.snapshot().rows.map(row => row.meta.id).sort(), ["sa_discovered", "sa_failed", "sa_known"]);
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("failed-source deletion repair keeps its 128-path budget and does not clear unverified errors early", async () => {
   const f = fixture();
   const model = new WorkReadModel(f.agent, "failed-batches", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
@@ -548,28 +634,6 @@ test("empty Subagent repair still publishes independent Background coordinator p
     assert.equal(model.metrics.scheduling.repairEntries, 0);
     assert.equal(model.metrics.logReads.bytes, logBytes);
   } finally { off(); await model.close(); store.close(); rmSync(f.root, { recursive: true, force: true }); }
-});
-
-test("a repair pass visits each known, failed, or discovered path once and retains deleted paths", async () => {
-  const f = fixture(); f.put("sa_known"); f.put("sa_deleted"); f.put("sa_failed");
-  writeFileSync(join(f.runs, "sa_failed", "meta.json"), "broken");
-  const model = new WorkReadModel(f.agent, "repair-unique", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
-  try {
-    await model.reconcile();
-    rmSync(join(f.runs, "sa_deleted"), { recursive: true });
-    f.put("sa_discovered");
-    const paths: string[] = [];
-    for await (const batch of (model as any).repairPaths()) {
-      assert.ok(batch.length <= 128);
-      paths.push(...batch);
-    }
-    const expected = ["sa_known", "sa_deleted", "sa_failed", "sa_discovered"].map(id => join(f.runs, id, "meta.json"));
-    assert.deepEqual(paths.slice().sort(), expected.sort(), "known and failed paths must not be scheduled again by discovery");
-    f.put("sa_failed");
-    await model.reconcile();
-    assert.equal(model.observation().status, "ready", "the next pass still repairs a formerly failed path");
-    assert.deepEqual(model.snapshot().rows.map(row => row.meta.id).sort(), ["sa_discovered", "sa_failed", "sa_known"]);
-  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test("initial repair retains health configuration degradation until valid settings recover", async () => {
