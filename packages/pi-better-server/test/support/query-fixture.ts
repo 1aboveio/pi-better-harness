@@ -28,11 +28,17 @@ export async function fixture(options: { capacity?: number; timeoutMs?: number; 
   const sockets = new Set<Socket>();
   let closingFixture = false;
   const peerErrors: Array<{ role: string; phase: string; code?: string; expected: boolean }> = [];
+  const peerActivity = { lateRepliesSkipped: 0 };
   const server = createServer(socket => {
     sockets.add(socket); socket.on("close", () => sockets.delete(socket));
     let closingPeer = false;
+    let deferredReply: (() => void) | undefined;
+    const writable = () => {
+      if (closingPeer || closingFixture) { peerActivity.lateRepliesSkipped++; return false; }
+      return !socket.destroyed;
+    };
     socket.on("error", (error: NodeJS.ErrnoException) => {
-      const expected = error.code === "ECONNRESET" && (closingPeer || closingFixture);
+      const expected = ["ECONNRESET", "EPIPE"].includes(error.code ?? "") && (closingPeer || closingFixture);
       if (peerErrors.length < 16) peerErrors.push({ role: "accepted-peer", phase: closingPeer ? "announced-close" : closingFixture ? "fixture-close" : "active", code: error.code, expected });
       if (!expected) throw error;
     });
@@ -45,17 +51,19 @@ export async function fixture(options: { capacity?: number; timeoutMs?: number; 
         const end = buffer.indexOf("\n"), line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
         const command = JSON.parse(line);
         const reply = (data: unknown, error?: unknown) => {
-          if (!socket.destroyed) socket.write(JSON.stringify({ type: "response", id: command.id,
+          if (writable()) socket.write(JSON.stringify({ type: "response", id: command.id,
             success: !error, data, error: error ? String(error) : undefined }) + "\n");
         };
         if (["hello", "ping"].includes(command.type)) { reply({ ok: true }); continue; }
+        if (command.type === "fixture_defer_reply") { deferredReply = () => reply({ ok: true }); continue; }
         if (command.type === "fixture_close") {
-          closingPeer = true;
           reply({ ok: true });
+          closingPeer = true; queries.close();
+          deferredReply?.(); deferredReply = undefined;
           continue;
         }
         try { void queries.handle(command).then(data => {
-          if (!socket.destroyed) socket.write(JSON.stringify({ type: "response", id: command.id, success: true }).slice(0, -1) + ',"data":' + data.json + "}\n");
+          if (writable()) socket.write(JSON.stringify({ type: "response", id: command.id, success: true }).slice(0, -1) + ',"data":' + data.json + "}\n");
         }, error => reply(undefined, error)); }
         catch (error) { reply(undefined, error); }
       }
@@ -94,5 +102,5 @@ export async function fixture(options: { capacity?: number; timeoutMs?: number; 
   // A test timeout does not unwind a suspended body into its finally block.
   after(close);
   server.listen(path); await once(server, "listening");
-  return { executor, client, stall, worker, bootstrapped, close, root, path, sockets, peerErrors };
+  return { executor, client, stall, worker, bootstrapped, close, root, path, sockets, peerErrors, peerActivity };
 }

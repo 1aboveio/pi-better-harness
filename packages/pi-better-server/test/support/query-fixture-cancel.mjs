@@ -18,15 +18,21 @@ test("cancelled query fixture releases its owned resources", { timeout: 1000 }, 
   t.after(() => {
     t.diagnostic(JSON.stringify({ workerStopped: f.worker.threadId === -1,
       clientDestroyed: client.socket.destroyed, transportRemoved: !existsSync(dirname(f.path)),
-      rootRemoved: !existsSync(f.root), mode, peerErrors: f.peerErrors }));
+      rootRemoved: !existsSync(f.root), mode, peerErrors: f.peerErrors, peerActivity: f.peerActivity }));
   });
   if (mode !== "bootstrap-held") {
     await f.worker.terminate();
-    if (mode !== "unannounced-reset") await client.request("fixture_close");
+    let deferred;
+    if (!mode?.startsWith("unannounced-")) {
+      deferred = assert.rejects(client.request("fixture_defer_reply"), /client closed/);
+      await client.request("fixture_close");
+    }
     client.close();
+    await deferred;
+    if (mode === "already-ended") assert.ok(f.peerActivity.lateRepliesSkipped >= 1, "closure must suppress queued replies");
     // Exercise the external transport error boundary after this exact peer closes.
-    const code = mode === "unexpected-error" ? "EIO" : "ECONNRESET";
-    peer.emit("error", Object.assign(new Error(`fixture peer ${code}`), { code }));
+    const codes = mode === "already-ended" ? ["ECONNRESET", "EPIPE"] : [mode === "unexpected-error" ? "EIO" : mode === "unannounced-pipe" ? "EPIPE" : "ECONNRESET"];
+    for (const code of codes) peer.emit("error", Object.assign(new Error(`fixture peer ${code}`), { code }));
   }
   // Cancellation must run the fixture's hook even though this body never unwinds.
   await new Promise(() => {});

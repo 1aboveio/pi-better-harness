@@ -37,14 +37,17 @@ test("query fixture cancellation closes live and already-ended resources without
     assert.equal(child.status, 1, `the deliberate test timeout remains a failure, not a waived assertion\n${child.stdout}\n${child.stderr}`);
     assert.match(child.stdout, /test timed out after 1000ms/);
     assert.match(child.stdout, /"workerStopped":true,"clientDestroyed":true,"transportRemoved":true,"rootRemoved":true/);
-    if (mode === "already-ended") assert.match(child.stdout, /"code":"ECONNRESET","expected":true/);
+    if (mode === "already-ended") {
+      assert.match(child.stdout, /"code":"ECONNRESET","expected":true/);
+      assert.match(child.stdout, /"code":"EPIPE","expected":true/);
+    }
   }
 });
 
 test("unexpected accepted-peer errors cannot stand in for the intentional cancellation timeout", { timeout: 20000 }, () => {
   const runtime = Number(process.versions.node.split(".")[0]) < 24 ? process.env.PI_TEST_PRIVATE_RUNTIME_NODE : process.execPath;
   assert.ok(runtime);
-  for (const mode of ["unannounced-reset", "unexpected-error"]) {
+  for (const mode of ["unannounced-reset", "unannounced-pipe", "unexpected-error"]) {
     const env = { ...process.env, PI_QUERY_FIXTURE_CANCEL_MODE: mode } as NodeJS.ProcessEnv;
     delete env.NODE_TEST_CONTEXT;
     const child: SpawnSyncReturns<string> = spawnSync(runtime, ["--import", "tsx", "--test", "--test-isolation=none", "--test-reporter=tap",
@@ -52,7 +55,7 @@ test("unexpected accepted-peer errors cannot stand in for the intentional cancel
     assert.equal(child.error, undefined);
     assert.equal(child.status, 1, child.stderr);
     assert.doesNotMatch(child.stdout, /test timed out after 1000ms/);
-    assert.match(child.stdout, mode === "unannounced-reset" ? /code: 'ECONNRESET'/ : /code: 'EIO'/);
+    assert.match(child.stdout, mode === "unannounced-reset" ? /code: 'ECONNRESET'/ : mode === "unannounced-pipe" ? /code: 'EPIPE'/ : /code: 'EIO'/);
     assert.match(child.stdout, /"expected":false/);
     assert.match(child.stdout, /"workerStopped":true,"clientDestroyed":true,"transportRemoved":true,"rootRemoved":true/);
   }
