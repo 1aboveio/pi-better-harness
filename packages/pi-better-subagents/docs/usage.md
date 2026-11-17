@@ -497,7 +497,14 @@ does not start an emulator or allocate test resources. The setting governs
 the fixed adapter only, not every OS process operation available through bash
 or trusted tools. New launches capture changes; running children retain their
 launch-time setting. Raw macOS `/bin/ps` remains subject to setuid execution
-restrictions. See [ADR 0011](../../../docs/adr/0011-fixed-read-only-process-inventory.md).
+restrictions. With Process Read and Commands On, the task PATH includes a
+protected non-setuid compatibility entry for exactly
+`ps -p PID -o lstart= -o comm=`. It returns the current-user process's start time
+and executable path, without exposing arguments or environment. The harness
+requires Xcode Command Line Tools to build this fixed helper; failure refuses
+identity queries without disabling other commands. This does not alter absolute
+`/bin/ps` or callers that replace PATH. See [ADR 0024](../../../docs/adr/0024-sandbox-process-identity-compatibility.md)
+and [ADR 0011](../../../docs/adr/0011-fixed-read-only-process-inventory.md).
 Network Off blocks task network access while Pi's provider transport remains
 available. The confined file worker has an 8 MiB file limit and rejects larger
 files explicitly; use confined commands for larger files when commands are On.
