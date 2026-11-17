@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isTerminalStatus } from "./types.mjs";
@@ -259,7 +259,7 @@ function recentEntries(origin) {
     const directory = recentPath(origin);
     try {
         registryIo.indexDirectoryReads++;
-        const entries = readdirSync(directory).flatMap(id => {
+        const entries = readdirSync(directory).filter(id => !id.startsWith(".")).flatMap(id => {
             try {
                 registryIo.indexRevisionChecks++;
                 return [{ id, observedAt: statSync(join(directory, id)).mtimeMs }];
@@ -280,6 +280,10 @@ function recentEntries(origin) {
 }
 export function recentMetaDeadline(origin) {
     return recentEntries(origin).map(entry => entry.observedAt + RECENT_MS);
+}
+/** Exact cooperative source identity; no metadata or historical enumeration. */
+export function observationRevisionForOrigin(origin) {
+    return [originActiveIndexDir(origin), recentPath(origin)].map(indexDirectorySignature).join(";");
 }
 /** Bounded cooperative writes, including results written before the first reader. */
 export function observeRecentMetasForOrigin(origin) {
@@ -342,12 +346,14 @@ function indexMeta(meta) {
         mkdirSync(recentDirectory, { recursive: true });
         // Independent pointers preserve concurrent writers; prune only this bounded
         // recent-write accelerator, never the authoritative metadata or history.
-        const candidates = readdirSync(recentDirectory);
+        const candidates = readdirSync(recentDirectory).filter(id => !id.startsWith("."));
         const retained = new Set(recentEntries(origin).filter(entry => entry.id !== meta.id).slice(0, RECENT_LIMIT - 1).map(entry => entry.id));
         for (const id of candidates)
             if (id !== meta.id && !retained.has(id))
                 removeIndexEntry(recentDirectory, id);
-        writeFileSync(join(recentDirectory, meta.id), "");
+        const temporary = join(recentDirectory, `.${meta.id}.${process.pid}.next`);
+        writeFileSync(temporary, "");
+        renameSync(temporary, join(recentDirectory, meta.id));
     }
     catch {
         // Indexes are accelerators; meta.json remains authoritative.

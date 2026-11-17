@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 // @ts-expect-error Generated canonical passive runner observation.
 import { snapshot } from "./domain/background/snapshot.mjs";
 // @ts-expect-error Generated canonical registry queries.
-import { observeMetasForOrigin, observeRecentMetasForOrigin, recentMetaDeadline, belongsToOrigin, readMeta, getRegistryIoMetrics } from "./domain/background/registry.mjs";
+import { observeMetasForOrigin, observeRecentMetasForOrigin, recentMetaDeadline, observationRevisionForOrigin, belongsToOrigin, readMeta, getRegistryIoMetrics } from "./domain/background/registry.mjs";
 import { BackgroundHistory } from "./background-history.ts";
 import type { WorkScope } from "./read-model.ts";
 import { ENTITY_BUDGET } from "./work-budget.ts";
@@ -52,6 +52,17 @@ export class BackgroundObservation {
   reason?: string;
   get connectionCount() { return this.readConnection ? 0 : this.ownDb ? 1 : 0; }
   get scopeCount() { return this.legacy.size; }
+  sourceRevision(scope: WorkScope): string[] {
+    if (!scope.cwd) return [];
+    return [observationRevisionForOrigin({ cwd: scope.cwd, sessionId: scope.sessionId }),
+      ...(scope.sessionId ? [observationRevisionForOrigin({ cwd: scope.cwd })] : [])];
+  }
+  nextDeadline(scope: WorkScope): number | null {
+    if (!scope.cwd) return null;
+    const deadlines = [...recentMetaDeadline({ cwd: scope.cwd, sessionId: scope.sessionId }),
+      ...(scope.sessionId ? recentMetaDeadline({ cwd: scope.cwd }) : [])];
+    return deadlines.length ? Math.min(...deadlines) : null;
+  }
   get registryMetrics() { return getRegistryIoMetrics(); }
   get changeMetrics() { return { ...this.inbox.metrics, coverage: this.hasInputVersions ? "cooperative-journal-and-exact-files" : "legacy-bounded-repair",
     operationRepairComplete: this.repairComplete, repairAfter: this.repairAfter, queuedHints: this.dirtyOperations.size,

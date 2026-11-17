@@ -373,7 +373,7 @@ export class WorkReadModel {
     return entry;
   }
   contentRevision(scope: WorkScope = {}) {
-    if (scope.background) return String(this.revision);
+    if (scope.background) return scope.backgroundHistory ? String(this.revision) : hash([this.revision, this.background.sourceRevision(scope)]);
     const entry = this.scopeEntry(scope);
     return `${entry.token}:${entry.revision}`;
   }
@@ -1015,7 +1015,7 @@ export class WorkReadModel {
         rows: tasks.map(meta => ({ meta, assignment: null, sourceRevision: hash(meta) })), totalMatching: index?.page.total ?? tasks.length,
         ...(index?.page.nextCursor ? { nextCursor: index.page.nextCursor } : {}),
         ...(index ? { backgroundIndex: index } : {}),
-        activity: { active }, nextDeadline: null };
+        activity: { active }, nextDeadline: scope.backgroundHistory ? null : this.background.nextDeadline(scope) };
     }
     const clauses: string[] = [], args: any[] = [];
     if (scope.id) { clauses.push("id = ?"); args.push(scope.id); }

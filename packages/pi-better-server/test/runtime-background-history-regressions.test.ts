@@ -28,17 +28,20 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
     if (i >= 4) lease.store.recordTerminalOutcome({ operationId, eventId: operationId, owner: recipient,
       outcome: "succeeded", evidence: [{ kind: "terminal-record", ref: operationId }] });
   }
-  const [{ registerTools }, { createObservedWaitHost }, { closeBackgroundObservation }, registry, { registerBackgroundTasksGoalProvider }] = await Promise.all([
-    load("tools"), load("observed-waits"), load("work-observation"), load("registry"), load("goal-provider"),
+  const [{ registerTools }, { createObservedWaitHost }, { closeBackgroundObservation }, registry, { registerBackgroundTasksGoalProvider }, { recordFailure }] = await Promise.all([
+    load("tools"), load("observed-waits"), load("work-observation"), load("registry"), load("goal-provider"), load("failures"),
   ]);
   const legacyIds = Array.from({ length: legacyCount }, (_, i) => `bg_history_retained_${i}`);
   legacyIds.forEach((task, i) => registry.writeMeta({ id: task, kind: "process", status: "succeeded", startedAt: i + 1,
     endedAt: i + 2, cwd: root, logPath: join(root, `log-${i}`), spawnPid: process.pid, callback: false,
     callbackOrigin: { cwd: root, sessionId: owner.sessionId } }));
   const capturedIds = ["bg_output_owned", "bg_output_foreign", "bg_output_unknown"];
-  capturedIds.forEach((task, i) => registry.writeMeta({ id: task, kind: "command_watch", status: "succeeded",
-    startedAt: Date.now() + 50000, endedAt: 2, cwd: root, logPath: join(root, `captured-${i}`), spawnPid: process.pid, callback: false,
-    callbackOrigin: i === 2 ? undefined : { cwd: root, sessionId: i === 0 ? owner.sessionId : "foreign" } }));
+  const budgetId = "bg_output_previous_budget";
+  const budget = { id: budgetId, name: "budget", kind: "command_watch", status: "succeeded", startedAt: 1, endedAt: 2,
+    cwd: root, logPath: registry.logPathFor(budgetId), spawnPid: process.pid, callback: false,
+    callbackOrigin: { cwd: root, sessionId: owner.sessionId } };
+  registry.writeMeta(budget); writeFileSync(budget.logPath, "");
+  recordFailure(budget, "failure_when", "failure condition matched", "poll", { category: "condition" });
   const executor = new WorkQueryExecutor(root, "history-component", {
     modelOptions: { baseDir: join(root, "raw"), durableDir: join(root, "archive"), supervisorDirectory: join(root, "supervisor"), intervalMs: 60000 } });
   const events = new EventEmitter(), tools = new Map<string, any>();
@@ -60,6 +63,50 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([(async () => {
+      const cachedList = (await run("bg_task_list")).content[0].text;
+      assert.match(cachedList, new RegExp(budgetId));
+      // Original output.test.ts afterEach removes files without registry removal.
+      rmSync(registry.taskDir(budgetId), { recursive: true, force: true });
+      capturedIds.forEach((task, i) => {
+        registry.writeMeta({ id: task, name: ["ours", "foreign", "unknown"][i], kind: "command_watch", status: "succeeded",
+          startedAt: Date.now() + 50000, endedAt: 2, cwd: root, logPath: registry.logPathFor(task), spawnPid: process.pid, callback: false,
+          callbackOrigin: i === 2 ? undefined : { cwd: root, sessionId: i === 0 ? owner.sessionId : "foreign" } });
+        writeFileSync(registry.logPathFor(task), "");
+      });
+      const immediate = (await run("bg_task_list")).content[0].text;
+      const freshKey = await client.get({ background: true, cwd: root, sessionId: owner.sessionId, processId: process.pid,
+        backgroundHistory: false, limit: 51 });
+      t.diagnostic(JSON.stringify({ cachedList, immediate, freshKeyIds: freshKey.rows.map((row: any) => row.meta.id),
+        freshKeyStatus: freshKey.status, inputs: capturedIds.map(task => registry.readMeta(task)) }));
+      assert.ok(freshKey.rows.some((row: any) => row.meta.id === capturedIds[0]), "same source is visible when the query cache is cold");
+      assert.match(immediate, /bg_output_owned/);
+      assert.doesNotMatch(immediate, /bg_output_foreign/);
+      assert.match(immediate, /unavailable ownership/);
+      const updated = { ...registry.readMeta(capturedIds[0]), name: "current-row-rewritten" };
+      registry.writeMeta(updated);
+      // A real missing observed journal remains an error on the current row,
+      // but must not suppress that row or the separate unknown-owner warning.
+      writeFileSync(join(registry.taskDir(capturedIds[0]), "failures.jsonl.observed"), "");
+      const withGap = (await run("bg_task_list")).content[0].text;
+      assert.match(withGap, /bg_output_owned/);
+      assert.match(withGap, /current-row-rewritten/);
+      assert.match(withGap, /Failure journal could not be read/);
+      assert.match(withGap, /unavailable ownership/);
+      assert.doesNotMatch(withGap, /bg_output_foreign/);
+      const beforeRepeat = await client.request("runtime_get_metrics");
+      const repeated = (await run("bg_task_list")).content[0].text;
+      assert.match(repeated, /bg_output_owned/);
+      assert.match(repeated, /Failure journal could not be read/);
+      assert.equal(/statusCursor=(\S+)/.exec(repeated)?.[1], /statusCursor=(\S+)/.exec(withGap)?.[1]);
+      const afterRepeat = await client.request("runtime_get_metrics");
+      assert.equal(afterRepeat.queryCount, beforeRepeat.queryCount, "unchanged scope reuses its cached projection");
+      assert.equal(afterRepeat.background.registry.metadataFileReads, beforeRepeat.background.registry.metadataFileReads,
+        "unchanged cache validation does not read metadata");
+      assert.equal(afterRepeat.background.registry.indexDirectoryReads, beforeRepeat.background.registry.indexDirectoryReads,
+        "unchanged cache validation does not enumerate indexes");
+      assert.ok(Number.isFinite(freshKey.nextDeadline), "cached recent rows carry their actual source expiry");
+      t.diagnostic(JSON.stringify({ repeat: { queries: afterRepeat.queryCount - beforeRepeat.queryCount,
+        registry: afterRepeat.background.registry, priorRegistry: beforeRepeat.background.registry } }));
       const fullDirectoryReads = registry.getRegistryIoMetrics().fullDirectoryReads;
       for (const scope of [{ cwd: root, sessionId: owner.sessionId }, { cwd: root + "-other", sessionId: owner.sessionId },
         { cwd: root, sessionId: "other" }]) await client.get({ background: true, ...scope });
@@ -103,7 +150,7 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
   } finally {
     if (timer) clearTimeout(timer);
     closeBackgroundObservation(pi); client.close(); host.close(); await executor.close(); lease.release();
-    for (const task of [...legacyIds, ...capturedIds]) rmSync(registry.taskDir(task), { recursive: true, force: true });
+    for (const task of [...legacyIds, ...capturedIds, budgetId]) rmSync(registry.taskDir(task), { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
 });
