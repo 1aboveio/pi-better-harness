@@ -373,7 +373,11 @@ export class WorkReadModel {
     return entry;
   }
   contentRevision(scope: WorkScope = {}) {
-    if (scope.background) return scope.backgroundHistory ? String(this.revision) : hash([this.revision, this.background.sourceRevision(scope)]);
+    if (scope.background) {
+      if (scope.backgroundHistory) return String(this.revision);
+      this.background.prepareQuery();
+      return hash([this.revision, this.background.sourceRevision(scope)]);
+    }
     const entry = this.scopeEntry(scope);
     return `${entry.token}:${entry.revision}`;
   }

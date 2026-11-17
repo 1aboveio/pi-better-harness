@@ -52,6 +52,14 @@ export class BackgroundObservation {
   reason?: string;
   get connectionCount() { return this.readConnection ? 0 : this.ownDb ? 1 : 0; }
   get scopeCount() { return this.legacy.size; }
+  prepareQuery(): void {
+    if (!this.enabled || !this.db || !this.hasInputVersions) return;
+    // Native mutations can commit between the last scheduled observation and
+    // the next list. Reuse the durable bounded inbox before cache validation.
+    const batch = this.inbox.receive(this.db, this.identity);
+    if (batch.size && this.refresh()) this.changed();
+    if (this.inbox.metrics.more || this.inbox.metrics.pending) this.schedule();
+  }
   sourceRevision(scope: WorkScope): string[] {
     if (!scope.cwd) return [];
     return [observationRevisionForOrigin({ cwd: scope.cwd, sessionId: scope.sessionId }),

@@ -10,7 +10,102 @@ import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { createLocalWorkClient } from "../src/runtime/local-client.ts";
 import { BackgroundObservation } from "../src/runtime/background.ts";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
+import { registerHooks } from "node:module";
 const load = (name: string) => import(new URL(`../src/runtime/domain/background-service/${name}.domain.mjs`, import.meta.url).href);
+
+test("cached parent and headless child factories list the parent's newly registered durable operation", { timeout: 10000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), "cached-factory-component-"));
+  const lease = acquireMutationStore(root);
+  const executor = new WorkQueryExecutor(root, "cached-factory-component", { modelOptions: {
+    baseDir: join(root, "raw"), durableDir: join(root, "archive"), supervisorDirectory: join(root, "supervisor"), intervalMs: 60000 } });
+  const clients: any[] = [], scopes: any[] = [];
+  const serviceTools = new Map<string, any>();
+  const { registerTools } = await load("tools");
+  const events = new EventEmitter();
+  events.on("pi-better-runtime:connect", request => {
+    const client = createLocalWorkClient(executor, root); clients.push(client);
+    const get = client.get.bind(client); client.get = (scope: any) => { scopes.push(scope); return get(scope); };
+    request.accept(client);
+  });
+  registerTools({ events, on() {}, registerTool(tool: any) { serviceTools.set(tool.name, tool); } }, undefined, () => {}, { resumeLocal: false });
+  const transportKey = Symbol.for("803.component.command-transport");
+  const id = "bgs_00000000000000000312";
+  const calls: any[] = [];
+  (globalThis as any)[transportKey] = async (_pi: any, ctx: any, key: string, tool: string, params: any) => {
+    calls.push({ tool, sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd });
+    if (tool === "__background_poll") return { tasks: [], legacyRows: [], deliveries: [] };
+    if (tool === "bg_task_spawn") {
+      const owner = { kind: "parent-session", workspace: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() };
+      lease.store.registerOperation({ operationId: "cached-parent-operation", taskId: id, launchToken: "cached-parent-token", owner,
+        observer: { kind: "local-supervisor", version: "1" } });
+      mkdirSync(join(root, "supervisor", "observed"), { recursive: true });
+      writeFileSync(join(root, "supervisor", "observed", `${id}.json`), JSON.stringify({ name: params.name }));
+      return { content: [{ type: "text", text: `Started ${id}` }] };
+    }
+    return serviceTools.get(tool).execute(key, params, undefined, undefined, ctx);
+  };
+  const hook = registerHooks({ resolve(specifier, context, nextResolve) {
+    if (/\/managed-client\.(js|ts)$/.test(specifier) && context.parentURL?.includes("pi-better-background-tasks"))
+      return { shortCircuit: true, url: "data:text/javascript," + encodeURIComponent("export const requestBackgroundTool=(...args)=>globalThis[Symbol.for('803.component.command-transport')](...args);") };
+    return nextResolve(specifier, context);
+  } });
+  const backgroundModule = new URL("../../pi-better-background-tasks/src/index.ts", import.meta.url).href;
+  const { default: background } = await import(backgroundModule);
+  const subagentsModule = new URL("../../pi-better-subagents/index.ts", import.meta.url).href;
+  const { default: subagents } = await import(subagentsModule);
+  const { initTheme } = await import("@earendil-works/pi-coding-agent"); initTheme("dark", false);
+  const make = (sessionId: string, tui: boolean) => {
+    const handlers = new Map<string, any[]>(), tools = new Map<string, any>();
+    const pi: any = { events: { emit: (name: string, value: any) => events.emit(name, value),
+      on(name: string, fn: any) { events.on(name, fn); return () => events.off(name, fn); } },
+      on(name: string, fn: any) { handlers.set(name, [...handlers.get(name) ?? [], fn]); },
+      registerTool(tool: any) { tools.set(tool.name, tool); }, registerCommand() {}, registerShortcut() {}, registerFlag() {}, appendEntry() {},
+      getSessionEntries: () => [], getAllTools: () => [], getActiveTools: () => [], setActiveTools() {}, sendMessage() {} };
+    const ui: any = { setStatus() {}, setWidget() {}, setEditorComponent(factory: any) { this.factory = factory; }, getEditorComponent() { return this.factory; }, notify() {}, theme: { fg: (_c: any, value: any) => value } };
+    const ctx: any = { cwd: root, mode: tui ? "tui" : "print", hasUI: tui, ui, isIdle: () => true,
+      sessionManager: { getSessionId: () => sessionId, getBranch: () => [], getEntries: () => [] } };
+    subagents(pi, { supervised: () => [], owner: { start: "component" }, identity: { root, instance: "component" } } as any); background(pi);
+    return { ctx, tools, async emit(name: string) {
+      let failure: any;
+      for (const fn of handlers.get(name) ?? []) { try { await fn({}, ctx); } catch (error) { failure ??= error; } }
+      if (failure) throw failure;
+    } };
+  };
+  let parent: any, child: any;
+  try {
+    parent = make("cached-parent", true); await parent.emit("session_start");
+    const state = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")];
+    const owner = state.uiCtx;
+    child = make("cached-child", false); await child.emit("session_start");
+    await child.emit("session_before_switch"); await child.emit("session_shutdown"); child = undefined;
+    assert.equal(state.uiCtx, owner, "headless lifecycle preserves the actual parent navigator owner");
+    assert.deepEqual([...state.providers.keys()].sort(), ["background-tasks", "subagents"]);
+    const run = (name: string, params: any) => parent.tools.get(name).execute(name, params, undefined, undefined, parent.ctx);
+    await run("bg_task_list", {});
+    await run("bg_task_spawn", { name: "parent-still-running", shell: false, argv: [process.execPath, "-e", "setTimeout(() => {}, 5_000)"], callback: false });
+    const registry = await load("registry"), unknownId = "bg_headless_unknown";
+    registry.writeMeta({ id: unknownId, kind: "process", status: "succeeded", startedAt: 1, endedAt: 2,
+      cwd: root, logPath: registry.logPathFor(unknownId), callback: false, spawnPid: process.pid });
+    lease.store.registerOperation({ operationId: "cached-child-operation", taskId: "bgs_00000000000000000313", launchToken: "cached-child-token",
+      owner: { kind: "parent-session", workspace: root, sessionId: "cached-child" }, observer: { kind: "local-supervisor", version: "1" } });
+    const listed = (await run("bg_task_list", {})).content[0].text;
+    const cold = await clients[0].get({ background: true, cwd: root, sessionId: "cached-parent", limit: 51 });
+    t.diagnostic(JSON.stringify({ listed, coldIds: cold.rows.map((row: any) => row.meta.id), calls, scopes, operation: lease.store.getOperation("cached-parent-operation") }));
+    assert.match(listed, /parent-still-running/, "the parent's own list still reports its task");
+    assert.doesNotMatch(listed, /bgs_00000000000000000313/);
+    assert.match(listed, /unavailable ownership/);
+    const childList = await serviceTools.get("bg_task_list").execute("child-isolation", {}, undefined, undefined,
+      { ...parent.ctx, sessionManager: { ...parent.ctx.sessionManager, getSessionId: () => "cached-child" } });
+    assert.doesNotMatch(childList.content[0].text, /parent-still-running/);
+    assert.match(childList.content[0].text, /bgs_00000000000000000313/);
+    assert.equal((await clients[0].request("runtime_get_metrics")).background.history.inventories, 0);
+    rmSync(registry.taskDir(unknownId), { recursive: true, force: true });
+  } finally {
+    await child?.emit("session_shutdown"); await parent?.emit("session_shutdown"); hook.deregister();
+    delete (globalThis as any)[transportKey];
+    for (const client of clients) client.close(); await executor.close(); lease.release(); rmSync(root, { recursive: true, force: true });
+  }
+});
 
 for (const legacyCount of [0, 160]) test(`public list settles after durable dismissal with ${legacyCount} retained legacy rows`, { timeout: 10000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), "dismissed-history-"));
