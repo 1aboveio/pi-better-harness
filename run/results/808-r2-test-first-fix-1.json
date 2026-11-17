@@ -2,16 +2,24 @@
   "unit": "808",
   "status": "incomplete",
   "sourceSHA": "4b7556af7843e70a595999442c586658a4dbfc0e",
-  "sha": "d8a03901e651031c013d410d45bd32cc4fe9a57b",
+  "sha": "773f4a8ade0a94468434d360f1b179ec289bc698",
   "actualSelection": { "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "source": "PI_PROVIDER, PI_MODEL, PI_REASONING_LEVEL readback" },
   "standingOrders": [],
   "decision": "808-common-driver-unmodified-approved-subjects",
-  "decisionNeeded": null,
+  "decisionNeeded": {
+    "owner": "Architect/coordinator",
+    "incompatibility": "Original baseline read-model has neither checkpoint/logReads metrics nor parseStates/healthStates parser maps used by the current owned eviction observer. The common driver now targets that actual subject and explicitly refuses missing observations. Source inspection establishes the mismatch; no native baseline capture was attempted.",
+    "options": ["Implement a baseline-specific external observation adapter for real read/fold counts and the baseline's actual parser-cache eviction boundary, without changing tracked baseline or inventing checkpoints.", "Clarify how the original baseline's absence of checkpoints is represented in comparison evidence while retaining every real before/after observation and all candidate acceptance budgets. This requires an Architect decision, not an implementer waiver."],
+    "unchanged": "No new baseline, tracked fixture backport, dirty baseline, fabricated capability, retagged report or provenance/acceptance relaxation is authorized or applied."
+  },
   "resolvedRulePaths": [
     { "rule": "R3", "path": "packages/pi-better-server/test/runtime-scope-boundaries.test.ts", "change": "All four metadata rows have real empty logs before initial reconciliation. Original unrelated B zero-notification and cursor assertions are unchanged.", "status": "focused-green" },
     { "rule": "R4", "path": "packages/pi-better-server/test/runtime-background-inputs.test.ts", "change": "Assert log_checkpoints attachment and checkpoint database identity on the same derived handle; retain indexConnections=1.", "status": "focused-green" },
     { "rule": "R4", "path": "packages/pi-better-server/test/mutation-store.test.ts", "change": "Actual RuntimeCancellation and RuntimeResultSupervision instances share controlStore's physical store. Named ownership witness checks three leases, each release, and exact zero after close. Existing direct two-owner expectations unchanged.", "status": "focused-green" },
-    { "rule": "R4", "path": "packages/pi-better-server/test/runtime-cancellation.test.ts", "change": "Correct only the logical ownership expression from two leases to three, under the existing approved decision and named-owner proof. All five SIGKILL stages and post-trigger assertions unchanged.", "status": "source-corrected-native-pending" }
+    { "rule": "R4", "path": "packages/pi-better-server/test/runtime-cancellation.test.ts", "change": "Correct only the logical ownership expression from two leases to three, under the existing approved decision and named-owner proof. All five SIGKILL stages and post-trigger assertions unchanged.", "status": "source-corrected-native-pending" },
+    { "rule": "R2", "path": "packages/pi-better-server/scripts/measure-full-runtime/campaign.mjs", "change": "Both subjects execute the same pinned external driver. Config names driver.checkout, approved.driver.head/sourceSha256 and each side's checkout/artifactRoot. Before execution, actual source cleanliness/manifest/HEAD and reconstructed artifact byte identity are verified. Driver identity is separate from actual subject provenance and imported artifact identity.", "status": "binding-component-green-baseline-observations-incompatible" },
+    { "rule": "R2", "path": "packages/pi-better-server/scripts/measure-full-runtime/subject-binding.mjs", "change": "Explicit module resolution redirects measured server modules to the approved artifact and extension modules to the approved source. Actual resolved module origins are recorded. Fixture files stay in the common driver. Subject mapping also precedes descendant probe/runtime imports and recovery tracing.", "status": "component-green-native-pending" },
+    { "rule": "R3", "path": "packages/pi-better-server/test/runtime-standalone.test.ts", "change": "An actual fixture-owned registered startup client now holds startup only until status proves the extension has its own registered foreground connection. Startup hold closes at that earned handoff and in finally. Passive probe remains passive; all original LIVE/owner/crash/idle checks remain unchanged.", "status": "source-corrected-native-pending" }
   ],
   "originalReproducers": {
     "retainedVerbatim": ".private-808/tmp/808-r2-original.fix.json",
@@ -38,7 +46,7 @@
       "baseline": "eec7b3e256a7548bbf67f69cd468f12eb3b91dc8",
       "baselineEntryBlob": "a1cd1276dbbbf9a08a85c60fd5e9e356e4e3340c",
       "green": null,
-      "status": "open-no-campaign-or-entry-edits"
+      "status": "original-entry-defect-recorded; external-driver-binding-now-implemented; baseline-observation-compatibility-open"
     }
   ],
   "verification": [
@@ -49,8 +57,25 @@
     { "command": "node .private-808/tmp/assertion-preservation-r2.mjs", "relativecwd": ".", "exit": 0, "evidence": ".private-808/tmp/r2-assertion-preservation.log", "result": "All 403 original assertion expressions retained against596b01de in the original six files." },
     { "command": "git diff --check", "relativecwd": ".", "exit": 0 }
   ],
-  "generated": { "status": "not-regenerated", "reason": "Only tests changed. No canonical or generated runtime modules changed. Prior 623-output comparison remains inherited evidence, not a fresh pass." },
-  "currentCheckpoint": "Local test corrections committed. R2 external driver/approved subject binding is not implemented. R3 packed first-LIVE cause and correction remain open. R4 native five-stage execution remains pending.",
+  "continuation": {
+    "commit": "773f4a8ade0a94468434d360f1b179ec289bc698",
+    "redGreen": [
+      { "command": "node --import tsx --test packages/pi-better-server/test/campaign-subject.test.ts", "relativecwd": ".", "redExit": 1, "redError": "windowInvocation is undefined", "redEvidence": ".private-808/tmp/r2-red-driver-binding.log", "greenExit": 0, "greenEvidence": ".private-808/tmp/r2-green-driver-binding.log" },
+      { "command": "node --import tsx --test --test-name-pattern='external measurements' packages/pi-better-server/test/paired-runtime-report.test.ts", "relativecwd": ".", "redExit": 1, "redError": "validator did not report the substituted or missing approved driver identity", "redEvidence": ".private-808/tmp/r2-red-driver-identity.log", "greenExit": 0, "greenEvidence": ".private-808/tmp/r2-driver-components-final.log" }
+    ],
+    "verification": [
+      { "command": "node --import tsx --test packages/pi-better-server/test/campaign-subject.test.ts packages/pi-better-server/test/aggregate-runtime-samples.test.ts packages/pi-better-server/test/paired-runtime-report.test.ts packages/pi-better-server/test/owned-runtime-producers.test.ts", "relativecwd": ".", "exit": 0, "passed": 59, "evidence": ".private-808/tmp/r2-driver-components-final.log" },
+      { "command": "npm run typecheck --workspace pi-better-server", "relativecwd": ".", "exit": 0, "evidence": ".private-808/tmp/r2-final-typecheck.log" },
+      { "command": "node .private-808/tmp/assertion-preservation-r2.mjs", "relativecwd": ".", "exit": 0, "preserved": 403, "evidence": ".private-808/tmp/r2-final-assertion-preservation.log" },
+      { "command": "git diff --check", "relativecwd": ".", "exit": 0 }
+    ],
+    "firstFailures": [
+      { "step": "component and type checks after binding API addition", "error": "Existing campaign fixtures lacked driver approval; declarations lacked windowInvocation/subject-binding types.", "evidence": [".private-808/tmp/r2-driver-components.log", ".private-808/tmp/r2-driver-typecheck.log"], "disposition": "Corrected fixtures/declarations; final components and typecheck passed." },
+      { "step": "injected real executor/model composition on first combined rerun", "error": "runtime-unhealthy: read worker unresponsive; watchdog deadline exceeded", "evidence": ".private-808/tmp/r2-driver-components-green.log", "disposition": "Case passed in isolation (.private-808/tmp/r2-compose-recheck.log) and in final full 59-case rerun. Deadline unchanged; transient cause not established. No cleanup error reported." }
+    ]
+  },
+  "generated": { "status": "not-regenerated", "reason": "Tests and external measurement scripts changed. No canonical generated runtime owner changed. Prior 623-output comparison remains inherited evidence, not a fresh pass." },
+  "currentCheckpoint": "Local fixture, named-owner and common-driver binding corrections committed. R3 packed startup hold has an explicit registered-client handoff, with native qualification still pending. R2 actual original-baseline observation compatibility remains unqualified; missing capabilities are explicitly refused. R4 native five-stage execution remains pending.",
   "pendingNative": {
     "status": "UNQUALIFIED",
     "localNode": "v24.21.0",
@@ -60,8 +85,8 @@
   },
   "failure": {
     "case": "R2 approved original baseline measurement",
-    "step": "Current campaign forks baseline tracked entry",
-    "error": "Baseline entry cannot emit incrementalWindows or fixtureSha256. Baseline read-model does not expose checkpoint or logReads metrics. External fixture binding and supported observations remain implementation work; no fabricated capabilities or provenance relaxation applied.",
+    "step": "External driver now selects the approved subject; source-backed baseline observation compatibility assessment",
+    "error": "Baseline read-model does not expose checkpoint or logReads metrics or the current parser map eviction boundary. Driver explicitly refuses missing actual log-read/checkpoint observations. No native attempt, fabricated capability or provenance relaxation applied.",
     "evidenceDir": ".private-808/tmp",
     "evidence": "r2-red-baseline.log",
     "cleanupErrors": []
@@ -75,9 +100,9 @@
     "status": "not-rerun"
   },
   "remainingWork": [
-    "Implement and test the approved same pinned external measurement driver against explicit unmodified baseline and candidate source/artifact roots, binding actual runtime modules/handles and independently recording driver and subject identity.",
-    "Resolve any baseline-specific unavailable observation at its actual boundary; report concrete incompatibility/options without relaxing qualification.",
-    "Establish and repair the packed fixture's actual foreground registration/lifetime and earned startup handoff; preserve LIVE assertions and all owner/idle deadlines.",
+    "Resolve the concrete original-baseline log-read/checkpoint/parser-eviction observation incompatibility described in decisionNeeded without fabricating observations or changing the baseline.",
+    "Coordinator qualifies actual common-driver/module/artifact composition, including complete baseline observations, rather than treating binding component tests as native evidence.",
+    "Coordinator verifies the packed fixture's actual registered startup-to-foreground handoff and all original LIVE/owner/deadline checks under the corrected fixture.",
     "Coordinator runs native qualification through the existing approved channels; no local denial replay or external delivery performed."
   ],
   "delivery": { "pushed": false, "prCreated": false, "externalWaitStarted": false }
