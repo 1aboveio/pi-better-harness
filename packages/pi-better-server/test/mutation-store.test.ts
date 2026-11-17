@@ -8,6 +8,8 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { acquireMutationStore, mutationStoreMetrics } from "../src/runtime/mutation-store.ts";
 import { makeEnv } from "./helpers.ts";
+import { RuntimeCancellation } from "../src/runtime/cancellation.ts";
+import { RuntimeResultSupervision } from "../src/runtime/result-supervision.ts";
 
 // The user-facing host supports Node 22; the fixed managed domain runs on private Node 24.
 // Keep these shared-connection assertions in one process, using that actual runtime.
@@ -24,6 +26,23 @@ if (Number(process.versions.node.split(".")[0]) < 24) {
     t.diagnostic(result.stdout);
   });
 } else {
+test("server controlStore, RuntimeCancellation and RuntimeResultSupervision share one physical store", async () => {
+  const env = makeEnv();
+  const controlStore = acquireMutationStore(env.agentDir);
+  const cancellation = new RuntimeCancellation(env.agentDir, "named-server-owners");
+  const results = new RuntimeResultSupervision(env.agentDir, "named-server-owners");
+  try {
+    assert.equal((cancellation as any).store, controlStore.store);
+    assert.equal((results as any).store, controlStore.store);
+    assert.deepEqual(mutationStoreMetrics(env.agentDir), { active: 1, leases: 3 });
+    results.close();
+    assert.deepEqual(mutationStoreMetrics(env.agentDir), { active: 1, leases: 2 });
+    await cancellation.close();
+    assert.deepEqual(mutationStoreMetrics(env.agentDir), { active: 1, leases: 1 });
+  } finally { results.close(); await cancellation.close(); controlStore.release(); }
+  assert.deepEqual(mutationStoreMetrics(env.agentDir), { active: 0, leases: 0 });
+});
+
 test("managed launch shares the mutation connection and releases only its lease", async () => {
   const env = makeEnv();
   const { createSubagentLaunch } = await import("../src/runtime/subagent-launch.ts");

@@ -48,6 +48,7 @@ test("content revisions route old and new scopes while unrelated cursors survive
       callbackOrigin: { cwd, sessionId: "parent" }, startedAt: 1 }));
   };
   write("sa_a", a); write("sa_b1", b); write("sa_b2", b); write("sa_c", c);
+  for (const id of ["sa_a", "sa_b1", "sa_b2", "sa_c"]) writeFileSync(join(root, "runs", id, "output.log"), "");
   const model = new WorkReadModel(root, "scope-revisions", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
   const changes = { a: 0, b: 0, c: 0 };
   try {

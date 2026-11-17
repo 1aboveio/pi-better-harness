@@ -122,7 +122,8 @@ for (const stage of ["unaccepted", "accepted", "before-stop-file", "after-stop-f
       const client = new WorkClient(ready.ready, root); clients.push(client); await client.ready;
       await client.request("runtime_cancellation_status");
       await client.request("runtime_result_supervision");
-      assert.deepEqual((await client.request("runtime_get_metrics")).mutationSqlite, { active: 1, leases: 2 });
+      // controlStore, RuntimeCancellation and RuntimeResultSupervision borrow one physical store.
+      assert.deepEqual((await client.request("runtime_get_metrics")).mutationSqlite, { active: 1, leases: 3 });
       return { child, client };
     };
     let taskId: string | undefined;
