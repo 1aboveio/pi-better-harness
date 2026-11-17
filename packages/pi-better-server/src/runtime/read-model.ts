@@ -493,8 +493,7 @@ export class WorkReadModel {
 
   private scopeStatus(scope: WorkScope): { status: WorkSnapshot["status"]; reason?: string } {
     const race = this.sourceRace;
-    // Only a validated, entity-attributed retry can leave another scope ready.
-    // Root, coordinator, malformed-input and initial-import failures stay global.
+    // Only verified attribution can narrow degradation; unknown failures stay global.
     if (this.imported && this.state === "degraded" && race && this.reason === race.reason
         && [...this.sourceErrors.keys()].every(path => race.paths.has(path))
         && !race.rows.some(row => this.matchesScope({ id: scope.id, cwd: scope.cwd, sessionId: scope.sessionId }, row))) {
@@ -578,6 +577,7 @@ export class WorkReadModel {
     try {
       const next = new Map(baseline.files);
       const failedPaths = new Map<string, string>();
+      const malformedPaths = new Set<string>();
       let batch = 0;
       let sliceStarted = performance.now();
       for (const [directory, archived] of [[this.markers, true], [this.archives, true], [this.runs, false]] as const) {
@@ -620,6 +620,7 @@ export class WorkReadModel {
               }
               next.set(path, entry!);
             } catch (error) {
+              if (!archived && error instanceof SyntaxError && this.files.has(path)) malformedPaths.add(path);
               if ((error as NodeJS.ErrnoException).code === "ENOENT") {
                 try {
                   await sourceStat(directory);
@@ -867,6 +868,7 @@ export class WorkReadModel {
       }
       // The pinned source snapshot is a valid baseline even while writers advance.
       // Subsequent commits remain beyond the durable received position.
+      const globallyUnverified = !!healthConfig.reason || rows.some(row => !row.assignment.verified);
       let after: string;
       try { after = this.reader.revision(); } catch { after = "unknown"; }
       if (after !== coordinator) {
@@ -895,11 +897,10 @@ export class WorkReadModel {
           if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
             this.dirty = true;
             const error = new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
-            if ((this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
+            if (!globallyUnverified && (this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
                 && path.startsWith(this.runs + sep) && info.size <= 1024n * 1024n && !failedPaths.size && [...this.sourceErrors].every(([path, reason]) =>
               this.sourceRace?.paths.has(path) && reason === this.sourceRace.reason)) {
-              // Recheck only for error routing: a concurrent move can affect a
-              // new workspace/recipient. Never publish this uncommitted row.
+              // Validate routing only; the uncommitted row remains unqueryable.
               try {
                 this.counters.metadataReads++;
                 const current = JSON.parse(await readFile(path, "utf8"));
@@ -960,6 +961,14 @@ export class WorkReadModel {
         const error = failedPaths.get(path);
         if (error) this.sourceErrors.set(path, error);
         else this.sourceErrors.delete(path);
+      }
+      // Retained raw parse failures keep their verified namespace, never partial JSON.
+      if (globallyUnverified) this.sourceRace = undefined;
+      if (!globallyUnverified && failedPaths.size && failedPaths.size === malformedPaths.size
+          && (previousState === "ready" || this.sourceRace && previousReason === this.sourceRace.reason)
+          && [...this.sourceErrors.keys()].every(path => malformedPaths.has(path))) {
+        this.sourceRace = { reason: failedPaths.values().next().value!, paths: malformedPaths,
+          rows: [...malformedPaths].map(path => this.projected.get(this.files.get(path)!.meta.id)) };
       }
       if (!this.sourceErrors.size) this.sourceRace = undefined;
       this.state = this.sourceErrors.size || healthConfig.reason ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";

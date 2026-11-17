@@ -1,4 +1,5 @@
 import test from "node:test";
+import { openSync, writeSync, closeSync } from "node:fs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,6 +53,79 @@ test("A staged source race degrades A but preserves verified B frames and cursor
     assert.equal(model.snapshot(scope).status, "degraded", "unknown root failures still affect B");
     assert.ok(bFrames > 0);
   } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a held partial A write degrades A but sends no unrelated B frames", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scope-malformed-"));
+  const put = (id: string, cwd: string) => {
+    mkdirSync(join(root, "runs", id), { recursive: true });
+    writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, status: "completed", startedAt: 1 }));
+  };
+  const a = join(root, "a"), b = join(root, "b");
+  put("sa_a", a); put("sa_b1", b); put("sa_b2", b);
+  const model = new WorkReadModel(root, "partial-json", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  let held: number | undefined;
+  try {
+    await model.reconcile();
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    for (const entry of (model as any).rootParents.values()) entry.watcher.close();
+    const scope = { cwd: b, limit: 1 }, first = model.snapshot(scope);
+    let frames = 0;
+    model.onChange(() => frames++, scope);
+    const path = join(root, "runs/sa_a/meta.json");
+    held = openSync(path, "w"); writeSync(held, '{"id":');
+    await (model as any).scan([path]);
+    assert.equal(model.observation().status, "degraded");
+    assert.equal(model.snapshot({ cwd: a }).status, "degraded");
+    assert.match(model.snapshot({ cwd: a }).reason!, /SyntaxError/);
+    assert.equal(model.snapshot({ cwd: a }).rows[0]!.meta.id, "sa_a");
+    assert.equal(frames, 0, "unrelated content sends no scoped frames");
+    assert.equal(model.snapshot(scope).status, "ready");
+    assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
+    writeFileSync(join(root, "settings.json"), "{");
+    await (model as any).scan([path]);
+    assert.equal(model.snapshot(scope).status, "degraded", "a global health source failure cannot be hidden by attributed A");
+    rmSync(join(root, "settings.json"));
+    writeSync(held, JSON.stringify({ id: "sa_a", cwd: b, status: "completed", startedAt: 1 }), 0, "utf8");
+    closeSync(held); held = undefined;
+    await model.reconcile();
+    assert.equal(model.snapshot({ cwd: b }).totalMatching, 3);
+    assert.ok(frames > 0);
+    assert.throws(() => model.snapshot({ ...scope, cursor: first.nextCursor }), /resync_required/);
+    writeFileSync(join(root, "runs/sa_b1/meta.json"), "{");
+    await (model as any).scan([join(root, "runs/sa_b1/meta.json")]);
+    assert.equal(model.snapshot(scope).status, "degraded", "B's own parse failure remains visible");
+    model.invalidate("Unknown source root failure");
+    assert.equal(model.snapshot({ cwd: a }).status, "degraded");
+  } finally { if (held !== undefined) closeSync(held); await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an unrelated unverified assignment cannot be hidden by an attributed partial source", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scope-global-assignment-"));
+  const a = join(root, "a"), b = join(root, "b"), c = join(root, "c");
+  const put = (id: string, cwd: string, extra = {}) => {
+    mkdirSync(join(root, "runs", id), { recursive: true });
+    writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, status: "completed", startedAt: 1, ...extra }));
+  };
+  put("sa_a", a); put("sa_b", b); put("sa_c", c);
+  const model = new WorkReadModel(root, "global-assignment", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  let held: number | undefined;
+  try {
+    await model.reconcile();
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    for (const entry of (model as any).rootParents.values()) entry.watcher.close();
+    const path = join(root, "runs/sa_a/meta.json");
+    held = openSync(path, "w"); writeSync(held, '{"id":');
+    await (model as any).scan([path]);
+    assert.equal(model.snapshot({ cwd: b }).status, "ready");
+    put("sa_c", c, { operations: { conversationId: "missing-coordinator-worker", workspace: c } });
+    await (model as any).scan([path, join(root, "runs/sa_c/meta.json")]);
+    assert.equal(model.snapshot({ id: "sa_c" }).rows[0]!.assignment.verified, false);
+    assert.equal(model.snapshot({ cwd: b }).status, "degraded", "unverified assignment coverage remains global even while A has an attributed parse failure");
+  } finally {
+    if (held !== undefined) closeSync(held);
+    await model.close(); rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("A health deadlines advance without invalidating B subscription or cursor", async t => {
