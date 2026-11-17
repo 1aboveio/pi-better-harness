@@ -271,17 +271,36 @@ test("10 socket clients share each truthful partial-write and recovery epoch", {
     const clients = [first, ...await Promise.all(Array.from({ length: 9 }, () => f.client()))];
     for (const client of clients) await client.subscribe(scope);
     const initial = await first.get(scope), baseline = f.executor.metrics() as any;
+    const frames: any[] = [];
+    const sourceWrites: unknown[] = [];
+    const stamp = (phase: string) => {
+      const info = statSync(path, { bigint: true });
+      sourceWrites.push({ phase, identity: `${info.dev}:${info.ino}`, bytes: String(info.size),
+        mtimeNs: String(info.mtimeNs), ctimeNs: String(info.ctimeNs) });
+    };
+    clients.forEach((client, subscriber) => client.onChange(value => {
+      if (frames.length < 40) frames.push({ subscriber, status: value.status, reason: value.reason,
+        seq: value.seq, scopeRevision: value.scopeRevision, instanceId: value.instanceId,
+        observedRevisionVector: value.observedRevisionVector,
+        rows: value.rows.map((row: any) => ({ id: row.meta.id, name: row.meta.name, sourceRevision: row.sourceRevision })) });
+    }));
     const awaiting = (status: string) => Promise.all(clients.map(client => new Promise<void>(resolve => {
       const stop = client.onChange(value => { if (value.status === status) { stop(); resolve(); } });
     })));
     const assertSharedEpoch = (before: any, after: any) => {
-      assert.equal(after.queryCount - before.queryCount, 1);
-      assert.equal(after.serializationCount - before.serializationCount, 1);
-      assert.equal(after.eventEncoding.serializations - before.eventEncoding.serializations, 1);
-      assert.equal(after.eventEncoding.frames - before.eventEncoding.frames, clients.length);
+      try {
+        assert.equal(after.queryCount - before.queryCount, 1);
+        assert.equal(after.serializationCount - before.serializationCount, 1);
+        assert.equal(after.eventEncoding.serializations - before.eventEncoding.serializations, 1);
+        assert.equal(after.eventEncoding.frames - before.eventEncoding.frames, clients.length);
+      } catch (error) {
+        console.error(`Partial-write epoch failure: ${JSON.stringify({ scope, sourceWrites, before, after, frames })}`);
+        throw error;
+      }
     };
     const degradedFrames = awaiting("degraded");
     held = openSync(path, "w"); writeSync(held, '{"id":');
+    stamp("partial-write");
     await f.executor.livenessReasons(); await degradedFrames;
     const degraded = await Promise.all(clients.map(client => client.get(scope)));
     for (const value of degraded) {
@@ -296,6 +315,7 @@ test("10 socket clients share each truthful partial-write and recovery epoch", {
     const readyFrames = awaiting("ready");
     writeSync(held, JSON.stringify({ ...meta, name: "changed" }), 0, "utf8");
     closeSync(held); held = undefined;
+    stamp("complete-write-and-close");
     await f.executor.livenessReasons(); await readyFrames;
     const recovered = await Promise.all(clients.map(client => client.get(scope)));
     for (const value of recovered) {
