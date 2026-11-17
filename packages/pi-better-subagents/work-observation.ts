@@ -10,6 +10,8 @@ let context: { agentDir: string; origin: { cwd: string; sessionId?: string } } |
 let connecting: Promise<void> | undefined;
 let collecting: Promise<void> | undefined;
 let collectingClient: WorkClient | undefined;
+let collectionRetry: ReturnType<typeof setTimeout> | undefined;
+let collectionFailures = 0;
 let dirty = false;
 let retry: ReturnType<typeof setTimeout> | undefined;
 let backoff = 100;
@@ -40,6 +42,7 @@ function reconnectLater(current: number) {
 
 // Every page is bounded; a conversation anchor fences collection across filtered queries.
 async function collect(candidate: WorkClient, current: number) {
+    if (collectionRetry) clearTimeout(collectionRetry); collectionRetry = undefined;
     dirty = true;
     if (collecting && collectingClient === candidate) return collecting;
     collectingClient = candidate;
@@ -81,12 +84,24 @@ async function collect(candidate: WorkClient, current: number) {
                     const allRows = [...new Map([...rows, ...history.rows, ...owed].map(row => [row.meta.id, row])).values()];
                     snapshot = { ...first, seq: anchor.seq, observedRevisionVector: anchor.observedRevisionVector, rows: allRows, nextCursor: undefined,
                         totalMatching: first.totalMatching + history.totalMatching, activity: { active: rows.length } };
+                    collectionFailures = 0;
                     completed = true; refresh();
                 } catch (error) {
                     if (current !== generation || candidate !== client) return;
                     if (attempt === 1 || candidate.closed) {
                         degraded(error);
                         if (candidate.closed) return;
+                        // Retry the outstanding notification after transient transport or
+                        // consistency failures, even when the terminal source sends no more events.
+                        if (!dirty && /runtime-(?:timeout|overloaded|unhealthy)|resync_required/.test(String(error)) && collectionFailures < 3) {
+                            const wait = 100 * 2 ** collectionFailures++;
+                            collectionRetry = setTimeout(() => {
+                                collectionRetry = undefined;
+                                if (current === generation && candidate === client && !candidate.closed)
+                                    void collect(candidate, current).catch(error => { if (current === generation && candidate === client) degraded(error); });
+                            }, wait);
+                            collectionRetry.unref?.();
+                        }
                         // A notification received during these page reads is
                         // still owed a coherent collection. Drain only that
                         // demand through the outer loop; do not start a poller.
@@ -119,6 +134,7 @@ async function connectObservation(current: number) {
     client = candidate;
     candidate.onChange(() => {
         if (current !== generation || candidate !== client) return;
+        collectionFailures = 0;
         if (candidate.closed) {
             details.clear(); pendingDetails.clear();
             degraded(candidate.snapshot?.reason ?? "runtime-unavailable: disconnected; resync required");
@@ -172,6 +188,8 @@ export async function observedList(scope: object) { return query(scope); }
 
 export function stopWorkObservation() {
     generation++; context = undefined;
+    if (collectionRetry) clearTimeout(collectionRetry); collectionRetry = undefined;
+    collectionFailures = 0;
     if (retry) clearTimeout(retry); retry = undefined;
     client?.close(); client = undefined; snapshot = undefined;
     connecting = undefined; collecting = undefined; collectingClient = undefined; dirty = false;
