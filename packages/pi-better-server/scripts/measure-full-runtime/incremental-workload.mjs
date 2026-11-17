@@ -123,6 +123,16 @@ export function workloadCounterDelta(before, after) {
     return b - a;
   };
   const fields = (a, b, names) => Object.fromEntries(names.map(name => [name, delta(a?.[name], b?.[name], name)]));
+  if (before.baselineObservation || after.baselineObservation) {
+    assert.equal(before.baselineObservation?.complete, true, 'Missing baseline observation coverage');
+    assert.equal(after.baselineObservation?.complete, true, 'Missing baseline observation coverage');
+    assert.equal(before.baselineObservation.threadId, after.baselineObservation.threadId, 'Baseline reader generation changed');
+    assert.deepEqual(before.baselineObservation.moduleUrls, after.baselineObservation.moduleUrls, 'Baseline module origins changed');
+    return { complete: false, unavailable: ['projection-source-breakdown', 'ordinary-versus-repair-source-work'],
+      projections: fields(before, after, ['projections']),
+      logs: fields(before.logReads, after.logReads, ['bytes', 'reads', 'parsedEvents', 'displayFolded', 'healthFolded']),
+      ordinary: null, repair: null };
+  }
   return {
     projections: fields(before, after, ['projections', 'assignmentProjections', 'logProjections', 'healthProjections']),
     logs: fields(before.logReads, after.logReads, ['bytes', 'reads', 'parsedEvents', 'displayFolded', 'healthFolded']),

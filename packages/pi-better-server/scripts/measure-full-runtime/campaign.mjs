@@ -77,6 +77,7 @@ async function executeWindow({ side, workload, checkout, artifactRoot, driverChe
   await new Promise((resolveDone, reject) => {
     const child = fork(script, [], { cwd: invocation.cwd, execArgv: ['--import', 'tsx'], stdio: 'inherit', env: { ...process.env,
       PI_FULL_RUNTIME_SUBJECT: invocation.binding,
+      PI_FULL_RUNTIME_BASELINE_OBSERVER: approved[side].head === baseline ? baseline : '',
       PI_INCREMENTAL_WORKLOAD: '1', PI_INCREMENTAL_MUTATIONS: '1', PI_INCREMENTAL_DURATION_MS: String(durationMs),
       PI_INCREMENTAL_HISTORY: String(workload.history), PI_INCREMENTAL_CLIENTS: String(workload.clients), PI_INCREMENTAL_GROUP: String(workload.group),
       PI_FULL_RUNTIME_HOST_ID: approved.fixedHostId, PI_FULL_RUNTIME_REPORT: output } });

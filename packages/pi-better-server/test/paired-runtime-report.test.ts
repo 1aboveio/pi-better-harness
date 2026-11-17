@@ -43,6 +43,14 @@ test('external measurements cannot substitute driver identity for approved subje
   assert.ok(has(validatePairedReports(value, value, expected), '.driver', 'missing-approved-driver'));
 });
 
+test('observed baseline parser work cannot qualify an unavailable ordinary versus repair breakdown', () => {
+  const value: any = specimen();
+  for (const metrics of [value.scenarios[0].countersBefore, value.scenarios[0].metrics]) {
+    metrics.baselineObservation = { complete: true, threadId: 1, moduleUrls: ['parse', 'health', 'cursor', 'tail'], durableCheckpoints: false };
+  }
+  assert.ok(has(validatePairedReports(value, value, expected), '.metrics', 'unavailable-source-work-breakdown'));
+});
+
 test('recorded primary admission refusal and malformed reports cannot qualify or yield CPU comparisons', () => {
   const recorded = JSON.parse(readFileSync(new URL('../../../docs/evidence/issue-808/transport-r3/native-report.json', import.meta.url), 'utf8'));
   for (const value of [recorded, null, {}, { scenarios: [null] }, { scenarios: [{ resources: [null], resourceBefore: [null], requiredProcesses: [null] }] }]) {

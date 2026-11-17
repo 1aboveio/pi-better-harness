@@ -1,6 +1,7 @@
 export function bindOwnedExecutor(value: any): void;
 export function ownedWorkerUrl(original: URL, expected?: URL): URL;
-export function bindOwnedModel(model: any, port: any): void;
+export function bindOwnedModel(model: any, port: any, workerUrl?: string): void;
+export function ownedModelObservation(model: any, workerUrl: string): any;
 export function controlOwnedExecutor(executor: any, action: string): Promise<{ action?: string; scope: string; elapsedMs?: number; physical?: { managerPid: number; beforeThreadId?: number; afterThreadId?: number } }>;
 export function installOwnedRouter(): (pid: number, action: string) => Promise<unknown>;
 export function registerOwnedLoader(): void;

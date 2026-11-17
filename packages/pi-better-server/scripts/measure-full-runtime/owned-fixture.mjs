@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { threadId } from 'node:worker_threads';
 import { register } from 'node:module';
+import { baselineModuleUrls, baselineObservation, evictBaselineParsers } from './baseline-observation.mjs';
 
 let executor, gc, gcObserver;
 function publish(name, value) {
@@ -48,12 +49,22 @@ export function ownedWorkerUrl(original, expected = new URL('../../src/runtime/q
   assert.equal(String(original), String(expected), 'No fixture binding for foreign worker');
   return new URL('./owned-query-worker.mjs', import.meta.url);
 }
-export function bindOwnedModel(model, port) {
+export function ownedModelObservation(model, workerUrl) {
+  if (model.metrics.logReads || process.env.PI_FULL_RUNTIME_BASELINE_OBSERVER !== 'eec7b3e256a7548bbf67f69cd468f12eb3b91dc8') return {};
+  const baseline = baselineObservation(baselineModuleUrls(workerUrl));
+  return { baselineObservation: baseline, ...(baseline.complete ? { logReads: baseline.logReads } : {}) };
+}
+export function bindOwnedModel(model, port, workerUrl) {
   threadGc();
   port.on('message', message => {
     if (message?.type !== 'resource-fixture-evict') return;
-    model.parseStates.clear(); model.healthStates.clear();
-    port.postMessage({ type: 'resource-fixture-evicted', nonce: message.nonce, checkpoints: model.metrics.checkpoints });
+    if (model.parseStates instanceof Map && model.healthStates instanceof Map) { model.parseStates.clear(); model.healthStates.clear(); }
+    else {
+      assert.equal(process.env.PI_FULL_RUNTIME_BASELINE_OBSERVER, 'eec7b3e256a7548bbf67f69cd468f12eb3b91dc8', 'Missing approved baseline adapter');
+      evictBaselineParsers(baselineModuleUrls(workerUrl), model);
+    }
+    port.postMessage({ type: 'resource-fixture-evicted', nonce: message.nonce, checkpoints: model.metrics.checkpoints,
+      ...ownedModelObservation(model, workerUrl) });
   });
 }
 export async function controlOwnedExecutor(executor, action) {
@@ -101,7 +112,7 @@ export function installOwnedRouter() {
   cp.spawn = (command, args, options) => {
     const childEnv = options?.env ?? process.env;
     const ownedNode = childEnv.PI_RESOURCE_REPORT_DIR === process.env.PI_RESOURCE_REPORT_DIR
-      && childEnv.NODE_OPTIONS?.includes(new URL('./probe.mjs', import.meta.url).href) && Array.isArray(options?.stdio);
+      && [new URL('./probe.mjs', import.meta.url).href, new URL('./subject-probe.mjs', import.meta.url).href].some(url => childEnv.NODE_OPTIONS?.includes(url)) && Array.isArray(options?.stdio);
     const child = spawn(command, args, ownedNode && !options.stdio.includes('ipc') ? { ...options, stdio: [...options.stdio, 'ipc'] } : options);
     if (ownedNode) { children.add(child); child.once('exit', () => children.delete(child)); child.channel?.unref(); }
     return child;

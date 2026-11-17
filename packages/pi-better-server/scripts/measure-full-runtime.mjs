@@ -74,6 +74,7 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
     './measure-full-runtime/darwin-capture.cc', './measure-full-runtime/build-darwin-capture.mjs',
     './measure-full-runtime/subject-binding.mjs', './measure-full-runtime/measure-subject.mjs',
     './measure-full-runtime/subject-probe.mjs',
+    './measure-full-runtime/baseline-observation.mjs',
     '../test/support/subagent-offline-model.ts',
   ].map(path => ({ path, sha256: createHash('sha256').update(readFileSync(new URL(path, import.meta.url))).digest('hex') })))).digest('hex'),
   diagnosticBudget: { samplerIntervalMs: 250, controlIntervalMs: 100 },
@@ -106,8 +107,8 @@ try {
   await until('socket', async () => { try { work = new WorkClient(join(transport,'pi-server.sock'), agent); await work.ready; return true; } catch { work?.close(); return false; } });
   if (subject) {
     const actual = await work.request('runtime_get_metrics');
-    report.subject.observations = { logReads: Boolean(actual.logReads), checkpoints: Boolean(actual.checkpoints) };
-    assert.ok(actual.logReads && actual.checkpoints, 'Approved subject lacks required log-read/checkpoint observations; external fixture compatibility remains unqualified');
+    report.subject.observations = { logReads: Boolean(actual.logReads), checkpoints: Boolean(actual.checkpoints), baseline: actual.baselineObservation ?? null };
+    assert.ok(actual.logReads && (actual.checkpoints || actual.baselineObservation?.complete && actual.baselineObservation.durableCheckpoints === false), 'Approved subject lacks complete actual parser observations; external fixture compatibility remains unqualified');
   }
   writeFileSync(join(agent,'server-registration-v1.json'), JSON.stringify({ version:1, agentDir:agent, serverDir:transport }));
   for (let i=0;i<2;i++) {
@@ -198,8 +199,10 @@ try {
     const workloadAfter = workload ? await reconcileWorkload(work, cwd, workload) : undefined;
     if (workload) {
       assert.deepEqual(workloadAfter, workloadBefore, 'Exact authoritative fixture results must survive the observation window');
-      assert.equal(metrics.projections, countersBefore.projections, 'Unchanged work must not be reprojected');
-      assert.equal(metrics.logReads.bytes, countersBefore.logReads.bytes, 'Ordinary observation must not reread unchanged logs');
+      if (!metrics.baselineObservation) {
+        assert.equal(metrics.projections, countersBefore.projections, 'Unchanged work must not be reprojected');
+        assert.equal(metrics.logReads.bytes, countersBefore.logReads.bytes, 'Ordinary observation must not reread unchanged logs');
+      }
       (report.incrementalWindows ??= []).push({ clients: count, countersBefore, countersAfter: metrics, delta: workloadCounterDelta(countersBefore, metrics), workloadBefore, workloadAfter });
     }
     assert.equal(status.hostedSessions,2); assert.equal(inspectDaemonOwner(transport).owner.pid,owner.pid);
@@ -278,6 +281,10 @@ try {
           const metrics = await client.request('runtime_get_metrics');
           if (metrics.inventories <= before.inventories) return false;
           if (['theme', 'same-settings'].includes(mutation.kind)) return true;
+          if (metrics.baselineObservation) {
+            try { await reconcileWorkload(client, cwd, workload); return true; }
+            catch { return false; }
+          }
           try {
             const snapshot = await client.get({ id: mutation.id }), row = snapshot.rows[0];
             if (mutation.kind === 'delete-log') return snapshot.status === 'degraded' && /Log source unavailable/.test(snapshot.reason ?? '') && Boolean(row?.health?.rawLog?.error);

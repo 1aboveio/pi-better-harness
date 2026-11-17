@@ -53,9 +53,22 @@ export async function runMutationSequence({ manifest, client, write, observe, re
         }
         step.after = await client.request('runtime_get_metrics');
         if (step.capability === 'evict') {
-          assert.ok(step.before.checkpoints?.hotDisplay > 0 || step.before.checkpoints?.hotHealth > 0, 'Eviction must start with actual retained parser state');
-          assert.equal(step.after.checkpoints?.hotDisplay, 0, 'Eviction must actually clear display parser state');
-          assert.equal(step.after.checkpoints?.hotHealth, 0, 'Eviction must actually clear health parser state');
+          if (step.before.baselineObservation) {
+            assert.equal(step.before.baselineObservation.complete, true);
+            assert.equal(step.after.baselineObservation?.complete, true);
+            assert.ok(step.before.baselineObservation.hotDisplay > 0 || step.before.baselineObservation.hotHealth > 0, 'Baseline eviction requires actual hot module caches');
+            assert.equal(step.after.baselineObservation.hotDisplay, 0);
+            assert.equal(step.after.baselineObservation.hotHealth, 0);
+            assert.equal(step.after.baselineObservation.durableCheckpoints, false);
+            if (evidenceScope === 'runtime') {
+              assert.equal(step.before.baselineObservation.threadId, receipt.physical.beforeThreadId);
+              assert.equal(step.after.baselineObservation.threadId, receipt.physical.afterThreadId);
+            }
+          } else {
+            assert.ok(step.before.checkpoints?.hotDisplay > 0 || step.before.checkpoints?.hotHealth > 0, 'Eviction must start with actual retained parser state');
+            assert.equal(step.after.checkpoints?.hotDisplay, 0, 'Eviction must actually clear display parser state');
+            assert.equal(step.after.checkpoints?.hotHealth, 0, 'Eviction must actually clear health parser state');
+          }
         } else if (evidenceScope === 'runtime') {
           const nextSnapshot = await client.get({ cwd: manifest.cwd, limit: 1 });
           assert.ok(previousSnapshot.instanceId && nextSnapshot.instanceId && previousSnapshot.instanceId !== nextSnapshot.instanceId, 'Runtime restart must have an actual new read instance');
@@ -78,7 +91,13 @@ export async function runMutationSequence({ manifest, client, write, observe, re
         step.after = await client.request('runtime_get_metrics');
         step.delta = workloadCounterDelta(step.before, step.after); step.accounting = 'mutation';
         const delta = step.delta;
-        if (['theme', 'same-settings'].includes(step.command.kind)) {
+        if (step.before.baselineObservation) {
+          step.unavailable = delta.unavailable;
+          if (step.command.kind === 'same-settings') assert.equal(receipt.beforeDigest, receipt.afterDigest);
+          if (step.key === 'append-after-eviction') {
+            assert.ok(delta.logs.bytes > 0 && delta.logs.displayFolded > 0 && delta.logs.healthFolded > 0, 'Baseline eviction must lead to actual read and fold work');
+          }
+        } else if (['theme', 'same-settings'].includes(step.command.kind)) {
           assert.equal(delta.logs.bytes, 0); assert.equal(delta.projections.logProjections, 0);
           if (step.command.kind === 'same-settings') assert.equal(receipt.beforeDigest, receipt.afterDigest);
         } else {
@@ -90,6 +109,13 @@ export async function runMutationSequence({ manifest, client, write, observe, re
         }
       }
       step.final = await reconcileWorkload(client, manifest.cwd, manifest);
+      if (step.capability === 'evict' && step.after.baselineObservation) {
+        step.recoveryObservation = (await client.request('runtime_get_metrics')).baselineObservation;
+        assert.equal(step.recoveryObservation?.complete, true);
+        assert.equal(step.recoveryObservation.threadId, step.after.baselineObservation.threadId);
+        assert.ok(step.recoveryObservation.logReads.bytes > step.after.baselineObservation.logReads.bytes, 'Baseline detail read must be cold after real eviction');
+        assert.ok(step.recoveryObservation.logReads.displayFolded > step.after.baselineObservation.logReads.displayFolded, 'Baseline detail read must actually refold after eviction');
+      }
       step.status = 'completed';
     } catch (error) {
       step.status = 'failed'; step.error = String(error);

@@ -91,7 +91,7 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
           if (value.window?.sampleIntervalMs !== 250) issue(p + '.diagnostics', 'changed-process-sampler-budget');
         }
         for (const [total, field] of [['totalCpuMs', 'cpuMs'], ['totalRss', 'rss']]) if (!finite(scenario[total]) || resources.some(value => !finite(value[field])) || Math.abs(resources.reduce((sum, value) => sum + value[field], 0) - scenario[total]) > 0.000001) issue(p + '.' + total, 'incorrect-aggregate');
-        try { workloadCounterDelta(scenario.countersBefore, scenario.metrics); } catch { issue(p + '.metrics', 'missing-reset-or-generation-change'); }
+        try { if (workloadCounterDelta(scenario.countersBefore, scenario.metrics).complete === false) issue(p + '.metrics', 'unavailable-source-work-breakdown'); } catch { issue(p + '.metrics', 'missing-reset-or-generation-change'); }
         const reconciliation = Array.isArray(report.incrementalWindows) ? report.incrementalWindows.find(value => value?.clients === scenario.clients) : undefined;
         if (!reconciliation?.workloadBefore || !reconciliation?.workloadAfter) issue(p + '.reconciliation', 'missing-final-results');
         else {

@@ -1,7 +1,10 @@
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
 import { observeGcThread } from './owned-fixture.mjs';
 import { parseSubjectBinding, subjectModuleUrl } from './subject-binding.mjs';
+import { baselineModuleUrls, instrumentBaselineModule } from './baseline-observation.mjs';
 export function initialize(data) { observeGcThread(`loader-${data.resourceParentThreadId}`); }
 
 const originalTarget = new URL('../../src/runtime/background-tools.ts', import.meta.url).href;
@@ -48,6 +51,13 @@ export function instrumentRecoveryTrace(source) {
 
 export async function load(url, context, nextLoad) {
   const helper = new URL('./owned-fixture.mjs', import.meta.url).href;
+  const baseline = process.env.PI_FULL_RUNTIME_BASELINE_OBSERVER === 'eec7b3e256a7548bbf67f69cd468f12eb3b91dc8';
+  if (baseline && process.env.PI_FULL_RUNTIME_SUBJECT) {
+    const binding = parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT);
+    const worker = pathToFileURL(join(binding.artifactRoot, 'src/runtime/query-worker.mjs'));
+    if (baselineModuleUrls(worker).includes(url)) return { format: 'module', shortCircuit: true,
+      source: instrumentBaselineModule(readFileSync(new URL(url), 'utf8'), new URL(url).pathname.split('/').at(-1).slice(0, -4)) };
+  }
   if (url.startsWith('file:') && new URL(url).pathname.endsWith('/src/runtime/query-executor.ts')) {
     let source = readFileSync(new URL(url), 'utf8');
     const anchor = 'this.lag.enable();\n    this.worker = this.startWorker();';
@@ -64,9 +74,11 @@ export async function load(url, context, nextLoad) {
     let source = readFileSync(new URL(url), 'utf8');
     const anchor = 'const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);';
     if (source.split(anchor).length !== 2) throw Error('Fixture model creation anchor changed');
-    source = source.replace(anchor, anchor + '\nbindOwnedModel(model,parentPort);');
-    source = source.replace('...model.metrics, background:', '...model.metrics, workerGc: threadGc(), background:');
-    return { format: 'module', shortCircuit: true, source: `import {bindOwnedModel,threadGc} from ${JSON.stringify(helper)};\n${source}` };
+    source = source.replace(anchor, anchor + '\nbindOwnedModel(model,parentPort,import.meta.url);');
+    const metricsAnchor = '...model.metrics, background:';
+    if (source.split(metricsAnchor).length !== 2) throw Error('Fixture worker metrics anchor changed');
+    source = source.replace(metricsAnchor, '...model.metrics, ...ownedModelObservation(model,import.meta.url), workerGc: threadGc(), background:');
+    return { format: 'module', shortCircuit: true, source: `import {bindOwnedModel,ownedModelObservation,threadGc} from ${JSON.stringify(helper)};\n${source}` };
   }
   if (url !== target) return nextLoad(url, context);
   const source = instrumentRecoveryTrace(readFileSync(new URL(url), 'utf8'));
