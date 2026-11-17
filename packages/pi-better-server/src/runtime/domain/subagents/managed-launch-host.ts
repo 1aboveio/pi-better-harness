@@ -352,6 +352,7 @@ export class ManagedSubagentHost {
         this.requestRecords.set(requestId, { kind: 'continuation-request', id: requestId, waitId: park.waitId, runId: park.runId,
             generation: park.generation, lastProgressAt: now, executionDeadline: null, nextDeadline: null,
             recovery: 'captured-continuation-serialized-by-current-launch-journal-owner' });
+        let dispatched = false;
         const result = this.tail.catch(() => undefined).then(async () => {
             const saved = this.journal.attempt(park.runId)?.launchAuthority;
             if (!saved) throw new Error("Captured continuation launch authority unavailable");
@@ -363,6 +364,7 @@ export class ManagedSubagentHost {
                 digest: launchDigest({ key, runId: park.runId }) };
             this.acceptedRequestLive = true;
             this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...permissions });
+            dispatched = true;
             const outcome = await run();
             if (outcome === "resumed") this.journal.finish(this.current.ownerKey, this.current.key, this.epoch, { status: outcome });
             this.continuationFailures.delete(retryKey);
@@ -371,6 +373,9 @@ export class ManagedSubagentHost {
             const failures = Math.min(6, (this.continuationFailures.get(retryKey)?.failures ?? 0) + 1);
             if (this.continuationFailures.size >= 128 && !this.continuationFailures.has(retryKey)) this.continuationFailures.delete(this.continuationFailures.keys().next().value!);
             this.continuationFailures.set(retryKey, { failures, retryAt: Date.now() + Math.min(30000, 1000 * 2 ** (failures - 1)), reason: String(error).slice(0, 500) });
+            // Let orchestration persist its existing pre-spawn hold. A skipped
+            // result would leave this exact generation ready despite refusal.
+            if (!dispatched) throw error;
             return "skipped" as const;
         }).finally(() => { this.requestRecords.delete(requestId); this.acceptedRequestLive = false; this.pending--; });
         this.tail = result;

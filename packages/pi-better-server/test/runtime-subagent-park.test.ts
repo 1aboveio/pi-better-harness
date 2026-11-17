@@ -10,6 +10,7 @@ import { defaultSandboxPermissions } from "../../pi-better-sandbox/permissions.t
 import { connect } from "node:net";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { inspectDaemonOwner, ownerIdentityVerified, ownerIsAlive, processMatchesStart, type DaemonOwnerIdentity } from "../src/daemon-owner.ts";
+import { onlyStatusProbeRemains } from "./support/runtime-status.ts";
 
 for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", "spawn", "result", "bootstrap", "published", "lease", "tools"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: scenario === "unavailable" ? 90000 : 60000 }, async () => {
   const restart = scenario === "park";
@@ -135,7 +136,15 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
       } finally { observer.close(); }
       await terminal(first.details.runId);
       const completedDependencies = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
-      try { assert.equal(completedDependencies.prepare("SELECT count(*) AS n FROM operations WHERE terminal_revision=0").get()?.n, 0, "all accepted dependencies have durable terminal facts before testing idle shutdown"); }
+      try {
+        assert.equal(completedDependencies.prepare("SELECT count(*) AS n FROM operations WHERE terminal_revision=0").get()?.n, 0, "all accepted dependencies have durable terminal facts before testing idle shutdown");
+        const park = JSON.parse(readFileSync(join(root, "pi-better-subagents/runs", first.details.runId, "park.json"), "utf8"));
+        const held = completedDependencies.prepare("SELECT phase, owner_session_id, owner_workspace, owner_branch_id FROM waits WHERE wait_id=? AND generation=?").get(park.waitId, park.generation);
+        assert.equal(held?.phase, "held", "unavailable continuation must acknowledge the exact durable generation before idle proof");
+        assert.equal(held?.owner_session_id, metaFor(first.details.runId).sessionId);
+        assert.equal(held?.owner_workspace, cwd);
+        assert.equal(held?.owner_branch_id, park.ownerBranchId);
+      }
       finally { completedDependencies.close(); }
       const terminalObservedAt = Date.now();
       // Use the SDK-free runtime handshake, including exact-root/capability
@@ -172,7 +181,7 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
         // runner observation may remain until the idle shutdown recheck.
         const assertFreshLiveness = () => {
           if (lastStatus.livenessObservation.observedAt >= terminalObservedAt)
-            assert.deepEqual(lastStatus.livenessReasons, [], "terminal unavailable work grants no fresh runtime liveness");
+            assert.equal(onlyStatusProbeRemains(lastStatus), true, "terminal unavailable work grants no fresh runtime liveness beyond its exact status dispatch");
         };
         assertFreshLiveness();
         // Measure the current successor's real 30-second idle + five-second
