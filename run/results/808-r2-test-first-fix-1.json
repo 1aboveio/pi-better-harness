@@ -1,0 +1,84 @@
+{
+  "unit": "808",
+  "status": "incomplete",
+  "sourceSHA": "4b7556af7843e70a595999442c586658a4dbfc0e",
+  "sha": "d8a03901e651031c013d410d45bd32cc4fe9a57b",
+  "actualSelection": { "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "source": "PI_PROVIDER, PI_MODEL, PI_REASONING_LEVEL readback" },
+  "standingOrders": [],
+  "decision": "808-common-driver-unmodified-approved-subjects",
+  "decisionNeeded": null,
+  "resolvedRulePaths": [
+    { "rule": "R3", "path": "packages/pi-better-server/test/runtime-scope-boundaries.test.ts", "change": "All four metadata rows have real empty logs before initial reconciliation. Original unrelated B zero-notification and cursor assertions are unchanged.", "status": "focused-green" },
+    { "rule": "R4", "path": "packages/pi-better-server/test/runtime-background-inputs.test.ts", "change": "Assert log_checkpoints attachment and checkpoint database identity on the same derived handle; retain indexConnections=1.", "status": "focused-green" },
+    { "rule": "R4", "path": "packages/pi-better-server/test/mutation-store.test.ts", "change": "Actual RuntimeCancellation and RuntimeResultSupervision instances share controlStore's physical store. Named ownership witness checks three leases, each release, and exact zero after close. Existing direct two-owner expectations unchanged.", "status": "focused-green" },
+    { "rule": "R4", "path": "packages/pi-better-server/test/runtime-cancellation.test.ts", "change": "Correct only the logical ownership expression from two leases to three, under the existing approved decision and named-owner proof. All five SIGKILL stages and post-trigger assertions unchanged.", "status": "source-corrected-native-pending" }
+  ],
+  "originalReproducers": {
+    "retainedVerbatim": ".private-808/tmp/808-r2-original.fix.json",
+    "note": "The full original triggers, round, head, command, relative cwd, expected outcome and evidence are retained verbatim, including prior-round R3. All executed reproducers target this candidate workspace, not the old review checkout."
+  },
+  "retainedWitnesses": [
+    {
+      "rules": ["R3", "R4"],
+      "command": "node --import tsx --test --test-name-pattern='content revisions route|Background constructor attaches' packages/pi-better-server/test/runtime-scope-boundaries.test.ts packages/pi-better-server/test/runtime-background-inputs.test.ts",
+      "relativecwd": ".",
+      "red": { "exit": 1, "evidence": ".private-808/tmp/r2-red-fixtures.log", "errors": ["runtime-scope-boundaries.test.ts:58: 1 !== 0", "runtime-background-inputs.test.ts:18: unexpected log_checkpoints attachment"] },
+      "green": { "exit": 0, "passed": 2, "evidence": ".private-808/tmp/r2-green-fixtures.log" }
+    },
+    {
+      "rule": "R4",
+      "red": { "exit": 1, "boundary": "In-process actual acquireMutationStore + RuntimeCancellation + RuntimeResultSupervision, expected original active1/leases2; cleanup closes all three owners", "error": "actual active1/leases3 versus expected active1/leases2", "evidence": ".private-808/tmp/r2-red-owners.log" },
+      "command": "node --import tsx --test --test-name-pattern='server controlStore|mutation services share a canonical' packages/pi-better-server/test/mutation-store.test.ts",
+      "relativecwd": ".",
+      "green": { "exit": 0, "passed": 2, "evidence": ".private-808/tmp/r2-green-owners.log" }
+    },
+    {
+      "rule": "R2",
+      "red": { "exit": 1, "boundary": "git show of original approved baseline entry and read-model, with assertion that the current campaign entry can emit incrementalWindows and fixtureSha256", "error": "R2: current baseline-entry campaign cannot produce the required report", "evidence": ".private-808/tmp/r2-red-baseline.log" },
+      "baseline": "eec7b3e256a7548bbf67f69cd468f12eb3b91dc8",
+      "baselineEntryBlob": "a1cd1276dbbbf9a08a85c60fd5e9e356e4e3340c",
+      "green": null,
+      "status": "open-no-campaign-or-entry-edits"
+    }
+  ],
+  "verification": [
+    { "command": "node --import tsx --test packages/pi-better-server/test/runtime-scope-boundaries.test.ts packages/pi-better-server/test/runtime-background-inputs.test.ts", "relativecwd": ".", "exit": 0, "evidence": ".private-808/tmp/r2-fixture-files.log" },
+    { "command": "node --import tsx --test packages/pi-better-server/test/aggregate-runtime-samples.test.ts packages/pi-better-server/test/paired-runtime-report.test.ts packages/pi-better-server/test/owned-runtime-producers.test.ts", "relativecwd": ".", "exit": 0, "passed": 56, "evidence": ".private-808/tmp/r2-components.log", "scope": "Components only; all timestamps, PID/start identity, sequence, counter and observer-cost rejection guards unchanged." },
+    { "command": "node --import tsx /Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/reviews/808-r1-repro.mjs \"$PWD\"", "relativecwd": ".", "exit": 0, "evidence": ".private-808/tmp/r2-original-reproducer.log" },
+    { "command": "npm run typecheck --workspace pi-better-server", "relativecwd": ".", "exit": 0, "evidence": ".private-808/tmp/r2-typecheck.log" },
+    { "command": "node .private-808/tmp/assertion-preservation-r2.mjs", "relativecwd": ".", "exit": 0, "evidence": ".private-808/tmp/r2-assertion-preservation.log", "result": "All 403 original assertion expressions retained against596b01de in the original six files." },
+    { "command": "git diff --check", "relativecwd": ".", "exit": 0 }
+  ],
+  "generated": { "status": "not-regenerated", "reason": "Only tests changed. No canonical or generated runtime modules changed. Prior 623-output comparison remains inherited evidence, not a fresh pass." },
+  "currentCheckpoint": "Local test corrections committed. R2 external driver/approved subject binding is not implemented. R3 packed first-LIVE cause and correction remain open. R4 native five-stage execution remains pending.",
+  "pendingNative": {
+    "status": "UNQUALIFIED",
+    "localNode": "v24.21.0",
+    "requiredNode": "24.14.1",
+    "replayedDeniedOperations": false,
+    "coordinatorOwned": ["Actual five SIGKILL triggers after corrected lease assertion", "Packed foreground registration/lifetime and earned startup handoff", "macOS and Linux real process/SQLite/socket/cleanup checks", "All eight acceptance criteria, same fixed host/source/artifact/fixture and every paired window >=600000ms, full actual observer CPU/RSS/GC/I/O/queue/event/recovery/exit/cleanup accounting"]
+  },
+  "failure": {
+    "case": "R2 approved original baseline measurement",
+    "step": "Current campaign forks baseline tracked entry",
+    "error": "Baseline entry cannot emit incrementalWindows or fixtureSha256. Baseline read-model does not expose checkpoint or logReads metrics. External fixture binding and supported observations remain implementation work; no fabricated capabilities or provenance relaxation applied.",
+    "evidenceDir": ".private-808/tmp",
+    "evidence": "r2-red-baseline.log",
+    "cleanupErrors": []
+  },
+  "retainedNativeFailure": {
+    "case": "packed standalone runtime first live owner",
+    "step": "runtime-standalone.test.ts:241 / eval1:46; exact4b CI44022062420 Linux",
+    "error": "owner dead !== live; passive getActivity reordering has no established causal fix",
+    "evidenceDir": "/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796",
+    "evidence": "831-4b-linux-runtime-api.log:200",
+    "status": "not-rerun"
+  },
+  "remainingWork": [
+    "Implement and test the approved same pinned external measurement driver against explicit unmodified baseline and candidate source/artifact roots, binding actual runtime modules/handles and independently recording driver and subject identity.",
+    "Resolve any baseline-specific unavailable observation at its actual boundary; report concrete incompatibility/options without relaxing qualification.",
+    "Establish and repair the packed fixture's actual foreground registration/lifetime and earned startup handoff; preserve LIVE assertions and all owner/idle deadlines.",
+    "Coordinator runs native qualification through the existing approved channels; no local denial replay or external delivery performed."
+  ],
+  "delivery": { "pushed": false, "prCreated": false, "externalWaitStarted": false }
+}
