@@ -69,7 +69,7 @@ export type SandboxPermissions = {
      */
     commandTimeoutSeconds?: number | null;
     network: boolean;
-    /** Fixed process_list adapter only; omitted legacy profiles keep it Off. */
+    /** Fixed process adapters (inventory and Darwin identity compatibility); omitted legacy profiles keep it Off. */
     processAccess?: "off" | "read";
 };
 
