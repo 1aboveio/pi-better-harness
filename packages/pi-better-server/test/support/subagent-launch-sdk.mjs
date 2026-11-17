@@ -42,7 +42,13 @@ process.on("message", async request => {
         if (request.policy !== undefined) policy = request.policy;
         if (request.goalComplete) sessionManager.appendCustomEntry("pi-better-goal", { kind: "set", goal: { goalId: "completed-parent-goal", status: "completed" } });
         const tool = session.extensionRunner.getToolDefinition(request.tool ?? "subagent_spawn");
-        const result = await tool.execute(request.key, request.params, undefined, undefined, session.extensionRunner.createContext());
+        const context = session.extensionRunner.createContext();
+        // Independent oracle: read the actual SDK foreground before tool preparation yields.
+        if (fixture) process.send({ invocation: request.id, entry: {
+            cwd: context.cwd, sessionId: context.sessionManager.getSessionId(),
+            branchId: context.sessionManager.getLeafId(),
+        } });
+        const result = await tool.execute(request.key, request.params, undefined, undefined, context);
         process.send({ id: request.id, result, ...(fixture ? { state: state() } : {}) });
     } catch (error) { process.send({ id: request.id, error: String(error), stack: error.stack, ...(fixture ? { state: state() } : {}) }); }
 });

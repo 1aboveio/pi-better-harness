@@ -7,6 +7,20 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { captureLaunchContext } from "../launch-context.ts";
 import { ownerBindingFromContext } from "../worker-waits.ts";
 
+test("capture preserves missing identity capabilities for downstream validation", () => {
+    assert.equal(captureLaunchContext(undefined), undefined);
+    const missing = { cwd: "/validation-only" };
+    assert.equal(captureLaunchContext(missing), missing);
+    const entries = [{ id: "validation-entry", type: "custom", customType: "settings", data: {} }];
+    const partial = { cwd: missing.cwd, sessionManager: { getBranch: () => entries } };
+    const captured = captureLaunchContext(partial);
+    entries.push({ id: "later-entry", type: "custom", customType: "settings", data: {} });
+    assert.equal(captured.sessionManager.getSessionId, undefined);
+    assert.equal(captured.sessionManager.getLeafId, undefined);
+    assert.equal(captured.sessionManager.getSessionFile, undefined);
+    assert.deepEqual(captured.sessionManager.getBranch().map(entry => entry.id), ["validation-entry"]);
+});
+
 for (const mode of ["same-session", "cross-session"]) {
     test(`launch ownership captures the invoking ${mode} branch before preparation`, async () => {
         const cwd = mkdtempSync(join(tmpdir(), "launch-context-"));

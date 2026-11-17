@@ -436,6 +436,9 @@ describe("completed-subagent continuation", () => {
             holder = undefined;
 
             const receipt = await resumeRun(h, { id: killedId, prompt: "RECOVER THE WORK" });
+            const invokingEntry = h.invocationEntries.at(-1);
+            assert.equal(invokingEntry.sessionId, "owner-session");
+            assert.ok(invokingEntry.branchId, "the invoking SDK branch is retained in the oracle");
             resumedId = idOf(receipt);
             assert.match(receipt.content[0].text, new RegExp(`from ${killedId} \\(interrupted attempt\\)`),
                 "the launch receipt names the interrupted attempt");
@@ -445,7 +448,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(resumed.sessionId, killed.sessionId, "the interrupted conversation is retained");
             assert.equal(resumed.rootRunId, killedId);
             assert.equal(resumed.resumedFrom, killedId, "the new attempt links back to the interrupted one");
-            assert.deepEqual(resumed.callbackOrigin, killed.callbackOrigin, "ownership follows the invoking foreground");
+            assert.deepEqual(resumed.callbackOrigin, invokingEntry, "ownership follows the invoking foreground");
             assert.equal(resumed.recipe.sessionDir, killed.recipe.sessionDir, "the saved recipe is reused");
             assert.equal(resumed.recipe.model, killed.recipe.model);
             assert.notEqual(resumed.logPath, killed.logPath, "each attempt keeps its own evidence");
@@ -727,6 +730,9 @@ describe("completed-subagent continuation", () => {
             resumedId = idOf(await successor.tools.get("subagent_spawn").execute("tc", {
                 session_name: "cross-session-worker", prompt: "PICK UP THE WORK",
             }, undefined, undefined, successor.ctx));
+            const invokingEntry = successor.invocationEntries.at(-1);
+            assert.equal(invokingEntry.sessionId, "another-session");
+            assert.ok(invokingEntry.branchId, "the invoking SDK branch is retained in the oracle");
             const resumed = await waitTerminal(resumedId);
             assert.equal(resumed.status, "completed");
             assert.equal(resumed.sessionId, root.sessionId, "the successor continued the SAME saved conversation");
@@ -734,7 +740,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(resumed.resumedFrom, rootId);
             // The new attempt is attributed to the INVOKING foreground, and the
             // prior attempt keeps its own origin.
-            assert.deepEqual(resumed.callbackOrigin, { cwd: WORKSPACE, sessionId: "another-session" });
+            assert.deepEqual(resumed.callbackOrigin, invokingEntry);
             assert.deepEqual(readMeta(rootId).callbackOrigin, rootSnapshot.callbackOrigin);
             // `ownedByOrigin` remains a pure provenance label: it describes which
             // foreground launched an attempt and never gates continuation.
