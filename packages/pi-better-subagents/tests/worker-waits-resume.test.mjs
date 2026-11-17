@@ -418,7 +418,8 @@ test("production schemas gate bridge tools and sandboxed workers are not withhel
     });
     // Background tools without a production schema are withheld, not advertised
     // with a permissive fallback.
-    assert.deepEqual(plan.tools.sort(), ["acknowledge_operation_result", "wait_for_operations"]);
+    assert.deepEqual(plan.tools.sort(), ["acknowledge_operation_result"]);
+    assert.equal(plan.capabilities.wait, false, "an implicit wait is withheld when no terminal evidence reader is authorized");
     assert.equal(plan.capabilities.background.spawn, false);
 
     // A sandboxed worker is planned exactly like any other; its task policy and

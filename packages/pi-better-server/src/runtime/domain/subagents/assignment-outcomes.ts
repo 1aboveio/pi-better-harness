@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { join, relative, isAbsolute, dirname, resolve } from "node:path";
 import { openSync, closeSync, fstatSync, readSync, realpathSync, constants } from "node:fs";
-import { openStore, ownerDiff, StoreError, type OwnerIdentity, type AssignmentOutcomeRecord } from "./shared-operation-coordinator/index.ts";
+import { openStore, ownerDiff, type OwnerIdentity, type AssignmentOutcomeRecord } from "./shared-operation-coordinator/index.ts";
 import type { RunMeta } from "./registry.ts";
 import { processStartToken, readMeta } from "./registry.ts";
 import type { PermissionSnapshot } from "./permission-policy.ts";
@@ -110,7 +110,9 @@ export function commitAssignmentTerminal(meta: RunMeta, recoveryFailure = false)
         }); } catch (error) {
             // A competing finalizer may commit after our initial read. The store
             // still refuses rewrites; return only the same captured binding's winner.
-            if (error instanceof StoreError && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
+            // A borrowed runtime store has its own coordinator module instance.
+            if (error instanceof Error && error.name === "StoreError" && "code" in error
+                && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
                 const winner = store.getAssignmentOutcome(binding.assignmentId);
                 const current = readMeta(meta.id);
                 if (winner && winner.assignmentId === binding.assignmentId && ownerDiff(winner.owner, binding.owner) === "none"
