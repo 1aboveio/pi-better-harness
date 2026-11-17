@@ -118,9 +118,10 @@ test("retired and current raw callbacks cross only their owned source boundaries
     assert.equal(model.metrics.scheduling.repairEntries, 0, "callback admission starts with exact entity work");
     await settleHints(model);
     const accepted = trace();
-    for (const stage of ["raw-callback", "hint-entry", "queue-admit", "queue-take", "scan-start"])
+    for (const stage of ["raw-callback", "hint-entry", "queue-admit"])
       assert.ok(admitted.some((entry: any) => entry.stage === stage), `missing boundary ${stage}`);
-    for (const stage of ["publish", "scan-end"])
+    // Taking admitted work now follows the source registration acknowledgement.
+    for (const stage of ["queue-take", "scan-start", "publish", "scan-end"])
       assert.ok(accepted.records.some((entry: any) => entry.stage === stage), `missing boundary ${stage}`);
     assert.equal(model.snapshot().rows[0]?.meta.name, "actual-input");
     t.diagnostic(JSON.stringify({ rejected, admitted, accepted }));

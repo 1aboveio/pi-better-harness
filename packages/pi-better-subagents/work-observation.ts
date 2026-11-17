@@ -55,7 +55,10 @@ async function collect(candidate: WorkClient, current: number) {
                     const first = await candidate.get(scope);
                     if (current !== generation || candidate !== client) return;
                     if (first.status === "rebuilding") {
-                        snapshot = { ...first, rows: snapshot?.rows ?? [] }; refresh(); return;
+                        snapshot = { ...first, rows: snapshot?.rows ?? [] }; refresh();
+                        // A newer publication may already be owed while this page
+                        // was in flight. Drain that demand, but never poll for it.
+                        break;
                     }
                     const rows = [...first.rows];
                     let cursor = first.nextCursor;

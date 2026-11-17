@@ -1,6 +1,7 @@
 import test from "node:test";
+import { openSync, writeSync, closeSync } from "node:fs";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, appendFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, appendFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -63,6 +64,7 @@ test("A partial JSON write degrades only its retained namespace and never publis
   const a = join(root, "a"), b = join(root, "b");
   put("sa_a", a); put("sa_b1", b); put("sa_b2", b);
   const model = new WorkReadModel(root, "partial-json", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  let held: number | undefined;
   try {
     await model.reconcile();
     for (const watcher of (model as any).watchers.values()) watcher.close();
@@ -70,8 +72,9 @@ test("A partial JSON write degrades only its retained namespace and never publis
     const scope = { cwd: b, limit: 1 }, first = model.snapshot(scope);
     let frames = 0;
     model.onChange(() => frames++, scope);
-    writeFileSync(join(root, "runs/sa_a/meta.json"), '{"id":');
-    await (model as any).scan([join(root, "runs/sa_a/meta.json")]);
+    const path = join(root, "runs/sa_a/meta.json");
+    held = openSync(path, "w"); writeSync(held, '{"id":');
+    await (model as any).scan([path]);
     assert.equal(model.observation().status, "degraded");
     assert.equal(model.snapshot({ cwd: a }).status, "degraded");
     assert.match(model.snapshot({ cwd: a }).reason!, /SyntaxError/);
@@ -79,17 +82,83 @@ test("A partial JSON write degrades only its retained namespace and never publis
     assert.equal(frames, 0, "unrelated content sends no scoped frames");
     assert.equal(model.snapshot(scope).status, "ready");
     assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
-    put("sa_a", b);
+    writeFileSync(join(root, "settings.json"), "{");
+    await (model as any).scan([path]);
+    assert.equal(model.snapshot(scope).status, "degraded", "a global health source failure cannot be hidden by attributed A");
+    rmSync(join(root, "settings.json"));
+    writeSync(held, JSON.stringify({ id: "sa_a", cwd: b, status: "completed", startedAt: 1 }), 0, "utf8");
+    closeSync(held); held = undefined;
     await model.reconcile();
-    assert.equal(model.snapshot({ cwd: b }).totalMatching, 3, "a valid move affects its destination");
+    assert.equal(model.snapshot({ cwd: b }).totalMatching, 3);
     assert.ok(frames > 0);
     assert.throws(() => model.snapshot({ ...scope, cursor: first.nextCursor }), /resync_required/);
-    writeFileSync(join(root, "runs/sa_b1/meta.json"), '{');
+    writeFileSync(join(root, "runs/sa_b1/meta.json"), "{");
     await (model as any).scan([join(root, "runs/sa_b1/meta.json")]);
     assert.equal(model.snapshot(scope).status, "degraded", "B's own parse failure remains visible");
     model.invalidate("Unknown source root failure");
     assert.equal(model.snapshot({ cwd: a }).status, "degraded");
-  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+  } finally { if (held !== undefined) closeSync(held); await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("ten scoped observers see one committed update and separate partial-write recovery epochs", async t => {
+  const root = mkdtempSync(join(tmpdir(), "scope-commit-"));
+  const directory = join(root, "runs/sa_committed"), path = join(directory, "meta.json");
+  const meta = { id: "sa_committed", cwd: root, status: "completed", startedAt: 1, name: "verified" };
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(path, JSON.stringify(meta));
+  const model = new WorkReadModel(root, "commit-epochs", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  const dispose: Array<() => void> = [];
+  let held: number | undefined;
+  try {
+    await model.reconcile();
+    // Control observation boundaries without a native process/socket replay.
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    for (const entry of (model as any).rootParents.values()) entry.watcher.close();
+    const scope = { cwd: root, limit: 1 };
+    const observations = Array.from({ length: 10 }, () => [] as ReturnType<WorkReadModel["snapshot"]>[]);
+    for (const frames of observations) dispose.push(model.onChange(() => frames.push(model.snapshot(scope)), scope));
+    const scan = () => (model as any).scan([path]);
+    const assertEpoch = (index: number, status: string, name: string) => {
+      for (const frames of observations) {
+        assert.equal(frames.length, index + 1, "one notification per observer per source identity");
+        assert.equal(frames[index]!.status, status);
+        assert.equal(frames[index]!.rows[0]!.meta.name, name);
+        assert.equal(frames[index]!.scopeRevision, observations[0]![index]!.scopeRevision);
+      }
+    };
+    const staged = `${path}.sharing.tmp`;
+    writeFileSync(staged, JSON.stringify({ ...meta, name: "committed" }));
+    await scan();
+    assert.ok(observations.every(frames => frames.length === 0), "staging does not change the visible source");
+    renameSync(staged, path);
+    await scan();
+    assertEpoch(0, "ready", "committed");
+    await scan();
+    assertEpoch(0, "ready", "committed");
+    const verified = observations[0]![0]!.rows[0]!;
+    held = openSync(path, "w"); writeSync(held, '{"id":');
+    await scan();
+    assertEpoch(1, "degraded", "committed");
+    for (const frames of observations) {
+      assert.match(frames[1]!.reason!, /SyntaxError/);
+      assert.deepEqual(frames[1]!.rows[0]!.meta, verified.meta);
+      assert.equal(frames[1]!.rows[0]!.sourceRevision, verified.sourceRevision);
+    }
+    await scan();
+    assertEpoch(1, "degraded", "committed");
+    writeSync(held, JSON.stringify({ ...meta, name: "recovered" }), 0, "utf8");
+    closeSync(held); held = undefined;
+    await scan();
+    assertEpoch(2, "ready", "recovered");
+    assert.equal(new Set(observations[0]!.map(frame => frame.scopeRevision)).size, 3);
+    t.diagnostic(JSON.stringify({ observers: observations.length, epochs: observations[0]!.map(frame => ({
+      status: frame.status, reason: frame.reason, scopeRevision: frame.scopeRevision, name: frame.rows[0]!.meta.name,
+    })) }));
+  } finally {
+    if (held !== undefined) closeSync(held);
+    dispose.forEach(stop => stop());
+    await model.close(); rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("A health deadlines advance without invalidating B subscription or cursor", async t => {

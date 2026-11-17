@@ -1,7 +1,7 @@
 import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
 import { opendir, readFile, stat, writeFile, mkdir, rename } from "node:fs/promises";
-import { watch, type FSWatcher } from "node:fs";
+import { watchSource, type SourceWatch, type SourceWatcher as FSWatcher } from "./source-watch.ts";
 import { basename, dirname, relative, join, resolve, sep } from "node:path";
 import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -127,7 +127,9 @@ export class WorkReadModel {
   readonly agentDir: string;
   readonly instanceId: string;
 
-  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number } = {}) {
+  private watch: SourceWatch;
+  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number; watch?: SourceWatch } = {}) {
+    this.watch = options.watch ?? watchSource;
     this.agentDir = agentDir; this.instanceId = instanceId;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
@@ -169,7 +171,7 @@ export class WorkReadModel {
         const identity = `${info.dev}:${info.ino}`;
         if (previous?.path === parent && previous.identity === identity) return;
         const entry = relative(parent, root).split(sep)[0];
-        const watcher = watch(parent, (_event, filename) => {
+        const watcher = this.watch(parent, (_event, filename) => {
           if (this.rootParents.get(root)?.watcher !== watcher) return;
           if (!filename || String(filename) === entry || String(filename) === relative(dirname(parent), parent)) void this.reconcile();
         });
@@ -203,7 +205,7 @@ export class WorkReadModel {
     }
     if (this.watchers.has(path)) return;
     try {
-      const watcher = watch(path, (_event, filename) => {
+      const watcher = this.watch(path, (_event, filename) => {
         if (this.watchers.get(path) !== watcher) return;
         if (path === this.runs) {
           // A raw directory may itself have been removed/replaced. Reattach
@@ -433,6 +435,7 @@ export class WorkReadModel {
       return drain ? this.pending.then(() => this.reconcile()) : this.pending;
     }
     this.pending = (async () => {
+      await this.watchRegistrations();
       if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
       do {
         this.dirty = false;
@@ -453,6 +456,7 @@ export class WorkReadModel {
         this.repair ??= this.repairPaths();
         const next = await this.repair.next();
         if (next.done) {
+          await this.watchRegistrations();
           this.repair = undefined; this.repairOwed = false;
           if (!this.imported) {
             this.imported = true;
@@ -481,6 +485,10 @@ export class WorkReadModel {
     const counter = this.sourceWork[kind]; counter.batches++; counter.paths += paths.length;
     counter.stats += this.sourceStats - before.stats; counter.metadataReads += this.counters.metadataReads - before.metadataReads;
     counter.logBytes += logReadMetrics.bytes - before.logBytes; counter.logReads += logReadMetrics.reads - before.logReads;
+  }
+
+  private async watchRegistrations() {
+    await Promise.all([...this.watchers.values(), ...[...this.rootParents.values()].map(value => value.watcher)].map(watcher => watcher.ready));
   }
 
   private async scan(paths: string[]) {
@@ -629,6 +637,7 @@ export class WorkReadModel {
       };
       // A delayed mkdir notification may retire a watch during the awaited reads.
       rearmRawDirectories();
+      await this.watchRegistrations();
       if (!this.staged && !changed && !failedPaths.size && !this.sourceErrors.size && !logFamilies.size && !deadlineExpired && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && !healthConfig.reason && this.state === "ready") return;
       const metas = new Map<string, any>();
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
@@ -761,6 +770,7 @@ export class WorkReadModel {
           await yieldTurn(); sliceStarted = performance.now();
         }
       }
+      const globallyUnverified = !!healthConfig.reason || rows.some(row => !row.assignment.verified);
       let after: string;
       try { after = this.reader.revision(); } catch { after = "unknown"; }
       if (after !== coordinator) {
@@ -788,7 +798,7 @@ export class WorkReadModel {
           if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
             this.dirty = true;
             const error = new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
-            if ((this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
+            if (!globallyUnverified && (this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
                 && path.startsWith(this.runs + sep) && info.size <= 1024n * 1024n && !failedPaths.size && [...this.sourceErrors].every(([path, reason]) =>
               this.sourceRace?.paths.has(path) && reason === this.sourceRace.reason)) {
               // Recheck only for error routing: a concurrent move can affect a
@@ -815,6 +825,7 @@ export class WorkReadModel {
       }
       if (this.closed) return;
       rearmRawDirectories();
+      await this.watchRegistrations();
       this.db.exec("BEGIN");
       const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");
@@ -851,7 +862,8 @@ export class WorkReadModel {
       }
       // Incomplete raw writes retain their verified namespace, not partial JSON.
       // New/unknown records and mixed failures cannot be narrowed this way.
-      if (failedPaths.size && failedPaths.size === malformedPaths.size
+      if (globallyUnverified) this.sourceRace = undefined;
+      if (!globallyUnverified && failedPaths.size && failedPaths.size === malformedPaths.size
           && (previousState === "ready" || this.sourceRace && previousReason === this.sourceRace.reason)
           && [...this.sourceErrors.keys()].every(path => malformedPaths.has(path))) {
         this.sourceRace = { reason: failedPaths.values().next().value!, paths: malformedPaths,

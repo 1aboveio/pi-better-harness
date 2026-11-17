@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 
+// Controlled registered-handler witness from 804/1efd0cf8 and 8d53f9b4.
 for (const missingLogs of [true, false]) test(`registered list paging ${missingLogs ? "rejects its stale cursor after missing-log observations" : "stays stable after complete source publication"}`, async () => {
   const root = mkdtempSync(join(tmpdir(), "settled-pages-"));
   const savedTmp = process.env.TMPDIR;
@@ -49,6 +50,7 @@ for (const missingLogs of [true, false]) test(`registered list paging ${missingL
       assert.notEqual(after.rows[0]!.sourceRevision, before.rows[0].sourceRevision);
       await assert.rejects(list.execute("list-next", { ...params, cursor }), /resync_required: cursor snapshot changed/);
     } else {
+      assert.equal(existsSync(failures), false);
       assert.equal(after.rows[0]!.sourceRevision, before.rows[0].sourceRevision);
       const next = await list.execute("list-next", { ...params, cursor });
       assert.notEqual(next.details.snapshot.rows[0].meta.id, before.rows[0].meta.id);
