@@ -16,10 +16,13 @@ for (const missingLogs of [true, false]) test(`registered list paging ${missingL
     mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ id, cwd: root, sessionId: `worker-${i}`,
       status: "completed", startedAt: i, endedAt: 100, callbackOrigin: { cwd: root, sessionId: "parent" } }));
-    if (!missingLogs) writeFileSync(join(directory, "output.log"), "");
+    if (!missingLogs) writeFileSync(join(directory, "output.log"), JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
   }
   const log = join(runs, "sa_shared_0/output.log");
-  writeFileSync(log, JSON.stringify({ type: "tool_execution_start", toolCallId: "first", toolName: "bash", at: 1 }) + "\n");
+  writeFileSync(log, [
+    { type: "tool_execution_start", toolCallId: "first", toolName: "bash", at: 1 },
+    { type: "agent_end", messages: [] },
+  ].map(event => JSON.stringify(event)).join("\n") + "\n");
   const model = new WorkReadModel(agent, "settled-pages", { baseDir: base, durableDir: join(root, "durable"), intervalMs: 60000 });
   try {
     await model.reconcile();
