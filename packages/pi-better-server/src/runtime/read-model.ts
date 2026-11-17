@@ -97,6 +97,7 @@ export class WorkReadModel {
   private repairWrite: Promise<void> = Promise.resolve();
   private repairPersistencePending = false;
   private sourceErrors = new Map<string, string>();
+  private sourceRace?: { reason: string; paths: Set<string>; rows: any[] };
   private sourceStats = 0;
   private sourceWork = { entity: { batches: 0, paths: 0, stats: 0, metadataReads: 0, logBytes: 0, logReads: 0 }, repair: { batches: 0, paths: 0, stats: 0, metadataReads: 0, logBytes: 0, logReads: 0 } };
   private scheduling = { entityBatches: 0, repairBatches: 0, repairEntries: 0, overflows: 0, maxQueueAgeMs: 0, maxPublicationMs: 0 };
@@ -106,7 +107,7 @@ export class WorkReadModel {
   private coordinatorConversations?: Map<string, string>;
   private revision = 0;
   private scopeSequence = 0;
-  private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number }>();
+  private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number; status: string }>();
   private changedRows: Array<{ before?: any; after?: any }> = [];
   private foldQueueSequence = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
@@ -356,7 +357,7 @@ export class WorkReadModel {
     if (!entry) {
       if (scope.cursor) throw new Error("resync_required: cursor retention expired");
       if (this.scopes.size >= 128) this.scopes.delete(this.scopes.keys().next().value!);
-      entry = { scope: { ...scope, cursor: undefined }, token: ++this.scopeSequence, revision: 0, used: now };
+      entry = { scope: { ...scope, cursor: undefined }, token: ++this.scopeSequence, revision: 0, used: now, status: hash(this.scopeStatus(scope)) };
       this.scopes.set(key, entry);
     }
     entry.used = now;
@@ -388,12 +389,25 @@ export class WorkReadModel {
     this.revision++;
     for (const entry of this.scopes.values()) {
       if (backgroundOnly) continue;
-      if (!this.changedRows.length || this.changedRows.some(({ before, after }) =>
+      const status = hash(this.scopeStatus(entry.scope));
+      if (entry.status !== status || this.changedRows.some(({ before, after }) =>
         this.matchesScope(entry.scope, before) || this.matchesScope(entry.scope, after)
         || this.matchesScope(entry.scope, before, true) !== this.matchesScope(entry.scope, after, true))) entry.revision++;
+      entry.status = status;
     }
     this.changedRows = [];
     for (const listener of this.listeners) listener();
+  }
+
+  private scopeStatus(scope: WorkScope): { status: WorkSnapshot["status"]; reason?: string } {
+    const race = this.sourceRace;
+    // Only verified attribution can narrow degradation; unknown failures stay global.
+    if (this.imported && this.state === "degraded" && race && this.reason === race.reason
+        && [...this.sourceErrors.keys()].every(path => race.paths.has(path))
+        && !race.rows.some(row => this.matchesScope({ id: scope.id, cwd: scope.cwd, sessionId: scope.sessionId }, row))) {
+      return { status: "ready" };
+    }
+    return { status: this.state, reason: this.reason };
   }
 
   reconcile(drain = true): Promise<void> {
@@ -456,11 +470,13 @@ export class WorkReadModel {
     const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
     let releaseCoordinator: (() => void) | undefined;
+    let sourceRace: WorkReadModel["sourceRace"];
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
       healthRevision: this.healthRevision, coordinator: this.coordinator, coordinatorConversations: this.coordinatorConversations };
     try {
       const next = new Map(baseline.files);
       const failedPaths = new Map<string, string>();
+      const malformedPaths = new Set<string>();
       let batch = 0;
       let sliceStarted = performance.now();
       for (const [directory, archived] of [[this.markers, true], [this.archives, true], [this.runs, false]] as const) {
@@ -503,6 +519,7 @@ export class WorkReadModel {
               }
               next.set(path, entry!);
             } catch (error) {
+              if (!archived && error instanceof SyntaxError && this.files.has(path)) malformedPaths.add(path);
               if ((error as NodeJS.ErrnoException).code === "ENOENT") {
                 try {
                   await sourceStat(directory);
@@ -701,6 +718,7 @@ export class WorkReadModel {
           await yieldTurn(); sliceStarted = performance.now();
         }
       }
+      const globallyUnverified = !!healthConfig.reason || rows.some(row => !row.assignment.verified);
       let after: string;
       try { after = this.reader.revision(); } catch { after = "unknown"; }
       if (after !== coordinator) {
@@ -721,13 +739,31 @@ export class WorkReadModel {
           try { return { info: await sourceStat(path, { bigint: true }) }; }
           catch (error) { return { error }; }
         }));
-        for (const [index, [, entry]] of group.entries()) {
+        for (const [index, [path, entry]] of group.entries()) {
           const observation = observations[index]!;
           if (!observation.info) throw observation.error;
           const info = observation.info;
           if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
             this.dirty = true;
-            throw new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
+            const error = new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
+            if (!globallyUnverified && (this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
+                && path.startsWith(this.runs + sep) && info.size <= 1024n * 1024n && !failedPaths.size && [...this.sourceErrors].every(([path, reason]) =>
+              this.sourceRace?.paths.has(path) && reason === this.sourceRace.reason)) {
+              // Validate routing only; the uncommitted row remains unqueryable.
+              try {
+                this.counters.metadataReads++;
+                const current = JSON.parse(await readFile(path, "utf8"));
+                const checked = await sourceStat(path, { bigint: true });
+                if (current?.id === entry.meta.id && typeof current.cwd === "string" && Number.isFinite(current.startedAt)
+                    && typeof current.status === "string" && checked.size <= 1024n * 1024n
+                    && `${checked.dev}:${checked.ino}:${checked.size}:${checked.mtimeNs}:${checked.ctimeNs}` === `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`) {
+                  sourceRace = { reason: String(error), paths: new Set(paths), rows: [
+                    ...[...uncommitted].flatMap(id => [this.projected.get(id), this.staged?.projected.get(id)].filter(Boolean)),
+                    { meta: current, assignment: { state: current.status } }] };
+                }
+              } catch { /* Unstable attribution keeps degradation global. */ }
+            }
+            throw error;
           }
           if (++batch % 256 === 0 || performance.now() - sliceStarted >= 8) {
             await yieldTurn(); sliceStarted = performance.now();
@@ -770,15 +806,25 @@ export class WorkReadModel {
         if (error) this.sourceErrors.set(path, error);
         else this.sourceErrors.delete(path);
       }
+      // Retained raw parse failures keep their verified namespace, never partial JSON.
+      if (globallyUnverified) this.sourceRace = undefined;
+      if (!globallyUnverified && failedPaths.size && failedPaths.size === malformedPaths.size
+          && (previousState === "ready" || this.sourceRace && previousReason === this.sourceRace.reason)
+          && [...this.sourceErrors.keys()].every(path => malformedPaths.has(path))) {
+        this.sourceRace = { reason: failedPaths.values().next().value!, paths: malformedPaths,
+          rows: [...malformedPaths].map(path => this.projected.get(this.files.get(path)!.meta.id)) };
+      }
+      if (!this.sourceErrors.size) this.sourceRace = undefined;
       this.state = this.sourceErrors.size || healthConfig.reason ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
       this.reason = this.sourceErrors.values().next().value ?? healthConfig.reason ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
       if ((this.imported || paths.length === 128) && (semanticChange || previousState !== this.state || previousReason !== this.reason)) {
-        this.changedRows = previousState === this.state && previousReason === this.reason ? changedRows : [];
+        this.changedRows = changedRows;
         this.publish();
       }
     } catch (error) {
       if (this.closed) return;
       const reason = String(error).slice(0, 512);
+      this.sourceRace = sourceRace;
       if (this.dirty) for (const path of paths) if (!this.hints.has(path)) this.hints.set(path, Date.now());
       for (const path of paths) this.sourceErrors.set(path, reason);
       const changed = this.state !== "degraded" || this.reason !== reason;
@@ -846,7 +892,7 @@ export class WorkReadModel {
     });
     const deadlines = rows.map((row: any) => row.health?.nextDeadline).filter((deadline: any) => typeof deadline === "number");
     return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([key, entry.token, entry.revision]), seq: this.revision,
-      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, status: this.state, reason: this.reason,
+      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, ...this.scopeStatus(scope),
       totalMatching,
       rows: page.map((record: any, index: number) => {
         const row = rows[index];

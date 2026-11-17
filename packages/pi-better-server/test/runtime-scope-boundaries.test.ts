@@ -1,4 +1,5 @@
 import test from "node:test";
+import { openSync, writeSync, closeSync } from "node:fs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,6 +8,92 @@ import { EventEmitter } from "node:events";
 import type { Socket } from "node:net";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
+
+test("a staged A verification race retains A truth and preserves B until a verified move", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scope-source-race-"));
+  const write = (id: string, cwd: string, name: string) => {
+    mkdirSync(join(root, "runs", id), { recursive: true });
+    writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, name, status: "completed", startedAt: 1 }));
+  };
+  const a = join(root, "a"), b = join(root, "b");
+  write("sa_a", a, "old"); write("sa_b1", b, "b1"); write("sa_b2", b, "b2");
+  const model = new WorkReadModel(root, "scope-race", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    for (const entry of (model as any).rootParents.values()) entry.watcher.close();
+    const scope = { cwd: b, limit: 1 }, first = model.snapshot(scope);
+    let frames = 0;
+    model.onChange(() => frames++, scope);
+    write("sa_a", a, "staged");
+    const reader = (model as any).reader, revision = reader.revision.bind(reader);
+    reader.revision = () => { write("sa_a", a, "committed-during-verification"); reader.revision = revision; return revision(); };
+    await (model as any).scan([join(root, "runs/sa_a/meta.json")]);
+    assert.equal(model.observation().status, "degraded");
+    assert.match(model.snapshot({ cwd: a }).reason!, /Source changed during observation/);
+    assert.equal(model.snapshot({ cwd: a }).rows[0]!.meta.name, "old");
+    assert.equal(frames, 0);
+    assert.equal(model.snapshot(scope).status, "ready");
+    assert.equal(model.snapshot(scope).scopeRevision, first.scopeRevision);
+    assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
+    await model.reconcile();
+    assert.equal(model.snapshot({ cwd: a }).rows[0]!.meta.name, "committed-during-verification");
+    assert.equal(frames, 0);
+    write("sa_a", a, "staged-move");
+    reader.revision = () => { write("sa_a", b, "moved-into-B"); reader.revision = revision; return revision(); };
+    await (model as any).scan([join(root, "runs/sa_a/meta.json")]);
+    assert.equal(model.snapshot(scope).status, "degraded", "a concurrent destination membership affects B");
+    assert.ok(frames > 0);
+    await model.reconcile();
+    model.invalidate("Source root unavailable");
+    assert.equal(model.snapshot(scope).status, "degraded");
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a held partial A write degrades A but sends no unrelated B frames", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scope-malformed-"));
+  const put = (id: string, cwd: string) => {
+    mkdirSync(join(root, "runs", id), { recursive: true });
+    writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, status: "completed", startedAt: 1 }));
+  };
+  const a = join(root, "a"), b = join(root, "b");
+  put("sa_a", a); put("sa_b1", b); put("sa_b2", b);
+  const model = new WorkReadModel(root, "partial-json", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  let held: number | undefined;
+  try {
+    await model.reconcile();
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    for (const entry of (model as any).rootParents.values()) entry.watcher.close();
+    const scope = { cwd: b, limit: 1 }, first = model.snapshot(scope);
+    let frames = 0;
+    model.onChange(() => frames++, scope);
+    const path = join(root, "runs/sa_a/meta.json");
+    held = openSync(path, "w"); writeSync(held, '{"id":');
+    await (model as any).scan([path]);
+    assert.equal(model.observation().status, "degraded");
+    assert.equal(model.snapshot({ cwd: a }).status, "degraded");
+    assert.match(model.snapshot({ cwd: a }).reason!, /SyntaxError/);
+    assert.equal(model.snapshot({ cwd: a }).rows[0]!.meta.id, "sa_a");
+    assert.equal(frames, 0, "unrelated content sends no scoped frames");
+    assert.equal(model.snapshot(scope).status, "ready");
+    assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
+    writeFileSync(join(root, "settings.json"), "{");
+    await (model as any).scan([path]);
+    assert.equal(model.snapshot(scope).status, "degraded", "a global health source failure cannot be hidden by attributed A");
+    rmSync(join(root, "settings.json"));
+    writeSync(held, JSON.stringify({ id: "sa_a", cwd: b, status: "completed", startedAt: 1 }), 0, "utf8");
+    closeSync(held); held = undefined;
+    await model.reconcile();
+    assert.equal(model.snapshot({ cwd: b }).totalMatching, 3);
+    assert.ok(frames > 0);
+    assert.throws(() => model.snapshot({ ...scope, cursor: first.nextCursor }), /resync_required/);
+    writeFileSync(join(root, "runs/sa_b1/meta.json"), "{");
+    await (model as any).scan([join(root, "runs/sa_b1/meta.json")]);
+    assert.equal(model.snapshot(scope).status, "degraded", "B's own parse failure remains visible");
+    model.invalidate("Unknown source root failure");
+    assert.equal(model.snapshot({ cwd: a }).status, "degraded");
+  } finally { if (held !== undefined) closeSync(held); await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test("A health deadlines advance without invalidating B subscription or cursor", async t => {
   const root = mkdtempSync(join(tmpdir(), "scope-deadlines-"));
