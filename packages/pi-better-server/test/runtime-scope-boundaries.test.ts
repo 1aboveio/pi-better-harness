@@ -54,6 +54,44 @@ test("A staged source race degrades A but preserves verified B frames and cursor
   } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("A partial JSON write degrades only its retained namespace and never publishes partial metadata", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scope-malformed-"));
+  const put = (id: string, cwd: string) => {
+    mkdirSync(join(root, "runs", id), { recursive: true });
+    writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, status: "completed", startedAt: 1 }));
+  };
+  const a = join(root, "a"), b = join(root, "b");
+  put("sa_a", a); put("sa_b1", b); put("sa_b2", b);
+  const model = new WorkReadModel(root, "partial-json", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    for (const entry of (model as any).rootParents.values()) entry.watcher.close();
+    const scope = { cwd: b, limit: 1 }, first = model.snapshot(scope);
+    let frames = 0;
+    model.onChange(() => frames++, scope);
+    writeFileSync(join(root, "runs/sa_a/meta.json"), '{"id":');
+    await (model as any).scan([join(root, "runs/sa_a/meta.json")]);
+    assert.equal(model.observation().status, "degraded");
+    assert.equal(model.snapshot({ cwd: a }).status, "degraded");
+    assert.match(model.snapshot({ cwd: a }).reason!, /SyntaxError/);
+    assert.equal(model.snapshot({ cwd: a }).rows[0]!.meta.id, "sa_a");
+    assert.equal(frames, 0, "unrelated content sends no scoped frames");
+    assert.equal(model.snapshot(scope).status, "ready");
+    assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
+    put("sa_a", b);
+    await model.reconcile();
+    assert.equal(model.snapshot({ cwd: b }).totalMatching, 3, "a valid move affects its destination");
+    assert.ok(frames > 0);
+    assert.throws(() => model.snapshot({ ...scope, cursor: first.nextCursor }), /resync_required/);
+    writeFileSync(join(root, "runs/sa_b1/meta.json"), '{');
+    await (model as any).scan([join(root, "runs/sa_b1/meta.json")]);
+    assert.equal(model.snapshot(scope).status, "degraded", "B's own parse failure remains visible");
+    model.invalidate("Unknown source root failure");
+    assert.equal(model.snapshot({ cwd: a }).status, "degraded");
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("A health deadlines advance without invalidating B subscription or cursor", async t => {
   const root = mkdtempSync(join(tmpdir(), "scope-deadlines-"));
   let now = 1000;

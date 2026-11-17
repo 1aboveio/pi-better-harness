@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+import { withFixtureCleanup } from "./support/fixture-outcome.ts";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 const { createLocalSupervisor, supervisorPaths } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
 
@@ -38,7 +39,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
     const [ready] = await Promise.race([once(child, "message"), exited.then(() => { throw new Error(errors); })]);
     return { child, ready, exited };
   };
-  try {
+  await withFixtureCleanup(async () => {
     let server = await start(guarded ? "./support/guarded-work-daemon.ts" : "./support/work-daemon.ts");
     const frontends = await Promise.all(Array.from({ length: crash === "concurrent-frontends" ? 2 : 1 }, () => start("./support/result-frontend.ts")));
     const frontend = frontends[0]!;
@@ -203,14 +204,14 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
         if (crash === "idle-guardian-held") assert.equal(store.getWait({ waitId: wait.waitId })?.phase, "held");
       }
     } finally { store.close(); }
-  } finally {
+  }, async () => {
     for (const client of clients) client.close();
     for (const child of children) if (child.exitCode === null && child.signalCode === null) {
       const exited = once(child, "exit"); child.send(stops.get(child) as any); await exited;
     }
     for (const id of taskIds) await createLocalSupervisor({ directory }).stop(id);
     rmSync(transport, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
-  }
+  });
 });
 }
 
