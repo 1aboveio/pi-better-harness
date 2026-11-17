@@ -495,7 +495,7 @@ export class WorkReadModel {
   private scopeStatus(scope: WorkScope): { status: WorkSnapshot["status"]; reason?: string } {
     const race = this.sourceRace;
     // Only a validated, entity-attributed retry can leave another scope ready.
-    // Root, coordinator, malformed-input and initial-import failures stay global.
+    // Root, coordinator, unattributed and initial-import failures stay global.
     if (this.imported && this.state === "degraded" && race && this.reason === race.reason
         && [...this.sourceErrors.keys()].every(path => race.paths.has(path))
         && !race.rows.some(row => this.matchesScope({ id: scope.id, cwd: scope.cwd, sessionId: scope.sessionId }, row))) {
@@ -579,6 +579,7 @@ export class WorkReadModel {
     try {
       const next = new Map(baseline.files);
       const failedPaths = new Map<string, string>();
+      const malformedPaths = new Set<string>();
       let batch = 0;
       let sliceStarted = performance.now();
       for (const [directory, archived] of [[this.markers, true], [this.archives, true], [this.runs, false]] as const) {
@@ -621,6 +622,7 @@ export class WorkReadModel {
               }
               next.set(path, entry!);
             } catch (error) {
+              if (!archived && error instanceof SyntaxError && this.files.has(path)) malformedPaths.add(path);
               if ((error as NodeJS.ErrnoException).code === "ENOENT") {
                 try {
                   await sourceStat(directory);
@@ -961,6 +963,14 @@ export class WorkReadModel {
         const error = failedPaths.get(path);
         if (error) this.sourceErrors.set(path, error);
         else this.sourceErrors.delete(path);
+      }
+      // Incomplete raw writes retain their verified namespace, not partial JSON.
+      // New/unknown records and mixed failures cannot be narrowed this way.
+      if (failedPaths.size && failedPaths.size === malformedPaths.size
+          && (previousState === "ready" || this.sourceRace && previousReason === this.sourceRace.reason)
+          && [...this.sourceErrors.keys()].every(path => malformedPaths.has(path))) {
+        this.sourceRace = { reason: failedPaths.values().next().value!, paths: malformedPaths,
+          rows: [...malformedPaths].map(path => this.projected.get(this.files.get(path)!.meta.id)) };
       }
       if (!this.sourceErrors.size) this.sourceRace = undefined;
       this.state = this.sourceErrors.size || healthConfig.reason ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
