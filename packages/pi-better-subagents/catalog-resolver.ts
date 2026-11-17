@@ -218,7 +218,41 @@ export function inspectCatalog(snapshot: CatalogSnapshot, id: string): CatalogIn
     };
 }
 
+export const catalogResolutionMetrics = { assemblies: 0, hits: 0 };
+const resolutions = new Map<string, Resolution>();
+
+function resolveCached(snapshot: CatalogSnapshot, id: string, compute: () => Resolution): Resolution {
+    const entry = findEntry(snapshot, id);
+    if (!entry) return compute();
+    const roleId = entry.definition?.kind === "agent" ? entry.definition.roleId : undefined;
+    const role = roleId ? findEntry(snapshot, roleId) : undefined;
+    // Only the selected definition, its base role and their own preferences contribute.
+    const key = JSON.stringify([{ ...entry, unused: undefined }, role && { ...role, unused: undefined }, snapshot.savedSettings?.[id], roleId && snapshot.savedSettings?.[roleId],
+        snapshot.sessionSettings?.[id], roleId && snapshot.sessionSettings?.[roleId]]);
+    const cached = resolutions.get(key);
+    if (cached) {
+        catalogResolutionMetrics.hits++;
+        const result = structuredClone(cached);
+        result.entry = entry;
+        if (result.effective) result.effective.snapshotDigest = snapshot.digest;
+        return result;
+    }
+    catalogResolutionMetrics.assemblies++;
+    const result = compute();
+    if (new TextEncoder().encode(key).byteLength <= 64 * 1024) resolutions.set(key, structuredClone(result));
+    if (resolutions.size > 512) resolutions.delete(resolutions.keys().next().value!);
+    return result;
+}
+
 function resolveRole(snapshot: CatalogSnapshot, roleId: string): Resolution {
+    return resolveCached(snapshot, roleId, () => resolveRoleUncached(snapshot, roleId));
+}
+
+function resolveAgent(snapshot: CatalogSnapshot, agentId: string): Resolution {
+    return resolveCached(snapshot, agentId, () => resolveAgentUncached(snapshot, agentId));
+}
+
+function resolveRoleUncached(snapshot: CatalogSnapshot, roleId: string): Resolution {
     const entry = findEntry(snapshot, roleId);
     if (!entry || entry.kind !== "role") {
         return {
@@ -268,7 +302,7 @@ function resolveRole(snapshot: CatalogSnapshot, roleId: string): Resolution {
     };
 }
 
-function resolveAgent(snapshot: CatalogSnapshot, agentId: string): Resolution {
+function resolveAgentUncached(snapshot: CatalogSnapshot, agentId: string): Resolution {
     const entry = findEntry(snapshot, agentId);
     if (!entry || entry.kind !== "agent") {
         return {

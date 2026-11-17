@@ -147,12 +147,13 @@ export function commitAssignmentTerminal(meta, recoveryFailure = false) {
         catch (error) {
             // A competing finalizer may commit after our initial read. The store
             // still refuses rewrites; return only the same captured binding's winner.
-            // A borrowed runtime store has its own coordinator module instance.
+            // A borrowed server store uses its canonical coordinator module,
+            // whose StoreError constructor differs from this embedded copy.
             if (error instanceof Error && error.name === "StoreError" && "code" in error
                 && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
                 const winner = store.getAssignmentOutcome(binding.assignmentId);
                 const current = readMeta(meta.id);
-                if (winner && winner.assignmentId === binding.assignmentId && ownerDiff(winner.owner, binding.owner) === "none"
+                if (winner && winner.assignmentId === binding.assignmentId && winner.revision === 1 && ownerDiff(winner.owner, binding.owner) === "none"
                     && ownerDiff(winner.recipient, binding.recipient) === "none"
                     && current?.assignment?.assignmentId === binding.assignmentId
                     && ownerDiff(current.assignment.owner, binding.owner) === "none" && ownerDiff(current.assignment.recipient, binding.recipient) === "none"

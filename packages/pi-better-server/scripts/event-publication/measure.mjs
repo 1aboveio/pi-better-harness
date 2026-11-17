@@ -1,7 +1,9 @@
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
 import { WorkClient } from '../../src/runtime/work-client.mjs';
+import { publicationObservation } from './commit.mjs';
 
 export function distribution(values) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -15,7 +17,7 @@ function deadline(promise, label) {
   })]).finally(() => clearTimeout(timer));
 }
 /** No snapshot polling or RPC response is counted as event visibility. */
-export async function measureEventPublication({ socketPath, agentDir, scope, metaPath, taskId, subscribers, commits = 5 }) {
+export async function measureEventPublication({ socketPath, agentDir, scope, metaPath, taskId, subscribers, commits = 5, phase, diagnostics }) {
   const clients = [], observations = [];
   const writer = fork(new URL('./writer.mjs', import.meta.url), [metaPath], { execArgv: [], stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
   try {
@@ -37,16 +39,33 @@ export async function measureEventPublication({ socketPath, agentDir, scope, met
             resolve({ subscriber, visibleNs: process.hrtime.bigint().toString(), seq: snapshot.seq, instanceId: snapshot.instanceId });
         }));
       }));
+      let acknowledgement;
       try {
         const committed = once(writer, 'message');
         writer.send({ marker });
-        const [message, visible] = await deadline(Promise.all([committed.then(([value]) => value), Promise.all(visibility)]), 'committed change through subscription');
-        observations.push({ commit, committedNs: message.committedNs, recipients: visible.map(value => ({ ...value,
-          latencyMs: Number(BigInt(value.visibleNs) - BigInt(message.committedNs)) / 1e6 })) });
+        const [message, visible] = await deadline(Promise.all([committed.then(([value]) => { acknowledgement = value; return value; }), Promise.all(visibility)]), 'committed change through subscription');
+        if (message.marker !== marker) throw new Error('External writer acknowledged a different source commit');
+        observations.push({ commit, marker, commitStartedNs: message.commitStartedNs, committedNs: message.committedNs,
+          recipients: visible.map(value => publicationObservation(message, value)) });
+      } catch (error) {
+        // Capture only after failure; RPC responses never satisfy the visibility assertion.
+        const row = value => ({ status: value?.status, reason: value?.reason, seq: value?.seq, scopeRevision: value?.scopeRevision,
+          row: value?.rows?.find(row => row.meta?.id === taskId) });
+        const report = { phase, commit, marker, acknowledgement, subscriptions: clients.map(client => row(client.snapshot)) };
+        try {
+          const info = statSync(metaPath, { bigint: true });
+          const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+          report.file = { id: meta.id, name: meta.name, identity: `${info.dev}:${info.ino}`, size: String(info.size), mtimeNs: String(info.mtimeNs) };
+          report.freshQuery = row(await clients[0].get(scope));
+          report.component = await diagnostics?.();
+        } catch (diagnosticError) { report.diagnosticError = String(diagnosticError); }
+        console.error(`Event publication failure: ${JSON.stringify(report).slice(0, 32768)}`);
+        throw error;
       } finally { removers.forEach(remove => remove()); }
     }
     const values = observations.flatMap(item => item.recipients.map(value => value.latencyMs));
-    return { boundary: 'external atomic metadata commit to matching real Unix subscription event', subscribers, commits,
+    return { boundary: 'external atomic metadata commit to matching real Unix subscription event',
+      latencyBound: 'conservative upper bound from immediately before atomic rename; completionDeltaMs retains the signed post-rename timestamp delta', subscribers, commits,
       healthyBudgetMs: 1000, ms: distribution(values), observations };
   } finally {
     clients.forEach(client => client.close());
