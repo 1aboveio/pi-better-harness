@@ -447,6 +447,15 @@ test("an exact-ID client retries indexing even when another assignment makes the
 
 test("an exact-ID client stops retrying a stalled inventory within its retry budget", { timeout: 10000 }, async () => {
   const f = await fixture({ timeoutMs: 500, workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
+  let inventoryBlocked = false;
+  const earlyMessages: unknown[] = [];
+  const phase = (message: any) => {
+    if (message.type === "inventory-blocked") {
+      inventoryBlocked = true;
+      earlyMessages.push(...(message.earlyMessages ?? []).slice(0, 4 - earlyMessages.length));
+    }
+  };
+  f.worker.on("message", phase);
   try {
     const client = await f.client();
     const began = performance.now();
@@ -455,7 +464,11 @@ test("an exact-ID client stops retrying a stalled inventory within its retry bud
     assert.equal(f.executor.metrics().executor.timeouts, 0);
     assert.equal(f.executor.metrics().executor.active, 0);
     assert.equal(f.executor.metrics().executor.worker, "running");
-  } finally { await f.close(); }
+  } catch (error) {
+    console.error(JSON.stringify({ exactReadFailure: { inventoryBlocked, earlyMessages,
+      observation: f.executor.observation(), metrics: f.executor.metrics() } }));
+    throw error;
+  } finally { f.worker.off("message", phase); await f.close(); }
 });
 
 test("a failed worker recovers existing subscriptions under a new observation epoch", { timeout: 10000 }, async () => {
