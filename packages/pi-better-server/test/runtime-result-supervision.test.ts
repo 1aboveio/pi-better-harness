@@ -81,6 +81,12 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       }
       assert.ok(status.livenessReasons.some((reason: any) => reason.kind === "runner" && reason.id === taskId),
         "Exact runner start identity must retain the server after every frontend exits, using the captured non-default supervisor directory");
+      if (guarded) {
+        assert.equal(status.instanceId, server.ready.instanceId, "startup must retain the original guarded server until runner supervision takes over");
+        const released = once(server.child, "message");
+        server.child.send({ releaseStartup: true });
+        assert.equal((await released)[0].startupReleased, true);
+      }
       client.close();
     }
     const negative = crash.startsWith("missing-");
@@ -194,6 +200,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
         assert.equal(signal, null);
         assert.ok(Date.now() - detachedAt < 5000, "idle exit must remain within the existing shutdown budget");
         const checkpoint = JSON.parse(readFileSync(join(transport, "clean-stop.json"), "utf8"));
+        assert.equal(checkpoint.token, server.ready.instanceId, "clean stop must belong to the originally announced guarded server");
         assert.equal(checkpoint.reason, "clean-stop");
         assert.equal(checkpoint.idleEvidence.lifecycle.runtimeIdleMs, 1000);
         assert.deepEqual(checkpoint.idleEvidence.obligations, []);
