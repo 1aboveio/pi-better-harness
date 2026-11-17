@@ -136,7 +136,13 @@ for (const count of [1, 5, 10]) test(`${count} socket clients share scoped query
     const received = clients.map(client => new Promise<void>(resolve => {
       const stop = client.onChange(value => { if (value.rows.some((row: any) => row.meta.name === "changed")) { stop(); resolve(); } });
     }));
-    write("sa_b2", scope.cwd, "changed"); await f.executor.livenessReasons(); await Promise.all(received);
+    // One committed replacement, as in the metadata writer; in-place writes can
+    // legitimately publish both a malformed-input epoch and a recovery epoch.
+    const committed = join(f.root, "runs/sa_b2/meta.json");
+    const staged = `${committed}.sharing.tmp`;
+    writeFileSync(staged, JSON.stringify({ ...JSON.parse(readFileSync(committed, "utf8")), name: "changed" }));
+    renameSync(staged, committed);
+    await f.executor.livenessReasons(); await Promise.all(received);
     await first.get(scope);
     const changed = f.executor.metrics() as any;
     assert.equal(changed.queryCount - baseline.queryCount, 1);
