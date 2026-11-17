@@ -10,3 +10,11 @@ export class WorkClient {
     get(scope: object): Promise<any>;
     close(): void;
 }
+
+export interface ConnectionOptions {
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    recover?: (options: { timeoutMs: number; signal: AbortSignal }) => Promise<unknown>;
+}
+/** Establishes a connection; never replays application requests. */
+export function connectWorkClient(socketPath: string, agentDir: string, capabilities?: string[], options?: ConnectionOptions): Promise<WorkClient>;

@@ -2,7 +2,7 @@
 import { mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { WorkClient } from "./shared-work-client.mjs";
+import { connectWorkClient } from "./shared-work-client.mjs";
 export const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 let client;
 let snapshot;
@@ -15,6 +15,7 @@ let retry;
 let backoff = 100;
 let failure = "Shared runtime observation is connecting.";
 let generation = 0;
+let connectionAbort = new AbortController();
 const details = new Map();
 const pendingDetails = new Set();
 let refresh = () => { };
@@ -133,6 +134,7 @@ async function collect(candidate, current) {
 }
 async function connectObservation(current) {
     const saved = context;
+    const signal = connectionAbort.signal;
     mkdirSync(saved.agentDir, { recursive: true, mode: 0o700 });
     saved.agentDir = realpathSync(saved.agentDir);
     let registration;
@@ -144,7 +146,7 @@ async function connectObservation(current) {
             throw error;
         const path = "./runtime-client/src/runtime/client.mjs";
         const { ensureRuntime } = await import(path);
-        await ensureRuntime({ agentDir: saved.agentDir });
+        await ensureRuntime({ agentDir: saved.agentDir, signal });
         registration = JSON.parse(readFileSync(join(saved.agentDir, "server-registration-v1.json"), "utf8"));
     }
     if (current !== generation)
@@ -152,7 +154,18 @@ async function connectObservation(current) {
     if (registration.version !== 1 || registration.agentDir !== saved.agentDir)
         throw new Error("Invalid canonical runtime registration");
     client?.close();
-    const candidate = new WorkClient(join(registration.serverDir, "pi-server.sock"), saved.agentDir);
+    const candidate = await connectWorkClient(join(registration.serverDir, "pi-server.sock"), saved.agentDir, [], {
+        signal,
+        recover: async ({ timeoutMs, signal }) => {
+            const path = "./runtime-client/src/runtime/client.mjs";
+            const { ensureRuntime } = await import(path);
+            await ensureRuntime({ agentDir: saved.agentDir, serverDir: registration.serverDir, timeoutMs, signal });
+        },
+    });
+    if (current !== generation) {
+        candidate.close();
+        return;
+    }
     client = candidate;
     candidate.onChange(() => {
         if (current !== generation || candidate !== client)
@@ -216,13 +229,16 @@ async function ensureObservation() {
     return connecting;
 }
 async function query(scope) {
+    const current = generation;
     for (let attempt = 0;; attempt++) {
         try {
             await ensureObservation();
+            if (current !== generation)
+                throw new Error("runtime-unavailable: observation closed");
             return await client.get(scope);
         }
         catch (error) {
-            if ((client && !client.closed) || attempt === 1)
+            if (current !== generation || (client && !client.closed) || attempt === 1)
                 throw error;
         }
     }
@@ -238,6 +254,8 @@ export async function observedList(scope) { return query(scope); }
 export function stopWorkObservation() {
     generation++;
     context = undefined;
+    connectionAbort.abort();
+    connectionAbort = new AbortController();
     if (retry)
         clearTimeout(retry);
     retry = undefined;

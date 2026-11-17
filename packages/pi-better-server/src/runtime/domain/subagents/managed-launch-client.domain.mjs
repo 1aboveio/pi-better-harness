@@ -7,7 +7,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { currentSandboxPermissions } from "./permission-policy.domain.mjs";
 import { ownerBindingFromContext, getWorkerOperationService, resolveProductionSchemas, DEFAULT_WORKER_BRIDGE_TOOLS } from "./worker-waits.domain.mjs";
 import { processStartToken } from "./registry.domain.mjs";
-import { WorkClient } from "./shared-work-client.mjs";
+import { connectWorkClient } from "./shared-work-client.mjs";
 import { catalogHostAuthority } from "./catalog-host-admission.domain.mjs";
 import { openSharedCatalog } from "./shared-catalog.domain.mjs";
 import { SANDBOX_POLICY_CHANNEL } from "./permission-policy.domain.mjs";
@@ -21,12 +21,12 @@ export async function submitManagedLaunch(pi, ctx, key, tool, params) {
     const registration = JSON.parse(readFileSync(join(root, "server-registration-v1.json"), "utf8"));
     if (registration.agentDir !== root || registration.version !== 1)
         throw new Error("Invalid runtime registration");
-    const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-subagent-launch-v1"]);
     const directory = join(root, "subagent-launch-admission");
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const stat = lstatSync(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o077))
         throw new Error("Unsafe launch admission directory");
+    const client = await connectWorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-subagent-launch-v1"]);
     const id = randomUUID(), secret = randomBytes(32).toString("hex"), path = join(directory, `${id}.json`);
     let unsubscribe;
     try {
