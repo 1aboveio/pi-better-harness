@@ -1,0 +1,87 @@
+{
+  "unit": "808",
+  "status": "source-complete-native-unqualified",
+  "sha": "9ef54213b6c1d82cabc2398cd42b9ff600e8f279",
+  "workspace": "/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/808",
+  "resultPath": "/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/results/808-r2-baseline-inventory-fix-1.json",
+  "auditPhase": "Full field audit below was recorded before source edits. Audit gaps are historical inputs; dispositions and proof follow.",
+  "standingOrders": [],
+  "decision": "808-truthful-baseline-inventory-breakdown (plan470), option1",
+  "originalCheckpoint": { "source": "1798ddd7d435e7f61eaa1103857ca2395755017b", "report": "caa5540f", "components": 67, "nativeQualification": "UNQUALIFIED", "history": ["d8a03901", "773f4a8a", "3f7f963e"], "unexplainedWatchdog": ".private-808/tmp/r2-driver-components-green.log; remains separate and unexplained" },
+  "completeFieldAudit": [
+    { "fields": "source.kind/head/dirty/manifest; expected.before/after; artifact.contentId; driver.kind/head/dirty/manifest; subject module origins; fixtureSha256", "baseline": "Produced by common driver and approved source/artifact binding, not old entry. Strict checks retained." },
+    { "fields": "schemaVersion/mode/failure, fixedHostId/hostname, machine release/arch/cpus/cpuModel/totalMemory, platform/node", "baseline": "Common driver/actual OS producers; no missing old API requirement. Native values unqualified until campaign." },
+    { "fields": "diagnosticBudget, activeWorkload, history/group/clients, requiredWindows, duration/start/end/elapsed", "baseline": "Same fixed fixture and all36 windows, each>=600000ms. No shortening or alternate baseline." },
+    { "fields": "resources/resourceBefore/requiredProcesses identity, PID/start, role/count, generation, user/system CPU, cpuMs, fsRead/fsWrite, rss, sample times/window span", "baseline": "Actual common probe and OS batch. Exact inventory/generation/counter/timestamp guards unchanged; native qualification pending." },
+    { "fields": "totalCpuMs/totalRss; aggregateCohorts/aggregatePeak; batch observer cost; Darwin native capture binding; sampler samples/cpuMicros/wallMs/interval", "baseline": "Existing full observer producers and validator guards retained. No metric flags substituted for observed values." },
+    { "fields": "workerGc.threadCoverage/process identities/count/duration and worker/loader lifecycle", "baseline": "Common owned loader/thread observers; worker metrics injected at the original metrics boundary. Native composition not qualified." },
+    { "fields": "queueAge samples/p50/p95/p99/max", "baseline": "Unsupported oldestQueuedAgeMs API. Original executor owns real queue[].enqueued; observe its current maximum age, including an observed empty-queue zero." },
+    { "fields": "eventLatency/recovery/exit samples/p50/p95/p99/max and coverage", "baseline": "Existing actual publication, owned physical worker controls and natural exit. Original recovery trace uses key rather than viewKey and a different eviction statement; exact source-specific trace anchors must be supported. No receipts alone qualify recovery." },
+    { "fields": "executor.restarts/worker state; assignments.generation", "baseline": "Original executor fields exist. Assignments generation API absent; do not fabricate one. Retain actual thread/module identity and reject resets." },
+    { "fields": "logReads.bytes/reads/parsedEvents/displayFolded/healthFolded", "baseline": "Implemented actual loaded parser FS/read/fold observers at1798, no missing=zero conversion." },
+    { "fields": "projections total vs assignment/log/health source breakdown", "baseline": "Original total projections exists; add observations at actual assignment/display/health calls. Unsupported labels must not masquerade as the candidate schema." },
+    { "fields": "sourceWork entity/repair batches/paths/stats/metadataReads/logBytes/logReads", "baseline": "Absent as an API. Add actual baseline-inventory TOTAL and per-module source boundaries, including FS attempts/failures, reads and bytes, inventory passes, path visits and projections. Uncategorized work stays visible. Candidate totals remain entity+repair and both breakdowns mandatory." },
+    { "fields": "hot parser caches, evict/restart controls, durable checkpoints/hits/restores", "baseline": "Exact loaded parseStates/factLogStates reset exports and derived detail cache, real owned thread guards. Durable checkpoints verified absent; never manufacture hits/restores. Candidate restoration remains mandatory." },
+    { "fields": "workloadBefore/After results/history/tasks/usage/final text, equality, seeded bytes, mutation receipts", "baseline": "Same actual workload and exact authoritative results. Baseline lacks current display coverage API; source diagnostics remain authoritative, not a fake coverage vector." },
+    { "fields": "deleted-log readiness and completeness", "baseline": "Original model can return ready with Log unreadable detail diagnostics, unlike candidate degraded state. Record truthful baseline capability separately and require the actual missing-source diagnostics and noncomplete evidence; never relabel ready as degraded or unavailable usage as zero." },
+    { "fields": "related roots/SQLite budgets, exact recipient isolation, Background management and registry deltas, cleanup", "baseline": "Existing common fixture checks and physical2/2/2 budgets preserved. Native baseline composition remains required, not inferred from components." },
+    { "fields": "paired machine/platform/node/workload/fixture/native binding equality, cpuComparison/no invented CPU threshold", "baseline": "Unchanged. Add comparable TOTAL source-work observations; reject incomplete totals and preserve candidate incremental budgets." }
+  ],
+  "implementation": {
+    "accounting": "baseline-inventory is a measured TOTAL vector, not ordinary/repair labels. Per-source vectors cover the exact loaded model, parse, health-observation, log-cursor and shared-log-utils modules. Unattributed reader Node filesystem operations remain explicitly in uncategorized; no residual work is dropped.",
+    "totals": "Actual original scan entries, metadata reads and row projections are cross-checked against original model counters. Actual Node filesystem boundaries count visits, stat/availability attempts, directory reads, canonicalizations, successful returned bytes and attempted reads. Parser FD/log reads and real folds remain observed by the original adapter. TOTAL is independently checked against the sum of every source, including uncategorized.",
+    "breakdowns": "Baseline assignmentCalls/displayCalls/healthCalls describe actual calls, not candidate incremental projection semantics. All extra baseline directory/metadata-byte/canonicalization/other-read counts remain visible. Candidate TOTAL is exactly its mandatory entity+repair counters; candidate breakdowns, generation fences, log/projection budgets and checkpoint restoration checks are unchanged.",
+    "coverage": "The observer is installed only in the actual baseline-owned reader before importing its original worker. It preserves original calls/arguments/results/errors and function properties, including realpathSync.native. Actually used callback/FileHandle or indeterminate byte-encoding boundaries mark coverage unavailable and reject required totals. Partial observed counts are never qualified as complete totals. Native SQLite and whole-process IO remain required OS resource observations, not invented byte counts.",
+    "queueAndTrace": "Original queue timestamps now produce actual oldestQueuedAgeMs; an actual empty queue supports zero. Baseline recovery-trace injection uses its own key and exact eviction statement, preserving original subject behavior.",
+    "missingSource": "Baseline missing-log readiness is reported truthfully with actual detail diagnostics and unavailable usage=null. Candidate degraded/missing-source contract is unchanged; no readiness or complete-coverage vector is manufactured.",
+    "validator": "Accepts complete measured baseline inventory totals without requiring a new API on eec. Rejects missing totals, hidden residuals, inconsistent source sums, counter resets, missing module/thread identity, and candidate relabeling as baseline. Qualified paired comparisons include both baseline TOTAL and candidate TOTAL ordinary+repair. All original host/source/artifact/fixture/process/timing/observer/coverage gates remain.",
+    "fixtureClosure": "All changed observer, worker, loader, workload and validator code remains in the same pinned common driver. Existing fixture byte closure already includes baseline-observation.mjs, owned-query-worker.mjs, recovery-trace-loader.mjs and incremental-workload.mjs; driver source identity covers the remaining files. No subject/backport/new-baseline/artifact identity change or provenance relaxation."
+  },
+  "actualProof": [
+    { "case": "Original baseline inventory and parser caches", "boundary": "Allowed in-process components, exact approved baseline git blobs, real filesystem/SQLite, original model and actual loaded parser reset closures. Test-only builtin require parent is file-backed because the component module uses a data URL; no native artifact composition claim.", "verified": "Nonzero original inventory passes/stat/metadata/projection observations; actual cold read and both folds after genuine eviction; exact loaded module identities and same thread; final text; wrong-copy eviction refusal; real uncategorized file bytes retained; tampered source TOTAL rejected." },
+    { "case": "Original missing log", "verified": "Actual original model remains ready while detail diagnostics prove missing source; reconciliation reports usage=null and sourceCompleteness=unavailable, never a zero bill." },
+    { "case": "Incomplete FS boundary", "verified": "Actually used FileHandle open marks sourceWork.complete=false and unavailable.open=1; required TOTAL rejects. This conditional rejection is not evidence the original campaign used that boundary." },
+    { "case": "Original executor queue", "boundary": "Original metrics method through the source-specific observer with controlled external performance clock; no native Worker/process launched", "verified": "Queued timestamps900/700 at clock1000 produce300ms; observed empty membership produces0." },
+    { "case": "Candidate and paired schemas", "verified": "Real candidate source TOTAL equals raw entity+repair counter differences. Baseline complete measured source sums accepted at the metrics boundary; missing/tampered totals and candidate baseline relabeling rejected. Schema specimens still fail full native/matrix qualification." }
+  ],
+  "witness": {
+    "round": 2,
+    "sourceHEAD": "1798ddd7d435e7f61eaa1103857ca2395755017b",
+    "baselineHEAD": "eec7b3e256a7548bbf67f69cd468f12eb3b91dc8",
+    "trigger": "Existing parser-only observation delta returned complete=false and null ordinary/repair because the original algorithm had no such APIs; plan470 requires truthful measured baseline-inventory TOTAL rather than invented labels or zero.",
+    "command": "node --import tsx --test packages/pi-better-server/test/baseline-observation.test.ts",
+    "relativecwd": ".",
+    "expected": "Real original source work is observed and summed as baseline-inventory; genuine eviction still produces actual bytes/folds and preserves module/reader identity; missing coverage rejects.",
+    "redExit": 1,
+    "redEvidence": ".private-808/tmp/baseline-inventory-red.log",
+    "greenExit": 0,
+    "greenEvidence": ".private-808/tmp/baseline-inventory-complete-proof.log",
+    "priorWitnesses": "All prior reports, RED/GREEN files and original triggers remain retained unchanged."
+  },
+  "verification": [
+    { "command": "node --import tsx --test packages/pi-better-server/test/baseline-observation.test.ts packages/pi-better-server/test/incremental-workload.test.ts packages/pi-better-server/test/workload-mutations.test.ts packages/pi-better-server/test/workload-recovery-sequence.test.ts packages/pi-better-server/test/campaign-subject.test.ts packages/pi-better-server/test/paired-runtime-report.test.ts packages/pi-better-server/test/owned-runtime-producers.test.ts packages/pi-better-server/test/aggregate-runtime-samples.test.ts", "relativecwd": ".", "exit": 0, "passed": 80, "evidence": ".private-808/tmp/baseline-inventory-complete-proof.log" },
+    { "command": "npm run typecheck --workspace pi-better-server", "relativecwd": ".", "exit": 0, "evidence": ".private-808/tmp/baseline-inventory-complete-types.log" },
+    { "command": "node .private-808/tmp/assertion-preservation-r2.mjs", "relativecwd": ".", "exit": 0, "preserved": 403, "evidence": ".private-808/tmp/baseline-inventory-complete-403.log" },
+    { "command": "node --check packages/pi-better-server/scripts/measure-full-runtime/baseline-observation.mjs", "relativecwd": ".", "exit": 0 },
+    { "command": "node --check packages/pi-better-server/scripts/measure-full-runtime/owned-query-worker.mjs", "relativecwd": ".", "exit": 0 },
+    { "command": "node --check packages/pi-better-server/scripts/measure-full-runtime.mjs", "relativecwd": ".", "exit": 0 },
+    { "command": "node --check packages/pi-better-server/scripts/measure-full-runtime/recovery-trace-loader.mjs", "relativecwd": ".", "exit": 0 },
+    { "check": "Original baseline recovery-trace anchors and transformed TypeScript syntax", "exit": 0, "evidence": ".private-808/tmp/baseline-inventory-trace.log", "scope": "Source/syntax only; native trace not run" },
+    { "command": "git diff --check", "relativecwd": ".", "exit": 0 }
+  ],
+  "firstFailures": [
+    { "step": "Pre-edit original recovery trace source assessment", "error": "Resource trace source anchor changed: scopes.delete(oldest); forgetOwner(oldest);", "evidence": ".private-808/tmp/baseline-background-tools.ts", "disposition": "Original variant now uses its exact key/eviction source and passes anchor/syntax check; native remains pending." },
+    { "step": "Initial new model observation run", "error": "SyntaxError: Unexpected identifier 'as'", "evidence": ".private-808/tmp/baseline-inventory-first-green.log", "disposition": "Fixed token-boundary matching so statSync does not match inside fstatSync." },
+    { "step": "Data-URL original model component construction", "error": "ERR_INVALID_ARG_VALUE from createRequire(import.meta.url)", "evidence": ".private-808/tmp/baseline-inventory-green.log", "disposition": "Test-only builtin SQLite resolution parent uses test-file URL; production original artifact URL unchanged." }
+  ],
+  "cleanupErrors": [],
+  "nativeRemainder": {
+    "qualification": "UNQUALIFIED",
+    "localNode": "v24.21.0",
+    "requiredNode": "24.14.1",
+    "coordinatorOwned": ["Actual approved eec/candidate artifact and common-driver composition", "All8 acceptance criteria on both OSes, same fixed host/source/artifact/fixture and each before/after window>=600000ms", "Complete CPU/RSS/GC/IO/queue/event/recovery/exit/cleanup and all observer cost", "R3 actual first LIVE/earned startup handoff with original owner/idle deadlines", "R4 all5 actual SIGKILL triggers and exact physical2/2/2/zero-after-close resource contracts"],
+    "unchanged": "No native/probe/process/socket/admission replay through any alternate Node/path/channel/identity/settings/guard. No CI dispatch, push, PR or external wait. Source corrections and80 components do not qualify the original baseline or reset expiry/nonconvergence."
+  },
+  "generated": "No canonical generated runtime owner changed; no generated output rebuild needed. Earlier623-output evidence remains inherited, not a fresh check or native advance.",
+  "decisionNeeded": null
+}
