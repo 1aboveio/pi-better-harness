@@ -35,6 +35,8 @@ test("A staged source race degrades A but preserves verified B frames and cursor
     assert.match(aFrames[0]?.reason, /Source changed during observation/);
     assert.equal(aFrames[0]?.rows[0].meta.name, "old", "unpublished staging is not visible");
     assert.equal(bFrames, 0, "unrelated content sends no scoped frames");
+    assert.match(model.snapshot({ cwd: a }).reason!, /Source changed during observation/);
+    assert.equal(model.snapshot({ cwd: a }).rows[0]!.meta.name, "old");
     assert.equal(model.snapshot(scope).status, "ready");
     assert.equal(model.snapshot(scope).scopeRevision, first.scopeRevision);
     assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);

@@ -50,7 +50,6 @@ for (const missingLogs of [true, false]) test(`registered list paging ${missingL
       assert.notEqual(after.rows[0]!.sourceRevision, before.rows[0].sourceRevision);
       await assert.rejects(list.execute("list-next", { ...params, cursor }), /resync_required: cursor snapshot changed/);
     } else {
-      assert.equal(existsSync(failures), false);
       assert.equal(after.rows[0]!.sourceRevision, before.rows[0].sourceRevision);
       const next = await list.execute("list-next", { ...params, cursor });
       assert.equal(existsSync(failures), false);
