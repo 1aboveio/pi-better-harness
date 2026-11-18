@@ -18,8 +18,9 @@ import { HostedSession } from "../src/hosted-session.ts";
 import { EventLog } from "../src/event-log.ts";
 import { checkHello } from "../src/handshake.ts";
 import { fork } from "node:child_process";
+import { subscribeBackgroundReady } from "./support/background-source-ready.ts";
 
-test("ordinary background clients share the canonical daemon without hosted ownership", { timeout: 15000 }, async () => {
+test("ordinary background clients share the canonical daemon without hosted ownership", { timeout: 15000 }, async t => {
   mkdirSync(resolve(".work/754"), { recursive: true });
   const root = mkdtempSync(resolve(".work/754/local-"));
   const transport = mkdtempSync("/tmp/p754-");
@@ -37,7 +38,7 @@ test("ordinary background clients share the canonical daemon without hosted owne
     const [ready] = await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
     for (let i = 0; i < 10; i++) {
       const client = new WorkClient(ready.ready, root, ["runtime-background-state-v1"]); clients.push(client);
-      const observed = await client.subscribe({ background: true, cwd: root, sessionId: `local-${i}` });
+      const observed = await subscribeBackgroundReady(client, { background: true, cwd: root, sessionId: `local-${i}` }, t.signal);
       assert.equal(observed.status, "ready");
       assert.equal(observed.activity.active, 0);
       assert.equal((await client.request("runtime_get_status")).hostedSessions, 0);
