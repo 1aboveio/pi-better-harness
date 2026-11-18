@@ -137,7 +137,7 @@ export async function resolveChildLaunch(options, trustedPaths = []) {
 }
 
 /** Validate actual child registration, never the parent's catalog. Groups require one physical candidate. */
-export async function checkChildPreflight(plan, { registry, tools, model }, load = loadContract) {
+export async function checkChildPreflight(plan, { registry, tools, registeredTools = [], model }, load = loadContract) {
   if (plan.configSnapshot && JSON.stringify(configSnapshot(plan.configSnapshot.map(item => item.dir))) !== JSON.stringify(plan.configSnapshot))
     throw new Error('Child configuration drift: agent or project JSON configuration changed. Launch again.');
   for (const item of plan.fingerprints) if (fingerprint(item.path) !== item.hash)
@@ -157,5 +157,13 @@ export async function checkChildPreflight(plan, { registry, tools, model }, load
   for (const group of plan.modelGroups) if (!available.some(m => m.provider === group.provider && m.api !== 'pi-virtual' &&
     (group.ids.includes(m.id) || (group.prefix && m.id.startsWith(group.prefix)))))
     throw new Error(`Child has no available candidate for ${group.provider}: ${group.ids.join(', ')}${group.prefix ? ` (prefix ${group.prefix})` : ''}. Check extension, models and credentials.`);
-  for (const tool of plan.tools) if (!tools.includes(tool)) throw new Error(`Child requested tool ${tool} is unavailable.`);
+  const inactive = [];
+  for (const tool of plan.tools) {
+    if (tools.includes(tool)) continue;
+    if (!plan.optionalTrustedTools?.includes(tool) || !registeredTools.includes(tool)) {
+      throw new Error(`Child requested tool ${tool} is unavailable.`);
+    }
+    inactive.push(tool);
+  }
+  return inactive;
 }

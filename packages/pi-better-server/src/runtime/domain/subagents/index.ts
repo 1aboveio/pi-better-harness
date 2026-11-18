@@ -3207,6 +3207,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             ];
 
             const selectedTools = allow.split(",").filter((name) => name && !excludes.has(name));
+            const inheritedTrusted = resume ? new Set(resume.recipe.optionalTrustedTools ?? []) : undefined;
+            const optionalTrustedTools = taskTools?.trusted.filter(({ name }) => selectedTools.includes(name)
+                && (inheritedTrusted ? inheritedTrusted.has(name) : requestedTools === undefined)).map(({ name }) => name) ?? [];
             const dropped = toolSelection?.dropped ?? [];
             const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
                 root: requestedSandboxDir, controlDir: join(runDir(id), "control"),
@@ -3268,6 +3271,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             if (resume) revalidateContinuationUnderLease(resume, callbackOrigin);
             const preflightPath = join(runDir(id), "child-preflight.json");
             writeFileSync(preflightPath, JSON.stringify({ ...fullResolution, model, tools: selectedTools,
+                optionalTrustedTools,
                 configSnapshot: configSnapshot([dirname(configPath()), join(cwd, ".pi")]),
             }));
             // Register the worker's bridge run before the child can start, so the
@@ -3350,6 +3354,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             const recipe = buildLaunchRecipe({
                 attemptId: id, sessionId, sessionDir: childSessionDir, cwd, model, effort: thinking,
                 tools: callerLaunchTools(allow), excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
+                ...(optionalTrustedTools.length ? { optionalTrustedTools } : {}),
                 skills: skills.mode === "inherit" ? undefined : [...skills.paths], clean, allowNested, approve,
                 sandbox: sandboxEnabled, sandboxDir: requestedSandboxDir, gitCloneWorkspace, callback: callbackEnabled, name: launchName,
                 agent: resume ? resume.recipe.agent : p.agent, role: resume ? resume.recipe.role : p.role,
