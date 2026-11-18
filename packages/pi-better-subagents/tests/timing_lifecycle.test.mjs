@@ -31,7 +31,7 @@ const { default: betterSubagents, progressCacheIdsForTests, isHealthTickerActive
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, runDir, processStartToken } = await import("../registry.ts");
 const { realProcessProbe } = await import("../health.ts");
-const { registerFixtureRun, retireFixtureRun, settleFixtureRun } = await import("./fixture-run-ownership.mjs");
+const { registerFixtureRun, retireFixtureRun, settleFixtureRun, captureRunRemovalEvidence } = await import("./fixture-run-ownership.mjs");
 const { timingWakeReceipt } = await import("../timing-notifications.ts");
 const { killProcessTree } = await import("../spawn.ts");
 
@@ -78,13 +78,22 @@ async function makeHarness(options = {}) {
     const spawned = port.spawned;
     port.spawned = (id, pid) => {
         spawned(id, pid);
-        ownedExits.set(id, { pid, start: processStartToken(pid), pi });
+        ownedExits.set(id, { pid, start: processStartToken(pid), pi, recipientEvidence: () => ({
+            sessionId: String(ctx.sessionManager.getSessionId()).slice(0, 128), recipient: recipient?.knownState() ?? null,
+            receiptSettlement: "not observed by local exit owner",
+            recentDeliveriesOmitted: Math.max(0, sent.length - 4),
+            recentDeliveries: sent.slice(-4).map(({ message }) => ({ customType: String(message.customType).slice(0, 80),
+                urgentEventId: typeof message.details?.urgentEventId === "string" ? message.details.urgentEventId.slice(0, 128) : undefined,
+                urgentEventIdTruncated: (message.details?.urgentEventId?.length ?? 0) > 128,
+                completionEventIds: message.details?.completionEventIds?.slice(0, 2).map(id => ({ id: String(id).slice(0, 128), truncated: String(id).length > 128 })),
+                completionEventIdsOmitted: Math.max(0, (message.details?.completionEventIds?.length ?? 0) - 2) })) }) });
     };
     port.observeExit = (id, completion) => {
         const owned = ownedExits.get(id);
         assert.ok(owned, "timing fixture must own the child exit observer");
         owned.completion = completion;
-        void completion.catch(() => {});
+        owned.completionState = "pending";
+        void completion.then(() => { owned.completionState = "fulfilled"; }, () => { owned.completionState = "rejected"; });
     };
     betterSubagents(pi, port);
     if (!options.manager) await Promise.all(recipients.filter(item => item.sessionId === ctx.sessionManager.getSessionId()).map(item => item.recipient.close()));
@@ -144,7 +153,32 @@ async function reap({ id, pid }) {
     await settleFixtureRun(owned, batcher, () => {
         assert.equal(realProcessProbe.groupAlive(pid), false, "timing child group must be quiescent before removal");
     });
-    rmSync(runDir(id), { recursive: true, force: true });
+    try { rmSync(runDir(id), { recursive: true, force: true }); }
+    catch (error) {
+        try {
+            // Snapshot the original failure before any later teardown can change its residue.
+            const residual = captureRunRemovalEvidence(runDir(id));
+            const runtime = stopRuntime.diagnostics();
+            const evidence = { id, errorCode: error.code,
+                residual, localOwner: { pid: owned.pid, startCaptured: Boolean(owned.start), completion: owned.completionState,
+                    groupProof: "passed before removal", pendingCallbacks: batcher.pendingCount(), exactReceipt: ownedExits.get(id) === owned },
+                recipient: owned.recipientEvidence?.(), daemon: { exitCode: runtime.exitCode, foldSettlement: "not observed by local exit owner" } };
+            let encoded = JSON.stringify(evidence);
+            if (Buffer.byteLength(encoded) > 32768) {
+                evidence.residual.entries = evidence.residual.entries.slice(0, 8);
+                evidence.residual.truncated = true;
+                if (evidence.recipient) {
+                    evidence.recipient.recentDeliveriesOmitted = (evidence.recipient.recentDeliveriesOmitted ?? 0) + Math.max(0, evidence.recipient.recentDeliveries.length - 1);
+                    evidence.recipient.recentDeliveries = evidence.recipient.recentDeliveries.slice(-1);
+                }
+                encoded = JSON.stringify(evidence);
+            }
+            console.error("[timing-reap-writer]", encoded);
+        } catch (captureError) {
+            try { console.error("[timing-reap-writer-unavailable]", captureError.code ?? "capture-failed"); } catch {}
+        }
+        throw error;
+    }
     retireFixtureRun({ id, pid }, owned, ownedExits, liveRuns);
 }
 
