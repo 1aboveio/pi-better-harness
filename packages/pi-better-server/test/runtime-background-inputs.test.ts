@@ -12,13 +12,14 @@ test("Background constructor attaches its inbox and repair state to the query ow
   const model = new WorkReadModel(root, "shared-inboxes", { baseDir: join(root, "runs"), durableDir: join(root, "archive"), intervalMs: 60000 });
   try {
     const derived = (model as any).db;
+    assert.equal((model as any).background.ready, false);
+    assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main"]);
+    await model.reconcile();
     const inbox = (model as any).background.inbox;
     assert.equal(inbox.db, derived);
     assert.equal(inbox.prefix, "background_inbox.");
-    assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "background_inbox"]);
-    await model.reconcile();
     assert.equal((model as any).db, derived, "deferred checkpoint acquisition retains the original owner");
-    assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "background_inbox", "log_checkpoints", "assignment_inbox"]);
+    assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "log_checkpoints", "assignment_inbox", "background_inbox"]);
     assert.ok(derived.prepare("SELECT name FROM background_inbox.sqlite_master WHERE name='background_file_repair'").get());
     assert.equal(derived.prepare("SELECT name FROM main.sqlite_master WHERE name='background_file_repair'").get(), undefined);
     assert.equal(derived.prepare("SELECT name FROM assignment_inbox.sqlite_master WHERE name='background_file_repair'").get(), undefined);
@@ -87,6 +88,7 @@ test("unchanged Background repair positions do not write the shared derived hand
   const model = new WorkReadModel(root, "idle-repair", { baseDir: root, durableDir: join(root, "archive"), intervalMs: 60000 });
   const observation = (model as any).background;
   try {
+    await model.reconcile();
     observation.read({ background: true, cwd: root, sessionId: "parent" });
     observation.refresh();
     const db = (model as any).db;
