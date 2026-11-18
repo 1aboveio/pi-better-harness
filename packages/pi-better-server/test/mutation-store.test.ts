@@ -19,9 +19,17 @@ if (Number(process.versions.node.split(".")[0]) < 24) {
     const version = await execute(runtime, ["-p", "process.versions.node"]);
     assert.ok(Number(version.stdout.trim().split(".")[0]) >= 24, "Private runtime must support the managed domain");
     const { NODE_TEST_CONTEXT: _context, ...env } = process.env;
-    const result = await execute(runtime, ["--import", "tsx", "--import", "../../scripts/isolate-registry.mjs",
-      "--test", fileURLToPath(import.meta.url)], { cwd: fileURLToPath(new URL("..", import.meta.url)), env, maxBuffer: 4 * 1024 * 1024 });
-    t.diagnostic(result.stdout);
+    try {
+      const result = await execute(runtime, ["--import", "tsx", "--import", "../../scripts/isolate-registry.mjs",
+        "--test", fileURLToPath(import.meta.url)], { cwd: fileURLToPath(new URL("..", import.meta.url)), env, maxBuffer: 4 * 1024 * 1024 });
+      t.diagnostic(result.stdout);
+    } catch (error) {
+      const child = error as Error & { stdout?: string; stderr?: string };
+      // Retain the actual inner TAP failure, not just the execFile wrapper.
+      if (child.stdout) t.diagnostic(child.stdout.slice(-64 * 1024));
+      if (child.stderr) t.diagnostic(child.stderr.slice(-16 * 1024));
+      throw error;
+    }
   });
 } else {
 test("managed launch shares the mutation connection and releases only its lease", async () => {
