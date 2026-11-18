@@ -358,26 +358,50 @@ test("stalled diagnostic completion rejects when its worker exits", { timeout: 1
 test("slow caller cancellation preserves other clients and ignores late replies", { timeout: 10000 }, async t => {
   const f = await fixture({ timeoutMs: 700, watchdogMs: 2000,
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
+  let phase = "bootstrap";
+  const requests: Array<Record<string, unknown>> = [];
+  const observe = (client: WorkClient, owner: string) => {
+    const request = client.request.bind(client);
+    client.request = (type, params = {}) => {
+      const began = performance.now();
+      const entry: Record<string, unknown> = { owner, type, phase, scope: (params as Record<string, unknown>).scope ?? null, state: "pending" };
+      if (requests.length < 16) requests.push(entry);
+      return request(type, params).then(value => {
+        Object.assign(entry, { state: "fulfilled", elapsedMs: performance.now() - began, status: value?.status }); return value;
+      }, error => {
+        Object.assign(entry, { state: "rejected", elapsedMs: performance.now() - began, error: String(error).slice(0, 512) }); throw error;
+      });
+    };
+  };
   try {
     await f.bootstrapped;
-    const a = await f.client(), b = await f.client(); await ready(b);
+    phase = "client-hello";
+    const a = await f.client(), b = await f.client();
+    observe(a, "slow-client"); observe(b, "other-client");
+    phase = "initial-ready-subscription";
+    await ready(b);
     const epoch = b.snapshot!.instanceId;
     const blocked = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "query-blocked") resolve(); }));
     const began = performance.now();
+    phase = "slow-query-blocked";
     const slow = assert.rejects(a.request("runtime_get_snapshot", { scope: { id: "sa_slow" } }), /runtime-timeout: caller/);
     await blocked;
     await new Promise(resolve => setTimeout(resolve, 150));
+    phase = "queued-read-and-control";
     const queued = b.request("runtime_get_snapshot", { scope: { limit: 2 } });
     const controlStart = performance.now();
     assert.equal((await b.request("ping")).ok, true);
     assert.deepEqual(await a.request("runtime_unsubscribe"), { unsubscribed: true });
     const controlMs = performance.now() - controlStart;
+    phase = "expected-slow-timeout";
     await slow;
     const timeoutMs = performance.now() - began;
+    phase = "queued-read-result";
     assert.equal((await queued).status, "ready", "cancellation frees execution without waiting for the slow source");
     assert.equal(f.executor.metrics().executor.restarts, 0);
     assert.equal(b.snapshot!.instanceId, epoch);
     f.worker.postMessage({ type: "release-query" });
+    phase = "fresh-read-after-release";
     const fresh = await b.get({ limit: 3 });
     assert.equal(fresh.status, "ready");
     assert.equal(f.executor.metrics().executor.worker, "running");
@@ -385,6 +409,9 @@ test("slow caller cancellation preserves other clients and ignores late replies"
     assert.ok(controlMs < 500);
     t.diagnostic(JSON.stringify({ timeoutMs, controlMs, rebuilding: fresh.status, restart: f.executor.metrics().executor.restarts,
       queueMs: f.executor.metrics().executor.waitMs, executionMs: f.executor.metrics().executor.readMs }));
+  } catch (error) {
+    try { t.diagnostic(JSON.stringify({ slowCallerFailure: { phase, requests, executor: f.executor.metrics().executor } }).slice(0, 8192)); } catch {}
+    throw error;
   } finally { await f.close(); }
 });
 
