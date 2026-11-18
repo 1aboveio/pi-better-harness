@@ -17,6 +17,7 @@ threads.Worker = class extends OriginalWorker {
 syncBuiltinESMExports();
 const { startDaemon } = await import("../../src/server.ts");
 const daemon = await startDaemon({ sessionIdleMs: 0, daemonIdleMs: 0 });
+if (process.env.PI_TEST_EXIT_ON_IDLE === "1") void daemon.closed.then(() => process.disconnect?.());
 process.send?.({ type: "ready", socket: daemon.socketPath });
 process.on("message", message => {
   if (message === "stop") void daemon.stop().then(() => process.exit(0));

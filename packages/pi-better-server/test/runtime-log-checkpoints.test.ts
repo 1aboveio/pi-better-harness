@@ -158,10 +158,10 @@ for (const count of [48, 96, 144]) test(`${count} tasks recover socket summaries
     navigator = new WorkClient(daemon.socketPath, agent); activity = new WorkClient(daemon.socketPath, agent);
     await ready(); await verify("0.03");
     const recovered = await navigator.request("runtime_get_metrics");
-    assert.ok(recovered.sqlite.active <= 2, "read worker must retain the original root database budget");
+    assert.equal(recovered.sqlite.active, 1, "read worker retains only the composed derived owner");
+    assert.equal(recovered.sqlite.maximum, 1, "replay cannot open a temporary source handle");
     assert.equal(recovered.indexConnections, 1);
-    assert.equal(recovered.sqlite.active - recovered.indexConnections, recovered.coordinatorConnections,
-      "every retained handle is either the real derived owner or the real coordinator reader");
+    assert.equal(recovered.coordinatorConnections, 1, "the logical readonly source is attached to that same owner");
     t.diagnostic(JSON.stringify({ tasks: count, sqlite: recovered.sqlite, derived: recovered.indexConnections,
       coordinator: recovered.coordinatorConnections, restored: recovered.checkpoints.restores, bytes: recovered.logReads.bytes }));
     assert.ok(recovered.logReads.bytes <= count * 512, JSON.stringify(recovered));

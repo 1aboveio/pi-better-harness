@@ -10,6 +10,7 @@ import { observeMetasForOrigin, observeRecentMetasForOrigin, recentMetaDeadline,
 import { BackgroundHistory } from "./background-history.ts";
 import type { WorkScope } from "./read-model.ts";
 import { ENTITY_BUDGET } from "./work-budget.ts";
+import { isSqliteLockContention } from "./log-checkpoints.ts";
 // @ts-expect-error Shared durable observation inbox, not execution authority.
 import { AssignmentInbox } from "./domain/assignment-inbox.mjs";
 
@@ -22,6 +23,7 @@ export class BackgroundObservation {
   private ownDb: any;
   private readConnection?: (refresh?: boolean) => any;
   private get db(): any { return this.readConnection ? this.readConnection(false) : this.ownDb; }
+  private get observationActive() { return Boolean(this.db?.observationActive); }
   private identity?: string;
   private knownCoordinator = false;
   private rows: any[] = [];
@@ -57,6 +59,7 @@ export class BackgroundObservation {
   get scopeCount() { return this.legacy.size; }
   prepareQuery(): void {
     if (!this.ready) return;
+    if (this.observationActive) return;
     if (!this.enabled || !this.db || !this.hasInputVersions) return;
     // Native mutations can commit between the last scheduled observation and
     // the next list. Reuse the durable bounded inbox before cache validation.
@@ -78,8 +81,16 @@ export class BackgroundObservation {
     return deadlines.length ? Math.min(...deadlines) : null;
   }
   get registryMetrics() { return getRegistryIoMetrics(); }
-  get changeMetrics() { return { ...(this.ready ? this.inbox.metrics : { available: false, received: null, applied: null, pending: null }), coverage: this.hasInputVersions ? "cooperative-journal-and-exact-files" : "legacy-bounded-repair",
-    operationRepairComplete: this.ready && this.repairComplete, repairAfter: this.ready ? this.repairAfter : null, queuedHints: this.dirtyOperations.size,
+  private get inboxMetrics() {
+    if (this.ready) {
+      try { return this.inbox.metrics; }
+      catch (error) { if (!isSqliteLockContention(error)) throw error; }
+    }
+    return { available: false, received: null, applied: null, pending: null };
+  }
+  get changeMetrics() { const metrics = this.inboxMetrics, available = this.ready && metrics.available !== false;
+    return { ...metrics, coverage: this.hasInputVersions ? "cooperative-journal-and-exact-files" : "legacy-bounded-repair",
+    operationRepairComplete: available && this.repairComplete, repairAfter: available ? this.repairAfter : null, queuedHints: this.dirtyOperations.size,
     fileCoverage: "active-and-retained; historical-files-only-when-history-requested" }; }
   livenessReasons(options: { refresh?: boolean } = {}) {
     if (!this.ready) throw new Error("Background inbox coverage is unverified");
@@ -192,7 +203,13 @@ export class BackgroundObservation {
   }
   refresh(): boolean {
     if (!this.ready) return false;
+    if (this.observationActive) return false;
     if (!this.enabled) return false;
+    let observation: { commit(): void; release(): void } | undefined;
+    const previous = { rows: this.rows, signature: this.signature, legacy: new Map([...this.legacy].map(([key, value]) => [key, { ...value }])),
+      terminalProjections: new Map(this.terminalProjections), scopeVersions: new Map(this.scopeVersions), recent: this.recent,
+      recentRevision: this.recentRevision, repairAfter: this.repairAfter, repairComplete: this.repairComplete,
+      dirtyOperations: new Set(this.dirtyOperations), changedOperations: new Map(this.changedOperations) };
     try {
       const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
       const path = join(this.root, "operation-coordinator.sqlite");
@@ -202,7 +219,10 @@ export class BackgroundObservation {
       if (identity !== this.identity) { this.repairAfter = ""; this.repairComplete = false; this.scopeVersions.clear(); this.terminalProjections.clear(); this.recentRevision = undefined; this.recent = []; for (const entry of this.legacy.values()) { entry.pendingRevision = undefined; entry.recentRevision = undefined; entry.recent = []; } this.history?.invalidate(); this.ownDb?.close(); this.ownDb = undefined; this.identity = identity; }
       if (!identity && this.knownCoordinator) throw new Error("Coordinator source disappeared; retaining the previous observation");
       if (identity) {
-        if (this.readConnection) this.readConnection();
+        if (this.readConnection) {
+          const source = this.readConnection();
+          observation = source?.beginSnapshot?.();
+        }
         else this.ownDb ??= new DatabaseSync(path, { readOnly: true });
         this.knownCoordinator = true;
         const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
@@ -293,20 +313,24 @@ export class BackgroundObservation {
         ...entry.recent.map(row => row.endedAt + 30000), ...recentMetaDeadline(entry.origin),
         ...(entry.origin.sessionId ? recentMetaDeadline({ cwd: entry.origin.cwd }) : [])])].filter(Number.isFinite);
       if (deadlines.length) { this.expiry = setTimeout(() => this.schedule(), Math.max(1, Math.min(...deadlines) - Date.now())); this.expiry.unref(); }
+      observation?.commit();
       return changed;
     } catch (error) {
+      observation?.release();
+      Object.assign(this, previous);
       const reason = String(error);
       const changed = this.status !== "degraded" || this.reason !== reason;
       this.status = "degraded"; this.reason = reason;
       return changed;
-    }
+    } finally { observation?.release(); }
   }
   private project(operations: any[], useCache = true) {
       return operations.map((op: any) => {
         try {
         const directory = this.directoryFor(op);
         this.observeDirectory(directory);
-        const cached = this.terminalProjections.get(op.operation_id);
+        const saved = this.terminalProjections.get(op.operation_id);
+        const cached = saved && { ...saved };
         const authority = JSON.stringify([op, directory]);
         const work = !useCache ? this.metrics.sourceWork.history : this.repairIds.has(op.operation_id) && !this.dirtyOperations.has(op.operation_id)
           ? this.metrics.sourceWork.repair : this.metrics.sourceWork.active;
@@ -337,7 +361,7 @@ export class BackgroundObservation {
         const version = JSON.stringify([op, directory, identities, waits]);
         // Both paths validate authority, file identities and dependencies above.
         // History mode changes accounting/invalidation, not projection identity.
-        if (cached?.version === version) { cached.dependencyVersion = dependencyVersion; this.metrics.projectionHits++; return cached.row; }
+        if (cached?.version === version) { cached.dependencyVersion = dependencyVersion; this.terminalProjections.set(op.operation_id, cached); this.metrics.projectionHits++; return cached.row; }
         if (useCache) this.history?.invalidateOperation(op.operation_id);
         this.metrics.runnerSnapshots++;
         work.snapshots++;
@@ -349,11 +373,13 @@ export class BackgroundObservation {
         const status = inspection?.terminal ? inspection.status : op.terminal_revision > 0 ? op.terminal_outcome : inspection?.status ?? "running";
         const row = { durable: true, id: op.task_id, operationId: op.operation_id, kind: context.kind ?? inspection?.kind ?? "process",
           status, active: !terminal, terminal, attention: terminal && status !== "succeeded", waits,
+          terminalRevision: op.terminal_revision, terminalOutcome: op.terminal_outcome,
           owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace, branchId: op.owner_branch_id ?? null },
           startedAt: inspection?.result?.startedAt ?? inspection?.launch.createdAt ?? op.created_at,
           endedAt: inspection?.result?.endedAt ?? op.terminal_at ?? undefined,
           cwd: inspection?.launch.cwd ?? op.owner_workspace, name: context.name, command: context.command, argv: context.argv,
-          dismissedAt: context.dismissedAt, exitCode: inspection?.result?.exitCode ?? null, logPaths: inspection?.logs ?? {} };
+          dismissedAt: context.dismissedAt, exitCode: inspection?.result?.exitCode ?? null,
+          signal: inspection?.result?.signal ?? null, logPaths: inspection?.logs ?? {} };
         this.terminalProjections.delete(op.operation_id);
         this.terminalProjections.set(op.operation_id, { version, authority, operation: op, inspection, row, dependencyVersion });
         if (this.terminalProjections.size > 4096) this.terminalProjections.delete(this.terminalProjections.keys().next().value!);
@@ -445,8 +471,8 @@ export class BackgroundObservation {
     if (scope.backgroundHistory) { this.metrics.historyQueries++; return index.records.map((record: any) => record.meta); }
     // Retained terminals stay visible by default, but a sidecar dismissal must
     // be observed even before its watcher notification is delivered.
-    if (this.status !== "degraded" && this.db) this.refreshRecent(legacy, legacy.recentRevision ?? 0);
-    const legacyRows = this.status === "degraded" ? legacy.rows : this.visibleLegacy(legacy.origin);
+    if (!this.observationActive && this.status !== "degraded" && this.db) this.refreshRecent(legacy, legacy.recentRevision ?? 0);
+    const legacyRows = this.observationActive || this.status === "degraded" ? legacy.rows : this.visibleLegacy(legacy.origin);
     const rows = [...new Map([...this.pendingRows(legacy), ...(scope.backgroundAll ? this.rows : [...this.rows, ...legacy.recent])].map(row => [row.id, row])).values()];
     return [...rows.filter(row => row.owner.kind === "parent-session" && row.dismissedAt === undefined
       && (scope.backgroundAll || row.owner.workspace === scope.cwd && row.owner.sessionId === scope.sessionId) && (!scope.active || row.active)),

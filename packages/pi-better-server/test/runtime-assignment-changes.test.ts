@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
+import { EventEmitter } from "node:events";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 const { openStore } = await import(new URL("../src/runtime/domain/subagents/shared-operation-coordinator/index.domain.mjs", import.meta.url).href);
 
@@ -83,7 +84,9 @@ test("bounded baseline hands off continuous receipts and rebuilds a truncated jo
     writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, sessionId: "worker", cwd: root, status: "completed", startedAt: i,
       ...(i === 259 ? { assignment: { assignmentId: "target", owner, recipient } } : {}) }));
   }
-  const model = new WorkReadModel(root, "baseline", { baseDir: root, durableDir: join(root, "archive"), intervalMs: 60000 });
+  // This test drives individual repair pages; OS hints must not start extra drains.
+  const watch = (() => Object.assign(new EventEmitter(), { close() {}, ready: Promise.resolve() })) as any;
+  const model = new WorkReadModel(root, "baseline", { baseDir: root, durableDir: join(root, "archive"), intervalMs: 60000, watch });
   const source = new DatabaseSync(join(root, "operation-coordinator.sqlite"));
   try {
     await model.reconcile(false);
@@ -109,7 +112,7 @@ test("bounded baseline hands off continuous receipts and rebuilds a truncated jo
     source.exec("UPDATE schema_meta SET value='4' WHERE key='schema_version'; DROP TABLE assignment_change_source");
     const compatibility = model.metrics.scheduling.repairEntries;
     await model.reconcile(false);
-    assert.equal(model.snapshot().status, "rebuilding");
+    assert.equal(model.snapshot().status, "rebuilding", model.snapshot().reason);
     assert.ok(model.metrics.scheduling.repairEntries - compatibility <= 128, "legacy sources share the bounded repair budget");
     for (let page = 0; page < 20 && model.snapshot().status !== "ready"; page++) await model.reconcile(false);
     assert.equal(model.snapshot().status, "ready");

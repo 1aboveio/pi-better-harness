@@ -545,7 +545,8 @@ test("local and direct-SSH processes that exit after /reload deliver their compl
       await dumpDurableCallbackDiagnostics(host, id, project);
       throw error;
     }
-    let meta = bgRegistry.readMeta(id);
+    const inspection = bgRegistry.inspectMeta(id);
+    let meta = inspection.meta;
     if (meta) {
       // Native transcript delivery precedes the asynchronous Server receipt RPC.
       // Observe its durable acknowledgment before asserting or reloading again.
@@ -556,6 +557,11 @@ test("local and direct-SSH processes that exit after /reload deliver their compl
       assert.equal(meta.callbackSuppressedAt, undefined, `${id} was suppressed: ${meta.callbackSuppressedReason}`);
       assert.ok(meta.callbackSentAt > 0);
     } else {
+      if (!id.startsWith("bgs_")) console.error("[reload-task-routing-failure]", JSON.stringify({
+        id, route: id === localId ? "local" : "direct-ssh", found: inspection.found, readable: inspection.readable,
+        registryDirectory: bgRegistry.tasksDir(), workspace: project, sessionId: host.sessionId,
+        callbacks: host.completions(id).length,
+      }));
       // A durable local task has no legacy receipt. Its exactly-once contract is
       // the single delivered batch plus the second reload below.
       if (!/^bgs_/.test(id)) console.error("reload-exit-source", JSON.stringify({

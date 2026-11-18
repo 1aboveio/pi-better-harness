@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { WorkClient } from '../src/runtime/work-client.mjs';
+import { retainGuardedStartup } from './support/guarded-startup.ts';
 
 // A duplex peer keeps the exact client framing and request deadlines while
 // controlling when the replacement worker can accept subscriptions.
@@ -22,6 +23,29 @@ async function until(predicate: () => boolean) {
   while (!predicate()) { assert.ok(Date.now()<deadline, 'client did not retry recovery'); await new Promise(r=>setTimeout(r,10)); }
 }
 const snapshot = (epoch: string) => ({instanceId:epoch,seq:1,status:'ready',rows:[]});
+
+test('guarded fixture readiness retains the original instance until explicit runner handoff', async () => {
+  let registered!: (hello: any) => void;
+  let closed = false, announced = false;
+  const client = { ready: new Promise(resolve => { registered = resolve; }), close: () => { closed = true; } };
+  const pending = retainGuardedStartup(client, '/fixture.sock').then(value => { announced = true; return value; });
+  await Promise.resolve();
+  assert.equal(announced, false, 'a listening socket alone cannot announce retained readiness');
+  registered({ instanceId: 'original' });
+  const startup = await pending;
+  assert.deepEqual(startup.ready, { ready: '/fixture.sock', instanceId: 'original' });
+  assert.equal(closed, false, 'SDK loading must retain the server before a runner exists');
+  startup.release();
+  assert.equal(closed, true, 'runner handoff must remove fixture retention before idle proof');
+});
+
+test('guarded startup registration failure closes the client without announcing readiness', async () => {
+  let closed = false;
+  const client = { ready: Promise.reject(new Error('runtime-unavailable: draining')), close: () => { closed = true; } };
+  const pending = retainGuardedStartup(client, '/fixture.sock');
+  await assert.rejects(pending, /draining/);
+  assert.equal(closed, true);
+});
 
 test('global sequence gaps between full scoped snapshots do not synthesize degraded frames', async () => {
   const f = fixture(); await f.client.ready;

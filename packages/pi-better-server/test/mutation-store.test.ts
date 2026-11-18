@@ -103,7 +103,7 @@ test("unavailable continuation authority backs off without retaining active work
   try {
     const park = { runId: "missing-authority", waitId: "wait", generation: 1 };
     const run = async () => { throw new Error("unavailable authority must not dispatch"); };
-    await assert.rejects(host.dispatchContinuation(park, run), /authority unavailable/);
+    await assert.rejects(host.dispatchContinuation(park, run), /Captured continuation launch authority unavailable/);
     const first = host.status().continuationUnavailable[0];
     assert.match(first.reason, /authority unavailable/);
     assert.equal(first.failures, 1);
@@ -111,8 +111,9 @@ test("unavailable continuation authority backs off without retaining active work
     assert.deepEqual(host.status().continuationUnavailable[0], first);
     assert.equal(host.busy, false);
     for (let i = 0; i < 130; i++) {
-      try { await host.dispatchContinuation({ ...park, waitId: `wait-${i}` }, run); }
-      catch (error) { assert.match(String(error), /authority unavailable/); }
+      await host.dispatchContinuation({ ...park, waitId: `wait-${i}` }, run).catch((error: unknown) => {
+        assert.match(String(error), /Captured continuation launch authority unavailable/);
+      });
     }
     assert.equal(host.status().continuationUnavailable.length, 32, "global admission budget also bounds a flood of distinct generations");
     assert.equal(host.busy, false);

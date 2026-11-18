@@ -1,5 +1,5 @@
 // Generated from packages/operation-coordinator/src/subagent-launch.ts. Do not edit directly.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { StoreContext } from "./sqlite.ts";
 
 export interface LaunchAttempt {
@@ -67,6 +67,26 @@ export class SubagentLaunchJournal {
     pendingIntents(): LaunchIntent[] {
         return this.db.prepare("SELECT * FROM subagent_launch_intents WHERE state='accepted'").all() as unknown as LaunchIntent[];
     }
+    private progressKey(owner: string, key: string) { return `launch-progress:${createHash('sha256').update(JSON.stringify([owner, key])).digest('hex')}`; }
+    private progress(owner: string, key: string) {
+        const row = this.db.prepare('SELECT value FROM coordinator_state WHERE key=?').get(this.progressKey(owner, key));
+        return row ? JSON.parse(String(row.value)) as { acceptedAt: number; lastProgressAt: number } : undefined;
+    }
+    private noteProgress(owner: string, key: string) {
+        const previous = this.progress(owner, key), now = Date.now();
+        this.db.prepare('INSERT OR REPLACE INTO coordinator_state (key,value) VALUES (?,?)').run(this.progressKey(owner, key),
+            JSON.stringify({ acceptedAt: previous?.acceptedAt ?? now, lastProgressAt: now }));
+    }
+    lifecycleReasons(owner?: string, key?: string) {
+        const exact = owner !== undefined && key !== undefined ? this.read(owner, key) : undefined;
+        const intents = owner !== undefined ? exact?.state === 'accepted' ? [exact] : [] : this.pendingIntents();
+        return intents.map(intent => ({ kind: 'task', id: this.progressKey(intent.owner, intent.request_key),
+            owner: intent.owner, management: { epoch: intent.epoch }, acceptedAt: this.progress(intent.owner, intent.request_key)?.acceptedAt ?? null,
+            lastProgressAt: this.progress(intent.owner, intent.request_key)?.lastProgressAt ?? null, executionDeadline: null, nextDeadline: null,
+            attempts: (JSON.parse(intent.attempts) as LaunchAttempt[]).map(attempt => ({ id: attempt.id, sessionId: attempt.sessionId,
+                state: attempt.state, writer: { pid: attempt.writerPid ?? attempt.pid, start: attempt.writerStartTime ?? attempt.pidStartTime } })),
+            recovery: 'drain-accepted-launch-until-journal-return-or-authoritative-handoff' }));
+    }
     finishRecovery(owner: string, key: string, epoch: number, result: unknown) {
         this.transaction(() => {
             this.current(epoch);
@@ -83,6 +103,7 @@ export class SubagentLaunchJournal {
                 return { prior: true, ...prior };
             }
             this.db.prepare("INSERT INTO subagent_launch_intents VALUES (?, ?, ?, ?, 'accepted', '[]', NULL)").run(owner, key, digest, epoch);
+            this.noteProgress(owner, key);
             return this.read(owner, key);
         });
     }
@@ -96,6 +117,7 @@ export class SubagentLaunchJournal {
             const attempt: LaunchAttempt = { ...input, token: randomBytes(32).toString("hex"), state: "prepared" };
             attempts.push(attempt);
             this.db.prepare("UPDATE subagent_launch_intents SET attempts=? WHERE owner=? AND request_key=?").run(JSON.stringify(attempts), owner, key);
+            this.noteProgress(owner, key);
             return attempt;
         });
     }
@@ -108,6 +130,7 @@ export class SubagentLaunchJournal {
             if (attempt.writerPid && attempt.writerPid !== pid) throw new Error("Launch writer does not match spawned process");
             Object.assign(attempt, { state: "spawned", pid, pidStartTime });
             this.db.prepare("UPDATE subagent_launch_intents SET attempts=? WHERE owner=? AND request_key=?").run(JSON.stringify(attempts), owner, key);
+            this.noteProgress(owner, key);
         });
     }
     finish(owner: string, key: string, epoch: number, result: unknown) {

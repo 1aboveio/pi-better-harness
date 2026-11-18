@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { createWorkBudget } from '../src/runtime/work-budget.ts';
 
 const { ObservedWaitHost } = await import(String('../src/runtime/domain/background-service/observed-waits.domain.mjs'));
 const { openStore } = await import(String('../src/runtime/domain/background-service/shared-operation-coordinator/index.domain.mjs'));
@@ -17,6 +18,24 @@ const branch = ['095bb1a8', 'a451842c', '37c74f76', '81b8bbb5', '8dec15e5', '996
 const ctx = (ids: string[], sessionId = '4edc1498-cbc9-481b-831a-ca3da05c99c1') => ({ cwd: '/fixture', sessionManager: {
   getSessionId: () => sessionId, getBranch: () => ids.map(id => ({ id })),
 } });
+
+test('scoped recovery joins startup without a second physical credit and admits its own pass after settlement', async () => {
+  const host = contextHost(), budget = createWorkBudget();
+  host.options = { enterControl: () => budget.enter('control') };
+  let release!: () => void, passes = 0;
+  const startup = new Promise<void>(resolve => { release = resolve; });
+  host.reconcilePass = async () => { passes++; if (passes === 1) await startup; };
+  const first = host.reconcileNow();
+  host.noteParentContext(ctx(['anchor']), { recover: false });
+  const scoped = host.reconcileNow();
+  assert.equal(budget.metrics().lanes.control!.active, 1);
+  assert.equal(budget.metrics().lanes.control!.admitted, 1);
+  release(); await Promise.all([first, scoped]);
+  assert.equal(passes, 2, 'startup cannot stand in for the requested scope');
+  assert.equal(budget.metrics().lanes.control!.active, 0);
+  assert.equal(budget.metrics().lanes.control!.admitted, 2);
+  assert.equal(budget.metrics().lanes.control!.completed, 2);
+});
 
 test('stable revision retains recovery progress across the actual alternating foreground branch views', t => {
   const host = contextHost();

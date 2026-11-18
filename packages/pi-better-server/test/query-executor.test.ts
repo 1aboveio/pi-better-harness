@@ -1097,11 +1097,12 @@ test('Subagents and Background share one coordinator read connection in the quer
     await f.executor.livenessReasons();
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
-    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator and one derived connection with inbox and checkpoints attached, regardless of domain');
-    assert.equal((f.executor.metrics().sqlite as any).opens, 2, 'both inbox attachments reuse the existing derived handle without another constructor open');
-    assert.equal((f.executor.metrics().sqlite as any).maximum, 2, 'Background attachment cannot temporarily exceed the existing handle budget');
+    assert.equal((f.executor.metrics().sqlite as any).active, 1, 'the worker composes readonly source, inboxes and checkpoints on its sole derived handle');
+    assert.equal((f.executor.metrics().sqlite as any).opens, 1, 'both inbox attachments and the source reuse the existing derived handle without another constructor open');
+    assert.equal((f.executor.metrics().sqlite as any).maximum, 1, 'Background attachment cannot temporarily open another worker handle');
+    assert.equal(f.executor.metrics().indexConnections, 1);
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
-    t.diagnostic(JSON.stringify({ retainedBudget: 2, sqlite: f.executor.metrics().sqlite }));
+    t.diagnostic(JSON.stringify({ workerRetainedBudget: 1, sqlite: f.executor.metrics().sqlite }));
   } finally { await f.close(); }
 });
 
@@ -1140,7 +1141,10 @@ test("assignment wait, resume claim, cancellation, outcome and receipt cross the
     store.receiptAssignmentOutcome({ assignmentId: "assignment", recipient, revision: 1, entryId: "entry" });
     await observed(s => s.rows[0]?.recipientPending === false);
     const sqlite = f.executor.metrics().sqlite as any;
-    assert.equal(sqlite.active, 2, "the full receipt journey retains only the source and shared derived handles");
+    assert.equal(sqlite.active, 1, "the full receipt journey retains the source on the sole derived handle");
+    assert.equal(sqlite.maximum, 1);
+    assert.equal(f.executor.metrics().coordinatorConnections, 1);
+    assert.equal(f.executor.metrics().indexConnections, 1);
     assert.ok(sqlite.maximum <= 2, "inbox transactions do not open an extra SQLite handle");
     t.diagnostic(JSON.stringify({ retainedBudget: 2, sqlite }));
     assert.equal(store.getWait(wait).phase, "cancelled");

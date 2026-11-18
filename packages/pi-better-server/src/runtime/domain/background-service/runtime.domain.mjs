@@ -23,7 +23,7 @@ export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;
 /** How to fix a false alarm: some tools write progress or warnings to stderr on success. */
 export const BLIND_CHECK_HINT = "If the stderr is expected (progress or warnings), redirect it (2>/dev/null) or set blind_checks:0.";
 /** Each cached extension factory owns its scheduling and suspension state. */
-export function createBackgroundTaskRuntime(attention = createFailureAttention(), deliverCompletion, admission) {
+export function createBackgroundTaskRuntime(attention = createFailureAttention(), deliverCompletion, admission, sourceWork = (_kind, _id, work) => work()) {
     const { resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention } = attention;
     const watcherTimers = new Map();
     const remoteSessionTimers = new Map();
@@ -432,7 +432,8 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         clearRemoteSessionTimer(id);
         if (scheduledWorkSuspended)
             return;
-        const timer = setTimeout(() => void pollRemoteSession(pi, id, getActiveSession), delayMs);
+        const dueAt = Date.now() + delayMs;
+        const timer = setTimeout(() => void sourceWork("remote-poll", id, () => scheduledWorkSuspended ? undefined : pollRemoteSession(pi, id, getActiveSession), dueAt), delayMs);
         timer.unref();
         remoteSessionTimers.set(id, timer);
     }
@@ -718,7 +719,9 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         const arm = () => {
             if (scheduledWorkSuspended)
                 return;
-            const timer = setTimeout(check, delayMs);
+            const dueAt = Date.now() + delayMs;
+            const timer = setTimeout(() => sourceWork("handoff", id, () => { if (!scheduledWorkSuspended)
+                check(); }, dueAt), delayMs);
             timer.unref();
             handoffTimers.set(id, timer);
         };
@@ -851,7 +854,8 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         clearWatchTimer(id);
         if (scheduledWorkSuspended)
             return;
-        const timer = setTimeout(() => void pollWatch(pi, id, getActiveSession, runOnce), delayMs);
+        const dueAt = Date.now() + delayMs;
+        const timer = setTimeout(() => void sourceWork("watch", id, () => scheduledWorkSuspended ? undefined : pollWatch(pi, id, getActiveSession, runOnce), dueAt), delayMs);
         timer.unref();
         watcherTimers.set(id, timer);
     }
@@ -1139,7 +1143,8 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         if (scheduledWorkSuspended)
             return;
         const delay = Math.max(0, deadlineAt - Date.now());
-        const timer = setTimeout(() => void timeoutProcess(pi, id, getActiveSession), delay);
+        const dueAt = deadlineAt;
+        const timer = setTimeout(() => void sourceWork("process-deadline", id, () => scheduledWorkSuspended ? undefined : timeoutProcess(pi, id, getActiveSession), dueAt), delay);
         timer.unref();
         processTimeoutTimers.set(id, timer);
     }
@@ -1333,16 +1338,23 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         stopLogRetention(id);
         if (scheduledWorkSuspended)
             return;
+        let dueAt = Date.now() + LOG_RETENTION_CHECK_MS;
         const timer = setInterval(() => {
-            const meta = readMeta(id);
-            if (!meta || meta.status !== "running") {
-                stopLogRetention(id);
-                return;
-            }
-            if (meta.kind === "process")
-                enforceLogRetention(meta);
-            if (observeTaskStallAttention(meta))
-                scheduleFailureAttention(pi, id, getActiveSession);
+            const due = dueAt;
+            dueAt = Date.now() + LOG_RETENTION_CHECK_MS;
+            return sourceWork("log-retention", id, () => {
+                if (scheduledWorkSuspended)
+                    return;
+                const meta = readMeta(id);
+                if (!meta || meta.status !== "running") {
+                    stopLogRetention(id);
+                    return;
+                }
+                if (meta.kind === "process")
+                    enforceLogRetention(meta);
+                if (observeTaskStallAttention(meta))
+                    scheduleFailureAttention(pi, id, getActiveSession);
+            }, due);
         }, LOG_RETENTION_CHECK_MS);
         timer.unref();
         logRetentionTimers.set(id, timer);

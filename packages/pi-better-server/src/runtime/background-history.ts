@@ -149,13 +149,17 @@ export class BackgroundHistory {
   }
 
   private startRefresh(version?: string) {
+    if (this.source()?.observationActive) return;
     if (this.closed || this.pending) return;
     const previous = this.status, changes = this.changes;
     this.status = "rebuilding";
     this.pending = Promise.resolve().then(() => this.refresh(version ?? this.sourceVersion())).catch(error => {
       for (const id of this.applying) this.dirty.add(id);
       for (const id of this.applyingLegacy) this.dirtyLegacy.add(id);
-      if (!this.closed) { this.status = "degraded"; this.reason = String(error); }
+      if (!this.closed) {
+        this.status = error === this.ownerBusy ? "rebuilding" : "degraded";
+        this.reason = error === this.ownerBusy ? undefined : String(error);
+      }
     }).finally(() => {
       this.applying = [];
       this.applyingLegacy = [];
@@ -217,7 +221,12 @@ export class BackgroundHistory {
         unreadable: Number(diagnostics.unreadable ?? 0), unknown: scope.backgroundAll ? 0 : Number(diagnostics.unknown ?? 0) } };
   }
 
+  private readonly ownerBusy = new Error("Derived history slice deferred to its observation owner");
   private async refresh(version: string) {
+    const writableSlice = () => {
+      if (this.source()?.observationActive) throw this.ownerBusy;
+    };
+    writableSlice();
     const generation = this.generation;
     const baseline = !this.imported;
     const legacy = this.legacyOwed || baseline;
@@ -264,6 +273,7 @@ export class BackgroundHistory {
     let last = "";
     if (source) for (;;) {
       if (this.closed) return;
+      writableSlice();
       this.metrics.operationQueries += baseline ? 1 : dirty.length;
       const operations = baseline ? source.prepare(`SELECT * FROM operations WHERE owner_kind = 'parent-session' AND observer_kind = 'local-supervisor'
         AND operation_id > ? ORDER BY operation_id LIMIT 128`).all(last)
@@ -300,6 +310,7 @@ export class BackgroundHistory {
       this.metrics.inputStats += 3;
       const signature = await identity(join(path, "meta.json"));
       const failure = digest([await identity(join(path, "failures.jsonl")), await identity(join(path, "failures.jsonl.observed"))]);
+      writableSlice();
       if (previous.get(key)?.signature === signature) { seen.add(key); updateFailure(key, failure); }
       else {
         this.metrics.metadataReads++;
@@ -309,6 +320,7 @@ export class BackgroundHistory {
       if (++batch % 128 === 0) await yieldTurn();
     }
     if (this.closed) return;
+    writableSlice();
     const removals = baseline ? this.db.prepare("SELECT key FROM background_history").all()
       : [...(legacy ? this.db.prepare("SELECT key FROM background_history WHERE key LIKE 'l:%'").all() : []),
         ...dirty.map(id => ({ key: `d:${id}` })), ...dirtyLegacy.map(id => ({ key: `l:${id}` }))];
