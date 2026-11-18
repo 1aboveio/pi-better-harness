@@ -11,6 +11,7 @@ import { connect } from "node:net";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { inspectDaemonOwner, ownerIdentityVerified, ownerIsAlive, processMatchesStart, type DaemonOwnerIdentity } from "../src/daemon-owner.ts";
 import { parkPhaseTrace } from "./support/park-phase-trace.ts";
+const { launchFixtureRequest } = await import(String("./support/launch-phase-probe.mjs"));
 
 for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", "spawn", "result", "bootstrap", "published", "lease", "tools"]) test(`managed worker continuation recovery: ${scenario}`, { timeout: scenario === "unavailable" ? 90000 : 60000 }, async t => {
   const trace = scenario === "unavailable" ? parkPhaseTrace(t.signal, record => console.error(JSON.stringify(record))) : undefined;
@@ -79,7 +80,7 @@ for (const scenario of ["standalone", "unavailable", "parent", "park", "claim", 
     trace?.mark("sdk-parent-ready");
     const [ready] = await Promise.race([once(parent, "message"), once(parent, "exit").then(() => { throw new Error(errors); })]);
     const launch = async (params: object, key = "same-launch", child = parent!, goalComplete = false) => {
-      const reply = once(child, "message"); child.send({ key, params, goalComplete }); const [message] = await reply;
+      const message = await launchFixtureRequest(child, { key, params, goalComplete, traceLaunch: Boolean(trace) }, trace);
       if (scenario === "standalone") { assert.match(String(message.error ?? JSON.stringify(message.result)), /did not authorize.*Background/); return { denied: true }; }
       assert.equal(message.error, undefined, `${message.stack ?? message.error}\n${errors}`); return message.result;
     };

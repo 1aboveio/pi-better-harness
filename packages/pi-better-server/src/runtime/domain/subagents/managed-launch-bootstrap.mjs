@@ -1,8 +1,8 @@
 // Generated fixed launch domain from packages/pi-better-subagents/managed-launch-bootstrap.mjs. Do not edit directly.
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { processStartToken } from "./registry.domain.mjs";
-import { launchDigest } from "./managed-launch-journal.mjs";
+import { processStartToken } from "./process-identity.mjs";
+import { launchDigest } from "./launch-digest.mjs";
 /** Runs before the Pi CLI or any worker extension can execute task code. */
 export function verifyManagedBootstrap(env = process.env) {
     if (!env.PI_MANAGED_SUBAGENT)
