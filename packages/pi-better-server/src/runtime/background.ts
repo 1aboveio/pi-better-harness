@@ -22,6 +22,7 @@ export class BackgroundObservation {
   private ownDb: any;
   private readConnection?: (refresh?: boolean) => any;
   private get db(): any { return this.readConnection ? this.readConnection(false) : this.ownDb; }
+  private get observationActive() { return Boolean(this.db?.observationActive); }
   private identity?: string;
   private knownCoordinator = false;
   private rows: any[] = [];
@@ -53,6 +54,7 @@ export class BackgroundObservation {
   get connectionCount() { return this.readConnection ? 0 : this.ownDb ? 1 : 0; }
   get scopeCount() { return this.legacy.size; }
   prepareQuery(): void {
+    if (this.observationActive) return;
     if (!this.enabled || !this.db || !this.hasInputVersions) return;
     // Native mutations can commit between the last scheduled observation and
     // the next list. Reuse the durable bounded inbox before cache validation.
@@ -163,7 +165,13 @@ export class BackgroundObservation {
     }, operations => this.project(operations, false), changed, op => this.directoryFor(op));
   }
   refresh(): boolean {
+    if (this.observationActive) return false;
     if (!this.enabled) return false;
+    let observation: { commit(): void; release(): void } | undefined;
+    const previous = { rows: this.rows, signature: this.signature, legacy: new Map([...this.legacy].map(([key, value]) => [key, { ...value }])),
+      terminalProjections: new Map(this.terminalProjections), scopeVersions: new Map(this.scopeVersions), recent: this.recent,
+      recentRevision: this.recentRevision, repairAfter: this.repairAfter, repairComplete: this.repairComplete,
+      dirtyOperations: new Set(this.dirtyOperations), changedOperations: new Map(this.changedOperations) };
     try {
       const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
       const path = join(this.root, "operation-coordinator.sqlite");
@@ -173,7 +181,10 @@ export class BackgroundObservation {
       if (identity !== this.identity) { this.repairAfter = ""; this.repairComplete = false; this.scopeVersions.clear(); this.terminalProjections.clear(); this.recentRevision = undefined; this.recent = []; for (const entry of this.legacy.values()) { entry.pendingRevision = undefined; entry.recentRevision = undefined; entry.recent = []; } this.history?.invalidate(); this.ownDb?.close(); this.ownDb = undefined; this.identity = identity; }
       if (!identity && this.knownCoordinator) throw new Error("Coordinator source disappeared; retaining the previous observation");
       if (identity) {
-        if (this.readConnection) this.readConnection();
+        if (this.readConnection) {
+          const source = this.readConnection();
+          observation = source?.beginSnapshot?.();
+        }
         else this.ownDb ??= new DatabaseSync(path, { readOnly: true });
         this.knownCoordinator = true;
         const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
@@ -262,20 +273,24 @@ export class BackgroundObservation {
         ...entry.recent.map(row => row.endedAt + 30000), ...recentMetaDeadline(entry.origin),
         ...(entry.origin.sessionId ? recentMetaDeadline({ cwd: entry.origin.cwd }) : [])])].filter(Number.isFinite);
       if (deadlines.length) { this.expiry = setTimeout(() => this.schedule(), Math.max(1, Math.min(...deadlines) - Date.now())); this.expiry.unref(); }
+      observation?.commit();
       return changed;
     } catch (error) {
+      observation?.release();
+      Object.assign(this, previous);
       const reason = String(error);
       const changed = this.status !== "degraded" || this.reason !== reason;
       this.status = "degraded"; this.reason = reason;
       return changed;
-    }
+    } finally { observation?.release(); }
   }
   private project(operations: any[], useCache = true) {
       return operations.map((op: any) => {
         try {
         const directory = this.directoryFor(op);
         this.observeDirectory(directory);
-        const cached = this.terminalProjections.get(op.operation_id);
+        const saved = this.terminalProjections.get(op.operation_id);
+        const cached = saved && { ...saved };
         const authority = JSON.stringify([op, directory]);
         const work = !useCache ? this.metrics.sourceWork.history : this.repairIds.has(op.operation_id) && !this.dirtyOperations.has(op.operation_id)
           ? this.metrics.sourceWork.repair : this.metrics.sourceWork.active;
@@ -306,7 +321,7 @@ export class BackgroundObservation {
         const version = JSON.stringify([op, directory, identities, waits]);
         // Both paths validate authority, file identities and dependencies above.
         // History mode changes accounting/invalidation, not projection identity.
-        if (cached?.version === version) { cached.dependencyVersion = dependencyVersion; this.metrics.projectionHits++; return cached.row; }
+        if (cached?.version === version) { cached.dependencyVersion = dependencyVersion; this.terminalProjections.set(op.operation_id, cached); this.metrics.projectionHits++; return cached.row; }
         if (useCache) this.history?.invalidateOperation(op.operation_id);
         this.metrics.runnerSnapshots++;
         work.snapshots++;
@@ -414,8 +429,8 @@ export class BackgroundObservation {
     if (scope.backgroundHistory) { this.metrics.historyQueries++; return index.records.map((record: any) => record.meta); }
     // Retained terminals stay visible by default, but a sidecar dismissal must
     // be observed even before its watcher notification is delivered.
-    if (this.status !== "degraded" && this.db) this.refreshRecent(legacy, legacy.recentRevision ?? 0);
-    const legacyRows = this.status === "degraded" ? legacy.rows : this.visibleLegacy(legacy.origin);
+    if (!this.observationActive && this.status !== "degraded" && this.db) this.refreshRecent(legacy, legacy.recentRevision ?? 0);
+    const legacyRows = this.observationActive || this.status === "degraded" ? legacy.rows : this.visibleLegacy(legacy.origin);
     const rows = [...new Map([...this.pendingRows(legacy), ...(scope.backgroundAll ? this.rows : [...this.rows, ...legacy.recent])].map(row => [row.id, row])).values()];
     return [...rows.filter(row => row.owner.kind === "parent-session" && row.dismissedAt === undefined
       && (scope.backgroundAll || row.owner.workspace === scope.cwd && row.owner.sessionId === scope.sessionId) && (!scope.active || row.active)),

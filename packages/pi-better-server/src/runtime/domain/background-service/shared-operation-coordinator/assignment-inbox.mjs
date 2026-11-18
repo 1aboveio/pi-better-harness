@@ -52,7 +52,7 @@ export class AssignmentInbox {
         this.more = !reset && Number(changes.at(-1)?.seq ?? after) < last;
         if (!reset && !changes.length)
             return this.batch(generation);
-        this.db.exec("BEGIN IMMEDIATE");
+        this.db.exec(this.shared ? `SAVEPOINT ${this.alias}_receive` : "BEGIN IMMEDIATE");
         try {
             if (reset) {
                 this.db.exec(`DELETE FROM ${this.prefix}pending; DELETE FROM ${this.prefix}applied_scopes; UPDATE ${this.prefix}diagnostics SET repairs=repairs+1`);
@@ -70,10 +70,10 @@ export class AssignmentInbox {
             // The obligations above and received position commit together.
             if (changes.length)
                 this.db.prepare(`UPDATE ${this.prefix}position SET received=? WHERE singleton=1`).run(changes.at(-1).seq);
-            this.db.exec("COMMIT");
+            this.db.exec(this.shared ? `RELEASE ${this.alias}_receive` : "COMMIT");
         }
         catch (error) {
-            this.db.exec("ROLLBACK");
+            this.db.exec(this.shared ? `ROLLBACK TO ${this.alias}_receive; RELEASE ${this.alias}_receive` : "ROLLBACK");
             throw error;
         }
         return this.batch(generation);
@@ -91,7 +91,7 @@ export class AssignmentInbox {
             return;
         if (!batch.size && (!position || position.applied === position.received))
             return;
-        this.db.exec("BEGIN IMMEDIATE");
+        this.db.exec(this.shared ? `SAVEPOINT ${this.alias}_ack` : "BEGIN IMMEDIATE");
         try {
             const remove = this.db.prepare(`DELETE FROM ${this.prefix}pending WHERE scope=? AND seq=?`);
             const applied = this.db.prepare(`INSERT INTO ${this.prefix}applied_scopes VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET seq=max(seq,excluded.seq)`);
@@ -103,10 +103,10 @@ export class AssignmentInbox {
             // A later entity completing cannot advance past any earlier obligation.
             this.db.exec(`UPDATE ${this.prefix}position SET applied=max(0,min(received,
                 COALESCE((SELECT min(first_seq)-1 FROM ${this.prefix}pending), received))) WHERE singleton=1`);
-            this.db.exec("COMMIT");
+            this.db.exec(this.shared ? `RELEASE ${this.alias}_ack` : "COMMIT");
         }
         catch (error) {
-            this.db.exec("ROLLBACK");
+            this.db.exec(this.shared ? `ROLLBACK TO ${this.alias}_ack; RELEASE ${this.alias}_ack` : "ROLLBACK");
             throw error;
         }
     }

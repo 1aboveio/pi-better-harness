@@ -1,5 +1,15 @@
 import { createRequire } from "node:module";
 import { AssignmentInbox } from "./assignment-inbox.mjs";
+import { pathToFileURL } from "node:url";
+
+// Only first-party source SQL passes this facade; quoted values stay untouched.
+const sourceTables = new Set(["schema_meta", "sqlite_master", "sqlite_schema", "assignment_change_source", "assignment_changes",
+    "waits", "wait_dependencies", "resume_claims", "operations", "coordinator_state", "assignment_outcomes",
+    "subagent_launch_intents", "background_input_versions", "background_parent_callbacks", "assignments"]);
+function sourceSQL(sql) {
+    if (/^PRAGMA\s+data_version\s*$/i.test(sql)) return "PRAGMA coordinator_source.data_version";
+    return sql.replace(/'(?:''|[^'])*'|\b[A-Za-z_][A-Za-z_0-9]*\b/g, token => sourceTables.has(token) ? `coordinator_source.${token}` : token);
+}
 
 /** Read-only, bounded projection input. Never creates/migrates a database. */
 export function readAssignmentWaits(path, owner, connection) {
@@ -43,46 +53,63 @@ export function readAssignmentWaits(path, owner, connection) {
 }
 
 /** A root read model owns this connection; ordinary observers remain one-shot. */
-export function createAssignmentReader(path, inboxPath = ":memory:", derivedConnection) {
+export function createAssignmentReader(path, inboxPath = ":memory:", derivedConnection, options = {}) {
     const inbox = new AssignmentInbox(inboxPath, derivedConnection);
     let db;
     let identity;
     let snapshot = false;
+    const composed = options.composed === true;
+    const owner = derivedConnection;
+    const dropSource = () => {
+        if (composed) { if (db) owner.exec("DETACH DATABASE coordinator_source"); }
+        else db?.close();
+        db = undefined; statements.clear();
+    };
     const statements = new Map();
-    return {
+    const reader = {
         revision() {
             const { statSync } = createRequire(import.meta.url)("node:fs");
             const stat = statSync(path, { bigint: true });
             const next = `${stat.dev}:${stat.ino}`;
             if (identity !== next) {
                 if (snapshot) throw new Error("Coordinator identity changed during observation");
-                db?.close();
-                db = undefined;
-                statements.clear();
+                dropSource();
                 identity = next;
             }
             const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
-            db ??= new DatabaseSync(path, { readOnly: true });
+            if (!db) {
+                if (composed) {
+                    const uri = pathToFileURL(path); uri.searchParams.set("mode", "ro");
+                    owner.prepare("ATTACH DATABASE ? AS coordinator_source").run(uri.href);
+                    db = { prepare: sql => owner.prepare(sourceSQL(sql)), get observationActive() { return snapshot; }, beginSnapshot: () => reader.beginSnapshot() };
+                } else db = new DatabaseSync(path, { readOnly: true });
+            }
             return `${identity}:${db.prepare("PRAGMA data_version").get().data_version}`;
         },
         connection(refresh = true) { if (refresh) this.revision(); return db; },
         changes() { this.revision(); return inbox.receive(db, identity); },
         acknowledgeChanges(batch, complete) { inbox.acknowledge(batch, complete); },
         get changeMetrics() { return inbox.metrics; },
+        get snapshotActive() { return snapshot; },
 
         beginSnapshot() {
             this.revision();
             if (snapshot) throw new Error("Coordinator snapshot already open");
-            db.exec("BEGIN");
+            const transaction = composed ? owner : db;
+            transaction.exec("BEGIN");
             snapshot = true;
             const release = () => {
                 if (!snapshot) return;
-                try { db.exec("ROLLBACK"); } finally { snapshot = false; }
+                try { transaction.exec("ROLLBACK"); } finally { snapshot = false; }
             };
             try {
                 // Pin the WAL read view before recording its revision; other writers keep advancing.
                 db.prepare("SELECT count(*) FROM sqlite_schema").get();
-                return { revision: this.revision(), release };
+                return { revision: this.revision(), release, commit: () => {
+                    if (!snapshot) return;
+                    transaction.exec("COMMIT");
+                    snapshot = false;
+                } };
             } catch (error) { release(); throw error; }
         },
 
@@ -123,7 +150,8 @@ export function createAssignmentReader(path, inboxPath = ":memory:", derivedConn
             return [...obligations, ...reasons];
         },
 
-        close() { if (snapshot) { db.exec("ROLLBACK"); snapshot = false; } db?.close(); db = undefined; statements.clear(); identity = undefined; inbox.close(); },
+        close() { if (snapshot) { (composed ? owner : db).exec("ROLLBACK"); snapshot = false; } dropSource(); identity = undefined; inbox.close(); },
 
     };
+    return reader;
 }
