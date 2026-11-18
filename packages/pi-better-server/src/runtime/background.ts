@@ -29,6 +29,9 @@ export class BackgroundObservation {
   private terminalProjections = new Map<string, { version: string; authority: string; operation: any; inspection: any; row: any; dependencyVersion?: number }>();
   private hasInputVersions = false;
   private inbox: any;
+  private indexDb: any;
+  private initialized = false;
+  get ready() { return this.initialized && !this.closed; }
   private dirtyOperations = new Set<string>();
   private scopeVersions = new Map<string, number>();
   private watchers = new Map<string, FSWatcher>();
@@ -49,11 +52,12 @@ export class BackgroundObservation {
   private legacy = new Map<string, BackgroundScope>();
   private recentRevision?: number;
   private recent: any[] = [];
-  status: "ready" | "degraded" = "ready";
+  status: "ready" | "rebuilding" | "degraded" = "rebuilding";
   reason?: string;
   get connectionCount() { return this.readConnection ? 0 : this.ownDb ? 1 : 0; }
   get scopeCount() { return this.legacy.size; }
   prepareQuery(): void {
+    if (!this.ready) return;
     if (this.observationActive) return;
     if (!this.enabled || !this.db || !this.hasInputVersions) return;
     // Native mutations can commit between the last scheduled observation and
@@ -63,21 +67,24 @@ export class BackgroundObservation {
     if (this.inbox.metrics.more || this.inbox.metrics.pending) this.schedule();
   }
   sourceRevision(scope: WorkScope): string[] {
+    if (!this.ready) return [];
     if (!scope.cwd) return [];
     return [observationRevisionForOrigin({ cwd: scope.cwd, sessionId: scope.sessionId }),
       ...(scope.sessionId ? [observationRevisionForOrigin({ cwd: scope.cwd })] : [])];
   }
   nextDeadline(scope: WorkScope): number | null {
+    if (!this.ready) return null;
     if (!scope.cwd) return null;
     const deadlines = [...recentMetaDeadline({ cwd: scope.cwd, sessionId: scope.sessionId }),
       ...(scope.sessionId ? recentMetaDeadline({ cwd: scope.cwd }) : [])];
     return deadlines.length ? Math.min(...deadlines) : null;
   }
   get registryMetrics() { return getRegistryIoMetrics(); }
-  get changeMetrics() { return { ...this.inbox.metrics, coverage: this.hasInputVersions ? "cooperative-journal-and-exact-files" : "legacy-bounded-repair",
-    operationRepairComplete: this.repairComplete, repairAfter: this.repairAfter, queuedHints: this.dirtyOperations.size,
+  get changeMetrics() { return { ...(this.ready ? this.inbox.metrics : { available: false, received: null, applied: null, pending: null }), coverage: this.hasInputVersions ? "cooperative-journal-and-exact-files" : "legacy-bounded-repair",
+    operationRepairComplete: this.ready && this.repairComplete, repairAfter: this.ready ? this.repairAfter : null, queuedHints: this.dirtyOperations.size,
     fileCoverage: "active-and-retained; historical-files-only-when-history-requested" }; }
   livenessReasons(options: { refresh?: boolean } = {}) {
+    if (!this.ready) throw new Error("Background inbox coverage is unverified");
     if (options.refresh !== false) {
       this.enabled = true;
       this.refresh();
@@ -111,7 +118,7 @@ export class BackgroundObservation {
     repairEntries: 0, exactHints: 0, journalEntities: 0, overflows: 0, activeRows: 0, exactOperationQueries: 0,
     sourceWork: { active: { stats: 0, waits: 0, snapshots: 0 }, repair: { stats: 0, waits: 0, snapshots: 0 }, history: { stats: 0, waits: 0, snapshots: 0 } } };
   private schedule() {
-    if (this.closed || this.scheduled) return;
+    if (!this.ready || this.scheduled) return;
     this.scheduled = true;
     setImmediate(() => { this.scheduled = false; if (!this.closed && this.refresh()) this.changed(); });
   }
@@ -148,23 +155,45 @@ export class BackgroundObservation {
     if (grant.launchToken !== op.launch_token || typeof grant.directory !== "string") throw new Error("Captured runner execution identity differs");
     return grant.directory;
   }
-  constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor"), indexDb?: any, changed = () => {}, readConnection?: (refresh?: boolean) => any) {
+  constructor(root: string, directory = join(tmpdir(), process.env.VITEST_POOL_ID ? `pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}` : "pi-better-background-tasks", "supervisor"), indexDb?: any, changed = () => {}, readConnection?: (refresh?: boolean) => any, options: { defer?: boolean } = {}) {
     this.readConnection = readConnection;
     this.changed = changed;
     this.root = root; this.directory = directory;
+    this.indexDb = indexDb;
     mkdirSync(join(root, "runtime-read-repair"), { recursive: true });
-    this.inbox = indexDb
-      ? new AssignmentInbox(join(root, "runtime-read-repair", "background.sqlite"), indexDb, { entityPrefix: "background:" })
-      : new AssignmentInbox(join(root, "runtime-read-repair", "background.sqlite"), { entityPrefix: "background:" });
-    this.inbox.db.exec(`CREATE TABLE IF NOT EXISTS ${this.inbox.prefix}background_file_repair(singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT, after_id TEXT, complete INTEGER)`);
-    const repair = this.inbox.db.prepare(`SELECT * FROM ${this.inbox.prefix}background_file_repair WHERE singleton=1`).get();
-    if (repair) { this.identity = repair.identity || undefined; this.knownCoordinator = Boolean(this.identity); this.repairAfter = repair.after_id; this.repairComplete = Boolean(repair.complete); }
+    // Create the owner's in-memory history tables once, never per acquisition attempt.
     if (indexDb) this.history = new BackgroundHistory(indexDb, directory, () => {
+      if (!this.ready) throw new Error("Background inbox coverage is unverified");
       if (this.status === "degraded") throw new Error(this.reason);
       return this.db;
     }, operations => this.project(operations, false), changed, op => this.directoryFor(op));
+    if (!options.defer) this.initialize();
+  }
+  initialize(): void {
+    if (this.closed) throw new Error("Background observation is closed");
+    if (this.ready) return;
+    if (this.indexDb?.isTransaction) throw new Error("Background initialization requires an unpinned owner");
+    if (this.inbox) throw new Error("Background inbox cleanup is incomplete");
+    const inbox = this.indexDb
+      ? new AssignmentInbox(join(this.root, "runtime-read-repair", "background.sqlite"), this.indexDb, { entityPrefix: "background:" })
+      : new AssignmentInbox(join(this.root, "runtime-read-repair", "background.sqlite"), { entityPrefix: "background:" });
+    try {
+      inbox.db.exec(`CREATE TABLE IF NOT EXISTS ${inbox.prefix}background_file_repair(singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT, after_id TEXT, complete INTEGER)`);
+      const repair = inbox.db.prepare(`SELECT * FROM ${inbox.prefix}background_file_repair WHERE singleton=1`).get();
+      if (repair) { this.identity = repair.identity || undefined; this.knownCoordinator = Boolean(this.identity); this.repairAfter = repair.after_id; this.repairComplete = Boolean(repair.complete); }
+      this.inbox = inbox;
+      this.initialized = true;
+    } catch (error) {
+      try { inbox.close(); }
+      catch (cleanup) {
+        this.inbox = inbox;
+        throw new AggregateError([error, cleanup], "Background initialization and owned cleanup failed");
+      }
+      throw error;
+    }
   }
   refresh(): boolean {
+    if (!this.ready) return false;
     if (this.observationActive) return false;
     if (!this.enabled) return false;
     let observation: { commit(): void; release(): void } | undefined;
@@ -404,10 +433,10 @@ export class BackgroundObservation {
         this.legacy.delete(oldest[0]);
       }
       const origin = { cwd: scope.cwd, sessionId: scope.sessionId };
-      entry = { origin, rows: this.visibleLegacy(origin), references: 0, pending: [], recent: [] };
-      if (this.status !== "degraded" && this.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_parent_callbacks'").get())
+      entry = { origin, rows: this.ready ? this.visibleLegacy(origin) : [], references: 0, pending: [], recent: [] };
+      if (this.ready && this.status !== "degraded" && this.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_parent_callbacks'").get())
         this.refreshPending(entry, Number(this.db.prepare("SELECT value FROM coordinator_state WHERE key='change_revision'").get()?.value ?? 0));
-      if (this.status !== "degraded" && this.db) this.refreshRecent(entry, Number(this.db.prepare("SELECT value FROM coordinator_state WHERE key='change_revision'").get()?.value ?? 0));
+      if (this.ready && this.status !== "degraded" && this.db) this.refreshRecent(entry, Number(this.db.prepare("SELECT value FROM coordinator_state WHERE key='change_revision'").get()?.value ?? 0));
     }
     this.legacy.delete(key); this.legacy.set(key, entry);
     return entry;
@@ -418,12 +447,14 @@ export class BackgroundObservation {
       .map((row: any) => [row.id, row])).values()];
   }
   retain(scope: { cwd?: string; sessionId?: string }) {
+    if (!this.ready) this.enabled = true;
     const entry = this.legacyScope(scope);
     entry.references++;
     let released = false;
     return () => { if (!released) { released = true; entry.references--; } };
   }
   read(scope: WorkScope, index?: any): any[] {
+    if (!this.ready) { this.enabled = true; return []; }
     const newlyGlobal = scope.backgroundAll && !this.allRequested;
     if (scope.backgroundAll) this.allRequested = true;
     if (!this.enabled || newlyGlobal) { this.enabled = true; this.refresh(); }
@@ -443,14 +474,15 @@ export class BackgroundObservation {
     this.closed = true;
     if (this.expiry) clearTimeout(this.expiry);
     for (const watcher of this.watchers.values()) watcher.close();
-    this.watchers.clear(); this.inbox.close();
-    if (this.history) return this.history.close().then(() => { this.ownDb?.close(); });
-    this.ownDb?.close(); return Promise.resolve();
+    this.watchers.clear(); this.inbox?.close(); this.inbox = undefined;
+    if (this.history) return this.history.close().then(() => { this.ownDb?.close(); this.ownDb = undefined; });
+    this.ownDb?.close(); this.ownDb = undefined; return Promise.resolve();
   }
   get historyStatus() { return this.history?.queryStatus ?? "degraded"; }
   get historyReason() { return this.history?.reason; }
   get historyMetrics() { return this.history?.metrics; }
   historyIndex(scope: WorkScope) {
+    if (!this.ready) throw new Error("Background inbox coverage is unverified");
     this.read({ ...scope, backgroundHistory: false });
     if (!this.history) throw new Error("Background history requires the shared root index");
     return this.history.read(scope);

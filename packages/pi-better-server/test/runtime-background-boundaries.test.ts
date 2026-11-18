@@ -151,7 +151,10 @@ test("Background history applies bounded pages, status filters and stable cursor
     assert.equal(active.activity.active, 1);
     assert.notEqual(active.scopeRevision, first.scopeRevision, "independent activity participates in a filtered history revision");
     const metrics = JSON.parse((await client.handle({ type: "runtime_get_metrics" })).json);
-    assert.equal(metrics.sqlite.active, 2, "history shares one derived index and one coordinator reader");
+    assert.equal(metrics.sqlite.active, 1, "history composes its coordinator reader on the sole derived handle");
+    assert.equal(metrics.sqlite.maximum, 1);
+    assert.equal(metrics.coordinatorConnections, 1);
+    assert.equal(metrics.indexConnections, 1);
     assert.equal(metrics.executor.restarts, 0, "indexed history does not restart the read worker");
   } finally {
     client?.close(); await executor?.close(); writer.close(); rmSync(root, { recursive: true, force: true });

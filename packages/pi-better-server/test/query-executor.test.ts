@@ -1108,8 +1108,9 @@ test('Subagents and Background share one coordinator read connection in the quer
     assert.equal((f.executor.metrics().sqlite as any).opens, 1, 'all source/inbox/checkpoint attachments reuse the derived handle without another constructor open');
     assert.equal((f.executor.metrics().sqlite as any).maximum, 1, 'Background attachment cannot temporarily add a physical source handle');
     assert.equal((f.executor.metrics().sqlite as any).active, 1, 'one query owner retains source, inbox and checkpoints, regardless of domain');
+    assert.equal(f.executor.metrics().indexConnections, 1);
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
-    t.diagnostic(JSON.stringify({ retainedBudget: 2, sqlite: f.executor.metrics().sqlite }));
+    t.diagnostic(JSON.stringify({ workerRetainedBudget: 1, sqlite: f.executor.metrics().sqlite }));
   } finally { await f.close(); }
 });
 
@@ -1150,6 +1151,9 @@ test("assignment wait, resume claim, cancellation, outcome and receipt cross the
     await observed(s => s.rows[0]?.recipientPending === false);
     const sqlite = f.executor.metrics().sqlite as any;
     assert.equal(sqlite.active, 1, "the full receipt journey retains its source on the shared derived handle");
+    assert.equal(sqlite.maximum, 1);
+    assert.equal(f.executor.metrics().coordinatorConnections, 1);
+    assert.equal(f.executor.metrics().indexConnections, 1);
     assert.ok(sqlite.maximum <= 2, "inbox transactions do not open an extra SQLite handle");
     t.diagnostic(JSON.stringify({ retainedBudget: 2, sqlite }));
     assert.equal(store.getWait(wait).phase, "cancelled");

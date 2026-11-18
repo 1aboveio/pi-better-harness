@@ -259,6 +259,19 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
   finally { await seed.close(); }
   const writer = new DatabaseSync(join(agent, "runtime-read-repair", "assignments.sqlite"));
   writer.exec("BEGIN EXCLUSIVE");
+  // Source writer and lock holder already exist; count all worker acquisitions.
+  const sqlite = createRequire(import.meta.url)("node:sqlite"), Original = sqlite.DatabaseSync;
+  const live = new Set<any>();
+  let maximum = 0;
+  sqlite.DatabaseSync = class extends Original {
+    constructor(...args: any[]) { super(...args); live.add(this); maximum = Math.max(maximum, live.size); }
+    prepare(sql: string) {
+      if (/^ATTACH\b/i.test(sql)) assert.equal(this.isTransaction, false);
+      return super.prepare(sql);
+    }
+    close() { super.close(); live.delete(this); }
+  };
+  t.after(() => { sqlite.DatabaseSync = Original; });
   t.mock.timers.enable({ apis: ["setInterval"] });
   let model: WorkReadModel | undefined;
   try {
@@ -269,7 +282,7 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
     await Promise.all(Array.from({ length: 32 }, () => current.reconcile(true)));
     assert.equal(current.metrics.initialization.attempts, 1);
     assert.equal(current.metrics.checkpoints.acquisitionAttempts, 1, "checkpoint attachment succeeded independently");
-    assert.deepEqual(names(db), ["main", "background_inbox", "log_checkpoints"], "failed assignment inbox ATTACH releases its own alias without detaching Background");
+    assert.deepEqual(names(db), ["main", "log_checkpoints"], "failed assignment ATTACH retains checkpoints without acquiring Background prematurely");
     const frames: any[] = [];
     const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0,
       write(line: string) { frames.push(JSON.parse(line)); }, destroy() {} });
@@ -288,6 +301,8 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
         assert.throws(() => current.upgradeObligations(), /rebuilding/);
         assert.equal(current.metrics.assignments.applied, null, "unavailable cursor is unknown, not verified zero");
         assert.equal(current.metrics.inventories, 0);
+        assert.equal(live.size, 1, "deferral retains one worker handle, plus the existing root mutation owner");
+        assert.equal(db.isTransaction, false);
         queries.handle({ type: "runtime_unsubscribe" });
         queries.handle({ type: "runtime_subscribe", scope: {} });
         t.mock.timers.tick(1000); await current.reconcile(false);
@@ -305,6 +320,9 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
       assert.equal(current.metrics.initialization.attempts, 5);
       assert.equal(current.snapshot({ id }).rows[0]!.recipientPending, false);
       assert.equal(current.metrics.assignments.pending, 0);
+      assert.equal(live.size, 1, "recovery cannot open a separate canonical source handle");
+      assert.equal(current.metrics.indexConnections, 1);
+      assert.equal(current.metrics.coordinatorConnections, 1);
       assert.ok(current.metrics.assignments.applied > oldApplied!);
       assert.ok(frames.some(frame => frame.event?.snapshot?.status === "ready"));
     } finally { queries.close(); }
@@ -312,6 +330,8 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
     if (writer.isTransaction) writer.exec("ROLLBACK");
     await model?.close(); writer.close(); source.close(); rmSync(root, { recursive: true, force: true });
   }
+  assert.equal(maximum, 1);
+  assert.equal(live.size, 0);
 });
 
 test("inbox schema contention releases only its newly acquired alias before same-owner replay", () => {

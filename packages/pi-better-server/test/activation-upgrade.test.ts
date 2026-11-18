@@ -506,8 +506,13 @@ test("committed activation survives observer cancellation and waits for shutdown
   try { await waitFor("old owner shutdown hook", gate(env, "shutdown").started); }
   catch (error) {
     const journal = readActivationJournal(env.serverDir);
+    let upgradeBlockers: unknown;
+    try {
+      const status = await client.call({ type: "runtime_upgrade_status" });
+      upgradeBlockers = JSON.stringify(status.data?.blockers?.slice(0, 8) ?? null).slice(0, 4096);
+    } catch (capture) { upgradeBlockers = { captureError: String(capture).slice(0, 512) }; }
     throw new Error(`${String(error)}; ${JSON.stringify({ enteredShutdown: existsSync(join(env.gateDir, "shutdown.entered")),
-      owner: inspectDaemonOwner(env.serverDir), phase: journal?.phase, reason: journal?.reason, activationOutcome })}`);
+      owner: inspectDaemonOwner(env.serverDir), phase: journal?.phase, reason: journal?.reason, activationOutcome, upgradeBlockers })}`);
   }
   const old = inspectDaemonOwner(env.serverDir);
   assert.equal(old.status, "live");
