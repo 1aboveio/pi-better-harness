@@ -111,6 +111,7 @@ export class WorkReadModel {
   private assignmentBaseline?: { key: string; seq: string };
   private assignmentFault?: { state: WorkSnapshot["status"]; reason?: string };
   private unsupportedAssignmentRevision?: string;
+  private coordinatorConversations?: Map<string, string>;
   private revision = 0;
   private scopeSequence = 0;
   private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number; status: string }>();
@@ -524,6 +525,33 @@ export class WorkReadModel {
     return { status: this.state, reason: this.reason };
   }
 
+  private rejectUnsupportedAssignmentRevision(): boolean {
+    let release: (() => void) | undefined;
+    try {
+      if (this.unsupportedAssignmentRevision) {
+        if (this.unsupportedAssignmentRevision === this.reader.revision()) return true;
+        this.unsupportedAssignmentRevision = undefined;
+      }
+      const connection = this.reader.connection(false);
+      const supported = (version: unknown) => version === undefined || (typeof version === "string" && ["1", "2", "3", "4"].includes(version));
+      if (!connection || supported(connection.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value)) return false;
+      const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
+      const version = this.reader.connection(false).prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value;
+      if (!supported(version)) {
+        this.unsupportedAssignmentRevision = snapshot.revision;
+        const reason = "Unsupported assignment source schema";
+        const changed = this.state !== "degraded" || this.reason !== reason;
+        this.state = "degraded"; this.reason = reason;
+        if (changed) this.publish();
+        return true;
+      }
+    } catch {
+      // Missing/initializing sources still follow the ordinary verification path.
+      this.unsupportedAssignmentRevision = undefined;
+    } finally { release?.(); }
+    return false;
+  }
+
   reconcile(drain = true): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.pending) {
@@ -531,15 +559,16 @@ export class WorkReadModel {
     }
     this.pending = (async () => {
       await this.watchRegistrations();
-      if (drain && this.repair && !this.unsupportedAssignmentRevision) { await this.repair.return(undefined); this.repair = undefined; }
+      let resetRepair = drain;
       do {
         this.dirty = false;
         // Background progress is independent of whether Subagent repair finds files.
         if (this.background.refresh()) this.publish(true);
         this.refreshAssignments();
-        // Metadata repair cannot verify an incompatible coordinator. Keep its
-        // obligations and last verified rows until a different source revision.
-        if (this.unsupportedAssignmentRevision) break;
+        // Metadata repair cannot verify this exact incompatible source revision.
+        if (this.rejectUnsupportedAssignmentRevision()) break;
+        if (resetRepair && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
+        resetRepair = false;
         if (this.hints.size) {
           const entries = workPage(this.hints);
           for (const [path, queued] of entries) { this.hints.delete(path); this.scheduling.maxQueueAgeMs = Math.max(this.scheduling.maxQueueAgeMs, Date.now() - queued); }
