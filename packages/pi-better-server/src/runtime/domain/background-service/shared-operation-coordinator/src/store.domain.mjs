@@ -19,6 +19,7 @@ import { repairFailedResume } from "./recovery.domain.mjs";
 import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.domain.mjs";
 import { describeOwnerDiff, normalizeOwner, requireCounter, requireId, requirePath, } from "./validate.domain.mjs";
 import { ensureSchema } from "./schema.domain.mjs";
+import { ensureAssignmentChanges } from "./assignment-changes.domain.mjs";
 import { createContext, openDatabase } from "./sqlite.domain.mjs";
 import { getOperation as readOperationRecord, listOperations as readOperationRecords, listRunningSupervisedBy as readRunningSupervisedBy, releaseSupervision as writeSupervisionRelease, recordSupervision as writeSupervision, recordTerminalOutcome as writeTerminalOutcome, registerOperation as writeOperation, } from "./operations.domain.mjs";
 import { getChangeRevision as readChangeRevision, readDiscoveryClaim as readClaim, readDiscoveryState, releaseDiscoveryClaim as deleteDiscoveryClaim, tryClaimDiscovery as writeDiscoveryClaim, } from "./discovery.domain.mjs";
@@ -32,6 +33,7 @@ export function openStore(options) {
     const ctx = createContext(db, options.now ? { now: options.now } : {});
     try {
         ensureSchema(ctx);
+        ensureAssignmentChanges(ctx);
     }
     catch (error) {
         try {

@@ -49,6 +49,7 @@
 import { describe, it, after, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { continuationFixture } from "./managed-continuation-fixture.mjs";
+import { registerFixtureRun, retireFixtureRun } from "./fixture-run-ownership.mjs";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { register } from "node:module";
@@ -106,6 +107,7 @@ process.env.PATH = `${binDir}:${originalPath}`;
 
 // ---- harness ---------------------------------------------------------------
 const liveRuns = []; // { id, pid } — children to reap and dirs to remove
+const ownedExits = new Map();
 const dirOnly = []; // ids with no child (metadata-only fixtures)
 
 async function makeHarness(options = {}) {
@@ -131,7 +133,20 @@ async function makeHarness(options = {}) {
         model: undefined,
         sessionManager: { getSessionId: () => sessionId },
     };
-    betterSubagents(pi, managedDomainPort());
+    const port = managedDomainPort();
+    const spawned = port.spawned;
+    port.spawned = (id, pid) => {
+        spawned(id, pid);
+        ownedExits.set(id, { pid, start: processStartToken(pid), pi });
+    };
+    port.observeExit = (id, completion) => {
+        const owned = ownedExits.get(id);
+        assert.ok(owned, "exit acknowledgement belongs to a child this fixture spawned");
+        owned.completion = completion;
+        // Retain the rejected acknowledgement for reapRun, not an unhandled rejection.
+        void completion.catch(() => {});
+    };
+    betterSubagents(pi, port);
     await Promise.all(recipients.map(recipient => recipient.close()));
     let recipient = await sdkRecipient({ cwd, sessionId, sent, notes, sendMessage: options.sendMessage, batchWindowMs: 5000 });
     recipients.push(recipient);
@@ -150,7 +165,7 @@ async function makeHarness(options = {}) {
     return { pi, tools, handlers, sent, notes, ctx, shutdown, get recipient() { return recipient; } };
 }
 
-async function spawnRun({ tools, ctx }, overrides = {}) {
+async function spawnRun({ tools, ctx, runTeardownOwner }, overrides = {}) {
     const res = await tools.get("subagent_spawn").execute(
         "tc", { prompt: "lifecycle test task", clean: true, sandbox: false, cwd: tmpdir(), ...overrides },
         undefined, undefined, ctx,
@@ -158,7 +173,7 @@ async function spawnRun({ tools, ctx }, overrides = {}) {
     const out = res.content[0].text;
     const id = out.match(/id=(\S+)/)[1];
     const pid = Number(out.match(/\(pid (\d+)\)/)[1]);
-    liveRuns.push({ id, pid });
+    registerFixtureRun({ id, pid }, ownedExits, liveRuns, runTeardownOwner);
     return { id, pid, out };
 }
 
@@ -191,21 +206,39 @@ async function waitFor(fn, { timeoutMs = 5000, intervalMs = 20 } = {}) {
 }
 
 /**
- * Reap a spawned run inside the test that created it: kill the child, wait
- * for the close handler to write a terminal status, and remove the run dir.
+ * Reap only this fixture's child, then await its full close/finalizer and
+ * callback acknowledgements before removing the owned run directory.
  * A still-running meta would keep `needsMonitoring` true for LATER tests in
  * this process (they share the module-level health ticker), so per-test
  * reaping is required for isolation — the file-level after() is only a
  * backstop for failures.
  */
 async function reapRun({ id, pid }) {
-    if (!readMeta(id)) return;
-    killProcessTree(pid, "SIGKILL");
-    await waitFor(() => {
-        const m = readMeta(id);
-        return m && m.status !== "running" && m.status !== "orphaned" ? m : undefined;
-    }, { timeoutMs: 2000 });
+    const owned = ownedExits.get(id);
+    if (!owned && !readMeta(id)) return;
+    assert.ok(owned?.completion && owned.pid === pid, "removal requires this fixture's exact child exit acknowledgement");
+    const batcher = getCallbackBatcher(owned.pi);
+    batcher.cancel();
+    if (realProcessProbe.pidExists(pid)) {
+        assert.ok(owned.start && processStartToken(pid) === owned.start && realProcessProbe.groupId(pid) === pid,
+            "never signal an unverified or recycled child owner");
+        killProcessTree(pid, "SIGKILL");
+    }
+    let timeout;
+    try {
+        const quiescence = (async () => {
+            await owned.completion;
+            batcher.cancel();
+            await batcher.settled();
+            batcher.cancel();
+            assert.equal(realProcessProbe.groupAlive(pid), false, "child process group must be quiescent before removal");
+        })();
+        await Promise.race([quiescence, new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error(`Owned finalizer did not settle for ${id}`)), 2000);
+        })]);
+    } finally { clearTimeout(timeout); }
     rmSync(runDir(id), { recursive: true, force: true });
+    retireFixtureRun({ id, pid }, owned, ownedExits, liveRuns);
 }
 
 /**
@@ -234,10 +267,7 @@ afterEach(async () => {
 after(async () => {
     await Promise.all(recipients.map(recipient => recipient.close()));
     process.env.PATH = originalPath;
-    for (const { id, pid } of liveRuns) {
-        killProcessTree(pid, "SIGKILL");
-        rmSync(runDir(id), { recursive: true, force: true });
-    }
+    for (const run of liveRuns) await reapRun(run);
     for (const id of dirOnly) rmSync(runDir(id), { recursive: true, force: true });
     rmSync(binDir, { recursive: true, force: true });
 });
@@ -612,6 +642,7 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
         process.env.PI_CONTINUATION_SLEEP_MS = "30000";
         const fixture = await continuationFixture({ root, artifacts, workspace: root });
         const h = fixture.makeHarness(); await h.ready;
+        let workerStopped = false;
         try {
             const { id, pid } = await spawnRun(h, { cwd: root });
             const meta = readMeta(id);
@@ -631,9 +662,18 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
             await h.shutdown();
             assert.equal(realProcessProbe.pidExists(pid), true, "foreground exit retains the captured worker");
             assert.equal((await fixture.healthOwner()).subagentHealthActive, true, "daemon retains health ownership after foreground exit");
-            await reapRun({ id, pid });
+            // This child belongs to the separate canonical fixture, not the
+            // local exit observer. Stop its verified group; fixture.close below
+            // acknowledges owner/recipient process exit before any root removal.
+            assert.ok(token && processStartToken(pid) === token && pgid === pid,
+                "remote fixture cleanup must verify the original live child identity");
+            killProcessTree(pid, "SIGKILL");
+            assert.ok(await waitFor(() => !realProcessProbe.groupAlive(pid), { timeoutMs: 2000 }),
+                "remote fixture child group must be quiescent before owner shutdown and removal");
+            workerStopped = true;
         } finally {
-            await h.shutdown(); await fixture.close(); rmSync(root, { recursive: true, force: true });
+            await h.shutdown(); await fixture.close();
+            if (workerStopped) rmSync(root, { recursive: true, force: true });
             for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
         }
     });
@@ -2040,9 +2080,10 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
 
     it("failed callback handoff is not permanently suppressed; reload delivers one later success", async () => {
         await withFakeClock(async () => {
-            let failNext = true;
+            let unavailable = true;
+            let rejectedHandoffs = 0;
             const h = await makeHarness({ sendMessage(message, options, sent) {
-                if (failNext) { failNext = false; throw new Error("simulated host delivery failure"); }
+                if (unavailable) { rejectedHandoffs++; throw new Error("simulated host delivery failure"); }
                 sent.push({ message, options });
             } });
             const { tools, handlers, sent, notes, pi, ctx } = h;
@@ -2072,7 +2113,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 await handlers.get("session_start")({}, ctx);
                 mock.timers.tick(HEALTH_TICK_MS);
 
-                if (!await waitFor(() => !failNext)) throw new Error(`first handoff was never attempted: ${JSON.stringify({ runtime: stopWorkRuntime.diagnostics(), recipient: await h.recipient.diagnostics(id) })}`);
+                if (!await waitFor(() => rejectedHandoffs > 0)) throw new Error(`first handoff was never attempted: ${JSON.stringify({ runtime: stopWorkRuntime.diagnostics(), recipient: await h.recipient.diagnostics(id) })}`);
                 assert.equal(healthMsgsFor(sent, id).length, 0, "failed handoff must not count as delivered");
                 assert.equal(
                     readMeta(id).lostCallbackSentAt,
@@ -2082,6 +2123,7 @@ describe("#65 — orphaned/lost health callbacks via health ticker", () => {
                 assert.equal(isHealthTickerActive(), false, "recipient delivery does not keep runtime supervision alive");
 
                 // Simulate /reload after the host recovered: next handoff succeeds once.
+                unavailable = false;
                 await handlers.get("session_start")({}, ctx);
                 mock.timers.tick(HEALTH_TICK_MS);
 

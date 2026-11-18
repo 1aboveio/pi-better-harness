@@ -66,6 +66,52 @@ test("late compact archives cannot replace live recipient markers or reset its c
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
+for (const successor of ["parent", "another-session"]) test(`late archive preserves saved-conversation recipient obligations for ${successor}`, async () => {
+  const f = fixture(), durable = join(f.root, "durable");
+  const saved = process.env.PI_SUBAGENT_DURABLE_DIR;
+  process.env.PI_SUBAGENT_DURABLE_DIR = durable;
+  const { archiveCompletedAttempt } = await import(new URL("../../pi-better-subagents/session-store.ts", import.meta.url).href);
+  const store = openStore({ path: join(f.agent, "operation-coordinator.sqlite") });
+  const model = new WorkReadModel(f.agent, "continued-recipient", { baseDir: f.base, durableDir: durable, intervalMs: 60000 });
+  const owner = { kind: "worker-conversation" as const, sessionId: "sa_original", workspace: f.root };
+  const pending = (sessionId: string) => model.snapshot({ cwd: f.root, sessionId, pendingRecipient: true });
+  try {
+    let originalRevision: string | undefined;
+    for (const [id, sessionId] of [["sa_original", "parent"], ["sa_continued", successor]]) {
+      const recipient = { kind: "parent-session" as const, sessionId, workspace: f.root };
+      const assignment = { version: 1, assignmentId: id, owner, recipient };
+      store.registerAssignment(assignment);
+      store.recordAssignmentOutcome({ ...assignment, revision: 1, outcome: "succeeded", reason: "Completed", evidence: [], waits: [], processUncertain: false });
+      const meta = f.put(id!, { sessionId: owner.sessionId, status: "completed", endedAt: 2, callback: true,
+        completionCallbackPendingAt: 1, callbackOrigin: { cwd: f.root, sessionId }, assignment,
+        ...(id === "sa_continued" ? { resumedFrom: "sa_original", rootRunId: "sa_original" } : {}),
+        recipe: { version: 1, sessionId: owner.sessionId, sessionDir: join(durable, "sessions"), cwd: f.root } });
+      model.fileHint(join(f.runs, id!), "meta.json"); await model.reconcile(); await settleHints(model);
+      assert.deepEqual(pending(sessionId!).rows.map(row => row.meta.id), [id]);
+      assert.equal(archiveCompletedAttempt(meta as never), true);
+      model.fileHint(model.archives, `${id}.json`); await settleHints(model);
+      const row = pending(sessionId!).rows[0];
+      assert.ok(row, "the actual compact writer must not remove the live recipient obligation");
+      assert.equal(row.meta.id, id);
+      assert.equal(row.meta.completionCallbackPendingAt, 1);
+      assert.equal(row.meta.callbackOrigin.sessionId, sessionId);
+      assert.equal(row.assignment.verified, true);
+      if (successor !== "parent") assert.equal(pending(sessionId === "parent" ? successor : "parent").rows.length, 0);
+      store.receiptAssignmentOutcome({ assignmentId: id, recipient, revision: 1, entryId: `receipt-${id}` });
+      f.put(id!, { ...meta, completionCallbackSentAt: 3 });
+      model.fileHint(join(f.runs, id!), "meta.json"); await model.reconcile(); await settleHints(model);
+      assert.equal(pending(sessionId!).rows.length, 0, "the durable receipt settles only its exact recipient obligation");
+      assert.equal(model.snapshot({ id }).rows[0]!.meta.completionCallbackSentAt, 3);
+      if (id === "sa_original") originalRevision = model.snapshot({ id }).rows[0]!.sourceRevision;
+      else assert.equal(model.snapshot({ id: "sa_original" }).rows[0]!.sourceRevision, originalRevision, "continuation leaves the prior attempt observation unchanged");
+    }
+  } finally {
+    await model.close(); store.close();
+    if (saved === undefined) delete process.env.PI_SUBAGENT_DURABLE_DIR; else process.env.PI_SUBAGENT_DURABLE_DIR = saved;
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test("directory self-name callbacks verify their owned source instead of a fictitious child", async () => {
   const f = fixture();
   const id = "sa_self_name";

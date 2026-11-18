@@ -45,6 +45,7 @@ import { spawnDetached, killProcessTree, type SpawnResult } from "./spawn.ts";
 import { abortUncommittedLaunch } from "./launch-abort.ts";
 import { parseRun, parseRunForLifecycle, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
+import { completeOwnedExit } from "./owned-exit.ts";
 import { selectSessionByName } from "./session-selection.ts";
 import { isWithinWorkspace } from "./workspace-scope.ts";
 import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
@@ -767,16 +768,12 @@ function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, no
 
 function markHealthCallbackSuppressed(meta: RunMeta, status: "orphaned" | "lost", reason: string, now: number): void {
     if (isConversationIdentityReason(reason)) return;
-    if (status === "orphaned") {
-        if (meta.orphanedCallbackSuppressedAt !== undefined) return;
-        meta.orphanedCallbackSuppressedAt = now;
-        meta.orphanedCallbackSuppressedReason = reason;
-    } else {
-        if (meta.lostCallbackSuppressedAt !== undefined) return;
-        meta.lostCallbackSuppressedAt = now;
-        meta.lostCallbackSuppressedReason = reason;
-    }
-    writeMeta(meta);
+    writeMeta(meta, { patch: current => {
+        if (isHealthCallbackHandled(current, status)) return;
+        return status === "orphaned"
+            ? { orphanedCallbackSuppressedAt: now, orphanedCallbackSuppressedReason: reason }
+            : { lostCallbackSuppressedAt: now, lostCallbackSuppressedReason: reason };
+    } });
 }
 
 function isHealthCallbackHandled(meta: RunMeta, status: "orphaned" | "lost"): boolean {
@@ -958,9 +955,10 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
         try { uiCtx.ui.notify(notice, "warning"); }
         catch { return; }
         // The marker acknowledges quiet delivery, never a model turn.
-        if (status === "orphaned") meta.orphanedCallbackSentAt = now;
-        else meta.lostCallbackSentAt = now;
-        writeMeta(meta);
+        writeMeta(meta, { patch: current => {
+            if (current.status !== status || isHealthCallbackHandled(current, status) || callbackSuppressionReason(current)) return;
+            return status === "orphaned" ? { orphanedCallbackSentAt: now } : { lostCallbackSentAt: now };
+        } });
         return;
     }
     void getCallbackBatcher(pi).deliverUrgent({
@@ -982,9 +980,10 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
                 markFailureAttentionDelivered(failurePath(meta.id), attention, at);
                 if (attention.incidents.some((incident) => pendingFailureAttention(collectRunFailures(meta.id, meta.cwd), at, { terminal: true })?.incidents.includes(incident))) return;
             }
-            if (status === "orphaned") current.orphanedCallbackSentAt = at;
-            else current.lostCallbackSentAt = at;
-            writeMeta(current);
+            writeMeta(current, { patch: current => {
+                if (isHealthCallbackHandled(current, status)) return;
+                return status === "orphaned" ? { orphanedCallbackSentAt: at } : { lostCallbackSentAt: at };
+            } });
         },
         onSuppressed: (reason, at) => {
             const current = readMeta(meta.id);
@@ -3438,9 +3437,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             // Register exit supervision before any fallible post-spawn publication.
             // A failed metadata write must not strand a running child without a close
             // handler; the lease stays held until that child has actually exited.
-            void spawned.exit.then(async (code) => {
-                try { finalizeRun(pi, ctx, id, code); }
-                finally { lease?.release(); }
+            const exitCompletion = completeOwnedExit(spawned.exit,
+                code => finalizeRun(pi, ctx, id, code),
+                () => { lease?.release(); }, async () => {
                 if (workerBridge) workerOperations.release(id, "attempt-exited");
                 // Reconcile this attempt's earlier published writer before its
                 // next park can admit another continuation of the conversation.
@@ -3457,6 +3456,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 });
                 await settleParkedExit(id);
             });
+            managed?.observeExit?.(id, exitCompletion);
             writeMeta(meta);
             committed = true;
             // `meta.json` is now the record of this run; the claim has served its
