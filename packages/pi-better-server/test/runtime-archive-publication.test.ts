@@ -28,25 +28,30 @@ test("a redundant terminal publication during verification preserves the first v
   // Notifications are not the proof: force the actual writer between inventory
   // and the unchanged source-signature guard, without a scheduling sleep.
   (model as any).watchers.forEach((watcher: any) => watcher.close());
-  const reader = (model as any).reader;
-  const changes = reader.changes.bind(reader);
   let calls = 0;
   let sourceStats = (model as any).sourceStats;
   let publication = meta;
-  reader.changes = () => {
-    // Assignment-only refresh also reads the journal, but precedes inventory.
-    // Publish only after this scan has actually observed the archive signature.
-    if (calls === 0 && (model as any).sourceStats > sourceStats) {
-      calls++;
-      archiveCompletedAttempt(publication as never);
-    }
-    return changes();
-  };
   const socket = new Socket();
   const queries = new WorkQueries(model, socket);
   const observations: WorkSnapshot[] = [];
   const off = model.onChange(() => observations.push(queries.handle({ type: "runtime_get_scope", scope: { id: meta.id } }) as WorkSnapshot));
   try {
+    // Reconciliation acquires the reader before scanning. Hook that boundary,
+    // not construction, so the first verified publication is still exercised.
+    const scan = (model as any).scan.bind(model);
+    (model as any).scan = async (paths: string[]) => {
+      const reader = (model as any).reader;
+      const changes = reader.changes.bind(reader);
+      reader.changes = () => {
+        if (calls === 0 && (model as any).sourceStats > sourceStats) {
+          calls++;
+          archiveCompletedAttempt(publication as never);
+        }
+        return changes();
+      };
+      try { return await scan(paths); }
+      finally { reader.changes = changes; }
+    };
     await model.reconcile();
     assert.equal(calls, 1, "the real publication must run within source verification");
     assert.ok(observations.length > 0);
