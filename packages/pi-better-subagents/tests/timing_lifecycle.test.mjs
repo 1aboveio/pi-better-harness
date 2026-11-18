@@ -29,7 +29,9 @@ const stopRuntime = await startWorkRuntimeFixture();
 const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: betterSubagents, progressCacheIdsForTests, isHealthTickerActive, forgetProgressCacheForTests } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
-const { readMeta, writeMeta, runDir } = await import("../registry.ts");
+const { readMeta, writeMeta, runDir, processStartToken } = await import("../registry.ts");
+const { realProcessProbe } = await import("../health.ts");
+const { registerFixtureRun, retireFixtureRun, settleFixtureRun } = await import("./fixture-run-ownership.mjs");
 const { timingWakeReceipt } = await import("../timing-notifications.ts");
 const { killProcessTree } = await import("../spawn.ts");
 
@@ -48,6 +50,7 @@ const originalPath = process.env.PATH ?? "";
 process.env.PATH = `${binDir}:${originalPath}`;
 
 const liveRuns = [];
+const ownedExits = new Map();
 const recipients = [];
 const { sdkRecipient } = await import("./sdk-recipient-fixture.mjs");
 
@@ -71,7 +74,19 @@ async function makeHarness(options = {}) {
         model: undefined,
         sessionManager: { getSessionId: () => options.sessionId ?? "timing-session" },
     };
-    betterSubagents(pi, managedDomainPort());
+    const port = managedDomainPort();
+    const spawned = port.spawned;
+    port.spawned = (id, pid) => {
+        spawned(id, pid);
+        ownedExits.set(id, { pid, start: processStartToken(pid), pi });
+    };
+    port.observeExit = (id, completion) => {
+        const owned = ownedExits.get(id);
+        assert.ok(owned, "timing fixture must own the child exit observer");
+        owned.completion = completion;
+        void completion.catch(() => {});
+    };
+    betterSubagents(pi, port);
     if (!options.manager) await Promise.all(recipients.filter(item => item.sessionId === ctx.sessionManager.getSessionId()).map(item => item.recipient.close()));
     const recipient = options.manager ? undefined : await sdkRecipient({ cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), sent, notes });
     if (recipient) { recipients.push({ recipient, sessionId: ctx.sessionManager.getSessionId(), failSend: options.failSend }); await recipient.failure(Boolean(options.failSend?.())); }
@@ -87,7 +102,7 @@ async function spawnRun(h, { noWaitForLaunch, ...overrides } = {}) {
     const out = res.content[0].text;
     const id = out.match(/id=(\S+)/)[1];
     const pid = Number(out.match(/\(pid (\d+)\)/)[1]);
-    liveRuns.push({ id, pid });
+    registerFixtureRun({ id, pid }, ownedExits, liveRuns);
     // The fake child writes its launch lines through a non-append fd; appending test
     // events before it has written would let those lines overwrite them.
     if (!noWaitForLaunch) {
@@ -117,12 +132,20 @@ async function tick() {
 }
 
 async function reap({ id, pid }) {
-    killProcessTree(pid, "SIGKILL");
-    await waitFor(() => {
-        const m = readMeta(id);
-        return m && m.status !== "running" && m.status !== "orphaned" ? m : undefined;
-    }, { timeoutMs: 2000 });
+    const owned = ownedExits.get(id);
+    assert.ok(owned?.completion && owned.pid === pid, "timing cleanup requires its exact child exit acknowledgement");
+    const batcher = getCallbackBatcher(owned.pi);
+    batcher.cancel();
+    if (realProcessProbe.pidExists(pid)) {
+        assert.ok(owned.start && processStartToken(pid) === owned.start && realProcessProbe.groupId(pid) === pid,
+            "timing cleanup must never signal an unverified or recycled child");
+        killProcessTree(pid, "SIGKILL");
+    }
+    await settleFixtureRun(owned, batcher, () => {
+        assert.equal(realProcessProbe.groupAlive(pid), false, "timing child group must be quiescent before removal");
+    });
     rmSync(runDir(id), { recursive: true, force: true });
+    retireFixtureRun({ id, pid }, owned, ownedExits, liveRuns);
 }
 
 /** Health-tick until the deadline steer is requested (the 60 ms deadline passes on its own). */
@@ -143,12 +166,12 @@ const MINUTE = 60_000;
 
 async function withFakeClock(fn) {
     mock.timers.enable({ apis: ["setInterval"] });
-    const firstRun = liveRuns.length;
+    const priorRuns = new Set(liveRuns.map(run => run.id));
     try { await fn(); } finally {
         // An assertion failure must not leave owed alerts for the next test's
         // same-session recipient. Reload cases intentionally share that scope.
         try {
-            for (const run of liveRuns.slice(firstRun)) if (existsSync(runDir(run.id))) await reap(run);
+            for (const run of [...liveRuns]) if (!priorRuns.has(run.id)) await reap(run);
         } finally { mock.timers.reset(); }
     }
 }
@@ -180,10 +203,7 @@ after(async () => {
     await Promise.all(recipients.map(({ recipient }) => recipient.close()));
     await stopRuntime();
     process.env.PATH = originalPath;
-    for (const { id, pid } of liveRuns) {
-        killProcessTree(pid, "SIGKILL");
-        rmSync(runDir(id), { recursive: true, force: true });
-    }
+    for (const run of [...liveRuns]) await reap(run);
     rmSync(binDir, { recursive: true, force: true });
 });
 
@@ -257,7 +277,7 @@ describe("harness timing: launch", () => {
             }, undefined, undefined, h.ctx);
             const ids = [...res.content[0].text.matchAll(/(sa_[a-z0-9]+_[a-z0-9]+)/g)].map((m) => m[1]);
             const metas = [...new Set(ids)].map((id) => readMeta(id));
-            for (const meta of metas) liveRuns.push({ id: meta.id, pid: meta.pid });
+            for (const meta of metas) registerFixtureRun({ id: meta.id, pid: meta.pid }, ownedExits, liveRuns);
             const one = metas.find((m) => m.name === "one");
             const two = metas.find((m) => m.name === "two");
             assert.equal(one.timing.deadlineAt - one.startedAt, 12 * 60_000);

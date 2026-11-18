@@ -565,8 +565,9 @@ export class WorkReadModel {
         // Background progress is independent of whether Subagent repair finds files.
         if (this.background.refresh()) this.publish(true);
         this.refreshAssignments();
-        // Metadata repair cannot verify this exact incompatible source revision.
-        if (this.rejectUnsupportedAssignmentRevision()) break;
+        // Metadata repair cannot verify an incompatible coordinator. Keep its
+        // obligations and last verified rows until a different source revision.
+        if (this.unsupportedAssignmentRevision || this.rejectUnsupportedAssignmentRevision()) break;
         if (resetRepair && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
         resetRepair = false;
         if (this.hints.size) {

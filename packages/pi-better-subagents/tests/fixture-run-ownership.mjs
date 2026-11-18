@@ -20,3 +20,18 @@ export function retireFixtureRun(run, receipt, ownedExits, liveRuns) {
     }
     ownedExits.delete(run.id);
 }
+
+/** Original two-second teardown budget covers finalization and callback writes. */
+export async function settleFixtureRun(receipt, batcher, assertQuiescent) {
+    batcher.cancel();
+    let timeout;
+    try {
+        await Promise.race([(async () => {
+            await receipt.completion;
+            batcher.cancel(); await batcher.settled(); batcher.cancel();
+            assertQuiescent();
+        })(), new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error("Owned timing finalizer did not settle")), 2000);
+        })]);
+    } finally { clearTimeout(timeout); }
+}
