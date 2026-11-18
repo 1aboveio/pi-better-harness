@@ -23,7 +23,6 @@ function setup(t: TestContext) {
   writeFileSync(script, `
 import { appendFileSync, existsSync, readFileSync, watch } from "node:fs";
 const root = process.argv[process.argv.indexOf("--run") + 1];
-appendFileSync(root + "/launches", process.pid + "\\n");
 const watcher = watch(root, () => finish());
 let finished = false;
 function finish() {
@@ -35,6 +34,8 @@ function finish() {
   process.exitCode = response.exit ?? 0;
 }
 finish();
+// The parent may release immediately after this marker becomes visible.
+appendFileSync(root + "/launches", process.pid + "\\n");
 `);
   const entries: any[] = [{ type: "custom", customType: "pi-better-workflow-plan", data: { version: 1, kind: "set", owner: owner.name, path: planPath } }];
   const launches = () => existsSync(join(root, "launches")) ? readFileSync(join(root, "launches"), "utf8").trim().split("\n").length : 0;
@@ -100,7 +101,10 @@ test("admission isolates authority, execution revision, timeout and run while sh
   ];
   await Promise.all([h.waitForLaunches(4), other.waitForLaunches(1)]);
   h.release(); other.release();
-  assert.ok((await Promise.all(pending)).every((gate) => gate.ok));
+  const gates = await Promise.all(pending);
+  assert.ok(gates.every((gate) => gate.ok), JSON.stringify(gates.map((gate, index) => ({
+    index, ok: gate.ok, ...(!gate.ok ? { reason: gate.reason.slice(0, 400) } : {}),
+  }))));
   assert.equal(h.launches(), 4);
   assert.equal(other.launches(), 1);
 });
