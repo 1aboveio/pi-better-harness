@@ -269,7 +269,30 @@ async function taskTerminal(host, id) {
 }
 
 async function dumpDurableCallbackDiagnostics(host, id, project) {
-  if (!String(id).startsWith("bgs_")) return;
+  if (!String(id).startsWith("bgs_")) {
+    const meta = bgRegistry.readMeta(id);
+    const branch = host.session.sessionManager.getBranch();
+    const origin = meta?.callbackOrigin;
+    console.error("[reload-legacy-callback-diagnostics]", JSON.stringify({
+      id, fixtures, registry: bgRegistry.baseDir(), taskDirectoryExists: existsSync(bgRegistry.taskDir(id)),
+      meta: meta && { status: meta.status, kind: meta.kind, startedAt: meta.startedAt, endedAt: meta.endedAt,
+        callback: meta.callback, callbackOrigin: origin, callbackSentAt: meta.callbackSentAt,
+        callbackSuppressedAt: meta.callbackSuppressedAt, callbackSuppressedReason: meta.callbackSuppressedReason },
+      active: { cwd: project, sessionId: host.session.sessionManager.getSessionId(), branchIds: branch.map(entry => entry.id),
+        streaming: host.session.isStreaming, pendingMessages: host.session.pendingMessageCount },
+      completionBatches: host.completions(id).map(message => ({ customType: message.customType, details: message.details })),
+      transcriptReceipts: branch.flatMap(entry => {
+        const message = entry.type === "custom_message" ? entry : entry.message;
+        return message?.customType === "background-completion-batch"
+          ? [{ id: entry.id, completionEventIds: message.details?.completionEventIds }] : [];
+      }),
+      sent: host.sent.length, requests: host.requests.length,
+      errors: host.errors.map(error => ({ message: String(error?.message ?? error), extensionPath: error?.extensionPath })),
+      incidents: Object.values(readBgJournal(id).observations).map(item => ({ id: item.id, operation: item.operation,
+        status: item.status, count: item.count })),
+    }));
+    return;
+  }
   try {
     const paths = supervisorPaths(supervisorDirectory(id), id);
     let operation;
@@ -702,7 +725,14 @@ async function sshScenario(transport) {
     assert.equal(resolved.status, "resolved", "a later successful poll resolves the pre-reload incident");
     assert.ok(resolved.count >= grown.count);
 
-    await waitFor("the watch completion callback", () => host.completions(watchId).length > 0);
+    try {
+      await waitFor("the watch completion callback", () => host.completions(watchId).length > 0);
+    } catch (error) {
+      retainFixtures = true;
+      try { await dumpDurableCallbackDiagnostics(host, watchId, project); }
+      catch (diagnosticError) { console.error("[reload-callback-diagnostics-failed]", String(diagnosticError)); }
+      throw error;
+    }
     await delay(300);
     assert.equal(host.completions(watchId).length, 1, "one completion across the reload");
 
