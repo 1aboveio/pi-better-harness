@@ -4,8 +4,10 @@ import type { EventEmitter } from "node:events";
 export function queryBootstrap(worker: Pick<EventEmitter, "on" | "once" | "off">, diagnostic: () => {
   observation: { status: string; reason?: string };
   executor: { worker?: string; restarts?: number; timeouts?: number; status?: string };
-}) {
+}, now = () => performance.now()) {
   let online = false, heartbeats = 0;
+  const began = now();
+  const phases: Array<{ phase: string; elapsedMs: number; heartbeats: number }> = [];
   return new Promise<void>((resolve, reject) => {
     const cleanup = () => {
       worker.off("online", started); worker.off("message", message);
@@ -14,6 +16,10 @@ export function queryBootstrap(worker: Pick<EventEmitter, "on" | "once" | "off">
     const started = () => { online = true; };
     const message = (value: any) => {
       if (value.type === "heartbeat") heartbeats++;
+      if (value.type === "fixture-bootstrap-phase" && typeof value.phase === "string") {
+        phases.push({ phase: value.phase.slice(0, 80), elapsedMs: Math.round(now() - began), heartbeats });
+        if (phases.length > 16) phases.shift();
+      }
       if (value.type === "fixture-ready") { cleanup(); resolve(); }
     };
     const exited = (code: number) => {
@@ -21,7 +27,7 @@ export function queryBootstrap(worker: Pick<EventEmitter, "on" | "once" | "off">
       let state: unknown;
       try { state = diagnostic(); }
       catch (error) { state = { diagnosticError: String(error) }; }
-      reject(new Error(`query fixture worker exited before bootstrap (code ${code}); ${JSON.stringify({ online, heartbeats, state })}`));
+      reject(new Error(`query fixture worker exited before bootstrap (code ${code}); ${JSON.stringify({ online, heartbeats, phases, state })}`));
     };
     const failed = (error: Error) => { cleanup(); reject(error); };
     worker.on("online", started); worker.on("message", message);

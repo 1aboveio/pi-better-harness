@@ -16,6 +16,13 @@ function deadline(promise, label) {
     timer = setTimeout(() => reject(new Error(`Event publication timeout: ${label}`)), 10000);
   })]).finally(() => clearTimeout(timer));
 }
+
+/** Observe a delivered violation after timing ends; never poll or repair it. */
+export async function publicationBudgetDiagnostic(observation, diagnostics) {
+  if (!observation.recipients.some(recipient => recipient.latencyMs > 1000)) return;
+  try { return { component: await diagnostics?.() }; }
+  catch (error) { return { diagnosticError: String(error) }; }
+}
 /** No snapshot polling or RPC response is counted as event visibility. */
 export async function measureEventPublication({ socketPath, agentDir, scope, metaPath, taskId, subscribers, commits = 5, phase, diagnostics }) {
   const clients = [], observations = [];
@@ -45,8 +52,14 @@ export async function measureEventPublication({ socketPath, agentDir, scope, met
         writer.send({ marker });
         const [message, visible] = await deadline(Promise.all([committed.then(([value]) => { acknowledgement = value; return value; }), Promise.all(visibility)]), 'committed change through subscription');
         if (message.marker !== marker) throw new Error('External writer acknowledged a different source commit');
-        observations.push({ commit, marker, commitStartedNs: message.commitStartedNs, committedNs: message.committedNs,
-          recipients: visible.map(value => publicationObservation(message, value)) });
+        const observation = { commit, marker, commitStartedNs: message.commitStartedNs, committedNs: message.committedNs,
+          recipients: visible.map(value => publicationObservation(message, value)) };
+        observations.push(observation);
+        const failure = await publicationBudgetDiagnostic(observation, diagnostics);
+        if (failure) {
+          observation.failure = failure;
+          console.error(`Event publication budget failure: ${JSON.stringify({ phase, ...observation }).slice(0, 32768)}`);
+        }
       } catch (error) {
         // Capture only after failure; RPC responses never satisfy the visibility assertion.
         const row = value => ({ status: value?.status, reason: value?.reason, seq: value?.seq, scopeRevision: value?.scopeRevision,
