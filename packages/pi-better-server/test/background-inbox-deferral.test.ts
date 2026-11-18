@@ -14,7 +14,7 @@ import { LogCheckpoints, isSqliteLockContention } from "../src/runtime/log-check
 const watch = (() => Object.assign(new EventEmitter(), { close() {}, ready: Promise.resolve() })) as any;
 const aliases = (db: any) => db.prepare("PRAGMA database_list").all().map((row: any) => row.name);
 
-test("exclusive Background inbox defers all consumers on the existing 803 owners until the next repair opportunity", async t => {
+test("exclusive Background inbox defers all consumers on two application handles until the next repair opportunity", async t => {
   const sqlite = createRequire(import.meta.url)("node:sqlite"), Original = sqlite.DatabaseSync;
   const live = new Set<any>();
   let maximum = 0;
@@ -53,7 +53,8 @@ test("exclusive Background inbox defers all consumers on the existing 803 owners
     await Promise.all(Array.from({ length: 32 }, () => current.reconcile()));
     mutation.store.recordTerminalOutcome({ operationId: "operation", eventId: "terminal", owner, outcome: "succeeded", evidence: [{ kind: "terminal-record", ref: "result" }] });
     for (let tick = 0; tick < 3; tick++) {
-      const began = performance.now(), attempts = current.metrics.initialization.attempts;
+      const began = performance.now();
+      const attempts = current.metrics.initialization.attempts;
       mutation.store.cancellationRuntimeEpoch(`control-${tick}`);
       current.fileHint(current.runs, "sa_hint");
       await Promise.all(Array.from({ length: 32 }, () => current.reconcile()));
@@ -75,13 +76,17 @@ test("exclusive Background inbox defers all consumers on the existing 803 owners
       assert.throws(() => current.upgradeObligations(), /rebuilding/);
       assert.equal(current.metrics.initialization.attempts, attempts);
       assert.deepEqual(aliases(db), ["main", "log_checkpoints", "assignment_inbox"]);
-      assert.equal(live.size, 3, "mutation and derived owners plus the exact independent lock holder; source has not opened");
+      assert.ok(live.has(writer));
+      assert.equal(live.size, 3, "two application handles plus exact independent lock holder");
       assert.equal(db.isTransaction, false);
       t.mock.timers.tick(1000); await current.reconcile(false);
       await new Promise<void>(resolve => setImmediate(resolve));
       assert.equal(current.metrics.initialization.attempts, attempts + 1);
       assert.equal(current.metrics.checkpoints.acquisitionAttempts, 1);
-      assert.ok(performance.now() - began < 400);
+      const controlMs = performance.now() - began;
+      assert.ok(controlMs < 400);
+      t.diagnostic(JSON.stringify({ tick, controlMs, callerBoundMs: 400, attempts: current.metrics.initialization.attempts,
+        applicationHandles: live.size - 1, externalLockHolders: 1, status: current.observation().status }));
     }
     writer.exec("ROLLBACK");
     assert.deepEqual(writer.prepare("SELECT * FROM position").get(), before);
@@ -94,14 +99,14 @@ test("exclusive Background inbox defers all consumers on the existing 803 owners
     assert.equal(current.snapshot(scope).status, "ready");
     assert.equal(current.snapshot(scope).rows[0]!.meta.status, "succeeded");
     assert.ok(frames.some(frame => frame.event?.snapshot?.status === "ready"));
-    assert.equal(live.size, 4, "803 retains its separate read-only coordinator source in addition to mutation, derived and lock holder");
+    assert.equal(live.size, 3);
     assert.equal(background.changeMetrics.pending, 0);
   } finally {
     queries?.close(); if (writer.isTransaction) writer.exec("ROLLBACK");
     await model?.close(); writer.close(); mutation.release();
   }
   assert.equal(live.size, 0);
-  assert.equal(maximum, 4);
+  assert.equal(maximum, 3);
 });
 
 test("Background repair-schema contention cleans only its alias and restores persisted repair state on the same owner", async () => {
@@ -122,7 +127,7 @@ test("Background repair-schema contention cleans only its alias and restores per
     assert.equal(background.ready, true);
     assert.equal(background.changeMetrics.repairAfter, "saved-cursor");
     assert.equal(background.changeMetrics.operationRepairComplete, false);
-    assert.equal(background.status, "rebuilding");
+    assert.equal(background.status, "rebuilding", "acquisition alone cannot publish verified coverage");
     await background.close(); await background.close();
     assert.deepEqual(aliases(owner), ["main", "log_checkpoints"]);
     assert.equal(owner.prepare("SELECT count(*) AS n FROM background_history").get().n, 0);
@@ -183,7 +188,7 @@ test("Background partial cleanup failure retains both errors and exact alias own
   } finally { fail = false; await background.close(); owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("closing a model while the Background exclusive writer remains held cancels acquisition", async t => {
+test("closing a model while the Background exclusive writer remains held settles and cancels acquisition", async t => {
   const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
   const root = mkdtempSync(join(tmpdir(), "background-close-deferred-"));
   const seed = new BackgroundObservation(root); await seed.close();
@@ -196,9 +201,73 @@ test("closing a model while the Background exclusive writer remains held cancels
     await model.reconcile();
     const metrics = (model as any).initialization;
     assert.equal(metrics.attempts, 1);
-    await model.close(); closed = true;
+    await model.close();
+    closed = true;
     assert.equal(writer.isTransaction, true);
     t.mock.timers.tick(10000); await model.reconcile();
     assert.equal(metrics.attempts, 1);
   } finally { if (!closed) await model.close(); writer.exec("ROLLBACK"); writer.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("partial initialization publication remains non-ready when an already-attached assignment inbox becomes exclusively locked", async t => {
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+  const root = mkdtempSync(join(tmpdir(), "partial-inbox-publication-"));
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const model = new WorkReadModel(root, "partial", { baseDir: join(root, "raw"), durableDir: join(root, "archive"), watch });
+  const background = (model as any).background, initialize = background.initialize.bind(background);
+  let writer: any;
+  background.initialize = () => {
+    writer ??= new DatabaseSync(":memory:");
+    writer.prepare("ATTACH DATABASE ? AS assignment_inbox").run(join(root, "runtime-read-repair", "assignments.sqlite"));
+    writer.prepare("ATTACH DATABASE ? AS background_inbox").run(join(root, "runtime-read-repair", "background.sqlite"));
+    writer.exec("BEGIN EXCLUSIVE");
+    return initialize();
+  };
+  const publications: any[] = [];
+  const stop = model.onChange(() => { publications.push({ metrics: model.metrics, background: model.backgroundMetrics, observation: model.observation() }); });
+  try {
+    await assert.doesNotReject(model.reconcile());
+    assert.ok(publications.length);
+    assert.equal(publications.at(-1).observation.status, "rebuilding");
+    assert.equal(publications.at(-1).metrics.assignments.applied, null);
+    assert.equal(model.snapshot().status, "rebuilding");
+    assert.equal(model.metrics.initialization.attempts, 1);
+    writer.exec("ROLLBACK");
+    background.initialize = initialize;
+    await model.reconcile(); assert.equal(model.metrics.initialization.attempts, 1);
+    t.mock.timers.tick(1000); await model.reconcile();
+    assert.equal(model.snapshot().status, "ready", model.snapshot().reason);
+  } finally { stop(); if (writer?.isTransaction) writer.exec("ROLLBACK"); await model.close(); writer?.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("initialized observation diagnostics report unknown cursors rather than throw under a real derived-owner exclusive lock", async () => {
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+  const root = mkdtempSync(join(tmpdir(), "initialized-inbox-publication-"));
+  const mutation = acquireMutationStore(root);
+  const model = new WorkReadModel(root, "initialized", { baseDir: join(root, "raw"), durableDir: join(root, "archive"), watch });
+  const writer = new DatabaseSync(":memory:");
+  try {
+    await model.reconcile(); model.snapshot({ background: true, cwd: root, sessionId: "parent" });
+    writer.prepare("ATTACH DATABASE ? AS assignment_inbox").run(join(root, "runtime-read-repair", "assignments.sqlite"));
+    writer.prepare("ATTACH DATABASE ? AS background_inbox").run(join(root, "runtime-read-repair", "background.sqlite"));
+    const attempts = model.metrics.initialization.attempts;
+    writer.exec("BEGIN EXCLUSIVE");
+    assert.throws(() => (model as any).reader.changeMetrics, isSqliteLockContention);
+    assert.throws(() => (model as any).background.inbox.metrics, isSqliteLockContention);
+    assert.equal(model.metrics.assignments.applied, null);
+    assert.equal(model.backgroundMetrics.changes.applied, null);
+    assert.equal(model.metrics.initialization.attempts, attempts);
+    writer.exec("ROLLBACK");
+    assert.equal(model.metrics.assignments.applied, 0);
+    assert.equal(model.backgroundMetrics.changes.applied, 0);
+    const reader = (model as any).reader, descriptor = Object.getOwnPropertyDescriptor(reader, "changeMetrics")!;
+    const failure = new Error("non-contention diagnostic failure");
+    Object.defineProperty(reader, "changeMetrics", { configurable: true, get() { throw failure; } });
+    try { assert.throws(() => model.metrics, error => error === failure); }
+    finally { Object.defineProperty(reader, "changeMetrics", descriptor); }
+    const inbox = (model as any).background.inbox;
+    Object.defineProperty(inbox, "metrics", { configurable: true, get() { throw failure; } });
+    try { assert.throws(() => model.backgroundMetrics, error => error === failure); }
+    finally { delete inbox.metrics; }
+  } finally { if (writer.isTransaction) writer.exec("ROLLBACK"); await model.close(); writer.close(); mutation.release(); rmSync(root, { recursive: true, force: true }); }
 });

@@ -600,9 +600,10 @@ describe("supervision authority", () => {
 
   it("the first scoped recovery cannot coalesce into an unscoped startup pass", async () => {
     const root = workspace("startup-scoped-recovery");
-    const store = openStore({ path: join(root, "operations.sqlite") });
+    const storePath = join(root, "operation-coordinator.sqlite");
+    const store = openStore({ path: storePath });
     cleanups.push(() => store.close());
-    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store,
+    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store, storePath,
       supervisorDirectory: join(root, "supervisor"), pollMs: 0, serverOwnedResults: true });
     cleanups.push(() => host.close());
     host.start();
@@ -625,7 +626,8 @@ describe("supervision authority", () => {
 
   it("recovers first and tail callback pages without claim-scan starvation or unbounded retries", async () => {
     const root = workspace("paged-callback-recovery"), directory = join(root, "supervisor");
-    const store = openStore({ path: join(root, "operations.sqlite") });
+    const storePath = join(root, "operation-coordinator.sqlite");
+    const store = openStore({ path: storePath });
     cleanups.push(() => store.close());
     mkdirSync(join(directory, "observed"), { recursive: true });
     const delivered: string[] = [];
@@ -637,10 +639,13 @@ describe("supervision authority", () => {
       store.recordTerminalOutcome({ operationId, owner, eventId: operationId, outcome: "succeeded", evidence: [{ kind: "summary", ref: id, summary: "done" }] });
       writeFileSync(join(directory, "observed", `${id}.json`), JSON.stringify({ kind: "process", cwd: root, callback: true, branchId, parentOrigin: { cwd: root, sessionId: owner.sessionId } }));
     }
-    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store, supervisorDirectory: directory, pollMs: 0, serverOwnedResults: true,
+    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store, storePath, supervisorDirectory: directory, pollMs: 0, serverOwnedResults: true,
       notifyParent(notification, delivery) { delivered.push(notification.taskId); delivery.delivered(); } });
     cleanups.push(() => host.close());
+    expect(existsSync(storePath)).toBe(true);
     const ctx = createCtx(root, "paged-owner", "current"); host.start(ctx);
+    expect((host as unknown as { storePath: string }).storePath).toBe(storePath);
+    expect((host as unknown as { changeWatcher?: unknown }).changeWatcher).toBeDefined();
     for (let page = 0; page < 10; page++) {
       host.noteParentContext(createCtx(root, "interleaved-owner")); await host.reconcileNow();
       host.noteParentContext(ctx); await host.reconcileNow();
@@ -656,6 +661,9 @@ describe("supervision authority", () => {
     host.noteParentContext(ctx, { recover: false });
     expect(host.hasPendingParentCallbackRecovery()).toBe(true);
     expect((host as unknown as { callbackRecoveryScopes: Map<string, unknown> }).callbackRecoveryScopes.size).toBeLessThanOrEqual(128);
+    host.close();
+    expect((host as unknown as { changeWatcher?: unknown; changeRepair?: unknown }).changeWatcher).toBeUndefined();
+    expect((host as unknown as { changeRepair?: unknown }).changeRepair).toBeUndefined();
   // This exercises 600 durable records and sidecars, not a wall-clock performance budget.
   }, 30_000);
 

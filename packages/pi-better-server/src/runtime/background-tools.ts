@@ -7,21 +7,25 @@ import { existsSync } from 'node:fs';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { acquireMutationStore } from './mutation-store.ts';
 /** Fixed canonical adapter. It never owns a native parent transcript. */
-export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>) {
+export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>, verificationMs = 30000,
+    trace?: (slot: number, phase: 'queued' | 'executing' | 'recovery' | 'read-pending' | 'read-returned' | 'tool-pending' | 'tool-returned' | 'settled') => void) {
     const load = (file: string) => import(`./domain/background-service/${file}.domain.mjs`);
     const [{ createObservedWaitHost }, { registerTools }, { createBackgroundTaskRuntime }, sandbox, authority, permissions, registry, navigator, failures] = await Promise.all([
         load('observed-waits'), load('tools'), load('runtime'), load('sandbox'), load('managed-authority'),
         import(String('./domain/sandbox-policy/permission-settings.domain.mjs')), load('registry'), load('navigator-provider'), load('failures'),
     ]);
+    const identity = await load('process-identity');
     const lease = acquireMutationStore(root);
+    const unknownWriters = new Map<string, number>();
     let journal: ReturnType<typeof lease.store.backgroundRequests>;
     let pi: any, service: any, session: any, runtime: any, current: any;
     let tail: Promise<unknown> = Promise.resolve(), pending = 0;
+    let traceSlot = 0;
     const projections = new Map<string, any>(), metrics = { scopeRefreshes: 0, exactDetailReads: 0, reconciles: 0 };
     const recoveryVersions = new Map<string, string>();
     const scopes = new Map<string, any>(), deliveries = new Map<string, any>();
     const traceSeen = new Set<string>();
-    const trace = (stage: string, facts: Record<string, unknown>) => {
+    const traceHandoff = (stage: string, facts: Record<string, unknown>) => {
         if (process.env.PI_BG_OBSERVED_WAITS_DEBUG !== '1') return;
         const full = JSON.stringify({ stage, ...facts });
         const line = full.length <= 4096 ? full : JSON.stringify({ stage, truncated: true });
@@ -47,20 +51,20 @@ export async function createBackgroundTools(root: string, instance: string, drai
     const notifyParent = (notification: any, delivery: any) => {
         const owner = { workspace: notification.origin?.cwd, sessionId: notification.origin?.sessionId }, scope = scopes.get(ownerKey(owner));
         const facts = { taskId: notification.taskId, receiptId: delivery.receiptId, sessionId: owner.sessionId, urgent: notification.urgent === true };
-        trace('notify', facts);
+        traceHandoff('notify', facts);
         if (!scope || deliveries.size >= 256) {
-            trace('defer', { ...facts, scopeKnown: Boolean(scope), backlog: deliveries.size });
+            traceHandoff('defer', { ...facts, scopeKnown: Boolean(scope), backlog: deliveries.size });
             delivery.defer('Native recipient unavailable or delivery backlog full');
             return;
         }
         if ([...deliveries.values()].some(item => item.receiptId === delivery.receiptId && ownerKey(item.scope.owner) === ownerKey(owner))) {
-            trace('duplicate', facts);
+            traceHandoff('duplicate', facts);
             delivery.defer('Delivery already pending');
             return;
         }
         const token = randomUUID();
         deliveries.set(token, { token, notification, receiptId: delivery.receiptId ?? `background-terminal:${notification.operationId}`, delivery, scope, createdAt: Date.now() });
-        trace('enqueued', facts);
+        traceHandoff('enqueued', facts);
     };
     try {
         journal = lease.store.backgroundRequests();
@@ -84,8 +88,14 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     pi = new Proxy(api, { get(target, key) { if (key === 'sendMessage')
                             return () => { throw new Error('Native parent transcript delivery requires authenticated frontend'); }; const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value; } });
                     runtime = createBackgroundTaskRuntime(failures.createFailureAttention((origin:any,event:any)=>new Promise<boolean>(resolve=>notifyParent({origin,taskId:event.inspectId??event.id,status:event.status,urgent:true,event:{...event,isDelivered:undefined,getSuppressionReason:undefined,onDelivered:undefined}},
-              {receiptId:event.receiptId,delivered:()=>{event.onDelivered?.(Date.now());resolve(true);},defer:()=>resolve(false)}))), (origin: any, event: any) => notifyParent({ origin, taskId: event.id, status: event.status, outcome: event.outcome, event: { ...event, isDelivered: undefined, getSuppressionReason: undefined, onDelivered: undefined, onSuppressed: undefined } }, { receiptId: event.receiptId, delivered: () => event.onDelivered?.(Date.now()), defer: () => undefined }), { assert: assertAdmission, prepared: (id: string) => journal.operation(current.ownerKey, current.record.key, { operationId: `legacy:${id}`, taskId: id, token: current.record.key }) });
+              {receiptId:event.receiptId,delivered:()=>{event.onDelivered?.(Date.now());resolve(true);},defer:()=>resolve(false)}))), (origin: any, event: any) => notifyParent({ origin, taskId: event.id, status: event.status, outcome: event.outcome, event: { ...event, isDelivered: undefined, getSuppressionReason: undefined, onDelivered: undefined, onSuppressed: undefined } }, { receiptId: event.receiptId, delivered: () => event.onDelivered?.(Date.now()), defer: () => undefined }), { assert: assertAdmission,
+                        prepared: (id: string) => journal.operation(current.ownerKey, current.record.key, { operationId: `legacy:${id}`, taskId: id, token: current.record.key }) },
+                        (kind: string, id: string, work: () => unknown, dueAt?: number) => {
+                            const origin = registry.readMeta(id)?.callbackOrigin;
+                            return lease.budget.scheduleSource(`legacy-${kind}`, id, work, JSON.stringify([origin?.cwd ?? root, origin?.sessionId ?? null]), dueAt);
+                        });
                     service = createObservedWaitHost(pi, { sharedStore: lease.store, storePath: join(root, 'operation-coordinator.sqlite'), serverOwnedResults: true, pollMs: 0,
+                        enterControl: () => lease.budget.enter('control'),
                         notifyParent, assertAdmission,
                         authorizeParentCancellation: ({requester, operation, requestId}: any) => {
                             assertAdmission();
@@ -127,14 +137,40 @@ export async function createBackgroundTools(root: string, instance: string, drai
     }
     return {
         get busy() { return pending > 0; },
+        lifecycleReasons() {
+            const now = Date.now(), reasons: any[] = journal.lifecycleReasons().map((reason: any) => ({ ...reason,
+                management: { instance } }));
+            for (const scope of scopes.values()) for (const meta of registry.listActiveMetasForOrigin({ cwd: scope.owner.workspace, sessionId: scope.owner.sessionId })) {
+                if (meta.status !== 'running') continue;
+                const watch = meta.kind === 'command_watch' || Boolean(meta.remote);
+                const verified = meta.pid && meta.pidStartTime && identity.readProcessStartToken(meta.pid) === meta.pidStartTime;
+                if (!watch && !verified) {
+                    if (!unknownWriters.has(meta.id)) unknownWriters.set(meta.id, now);
+                    const since = unknownWriters.get(meta.id)!;
+                    if (now >= since + verificationMs) continue;
+                    reasons.push({ kind: 'verification', id: meta.id, owner: scope.owner, lastProgressAt: since,
+                        nextDeadline: since + verificationMs, recovery: 'legacy-writer-unverified-no-takeover' });
+                    continue;
+                }
+                unknownWriters.delete(meta.id);
+                reasons.push({ kind: watch ? 'task' : 'runner', id: meta.id, owner: scope.owner,
+                    writer: { pid: meta.pid, start: meta.pidStartTime }, lastProgressAt: meta.lastProgressAt ?? meta.startedAt,
+                    nextDeadline: meta.deadlineAt ?? (watch ? (meta.lastCheckedAt ?? meta.startedAt) + (meta.intervalMs ?? 1000) : now + 1000),
+                    recovery: watch ? 'captured-legacy-watch' : 'captured-legacy-command' });
+            }
+            return reasons;
+        },
         metrics() { return { ...metrics, registry: registry.getRegistryIoMetrics(), cachedScopes: projections.size }; },
-        handle(command: any) {
+        handle(command: any, onAccepted?: (id: string) => void) {
             if (Object.keys(command).some(key => !['id', 'type', 'authority'].includes(key)))
                 return Promise.reject(new Error('unsupported Background request field'));
             if (pending >= 64)
                 return Promise.reject(new Error('runtime-overloaded: Background request capacity'));
             pending++;
+            const slot = ++traceSlot;
+            trace?.(slot, 'queued');
             const request = tail.catch(() => undefined).then(async () => {
+                trace?.(slot, 'executing');
                 const record = authority.readBackgroundAuthority(root, instance, command.authority), key = ownerKey(record.owner);
                 // A warmed branch view must not overwrite another foreground's progress.
                 const viewKey = JSON.stringify([key, authority.backgroundDigest(record.branchIds)]);
@@ -164,7 +200,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     }
                 if (record.tool === '__background_receipt') {
                     const item = deliveries.get(record.params.token);
-                    trace('receipt', { sessionId: record.owner.sessionId, taskId: item?.notification.taskId,
+                    traceHandoff('receipt', { sessionId: record.owner.sessionId, taskId: item?.notification.taskId,
                         receiptId: item?.receiptId, found: Boolean(item), delivered: record.params.delivered === true });
                     if (!item || ownerKey(item.scope.owner) !== key)
                         throw new Error('delivery-receipt-refused');
@@ -180,7 +216,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     return { receipted: record.params.delivered === true };
                 }
                 if (record.tool === '__background_poll') {
-                    trace('poll-enter', { sessionId: record.owner.sessionId });
+                    traceHandoff('poll-enter', { sessionId: record.owner.sessionId });
                     if (!observe)
                         throw new Error('Shared Background observation unavailable');
                     // Recovery is indexed and bounded independently of display readiness.
@@ -188,11 +224,14 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     if (recoveryVersions.get(viewKey) !== recoveryVersion || service.hasPendingParentCallbackRecovery()) {
                         metrics.reconciles++;
                         service.noteParentContext(ctx);
+                        trace?.(slot, 'recovery');
                         await service.reconcileNow();
                         if (!recoveryVersions.has(viewKey) && recoveryVersions.size >= 128) forgetView(recoveryVersions.keys().next().value!);
                         recoveryVersions.set(viewKey, recoveryVersion);
                     }
+                    trace?.(slot, 'read-pending');
                     const snapshot = await observe({ background: true, cwd: record.owner.workspace, sessionId: record.owner.sessionId });
+                    trace?.(slot, 'read-returned');
                     if (snapshot.status !== 'ready')
                         throw new Error(snapshot.reason ?? 'Shared Background observation unverified');
                     const revision = authority.backgroundDigest([snapshot.scopeRevision, record.branchIds]);
@@ -210,7 +249,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                         projections.set(viewKey, projection);
                     }
                     const outgoing = [...deliveries.values()].filter(item => ownerKey(item.scope.owner) === key).map(({ token, notification, receiptId }) => ({ token, notification, receiptId }));
-                    trace('poll-return', { sessionId: record.owner.sessionId, total: outgoing.length, deliveries: outgoing.slice(0, 8).map(item => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
+                    traceHandoff('poll-return', { sessionId: record.owner.sessionId, total: outgoing.length, deliveries: outgoing.slice(0, 8).map(item => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
                     return { ...projection, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: outgoing };
                 }
                 const origin = { cwd: record.owner.workspace, sessionId: record.owner.sessionId };
@@ -251,15 +290,19 @@ export async function createBackgroundTools(root: string, instance: string, drai
                 if (admission && draining() && !prior)
                     throw new Error('runtime-draining: new Background execution deferred for upgrade');
                 if (mutation) {
-                    const accepted = journal.accept(key, record.key, authority.backgroundDigest({ tool: record.tool, params: record.params }));
+                    const accepted = journal.accept(key, record.key, authority.backgroundDigest({ tool: record.tool, params: record.params }),
+                        { instance, pid: record.pid, start: record.start });
                     if (accepted.prior)
                         return accepted.record.result ?? { content: [{ type: 'text', text: 'Accepted Background request has an uncertain outcome; inspect its exact operations before issuing new work.' }], details: { status: 'outcome_unknown', operations: accepted.record.operations } };
                     journal.dispatch(key, record.key);
+                    onAccepted?.(`background-request-v1:${authority.backgroundDigest([key, record.key])}`);
                 }
                 assertAdmission();
                 let result;
                 try {
+                    trace?.(slot, 'tool-pending');
                     result = await tool.execute(record.key, record.params, undefined, undefined, ctx);
+                    trace?.(slot, 'tool-returned');
                 }
                 catch (error) {
                     if (mutation)
@@ -279,9 +322,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     journal.finish(key, record.key, result);
                 return result;
             }).catch(error => {
-                trace('request-error', { tool: current?.record.tool, sessionId: current?.record.owner.sessionId, error: String(error).slice(0, 256) });
+                traceHandoff('request-error', { tool: current?.record.tool, sessionId: current?.record.owner.sessionId, error: String(error).slice(0, 256) });
                 throw error;
-            }).finally(() => { pending--; });
+            }).finally(() => { pending--; trace?.(slot, 'settled'); });
             tail = request;
             return request;
         },

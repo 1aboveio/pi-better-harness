@@ -325,6 +325,7 @@ for (const historyMode of [false, true]) test(historyMode ? "active and incremen
       lease.store.recordTerminalOutcome({ operationId, eventId: operationId, owner: recipient, outcome: "succeeded",
         evidence: [{ kind: "terminal-record", ref: operationId }] });
     }
+    await model?.reconcile();
     const scope = { background: true, cwd: root, sessionId: owner.sessionId };
     await model?.reconcile();
     observation.read(scope); observation.refresh();

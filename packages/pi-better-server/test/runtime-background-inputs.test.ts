@@ -7,19 +7,45 @@ import { BackgroundObservation } from "../src/runtime/background.ts";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 
+test("shared Background projection retains committed authority without deriving it from display state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "background-terminal-authority-"));
+  const store = openStore({ path: join(root, "operation-coordinator.sqlite") });
+  const observation = new BackgroundObservation(root, join(root, "supervisor"));
+  const owner = { kind: "parent-session" as const, workspace: root, sessionId: "parent" };
+  const scope = { background: true, cwd: root, sessionId: owner.sessionId };
+  try {
+    store.registerOperation({ operationId: "authority", taskId: "bgs_00000000000000000001", launchToken: "authority", owner,
+      observer: { kind: "local-supervisor", version: "1" } });
+    const pending = observation.read(scope)[0];
+    assert.equal(pending.terminalRevision, 0);
+    assert.equal(pending.terminalOutcome, null);
+    store.recordTerminalOutcome({ operationId: "authority", eventId: "committed", owner, outcome: "succeeded",
+      evidence: [{ kind: "terminal-record", ref: "committed" }] });
+    observation.refresh();
+    const committed = observation.read(scope)[0];
+    assert.ok(committed.terminalRevision > 0);
+    assert.equal(committed.terminalOutcome, "succeeded");
+    assert.equal(committed.signal, null);
+    assert.equal(committed.exitCode, null, "committed outcome alone is not runner exit evidence");
+  } finally { await observation.close(); store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("Background constructor attaches its inbox and repair state to the query owner's handle", async () => {
   const root = mkdtempSync(join(tmpdir(), "background-connection-"));
   const model = new WorkReadModel(root, "shared-inboxes", { baseDir: join(root, "runs"), durableDir: join(root, "archive"), intervalMs: 60000 });
   try {
     const derived = (model as any).db;
+    assert.equal((model as any).background.inbox, undefined);
     assert.equal((model as any).background.ready, false);
     assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main"]);
+    assert.equal(model.metrics.checkpoints.acquisitionAttempts, 0, "construction must not acquire checkpoints");
     await model.reconcile();
+    assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "log_checkpoints", "assignment_inbox", "background_inbox"]);
     const inbox = (model as any).background.inbox;
     assert.equal(inbox.db, derived);
     assert.equal(inbox.prefix, "background_inbox.");
+    assert.equal(model.metrics.checkpoints.acquisitionAttempts, 1);
     assert.equal((model as any).db, derived, "deferred checkpoint acquisition retains the original owner");
-    assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "log_checkpoints", "assignment_inbox", "background_inbox"]);
     assert.ok(derived.prepare("SELECT name FROM background_inbox.sqlite_master WHERE name='background_file_repair'").get());
     assert.equal(derived.prepare("SELECT name FROM main.sqlite_master WHERE name='background_file_repair'").get(), undefined);
     assert.equal(derived.prepare("SELECT name FROM assignment_inbox.sqlite_master WHERE name='background_file_repair'").get(), undefined);

@@ -82,23 +82,30 @@ export class LogCheckpoints {
     if (!row) { this.metrics.misses++; return undefined; }
     try { const saved = JSON.parse(row.payload); this.metrics.restores++; return saved; } catch { this.metrics.misses++; return undefined; }
   }
-  save(path: string, value: unknown) {
+  save(path: string, value: unknown, deferPublication = false) {
     if (!this.initialized || this.closed) throw new Error("Checkpoint coverage is unavailable");
     const payload = JSON.stringify(value), bytes = Buffer.byteLength(payload);
-    this.db.exec("BEGIN IMMEDIATE");
+    this.db.exec(this.shared ? "SAVEPOINT checkpoint_save" : "BEGIN IMMEDIATE");
     try {
       this.db.prepare(`DELETE FROM ${this.prefix}checkpoints WHERE path=?`).run(path);
       if (bytes <= LOG_CHECKPOINT_ENTRY_BUDGET) {
         this.db.prepare(`INSERT INTO ${this.prefix}checkpoints VALUES(?,?,?,?,?)`).run(path, LOG_CHECKPOINT_VERSION, payload, bytes, Date.now());
       }
-      else this.metrics.oversized++;
       while (this.db.prepare(`SELECT coalesce(sum(bytes),0) AS n FROM ${this.prefix}checkpoints`).get().n > LOG_CHECKPOINT_BUDGET) {
         this.db.exec(`DELETE FROM ${this.prefix}checkpoints WHERE path=(SELECT path FROM ${this.prefix}checkpoints ORDER BY used,path LIMIT 1)`);
       }
       this.db.prepare(`DELETE FROM ${this.prefix}checkpoints WHERE path IN (SELECT path FROM ${this.prefix}checkpoints ORDER BY used DESC,path DESC LIMIT -1 OFFSET ?)`).run(LOG_CHECKPOINT_MAX_ENTRIES);
-      this.db.exec("COMMIT");
-      this.metrics.commits++;
-    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      this.db.exec(this.shared ? "RELEASE checkpoint_save" : "COMMIT");
+      let published = false;
+      const publish = () => {
+        if (published) return;
+        published = true;
+        this.metrics.commits++;
+        if (bytes > LOG_CHECKPOINT_ENTRY_BUDGET) this.metrics.oversized++;
+      };
+      if (!deferPublication) publish();
+      return publish;
+    } catch (error) { this.db.exec(this.shared ? "ROLLBACK TO checkpoint_save; RELEASE checkpoint_save" : "ROLLBACK"); throw error; }
   }
   close() {
     if (this.closed) return;

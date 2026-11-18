@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { EventEmitter } from "node:events";
+import { createRequire } from "node:module";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -18,6 +19,18 @@ const names = (db: DatabaseSync) => db.prepare("PRAGMA database_list").all().map
 const fixture = () => mkdtempSync(join(tmpdir(), "checkpoint-deferral-"));
 
 test("exclusive checkpoint owner defers once per repair tick, keeps consumer coverage incomplete, then restores on the same owner", async t => {
+  const sqlite = createRequire(import.meta.url)("node:sqlite"), Original = sqlite.DatabaseSync;
+  const live = new Set<any>();
+  let maximum = 0;
+  sqlite.DatabaseSync = class extends Original {
+    constructor(...args: any[]) { super(...args); live.add(this); maximum = Math.max(maximum, live.size); }
+    prepare(sql: string) {
+      if (/^ATTACH\b/i.test(sql)) assert.equal(this.isTransaction, false, "acquisition must precede the owner transaction");
+      return super.prepare(sql);
+    }
+    close() { super.close(); live.delete(this); }
+  };
+  t.after(() => { sqlite.DatabaseSync = Original; });
   const root = fixture(), baseDir = join(root, "raw"), agent = join(root, "agent");
   const directory = join(baseDir, "runs", "sa_checkpoint_deferred"), log = join(directory, "output.log");
   mkdirSync(directory, { recursive: true });
@@ -29,7 +42,8 @@ test("exclusive checkpoint owner defers once per repair tick, keeps consumer cov
   const seed = new WorkReadModel(agent, "seed", options);
   try { await seed.reconcile(); assert.equal(seed.snapshot().status, "ready"); }
   finally { await seed.close(); }
-  const writer = new DatabaseSync(":memory:");
+  // The independent lock holder is counted explicitly, not an application handle.
+  const writer = new sqlite.DatabaseSync(":memory:");
   const checkpoints = new LogCheckpoints(join(agent, "runtime-log-checkpoints.sqlite"), writer);
   assert.ok(checkpoints.load(log), "normal prior fold was persisted");
   writer.exec("BEGIN EXCLUSIVE");
@@ -41,7 +55,13 @@ test("exclusive checkpoint owner defers once per repair tick, keeps consumer cov
   let modelClosed = false;
   const control = openStore({ path: join(agent, "operation-coordinator.sqlite") });
   const command = { type: "runtime_subscribe", scope: {} };
+  const assertHandles = () => {
+    assert.ok(live.has(writer));
+    assert.ok(live.has(owner));
+    assert.equal(live.size, 3, "two application handles plus the exact external checkpoint lock holder");
+  };
   try {
+    assertHandles();
     assert.equal(owner.prepare("PRAGMA busy_timeout").get().timeout, 0);
     assert.equal((queries.handle(command) as any).status, "rebuilding");
     await Promise.all(Array.from({ length: 32 }, () => model.reconcile(true)));
@@ -67,6 +87,8 @@ test("exclusive checkpoint owner defers once per repair tick, keeps consumer cov
       await model.reconcile(false);
       assert.equal(model.metrics.checkpoints.acquisitionAttempts, before + 1, "one attempt per existing interval");
       assert.equal(model.metrics.inventories, 0, "no source coverage or applied cursor before initialization");
+      assertHandles();
+      assert.equal(owner.isTransaction, false);
       await new Promise<void>(resolve => setImmediate(resolve));
       assert.equal(model.metrics.checkpoints.acquisitionAttempts, before + 1, "no finally recursion or drain spin");
       const controlMs = performance.now() - began;
@@ -82,6 +104,7 @@ test("exclusive checkpoint owner defers once per repair tick, keeps consumer cov
     await model.reconcile();
     assert.equal((model as any).db, owner);
     assert.equal(model.metrics.indexConnections, 1);
+    assertHandles();
     assert.equal(model.snapshot().status, "ready", model.snapshot().reason);
     assert.equal(model.metrics.checkpoints.restores, 1);
     assert.ok(model.metrics.checkpoints.commits >= 1);
@@ -101,6 +124,8 @@ test("exclusive checkpoint owner defers once per repair tick, keeps consumer cov
     checkpoints.close(); writer.close(); control.close();
     rmSync(root, { recursive: true, force: true });
   }
+  assert.equal(live.size, 0);
+  assert.equal(maximum, 3, "no transient handle beyond the two owners and known lock holder");
 });
 
 test("schema contention after ATTACH releases only the participant's attachment and replays after release", () => {
@@ -233,6 +258,19 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
   finally { await seed.close(); }
   const writer = new DatabaseSync(join(agent, "runtime-read-repair", "assignments.sqlite"));
   writer.exec("BEGIN EXCLUSIVE");
+  // Source writer and lock holder already exist; count all worker acquisitions.
+  const sqlite = createRequire(import.meta.url)("node:sqlite"), Original = sqlite.DatabaseSync;
+  const live = new Set<any>();
+  let maximum = 0;
+  sqlite.DatabaseSync = class extends Original {
+    constructor(...args: any[]) { super(...args); live.add(this); maximum = Math.max(maximum, live.size); }
+    prepare(sql: string) {
+      if (/^ATTACH\b/i.test(sql)) assert.equal(this.isTransaction, false);
+      return super.prepare(sql);
+    }
+    close() { super.close(); live.delete(this); }
+  };
+  t.after(() => { sqlite.DatabaseSync = Original; });
   t.mock.timers.enable({ apis: ["setInterval"] });
   let model: WorkReadModel | undefined;
   try {
@@ -243,7 +281,7 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
     await Promise.all(Array.from({ length: 32 }, () => current.reconcile(true)));
     assert.equal(current.metrics.initialization.attempts, 1);
     assert.equal(current.metrics.checkpoints.acquisitionAttempts, 1, "checkpoint attachment succeeded independently");
-    assert.deepEqual(names(db), ["main", "log_checkpoints"], "failed assignment ATTACH leaves no alias and Background has not acquired yet");
+    assert.deepEqual(names(db), ["main", "log_checkpoints"], "failed assignment ATTACH retains checkpoints without acquiring Background prematurely");
     const frames: any[] = [];
     const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0,
       write(line: string) { frames.push(JSON.parse(line)); }, destroy() {} });
@@ -267,6 +305,8 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
         assert.throws(() => current.upgradeObligations(), /rebuilding/);
         assert.equal(current.metrics.assignments.applied, null, "unavailable cursor is unknown, not verified zero");
         assert.equal(current.metrics.inventories, 0);
+        assert.equal(live.size, 1, "deferral retains one worker handle, plus the existing root mutation owner");
+        assert.equal(db.isTransaction, false);
         queries.handle({ type: "runtime_unsubscribe" });
         queries.handle({ type: "runtime_subscribe", scope: {} });
         t.mock.timers.tick(1000); await current.reconcile(false);
@@ -284,6 +324,9 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
       assert.equal(current.metrics.initialization.attempts, 5);
       assert.equal(current.snapshot({ id }).rows[0]!.recipientPending, false);
       assert.equal(current.metrics.assignments.pending, 0);
+      assert.equal(live.size, 1, "recovery cannot open a separate canonical source handle");
+      assert.equal(current.metrics.indexConnections, 1);
+      assert.equal(current.metrics.coordinatorConnections, 1);
       assert.ok(current.metrics.assignments.applied > oldApplied!);
       assert.ok(frames.some(frame => frame.event?.snapshot?.status === "ready"));
       const scope = { background: true, backgroundHistory: true, cwd: root, sessionId: "parent" };
@@ -297,6 +340,8 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
     if (writer.isTransaction) writer.exec("ROLLBACK");
     await model?.close(); writer.close(); source.close(); rmSync(root, { recursive: true, force: true });
   }
+  assert.equal(maximum, 1);
+  assert.equal(live.size, 0);
 });
 
 test("inbox schema contention releases only its newly acquired alias before same-owner replay", () => {

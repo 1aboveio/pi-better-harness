@@ -18,7 +18,7 @@ import { effectiveStatus } from "./domain/process-status.mjs";
 import { extractChildEventFactsFromLog, healthThresholdsForConfig, encodeHealthLogState, decodeHealthLogState } from "./domain/health-observation.mjs";
 import { LogCheckpoints, isSqliteLockContention } from "./log-checkpoints.ts";
 import { BackgroundObservation } from "./background.ts";
-import { workPage } from "./work-budget.ts";
+import { workPage, createWorkBudget } from "./work-budget.ts";
 // @ts-expect-error Generated canonical read-only failure projection.
 import { readFailureStateReadOnly, pendingFailureAttention } from "./domain/subagents/shared-failure-observations.domain.mjs";
 import { readHealthConfig } from "./health-config.ts";
@@ -67,6 +67,7 @@ const healthDeadlineExpired = (row: { health?: any }, now: number) => typeof row
 
 /** Reconstructable query state. It never authorizes execution or writes source records. */
 export class WorkReadModel {
+  private budget: ReturnType<typeof createWorkBudget>;
   onTerminalLogsChanged?: () => void;
   private background: BackgroundObservation;
   private db: any;
@@ -125,8 +126,15 @@ export class WorkReadModel {
   private reason: string | undefined = "Initial source inventory is rebuilding.";
   private counters = { inventories: 0, metadataReads: 0, projections: 0, assignmentProjections: 0, logProjections: 0, healthProjections: 0, failureProjections: 0, healthRecomputations: 0, healthConfigInvalidations: 0 };
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, healthDeadline: 0, unverified: 0, initial: 0 };
+  private get assignmentMetrics() {
+    if (this.observationInitialized) {
+      try { return this.reader.changeMetrics; }
+      catch (error) { if (!isSqliteLockContention(error)) throw error; }
+    }
+    return { available: false, received: null, applied: null, pending: null };
+  }
   get metrics() {
-    return { ...this.counters, assignments: this.reader?.changeMetrics ?? { available: false, received: null, applied: null, pending: null }, initialization: { ...this.initialization }, checkpoints: { ...this.checkpoints.metrics, hotDisplay: this.parseStates.size, hotHealth: this.healthStates.size }, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader?.connection(false))) + this.background.connectionCount,
+    return { ...this.counters, assignments: this.assignmentMetrics, initialization: { ...this.initialization }, checkpoints: { ...this.checkpoints.metrics, hotDisplay: this.parseStates.size, hotHealth: this.healthStates.size }, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader?.connection(false))) + this.background.connectionCount,
       indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size, sourceParentWatchers: this.rootParents.size, rootParentWatchers: this.rootParents.size };
   }
   readonly runs: string;
@@ -136,7 +144,8 @@ export class WorkReadModel {
   readonly instanceId: string;
 
   private watch: SourceWatch;
-  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number; watch?: SourceWatch } = {}) {
+  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number; watch?: SourceWatch; budgetBuffer?: SharedArrayBuffer } = {}) {
+    this.budget = createWorkBudget(options.budgetBuffer);
     this.watch = options.watch ?? watchSource;
     this.agentDir = agentDir; this.instanceId = instanceId;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
@@ -434,15 +443,15 @@ export class WorkReadModel {
 
   /** Ordinary coordinator commits use the reverse scope index, not the source inventory. */
   private refreshAssignments(baselineOnly = false) {
-    if ((!this.imported && !baselineOnly) || this.staged) return;
+    if ((!this.imported && !baselineOnly) || this.staged || this.reader.snapshotActive) return;
     let release: (() => void) | undefined;
     let revision: string | undefined;
     try {
       if (this.unsupportedAssignmentRevision && this.unsupportedAssignmentRevision === this.reader.revision()) return;
       this.unsupportedAssignmentRevision = undefined;
+      const changes = this.reader.changes();
       const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
       revision = snapshot.revision;
-      const changes = this.reader.changes();
       if (changes.has("*")) {
         const key = `${this.reader.changeMetrics.generation}:${changes.get("*")}`;
         if (baselineOnly) {
@@ -476,7 +485,7 @@ export class WorkReadModel {
       }
       let changed = false;
       const changedRows: WorkReadModel["changedRows"] = [];
-      this.db.exec("BEGIN");
+      this.db.exec("SAVEPOINT assignment_refresh");
       try {
         const update = this.db.prepare("UPDATE rows SET state=?, active=?, recipient_pending=?, payload=? WHERE id=?");
         for (const row of updated) {
@@ -485,11 +494,12 @@ export class WorkReadModel {
           changedRows.push({ before: this.projected.get(row.meta.id), after: row });
           changed = true;
         }
-        this.db.exec("COMMIT");
-      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        this.db.exec("RELEASE assignment_refresh");
+      } catch (error) { this.db.exec("ROLLBACK TO assignment_refresh; RELEASE assignment_refresh"); throw error; }
       // A crash after application but before acknowledgement safely repeats this batch.
-      for (const row of updated) this.projected.set(row.meta.id, row);
       this.reader.acknowledgeChanges(changes, false);
+      snapshot.commit();
+      for (const row of updated) this.projected.set(row.meta.id, row);
       if (this.reader.changeMetrics.more || this.reader.changeMetrics.pending) this.dirty = true;
       this.coordinator = snapshot.revision;
       this.counters.assignmentProjections += updated.length; this.counters.projections += updated.length;
@@ -501,13 +511,14 @@ export class WorkReadModel {
       }
       if (changed) this.publish();
     } catch (error) {
+      release?.(); release = undefined;
       if (!this.projected.size) return;
       // A coordinator has never been required for plain archived/log-only runs.
       // Losing an already observed database still degrades the existing coverage.
       if ((error as NodeJS.ErrnoException).code === "ENOENT" && this.coordinator === "unknown") return;
       if (error instanceof Error && error.message === "Unsupported assignment source schema") this.unsupportedAssignmentRevision = revision;
       this.assignmentFault ??= { state: this.state, reason: this.reason };
-      if (String(error).includes("no such table: assignment_change_source")) {
+      if (/no such table: (?:coordinator_source\.)?assignment_change_source$/.test(String(error))) {
         // Old sources have no feed. Finish one budgeted compatibility pass;
         // continuous legacy writes do not restart a pass already in progress.
         this.imported = false; this.repairOwed = true; this.state = "rebuilding";
@@ -560,6 +571,8 @@ export class WorkReadModel {
     if (this.pending) {
       return drain && this.observationInitialized ? this.pending.then(() => this.reconcile()) : this.pending;
     }
+    const release = this.budget.enter("repair");
+    if (!release) return Promise.resolve();
     this.pending = (async () => {
       await this.watchRegistrations();
       if (this.closed) return;
@@ -572,7 +585,7 @@ export class WorkReadModel {
           if (this.db.isTransaction) throw new Error("Derived observation initialization requires an unpinned owner");
           initialized = this.checkpoints.initialize();
           if (initialized) this.reader ??= createAssignmentReader(join(this.agentDir, "operation-coordinator.sqlite"),
-            join(this.agentDir, "runtime-read-repair", "assignments.sqlite"), this.db);
+            join(this.agentDir, "runtime-read-repair", "assignments.sqlite"), this.db, { composed: true });
           if (initialized) this.background.initialize();
         } catch (error) {
           if (isSqliteLockContention(error)) initialized = false;
@@ -633,6 +646,7 @@ export class WorkReadModel {
     })().catch(error => {
       this.repair = undefined; this.state = "degraded"; this.reason = String(error).slice(0, 512); this.publish();
     }).finally(() => {
+      release();
       this.pending = undefined;
       if (this.observationInitialized && (this.hints.size || this.dirty) && !this.closed && !this.unsupportedAssignmentRevision) { this.dirty = false; void this.reconcile(false); }
     });
@@ -656,6 +670,9 @@ export class WorkReadModel {
     const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
     let releaseCoordinator: (() => void) | undefined;
+    let commitCoordinator: (() => void) | undefined;
+    const checkpointWrites: Array<[string, unknown]> = [];
+    const parseBefore = new Map(this.parseStates), healthBefore = new Map(this.healthStates);
     let sourceRace: WorkReadModel["sourceRace"];
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
       healthRevision: this.healthRevision, coordinator: this.coordinator };
@@ -736,13 +753,13 @@ export class WorkReadModel {
           }
         }
       }
+      let assignmentChanges: Map<string, string> | undefined;
+      try { assignmentChanges = this.reader.changes(); } catch { /* Legacy sources retain bounded repair. */ }
       let coordinator: string;
       try {
         const snapshot = this.reader.beginSnapshot();
-        coordinator = snapshot.revision; releaseCoordinator = snapshot.release;
+        coordinator = snapshot.revision; releaseCoordinator = snapshot.release; commitCoordinator = snapshot.commit;
       } catch { coordinator = "unknown"; }
-      let assignmentChanges: Map<string, string> | undefined;
-      try { assignmentChanges = this.reader.changes(); } catch { /* Legacy sources are reconciled through bounded metadata repair. */ }
       if (assignmentChanges?.has("*")) {
         const seq = assignmentChanges.get("*")!;
         const key = `${this.reader.changeMetrics.generation}:${seq}`;
@@ -903,6 +920,11 @@ export class WorkReadModel {
           if (logChanged) withLogReadBatch(() => {
             this.counters.logProjections++; this.counters.healthProjections++;
             const logPath = join(this.runs, meta.id, "output.log");
+            const priorDisplay = parseBefore.get(logPath), priorHealth = healthBefore.get(logPath);
+            if (priorDisplay && this.parseStates.get(logPath) === priorDisplay)
+              this.parseStates.set(logPath, decodeParseLogState(structuredClone(encodeParseLogState(priorDisplay))));
+            if (priorHealth && this.healthStates.get(logPath) === priorHealth)
+              this.healthStates.set(logPath, decodeHealthLogState(structuredClone(encodeHealthLogState(priorHealth))));
             if (!this.parseStates.has(logPath) || !this.healthStates.has(logPath)) {
               const saved = this.checkpoints.load(logPath);
               if (saved) {
@@ -925,9 +947,9 @@ export class WorkReadModel {
             if (health && healthState) health = { ...health, coverage: { start: healthState.cursor.coverageStart ?? 0,
               offset: healthState.cursor.offset, missing: healthState.cursor.missing } };
             if (displayState?.catchingUp) logs.set(meta.id, `${logs.get(meta.id)}:catching-up`);
-            if (displayState && healthState) this.checkpoints.save(logPath, {
+            if (displayState && healthState) checkpointWrites.push([logPath, {
               display: encodeParseLogState(displayState), health: encodeHealthLogState(healthState),
-            });
+            }]);
             while (this.parseStates.size > 64) this.parseStates.delete(this.parseStates.keys().next().value);
             while (this.healthStates.size > 64) this.healthStates.delete(this.healthStates.keys().next().value);
           });
@@ -1011,11 +1033,12 @@ export class WorkReadModel {
       if (this.closed) return;
       rearmRawDirectories();
       await this.watchRegistrations();
-      this.db.exec("BEGIN");
+      if (!commitCoordinator) this.db.exec("BEGIN");
       const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");
       let semanticChange = false;
       const changedRows: WorkReadModel["changedRows"] = [];
+      const publishCheckpoints: Array<() => void> = [];
       try {
         for (const id of this.projected.keys()) if (!metas.has(id)) { changedRows.push({ before: this.projected.get(id) }); remove.run(id); this.db.prepare("DELETE FROM assignment_members WHERE id=?").run(id); this.db.prepare("DELETE FROM terminal_log_folds WHERE id=?").run(id); semanticChange = true; }
         for (const id of terminalLogChanges) this.db.prepare("INSERT INTO terminal_log_folds VALUES (?, ?, 1, ?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, pending=1, queue_position=CASE WHEN terminal_log_folds.pending=0 THEN excluded.queue_position ELSE terminal_log_folds.queue_position END").run(id, hash([logs.get(id), metas.get(id)?.status]), ++this.foldQueueSequence);
@@ -1032,10 +1055,15 @@ export class WorkReadModel {
           const workspace = m.assignment?.owner?.workspace ?? m.operations?.workspace ?? m.cwd;
           for (const assignmentId of new Set([m.assignment?.assignmentId ?? null, null])) this.db.prepare("INSERT INTO assignment_members VALUES(?,?)").run(JSON.stringify([session, workspace, assignmentId]), m.id);
         }
-        this.db.exec("COMMIT");
-      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
-      // Only the completed bounded source walk may acknowledge a baseline.
-      if (assignmentChanges && rows.every(row => row.assignment.verified)) this.reader.acknowledgeChanges(assignmentChanges, false);
+        for (const [path, checkpoint] of checkpointWrites) publishCheckpoints.push(this.checkpoints.save(path, checkpoint, true));
+        // Application and its exact acknowledgement share the owner commit.
+        if (assignmentChanges && rows.every(row => row.assignment.verified)) this.reader.acknowledgeChanges(assignmentChanges, false);
+        if (commitCoordinator) commitCoordinator(); else this.db.exec("COMMIT");
+      } catch (error) {
+        if (releaseCoordinator) releaseCoordinator(); else this.db.exec("ROLLBACK");
+        throw error;
+      }
+      for (const publish of publishCheckpoints) publish();
       this.files = next; this.logs = logs; this.failureJournals = failureJournals; this.processes = processes; this.healthRevision = healthConfig.revision; this.coordinator = coordinator; this.inventory++;
       this.projected = new Map(rows.map(row => [row.meta.id, row]));
       for (const states of [this.parseStates, this.healthStates]) for (const path of states.keys()) {
@@ -1067,6 +1095,8 @@ export class WorkReadModel {
         this.publish();
       }
     } catch (error) {
+      releaseCoordinator?.(); releaseCoordinator = undefined;
+      this.parseStates = parseBefore; this.healthStates = healthBefore;
       if (this.closed) return;
       const reason = String(error).slice(0, 512);
       this.sourceRace = sourceRace;
@@ -1083,6 +1113,11 @@ export class WorkReadModel {
     return this.db.prepare("SELECT id, revision FROM terminal_log_folds WHERE pending=1 ORDER BY queue_position, id LIMIT 128").all();
   }
   acknowledgeTerminalLogs(batch: Array<{id: string; revision: string}>) {
+    if (this.closed) return;
+    if (this.reader?.snapshotActive && this.pending) {
+      void this.pending.then(() => this.acknowledgeTerminalLogs(batch));
+      return;
+    }
     const acknowledge = this.db.prepare("UPDATE terminal_log_folds SET pending=CASE WHEN revision=? THEN 0 ELSE 1 END, queue_position=? WHERE id=?");
     // A newer revision remains owed, but rejoins behind existing obligations.
     // Continuously changing low IDs cannot monopolize every subsequent batch.
@@ -1090,6 +1125,9 @@ export class WorkReadModel {
   }
 
   snapshot(scope: WorkScope = {}): WorkSnapshot {
+    if (!this.observationInitialized && !this.closed) return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, this.state, this.reason]), seq: this.revision,
+      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, status: this.state, reason: this.reason,
+      rows: [], totalMatching: 0, activity: { active: 0 }, nextDeadline: null };
     if (scope.background) {
       if (!this.observationInitialized) {
         const status = this.state === "ready" ? "degraded" : this.state;

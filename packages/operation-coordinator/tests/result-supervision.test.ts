@@ -7,6 +7,48 @@ import { DatabaseSync } from "node:sqlite";
 afterEach(cleanupHarnesses);
 const transfer = (operationId: string) => ({ operationId, expectedHostId: "host-1", directory: "/supervisor", hostId: "server:epoch-1", epoch: "epoch-1" });
 
+test("result supervision follows exact shared changes and detects a retained-feed gap", () => {
+    const { store, path } = createHarness();
+    const baseline = store.resultSupervisionChanges();
+    assert.equal(baseline.reset, true);
+    store.registerOperation({ operationId: "op-build-1", taskId: "task", launchToken: "token", owner: workerOwner,
+        observer: { kind: "local-supervisor", version: "1" }, supervision: { hostId: "host-1" } });
+    store.handoffResultSupervision(transfer("op-build-1"));
+    const changed = store.resultSupervisionChanges(baseline);
+    assert.equal(changed.reset, false);
+    assert.deepEqual(changed.operationIds, ["op-build-1"]);
+    assert.deepEqual(store.resultSupervisionChanges(changed).operationIds, []);
+    const peer = new DatabaseSync(path);
+    try {
+        // The normal retention trigger drops earlier feed positions. The
+        // consumer must recover authority instead of trusting a stale cursor.
+        const insert = peer.prepare("INSERT INTO assignment_changes(entity,entity_id,session_id,workspace) VALUES('binding','unrelated','s','/w')");
+        peer.exec("BEGIN");
+        for (let i = 0; i < 4200; i++) insert.run();
+        peer.exec("COMMIT");
+    } finally { peer.close(); }
+    assert.equal(store.resultSupervisionChanges(changed).reset, true);
+    assert.equal(store.resultSupervisions(true)[0]?.operationId, "op-build-1");
+});
+
+test("unrelated assignment traffic yields bounded pages without runner work", () => {
+    const { store, path } = createHarness();
+    const baseline = store.resultSupervisionChanges();
+    const peer = new DatabaseSync(path);
+    try {
+        const insert = peer.prepare("INSERT INTO assignment_changes(entity,entity_id,session_id,workspace) VALUES('binding','unrelated','s','/w')");
+        for (let i = 0; i < 129; i++) insert.run();
+    } finally { peer.close(); }
+    const first = store.resultSupervisionChanges(baseline);
+    assert.equal(first.more, true);
+    assert.equal(first.seq - baseline.seq, 128);
+    assert.deepEqual(first.operationIds, []);
+    const second = store.resultSupervisionChanges(first);
+    assert.equal(second.more, false);
+    assert.equal(second.seq - first.seq, 1);
+    assert.deepEqual(second.operationIds, []);
+});
+
 test("the first open of a v3 database installs the result admission fence", () => {
     const harness = createHarness();
     registerOperation(harness.store);

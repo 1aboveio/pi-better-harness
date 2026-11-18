@@ -21,10 +21,33 @@ import { inspectMeta, logPathFor, metaPathFor, taskDir, writeMeta } from "./regi
 import { registerTools } from "./tools.js";
 import { clearBackgroundTasksNavigatorSession, ensureBackgroundTasksNavigator, ensureBackgroundTasksNavigatorProvider } from "./navigator-provider.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, Condition } from "./types.js";
+const { captureRunRemovalEvidence } = await import(new URL("../../pi-better-subagents/tests/fixture-run-ownership.mjs", import.meta.url).href);
 
 const createdIds: string[] = [];
 const apis: any[] = [];
-let stopRuntime: () => Promise<void>;
+let stopRuntime: Awaited<ReturnType<typeof startWorkRuntime>>;
+const fixtureWriters = new Map<string, { pid: number; status: string; cleanup: string }>();
+
+function retainMissingTaskWriter(error: unknown): void {
+  const match = /Unverified background task ([A-Za-z0-9_-]{1,128}): metadata file is missing/.exec(String(error));
+  if (!match) return;
+  try {
+    const fixtureWriter = fixtureWriters.get(match[1]!);
+    const evidence = { id: match[1], residual: fixtureWriter ? captureRunRemovalEvidence(taskDir(match[1]!))
+      : { entries: [], truncated: false, unavailable: "not retained as an owned fixture" },
+      fixtureWriter: fixtureWriter ?? null, registeredObservationApis: apis.length,
+      daemon: stopRuntime.diagnostics(), pendingWrites: "not observed by fixture", residualAuthor: "not established by filenames" };
+    let encoded = JSON.stringify(evidence);
+    if (Buffer.byteLength(encoded) > 32768) {
+      evidence.residual.entries = evidence.residual.entries.slice(0, 8);
+      evidence.residual.truncated = true;
+      encoded = JSON.stringify(evidence);
+    }
+    console.error("[output-missing-task-writer]", encoded);
+  } catch (captureError) {
+    try { console.error("[output-missing-task-writer-unavailable]", (captureError as NodeJS.ErrnoException).code ?? "capture-failed"); } catch {}
+  }
+}
 beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
 afterAll(async () => { await stopRuntime(); });
 const origin: BackgroundTaskCallbackOrigin = { cwd: "/tmp/output-scope", sessionId: "session-a" };
@@ -33,7 +56,11 @@ const otherOrigin: BackgroundTaskCallbackOrigin = { cwd: "/tmp/output-scope", se
 afterEach(() => {
   clearBackgroundTasksNavigatorSession();
   for (const api of apis.splice(0)) closeBackgroundObservation(api);
-  for (const id of createdIds.splice(0)) rmSync(taskDir(id), { recursive: true, force: true });
+  for (const id of createdIds.splice(0)) {
+    rmSync(taskDir(id), { recursive: true, force: true });
+    const writer = fixtureWriters.get(id);
+    if (writer) writer.cleanup = "directory removal returned";
+  }
 });
 
 function fixture(overrides: Partial<BackgroundTaskMeta> & { logLines?: string[] } = {}): BackgroundTaskMeta {
@@ -58,6 +85,8 @@ function fixture(overrides: Partial<BackgroundTaskMeta> & { logLines?: string[] 
     ...rest,
   };
   writeMeta(meta);
+  fixtureWriters.set(id, { pid: process.pid, status: String(meta.status).slice(0, 40), cleanup: "metadata write returned; cleanup not requested" });
+  if (fixtureWriters.size > 32) fixtureWriters.delete(fixtureWriters.keys().next().value!);
   return meta;
 }
 
@@ -911,52 +940,56 @@ describe("review regressions (#312)", () => {
   });
 
   it("does not treat a legacy no-origin task as owned when the session id is absent", async () => {
-    const legacy = fixture({ logLines: ["LEGACY_NO_ORIGIN"], callbackOrigin: undefined });
-    const ours = fixture({ logLines: ["OWN_SESSIONLESS"], callbackOrigin: { cwd: origin.cwd } });
-    const tools = register();
-    const sessionless = { cwd: origin.cwd, sessionManager: { getSessionId: () => undefined } };
-    const legacyLog = textOf(await tools.bg_task_log.execute("tc", { id: legacy.id }, undefined, undefined, sessionless));
-    expect(legacyLog).not.toContain("LEGACY_NO_ORIGIN");
-    expect(legacyLog).toContain("ownership is unavailable");
-    const ownLog = textOf(await tools.bg_task_log.execute("tc", { id: ours.id }, undefined, undefined, sessionless));
-    expect(ownLog).toContain("OWN_SESSIONLESS");
-    const list = textOf(await tools.bg_task_list.execute("tc", { limit: 100, max_bytes: 4096 }, undefined, undefined, sessionless));
-    expect(list).not.toContain(`${legacy.id} `);
-    expect(list).toContain(`${ours.id} `);
-    const observed = await backgroundObservation(apis.at(-1), sessionless as any, true);
-    expect(observed.rows.some((row: any) => row.meta.id === legacy.id)).toBe(false);
-    expect(observed.rows.some((row: any) => row.meta.id === ours.id)).toBe(true);
+    try {
+      const legacy = fixture({ logLines: ["LEGACY_NO_ORIGIN"], callbackOrigin: undefined });
+      const ours = fixture({ logLines: ["OWN_SESSIONLESS"], callbackOrigin: { cwd: origin.cwd } });
+      const tools = register();
+      const sessionless = { cwd: origin.cwd, sessionManager: { getSessionId: () => undefined } };
+      const legacyLog = textOf(await tools.bg_task_log.execute("tc", { id: legacy.id }, undefined, undefined, sessionless));
+      expect(legacyLog).not.toContain("LEGACY_NO_ORIGIN");
+      expect(legacyLog).toContain("ownership is unavailable");
+      const ownLog = textOf(await tools.bg_task_log.execute("tc", { id: ours.id }, undefined, undefined, sessionless));
+      expect(ownLog).toContain("OWN_SESSIONLESS");
+      const list = textOf(await tools.bg_task_list.execute("tc", { limit: 100, max_bytes: 4096 }, undefined, undefined, sessionless));
+      expect(list).not.toContain(`${legacy.id} `);
+      expect(list).toContain(`${ours.id} `);
+      const observed = await backgroundObservation(apis.at(-1), sessionless as any, true);
+      expect(observed.rows.some((row: any) => row.meta.id === legacy.id)).toBe(false);
+      expect(observed.rows.some((row: any) => row.meta.id === ours.id)).toBe(true);
+    } catch (error) { retainMissingTaskWriter(error); throw error; }
   });
 });
 
 describe("output-control aliases (#321)", () => {
   it("accepts lines/tail_lines and max_bytes/maxBytes on every log surface; the canonical name wins", async () => {
-    const lines = Array.from({ length: 30 }, (_, index) => `alias-line-${String(index + 1).padStart(2, "0")} ${"x".repeat(40)}`);
-    const meta = fixture({ logLines: lines });
-    const tools = register();
-    const surfaces = [[tools.bg_task_log, {}], [tools.bg_task, { action: "log" }], [tools.bg_status, { action: "log" }]] as const;
-    for (const [tool, extra] of surfaces) {
-      const run = async (params: Record<string, unknown>) => textOf(await tool.execute("tc", { ...extra, id: meta.id, ...params }, undefined, undefined, ctx));
-      const canonical = await run({ lines: 3 });
-      expect(canonical).toContain("newest 3 display rows");
-      expect(canonical).toContain("alias-line-30");
-      expect(canonical).not.toContain("alias-line-27");
-      expect(await run({ tail_lines: 3 })).toBe(canonical);
-      expect(await run({ lines: 2, tail_lines: 5 })).toContain("newest 2 display rows");
-      const rawCanonical = await run({ lines: 0 });
-      expect(rawCanonical).toContain("raw log");
-      expect(await run({ tail_lines: 0 })).toBe(rawCanonical);
+    try {
+      const lines = Array.from({ length: 30 }, (_, index) => `alias-line-${String(index + 1).padStart(2, "0")} ${"x".repeat(40)}`);
+      const meta = fixture({ logLines: lines });
+      const tools = register();
+      const surfaces = [[tools.bg_task_log, {}], [tools.bg_task, { action: "log" }], [tools.bg_status, { action: "log" }]] as const;
+      for (const [tool, extra] of surfaces) {
+        const run = async (params: Record<string, unknown>) => textOf(await tool.execute("tc", { ...extra, id: meta.id, ...params }, undefined, undefined, ctx));
+        const canonical = await run({ lines: 3 });
+        expect(canonical).toContain("newest 3 display rows");
+        expect(canonical).toContain("alias-line-30");
+        expect(canonical).not.toContain("alias-line-27");
+        expect(await run({ tail_lines: 3 })).toBe(canonical);
+        expect(await run({ lines: 2, tail_lines: 5 })).toContain("newest 2 display rows");
+        const rawCanonical = await run({ lines: 0 });
+        expect(rawCanonical).toContain("raw log");
+        expect(await run({ tail_lines: 0 })).toBe(rawCanonical);
 
-      const small = await run({ max_bytes: 300 });
-      expect(utf8ByteLength(small)).toBeLessThanOrEqual(300);
-      expect(await run({ maxBytes: 300 })).toBe(small);
-      const bothBytes = await run({ max_bytes: 300, maxBytes: 4096 });
-      expect(bothBytes).toBe(small);
-    }
-    const list = textOf(await tools.bg_task_list.execute("tc", { maxBytes: 200 }, undefined, undefined, ctx));
-    expect(utf8ByteLength(list)).toBeLessThanOrEqual(200);
-    const status = textOf(await tools.bg_task_status.execute("tc", { id: meta.id, maxBytes: 400 }, undefined, undefined, ctx));
-    expect(utf8ByteLength(status)).toBeLessThanOrEqual(400);
+        const small = await run({ max_bytes: 300 });
+        expect(utf8ByteLength(small)).toBeLessThanOrEqual(300);
+        expect(await run({ maxBytes: 300 })).toBe(small);
+        const bothBytes = await run({ max_bytes: 300, maxBytes: 4096 });
+        expect(bothBytes).toBe(small);
+      }
+      const list = textOf(await tools.bg_task_list.execute("tc", { maxBytes: 200 }, undefined, undefined, ctx));
+      expect(utf8ByteLength(list)).toBeLessThanOrEqual(200);
+      const status = textOf(await tools.bg_task_status.execute("tc", { id: meta.id, maxBytes: 400 }, undefined, undefined, ctx));
+      expect(utf8ByteLength(status)).toBeLessThanOrEqual(400);
+    } catch (error) { retainMissingTaskWriter(error); throw error; }
   });
 
   it("declares canonical and deprecated names in every read schema", () => {

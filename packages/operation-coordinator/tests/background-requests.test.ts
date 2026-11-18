@@ -5,6 +5,32 @@ import { BACKGROUND_PENDING_QUERY } from '../src/background-requests.ts';
 import { test,afterEach } from 'node:test';
 import { cleanupHarnesses,createHarness } from './support.ts';
 afterEach(cleanupHarnesses);
+test('launch reasons use the accepted journal and writer identity but never bearer tokens',()=>{
+  const h=createHarness(), journal=h.store.subagentLaunchJournal(), epoch=journal.epoch('instance');
+  journal.accept('owner','key','secret-digest',epoch);
+  const reason=journal.lifecycleReasons()[0]!;
+  assert.equal(reason.kind,'task'); assert.equal(reason.executionDeadline,null);
+  assert.ok(reason.lastProgressAt); assert.equal(reason.management.epoch,epoch);
+  assert.doesNotMatch(JSON.stringify(reason),/secret-digest/);
+  journal.finish('owner','key',epoch,{});
+  assert.deepEqual(journal.lifecycleReasons(),[]);
+});
+test('accepted request reasons follow durable progress without exposing execution tokens or inventing expiry',()=>{
+  const h=createHarness(), journal=h.store.backgroundRequests();
+  journal.accept('owner','request','digest'); journal.dispatch('owner','request');
+  journal.operation('owner','request',{operationId:'op',taskId:'task',token:'SECRET'});
+  h.reopen();
+  const reasons=h.store.backgroundRequests().lifecycleReasons();
+  assert.equal(reasons.length,1);
+  assert.equal(reasons[0]?.kind,'task');
+  assert.deepEqual(reasons[0]?.operations,[{operationId:'op',taskId:'task'}]);
+  assert.equal(reasons[0]?.executionDeadline,null);
+  assert.equal(reasons[0]?.nextDeadline,null);
+  assert.ok(reasons[0]?.lastProgressAt);
+  assert.doesNotMatch(JSON.stringify(reasons),/SECRET|digest/);
+  h.store.backgroundRequests().finish('owner','request',{});
+  assert.deepEqual(h.store.backgroundRequests().lifecycleReasons(),[]);
+});
 test('Background request replay retains prepared identities across writer loss and refuses changed content',()=>{
   const h=createHarness(),owner='workspace/session',key='native-tool-call';
   let journal=h.store.backgroundRequests();
