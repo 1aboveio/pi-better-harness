@@ -1084,14 +1084,21 @@ export class WorkReadModel {
 
   snapshot(scope: WorkScope = {}): WorkSnapshot {
     if (scope.background) {
+      if (!this.observationInitialized) {
+        const status = this.state === "ready" ? "degraded" : this.state;
+        const reason = this.reason ?? "Derived observation inputs are unavailable.";
+        return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, status, reason]), seq: this.revision,
+          observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
+          status, reason, rows: [], totalMatching: 0, activity: { active: 0 }, nextDeadline: null };
+      }
       if (scope.backgroundHistory && this.background.refresh()) this.publish(true);
       const index = scope.backgroundHistory ? this.background.historyIndex(scope) : undefined;
       const tasks = this.background.read(scope, index);
-      const status = !this.observationInitialized ? this.state : this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
+      const status = this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
       const active = (index ? this.background.read({ ...scope, backgroundHistory: false, active: true }) : tasks).filter(task => task.durable ? task.active : task.status === "running").length;
       return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, tasks, status, index?.page, active]), seq: this.revision,
         observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
-        status, reason: !this.observationInitialized ? this.reason : this.background.reason ?? (index ? this.background.historyReason : undefined),
+        status, reason: this.background.reason ?? (index ? this.background.historyReason : undefined),
         rows: tasks.map(meta => ({ meta, assignment: null, sourceRevision: hash(meta) })), totalMatching: index?.page.total ?? tasks.length,
         ...(index?.page.nextCursor ? { nextCursor: index.page.nextCursor } : {}),
         ...(index ? { backgroundIndex: index } : {}),
