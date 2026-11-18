@@ -35,6 +35,8 @@ test("A staged source race degrades A but preserves verified B frames and cursor
     assert.match(aFrames[0]?.reason, /Source changed during observation/);
     assert.equal(aFrames[0]?.rows[0].meta.name, "old", "unpublished staging is not visible");
     assert.equal(bFrames, 0, "unrelated content sends no scoped frames");
+    assert.match(model.snapshot({ cwd: a }).reason!, /Source changed during observation/);
+    assert.equal(model.snapshot({ cwd: a }).rows[0]!.meta.name, "old");
     assert.equal(model.snapshot(scope).status, "ready");
     assert.equal(model.snapshot(scope).scopeRevision, first.scopeRevision);
     assert.equal(model.snapshot({ ...scope, cursor: first.nextCursor }).rows.length, 1);
@@ -89,7 +91,7 @@ test("a held partial A write degrades A but sends no unrelated B frames", async 
     writeSync(held, JSON.stringify({ id: "sa_a", cwd: b, status: "completed", startedAt: 1 }), 0, "utf8");
     closeSync(held); held = undefined;
     await model.reconcile();
-    assert.equal(model.snapshot({ cwd: b }).totalMatching, 3);
+    assert.equal(model.snapshot({ cwd: b }).totalMatching, 3, "a valid move affects its destination");
     assert.ok(frames > 0);
     assert.throws(() => model.snapshot({ ...scope, cursor: first.nextCursor }), /resync_required/);
     writeFileSync(join(root, "runs/sa_b1/meta.json"), "{");

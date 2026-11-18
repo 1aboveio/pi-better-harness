@@ -235,6 +235,7 @@ export class ManagedSubagentHost {
         if (failure && Date.now() < failure.retryAt) return Promise.resolve("skipped" as const);
         this.continuationWindow.admitted++;
         this.pending++;
+        let dispatched = false;
         const result = this.tail.catch(() => undefined).then(async () => {
             const saved = this.journal.attempt(park.runId)?.launchAuthority;
             if (!saved) throw new Error("Captured continuation launch authority unavailable");
@@ -245,6 +246,7 @@ export class ManagedSubagentHost {
                 ownerKey: JSON.stringify([saved.owner.workspace, saved.owner.sessionId]),
                 digest: launchDigest({ key, runId: park.runId }) };
             this.api.events.emit("pi-better-sandbox:policy", { state: "enabled", ...permissions });
+            dispatched = true;
             const outcome = await run();
             if (outcome === "resumed") this.journal.finish(this.current.ownerKey, this.current.key, this.epoch, { status: outcome });
             this.continuationFailures.delete(retryKey);
@@ -253,6 +255,9 @@ export class ManagedSubagentHost {
             const failures = Math.min(6, (this.continuationFailures.get(retryKey)?.failures ?? 0) + 1);
             if (this.continuationFailures.size >= 128 && !this.continuationFailures.has(retryKey)) this.continuationFailures.delete(this.continuationFailures.keys().next().value!);
             this.continuationFailures.set(retryKey, { failures, retryAt: Date.now() + Math.min(30000, 1000 * 2 ** (failures - 1)), reason: String(error).slice(0, 500) });
+            // Let orchestration persist its existing pre-spawn hold. A skipped
+            // result would leave this exact generation ready despite refusal.
+            if (!dispatched) throw error;
             return "skipped" as const;
         }).finally(() => { this.pending--; });
         this.tail = result;

@@ -147,8 +147,7 @@ export function commitAssignmentTerminal(meta, recoveryFailure = false) {
         catch (error) {
             // A competing finalizer may commit after our initial read. The store
             // still refuses rewrites; return only the same captured binding's winner.
-            // A borrowed server store uses its canonical coordinator module,
-            // whose StoreError constructor differs from this embedded copy.
+            // Borrowed runtime stores use a different coordinator module's StoreError constructor.
             if (error instanceof Error && error.name === "StoreError" && "code" in error
                 && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
                 const winner = store.getAssignmentOutcome(binding.assignmentId);
