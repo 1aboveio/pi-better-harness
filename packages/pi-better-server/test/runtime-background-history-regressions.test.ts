@@ -63,8 +63,6 @@ for (const historyActive of [false, true]) test(`repaired legacy watch releases 
 test("cached parent and headless child factories list the parent's newly registered durable operation", { timeout: 10000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), "cached-factory-component-"));
   const lease = acquireMutationStore(root);
-  const executor = new WorkQueryExecutor(root, "cached-factory-component", { modelOptions: {
-    baseDir: join(root, "raw"), durableDir: join(root, "archive"), supervisorDirectory: join(root, "supervisor"), intervalMs: 60000 } });
   const clients: any[] = [], scopes: any[] = [];
   const serviceTools = new Map<string, any>();
   const { registerTools } = await load("tools");
@@ -101,6 +99,9 @@ test("cached parent and headless child factories list the parent's newly registe
   const subagentsModule = new URL("../../pi-better-subagents/index.ts", import.meta.url).href;
   const { default: subagents } = await import(subagentsModule);
   const { initTheme } = await import("@earendil-works/pi-coding-agent"); initTheme("dark", false);
+  // Load the host factories before starting the worker's bootstrap watchdog.
+  const executor = new WorkQueryExecutor(root, "cached-factory-component", { modelOptions: {
+    baseDir: join(root, "raw"), durableDir: join(root, "archive"), supervisorDirectory: join(root, "supervisor"), intervalMs: 60000 } });
   const make = (sessionId: string, tui: boolean) => {
     const handlers = new Map<string, any[]>(), tools = new Map<string, any>();
     const pi: any = { events: { emit: (name: string, value: any) => events.emit(name, value),
