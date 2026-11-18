@@ -36,6 +36,7 @@ test("Background constructor attaches its inbox and repair state to the query ow
   try {
     const derived = (model as any).db;
     assert.equal((model as any).background.inbox, undefined);
+    assert.equal((model as any).background.ready, false);
     assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main"]);
     assert.equal(model.metrics.checkpoints.acquisitionAttempts, 0, "construction must not acquire checkpoints");
     await model.reconcile();
@@ -44,6 +45,7 @@ test("Background constructor attaches its inbox and repair state to the query ow
     assert.equal(inbox.db, derived);
     assert.equal(inbox.prefix, "background_inbox.");
     assert.equal(model.metrics.checkpoints.acquisitionAttempts, 1);
+    assert.equal((model as any).db, derived, "deferred checkpoint acquisition retains the original owner");
     assert.ok(derived.prepare("SELECT name FROM background_inbox.sqlite_master WHERE name='background_file_repair'").get());
     assert.equal(derived.prepare("SELECT name FROM main.sqlite_master WHERE name='background_file_repair'").get(), undefined);
     assert.equal(derived.prepare("SELECT name FROM assignment_inbox.sqlite_master WHERE name='background_file_repair'").get(), undefined);

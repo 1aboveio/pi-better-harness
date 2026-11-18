@@ -17,6 +17,7 @@ export type ReadStream = Pick<Duplex, "destroyed" | "writableLength" | "write" |
 interface Stream { socket: ReadStream; paused: boolean; generation: number; drain: () => void; close: () => void }
 interface WorkerMetrics { sourceWatchers?: number; inventories?: number; coordinatorConnections?: number; indexConnections?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
 export interface QueryExecutorOptions {
+  queryCacheDiagnostics?: boolean;
   capacity?: number; timeoutMs?: number; maxConnections?: number; watchdogMs?: number;
   workerUrl?: URL;
   budgetBuffer?: SharedArrayBuffer;
@@ -96,7 +97,8 @@ export class WorkQueryExecutor {
     const generation = this.workerGeneration;
     const instanceId = this.workerGeneration ? `${this.instanceId}:reads:${this.workerGeneration}` : this.instanceId;
     const worker = new Worker(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url), {
-      execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: { ...this.options.modelOptions, budgetBuffer: this.options.budgetBuffer } },
+      execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: { ...this.options.modelOptions, budgetBuffer: this.options.budgetBuffer },
+        queryCacheDiagnostics: this.options.queryCacheDiagnostics === true },
     });
     worker.on("message", message => {
       if (this.sourceWatches.handle(generation, message, value => {
@@ -110,7 +112,7 @@ export class WorkQueryExecutor {
       // Preserve the SQLite producer that the forwarded Error message omits.
       const producer = /database (?:is locked|table is locked)/.test(original)
         ? `\n${String(error instanceof Error ? error.stack ?? error : error).split("\n").slice(0, 12).join("\n").slice(0, 4096)}` : "";
-      this.fail(new Error(`runtime-unhealthy: read worker failed: ${original}${producer}`));
+      this.fail(new Error(`runtime-unhealthy: read worker failed: ${original}${producer}`, { cause: error }));
     });
     worker.on("exit", code => {
       if (worker !== this.worker) return;
