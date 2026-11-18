@@ -281,7 +281,7 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
     await Promise.all(Array.from({ length: 32 }, () => current.reconcile(true)));
     assert.equal(current.metrics.initialization.attempts, 1);
     assert.equal(current.metrics.checkpoints.acquisitionAttempts, 1, "checkpoint attachment succeeded independently");
-    assert.deepEqual(names(db), ["main", "background_inbox", "log_checkpoints"], "failed inbox ATTACH leaves no owned alias or loss of the other participant");
+    assert.deepEqual(names(db), ["main", "log_checkpoints"], "failed assignment ATTACH retains checkpoints without acquiring Background prematurely");
     const frames: any[] = [];
     const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0,
       write(line: string) { frames.push(JSON.parse(line)); }, destroy() {} });
@@ -366,7 +366,7 @@ test("inbox corruption is not lock deferral and close does not require an initia
     assert.match(model.snapshot().reason!, /not a database/);
     assert.equal(model.metrics.initialization.contentions, 0);
     assert.equal(model.metrics.assignments.applied, null);
-    assert.deepEqual(names((model as any).db), ["main", "background_inbox", "log_checkpoints"]);
+    assert.deepEqual(names((model as any).db), ["main", "log_checkpoints"]);
     t.mock.timers.tick(1000); await model.reconcile();
     assert.equal(model.metrics.initialization.attempts, 1);
     assert.throws(() => model.livenessReasons(), /unverified/);
