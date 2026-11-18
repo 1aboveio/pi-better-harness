@@ -105,6 +105,8 @@ test("version 1 migrates without losing dependency evidence or published writer 
     const { h, input } = fixture();
     h.closeStore();
     const db = new DatabaseSync(h.path);
+    // The fixture removes additive schema too, matching an actual v1 database.
+    for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'assignment_change_%'").all()) db.exec(`DROP TRIGGER "${row.name}"`);
     db.exec("DROP TABLE assignment_outcome_waits; DROP TABLE assignment_outcomes; DROP TABLE assignment_attempts; DROP TABLE assignment_bindings; ALTER TABLE outbox_events DROP COLUMN event_type; DROP INDEX waits_one_pending_per_owner; ALTER TABLE waits DROP COLUMN dispatch_disarmed; CREATE UNIQUE INDEX waits_one_pending_per_owner ON waits (owner_kind, owner_session_id, coalesce(owner_branch_id, '')) WHERE phase NOT IN ('consumed', 'cancelled'); UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'");
     db.close();
     h.reopen();

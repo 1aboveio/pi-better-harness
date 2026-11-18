@@ -172,6 +172,7 @@ async function openSession(project) {
   });
   const sent = [];
   const errors = [];
+  const taskStatusProof = new Map();
   const sendCustomMessage = session.sendCustomMessage.bind(session);
   session.sendCustomMessage = (message, options) => {
     sent.push({ ...message, options });
@@ -182,6 +183,7 @@ async function openSession(project) {
     sent,
     requests,
     errors,
+    taskStatusProof,
     sessionId: session.sessionManager.getSessionId(),
     start: async () => {
       runtimeOwner ??= await prepareOwnedRuntime(agentDir);
@@ -196,7 +198,12 @@ async function openSession(project) {
       const tool = session.agent.state.tools.find((candidate) => candidate.name === name);
       assert.ok(tool, `${name} is registered`);
       const result = await tool.execute(randomUUID(), params, new AbortController().signal);
-      return result.content.map((part) => part.text ?? "").join("\n");
+      const text = result.content.map((part) => part.text ?? "").join("\n");
+      if (name === "bg_task_status" && typeof params.id === "string") {
+        taskStatusProof.set(params.id, { terminal: isTerminalStatusText(text),
+          returnedTaskIdentity: text.includes(params.id), nativeError: result.isError === true });
+      }
+      return text;
     },
     completions: (id) => sent.filter((m) => m.customType === "background-completion-batch" && String(m.content).includes(id)),
   };
@@ -517,6 +524,13 @@ test("local and direct-SSH processes that exit after /reload deliver their compl
     } else {
       // A durable local task has no legacy receipt. Its exactly-once contract is
       // the single delivered batch plus the second reload below.
+      if (!/^bgs_/.test(id)) console.error("reload-exit-source", JSON.stringify({
+        phase: "completion-source-lookup", launchRoute: id === localId ? "local" : "structured-ssh-direct",
+        taskClass: /^bg_/.test(id) ? "legacy" : "unknown", fixtureRegistry: bgRegistry.baseDir(),
+        taskDirectoryExists: existsSync(bgRegistry.taskDir(id)), canonicalStatus: host.taskStatusProof.get(id),
+        runtimeOwner: inspectDaemonOwner(serverDir).status, bootstrapErrorCount: host.errors.length,
+        deliveredBatches: host.completions(id).length,
+      }));
       assert.match(id, /^bgs_/);
     }
     await host.session.waitForIdle();

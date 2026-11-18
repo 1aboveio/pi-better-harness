@@ -57,7 +57,7 @@ test("A staged source race degrades A but preserves verified B frames and cursor
   } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("A partial JSON write degrades only its retained namespace and never publishes partial metadata", async () => {
+test("a held partial A write degrades A but sends no unrelated B frames", async () => {
   const root = mkdtempSync(join(tmpdir(), "scope-malformed-"));
   const put = (id: string, cwd: string) => {
     mkdirSync(join(root, "runs", id), { recursive: true });
@@ -100,6 +100,34 @@ test("A partial JSON write degrades only its retained namespace and never publis
     model.invalidate("Unknown source root failure");
     assert.equal(model.snapshot({ cwd: a }).status, "degraded");
   } finally { if (held !== undefined) closeSync(held); await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an unrelated unverified assignment cannot be hidden by an attributed partial source", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scope-global-assignment-"));
+  const a = join(root, "a"), b = join(root, "b"), c = join(root, "c");
+  const put = (id: string, cwd: string, extra = {}) => {
+    mkdirSync(join(root, "runs", id), { recursive: true });
+    writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, status: "completed", startedAt: 1, ...extra }));
+  };
+  put("sa_a", a); put("sa_b", b); put("sa_c", c);
+  const model = new WorkReadModel(root, "global-assignment", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  let held: number | undefined;
+  try {
+    await model.reconcile();
+    for (const watcher of (model as any).watchers.values()) watcher.close();
+    for (const entry of (model as any).rootParents.values()) entry.watcher.close();
+    const path = join(root, "runs/sa_a/meta.json");
+    held = openSync(path, "w"); writeSync(held, '{"id":');
+    await (model as any).scan([path]);
+    assert.equal(model.snapshot({ cwd: b }).status, "ready");
+    put("sa_c", c, { operations: { conversationId: "missing-coordinator-worker", workspace: c } });
+    await (model as any).scan([path, join(root, "runs/sa_c/meta.json")]);
+    assert.equal(model.snapshot({ id: "sa_c" }).rows[0]!.assignment.verified, false);
+    assert.equal(model.snapshot({ cwd: b }).status, "degraded", "unverified assignment coverage remains global even while A has an attributed parse failure");
+  } finally {
+    if (held !== undefined) closeSync(held);
+    await model.close(); rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("ten scoped observers see one committed update and separate partial-write recovery epochs", async t => {

@@ -10,6 +10,7 @@ import { WorkClient } from "../src/runtime/work-client.mjs";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
 import { privateRuntimeNode } from "./private-runtime-node.ts";
+import { historyPhaseMetrics } from "./support/history-phase-metrics.ts";
 
 function fixtureRoot(name: string) {
   const parent = resolve("../../.work/753");
@@ -93,7 +94,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
         maximum: main.maximum + worker.maximum };
     };
     const sqliteBefore = await actualConnections();
-    assert.equal(sqliteBefore.active, 2, "one query index with attached checkpoints and one coordinator connection are retained by the daemon");
+    assert.equal(sqliteBefore.active, 2, "one coordinator and one derived connection retain the query index, durable inbox and checkpoints");
     assert.equal(first.snapshot!.rows.length, 50);
     for (const count of [1, 5, 10]) {
       phase = `shared-scope-clients-${count}`;
@@ -454,7 +455,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
   let diagnosticModel: WorkReadModel | undefined;
   const phases: { phase: string; elapsedMs: number; metrics: unknown }[] = [];
   const mark = (phase: string) => {
-    phases.push({ phase, elapsedMs: Math.round(performance.now() - started), metrics: diagnosticModel?.metrics });
+    phases.push({ phase, elapsedMs: Math.round(performance.now() - started), metrics: historyPhaseMetrics(diagnosticModel) });
     if (phases.length > 32) phases.shift();
   };
   const report = (cause: "abort" | "failure") => {
@@ -462,7 +463,7 @@ test("10000 durable records use bounded indexed history pages; a single archive 
     reported = true;
     const state = diagnosticModel as any;
     console.error(JSON.stringify({ historyDeadlineFailure: { cause, elapsedMs: Math.round(performance.now() - started),
-      archivesWritten, activeWritten, phases, metrics: diagnosticModel?.metrics,
+      archivesWritten, activeWritten, phases, metrics: historyPhaseMetrics(diagnosticModel),
       model: state && { state: state.state, imported: state.imported, pending: Boolean(state.pending), repair: Boolean(state.repair) } } }));
   };
   const aborted = () => report("abort");
@@ -566,7 +567,15 @@ test("10000 durable records use bounded indexed history pages; a single archive 
   }
 });
 
-test("concurrent coordinator writes cannot starve an initial inventory or hide later assignment changes", { timeout: 10000 }, async () => {
+test("concurrent coordinator writes cannot starve an initial inventory or hide later assignment changes", { timeout: 10000 }, async t => {
+  let observedModel: WorkReadModel | undefined;
+  const trace = (phase: string) => {
+    if (process.env.PI_TEST_RUNTIME_WORK_PHASES === "1") t.diagnostic(JSON.stringify({ case: "coordinator-churn", phase,
+      owner: observedModel && { closed: (observedModel as any).closed, readerInitialized: Boolean((observedModel as any).reader),
+        watchers: (observedModel as any).watchers.size, parentWatchers: (observedModel as any).rootParents.size },
+      resources: process.getActiveResourcesInfo() }));
+  };
+  trace("callback-entered");
   const root = fixtureRoot("coordinator-churn");
   const run = join(root, "runs/sa_churn"); mkdirSync(run, { recursive: true });
   writeFileSync(join(run, "meta.json"), JSON.stringify({ id: "sa_churn", sessionId: "worker", cwd: root,
@@ -578,14 +587,27 @@ test("concurrent coordinator writes cannot starve an initial inventory or hide l
   const external = new DatabaseSync(path);
   external.exec("CREATE TABLE diagnostic_churn(value INTEGER); INSERT INTO diagnostic_churn VALUES(0)");
   const model = new WorkReadModel(root, "churn-instance", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
-  const reader = (model as any).reader;
-  const read = reader.read.bind(reader);
-  reader.read = (owner: any) => {
-    const observation = read(owner);
-    external.exec("UPDATE diagnostic_churn SET value = value + 1");
-    return observation;
-  };
+  observedModel = model;
+  let cleanup: Promise<void> | undefined;
+  const close = () => cleanup ??= (async () => {
+    await model.close(); external.close(); writer.close(); rmSync(root, { recursive: true, force: true });
+  })();
+  t.after(async () => { trace("after-callback-before-cleanup"); await close(); trace("after-cleanup"); });
+  trace("model-constructed");
   try {
+    // Install once after ordinary reader acquisition, without a warm-up scan.
+    const scan = (model as any).scan.bind(model);
+    (model as any).scan = (paths: string[]) => {
+      (model as any).scan = scan;
+      const reader = (model as any).reader;
+      const read = reader.read.bind(reader);
+      reader.read = (owner: any) => {
+        const observation = read(owner);
+        external.exec("UPDATE diagnostic_churn SET value = value + 1");
+        return observation;
+      };
+      return scan(paths);
+    };
     await model.reconcile();
     assert.equal(model.snapshot().status, "ready", "an unrelated commit during every projection must not discard the whole inventory");
     assert.equal(model.snapshot().rows[0]!.assignment.state, "completed");
@@ -597,7 +619,8 @@ test("concurrent coordinator writes cannot starve an initial inventory or hide l
     await model.reconcile();
     assert.equal(model.snapshot().status, "ready");
     assert.equal(model.snapshot().rows[0]!.assignment.state, "waiting", "a later coordinator snapshot must observe the new wait");
-  } finally { await model.close(); external.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+    trace("assertions-complete");
+  } finally { trace("finally-entered"); await close(); trace("finally-complete"); }
 });
 
 test("source churn retries reuse completed historical parsing without publishing an inconsistent snapshot", async () => {
@@ -611,23 +634,71 @@ test("source churn retries reuse completed historical parsing without publishing
   const { openStore } = await import(new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href);
   const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
   const model = new WorkReadModel(root, "source-churn", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
-  const reader = (model as any).reader;
-  const read = reader.read.bind(reader);
   let changed = false;
-  reader.read = (owner: any) => {
-    if (!changed) {
-      changed = true;
-      assert.equal(model.snapshot().rows.length, 0);
-      writeFileSync(join(root, "runs/sa_changing/meta.json"), JSON.stringify({ ...metas[1], name: "latest" }));
-    }
-    return read(owner);
-  };
   try {
+    const scan = (model as any).scan.bind(model);
+    (model as any).scan = (paths: string[]) => {
+      (model as any).scan = scan;
+      const reader = (model as any).reader;
+      const read = reader.read.bind(reader);
+      reader.read = (owner: any) => {
+        if (!changed) {
+          changed = true;
+          assert.equal(model.snapshot().rows.length, 0);
+          writeFileSync(join(root, "runs/sa_changing/meta.json"), JSON.stringify({ ...metas[1], name: "latest" }));
+        }
+        return read(owner);
+      };
+      return scan(paths);
+    };
     await model.reconcile();
     assert.equal(model.snapshot().status, "ready");
     assert.equal(model.snapshot({ id: "sa_changing" }).rows[0]!.meta.name, "latest");
     assert.equal(model.metrics.metadataReads, 3, "unchanged historical metadata survives an abandoned scan");
     assert.equal(model.metrics.projections, 3, "only the changed family needs projection again");
+  } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("source retry invalidates cached assignments when a newer journal position arrives", async () => {
+  const root = fixtureRoot("source-journal-churn");
+  const metas = ["history", "changing"].map(name => ({ id: `sa_${name}`, sessionId: name, cwd: root,
+    status: "completed", startedAt: 1, operations: { conversationId: name, workspace: root } }));
+  for (const meta of metas) {
+    mkdirSync(join(root, "runs", meta.id), { recursive: true });
+    writeFileSync(join(root, "runs", meta.id, "meta.json"), JSON.stringify(meta));
+  }
+  const { openStore } = await import(new URL("../../pi-better-subagents/shared-operation-coordinator/index.ts", import.meta.url).href);
+  const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
+  const model = new WorkReadModel(root, "journal-churn", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  let changed = false;
+  try {
+    const scan = (model as any).scan.bind(model);
+    (model as any).scan = (paths: string[]) => {
+      (model as any).scan = scan;
+      const reader = (model as any).reader;
+      const read = reader.read.bind(reader);
+      reader.read = (owner: any) => {
+        const result = read(owner);
+        if (!changed) {
+          changed = true;
+          writeFileSync(join(root, "runs/sa_changing/meta.json"), JSON.stringify({ ...metas[1], name: "latest" }));
+          const owner = { kind: "worker-conversation" as const, sessionId: "history", workspace: root };
+          writer.registerOperation({ operationId: "retry-op", taskId: "retry-task", launchToken: "retry-token", owner,
+            observer: { kind: "background-tasks", version: "1" }, supervision: { hostId: "host", runnerId: "runner" }, authorityRef: "scope" });
+          writer.registerWait({ waitId: "retry-wait", owner, dependencies: [{ operationId: "retry-op" }],
+            origin: { attemptId: "sa_history" }, continuationNote: "Interpret evidence." });
+        }
+        return result;
+      };
+      return scan(paths);
+    };
+    await model.reconcile();
+    assert.equal(model.snapshot().status, "ready");
+    assert.equal(model.snapshot({ id: "sa_history" }).rows[0]!.assignment.state, "waiting");
+    assert.equal(model.snapshot({ id: "sa_changing" }).rows[0]!.meta.name, "latest");
+    assert.equal(model.metrics.metadataReads, 3);
+    assert.equal(model.metrics.projections, 4, "the changed file and newer assignment obligation each invalidate their cached family");
+    assert.equal(model.metrics.assignments.pending, 0);
   } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
