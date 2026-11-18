@@ -1,0 +1,78 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "landed-main-integrated-focused-goal-proof-pass-native-composition-qualification-pending",
+  "sha": "1a33699493f65e325e1302555769f9d927bfd028",
+  "head": "1a33699493f65e325e1302555769f9d927bfd028",
+  "headKind": "Tested integration merge; subsequent report-only commit leaves source/tests unchanged.",
+  "parents": ["a411081d85efa80598b39a9973ed739495de8711", "09e06ef292e5e9fe6f65903e0b2800637b4baa97"],
+  "standingOrders": [],
+  "actualModel": {
+    "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "session": "sa_mwkb0p9t_17",
+    "evidence": ".private-805/logs/merge09e06-model.jsonl",
+    "readback": "Actual session model_change/thinking_level_change records parsed structurally; PI_MODEL/PI_REASONING_LEVEL/PI_SESSION_ID agree. No model pin changed."
+  },
+  "context": {
+    "spec": "../../sources/805.json",
+    "plan": "../../task-plan.json",
+    "planRevision": 651,
+    "requirements": "Precise current-owner/branch activity notifications and deadlines, bounded legacy compatibility, no warmed-provider polling, obsolete callback/deadline fencing, original host continuation authority and no duplicate wakes.",
+    "landedProvenance": "User reports803PR823 merged after da08b4f2 review and requiredCI44287227774. Fetched exact landed merge09e06 only. Upstream CI success is not represented as proof for the new805 composition; no remote mutation or watcher/wait."
+  },
+  "integration": {
+    "fetch": "git fetch origin 09e06ef292e5e9fe6f65903e0b2800637b4baa97",
+    "fetchExit": 0,
+    "merge": "git merge --no-ff --no-commit 09e06ef292e5e9fe6f65903e0b2800637b4baa97",
+    "mergeExit": 0,
+    "conflicts": [],
+    "scope": "Clean ordinary merge. Adds landed derived Background history readiness guard, lock-protected metadata health acknowledgements and inactive inherited trusted-tool preflight behavior with generated copies/tests. No805 reimplementation or duplicate upstream bootstrap policy.",
+    "localPreservation": "Goal activity/index/types, admission marker, Navigator fixture3aa9f0ce, actual Goal recovery regression, standalone readiness fixture and production query-executor/query-worker remain byte-identical to a411. Exact a411 and3aa9 ancestors retained.",
+    "historyPreservation": "805-ci99e-fix.json tracked file AND requested ../../results/805-ci99e-fix.json copy remain byte-identical. Prior compat deadline, activation prepared/deferred, Navigator native failure and Linux10-minute cancellation history is not rewritten or marked resolved by local success.",
+    "generated": "Existing sync-runtime-domain rerun leaves tracked generated files byte-identical; no metadata churn or manual generated policy shortcut.",
+    "evidence": [".private-805/logs/merge09e06-fetch.log", ".private-805/logs/merge09e06-merge.log", ".private-805/logs/merge09e06-preserved.log", ".private-805/logs/merge09e06-sync.log"]
+  },
+  "checks": [
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-goal/test/activity.test.ts packages/pi-better-goal/test/activity-notifications.test.ts packages/pi-better-goal/test/goal-clock.test.ts packages/pi-better-goal/test/admission-scheduler.test.ts packages/pi-better-server/test/goal-recovery-readiness.test.ts",
+      "exit": 0, "passed": 48, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/merge09e06-goal.log",
+      "meaning": "Actual Goal notification/deadline and admission handling plus actual model/WorkClient/provider/collector regression. Healthy elapsed time does not recollect notifying providers. Exact deadline fires once; replaced deadline cannot collect at its old instant. Notification clears work and emits one owner drain wake, never duplicate. Pause/resume/hold/completion/branch-generation/foreground transitions cancel stale callbacks/deadlines. Legacy compatibility budget and activity-v1 requirements remain. Goal clock refresh/30-second expiry tests pass.",
+      "unverified": "Thrown provider and explicit unknown coverage preserve current goal tracker without false idle/drain wake, prevent stale verified cache resurrection, and add no retry poll. Mixed coverage preserves known rows without inferring drain. Actual hello can precede initialized query scope; same subscription publishes verifiedready after normal reconciliation, then drains once. Command trace exactlyhello,runtime_subscribe and no full-state get/resubscribe."
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/checkpoint-deferral.test.ts packages/pi-better-server/test/background-inbox-deferral.test.ts packages/pi-better-server/test/cold-bootstrap.test.ts packages/pi-better-server/test/cached-factory-startup.test.ts",
+      "exit": 0, "passed": 17, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/merge09e06-server.log",
+      "meaning": "Actual SQLite participants retain owned aliases/cleanup, repair-only retry permission and truthful incomplete coverage. New landed history guard does not mint index/cursor before reader acquisition and verifies empty history only after normal initialization. Cold/cached setup guards retain expired-request non-authority and original watchdog/caller bounds without a native worker replay."
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/run_finalization.test.mjs",
+      "exit": 0, "passed": 27, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/merge09e06-finalization-isolated.log",
+      "meaning": "Includes landed stale health acknowledgement preservation of actual terminal/aggregate completion evidence. Existing assignment outcomes and first terminal evidence remain authoritative."
+    },
+    {
+      "command": "npm run typecheck --workspace packages/pi-better-goal --workspace packages/pi-better-server --workspace packages/pi-better-subagents --workspace packages/pi-better-background-tasks",
+      "exit": 0,
+      "evidence": ".private-805/logs/merge09e06-types.log"
+    },
+    { "command": "node .private-805/ci99e-navigator-premise.mjs", "exit": 0, "evidence": ".private-805/logs/merge09e06-navigator.log", "meaning": "Retained3aa9 actual fixture prefix waits for main-list row publication before keys; not a native stop/process qualification." },
+    { "command": "node .private-805/scripts2-phase-check.mjs", "exit": 0, "evidence": ".private-805/logs/merge09e06-ssh-guards.log", "meaning": "All77 original protected SSH assertion/wait calls and bounded diagnostics preserved." },
+    { "command": "Read-only byte comparisons and generated-sync idempotence; git diff --check; git diff --cached --check; exact landed/local ancestry checks", "exit": 0 }
+  ],
+  "retainedExtraCheckFailure": {
+    "command": "node --import tsx --test packages/pi-better-subagents/tests/run_finalization.test.mjs packages/pi-better-subagents/tests/child-preflight.test.mjs packages/pi-better-subagents/tests/child-dependencies.test.mjs",
+    "exit": 1, "passed": 40, "failed": 1,
+    "firstFailure": "terminal metadata precedes retained outcome: registerAssignmentAttempt -> shared schema transaction reports attempt to write a readonly database (SQLITE_READONLY8). Command omitted repository isolation preload; no shared agent/runtime/permission or dependency change attempted.",
+    "evidence": ".private-805/logs/merge09e06-upstream-contracts.log",
+    "interpretation": "Not counted as a product causalRED or proof of upstream regression. Correct normal isolated finalization rerun passes27/27 as above. Fourteen child-preflight/dependency cases passed in the initial batch but the batch itself is not labeledPASS. No repeat full264-suite loop or reinstall."
+  },
+  "nativeCiStillRequired": [
+    "Original registered Navigator main-list x stop/dismiss/process-exit case on this exact merge. The3aa9 setup guard has only controlled fixture proof;99e failure history remains.",
+    "Original cold-bootstrap compat case98 and full server/compat completion on this exact composition. Local mailbox/Goal proof and upstreamPR823CI do not retroactively resolve99e caller timeout.",
+    "Activation case16 old shutdown hook/prepared blocker transition and exact owner release/adoption. No activation policy or new blocker handling implemented here.",
+    "Original Goal+Subagent+Background owner activity/deadline/admission/delivery journeys and standalone clean-recovery, SSH/reload and physical/control/query budgets on the new composed head. Earlier exact native passes remain prior-head evidence, not new-head acceptance.",
+    "Linux-sandbox full job completion under its unchanged10-minute limit, plus all required native/platform gates. Prior final9-test batchPASS is not jobPASS. Coordinator owns CI dispatch, push and waits."
+  ],
+  "boundaries": "No push, remote mutation, PR action, CI retry, watcher/wait, deadline/threshold increase, new timer/poll policy, shared runtime/settings/permissions modification, destructive git operation or duplicate upstream bootstrap implementation. LocalNode24.21.0 remains distinct from canonical24.14.1 native acceptance."
+}
