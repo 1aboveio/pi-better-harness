@@ -6,6 +6,54 @@ import extension from "./extension-fixture.js";
 import type { ActivitySnapshot } from "../src/types.js";
 import { currentGoalSnapshot, continuationStateEntry, createContinuationState } from "../src/goal-state.js";
 
+for (const failure of ["throw", "explicit"]) {
+  test(`Goal preserves unverified ${failure} coverage until a verified notification`, async t => {
+    t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 100_000 });
+    const events = new EventEmitter(), handlers = new Map<string, any>(), commands = new Map<string, any>();
+    const entries: any[] = [], messages: any[] = [], snapshots: ActivitySnapshot[] = [];
+    const ctx = { hasUI: false, cwd: "/owner", isIdle: () => true,
+      sessionManager: { getSessionId: () => "owner", getBranch: () => entries }, ui: { notify() {}, setWidget() {} } } as unknown as ExtensionContext;
+    extension({ events, on: (key: string, handler: any) => handlers.set(key, handler),
+      registerCommand: (key: string, command: any) => commands.set(key, command), registerTool() {},
+      appendEntry: (customType: string, data: any) => entries.push({ type: "custom", customType, data }),
+      sendMessage: (message: any) => messages.push(message),
+    } as unknown as ExtensionAPI);
+    let state = "running", reads = 0, notify = () => {};
+    events.on("pi-better-goal:activity", value => snapshots.push(value));
+    events.emit("pi-better-goal:register-provider", { id: "subagents", activityVersion: 1,
+      onActivityChanged: (changed: () => void) => { notify = changed; return () => {}; },
+      getActivity: () => {
+        reads++;
+        if (state === "unknown" && failure === "throw") throw new Error("scope rebuilding");
+        return { providerId: "subagents", nextDeadline: null, coverage: state === "unknown" ? "unverified" : "verified",
+          items: state === "running" ? [{ id: "worker", status: "running", active: true }] : [] };
+      },
+    });
+    const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+    await handlers.get("session_start")({}, ctx);
+    t.after(() => handlers.get("session_shutdown")({}, ctx));
+    await commands.get("goal").handler("finish", ctx);
+    await handlers.get("agent_start")({}, ctx);
+    await handlers.get("agent_settled")({}, ctx);
+    const before = messages.length;
+    state = "unknown"; notify(); await flush();
+    assert.equal(snapshots.at(-1)?.coverage, "unverified");
+    await commands.get("better-activity").handler("", ctx);
+    assert.equal(snapshots.at(-1)?.coverage, "unverified", "a failed read must not resurrect a verified cache");
+    await handlers.get("agent_settled")({}, ctx);
+    const unknownReads = reads;
+    t.mock.timers.tick(60_000); await flush();
+    assert.equal(messages.length, before, "unknown activity cannot drain or send an idle continuation");
+    assert.equal(reads, unknownReads, "no polling or retry timer is added");
+    state = "ready"; notify(); await flush();
+    assert.equal(snapshots.at(-1)?.coverage, "verified");
+    t.mock.timers.tick(60_000); await flush();
+    assert.equal(messages.length, before + 1, "verified empty publication drains the preserved tracker once");
+    t.mock.timers.tick(60_000); await flush();
+    assert.equal(messages.length, before + 1);
+  });
+}
+
 for (const inspection of ["command", "tool", "registration", "replacement"]) {
   test(`Goal keeps newer provider cache after overlapping ${inspection}`, async t => {
     t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 100_000 });

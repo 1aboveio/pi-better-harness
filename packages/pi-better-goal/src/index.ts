@@ -10,6 +10,7 @@ import { OPERATION_RESUME_ADMISSION, operationOwnerMatches, type OperationResume
 
 import {
   collectActivitySnapshot,
+  hasUnverifiedActivity,
   planBackgroundDrainWake,
   summarizeActiveBackground,
   terminalAttentionSignature,
@@ -204,6 +205,7 @@ export function finishedSinceQuestion(
   activeAtStart: ReadonlyMap<string, BackgroundWorkItem>,
   snapshot: ActivitySnapshot,
 ): BackgroundWorkItem[] {
+  if (hasUnverifiedActivity(snapshot)) return [];
   const stillActive = activeItemsByKey(snapshot);
   const current = new Map<string, BackgroundWorkItem>();
   for (const provider of snapshot.providers) {
@@ -629,7 +631,7 @@ export default function (pi: ExtensionAPI): void {
     if (!auditIsCurrent() || !isPokeable(goal)) return;
     if (!boundCommandReady(goal, ctx)) return;
     const snapshot = await publishSnapshot(ctx);
-    if (!snapshot || !auditIsCurrent() || snapshot.foregroundRunning || snapshot.backgroundRunning) return;
+    if (!snapshot || !auditIsCurrent() || snapshot.foregroundRunning || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) return;
 
     continuationQueuedFor = goal.goalId;
     const content = kind === "background-drained"
@@ -687,10 +689,21 @@ export default function (pi: ExtensionAPI): void {
         if (cached && provider.onActivityChanged && !dirtyProviders.has(provider.id) &&
             !(typeof cached.nextDeadline === "number" && cached.nextDeadline <= Date.now())) return cached;
         dirtyProviders.delete(provider.id);
-        const value = await provider.getActivity(ctx);
-        if (provider.activityVersion === 1 && value.nextDeadline !== null &&
-            (typeof value.nextDeadline !== "number" || !Number.isFinite(value.nextDeadline))) {
-          throw new Error(`${provider.id}: activity v1 requires an explicit nextDeadline`);
+        let value: BackgroundProviderSnapshot;
+        try {
+          value = await provider.getActivity(ctx);
+          if (provider.activityVersion === 1 && value.nextDeadline !== null &&
+              (typeof value.nextDeadline !== "number" || !Number.isFinite(value.nextDeadline))) {
+            throw new Error(`${provider.id}: activity v1 requires an explicit nextDeadline`);
+          }
+        } catch (error) {
+          // A failed fresh read must not resurrect an older verified cache.
+          if (execution === executionGeneration && providers.get(provider.id) === provider &&
+              sequence >= (providerCacheSequences.get(provider.id) ?? 0)) {
+            providerCacheSequences.set(provider.id, sequence);
+            providerCache.delete(provider.id);
+          }
+          throw error;
         }
         // Explicit inspections may finish before an older notification read.
         if (execution === executionGeneration && providers.get(provider.id) === provider &&
@@ -719,7 +732,7 @@ export default function (pi: ExtensionAPI): void {
       scheduleIdleContinuation(goal, ctx, "background-drained", snapshot);
     }
 
-    if (snapshot.foregroundRunning || snapshot.backgroundRunning) {
+    if (snapshot.foregroundRunning || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) {
       clearIdleContinuation();
     }
 
@@ -1003,7 +1016,7 @@ export default function (pi: ExtensionAPI): void {
     if (!previous.autoContinue && preferences.autoContinue) {
       const snapshot = await publishSnapshot(ctx);
       const goal = getGoal(ctx);
-      if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning) {
+      if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning && !hasUnverifiedActivity(snapshot)) {
         scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
       }
     }
@@ -1376,7 +1389,7 @@ export default function (pi: ExtensionAPI): void {
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
     syncPollingState();
-    if (restoredGoal?.status === "active" && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning && !snapshot.backgroundRunning) {
+    if (restoredGoal?.status === "active" && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning && !snapshot.backgroundRunning && !hasUnverifiedActivity(snapshot)) {
       scheduleIdleContinuation(restoredGoal, ctx, "continuation");
     }
   });
@@ -1485,7 +1498,9 @@ export default function (pi: ExtensionAPI): void {
     }
 
     if (!isPokeable(goal)) return;
-    const backgroundInstruction = snapshot.backgroundRunning
+    const backgroundInstruction = hasUnverifiedActivity(snapshot)
+      ? " Background activity is unverified. Do not infer completion or drained work from missing activity; inspect a verified observation before completing the goal."
+      : snapshot.backgroundRunning
       ? ` The goal still has delegated background work running (${summarizeActiveBackground(snapshot)}). Foreground idleness alone is not goal completion; keep any structured plan current and do not mark verification, the plan, or the goal complete until every relevant delegated task reaches a terminal state and its result or failure has been inspected and integrated.`
       : "";
     if (harnessPresent) {
@@ -1604,7 +1619,7 @@ export default function (pi: ExtensionAPI): void {
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
     const goal = getGoal(ctx);
-    if (!isPokeable(goal) || snapshot.backgroundRunning) {
+    if (!isPokeable(goal) || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) {
       return;
     }
     // A run the scheduler says is only waiting (a retry is due at a known time) is not stuck: wake at
