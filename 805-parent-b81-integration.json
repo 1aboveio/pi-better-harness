@@ -1,0 +1,69 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "local-parent-integration-complete-canonical-qualification-pending",
+  "head": "dc651db26261b727675d4bd1a476d1125de9d7fa",
+  "priorHead": "252f7cd267de9088fd5552318cc9a8d8ea669623",
+  "parent": "b81d158fbf22ce211290225188308f9dba91272d",
+  "actualModelReadback": {
+    "session": "sa_mwkb0p9t_17",
+    "provider": "openai",
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "evidence": "Actual session JSONL model_change and thinking_level_change records read on this continuation."
+  },
+  "checkpoint": {
+    "change": "Existing published 805 history ordinarily merged with exact settled reviewed parent803 b81. No reset, rebase or history replacement.",
+    "mergeParents": ["252f7cd267de9088fd5552318cc9a8d8ea669623", "b81d158fbf22ce211290225188308f9dba91272d"],
+    "ancestryVerified": ["b81d158fbf22ce211290225188308f9dba91272d", "25338a91", "8bbeb3b3"],
+    "conflictsResolved": 5,
+    "localMergeCoherent": true,
+    "remoteMergeabilityVerified": false,
+    "nativeRecoveryCauseOrRepairClaimed": false,
+    "acceptanceAdvance": "Local ancestry/composition only. Original native recovery witness is enabled for coordinator qualification, not claimed passing."
+  },
+  "resolutions": [
+    { "file": "packages/pi-better-server/src/runtime/read-model.ts", "meaning": "Use parent's this.watch source-watch abstraction while retaining 805's this.closed and watcher-identity fences at both callback sites." },
+    { "file": "packages/pi-better-server/test/query-executor.test.ts", "meaning": "Retain parent source/worker/client-frame diagnostics and exact scope together with 805's failure-only awaited-phase/cached-state record. Keep original assertions/deadlines." },
+    { "file": "packages/pi-better-server/test/runtime-work.test.ts", "meaning": "Keep shared Goal event bus and warmed-provider zero-query witness, plus parent's extension-session-start phase marker." },
+    { "file": "packages/pi-better-server/test/support/subagent-launch-sdk.mjs", "meaning": "Keep parent's launch-phase tracing/stop cleanup and 805's independent actual SDK invocation-entry cwd/session/branch capture before tool.execute and any await." },
+    { "file": "packages/pi-better-subagents/tests/managed-continuation-fixture.mjs", "meaning": "Expose both independent invocationEntries and parent's runTeardownOwner continuation-fixture marker." }
+  ],
+  "validation": [
+    { "command": "git fetch /Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/803 b81d158fbf22ce211290225188308f9dba91272d", "exit": 0, "evidence": ".private-805/logs/parent-b81-fetch.log", "scope": "Local exact committed object import; no remote delivery or sibling modifications." },
+    { "command": "git merge --no-ff --no-commit b81d158fbf22ce211290225188308f9dba91272d", "exit": 1, "expected": true, "error": "Content conflicts in five named files; resolved semantically as listed.", "evidence": ".private-805/logs/parent-b81-merge.log" },
+    { "command": "node scripts/sync-runtime-domain.mjs", "exit": 0, "evidence": ".private-805/logs/parent-b81-sync.log", "scope": "No additional generated drift after merge." },
+    { "command": "npm run typecheck --workspace packages/pi-better-server", "exit": 0, "evidence": ".private-805/logs/parent-b81-server-types.log" },
+    { "command": "npm run typecheck --workspace packages/pi-better-subagents", "exit": 0, "evidence": ".private-805/logs/parent-b81-subagents-types.log" },
+    { "command": "npm run typecheck --workspace packages/pi-better-background-tasks", "exit": 0, "evidence": ".private-805/logs/parent-b81-background-types.log" },
+    { "command": "npm run typecheck --workspace packages/pi-better-goal", "exit": 0, "evidence": ".private-805/logs/parent-b81-goal-types.log" },
+    { "command": "node --import tsx --test packages/pi-better-server/test/work-client-recovery.test.ts packages/pi-better-subagents/tests/launch-context.test.mjs packages/pi-better-subagents/tests/capacity_gate.test.mjs", "exit": 0, "passed": 24, "failed": 0, "skipped": 0, "evidence": ".private-805/logs/parent-b81-focused.log" },
+    { "command": "node --import tsx --test packages/pi-better-goal/test/activity-notifications.test.ts", "exit": 0, "passed": 15, "failed": 0, "skipped": 0, "evidence": ".private-805/logs/parent-b81-goal-activity.log" },
+    { "command": "node --import tsx --test --test-name-pattern 'unsubscribe revokes|failed native stop|watch event overflow|backend registration failure' packages/pi-better-server/test/source-watch.test.ts", "exit": 0, "passed": 4, "failed": 0, "skipped": 0, "evidence": ".private-805/logs/parent-b81-watch-controls.log", "scope": "Existing in-process host controls with injected backend, not the excluded real-native source write test." },
+    { "command": "node --check packages/pi-better-server/test/support/subagent-launch-sdk.mjs", "exit": 0 },
+    { "command": "node --check packages/pi-better-subagents/tests/managed-continuation-fixture.mjs", "exit": 0 },
+    { "command": "cmp packages/pi-better-subagents/launch-context.ts packages/pi-better-server/src/runtime/domain/subagents/launch-context.ts", "exit": 0 },
+    { "command": "cmp packages/pi-better-subagents/index.ts packages/pi-better-server/src/runtime/domain/subagents/index.ts", "exit": 0 },
+    { "command": "git diff --cached --check", "exit": 0 },
+    { "command": "git ls-files -u", "exit": 0, "result": "No unmerged paths before commit." },
+    { "command": "git merge-base --is-ancestor b81d158fbf22ce211290225188308f9dba91272d HEAD", "exit": 0 },
+    { "command": "git merge-base --is-ancestor 25338a91 HEAD", "exit": 0 },
+    { "command": "git merge-base --is-ancestor 8bbeb3b3 HEAD", "exit": 0 }
+  ],
+  "remainingFailures": [
+    { "case": "004 CI44034617191 compat2 worker-subscription recovery", "error": "runtime-timeout: caller read deadline exceeded; source was not verified", "evidence": "../../827-004-compat2-api.log:1120", "status": "Unresolved until original canonical native witness qualifies exact integrated head; diagnostics are not a cause/fix." },
+    { "case": "004 default history projection", "error": "tools and activity never activate historical inventory: 2 !== 0", "evidence": "../../827-004-compat2-api.log:1921", "status": "Settled parent source now integrated; original integrated-case qualification pending, not declared repaired by merge." },
+    { "case": "scripts2", "error": "EOF/network log retrieval; retained file zero bytes", "evidence": "../../827-004-scripts2-api.log", "status": "Not passed; primary output still missing." },
+    { "case": "10f old fold replacement read deadline", "evidence": "../../827-10f-server2-api.log:1311", "status": "Retained prior failure history; unrelated focused checks do not repair it." }
+  ],
+  "selfReview": [
+    "No whole-side conflict selection; both semantic intents preserved at all five conflicting files.",
+    "Parent native-watch ownership, close/quiescence and history fixes retained alongside invocation-entry identity and exact recipient/immutable-outcome rules.",
+    "No deadlines, assertions, resource limits, control16/query8/repair8-total32, physical2/2/2 or failure counters changed.",
+    "No restricted native/socket/process/probe/admission replay, shared-runtime/settings/permission change, push, PR, external watcher or CI dispatch. Local Node24.21 remains distinct from required canonical24.14.1."
+  ],
+  "blockers": [
+    "No remaining local merge blocker. Coordinator must publish the integrated head and confirm actual PR827 mergeability against current provider base.",
+    "Canonical CI/native original recovery, history and other retained criteria remain unqualified for this integrated head."
+  ]
+}
