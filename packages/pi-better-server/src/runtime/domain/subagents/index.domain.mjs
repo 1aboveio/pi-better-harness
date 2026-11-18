@@ -640,19 +640,13 @@ function deliverFailureAttention(pi, meta, now) {
 function markHealthCallbackSuppressed(meta, status, reason, now) {
     if (isConversationIdentityReason(reason))
         return;
-    if (status === "orphaned") {
-        if (meta.orphanedCallbackSuppressedAt !== undefined)
-            return;
-        meta.orphanedCallbackSuppressedAt = now;
-        meta.orphanedCallbackSuppressedReason = reason;
-    }
-    else {
-        if (meta.lostCallbackSuppressedAt !== undefined)
-            return;
-        meta.lostCallbackSuppressedAt = now;
-        meta.lostCallbackSuppressedReason = reason;
-    }
-    writeMeta(meta);
+    writeMeta(meta, { patch: current => {
+            if (isHealthCallbackHandled(current, status))
+                return;
+            return status === "orphaned"
+                ? { orphanedCallbackSuppressedAt: now, orphanedCallbackSuppressedReason: reason }
+                : { lostCallbackSuppressedAt: now, lostCallbackSuppressedReason: reason };
+        } });
 }
 function isHealthCallbackHandled(meta, status) {
     return status === "orphaned"
@@ -838,11 +832,11 @@ function deliverHealthCallback(pi, meta, status, now) {
             return;
         }
         // The marker acknowledges quiet delivery, never a model turn.
-        if (status === "orphaned")
-            meta.orphanedCallbackSentAt = now;
-        else
-            meta.lostCallbackSentAt = now;
-        writeMeta(meta);
+        writeMeta(meta, { patch: current => {
+                if (current.status !== status || isHealthCallbackHandled(current, status) || callbackSuppressionReason(current))
+                    return;
+                return status === "orphaned" ? { orphanedCallbackSentAt: now } : { lostCallbackSentAt: now };
+            } });
         return;
     }
     void getCallbackBatcher(pi).deliverUrgent({
@@ -868,11 +862,11 @@ function deliverHealthCallback(pi, meta, status, now) {
                 if (attention.incidents.some((incident) => pendingFailureAttention(collectRunFailures(meta.id, meta.cwd), at, { terminal: true })?.incidents.includes(incident)))
                     return;
             }
-            if (status === "orphaned")
-                current.orphanedCallbackSentAt = at;
-            else
-                current.lostCallbackSentAt = at;
-            writeMeta(current);
+            writeMeta(current, { patch: current => {
+                    if (isHealthCallbackHandled(current, status))
+                        return;
+                    return status === "orphaned" ? { orphanedCallbackSentAt: at } : { lostCallbackSentAt: at };
+                } });
         },
         onSuppressed: (reason, at) => {
             const current = readMeta(meta.id);

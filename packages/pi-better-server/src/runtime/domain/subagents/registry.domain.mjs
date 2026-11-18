@@ -945,10 +945,22 @@ export function observeArchivePublication(id, error) {
     catch { /* the journal is best-effort; retaining the run is the safety net */ }
 }
 export function writeMeta(meta, options = {}) {
+    if (options.patch && !readMeta(meta.id))
+        return;
     mkdirSync(runDir(meta.id), { recursive: true });
+    let written = false;
     withRunMetaLock(meta.id, (owns) => {
         if (options.ifAbsent && existsSync(metaPathFor(meta.id)))
             return;
+        if (options.patch) {
+            const current = readMeta(meta.id);
+            if (!current)
+                return;
+            const patch = options.patch(current);
+            if (!patch)
+                return;
+            meta = { ...current, ...patch, id: meta.id };
+        }
         metaWriteBarrier?.();
         if (!owns())
             throw new MetadataLockLost();
@@ -970,7 +982,10 @@ export function writeMeta(meta, options = {}) {
             }
         }
         owns();
+        written = true;
     });
+    if (options.patch && !written)
+        return;
     for (const listener of metaChangedListeners) {
         try {
             listener();
