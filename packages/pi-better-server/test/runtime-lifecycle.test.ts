@@ -373,7 +373,9 @@ test("upgrade observation refuses unknown writer metadata instead of treating it
   writeFileSync(join(run, 'meta.json'), JSON.stringify({ id: 'sa_unknown_1', sessionId: 'sa_unknown_1',
     status: 'running', pid: process.pid, spawnPid: process.pid, cwd: root, startedAt: Date.now(),
     promptPreview: 'unknown writer', logPath: join(run, 'log.jsonl') }));
-  const model = new WorkReadModel(root, 'upgrade-test', { baseDir, durableDir: join(root, 'archives') });
+  writeFileSync(join(run, 'output.log'), '');
+  const watch = (() => ({ close() {}, on() {}, ready: Promise.resolve() })) as any;
+  const model = new WorkReadModel(root, 'upgrade-test', { baseDir, durableDir: join(root, 'archives'), watch });
   t.after(async () => { await model.close(); rmSync(root, { recursive: true, force: true }); });
   await model.reconcile();
   assert.ok(model.upgradeObligations().some(reason => reason.kind === 'unresolved-writer' && reason.id === 'sa_unknown_1'));

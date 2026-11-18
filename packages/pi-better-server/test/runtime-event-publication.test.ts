@@ -12,6 +12,7 @@ test('external committed changes reach exact real socket subscribers within the 
   mkdirSync(agent); mkdirSync(run, { recursive: true });
   writeFileSync(metaPath, JSON.stringify({ id: taskId, cwd: root, status: 'completed', startedAt: Date.now(), endedAt: Date.now(),
     sessionId: 'worker', callbackOrigin: { cwd: root, sessionId: 'parent' }, name: 'original' }));
+  writeFileSync(join(run, 'output.log'), '');
   const daemon = fork(new URL('./support/work-daemon.ts', import.meta.url), [], { execArgv: ['--import', 'tsx'],
     env: { ...process.env, TMPDIR: root, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport }, stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
   try {

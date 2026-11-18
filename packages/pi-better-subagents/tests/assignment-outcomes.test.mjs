@@ -377,6 +377,8 @@ test("verified missing wait history retains failure without claiming writer term
     registerAssignmentAttempt(binding, id);
     const meta = { id, assignment: binding, status: "lost", pid: 4194304, spawnPid: process.pid,
         cwd: process.cwd(), sessionId: id, promptPreview: "outage evidence", startedAt: Date.now(), logPath: logPathFor(id) };
+    mkdirSync(runDir(id), { recursive: true });
+    writeFileSync(logPathFor(id), "");
     retainObservation(meta, { version: 1, waitId: "missing-required-wait", generation: 1,
         attemptId: id, phase: "resuming", parkedAt: 1, updatedAt: 1 });
     const h = host("unrelated");
