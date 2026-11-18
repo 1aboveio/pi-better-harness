@@ -53,7 +53,11 @@ const requests = new Map();
 // A heartbeat proves the worker can service control messages between bounded
 // indexing batches; it does not claim that a source snapshot is fresh.
 let heartbeatPending = false;
+const heartbeat = workerData.heartbeat;
+const markHeartbeat = () => { if (heartbeat) Atomics.store(heartbeat, 0, process.hrtime.bigint()); };
+markHeartbeat();
 setInterval(() => {
+  markHeartbeat();
   if (heartbeatPending) return;
   heartbeatPending = true;
   parentPort.postMessage({ type: "heartbeat" });

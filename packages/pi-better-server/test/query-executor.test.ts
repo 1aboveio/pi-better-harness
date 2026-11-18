@@ -259,6 +259,31 @@ test("cold bootstrap caller deadline does not imply a wedged read worker", { tim
   } finally { await f.close(); }
 });
 
+test("delayed parent receipt does not kill a responsive read worker", { timeout: 10000 }, async () => {
+  const f = await fixture({ watchdogMs: 800 });
+  try {
+    const client = await f.client();
+    await ready(client);
+    const epoch = client.snapshot!.instanceId;
+    // Simulate the watchdog running before queued worker messages are drained.
+    // Keep the worker running and withhold only the executor's message delivery.
+    const [receive] = f.worker.listeners("message") as ((message: unknown) => void)[];
+    assert.ok(receive);
+    const queued: unknown[] = [];
+    const hold = (message: unknown) => queued.push(message);
+    f.worker.off("message", receive).on("message", hold);
+    try {
+      await new Promise<void>(resolve => setTimeout(resolve, 1100));
+      assert.equal(f.executor.metrics().executor.status, "ready");
+    } finally {
+      f.worker.off("message", hold).on("message", receive);
+      for (const message of queued) receive(message);
+    }
+    assert.equal((await client.get({ limit: 1 })).instanceId, epoch);
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+  } finally { await f.close(); }
+});
+
 test("responsive rebuilding outlives the watchdog without claiming source readiness", { timeout: 10000 }, async t => {
   const f = await fixture({ watchdogMs: 800,
     workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });

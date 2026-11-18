@@ -44,6 +44,7 @@ export class WorkQueryExecutor {
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private watchdog?: ReturnType<typeof setInterval>;
   private lastResponse = performance.now();
+  private heartbeat!: BigInt64Array;
   private probe?: Int32Array;
   private workerMetrics: WorkerMetrics = {};
   private lastObservation: Omit<ReturnType<WorkReadModel["observation"]>, "observedAt"> & { observedAt: number | null } = {
@@ -70,8 +71,13 @@ export class WorkQueryExecutor {
     this.watchdog = setInterval(() => {
       const silenceMs = performance.now() - this.lastResponse;
       if (!this.closed && !this.failure && silenceMs > (this.options.watchdogMs ?? 4000)) {
+        const tick = Atomics.load(this.heartbeat, 0);
+        const heartbeatAgeMs = tick === 0n ? null : Number(process.hrtime.bigint() - tick) / 1e6;
+        // A busy parent can run the overdue watchdog before draining queued messages.
+        if (heartbeatAgeMs !== null && heartbeatAgeMs <= (this.options.watchdogMs ?? 4000)) return;
         if (this.probe) {
           const evidence = { generation: this.workerGeneration, silenceMs: Math.round(silenceMs),
+            heartbeatAgeMs: heartbeatAgeMs === null ? null : Math.round(heartbeatAgeMs),
             mainLoopMaxDelayMs: Math.round(this.lag.max / 1e6), active: !!this.active, queued: this.queue.length,
             execution: executionPhases[Atomics.load(this.probe, 0)], inventory: inventoryPhases[Atomics.load(this.probe, 1)] };
           try { this.options.logWatchdog?.(`Read worker watchdog: ${JSON.stringify(evidence)}`); } catch { /* preserve watchdog behavior */ }
@@ -84,9 +90,10 @@ export class WorkQueryExecutor {
 
   private startWorker() {
     const instanceId = this.workerGeneration ? `${this.instanceId}:reads:${this.workerGeneration}` : this.instanceId;
+    this.heartbeat = new BigInt64Array(new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT));
     this.probe = this.options.logWatchdog ? new Int32Array(new SharedArrayBuffer(8)) : undefined;
     const worker = new Worker(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url), {
-      execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: this.options.modelOptions, probe: this.probe },
+      execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: this.options.modelOptions, probe: this.probe, heartbeat: this.heartbeat },
     });
     worker.on("message", message => { if (worker === this.worker) this.receive(message); });
     worker.on("error", error => { if (worker === this.worker) this.fail(new Error(`runtime-unhealthy: read worker failed: ${String(error)}`)); });
