@@ -29,6 +29,7 @@ for (const historyActive of [false, true]) test(`repaired legacy watch releases 
   const background = (model as any).background;
   const scope = { background: true, cwd: root, sessionId: owner.sessionId };
   try {
+    await model.reconcile();
     assert.equal(model.snapshot(scope).status, "ready");
     if (historyActive) {
       background.historyIndex(scope);
@@ -324,6 +325,7 @@ for (const historyMode of [false, true]) test(historyMode ? "active and incremen
         evidence: [{ kind: "terminal-record", ref: operationId }] });
     }
     const scope = { background: true, cwd: root, sessionId: owner.sessionId };
+    await model?.reconcile();
     observation.read(scope); observation.refresh();
     mkdirSync(join(directory, "observed"), { recursive: true });
     const path = join(directory, "observed", `${taskId("754-operation")}.json`);
