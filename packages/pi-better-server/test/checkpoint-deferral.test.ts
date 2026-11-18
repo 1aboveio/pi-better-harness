@@ -257,8 +257,10 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
         assert.equal(current.metrics.initialization.attempts, before);
         assert.equal((queries.handle({ type: "runtime_subscribe", scope: {} }) as any).status, "rebuilding");
         assert.equal((queries.handle({ type: "runtime_get_snapshot", scope: { background: true, cwd: root, sessionId: "parent" } }) as any).status, "rebuilding");
-        const history = queries.handle({ type: "runtime_get_snapshot", scope: { background: true, backgroundHistory: true, cwd: root, sessionId: "parent" } }) as any;
-        assert.equal(history.status, "rebuilding", "explicit history also preserves unavailable source coverage");
+        const history = queries.handle({ type: "runtime_get_snapshot", scope: {
+          background: true, backgroundHistory: true, cwd: root, sessionId: "parent" } }) as any;
+        assert.equal(history.status, "rebuilding", "history cannot dereference a reader before acquisition");
+        assert.equal(history.backgroundIndex, undefined, "unverified history must not mint an index or cursor");
         assert.equal(current.backgroundMetrics.history?.inventories ?? 0, 0, "unavailable history never inventories the source");
         assert.equal(current.observation().status, "rebuilding");
         assert.throws(() => current.livenessReasons(), /unverified/);
@@ -284,6 +286,12 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
       assert.equal(current.metrics.assignments.pending, 0);
       assert.ok(current.metrics.assignments.applied > oldApplied!);
       assert.ok(frames.some(frame => frame.event?.snapshot?.status === "ready"));
+      const scope = { background: true, backgroundHistory: true, cwd: root, sessionId: "parent" };
+      queries.handle({ type: "runtime_get_snapshot", scope });
+      await (current as any).background.history.pending;
+      const verifiedHistory = queries.handle({ type: "runtime_get_snapshot", scope }) as any;
+      assert.equal(verifiedHistory.status, "ready", verifiedHistory.reason);
+      assert.equal(verifiedHistory.totalMatching, 0, "empty history is verified only after ordinary source initialization");
     } finally { queries.close(); }
   } finally {
     if (writer.isTransaction) writer.exec("ROLLBACK");

@@ -641,19 +641,13 @@ function deliverFailureAttention(pi, meta, now) {
 function markHealthCallbackSuppressed(meta, status, reason, now) {
     if (isConversationIdentityReason(reason))
         return;
-    if (status === "orphaned") {
-        if (meta.orphanedCallbackSuppressedAt !== undefined)
-            return;
-        meta.orphanedCallbackSuppressedAt = now;
-        meta.orphanedCallbackSuppressedReason = reason;
-    }
-    else {
-        if (meta.lostCallbackSuppressedAt !== undefined)
-            return;
-        meta.lostCallbackSuppressedAt = now;
-        meta.lostCallbackSuppressedReason = reason;
-    }
-    writeMeta(meta);
+    writeMeta(meta, { patch: current => {
+            if (isHealthCallbackHandled(current, status))
+                return;
+            return status === "orphaned"
+                ? { orphanedCallbackSuppressedAt: now, orphanedCallbackSuppressedReason: reason }
+                : { lostCallbackSuppressedAt: now, lostCallbackSuppressedReason: reason };
+        } });
 }
 function isHealthCallbackHandled(meta, status) {
     return status === "orphaned"
@@ -839,11 +833,11 @@ function deliverHealthCallback(pi, meta, status, now) {
             return;
         }
         // The marker acknowledges quiet delivery, never a model turn.
-        if (status === "orphaned")
-            meta.orphanedCallbackSentAt = now;
-        else
-            meta.lostCallbackSentAt = now;
-        writeMeta(meta);
+        writeMeta(meta, { patch: current => {
+                if (current.status !== status || isHealthCallbackHandled(current, status) || callbackSuppressionReason(current))
+                    return;
+                return status === "orphaned" ? { orphanedCallbackSentAt: now } : { lostCallbackSentAt: now };
+            } });
         return;
     }
     void getCallbackBatcher(pi).deliverUrgent({
@@ -869,11 +863,11 @@ function deliverHealthCallback(pi, meta, status, now) {
                 if (attention.incidents.some((incident) => pendingFailureAttention(collectRunFailures(meta.id, meta.cwd), at, { terminal: true })?.incidents.includes(incident)))
                     return;
             }
-            if (status === "orphaned")
-                current.orphanedCallbackSentAt = at;
-            else
-                current.lostCallbackSentAt = at;
-            writeMeta(current);
+            writeMeta(current, { patch: current => {
+                    if (isHealthCallbackHandled(current, status))
+                        return;
+                    return status === "orphaned" ? { orphanedCallbackSentAt: at } : { lostCallbackSentAt: at };
+                } });
         },
         onSuppressed: (reason, at) => {
             const current = readMeta(meta.id);
@@ -3124,6 +3118,9 @@ export default function (pi, managed) {
                 p.prompt,
             ];
             const selectedTools = allow.split(",").filter((name) => name && !excludes.has(name));
+            const inheritedTrusted = resume ? new Set(resume.recipe.optionalTrustedTools ?? []) : undefined;
+            const optionalTrustedTools = taskTools?.trusted.filter(({ name }) => selectedTools.includes(name)
+                && (inheritedTrusted ? inheritedTrusted.has(name) : requestedTools === undefined)).map(({ name }) => name) ?? [];
             const dropped = toolSelection?.dropped ?? [];
             const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
                 root: requestedSandboxDir, controlDir: join(runDir(id), "control"),
@@ -3191,6 +3188,7 @@ export default function (pi, managed) {
                 revalidateContinuationUnderLease(resume, callbackOrigin);
             const preflightPath = join(runDir(id), "child-preflight.json");
             writeFileSync(preflightPath, JSON.stringify({ ...fullResolution, model, tools: selectedTools,
+                optionalTrustedTools,
                 configSnapshot: configSnapshot([dirname(configPath()), join(cwd, ".pi")]),
             }));
             // Register the worker's bridge run before the child can start, so the
@@ -3277,6 +3275,7 @@ export default function (pi, managed) {
             const recipe = buildLaunchRecipe({
                 attemptId: id, sessionId, sessionDir: childSessionDir, cwd, model, effort: thinking,
                 tools: callerLaunchTools(allow), excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
+                ...(optionalTrustedTools.length ? { optionalTrustedTools } : {}),
                 skills: skills.mode === "inherit" ? undefined : [...skills.paths], clean, allowNested, approve,
                 sandbox: sandboxEnabled, sandboxDir: requestedSandboxDir, gitCloneWorkspace, callback: callbackEnabled, name: launchName,
                 agent: resume ? resume.recipe.agent : p.agent, role: resume ? resume.recipe.role : p.role,
