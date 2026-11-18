@@ -7,15 +7,17 @@ import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { LogCheckpoints } from "../src/runtime/log-checkpoints.ts";
 import { DatabaseSync } from "node:sqlite";
 import { createRequire } from "node:module";
+import { EventEmitter } from "node:events";
 const { openDatabase, createContext } = await import(new URL("../../operation-coordinator/src/sqlite.ts", import.meta.url).href);
 const { ensureSchema } = await import(new URL("../../operation-coordinator/src/schema.ts", import.meta.url).href);
 const { ensureAssignmentChanges } = await import(new URL("../../operation-coordinator/src/assignment-changes.ts", import.meta.url).href);
+const watch = (() => Object.assign(new EventEmitter(), { close() {}, ready: Promise.resolve() })) as any;
 
 test("actual read models open under a derived reservation and refresh under a coordinator WAL writer", async () => {
   const root = mkdtempSync(join(tmpdir(), "model-sql-contention-"));
   const source = openDatabase(join(root, "operation-coordinator.sqlite"), { busyTimeoutMs: 0 });
   const ctx = createContext(source); ensureSchema(ctx); ensureAssignmentChanges(ctx);
-  const options = { baseDir: join(root, "runs"), durableDir: join(root, "archive"), intervalMs: 60000 };
+  const options = { baseDir: join(root, "runs"), durableDir: join(root, "archive"), intervalMs: 60000, watch };
   const first = new WorkReadModel(root, "sql-first", options);
   let second: WorkReadModel | undefined;
   try {
@@ -51,7 +53,7 @@ test("checkpoint initialization rejects an unknown schema without retaining anot
   } finally { owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("failed checkpoint construction releases the new model's physical owner", () => {
+test("failed deferred checkpoint acquisition releases its attachment and shutdown releases the physical owner", async () => {
   const root = mkdtempSync(join(tmpdir(), "checkpoint-owner-failure-"));
   const seed = new DatabaseSync(join(root, "runtime-log-checkpoints.sqlite"));
   seed.exec("CREATE TABLE checkpoints(path TEXT PRIMARY KEY)"); seed.close();
@@ -61,8 +63,17 @@ test("failed checkpoint construction releases the new model's physical owner", (
     constructor(...args: any[]) { super(...args); active++; }
     close() { super.close(); active--; }
   };
+  let model: WorkReadModel | undefined;
   try {
-    assert.throws(() => new WorkReadModel(root, "bad-schema"), /Unsupported checkpoint schema/);
+    model = new WorkReadModel(root, "bad-schema", { watch });
+    assert.equal(model.metrics.checkpoints.acquisitionAttempts, 0, "construction does not acquire a deferred checkpoint");
+    await model.reconcile();
+    assert.equal(model.snapshot().status, "degraded");
+    assert.match(model.snapshot().reason!, /Unsupported checkpoint schema/);
+    assert.equal(model.metrics.checkpoints.contentions, 0, "unknown schema is not safe lock deferral");
+    assert.equal((model as any).checkpoints.ready, false);
+    assert.deepEqual((model as any).db.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "assignment_inbox", "background_inbox"]);
+    await model.close(); model = undefined;
     assert.equal(active, 0);
-  } finally { sqlite.DatabaseSync = Original; rmSync(root, { recursive: true, force: true }); }
+  } finally { await model?.close(); sqlite.DatabaseSync = Original; rmSync(root, { recursive: true, force: true }); }
 });
