@@ -111,6 +111,8 @@ export interface LaunchRecipe {
     effort?: string;
     /** Effective tool allowlist (already adjusted for confinement). */
     tools: string;
+    /** Inherited trusted tools may be registered but inactive in the child. Older recipes are strict. */
+    optionalTrustedTools?: string[];
     excludeTools?: string;
     /**
      * Effective skill exposure: absent means discovery of the user catalog,
