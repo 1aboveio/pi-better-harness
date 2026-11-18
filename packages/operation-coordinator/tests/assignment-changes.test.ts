@@ -10,6 +10,54 @@ import { cleanupHarnesses, createHarness, workerOwner, parentOwner, registerOper
 
 afterEach(cleanupHarnesses);
 
+test("Background and assignment consumers share journal recovery without accepting each other's scopes", () => {
+    const h = createHarness(), source = new DatabaseSync(h.path);
+    const assignment = new AssignmentInbox(":memory:");
+    const background = new AssignmentInbox(h.path + ".background", { entityPrefix: "background:" });
+    try {
+        assignment.acknowledge(assignment.receive(source, "source"), true);
+        background.acknowledge(background.receive(source, "source"), true);
+        h.store.registerOperation({ operationId: "exact-background", taskId: "exact-background", launchToken: "token",
+            owner: parentOwner, observer: { kind: "local-supervisor", version: "1" } });
+        h.store.registerAssignment({ assignmentId: "assignment-only", owner: workerOwner, recipient: parentOwner });
+        const a = assignment.receive(source, "source"), b = background.receive(source, "source");
+        assert.equal(a.size, 1); assert.equal(b.size, 1);
+        assert.equal(JSON.parse([...b.keys()][0])[2], "exact-background");
+        assert.equal(JSON.parse([...a.keys()][0])[2], "assignment-only");
+        const received = background.metrics.received;
+        const reopened = new AssignmentInbox(h.path + ".background", { entityPrefix: "background:" });
+        try {
+            assert.equal(reopened.receive(source, "source").size, 1);
+            assert.equal(reopened.metrics.received, received);
+            assert.equal(reopened.metrics.pending, 1);
+            reopened.acknowledge(b, false);
+            assert.equal(reopened.metrics.pending, 0);
+            reopened.receive(source, "replacement");
+            reopened.acknowledge(b, true);
+            assert.equal(reopened.metrics.pending, 1, "old generation cannot acknowledge replacement baseline");
+        } finally { reopened.close(); }
+    } finally { assignment.close(); background.close(); source.close(); h.closeStore(); }
+});
+
+test("Background input revisions are exact, atomic, and inherited by direct SQL writers", () => {
+    const h = createHarness(), db = new DatabaseSync(h.path);
+    try {
+        for (const operationId of ["background-a", "background-b"]) h.store.registerOperation({ operationId, taskId: operationId,
+            launchToken: operationId, owner: workerOwner, observer: { kind: "local-supervisor", version: "1" } });
+        const version = (id: string) => db.prepare("SELECT revision FROM background_input_versions WHERE operation_id=?").get(id)!.revision;
+        const a = version("background-a"), b = version("background-b");
+        db.exec("BEGIN; UPDATE operations SET health_reason='rolled back' WHERE operation_id='background-a'; ROLLBACK");
+        assert.equal(version("background-a"), a);
+        h.store.registerWait({ waitId: "background-wait", owner: workerOwner, dependencies: [{ operationId: "background-a" }], continuationNote: "Read exact result" });
+        assert.ok(Number(version("background-a")) > Number(a));
+        assert.equal(version("background-b"), b);
+        const before = Number(version("background-a"));
+        db.exec("UPDATE waits SET phase_reason='old writer' WHERE wait_id='background-wait'");
+        assert.ok(Number(version("background-a")) > before);
+        assert.equal(version("background-b"), b);
+    } finally { db.close(); h.closeStore(); }
+});
+
 test("wait commits publish exact scopes; rollback publishes nothing, including an old SQL writer", () => {
     const h = createHarness();
     registerOperation(h.store);

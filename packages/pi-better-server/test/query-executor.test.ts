@@ -1079,6 +1079,8 @@ test('Subagents and Background share one coordinator read connection in the quer
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
     assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator and one derived connection with inbox and checkpoints attached, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).opens, 2, 'both inbox attachments reuse the existing derived handle without another constructor open');
+    assert.equal((f.executor.metrics().sqlite as any).maximum, 2, 'Background attachment cannot temporarily exceed the existing handle budget');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
     t.diagnostic(JSON.stringify({ retainedBudget: 2, sqlite: f.executor.metrics().sqlite }));
   } finally { await f.close(); }

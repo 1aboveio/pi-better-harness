@@ -34,6 +34,21 @@ export function createManagedBackgroundFrontend(pi) {
             ownership.delete(ownership.keys().next().value);
     };
     const queued = new Set(), listeners = new Set();
+    const traceSeen = new Set();
+    const trace = (stage, facts = {}) => {
+        if (process.env.PI_BG_OBSERVED_WAITS_DEBUG !== '1')
+            return;
+        const full = JSON.stringify({ stage, sessionId: ctx?.sessionManager.getSessionId(), ...facts });
+        const line = full.length <= 4096 ? full : JSON.stringify({ stage, truncated: true });
+        if (traceSeen.has(line) || traceSeen.size >= 128)
+            return;
+        const output = traceSeen.size === 127 ? JSON.stringify({ stage: 'capture-limit', limit: 128 }) : line;
+        traceSeen.add(line);
+        try {
+            console.error('[background-handoff-frontend]', output);
+        }
+        catch { /* diagnostics never own delivery */ }
+    };
     const active = (origin, branch) => Boolean(ctx && origin.cwd === ctx.cwd && origin.sessionId === ctx.sessionManager.getSessionId()
         && (!branch || ctx.sessionManager.getBranch().some(entry => entry.id === branch)));
     const request = (tool, params) => {
@@ -55,7 +70,9 @@ export function createManagedBackgroundFrontend(pi) {
         dirty = false;
         const captured = ctx, version = generation;
         refresh = (async () => {
+            trace('poll-start');
             const snapshot = await request('__background_poll', {});
+            trace('poll-received', { stale: version !== generation, total: snapshot.deliveries?.length ?? 0, deliveries: (snapshot.deliveries ?? []).slice(0, 8).map((item) => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
             if (version !== generation)
                 return;
             if (snapshot.recoveryPending === true)
@@ -67,9 +84,14 @@ export function createManagedBackgroundFrontend(pi) {
                 if (queued.has(item.token))
                     continue;
                 queued.add(item.token);
-                const receipt = (delivered, reason) => void requestBackgroundTool(pi, captured, randomUUID(), '__background_receipt', { token: item.token, delivered, reason })
-                    .catch(() => undefined).finally(() => { queued.delete(item.token); if (ctx === captured)
-                    void reconcile().catch(() => undefined); });
+                const facts = { taskId: item.notification.taskId, receiptId: item.receiptId };
+                const receipt = (delivered, reason) => {
+                    trace('handoff', { ...facts, delivered, reason: reason?.slice(0, 256) });
+                    void requestBackgroundTool(pi, captured, randomUUID(), '__background_receipt', { token: item.token, delivered, reason })
+                        .then(() => trace('receipt-return', facts), error => trace('receipt-error', { ...facts, error: String(error).slice(0, 256) }))
+                        .finally(() => { queued.delete(item.token); if (ctx === captured)
+                        void reconcile().catch(() => undefined); });
+                };
                 const proof = captured.sessionManager.getBranch().some((entry) => {
                     const message = entry.type === 'custom_message' ? entry : entry.message;
                     return item.notification.urgent ? message?.customType === item.notification.event.customType && message.details?.urgentEventId === item.receiptId : message?.customType === 'background-completion-batch' && message.details?.completionEventIds?.includes(item.receiptId);
@@ -79,6 +101,7 @@ export function createManagedBackgroundFrontend(pi) {
                     continue;
                 }
                 const n = item.notification;
+                trace('queue', { ...facts, urgent: n.urgent === true, recipientActive: active(n.origin, n.branchId) });
                 if (n.urgent) {
                     void getCallbackBatcher(pi).deliverUrgent({ ...n.event, receiptId: item.receiptId, getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active', onDelivered: () => receipt(true), onSuppressed: (reason) => receipt(false, reason) });
                     continue;
@@ -88,7 +111,8 @@ export function createManagedBackgroundFrontend(pi) {
                     getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active',
                     onDelivered: () => receipt(true), onSuppressed: (reason) => receipt(false, reason) });
             }
-        })().finally(() => { refresh = undefined; if (dirty && ctx)
+        })().catch(error => { trace('poll-error', { error: String(error).slice(0, 256) }); throw error; })
+            .finally(() => { refresh = undefined; if (dirty && ctx)
             void reconcile().catch(() => undefined); });
         return refresh;
     };

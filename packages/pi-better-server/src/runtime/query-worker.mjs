@@ -66,8 +66,9 @@ const encoded = new WeakMap();
 let cacheBytes = 0, cacheHits = 0, queryCount = 0, serializationCount = 0;
 let revisionPending = false, revisionDirty = false;
 const durations = [];
+const cacheComparisons = workerData.queryCacheDiagnostics ? [] : undefined;
 const metrics = () => ({ ...model.metrics, background: model.backgroundMetrics, sqlite: { ...connections }, cacheHits, queryCount, serializationCount, eventEncoding: { ...queryEncodingMetrics }, cacheBytes,
-  cacheEntries: cache.size, queryDurationMs: [...durations] });
+  cacheEntries: cache.size, queryDurationMs: [...durations], ...(cacheComparisons ? { cacheComparisons: [...cacheComparisons] } : {}) });
 const snapshot = model.snapshot.bind(model);
 model.snapshot = scope => {
   scope = workScope(scope ?? {});
@@ -75,12 +76,26 @@ model.snapshot = scope => {
   const revision = model.contentRevision(scope);
   const cacheable = !scope?.backgroundHistory;
   const previous = cacheable ? cache.get(key) : undefined;
-  if (previous?.revision === revision && (previous.value.nextDeadline === null || previous.value.nextDeadline > Date.now())) {
+  const comparedAt = Date.now();
+  const hit = previous?.revision === revision && (previous.value.nextDeadline === null || previous.value.nextDeadline > comparedAt);
+  // Only the original regression fixture opts in; no extra source reads.
+  let comparison;
+  if (cacheComparisons) {
+    comparison = { queryCount, scope, revision, priorRevision: previous?.revision ?? null,
+      priorScopeRevision: previous?.value.scopeRevision ?? null, priorSeq: previous?.value.seq ?? null,
+      priorObservedRevisionVector: previous?.value.observedRevisionVector ?? null, priorDeadline: previous?.value.nextDeadline ?? null,
+      comparedAt, hit: Boolean(hit) };
+    cacheComparisons.push(comparison);
+    if (cacheComparisons.length > 16) cacheComparisons.shift();
+  }
+  if (hit) {
     cacheHits++; cache.delete(key); cache.set(key, previous); return previous.value;
   }
   if (previous) { cacheBytes -= previous.bytes; cache.delete(key); }
   const started = performance.now();
   const value = snapshot(scope);
+  if (comparison) Object.assign(comparison, { scopeRevision: value.scopeRevision,
+    nextDeadline: value.nextDeadline, seq: value.seq, observedRevisionVector: value.observedRevisionVector });
   const json = snapshotJSON(value);
   serializationCount++;
   const bytes = Buffer.byteLength(json);

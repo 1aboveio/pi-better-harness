@@ -36,7 +36,7 @@ test("ordinary background clients share the canonical daemon without hosted owne
   let store: any;
   try {
     const [ready] = await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 10; i++) {
       const client = new WorkClient(ready.ready, root, ["runtime-background-state-v1"]); clients.push(client);
       const observed = await subscribeBackgroundReady(client, { background: true, cwd: root, sessionId: `local-${i}` }, t.signal);
       assert.equal(observed.status, "ready");
@@ -63,6 +63,14 @@ test("ordinary background clients share the canonical daemon without hosted owne
       }
     };
     await waitFor(value => value.activity.active === 1 && value.rows[0]?.meta.id === taskId);
+    const shared = (await clients[0]!.request("runtime_get_metrics")).background;
+    for (const count of [1, 5, 10]) {
+      const values = await Promise.all(clients.slice(0, count).map(client => client.get({ background: true, cwd: root, sessionId: "local-0" })));
+      assert.ok(values.every(value => value.rows[0]?.meta.id === taskId));
+      const metrics = (await clients[0]!.request("runtime_get_metrics")).background;
+      assert.equal(metrics.runnerSnapshots, shared.runnerSnapshots, "same-scope clients reuse the root projection");
+      assert.equal(metrics.history.inventories, 0);
+    }
     assert.equal((await clients[1]!.get({ background: true, cwd: root, sessionId: "local-1" })).activity.active, 0);
     store.registerWait({ waitId: "754-daemon-wait", owner, dependencies: [{ operationId: "754-daemon-operation" }], continuationNote: "Read exact runner evidence" });
     await waitFor(value => value.rows[0]?.meta.waits[0]?.waitId === "754-daemon-wait");
@@ -191,9 +199,37 @@ test("shared query observes real runner and wait without taking supervision auth
     unlinkSync(corrupt);
     await model.reconcile();
     assert.equal((await clients[0]!.get(scope)).status, "ready");
-    store.registerWait({ waitId: "754-wait", owner, dependencies: [{ operationId: "754-operation" }], continuationNote: "Interpret the exact runner result" });
-    await model.reconcile();
-    assert.equal((await clients[0]!.get(scope)).rows[0]!.meta.waits[0].waitId, "754-wait");
+    const beforeWait = { ...model.backgroundMetrics };
+    const waitDiagnosticBefore = structuredClone(beforeWait);
+    const background = (model as any).background, project = background.project;
+    const projectionTrace: any[] = [];
+    const describe = (operations: any[]) => operations.slice(0, 8).map(op => {
+      const cached = background.terminalProjections.get(op.operation_id);
+      const version = cached && JSON.parse(cached.version);
+      return { operationId: op.operation_id, phase: op.phase, dirty: background.dirtyOperations.has(op.operation_id),
+        repair: background.repairIds.has(op.operation_id), dependencyVersion: cached?.dependencyVersion,
+        files: version?.[2], waits: version?.[3] };
+    });
+    background.project = function(operations: any[], useCache = true) {
+      const before = describe(operations), count = this.metrics.runnerSnapshots;
+      try { return project.call(this, operations, useCache); }
+      finally {
+        const delta = this.metrics.runnerSnapshots - count;
+        if (delta && projectionTrace.length < 32) projectionTrace.push({ useCache, delta, before, after: describe(operations) });
+      }
+    };
+    try {
+      store.registerWait({ waitId: "754-wait", owner, dependencies: [{ operationId: "754-operation" }], continuationNote: "Interpret the exact runner result" });
+      await model.reconcile();
+      assert.equal((await clients[0]!.get(scope)).rows[0]!.meta.waits[0].waitId, "754-wait");
+      assert.equal(model.backgroundMetrics.dependencyQueries - beforeWait.dependencyQueries, 1, "only the exact task's dependent waits are read");
+      assert.equal(model.backgroundMetrics.runnerSnapshots - beforeWait.runnerSnapshots, 1, "unrelated active and terminal tasks retain their projections");
+    } catch (error) {
+      console.error(`Background wait projection failure: ${JSON.stringify({ beforeWait: waitDiagnosticBefore,
+        afterWait: model.backgroundMetrics, status: background.status, reason: background.reason, projectionTrace })}`);
+      throw error;
+    } finally { background.project = project; }
+    assert.equal(model.backgroundMetrics.history!.inventories, 0, "tools and activity never activate historical inventory");
     for (let i = 0; i < hosts.length; i++) {
       await hosts[i]!.refreshActivity();
       assert.equal(hosts[i]!.executionActive, true);

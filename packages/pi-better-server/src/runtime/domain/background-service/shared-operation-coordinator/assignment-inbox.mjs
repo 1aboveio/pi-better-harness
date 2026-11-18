@@ -2,18 +2,28 @@
 import { createRequire } from "node:module";
 /** Rebuildable observation state, never an execution or delivery credential. */
 export class AssignmentInbox {
-    constructor(path, connection) {
+    constructor(path, connectionOrOptions, options = {}) {
+        const connection = typeof connectionOrOptions?.prepare === "function" ? connectionOrOptions : undefined;
+        if (!connection)
+            options = connectionOrOptions ?? options;
+        this.entityPrefix = options.entityPrefix;
         const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
         this.shared = Boolean(connection);
         this.db = connection ?? new DatabaseSync(path);
-        this.prefix = connection ? "assignment_inbox." : "";
+        this.alias = this.entityPrefix === "background:" ? "background_inbox" : "assignment_inbox";
+        this.prefix = connection ? `${this.alias}.` : "";
         let attached = false;
         try {
             // Share the query owner's handle; only the attached derived file is durable.
             if (connection) {
-                connection.prepare("ATTACH DATABASE ? AS assignment_inbox").run(path);
+                connection.prepare(`ATTACH DATABASE ? AS ${this.alias}`).run(path);
                 attached = true;
             }
+            // Reopening initialized schema must not reserve an attached writer.
+            const tables = this.db.prepare(`SELECT count(*) AS n FROM ${this.prefix}sqlite_master
+                WHERE type='table' AND name IN ('position','pending','applied_scopes','diagnostics')`).get().n;
+            if (tables === 4 && this.db.prepare(`SELECT 1 FROM ${this.prefix}diagnostics LIMIT 1`).get())
+                return;
             this.db.exec(`CREATE TABLE IF NOT EXISTS ${this.prefix}position (
             singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation TEXT NOT NULL,
             received INTEGER NOT NULL, applied INTEGER NOT NULL);
@@ -32,7 +42,7 @@ export class AssignmentInbox {
             // Never detach an earlier participant or close a borrowed owner.
             try {
                 if (attached)
-                    this.db.exec("DETACH DATABASE assignment_inbox");
+                    this.db.exec(`DETACH DATABASE ${this.alias}`);
                 else if (!connection)
                     this.db.close();
             }
@@ -58,6 +68,8 @@ export class AssignmentInbox {
         const after = reset ? last : position.received;
         const changes = reset ? [] : source.prepare("SELECT * FROM assignment_changes WHERE seq>? ORDER BY seq LIMIT 128").all(after);
         this.more = !reset && Number(changes.at(-1)?.seq ?? after) < last;
+        if (!reset && !changes.length)
+            return this.batch(generation);
         this.db.exec("BEGIN IMMEDIATE");
         try {
             if (reset) {
@@ -67,8 +79,12 @@ export class AssignmentInbox {
             }
             const insert = this.db.prepare(`INSERT INTO ${this.prefix}pending VALUES(?, ?, ?, ?)
                 ON CONFLICT(scope) DO UPDATE SET seq=excluded.seq`);
-            for (const change of changes)
+            for (const change of changes) {
+                const background = change.entity.startsWith('background:');
+                if (this.entityPrefix ? !change.entity.startsWith(this.entityPrefix) : background)
+                    continue;
                 insert.run(JSON.stringify([change.session_id, change.workspace, change.assignment_id]), change.seq, change.seq, Date.now());
+            }
             // The obligations above and received position commit together.
             if (changes.length)
                 this.db.prepare(`UPDATE ${this.prefix}position SET received=? WHERE singleton=1`).run(changes.at(-1).seq);
@@ -78,12 +94,20 @@ export class AssignmentInbox {
             this.db.exec("ROLLBACK");
             throw error;
         }
+        return this.batch(generation);
+    }
+    batch(generation) {
         const batch = new Map(this.db.prepare(`SELECT scope, seq FROM ${this.prefix}pending ORDER BY first_seq, scope LIMIT 128`).all().map(row => [row.scope, String(row.seq)]));
         Object.defineProperty(batch, "generation", { value: generation });
         return batch;
     }
     acknowledge(batch, baselineComplete) {
-        if (batch.generation && batch.generation !== this.db.prepare(`SELECT generation FROM ${this.prefix}position WHERE singleton=1`).get()?.generation)
+        const position = this.db.prepare(`SELECT * FROM ${this.prefix}position WHERE singleton=1`).get();
+        if (batch.generation && batch.generation !== position?.generation)
+            return;
+        if (batch.size && ![...batch.keys()].some(scope => scope !== "*" || baselineComplete))
+            return;
+        if (!batch.size && (!position || position.applied === position.received))
             return;
         this.db.exec("BEGIN IMMEDIATE");
         try {
@@ -113,7 +137,7 @@ export class AssignmentInbox {
             ...this.db.prepare(`SELECT repairs FROM ${this.prefix}diagnostics`).get() };
     }
     close() { if (this.shared)
-        this.db.exec("DETACH DATABASE assignment_inbox");
+        this.db.exec(`DETACH DATABASE ${this.alias}`);
     else
         this.db.close(); }
 }

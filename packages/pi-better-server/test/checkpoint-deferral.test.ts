@@ -243,7 +243,7 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
     await Promise.all(Array.from({ length: 32 }, () => current.reconcile(true)));
     assert.equal(current.metrics.initialization.attempts, 1);
     assert.equal(current.metrics.checkpoints.acquisitionAttempts, 1, "checkpoint attachment succeeded independently");
-    assert.deepEqual(names(db), ["main", "log_checkpoints"], "failed inbox ATTACH leaves no owned alias");
+    assert.deepEqual(names(db), ["main", "log_checkpoints"], "failed assignment ATTACH leaves no alias and Background has not acquired yet");
     const frames: any[] = [];
     const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0,
       write(line: string) { frames.push(JSON.parse(line)); }, destroy() {} });
@@ -261,7 +261,7 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
           background: true, backgroundHistory: true, cwd: root, sessionId: "parent" } }) as any;
         assert.equal(history.status, "rebuilding", "history cannot dereference a reader before acquisition");
         assert.equal(history.backgroundIndex, undefined, "unverified history must not mint an index or cursor");
-        assert.equal(current.backgroundMetrics.history!.inventories, 0);
+        assert.equal(current.backgroundMetrics.history?.inventories ?? 0, 0, "unavailable history never inventories the source");
         assert.equal(current.observation().status, "rebuilding");
         assert.throws(() => current.livenessReasons(), /unverified/);
         assert.throws(() => current.upgradeObligations(), /rebuilding/);
@@ -317,6 +317,29 @@ test("inbox schema contention releases only its newly acquired alias before same
   } finally {
     if (writer.isTransaction) writer.exec("ROLLBACK");
     owner.close(); writer.close(); rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Background inbox schema contention preserves the existing assignment alias", () => {
+  const root = fixture(), path = join(root, "background.sqlite");
+  const writer = new DatabaseSync(path), owner = new DatabaseSync(":memory:");
+  const assignment = new AssignmentInbox(join(root, "assignment.sqlite"), owner);
+  writer.exec("CREATE TABLE retained(value); BEGIN IMMEDIATE");
+  try {
+    assert.throws(() => new AssignmentInbox(path, owner, { entityPrefix: "background:" }), /database is locked/);
+    assert.deepEqual(names(owner), ["main", "assignment_inbox"], "cleanup cannot detach the earlier assignment participant");
+    assert.equal(assignment.metrics.repairs, 0);
+    writer.exec("ROLLBACK");
+    const background = new AssignmentInbox(path, owner, { entityPrefix: "background:" });
+    try {
+      assert.deepEqual(names(owner), ["main", "assignment_inbox", "background_inbox"]);
+      assert.equal(background.metrics.repairs, 0);
+    } finally { background.close(); }
+    assert.equal(assignment.metrics.repairs, 0);
+    assert.deepEqual(names(owner), ["main", "assignment_inbox"]);
+  } finally {
+    if (writer.isTransaction) writer.exec("ROLLBACK");
+    assignment.close(); owner.close(); writer.close(); rmSync(root, { recursive: true, force: true });
   }
 });
 

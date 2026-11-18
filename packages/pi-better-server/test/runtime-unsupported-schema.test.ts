@@ -71,7 +71,10 @@ test("unsupported assignment schema settles degraded repair and recovers only af
     assert.equal((model as any).db.prepare("SELECT total_changes() AS n").get().n, writes);
     external.exec("UPDATE schema_meta SET value='4' WHERE key='schema_version'");
     await model.reconcile();
-    assert.equal(model.snapshot().status, "ready");
+    const restored = model.snapshot();
+    assert.equal(restored.status, "ready", JSON.stringify({ reason: restored.reason,
+      rejectedRevision: (model as any).unsupportedAssignmentRevision, pending: Boolean((model as any).pending),
+      staged: Boolean((model as any).staged), sourceErrors: [...(model as any).sourceErrors].slice(0, 4) }));
     assert.ok(model.snapshot().rows.every(row => row.assignment.verified));
     assert.equal(model.snapshot({ id: "sa_history_2" }).rows[0]!.meta.name, "deferred replacement");
     assert.equal(model.metrics.metadataReads - settled.metadataReads, 1);
