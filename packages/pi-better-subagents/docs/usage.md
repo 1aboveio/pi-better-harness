@@ -575,6 +575,10 @@ chosen in `/sandbox` → Subagents · Tools
   default loadout and reported with its reason in the launch output; an explicit
   `tools` request for a tool the task boundary cannot provide refuses the launch.
   Ticked tools join the default tool list; an explicit `tools` list still decides.
+  If a trusted tool is inherited from the defaults, registers in the child, and
+  is then inactive (for example, because the extension requires a different
+  model), the child logs the omission once and continues without it. Missing
+  registrations and unavailable explicitly requested tools still fail preflight.
 
 Other tools are disabled in confined children. One that only joined the default
 loadout is omitted from the child and listed in launch output with the reason;
