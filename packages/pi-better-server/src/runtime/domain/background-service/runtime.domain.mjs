@@ -637,6 +637,10 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         scheduleLogRetention(pi, meta.id, getActiveSession);
         const remoteTask = resolvePersistedRemoteTask(meta, dependencies.remoteRunner);
         if (meta.kind === "command_watch") {
+            // Shared display refreshes can revisit an already supervised watch. They
+            // must not replace its captured interval with a new immediate poll.
+            if (watcherTimers.has(meta.id) || activePolls.has(meta.id))
+                return meta;
             scheduleWatch(pi, meta.id, 0, getActiveSession, remoteTask
                 ? (timeoutMs) => remoteTask.runOnce(undefined, timeoutMs)
                 : dependencies.watchPollRunner);
