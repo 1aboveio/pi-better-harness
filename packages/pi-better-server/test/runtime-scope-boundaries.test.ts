@@ -14,6 +14,7 @@ test("A staged source race degrades A but preserves verified B frames and cursor
   const write = (id: string, cwd: string, name: string) => {
     mkdirSync(join(root, "runs", id), { recursive: true });
     writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, name, status: "completed", startedAt: 1 }));
+    writeFileSync(join(root, "runs", id, "output.log"), "");
   };
   const a = join(root, "a"), b = join(root, "b");
   write("sa_a", a, "old"); write("sa_b1", b, "b1"); write("sa_b2", b, "b2");
@@ -62,6 +63,7 @@ test("a held partial A write degrades A but sends no unrelated B frames", async 
   const put = (id: string, cwd: string) => {
     mkdirSync(join(root, "runs", id), { recursive: true });
     writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, status: "completed", startedAt: 1 }));
+    writeFileSync(join(root, "runs", id, "output.log"), "");
   };
   const a = join(root, "a"), b = join(root, "b");
   put("sa_a", a); put("sa_b1", b); put("sa_b2", b);
@@ -108,6 +110,7 @@ test("an unrelated unverified assignment cannot be hidden by an attributed parti
   const put = (id: string, cwd: string, extra = {}) => {
     mkdirSync(join(root, "runs", id), { recursive: true });
     writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, cwd, status: "completed", startedAt: 1, ...extra }));
+    writeFileSync(join(root, "runs", id, "output.log"), "");
   };
   put("sa_a", a); put("sa_b", b); put("sa_c", c);
   const model = new WorkReadModel(root, "global-assignment", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
@@ -136,6 +139,7 @@ test("ten scoped observers see one committed update and separate partial-write r
   const meta = { id: "sa_committed", cwd: root, status: "completed", startedAt: 1, name: "verified" };
   mkdirSync(directory, { recursive: true });
   writeFileSync(path, JSON.stringify(meta));
+  writeFileSync(join(directory, "output.log"), "");
   const model = new WorkReadModel(root, "commit-epochs", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
   const dispose: Array<() => void> = [];
   let held: number | undefined;
