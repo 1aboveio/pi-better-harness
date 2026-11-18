@@ -21,23 +21,23 @@ export class LogCheckpoints {
     this.prefix = connection ? "log_checkpoints." : "";
     let attached = false;
     try {
-    // Keep durable folds on the query owner's handle; query tables stay in memory.
-    if (connection) { this.db.prepare("ATTACH DATABASE ? AS log_checkpoints").run(path); attached = true; }
-    const existing = this.db.prepare(`SELECT type FROM ${this.prefix}sqlite_master WHERE name='checkpoints'`).get();
-    if (existing) {
-      const columns = this.db.prepare(`PRAGMA ${this.prefix}table_info(checkpoints)`).all();
-      const expected = [["path", "TEXT", 1], ["version", "INTEGER", 0], ["payload", "TEXT", 0], ["bytes", "INTEGER", 0], ["used", "INTEGER", 0]];
-      if (existing.type !== "table" || columns.length !== expected.length || columns.some((column: any, i: number) => column.name !== expected[i]![0] || column.type !== expected[i]![1] || column.pk !== expected[i]![2])) {
-        throw new Error("Unsupported checkpoint schema");
+      // Keep durable folds on the query owner's handle; query tables stay in memory.
+      if (connection) { this.db.prepare("ATTACH DATABASE ? AS log_checkpoints").run(path); attached = true; }
+      const existing = this.db.prepare(`SELECT type FROM ${this.prefix}sqlite_master WHERE name='checkpoints'`).get();
+      if (existing) {
+        const columns = this.db.prepare(`PRAGMA ${this.prefix}table_info(checkpoints)`).all();
+        const expected = [["path", "TEXT", 1], ["version", "INTEGER", 0], ["payload", "TEXT", 0], ["bytes", "INTEGER", 0], ["used", "INTEGER", 0]];
+        if (existing.type !== "table" || columns.length !== expected.length || columns.some((column: any, i: number) => column.name !== expected[i]![0] || column.type !== expected[i]![1] || column.pk !== expected[i]![2])) {
+          throw new Error("Unsupported checkpoint schema");
+        }
+        return;
       }
-      return;
-    }
-    this.db.exec(`PRAGMA ${this.prefix}journal_mode=DELETE`);
-    // Setting an already-enabled auto_vacuum still requests a write lock.
-    // Reopening a checkpoint reader must not contend with a reserved writer.
-    if (this.db.prepare(`PRAGMA ${this.prefix}auto_vacuum`).get().auto_vacuum !== 1) {
-      this.db.exec(`PRAGMA ${this.prefix}auto_vacuum=FULL`);
-    }
+      this.db.exec(`PRAGMA ${this.prefix}journal_mode=DELETE`);
+      // Setting an already-enabled auto_vacuum still requests a write lock.
+      // Reopening a checkpoint reader must not contend with a reserved writer.
+      if (this.db.prepare(`PRAGMA ${this.prefix}auto_vacuum`).get().auto_vacuum !== 1) {
+        this.db.exec(`PRAGMA ${this.prefix}auto_vacuum=FULL`);
+      }
       this.db.exec(`CREATE TABLE IF NOT EXISTS ${this.prefix}checkpoints(path TEXT PRIMARY KEY, version INTEGER, payload TEXT, bytes INTEGER, used INTEGER)`);
     } catch (error) {
       // A failed constructor has no caller-visible handle to close. Release only

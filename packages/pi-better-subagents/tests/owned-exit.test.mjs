@@ -2,13 +2,34 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { completeOwnedExit } from "../owned-exit.ts";
 import { createCallbackBatcher } from "../shared-callback-batcher.ts";
-import { registerFixtureRun, retireFixtureRun } from "./fixture-run-ownership.mjs";
+import { registerFixtureRun, retireFixtureRun, settleFixtureRun } from "./fixture-run-ownership.mjs";
 
 const deferred = () => {
     let resolve;
     const promise = new Promise(done => { resolve = done; });
     return { promise, resolve };
 };
+
+test("timing teardown waits for both owned finalization and pending callback writes before group proof", async () => {
+    const finalizer = deferred(), handoff = deferred();
+    const batcher = createCallbackBatcher({ sendMessage: () => handoff.promise });
+    let receiptWritten = false, removed = false;
+    const delivery = batcher.deliverUrgent({ source: "subagent", id: "timing", label: "timing", status: "lost",
+        customType: "health", content: "attention", onDelivered: () => { receiptWritten = true; } });
+    const completion = settleFixtureRun({ completion: finalizer.promise }, batcher, () => {
+        assert.equal(receiptWritten, true, "group proof cannot precede in-flight receipt writes");
+    }).then(() => { removed = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(removed, false);
+    finalizer.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(removed, false, "terminal finalization alone cannot authorize removal");
+    handoff.resolve(); await delivery; await completion;
+    assert.equal(removed, true);
+    const failure = new Error("finalizer refused");
+    await assert.rejects(settleFixtureRun({ completion: Promise.reject(failure) }, batcher,
+        () => assert.fail("failed finalizer cannot authorize group proof or deletion")), error => error === failure);
+});
 
 test("fixture cleanup registration follows the actual exit observer, not the tool caller", () => {
     const run = { id: "local", pid: 123 }, liveRuns = [];

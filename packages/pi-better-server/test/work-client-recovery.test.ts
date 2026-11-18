@@ -162,3 +162,26 @@ test('a response delivered before disconnect is an old observation, not replacem
     await assert.rejects(f.client.get({background:true,cwd:'/project'}),/runtime-unavailable: disconnected/);
   } finally {f.client.close();}
 });
+
+test('the standalone crash trigger owns a pending transport read, not just cached Goal activity', async () => {
+  const { backgroundGoalObservation, backgroundObservation, closeBackgroundObservation } = await import(new URL('../../pi-better-background-tasks/src/work-observation.ts', import.meta.url).href);
+  const f=fixture();await f.client.ready;
+  const pi={events:{emit(_name: string, request: any){request.accept(f.client);}}};
+  const ctx={cwd:'/project',sessionManager:{getSessionId:()=> 'parent'}};
+  try {
+    const initial=backgroundGoalObservation(pi,ctx);
+    await until(()=>f.requests.length===2);f.reply(f.requests[1],snapshot('old'));await initial;
+    const before=f.requests.length;
+    const cached=await backgroundGoalObservation(pi,ctx);
+    assert.equal(cached.instanceId,'old');
+    assert.equal(f.requests.length,before,'warmed Goal activity intentionally sends no RPC');
+    const pending=backgroundObservation(pi,ctx);
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    assert.equal(f.requests.length,before+1,'an interrupted read must issue an actual snapshot RPC');
+    const request=f.requests.at(-1);
+    assert.equal(request.type,'runtime_get_snapshot');
+    assert.equal((f.client as unknown as {pending: Map<string, unknown>}).pending.has(request.id),true);
+    const rejected=assert.rejects(pending,/runtime-unavailable: disconnected/);
+    f.disconnect();await rejected;
+  } finally {closeBackgroundObservation(pi);f.client.close();}
+});

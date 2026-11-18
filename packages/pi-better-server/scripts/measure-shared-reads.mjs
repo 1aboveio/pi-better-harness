@@ -180,7 +180,8 @@ try {
       phase('event-publication', history, count);
       entry.eventPublication = await measureEventPublication({ socketPath: ready.socket, agentDir: agent,
         scope: { cwd: root, sessionId, active: true }, metaPath: join(runs, 'sa_resource_active_0', 'meta.json'),
-        taskId: 'sa_resource_active_0', subscribers: count });
+        taskId: 'sa_resource_active_0', subscribers: count, phase: { history, clients: count },
+        diagnostics: () => control.request('runtime_get_metrics') });
       assert.ok(entry.eventPublication.ms.max <= 1000, `Committed changes must reach healthy subscribers within 1s: ${JSON.stringify(entry.eventPublication.ms)}`);
       assert.ok(entry.eventPublication.ms.p50 >= 0, 'Event visibility must follow the source commit');
       console.log(JSON.stringify(entry));

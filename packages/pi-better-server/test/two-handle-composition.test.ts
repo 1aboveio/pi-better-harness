@@ -151,6 +151,7 @@ test("bounded baseline slices keep committed query coverage while the canonical 
     const id = `sa_slice_${i}`;
     mkdirSync(join(root, "runs", id), { recursive: true });
     writeFileSync(join(root, "runs", id, "meta.json"), JSON.stringify({ id, sessionId: id, cwd: root, status: "completed", startedAt: i }));
+    writeFileSync(join(root, "runs", id, "output.log"), "");
   }
   const model = new WorkReadModel(root, "slices", { baseDir: root, durableDir: join(root, "durable"), supervisorDirectory: join(root, "supervisor"), intervalMs: 60000, watch });
   let running = true, writes = 0;

@@ -7,75 +7,10 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, renameSync, appendFileS
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { MessageChannel, receiveMessageOnPort, type Worker } from "node:worker_threads";
-import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { fixture } from "./support/query-fixture.ts";
 import { HostSourceWatches, nativeWatch } from "../src/runtime/source-watch.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 
-async function fixture(options: { intervalMs?: number; capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "query-root-"));
-  mkdirSync(join(root, "runs"));
-  const transport = mkdtempSync("/tmp/query-socket-");
-  const executor = new WorkQueryExecutor(root, "query-instance", { ...options,
-    workerUrl: options.workerUrl ?? new URL("./support/slow-query-worker.mjs", import.meta.url),
-    modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: options.intervalMs ?? 60000 } });
-  const sockets = new Set<Socket>();
-  const server = createServer(socket => {
-    sockets.add(socket); socket.on("close", () => sockets.delete(socket));
-    const queries = executor.connect(socket);
-    socket.setEncoding("utf8");
-    let buffer = "";
-    socket.on("data", chunk => {
-      buffer += chunk;
-      while (buffer.includes("\n")) {
-        const end = buffer.indexOf("\n"), line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
-        const command = JSON.parse(line);
-        const reply = (data: unknown, error?: unknown) => {
-          if (!socket.destroyed) socket.write(JSON.stringify({ type: "response", id: command.id,
-            success: !error, data, error: error ? String(error) : undefined }) + "\n");
-        };
-        if (["hello", "ping"].includes(command.type)) { reply({ ok: true }); continue; }
-        try { void queries.handle(command).then(data => {
-          if (!socket.destroyed) socket.write(JSON.stringify({ type: "response", id: command.id, success: true }).slice(0, -1) + ',"data":' + data.json + "}\n");
-        }, error => reply(undefined, error)); }
-        catch (error) { reply(undefined, error); }
-      }
-    });
-  });
-  const path = join(transport, "query.sock");
-  server.listen(path); await once(server, "listening");
-  const clients: WorkClient[] = [];
-  const client = async () => { const value = new WorkClient(path, root); clients.push(value); await value.ready; return value; };
-  const worker = (executor as unknown as { worker: Worker }).worker;
-  const bootstrapped = new Promise<void>(resolve => {
-    const listener = (message: any) => { if (message.type === "fixture-ready") { worker.off("message", listener); resolve(); } };
-    worker.on("message", listener);
-  });
-  const stall = async (iterations = 3000000) => {
-    const started = new Promise<void>(resolve => {
-      const listener = (message: any) => { if (message.type === "diagnostic-started") { worker.off("message", listener); resolve(); } };
-      worker.on("message", listener);
-    });
-    const finished = new Promise<number>((resolve, reject) => {
-      const cleanup = () => { worker.off("message", listener); worker.off("exit", exited); worker.off("error", failed); };
-      const listener = (message: any) => { if (message.type === "diagnostic-finished") { cleanup(); resolve(message.durationMs); } };
-      const exited = (code: number) => { cleanup(); reject(new Error(`diagnostic worker exited before completing SQLite work (code ${code})`)); };
-      const failed = (error: Error) => { cleanup(); reject(error); };
-      worker.on("message", listener); worker.once("exit", exited); worker.once("error", failed);
-    });
-    // Some watchdog tests intentionally discard the completion promise.
-    void finished.catch(() => {});
-    worker.postMessage({ type: "diagnostic-stall", iterations }); await started;
-    return { finished };
-  };
-  const close = async () => {
-    clients.forEach(client => client.close()); sockets.forEach(socket => socket.destroy());
-    await new Promise<void>(resolve => server.close(() => resolve())); await executor.close();
-    rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
-  };
-  return { executor, client, stall, worker, bootstrapped, close, root, path };
-}
 const { commitMetadata } = await import(String("../scripts/event-publication/commit.mjs"));
 
 async function ready(client: WorkClient) {
@@ -875,6 +810,8 @@ test("an exact-ID client stops retrying a stalled inventory within its retry bud
 
 test("a failed worker recovers existing subscriptions under a new observation epoch", { timeout: 10000 }, async t => {
   const f = await fixture();
+  let phase = "create source";
+  let observedClient: WorkClient | undefined;
   try {
     const directory = join(f.root, "runs", "sa_recovery");
     const scope = { id: "sa_recovery", limit: 1 };
@@ -907,10 +844,14 @@ test("a failed worker recovers existing subscriptions under a new observation ep
         mtimeNs: String(info.mtimeNs), ctimeNs: String(info.ctimeNs) });
     };
     write("first");
-    const client = await f.client();
+    phase = "connect client";
+    const client = observedClient = await f.client();
     client.onChange(snapshot => record(frames, snapshot));
+    phase = "initial ready subscription";
     await ready(client);
+    phase = "exact-ID subscription";
     await client.subscribe(scope);
+    phase = "publish latest source to original subscription";
     write("latest");
     const until = Date.now() + 3000;
     while (client.snapshot?.rows[0]?.meta.name !== "latest") {
@@ -936,12 +877,25 @@ test("a failed worker recovers existing subscriptions under a new observation ep
         }
       });
     });
+    phase = "terminate original worker";
     await f.worker.terminate();
+    phase = "recover existing subscription";
     await recovered;
     assert.equal(client.closed, false);
     assert.equal(resynced, true);
     assert.equal(f.executor.metrics().executor.worker, "running");
+    phase = "verify recovered exact-ID read";
     assert.equal((await client.get({ id: "sa_recovery", limit: 1 })).rows[0]!.meta.name, "latest");
+  } catch (error) {
+    // Cached evidence only: diagnosing a failed read must not issue another RPC
+    // or give recovery more time before the original failure is reported.
+    console.error(JSON.stringify({ case: "worker-subscription-recovery", phase,
+      error: String(error), observation: f.executor.observation(), metrics: f.executor.metrics(),
+      client: observedClient && { closed: observedClient.closed, instanceId: observedClient.snapshot?.instanceId,
+        seq: observedClient.snapshot?.seq, status: observedClient.snapshot?.status, reason: observedClient.snapshot?.reason,
+        rows: observedClient.snapshot?.rows.map(row => ({ id: row.meta.id, name: row.meta.name })) },
+    }));
+    throw error;
   } finally { await f.close(); }
 });
 
@@ -1150,10 +1104,10 @@ test('Subagents and Background share one coordinator read connection in the quer
     await f.executor.livenessReasons();
     await client.get({ cwd: f.root, active: true });
     await client.get({ background: true, cwd: f.root, sessionId: 'shared-reader', active: true });
-    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator and one derived connection with the durable inbox attached, regardless of domain');
-    assert.equal((f.executor.metrics().sqlite as any).opens, 2, 'both inbox attachments reuse the existing derived handle without another constructor open');
-    assert.equal((f.executor.metrics().sqlite as any).maximum, 2, 'Background attachment cannot temporarily exceed the existing handle budget');
-    assert.equal((f.executor.metrics().sqlite as any).active, 2, 'one coordinator plus one derived index with attached checkpoints, regardless of domain');
+    assert.equal((f.executor.metrics().sqlite as any).active, 1, 'one derived owner attaches the readonly source and both domains');
+    assert.equal((f.executor.metrics().sqlite as any).opens, 1, 'all source/inbox/checkpoint attachments reuse the derived handle without another constructor open');
+    assert.equal((f.executor.metrics().sqlite as any).maximum, 1, 'Background attachment cannot temporarily add a physical source handle');
+    assert.equal((f.executor.metrics().sqlite as any).active, 1, 'one query owner retains source, inbox and checkpoints, regardless of domain');
     assert.equal(f.executor.metrics().coordinatorConnections, 1);
     t.diagnostic(JSON.stringify({ retainedBudget: 2, sqlite: f.executor.metrics().sqlite }));
   } finally { await f.close(); }
@@ -1195,7 +1149,7 @@ test("assignment wait, resume claim, cancellation, outcome and receipt cross the
     store.receiptAssignmentOutcome({ assignmentId: "assignment", recipient, revision: 1, entryId: "entry" });
     await observed(s => s.rows[0]?.recipientPending === false);
     const sqlite = f.executor.metrics().sqlite as any;
-    assert.equal(sqlite.active, 2, "the full receipt journey retains only the source and shared derived handles");
+    assert.equal(sqlite.active, 1, "the full receipt journey retains its source on the shared derived handle");
     assert.ok(sqlite.maximum <= 2, "inbox transactions do not open an extra SQLite handle");
     t.diagnostic(JSON.stringify({ retainedBudget: 2, sqlite }));
     assert.equal(store.getWait(wait).phase, "cancelled");
@@ -1497,7 +1451,7 @@ test("root recreation after an observed absence publishes without inventory fall
     mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, "output.log"), "");
     writeFileSync(join(directory, "meta.json"), JSON.stringify({ ...meta, name: "recreated" }));
-    await waitForEvent(() => client.snapshot?.rows[0]?.meta.name === "recreated");
+    await waitForEvent(() => client.snapshot?.status === "ready" && client.snapshot.rows[0]?.meta.name === "recreated");
     assert.equal(client.snapshot!.status, "ready");
     await waitForEvent(async () => {
       await client.get({ cwd: f.root, sessionId: "parent", limit: 10 });

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { WorkReadModel } from '../src/runtime/read-model.ts';
 import { workloadCounterDelta } from '../scripts/measure-full-runtime/incremental-workload.mjs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
+import { EventEmitter } from 'node:events';
 
 test('detail reads belong to candidate TOTAL exactly once, including warm cache reuse', async t => {
   const root = mkdtempSync(join(tmpdir(), '808-accounting-'));
@@ -15,7 +16,10 @@ test('detail reads belong to candidate TOTAL exactly once, including warm cache 
   const sibling = join(root, 'runs', 'sibling'); mkdirSync(sibling);
   writeFileSync(join(sibling, 'meta.json'), JSON.stringify({ id: 'sibling', cwd: root, sessionId: 'worker', status: 'completed', startedAt: 1, callback: false }));
   writeFileSync(join(sibling, 'output.log'), JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'interleaved detail' }] } }) + '\n');
-  const model = new WorkReadModel(root, 'accounting', { baseDir: root, durableDir: join(root, 'durable'), intervalMs: 60000 });
+  const watch = (_path: string, listener: (...args: any[]) => void) => {
+    const value: any = new EventEmitter(); value.on('change', listener); value.ready = Promise.resolve(); value.close = () => {}; return value;
+  };
+  const model = new WorkReadModel(root, 'accounting', { baseDir: root, durableDir: join(root, 'durable'), intervalMs: 60000, watch });
   try {
     await model.reconcile();
     const before = model.metrics;

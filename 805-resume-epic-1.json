@@ -1,0 +1,85 @@
+{
+  "unit": "805",
+  "status": "diagnostic-source-ready-cause-unresolved",
+  "baseline": "004ffcaece22031118835a9bb235d5ea1f02b3fd",
+  "sourceCommit": "cbf632384aed16865b3e54cffa7a95fd26ca7a1c",
+  "decisionNeeded": null,
+  "actualModelReadback": {
+    "session": "sa_mwkb0p9t_17",
+    "provider": "openai",
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "evidence": "Actual session JSONL first three records read on continuation; model_change and thinking_level_change, not catalog inference."
+  },
+  "checkpointChanges": {
+    "acceptanceAdvanced": false,
+    "causeReproduced": false,
+    "productionFixClaimed": false,
+    "change": "Original worker-subscription recovery test now prints the exact awaited phase, original error, cached executor observation/metrics and cached client epoch/seq/status/row identity on failure, then rethrows the original error before unchanged cleanup.",
+    "reason": "004 primary TAP reports a four-second caller deadline without the failing RPC phase. Initial ready subscription, exact-ID subscription, source publication, original-worker termination, replacement subscription recovery and final read are distinct boundaries. Duration alone cannot establish which failed.",
+    "preserved": "All original assertions, 10-second test timeout, 3-second publication and recovery deadlines, 4-second executor caller deadline, failure counters, prior source/failure history, physical2/2/2 and control16/query8/repair8-total32 remain unchanged. Diagnostics add no RPC, retry, await, worker, socket, source scan or runtime authority."
+  },
+  "primaryEvidence": [
+    {
+      "case": "a failed worker recovers existing subscriptions under a new observation epoch",
+      "step": "CI44034617191 compat2 original query-executor.test.ts case115",
+      "error": "Error: runtime-timeout: caller read deadline exceeded; source was not verified",
+      "durationMs": 4016.848021,
+      "evidence": "../../827-004-compat2-api.log:1120",
+      "classification": "UNRESOLVED; smallest causal reproduction not obtained within permitted in-process work."
+    },
+    {
+      "case": "shared query observes real runner and wait without taking supervision authority",
+      "step": "runtime-background.test.ts:231",
+      "error": "tools and activity never activate historical inventory: 2 !== 0",
+      "evidence": "../../827-004-compat2-api.log:1921",
+      "classification": "Retained parent history projection failure; no ancestry integration or duplicate parent repair."
+    },
+    {
+      "case": "scripts2",
+      "error": "Coordinator records log retrieval EOF/network; retained file has zero bytes.",
+      "evidence": "../../827-004-scripts2-api.log",
+      "classification": "Not passed; no case/root-cause claim from missing log."
+    }
+  ],
+  "tests": [
+    {
+      "command": "node --import tsx --test packages/pi-better-server/test/work-client-recovery.test.ts",
+      "exit": 0,
+      "passed": 13,
+      "skipped": 0,
+      "evidence": ".private-805/logs/resume-epic-client.log",
+      "scope": "Existing in-process transport tests: transient startup recovery, scope/epoch fencing, cancellation, disconnect and exact-ID rebuilding. Not a reproduction or fix of the native CI deadline."
+    },
+    {
+      "command": "npm run typecheck --workspace packages/pi-better-server",
+      "exit": 2,
+      "phase": "first diagnostic edit",
+      "error": "test/query-executor.test.ts(651,20): TS18048: 'client' is possibly 'undefined'.",
+      "evidence": ".private-805/logs/resume-epic-types.log",
+      "disposition": "Corrected the test-only optional captured reference; retained first failure."
+    },
+    {
+      "command": "npm run typecheck --workspace packages/pi-better-server",
+      "exit": 0,
+      "phase": "final corrected diagnostic edit",
+      "evidence": ".private-805/logs/resume-epic-types-final.log"
+    },
+    { "command": "git diff --check", "exit": 0 }
+  ],
+  "selfReview": [
+    "No production repair inferred from the adjacent pure-client test passes or approximately four-second elapsed time.",
+    "Failure logging uses cached bounded state only and rethrows the same error; no fresh observation changes the failing source or timing.",
+    "No default-history fix or unsettled parent merged; parent a1c0a9 object is absent from this clone and was not fetched.",
+    "No remote pushes, PRs, external waits, shared settings/runtime changes, native-denial replay through another Node/path/channel, resets, force or rebase."
+  ],
+  "blockers": [
+    "Exact failed native phase/worker state is missing from retained 004 TAP. The coordinator must qualify the original unchanged test through the approved canonical Node24.14.1 lane and retain its new failure-only record if it recurs; local Node24.21/native restrictions remain unchanged.",
+    "Parent803 must settle before ancestry integration and history projection qualification. Owners802/804 continue their own parent work.",
+    "scripts2 primary output is unavailable in the retained zero-byte file; network EOF remains separate and unqualified."
+  ],
+  "remainingWork": [
+    "Identify the actual failed RPC/phase from canonical producer evidence, reproduce its smallest cause within allowed boundaries, then make a causal RED/GREEN repair if indicated.",
+    "Qualify settled ancestry and all original 805/native criteria without changing thresholds or resetting non-convergence history."
+  ]
+}

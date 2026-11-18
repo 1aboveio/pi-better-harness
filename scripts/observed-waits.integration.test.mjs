@@ -1352,7 +1352,17 @@ test("cancelling a parked assignment after the production continuation CLI is pu
         // evidence through the real bridge, then stopped at the ack gate.
         const heldLog = await waitUntil(() => {
             const text = readFileSync(registry.logPathFor(running.meta.id), "utf8");
-            return text.includes("bg_task_status") && text.includes("bg_task_log") ? text : undefined;
+            // Tool names in prompts or call-start events do not prove evidence reads finished.
+            const records = value => value.split("\n").flatMap(line => {
+                try { return [JSON.parse(line)]; } catch { return []; }
+            });
+            const completed = new Set(records(text)
+                .filter(event => event.type === "tool_execution_end" && event.isError === false)
+                .map(event => event.toolName));
+            const checkpoint = existsSync(traceFile) && records(readFileSync(traceFile, "utf8")).some(event =>
+                event.mode === "resume" && event.step === "status-log" && event.taskId === operation.taskId
+                && event.waitId === wait.waitId && event.generation === wait.generation);
+            return completed.has("bg_task_status") && completed.has("bg_task_log") && checkpoint ? text : undefined;
         }, "the continuation CLI to read status and log evidence", 30_000);
         assert.doesNotMatch(heldLog, /"toolName":"acknowledge_operation_result"/, "the held child has not acknowledged anything");
         const heldTrace = readFileSync(traceFile, "utf8");

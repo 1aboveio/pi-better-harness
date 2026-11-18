@@ -102,11 +102,11 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
         maximum: main.maximum + worker.maximum } };
     };
     const sqliteBefore = await actualConnections();
-    assert.equal(sqliteBefore.opens, 2, "query owns exactly one coordinator reader and one shared derived handle");
-    assert.equal(sqliteBefore.maximum, 2, "query peak physical handle budget remains two");
+    assert.equal(sqliteBefore.opens, 1, "query opens only its derived owner with the canonical source attached readonly");
+    assert.equal(sqliteBefore.maximum, 1, "query attachments cannot open a hidden second physical handle");
     assert.equal(sqliteBefore.total.active, sqliteBefore.main.active + sqliteBefore.active, "all main and query physical handles remain visible");
-    assert.equal(sqliteBefore.active, 2, "one coordinator and one derived connection retain the query index and attached durable inbox");
-    assert.equal(sqliteBefore.active, 2, "one query index with attached checkpoints and one coordinator connection are retained by the daemon");
+    assert.equal(sqliteBefore.active, 1, "one derived query owner retains source, inbox and checkpoints");
+    assert.equal(sqliteBefore.total.active, 2, "MAIN mutation and QUERY derived owners retain exactly two physical handles together");
     assert.equal(first.snapshot!.rows.length, 50);
     for (const count of [1, 5, 10]) {
       phase = `shared-scope-clients-${count}`;

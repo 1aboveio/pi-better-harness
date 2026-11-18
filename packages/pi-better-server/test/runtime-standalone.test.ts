@@ -95,7 +95,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
     const ctx={cwd:${JSON.stringify(evidence)},sessionManager:{getSessionId:()=> 'cold-background'}};
     const {registerTools}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "tools.ts"))}).href);
     const {registerBackgroundTasksGoalProvider}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "goal-provider.ts"))}).href);
-    const {closeBackgroundObservation}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "work-observation.ts"))}).href);
+    const {backgroundObservation,closeBackgroundObservation}=await jiti.import(pathToFileURL(${JSON.stringify(join(backgroundSource, "work-observation.ts"))}).href);
   `;
   const coldScript = entryScript + `
     try {
@@ -194,6 +194,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
   const recoveryScript = entryScript + `
     import {readFileSync,appendFileSync,existsSync} from 'node:fs';
     import {connect} from 'node:net';
+    import {execFileSync} from 'node:child_process';
     import {createRequire as fixtureRequire,syncBuiltinESMExports as syncFixtureNet} from 'node:module';
     const fixtureNet=fixtureRequire(${JSON.stringify(packedApi)})('node:net');
     const originalConnect=fixtureNet.connect,originalWrite=fixtureNet.Socket.prototype.write;
@@ -201,7 +202,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
     fixtureNet.connect=function(...args){const socket=Reflect.apply(originalConnect,this,args);if((typeof args[0]==='string'?args[0]:args[0]?.path)===process.env.PI_SERVER_DIR+'/pi-server.sock')ownerSockets.add(socket);return socket};
     fixtureNet.Socket.prototype.write=function(chunk,...args){const result=Reflect.apply(originalWrite,this,[chunk,...args]);
       if(requestWritten&&ownerSockets.has(this)){let frame;try{frame=JSON.parse(String(chunk))}catch{}
-        if(frame?.type==='runtime_get_snapshot'){const resolve=requestWritten;requestWritten=undefined;resolve({id:frame.id,type:frame.type,socket:this})}}
+        if(frame?.type==='runtime_get_snapshot'){const resolve=requestWritten;requestWritten=undefined;resolve({id:frame.id,type:frame.type,scope:frame.scope,socket:this})}}
       return result;};syncFixtureNet();
     const {WorkClient,ensureRuntime}=await import(${JSON.stringify(packedApi)});
     const {inspectDaemonOwner}=await import(${JSON.stringify(new URL("../daemon-owner.mjs", pathToFileURL(clients[1]!)).href)});
@@ -241,14 +242,21 @@ test("packed standalone packages use one pinned socket runtime, including cached
       trace('foreground-ready');await probe();const first=owner().pid;
       await stop();trace('clean-stop');assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
       assert.deepEqual((await provider.getActivity(ctx)).items,[]);trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
-      const crashed=owner().pid;paused=crashed;process.kill(crashed,'SIGSTOP');
+      const crashedOwner=owner(),crashed=crashedOwner.pid;paused=crashed;process.kill(crashed,'SIGSTOP');
+      const stoppedBy=Date.now()+5000;
+      while(!execFileSync('ps',['-o','state=','-p',String(crashed)],{encoding:'utf8'}).trim().startsWith('T')) {
+        assert.ok(Date.now()<stoppedBy,'original daemon did not acknowledge SIGSTOP');
+        await new Promise(r=>setImmediate(r));
+      }
+      trace('stop-observed');
       const written=new Promise(resolve=>{requestWritten=resolve});
       const interrupted=listed().then(()=>provider.getActivity(ctx));
       const pendingRequest=await Promise.race([written,interrupted.then(()=>{throw Error('Crash witness operation completed before its real request was written')})]);
       assert.equal(pendingRequest.socket.destroyed,false);assert.equal(owner().pid,crashed);
+      assert.equal(pendingRequest.scope.sessionId,ctx.sessionManager.getSessionId());
       appendFileSync(${JSON.stringify(join(evidence, "recovery-timeline.jsonl"))},JSON.stringify({phase:'interrupted-request-written',id:pendingRequest.id,type:pendingRequest.type,owner:owner()})+'\\n');
       trace('before-kill');process.kill(crashed,'SIGKILL');paused=undefined;trace('kill-sent');
-      assert.deepEqual((await interrupted).items,[]);trace('crash-recovery-ready');assert.notEqual(owner().pid,crashed);await listed();
+      assert.deepEqual((await interrupted).items,[]);trace('crash-recovery-ready');assert.notEqual(owner().pid,crashed);assert.notEqual(owner().token,crashedOwner.token);await listed();
       await stop();closeBackgroundObservation(pi);await listed('bg_status');
       assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
       assert.deepEqual((await provider.getActivity({...ctx,sessionManager:{getSessionId:()=> 'foreign'}})).items,[]);
