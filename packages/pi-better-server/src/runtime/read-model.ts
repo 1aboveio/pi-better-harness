@@ -78,6 +78,8 @@ export class WorkReadModel {
   private parseStates = new Map();
   private healthStates = new Map();
   private checkpoints: LogCheckpoints;
+  private checkpointAttemptAllowed = true;
+  private checkpointFailure = false;
   private failureJournals = new Map<string, string>();
   private processes = new Map<string, string>();
   private staged?: {
@@ -139,7 +141,7 @@ export class WorkReadModel {
     this.agentDir = agentDir; this.instanceId = instanceId;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
-    this.checkpoints = new LogCheckpoints(join(agentDir, "runtime-log-checkpoints.sqlite"), this.db);
+    this.checkpoints = new LogCheckpoints(join(agentDir, "runtime-log-checkpoints.sqlite"), this.db, { defer: true });
     mkdirSync(join(agentDir, "runtime-read-repair"), { recursive: true });
     this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"), join(agentDir, "runtime-read-repair", "assignments.sqlite"), this.db, { composed: true });
     this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(true), refresh => this.reader.connection(refresh));
@@ -162,7 +164,7 @@ export class WorkReadModel {
     // can retain a replaced file's old inode after atomic rename and miss later
     // commits. Flat archives need one watcher; raw runs use one per directory.
     for (const path of [this.runs, this.archives, this.markers]) { this.watchRootParent(path); this.watchDirectory(path); }
-    this.timer = setInterval(() => { this.repairOwed = true; if (!this.pending) void this.reconcile(false); }, options.intervalMs ?? 1000);
+    this.timer = setInterval(() => { this.checkpointAttemptAllowed = true; this.repairOwed = true; if (!this.pending) void this.reconcile(false); }, options.intervalMs ?? 1000);
     this.timer.unref();
   }
 
@@ -333,10 +335,11 @@ export class WorkReadModel {
     return () => { this.listeners.delete(notify); release?.(); };
   }
   get backgroundMetrics() { return { ...this.background.metrics, registry: this.background.registryMetrics, changes: this.background.changeMetrics, scopes: this.background.scopeCount, history: this.background.historyMetrics }; }
-  observation(reasons = this.livenessReasons({ refresh: false })) {
+  observation(reasons = this.checkpoints.ready ? this.livenessReasons({ refresh: false }) : []) {
     return { status: this.state, reason: this.reason, observedAt: Date.now(), reasons };
   }
   livenessReasons(options: { refresh?: boolean } = {}) {
+    if (!this.checkpoints.ready) throw new Error(`Runtime observation ${this.state}: checkpoint coverage is unverified`);
     return [
       ...[...this.projected.values()].filter(row => row.meta.status === "running"
         && processMatchesStart(row.meta.pid, row.meta.pidStartTime))
@@ -558,12 +561,25 @@ export class WorkReadModel {
   reconcile(drain = true): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.pending) {
-      return drain ? this.pending.then(() => this.reconcile()) : this.pending;
+      return drain && this.checkpoints.ready ? this.pending.then(() => this.reconcile()) : this.pending;
     }
     const release = this.budget.enter("repair");
     if (!release) return Promise.resolve();
     this.pending = (async () => {
       await this.watchRegistrations();
+      if (this.closed) return;
+      if (!this.checkpoints.ready) {
+        if (!this.checkpointAttemptAllowed || this.checkpointFailure) return;
+        this.checkpointAttemptAllowed = false;
+        let initialized: boolean;
+        try { initialized = this.checkpoints.initialize(); }
+        catch (error) { this.checkpointFailure = true; throw error; }
+        if (!initialized) {
+          const reason = "Checkpoint acquisition is contended; source coverage remains unverified.";
+          if (this.reason !== reason) { this.state = "rebuilding"; this.reason = reason; this.publish(); }
+          return;
+        }
+      }
       let resetRepair = drain;
       do {
         this.dirty = false;
@@ -614,7 +630,7 @@ export class WorkReadModel {
     }).finally(() => {
       release();
       this.pending = undefined;
-      if ((this.hints.size || this.dirty) && !this.closed && !this.unsupportedAssignmentRevision) { this.dirty = false; void this.reconcile(false); }
+      if (this.checkpoints.ready && (this.hints.size || this.dirty) && !this.closed && !this.unsupportedAssignmentRevision) { this.dirty = false; void this.reconcile(false); }
     });
     return this.pending;
   }
