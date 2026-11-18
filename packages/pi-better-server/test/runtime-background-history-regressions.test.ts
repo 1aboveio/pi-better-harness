@@ -183,6 +183,7 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
   registry.writeMeta(budget); writeFileSync(budget.logPath, "");
   recordFailure(budget, "failure_when", "failure condition matched", "poll", { category: "condition" });
   const executor = new WorkQueryExecutor(root, "history-component", {
+    queryCacheDiagnostics: true,
     modelOptions: { baseDir: join(root, "raw"), durableDir: join(root, "archive"), supervisorDirectory: join(root, "supervisor"), intervalMs: 60000 } });
   const events = new EventEmitter(), tools = new Map<string, any>();
   const pi: any = { events, on() {}, registerTool(tool: any) { tools.set(tool.name, tool); } };
@@ -239,7 +240,13 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
       assert.match(repeated, /Failure journal could not be read/);
       assert.equal(/statusCursor=(\S+)/.exec(repeated)?.[1], /statusCursor=(\S+)/.exec(withGap)?.[1]);
       const afterRepeat = await client.request("runtime_get_metrics");
+      if (afterRepeat.queryCount !== beforeRepeat.queryCount) t.diagnostic(JSON.stringify({
+        cacheComparisonFailure: { legacyCount, before: { queryCount: beforeRepeat.queryCount, comparisons: beforeRepeat.cacheComparisons.slice(-2) },
+          after: { queryCount: afterRepeat.queryCount, comparisons: afterRepeat.cacheComparisons.filter((entry: any) => entry.queryCount >= beforeRepeat.queryCount) } } }).slice(0, 16384));
       assert.equal(afterRepeat.queryCount, beforeRepeat.queryCount, "unchanged scope reuses its cached projection");
+      assert.ok(afterRepeat.cacheComparisons.length <= 16, "opt-in comparison capture remains bounded");
+      assert.ok(afterRepeat.cacheComparisons.some((entry: any) => entry.hit && entry.revision === entry.priorRevision
+        && entry.scope.background && entry.scope.sessionId === owner.sessionId), "capture retains actual scoped cache reuse");
       assert.equal(afterRepeat.background.registry.metadataFileReads, beforeRepeat.background.registry.metadataFileReads,
         "unchanged cache validation does not read metadata");
       assert.equal(afterRepeat.background.registry.indexDirectoryReads, beforeRepeat.background.registry.indexDirectoryReads,
