@@ -1203,6 +1203,30 @@ describe("command watch progress evidence", () => {
     } finally { runtime.suspendScheduledWork(); }
   });
 
+  it("shared observation resumes cannot accelerate an already owned one-second watch", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(watchStartedAt);
+    const watch = scriptedWatch([{ exitCode: 7, stdout: '{"status":"pending"}\n' }]);
+    const origin = { cwd: process.cwd(), sessionId: "reload-watch-parent" };
+    const meta = startWatchTask(fakePi, { name: "reload-watch", command: "controlled SSH poll boundary", interval_seconds: 1,
+      timeout_seconds: 0, callback: false, success_when: { type: "json_path_equals", path: "$.status", value: "done" } },
+      origin.cwd, origin, () => origin, { watchPollRunner: watch.runner });
+    ids.push(meta.id);
+    await advance(0);
+    expect(watch.calls()).toBe(1);
+    for (let read = 0; read < 22; read++) {
+      await advance(100);
+      resumeRunningTask(fakePi, readMeta(meta.id)!, () => origin, { watchPollRunner: watch.runner });
+      await advance(0);
+    }
+    expect(watch.calls()).toBe(3); // Initial poll, then the two original interval deadlines.
+    suspendScheduledWork(); resumeScheduledWork();
+    resumeRunningTask(fakePi, readMeta(meta.id)!, () => origin, { watchPollRunner: watch.runner });
+    await advance(0);
+    expect(watch.calls(), "a genuinely suspended owner still resumes immediately").toBe(4);
+    await advance(1000);
+    expect(watch.calls()).toBe(5);
+  });
+
   it("holds the state clock while polls keep reporting the same outcome", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(watchStartedAt);

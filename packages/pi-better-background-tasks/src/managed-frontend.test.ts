@@ -7,6 +7,37 @@ import { createManagedBackgroundFrontend } from './managed-frontend.js';
 const context = (branch: any[] = []) => ({ cwd: '/workspace', sessionManager: { getSessionId: () => 'native', getBranch: () => branch } } as any);
 beforeEach(() => { fixture.request.mockReset(); fixture.enqueue.mockReset();fixture.urgent.mockReset(); fixture.observe = undefined; });
 describe('managed native UI boundary', () => {
+    it('captures poll, queue, handoff, receipt and failure without changing delivery', async () => {
+      vi.stubEnv('PI_BG_OBSERVED_WAITS_DEBUG', '1');
+      const output = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let delivered = false;
+      fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => {
+        if (tool === '__background_receipt') { delivered = true; return {}; }
+        return { tasks: [], deliveries: delivered ? [] : [{ token: 'private-token', receiptId: 'receipt',
+          notification: { taskId: 'watch', origin: { cwd: '/workspace', sessionId: 'native' }, status: 'succeeded', event: {} } }] };
+      });
+      const frontend = createManagedBackgroundFrontend({ registerTool() {} } as any);
+      try {
+        frontend.host.start(context()); await frontend.host.reconcileNow();
+        expect(fixture.enqueue).toHaveBeenCalledTimes(1);
+        fixture.enqueue.mock.calls[0][0].onDelivered();
+        await vi.waitFor(() => expect(delivered).toBe(true));
+        await frontend.host.reconcileNow();
+        const records = () => output.mock.calls.filter(call => call[0] === '[background-handoff-frontend]').map(call => JSON.parse(call[1]));
+        expect(records().map(item => item.stage)).toEqual(expect.arrayContaining(['poll-start', 'poll-received', 'queue', 'handoff', 'receipt-return']));
+        expect(JSON.stringify(records())).not.toContain('private-token');
+        fixture.request.mockRejectedValue(new Error('actual poll refusal'));
+        await expect(frontend.host.reconcileNow()).rejects.toThrow('actual poll refusal');
+        expect(records().some(item => item.stage === 'poll-error' && item.error.includes('actual poll refusal'))).toBe(true);
+        for (let i = 0; i < 140; i++) {
+          fixture.request.mockRejectedValue(new Error(`distinct failure ${i}`));
+          await frontend.host.reconcileNow().catch(() => {});
+        }
+        expect(records().length).toBeLessThanOrEqual(128);
+        expect(records().at(-1).stage).toBe('capture-limit');
+        expect(output.mock.calls.every(call => String(call[1]).length <= 4096)).toBe(true);
+      } finally { frontend.host.close(); output.mockRestore(); vi.unstubAllEnvs(); }
+    });
     it('keeps 60 render reads free of provider requests and fetches evidence only on explicit selection', async () => {
         fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => tool === '__background_poll' ? { tasks: [{ id: 'durable', active: true }], legacyRows: [{ id: 'legacy', status: 'running' }], deliveries: [] } : tool === '__background_log' ? { stdout: 'evidence' } : { id: 'legacy' });
         const frontend = createManagedBackgroundFrontend({ registerTool() { } } as any), ctx = context();

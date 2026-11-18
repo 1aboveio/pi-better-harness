@@ -221,7 +221,6 @@ export class BackgroundObservation {
       if (this.db) for (const id of new Set([...this.dirtyOperations, ...this.repairIds])) {
         this.metrics.exactOperationQueries++;
         this.changedOperations.set(id, this.db.prepare("SELECT * FROM operations WHERE operation_id=?").get(id));
-        if (this.repairIds.has(id)) this.history?.repairOperation(this.changedOperations.get(id), id);
       }
       const operations = this.db ? this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor'").all() : [];
       this.metrics.activeRows += operations.length;
@@ -264,6 +263,9 @@ export class BackgroundObservation {
       // Projection churn must not cancel a yielding history build. Its own
       // source versions and watchers invalidate only changed source facts.
       this.rows = rows; this.signature = signature; this.status = "ready"; this.reason = undefined;
+      // History's source fence must see this newly verified observation, not
+      // reject recovery because the previous pass found a partial legacy write.
+      for (const id of this.repairIds) this.history?.repairOperation(this.changedOperations.get(id), id);
       this.history?.reconcile();
       if (batch) this.inbox.acknowledge(batch, true);
       this.dirtyOperations.clear();
