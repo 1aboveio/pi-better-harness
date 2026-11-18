@@ -11,24 +11,37 @@ export class AssignmentInbox {
         this.db = connection ?? new DatabaseSync(path);
         this.alias = this.entityPrefix === "background:" ? "background_inbox" : "assignment_inbox";
         this.prefix = connection ? `${this.alias}.` : "";
-        // Share the query owner's handle; only the attached derived file is durable.
-        if (connection) connection.prepare(`ATTACH DATABASE ? AS ${this.alias}`).run(path);
-        // A second observer may open while the first holds a derived write
-        // transaction. Existing schema/diagnostics require no write reservation.
-        const tables = this.db.prepare(`SELECT count(*) AS n FROM ${this.prefix}sqlite_master
-            WHERE type='table' AND name IN ('position','pending','applied_scopes','diagnostics')`).get().n;
-        if (tables === 4 && this.db.prepare(`SELECT 1 FROM ${this.prefix}diagnostics LIMIT 1`).get()) return;
-        this.db.exec(`CREATE TABLE IF NOT EXISTS ${this.prefix}position (
+        let attached = false;
+        try {
+            // Share the query owner's handle; only the attached derived file is durable.
+            if (connection) {
+                connection.prepare(`ATTACH DATABASE ? AS ${this.alias}`).run(path);
+                attached = true;
+            }
+            // Existing initialized schema needs no write reservation.
+            const tables = this.db.prepare(`SELECT count(*) AS n FROM ${this.prefix}sqlite_master
+                WHERE type='table' AND name IN ('position','pending','applied_scopes','diagnostics')`).get().n;
+            if (tables === 4 && this.db.prepare(`SELECT 1 FROM ${this.prefix}diagnostics LIMIT 1`).get()) return;
+            this.db.exec(`CREATE TABLE IF NOT EXISTS ${this.prefix}position (
             singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation TEXT NOT NULL,
             received INTEGER NOT NULL, applied INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS ${this.prefix}pending (
                 scope TEXT PRIMARY KEY, seq INTEGER NOT NULL, first_seq INTEGER NOT NULL, since INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS ${this.prefix}applied_scopes (scope TEXT PRIMARY KEY, seq INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS ${this.prefix}diagnostics (repairs INTEGER NOT NULL);`);
-        // Reopening an initialized inbox must not reserve every attached file
-        // merely to execute an INSERT whose SELECT would produce no rows.
-        if (!this.db.prepare(`SELECT 1 FROM ${this.prefix}diagnostics LIMIT 1`).get()) {
-            this.db.exec(`INSERT INTO ${this.prefix}diagnostics SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM ${this.prefix}diagnostics)`);
+            // Reopening an initialized inbox must not reserve every attached file
+            // merely to execute an INSERT whose SELECT would produce no rows.
+            if (!this.db.prepare(`SELECT 1 FROM ${this.prefix}diagnostics LIMIT 1`).get()) {
+                this.db.exec(`INSERT INTO ${this.prefix}diagnostics SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM ${this.prefix}diagnostics)`);
+            }
+        } catch (error) {
+            // A failed constructor cannot transfer its alias to a caller.
+            // Never detach an earlier participant or close a borrowed owner.
+            try {
+                if (attached) this.db.exec(`DETACH DATABASE ${this.alias}`);
+                else if (!connection) this.db.close();
+            } catch (cleanup) { throw new AggregateError([error, cleanup], "Assignment inbox initialization and owned cleanup failed"); }
+            throw error;
         }
     }
 

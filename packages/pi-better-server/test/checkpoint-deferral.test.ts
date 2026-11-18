@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { LogCheckpoints } from "../src/runtime/log-checkpoints.ts";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
+const { AssignmentInbox } = await import(new URL("../../operation-coordinator/assignment-inbox.mjs", import.meta.url).href);
 const { openStore } = await import(new URL("../src/runtime/domain/subagents/shared-operation-coordinator/index.domain.mjs", import.meta.url).href);
 
 // The SQLite and query owners are real; only filesystem notification and the
@@ -236,4 +237,138 @@ test("partial attachment cleanup failure is reported, retained as owned, and nev
     assert.deepEqual(names(owner), ["main"]);
     assert.equal(owner.prepare("SELECT 42 AS value").get()!.value, 42);
   } finally { failCleanup = false; checkpoint.close(); owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("inbox exclusive acquisition shares the repair permission and never verifies empty coverage", async t => {
+  const root = fixture(), agent = join(root, "agent"), baseDir = join(root, "raw");
+  const id = "sa_inbox_contended", directory = join(baseDir, "runs", id);
+  mkdirSync(directory, { recursive: true }); mkdirSync(agent);
+  const source = openStore({ path: join(agent, "operation-coordinator.sqlite") });
+  const ownerRef = { kind: "worker-conversation", sessionId: "worker", workspace: root };
+  const recipient = { kind: "parent-session", sessionId: "parent", workspace: root };
+  source.registerAssignment({ assignmentId: id, owner: ownerRef, recipient });
+  source.recordAssignmentOutcome({ assignmentId: id, owner: ownerRef, recipient, revision: 1,
+    outcome: "failed", reason: "fixture", evidence: [], waits: [], processUncertain: false });
+  writeFileSync(join(directory, "meta.json"), JSON.stringify({ id, cwd: root, sessionId: "worker", status: "completed",
+    startedAt: 1, assignment: { assignmentId: id, owner: ownerRef, recipient }, callbackOrigin: { cwd: root, sessionId: "parent" } }));
+  const options = { baseDir, durableDir: join(root, "archive"), intervalMs: 1000, watch };
+  const seed = new WorkReadModel(agent, "inbox-seed", options);
+  let oldApplied: number;
+  try { await seed.reconcile(); oldApplied = seed.metrics.assignments.applied; }
+  finally { await seed.close(); }
+  const writer = new DatabaseSync(join(agent, "runtime-read-repair", "assignments.sqlite"));
+  writer.exec("BEGIN EXCLUSIVE");
+  // Source writer and lock holder already exist; count all worker acquisitions.
+  const sqlite = createRequire(import.meta.url)("node:sqlite"), Original = sqlite.DatabaseSync;
+  const live = new Set<any>();
+  let maximum = 0;
+  sqlite.DatabaseSync = class extends Original {
+    constructor(...args: any[]) { super(...args); live.add(this); maximum = Math.max(maximum, live.size); }
+    prepare(sql: string) {
+      if (/^ATTACH\b/i.test(sql)) assert.equal(this.isTransaction, false);
+      return super.prepare(sql);
+    }
+    close() { super.close(); live.delete(this); }
+  };
+  t.after(() => { sqlite.DatabaseSync = Original; });
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let model: WorkReadModel | undefined;
+  try {
+    // This constructor is the exact native failing boundary, not a substitute inbox.
+    assert.doesNotThrow(() => { model = new WorkReadModel(agent, "inbox-deferred", options); });
+    const current = model!, db = (current as any).db;
+    source.receiptAssignmentOutcome({ assignmentId: id, recipient, revision: 1, entryId: "received-during-lock" });
+    await Promise.all(Array.from({ length: 32 }, () => current.reconcile(true)));
+    assert.equal(current.metrics.initialization.attempts, 1);
+    assert.equal(current.metrics.checkpoints.acquisitionAttempts, 1, "checkpoint attachment succeeded independently");
+    assert.deepEqual(names(db), ["main", "background_inbox", "log_checkpoints"], "failed inbox ATTACH leaves no owned alias or loss of the other participant");
+    const frames: any[] = [];
+    const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0,
+      write(line: string) { frames.push(JSON.parse(line)); }, destroy() {} });
+    const queries = new WorkQueries(current, socket as any);
+    try {
+      for (let tick = 0; tick < 3; tick++) {
+        const before: number = current.metrics.initialization.attempts;
+        const began = performance.now();
+        current.fileHint(current.runs, id);
+        await Promise.all(Array.from({ length: 32 }, () => current.reconcile(true)));
+        assert.equal(current.metrics.initialization.attempts, before);
+        assert.equal((queries.handle({ type: "runtime_subscribe", scope: {} }) as any).status, "rebuilding");
+        assert.equal((queries.handle({ type: "runtime_get_snapshot", scope: { background: true, cwd: root, sessionId: "parent" } }) as any).status, "rebuilding");
+        assert.equal(current.observation().status, "rebuilding");
+        assert.throws(() => current.livenessReasons(), /unverified/);
+        assert.throws(() => current.upgradeObligations(), /rebuilding/);
+        assert.equal(current.metrics.assignments.applied, null, "unavailable cursor is unknown, not verified zero");
+        assert.equal(current.metrics.inventories, 0);
+        assert.equal(live.size, 1, "deferral retains one worker handle, plus the existing root mutation owner");
+        assert.equal(db.isTransaction, false);
+        queries.handle({ type: "runtime_unsubscribe" });
+        queries.handle({ type: "runtime_subscribe", scope: {} });
+        t.mock.timers.tick(1000); await current.reconcile(false);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(current.metrics.initialization.attempts, before + 1);
+        assert.equal(current.metrics.checkpoints.acquisitionAttempts, 1);
+        assert.ok(performance.now() - began < 400, "query/control remains within original caller deadline");
+      }
+      writer.exec("ROLLBACK");
+      assert.equal(writer.prepare("SELECT applied FROM position").get()!.applied, oldApplied!);
+      await current.reconcile(); assert.equal(current.metrics.initialization.attempts, 4);
+      t.mock.timers.tick(1000); await current.reconcile(false); await current.reconcile();
+      assert.equal((current as any).db, db);
+      assert.equal(current.snapshot().status, "ready", current.snapshot().reason);
+      assert.equal(current.metrics.initialization.attempts, 5);
+      assert.equal(current.snapshot({ id }).rows[0]!.recipientPending, false);
+      assert.equal(current.metrics.assignments.pending, 0);
+      assert.equal(live.size, 1, "recovery cannot open a separate canonical source handle");
+      assert.equal(current.metrics.indexConnections, 1);
+      assert.equal(current.metrics.coordinatorConnections, 1);
+      assert.ok(current.metrics.assignments.applied > oldApplied!);
+      assert.ok(frames.some(frame => frame.event?.snapshot?.status === "ready"));
+    } finally { queries.close(); }
+  } finally {
+    if (writer.isTransaction) writer.exec("ROLLBACK");
+    await model?.close(); writer.close(); source.close(); rmSync(root, { recursive: true, force: true });
+  }
+  assert.equal(maximum, 1);
+  assert.equal(live.size, 0);
+});
+
+test("inbox schema contention releases only its newly acquired alias before same-owner replay", () => {
+  const root = fixture(), path = join(root, "inbox.sqlite");
+  const writer = new DatabaseSync(path), owner = new DatabaseSync(":memory:");
+  writer.exec("CREATE TABLE retained(value); BEGIN IMMEDIATE");
+  try {
+    assert.throws(() => new AssignmentInbox(path, owner), /database is locked/);
+    assert.deepEqual(names(owner), ["main"], "failed schema initialization must release its exact alias");
+    writer.exec("ROLLBACK");
+    const inbox = new AssignmentInbox(path, owner);
+    try {
+      assert.equal(inbox.metrics.repairs, 0);
+      assert.throws(() => new AssignmentInbox(path, owner), /already in use/);
+      assert.equal(inbox.metrics.repairs, 0, "duplicate failure must not detach existing participant");
+    } finally { inbox.close(); }
+    assert.equal(owner.prepare("SELECT 42 AS n").get()!.n, 42);
+  } finally {
+    if (writer.isTransaction) writer.exec("ROLLBACK");
+    owner.close(); writer.close(); rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("inbox corruption is not lock deferral and close does not require an initialized reader", async t => {
+  const root = fixture();
+  mkdirSync(join(root, "runtime-read-repair"));
+  writeFileSync(join(root, "runtime-read-repair", "assignments.sqlite"), "not a SQLite database");
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const model = new WorkReadModel(root, "inbox-corrupt", { baseDir: join(root, "raw"), durableDir: join(root, "archive"), watch });
+  try {
+    await model.reconcile();
+    assert.equal(model.snapshot().status, "degraded");
+    assert.match(model.snapshot().reason!, /not a database/);
+    assert.equal(model.metrics.initialization.contentions, 0);
+    assert.equal(model.metrics.assignments.applied, null);
+    assert.deepEqual(names((model as any).db), ["main", "background_inbox", "log_checkpoints"]);
+    t.mock.timers.tick(1000); await model.reconcile();
+    assert.equal(model.metrics.initialization.attempts, 1);
+    assert.throws(() => model.livenessReasons(), /unverified/);
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
