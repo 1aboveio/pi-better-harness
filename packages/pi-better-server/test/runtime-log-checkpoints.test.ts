@@ -26,6 +26,10 @@ test("checkpoint readers open under another derived owner's reservation without 
   let second: LogCheckpoints | undefined;
   try {
     first.save("log", { offset: 10, usage: 1 });
+    assert.throws(() => new LogCheckpoints(path, firstOwner), /already in use/);
+    assert.deepEqual(first.load("log"), { offset: 10, usage: 1 },
+      "failed duplicate attachment must not detach an existing caller's checkpoints");
+    secondOwner.exec("CREATE TABLE query_rows(id TEXT); INSERT INTO query_rows VALUES('retained')");
     firstOwner.exec("BEGIN IMMEDIATE");
     assert.doesNotThrow(() => { second = new LogCheckpoints(path, secondOwner); });
     assert.deepEqual(second!.load("log"), { offset: 10, usage: 1 });
@@ -37,6 +41,13 @@ test("checkpoint readers open under another derived owner's reservation without 
     firstOwner.exec("DROP TABLE log_checkpoints.checkpoints; BEGIN IMMEDIATE");
     assert.throws(() => new LogCheckpoints(path, secondOwner), /database is locked/,
       "missing schema still requires initialization and cannot be treated as available under a writer");
+    firstOwner.exec("ROLLBACK");
+    assert.doesNotThrow(() => { second = new LogCheckpoints(path, secondOwner); },
+      "failed bootstrap must release only its attachment so the same owner can recover after contention");
+    assert.equal(secondOwner.prepare("SELECT id FROM query_rows").get()!.id, "retained",
+      "bootstrap cleanup must not close the borrowed query owner");
+    second!.save("recovered", { offset: 30 });
+    assert.deepEqual(first.load("recovered"), { offset: 30 });
   } finally {
     if (firstOwner.isTransaction) firstOwner.exec("ROLLBACK");
     second?.close(); first.close(); secondOwner.close(); firstOwner.close();

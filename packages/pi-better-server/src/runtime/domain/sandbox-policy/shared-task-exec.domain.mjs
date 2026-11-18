@@ -18,6 +18,7 @@ import { pathToFileURL } from "node:url";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 const { createLocalBashOperations, getShellConfig } = PiCodingAgent;
 import { directApplicationTarget, maybeBuildSandboxCommand, SHELL_EXECUTABLE_NAMES } from "./shared-sandbox-core.domain.mjs";
+import { processIdentityDirectory } from "./shared-task-process-identity.domain.mjs";
 export function taskExecutionEnvironment(input) {
     const environment = { ...input };
     // The authenticated worker transport belongs to trusted Pi, not to its task commands.
@@ -250,6 +251,18 @@ export function createTaskExecutor(controller, shellPath = () => undefined, diag
         // Git inventory otherwise creates optional locks in an outside gitdir it cannot unlink (#419).
         const taskEnv = { GIT_OPTIONAL_LOCKS: "0", ...process.env, ...options.env,
             ...(scratch ? { TMPDIR: scratch, TMP: scratch, TEMP: scratch } : {}) };
+        if (options.signal?.aborted)
+            throw new Error("aborted");
+        const identityDirectory = await processIdentityDirectory(plan);
+        if (identityDirectory && JSON.stringify(controller.requireLaunchPlan()) !== JSON.stringify(plan)) {
+            throw new Error("Sandbox permissions changed while preparing process identity; retry the command.");
+        }
+        const executionPolicy = identityDirectory ? { ...plan.policy,
+            runtimeWrite: [...(plan.policy.runtimeWrite ?? []), identityDirectory],
+            denyWrite: [...(plan.policy.denyWrite ?? []), identityDirectory],
+        } : plan.policy;
+        if (identityDirectory)
+            taskEnv.PATH = `${identityDirectory}:${taskEnv.PATH ?? "/usr/bin:/bin"}`;
         // Resolve against the launch cwd, not the trusted Pi process cwd.
         const executable = target.kind === "argv" ? findExecutable(target.execPath, taskEnv, cwd) : undefined;
         if (target.kind === "argv" && !executable) {
@@ -276,7 +289,7 @@ export function createTaskExecutor(controller, shellPath = () => undefined, diag
                 ? [shell.shell, ...shell.args, target.command]
                 : [executable, ...target.execArgs];
             const wrapped = maybeBuildSandboxCommand({
-                policy: plan.policy, profilePath,
+                policy: executionPolicy, profilePath,
                 ...(target.kind === "shell"
                     ? { execPath: "/usr/bin/env", execArgs: ["-i", "--", ...envArgs, ...targetArgs] }
                     : { ...directApplicationTarget(executable, target.execArgs, taskEnv, permissions?.shell !== false),

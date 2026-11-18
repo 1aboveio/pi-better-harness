@@ -19,15 +19,29 @@ export class LogCheckpoints {
     this.shared = Boolean(connection);
     this.db = connection ?? new DatabaseSync(path);
     this.prefix = connection ? "log_checkpoints." : "";
-    // Keep durable folds on the query owner's handle; query tables stay in memory.
-    if (connection) this.db.prepare("ATTACH DATABASE ? AS log_checkpoints").run(path);
-    this.db.exec(`PRAGMA ${this.prefix}journal_mode=DELETE`);
-    // Setting an already-enabled auto_vacuum still requests a write lock.
-    // Reopening a checkpoint reader must not contend with a reserved writer.
-    if (this.db.prepare(`PRAGMA ${this.prefix}auto_vacuum`).get().auto_vacuum !== 1) {
-      this.db.exec(`PRAGMA ${this.prefix}auto_vacuum=FULL`);
+    let attached = false;
+    try {
+      // Keep durable folds on the query owner's handle; query tables stay in memory.
+      if (connection) {
+        this.db.prepare("ATTACH DATABASE ? AS log_checkpoints").run(path);
+        attached = true;
+      }
+      this.db.exec(`PRAGMA ${this.prefix}journal_mode=DELETE`);
+      // Setting an already-enabled auto_vacuum still requests a write lock.
+      // Reopening a checkpoint reader must not contend with a reserved writer.
+      if (this.db.prepare(`PRAGMA ${this.prefix}auto_vacuum`).get().auto_vacuum !== 1) {
+        this.db.exec(`PRAGMA ${this.prefix}auto_vacuum=FULL`);
+      }
+      this.db.exec(`CREATE TABLE IF NOT EXISTS ${this.prefix}checkpoints(path TEXT PRIMARY KEY, version INTEGER, payload TEXT, bytes INTEGER, used INTEGER)`);
+    } catch (error) {
+      // A failed constructor has no caller-visible handle to close. Release only
+      // resources acquired here, never an attachment owned by an earlier caller.
+      try {
+        if (attached) this.db.exec("DETACH DATABASE log_checkpoints");
+        else if (!connection) this.db.close();
+      } catch { /* Preserve the original bootstrap failure. */ }
+      throw error;
     }
-    this.db.exec(`CREATE TABLE IF NOT EXISTS ${this.prefix}checkpoints(path TEXT PRIMARY KEY, version INTEGER, payload TEXT, bytes INTEGER, used INTEGER)`);
   }
   load(path: string): any {
     const row = this.db.prepare(`SELECT payload FROM ${this.prefix}checkpoints WHERE path=? AND version=?`).get(path, LOG_CHECKPOINT_VERSION);

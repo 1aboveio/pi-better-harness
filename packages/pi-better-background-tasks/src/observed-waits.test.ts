@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -2585,7 +2586,19 @@ describe("callback origin and delivery receipt", () => {
   });
 
   it("discovers a terminal result recorded after this host's initial scan", async () => {
-    const root = workspace("late-terminal-discovery");
+    const root = mkdtempSync(join(tmpdir(), "observed-waits-late-terminal-discovery-"));
+    let runnerClosed = false;
+    let runnerExit = Promise.resolve();
+    let runnerResult: string | undefined;
+    cleanups.push(async () => {
+      const before = { closed: runnerClosed, terminal: runnerResult ? existsSync(runnerResult) : false };
+      await runnerExit;
+      expect(runnerClosed, "the owned fixture writer must exit before its directory is removed").toBe(true);
+      expect(runnerResult).toBeDefined();
+      expect(JSON.parse(readFileSync(runnerResult!, "utf8")).attestedBy).toBe("runner");
+      console.log(JSON.stringify({ fixtureWriterQuiescence: { before, closed: runnerClosed, terminal: true } }));
+      rmSync(root, { recursive: true, force: true });
+    });
     const options = {
       storePath: join(root, "operations.sqlite"),
       supervisorDirectory: join(root, "supervisor"),
@@ -2604,12 +2617,29 @@ describe("callback origin and delivery receipt", () => {
     // records terminal while the watcher is not reconciling.
     const launcherHarness = createHarness();
     const launcher = createObservedWaitHost(launcherHarness.pi, { ...options, notifyParent: () => {} });
+    cleanups.push(() => launcher.close());
     launcher.start(ctx);
+    const childProcess = createRequire(import.meta.url)("node:child_process") as typeof import("node:child_process");
+    const originalSpawn = childProcess.spawn;
+    const capture = vi.spyOn(childProcess, "spawn").mockImplementation((...args: Parameters<typeof spawn>) => {
+      const child = originalSpawn(...args);
+      if (args[1]?.[1] === options.supervisorDirectory) {
+        runnerResult = join(options.supervisorDirectory, "tasks", args[1][2]!, "result.json");
+        runnerExit = new Promise<void>((resolve, reject) => {
+          child.once("error", reject);
+          child.once("close", code => { runnerClosed = true; code === 0 ? resolve() : reject(new Error(`fixture runner exit ${code}`)); });
+        });
+        // Cleanup still awaits the original promise and propagates any failure.
+        void runnerExit.catch(() => {});
+      }
+      return child;
+    });
+    syncBuiltinESMExports();
     const launch = await launcher.launchParent({
       kind: "process",
       params: { argv: nodeCommand('setTimeout(() => { console.log("late-terminal"); }, 300)'), shell: false, callback: true },
       ctx,
-    });
+    }).finally(() => { capture.mockRestore(); syncBuiltinESMExports(); });
     launcher.close();
     recordTerminalFromChild(root, launch.operationId, launch.owner, "late-terminal");
 

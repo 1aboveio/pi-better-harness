@@ -24,6 +24,7 @@ export const OPERATIONS_CONVERSATION_ID_ENV = "PI_BETTER_OPERATIONS_CONVERSATION
 export const OPERATIONS_ATTEMPT_ID_ENV = "PI_BETTER_OPERATIONS_ATTEMPT_ID";
 export const OPERATIONS_WRITER_LEASE_ID_ENV = "PI_BETTER_OPERATIONS_WRITER_LEASE_ID";
 export const OPERATIONS_CHILD_ID_ENV = "PI_BETTER_OPERATIONS_CHILD_ID";
+export const OPERATIONS_DEADLINE_AT_ENV = "PI_BETTER_OPERATIONS_DEADLINE_AT";
 /**
  * Parent-provided bridge environment. A launched background task must not
  * inherit any of these names: the token authorizes this child, not a shell it
@@ -39,6 +40,7 @@ export const OPERATION_BRIDGE_ENV_KEYS = Object.freeze([
     OPERATIONS_ATTEMPT_ID_ENV,
     OPERATIONS_WRITER_LEASE_ID_ENV,
     OPERATIONS_CHILD_ID_ENV,
+    OPERATIONS_DEADLINE_AT_ENV,
 ]);
 const BRIDGE_ENV_KEY_SET = new Set(OPERATION_BRIDGE_ENV_KEYS);
 export function findBridgeEnvironmentKey(value, seen = new Set()) {
@@ -592,6 +594,7 @@ export function descriptorsForCapabilities(capabilities) {
  * failure, not a reason to expose an extra tool.
  */
 export function normalizeToolDescriptors(tools, capabilities) {
+    assertWaitToolDependencies(capabilities, tools.map(tool => tool.name));
     const seen = new Set();
     const normalized = [];
     for (const tool of tools) {
@@ -614,6 +617,17 @@ export function normalizeToolDescriptors(tools, capabilities) {
         }
     }
     return deepFreeze(normalized.sort((a, b) => a.name.localeCompare(b.name)));
+}
+/** A parked conversation must be able to read and interpret its terminal evidence. */
+export function assertWaitToolDependencies(capabilities, names) {
+    if (!capabilities.wait && !capabilities.parking && !names.includes(WAIT_OPERATIONS_TOOL))
+        return;
+    if (!capabilities.wait || !capabilities.parking || !names.includes(WAIT_OPERATIONS_TOOL)
+        || !capabilities.acknowledge || !names.includes(ACKNOWLEDGE_OPERATION_TOOL)
+        || !((capabilities.background.status && names.includes("bg_task_status"))
+            || (capabilities.background.log && names.includes("bg_task_log")))) {
+        throw new OperationBridgeError("invalid-request", "wait_for_operations requires parking, acknowledge_operation_result and at least one terminal evidence reader (bg_task_status or bg_task_log) in the final authorized tools list. Add the missing tools explicitly or remove wait_for_operations.");
+    }
 }
 export function capabilityForTool(name, capabilities) {
     switch (name) {
