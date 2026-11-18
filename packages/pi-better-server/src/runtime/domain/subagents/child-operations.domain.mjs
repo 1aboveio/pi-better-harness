@@ -20,7 +20,8 @@ import { readFileSync, realpathSync } from "node:fs";
 import { connect } from "node:net";
 import * as piSdk from "@earendil-works/pi-coding-agent";
 import { captureParkCheckpoint } from "./park-checkpoint.domain.mjs";
-import { ACKNOWLEDGE_OPERATION_TOOL, OPERATION_BRIDGE_ENV_KEYS, OPERATION_BRIDGE_TOOL_NAMES, OPERATION_BRIDGE_VERSION, OPERATIONS_ATTEMPT_ID_ENV, OPERATIONS_CHILD_ID_ENV, OPERATIONS_CONVERSATION_ID_ENV, OPERATIONS_ENABLED_ENV, OPERATIONS_ENDPOINT_ENV, OPERATIONS_RUN_ID_ENV, OPERATIONS_TOKEN_ENV, OPERATIONS_WRITER_LEASE_ID_ENV, WAIT_OPERATIONS_TOOL, OperationBridgeError, OperationToolError, cloneJson, deepFreeze, descriptorFingerprint, findBridgeEnvironmentKey, isLaunchTool, normalizeWaitForOperationsResult, requiresParkCheckpoint, parseBridgeEndpoint, validateJsonSchemaSupport, redactSecret, } from "./operation-bridge-types.domain.mjs";
+import { supportsPromptSections } from "./shared-execution-policy.domain.mjs";
+import { ACKNOWLEDGE_OPERATION_TOOL, OPERATION_BRIDGE_ENV_KEYS, OPERATION_BRIDGE_TOOL_NAMES, OPERATION_BRIDGE_VERSION, OPERATIONS_ATTEMPT_ID_ENV, OPERATIONS_CHILD_ID_ENV, OPERATIONS_CONVERSATION_ID_ENV, OPERATIONS_DEADLINE_AT_ENV, OPERATIONS_ENABLED_ENV, OPERATIONS_ENDPOINT_ENV, OPERATIONS_RUN_ID_ENV, OPERATIONS_TOKEN_ENV, OPERATIONS_WRITER_LEASE_ID_ENV, WAIT_OPERATIONS_TOOL, assertWaitToolDependencies, OperationBridgeError, OperationToolError, cloneJson, deepFreeze, descriptorFingerprint, findBridgeEnvironmentKey, isLaunchTool, normalizeWaitForOperationsResult, requiresParkCheckpoint, parseBridgeEndpoint, validateJsonSchemaSupport, validateJsonSchema, redactSecret, } from "./operation-bridge-types.domain.mjs";
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/;
 /** Namespace access keeps an older SDK without a VERSION export from failing at import time. */
 const PI_CODING_AGENT_VERSION = piSdk.VERSION;
@@ -66,6 +67,10 @@ export function readChildOperationBridgeConfig(env = process.env) {
     const token = env[OPERATIONS_TOKEN_ENV];
     const runId = env[OPERATIONS_RUN_ID_ENV];
     const conversationId = env[OPERATIONS_CONVERSATION_ID_ENV];
+    const deadline = env[OPERATIONS_DEADLINE_AT_ENV];
+    if (deadline !== undefined && (!/^\d+$/.test(deadline) || !Number.isSafeInteger(Number(deadline)))) {
+        return { status: "invalid", reason: "operation bridge assignment deadline is invalid" };
+    }
     try {
         parseBridgeEndpoint(endpoint);
     }
@@ -85,6 +90,7 @@ export function readChildOperationBridgeConfig(env = process.env) {
             token,
             runId,
             conversationId,
+            ...(deadline !== undefined ? { deadlineAt: Number(deadline) || null } : {}),
             ...(env[OPERATIONS_ATTEMPT_ID_ENV] ? { attemptId: env[OPERATIONS_ATTEMPT_ID_ENV] } : {}),
             ...(env[OPERATIONS_WRITER_LEASE_ID_ENV] ? { writerLeaseId: env[OPERATIONS_WRITER_LEASE_ID_ENV] } : {}),
             ...(env[OPERATIONS_CHILD_ID_ENV] ? { childId: env[OPERATIONS_CHILD_ID_ENV] } : {}),
@@ -402,6 +408,7 @@ export function verifyDescriptor(value, config) {
         }));
     }
     const capabilities = validateCapabilities(record.capabilities);
+    assertWaitToolDependencies(capabilities, [...seen]);
     if (seen.has(WAIT_OPERATIONS_TOOL) && !(capabilities.wait && capabilities.parking)) {
         throw new OperationBridgeError("invalid-request", "parent exposed wait_for_operations without a parking capability");
     }
@@ -621,7 +628,17 @@ export function installChildOperationBridge(pi, options = {}) {
     let installed = false;
     let starting;
     let completingPark = false;
+    let completion = { correctionUsed: false, reported: false };
+    let reportError;
+    let bridgeConfig;
     const env = options.env ?? process.env;
+    const completionEntryType = "pi-subagent-completion";
+    const canCorrectCompletion = (signal) => state.status === "ready"
+        && !completion.correctionUsed && !completion.reported && !signal?.aborted
+        && (bridgeConfig?.deadlineAt == null || Date.now() < bridgeConfig.deadlineAt);
+    function saveCompletion() {
+        pi.appendEntry(completionEntryType, { attemptId: bridgeConfig?.attemptId ?? bridgeConfig?.runId, ...completion });
+    }
     const handle = {
         getState: () => ({ ...state, ...(state.descriptor ? { descriptor: state.descriptor } : {}) }),
     };
@@ -655,7 +672,7 @@ export function installChildOperationBridge(pi, options = {}) {
         if (activeToolExecutions === 0)
             restoreBridgeEnvironment();
     });
-    pi.on("session_start", async (_event, _ctx) => {
+    pi.on("session_start", async (_event, ctx) => {
         if (installed || starting)
             return starting;
         starting = (async () => {
@@ -669,6 +686,7 @@ export function installChildOperationBridge(pi, options = {}) {
                 return;
             }
             state.status = "connecting";
+            bridgeConfig = read.config;
             options.onDiagnostic?.({ event: "connecting" });
             const active = (options.clientFactory ?? ((config) => createOperationBridgeClient(config, {
                 requestTimeoutMs: options.requestTimeoutMs,
@@ -686,6 +704,19 @@ export function installChildOperationBridge(pi, options = {}) {
             }
             client = active;
             state.descriptor = descriptor;
+            if (descriptor.capabilities.reportAssignment) {
+                const entries = ctx.sessionManager.getEntries();
+                for (let index = entries.length - 1; index >= 0; index--) {
+                    const entry = entries[index];
+                    if (entry.type !== "custom" || entry.customType !== completionEntryType)
+                        continue;
+                    const data = entry.data;
+                    if (data?.attemptId !== (read.config.attemptId ?? read.config.runId))
+                        continue;
+                    completion = { correctionUsed: data.correctionUsed === true, reported: data.reported === true };
+                    break;
+                }
+            }
             try {
                 registerTools(descriptor, state.parkingSupported === true);
             }
@@ -702,6 +733,33 @@ export function installChildOperationBridge(pi, options = {}) {
             options.onDiagnostic?.({ event: "ready", code: "handshake" });
         })().finally(() => { starting = undefined; });
         return starting;
+    });
+    pi.on("before_agent_start", (event, ctx) => {
+        if (!state.descriptor?.capabilities.reportAssignment)
+            return;
+        const instruction = `Assignment completion: call report_assignment_result before returning. Evidence sources must resolve inside this assigned workspace: ${JSON.stringify(ctx.cwd)}. A sibling output directory is outside that boundary; use an existing workspace file or place the reportable artifact inside the workspace. Use offset and max_bytes for evidence larger than 65536 bytes. Continue remaining local work within the existing deadline, or report a concrete blocker; do not infer a tool-call budget from the number of calls you have made.`;
+        if (!supportsPromptSections(event.systemPromptOptions))
+            return { systemPrompt: `${event.systemPrompt}\n\n${instruction}` };
+        const prompt = event.systemPromptOptions;
+        (prompt.sections ??= {}).assignment_completion = instruction;
+    });
+    pi.on("agent_end", (event, ctx) => {
+        if (!state.descriptor?.capabilities.reportAssignment || !canCorrectCompletion(ctx.signal))
+            return;
+        let last;
+        for (let index = event.messages.length - 1; index >= 0; index--) {
+            const message = event.messages[index];
+            if (message.role !== "assistant")
+                continue;
+            last = message;
+            break;
+        }
+        if (last?.stopReason !== "stop")
+            return;
+        completion.correctionUsed = true;
+        saveCompletion();
+        pi.sendMessage({ customType: "assignment-completion-correction", display: false,
+            content: `The assignment has no accepted report. ${reportError ? `The latest report was refused: ${reportError}. ` : ""}This is the one completion correction for this execution attempt, within its original authority and deadline. Finish available remaining work, inspect and acknowledge any outstanding operation evidence, then call report_assignment_result with workspace evidence. If progress is blocked or work remains, report incomplete with remaining_work and the concrete blocker. Do not claim completion from process exit or final prose.` }, { deliverAs: "followUp", triggerTurn: true });
     });
     pi.on("message_end", (event) => {
         const message = event.message;
@@ -777,6 +835,8 @@ export function installChildOperationBridge(pi, options = {}) {
                         return await invokeTool(tool, toolCallId, params, signal);
                     }
                     catch (error) {
+                        if (tool.name === "report_assignment_result")
+                            reportError = redactSecret(error instanceof Error ? error.message : String(error)).slice(0, 2048);
                         return toolErrorResult(error);
                     }
                 },
@@ -790,6 +850,13 @@ export function installChildOperationBridge(pi, options = {}) {
             throw new OperationToolError("tool parameters must be an object");
         }
         const params = rawParams;
+        if (tool.name === "report_assignment_result" && params.status === "incomplete" && !params.blocker
+            && Array.isArray(params.remaining_work) && params.remaining_work.length > 0
+            && validateJsonSchema(tool.parameters, params).ok && canCorrectCompletion(signal)) {
+            completion.correctionUsed = true;
+            saveCompletion();
+            throw new OperationToolError("The incomplete report has not been accepted. Use the one completion correction to continue the listed remaining local work within the original authority and deadline, then report the result. If blocked or still incomplete, report that explicitly; no further automatic correction will be requested.");
+        }
         if (isLaunchTool(tool.name, params)) {
             const bridgeEnvironmentField = findBridgeEnvironmentKey(params);
             if (bridgeEnvironmentField) {
@@ -797,6 +864,17 @@ export function installChildOperationBridge(pi, options = {}) {
             }
         }
         const raw = await client.request(tool.name, params, { signal });
+        if (tool.name === "report_assignment_result" && raw && typeof raw === "object"
+            && ["complete", "incomplete"].includes(String(raw.status))) {
+            completion.reported = true;
+            reportError = undefined;
+            saveCompletion();
+        }
+        if (tool.name === ACKNOWLEDGE_OPERATION_TOOL && params.disposition === "assignment-complete"
+            && raw && typeof raw === "object" && raw.phase === "consumed") {
+            completion.reported = true;
+            saveCompletion();
+        }
         if (tool.name === WAIT_OPERATIONS_TOOL) {
             return waitToolResult(toolCallId, raw);
         }

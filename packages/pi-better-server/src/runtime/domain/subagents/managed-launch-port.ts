@@ -19,4 +19,6 @@ export interface ManagedLaunchPort {
     workerCommand(args: string[]): { file: string; fileArgs: string[] };
     beforeSpawn(input: { id: string; sessionId: string; lease: string; leasePath: string; preflightPath: string; policyPath?: string; permissions: unknown; recoveryMeta: RunMeta; recipe: NonNullable<RunMeta["recipe"]> }): Record<string, string>;
     spawned(id: string, pid: number): void;
+    /** Private fixture/owner observation, never a serialized execution capability. */
+    observeExit?(id: string, completion: Promise<void>): void;
 }

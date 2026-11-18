@@ -45,7 +45,7 @@ function cellHint(key, profile, column) {
     if (key === "processAccess")
         return column === "background"
             ? "Task status diagnostics: requires Read here and in Main. No process control; shell access is unchanged."
-            : "process_list: current-user PIDs and names. Main also gates task diagnostics. No process control.";
+            : "Read process IDs/names and macOS ps identity queries. Main also gates task diagnostics. No process control.";
     return undefined;
 }
 const columns = ["main", "subagents", "background"];

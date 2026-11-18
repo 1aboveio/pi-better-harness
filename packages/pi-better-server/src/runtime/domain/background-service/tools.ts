@@ -746,7 +746,7 @@ async function runAction(
   }
 }
 
-/** Shared history applies ownership, filters and paging before metadata crosses the socket. */
+/** Ordinary lists reuse retained activity; explicit filtered/paged lists open history. */
 async function durableAwareList(
   pi: ExtensionAPI,
   params: Record<string, unknown>,
@@ -754,10 +754,17 @@ async function durableAwareList(
   ctx: ExtensionContext,
 ): Promise<string> {
   const options = listOptions(params, origin);
-  const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, true, params.all === true,
+  const history = params.all === true || params.limit !== undefined || params.status !== undefined
+    || typeof params.cursor === "string" && cursorKind(params.cursor) !== "s";
+  const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, history, params.all === true,
     { limit: options.limit, statuses: options.statuses, cursor: options.cursor }) : undefined;
   if (snapshot && snapshot.status !== "ready") throw new Error(snapshot.reason ?? "Background activity is unverified");
-  const legacy = formatList(options, snapshot?.backgroundIndex);
+  const index = snapshot?.backgroundIndex ?? (snapshot ? { records: snapshot.rows
+    .map((row: any) => ({ found: true, meta: row.meta.durable ? { ...row.meta,
+      callbackOrigin: { cwd: row.meta.owner.workspace, sessionId: row.meta.owner.sessionId },
+      logPath: row.meta.logPaths?.stdout ?? "" } : row.meta }))
+    .sort((a: any, b: any) => b.meta.startedAt - a.meta.startedAt || b.meta.id.localeCompare(a.meta.id)) } : undefined);
+  const legacy = formatList(options, index);
   if (snapshot) return legacy;
   const host = getObservedWaitHost(pi);
   if ((!snapshot && !host?.available) || !origin || typeof params.cursor === "string") return legacy;

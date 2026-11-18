@@ -16,7 +16,7 @@ import { createAssignmentProjector } from "./assignment-projection.mjs";
 import { historicalWaits, attentionRevision, attentionDismissed, dismissAttention } from "./historical-attention.domain.mjs";
 import { registerAssignmentAttempt, commitAssignmentTerminal, readOutcome, receiptOutcome, outcomeTranscriptReceipt, inspectOutcome, createOutcomeHost, closeOutcomeHost, claimOutcome } from "./assignment-outcomes.domain.mjs";
 import { currentSandboxPermissions } from "./permission-policy.domain.mjs";
-import { createToolDescriptor } from "./operation-bridge-types.domain.mjs";
+import { assertWaitToolDependencies, createToolDescriptor } from "./operation-bridge-types.domain.mjs";
 import { requestResumeAdmission } from "./worker-waits.domain.mjs";
 import { execSync } from "node:child_process";
 import { writeFileSync, mkdirSync, renameSync, statSync } from "node:fs";
@@ -34,6 +34,7 @@ import { spawnDetached } from "./spawn.domain.mjs";
 import { abortUncommittedLaunch } from "./launch-abort.domain.mjs";
 import { parseRun, parseRunForLifecycle, resetParseRunCursor } from "./parse.domain.mjs";
 import { finalizeRun as finalizeRunCore } from "./finalization.domain.mjs";
+import { completeOwnedExit } from "./owned-exit.domain.mjs";
 import { selectSessionByName } from "./session-selection.domain.mjs";
 import { isWithinWorkspace } from "./workspace-scope.domain.mjs";
 import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.domain.mjs";
@@ -2973,6 +2974,7 @@ export default function (pi, managed) {
                 bridgePlan.capabilities = { ...bridgePlan.capabilities, reportAssignment: true };
                 productionBridgeSchemas.schemas.set("report_assignment_result", createToolDescriptor("report_assignment_result"));
             }
+            assertWaitToolDependencies(bridgePlan.capabilities, bridgePlan.tools);
             const bridgeEnabled = bridgePlan.tools.length > 0;
             if (bridgeEnabled) {
                 allow = [...new Set([...allow.split(",").filter(Boolean), ...bridgePlan.tools])].join(",");
@@ -3372,13 +3374,7 @@ export default function (pi, managed) {
             // Register exit supervision before any fallible post-spawn publication.
             // A failed metadata write must not strand a running child without a close
             // handler; the lease stays held until that child has actually exited.
-            void spawned.exit.then(async (code) => {
-                try {
-                    finalizeRun(pi, ctx, id, code);
-                }
-                finally {
-                    lease?.release();
-                }
+            const exitCompletion = completeOwnedExit(spawned.exit, code => finalizeRun(pi, ctx, id, code), () => { lease?.release(); }, async () => {
                 if (workerBridge)
                     workerOperations.release(id, "attempt-exited");
                 // Reconcile this attempt's earlier published writer before its
@@ -3399,6 +3395,7 @@ export default function (pi, managed) {
                 });
                 await settleParkedExit(id);
             });
+            managed?.observeExit?.(id, exitCompletion);
             writeMeta(meta);
             committed = true;
             // `meta.json` is now the record of this run; the claim has served its

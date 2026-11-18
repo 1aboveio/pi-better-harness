@@ -5,6 +5,7 @@ import type { Duplex } from "node:stream";
 import type { WorkReadModel } from "./read-model.ts";
 import { workScope } from "./queries.ts";
 import { notifyWorkBudget } from "./work-budget.ts";
+import { HostSourceWatches } from "./source-watch.ts";
 
 export interface EncodedRead { json: string }
 interface Waiter { connection: number; expiresAt: number; deadline: ReturnType<typeof setTimeout>; resolve(value: EncodedRead): void; reject(error: Error): void }
@@ -26,6 +27,7 @@ export interface QueryExecutorOptions {
 /** One root, one read worker, one admitted operation at a time. No mutation RPC. */
 export class WorkQueryExecutor {
   private worker: Worker;
+  private sourceWatches = new HostSourceWatches();
   private streams = new Map<number, Stream>();
   private workerConnections = new Set<number>();
   private queue: Query[] = [];
@@ -91,15 +93,22 @@ export class WorkQueryExecutor {
       Atomics.store(counts, 1, 0); Atomics.store(counts, 2, 0);
       notifyWorkBudget(this.options.budgetBuffer);
     }
+    const generation = this.workerGeneration;
     const instanceId = this.workerGeneration ? `${this.instanceId}:reads:${this.workerGeneration}` : this.instanceId;
     const worker = new Worker(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url), {
       execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: { ...this.options.modelOptions, budgetBuffer: this.options.budgetBuffer } },
     });
-    worker.on("message", message => { if (worker === this.worker) this.receive(message); });
+    worker.on("message", message => {
+      if (this.sourceWatches.handle(generation, message, value => {
+        if (worker === this.worker && !this.exited) worker.postMessage(value);
+      })) return;
+      if (worker === this.worker) this.receive(message);
+    });
     worker.on("error", error => { if (worker === this.worker) this.fail(new Error(`runtime-unhealthy: read worker failed: ${String(error)}`)); });
     worker.on("exit", code => {
       if (worker !== this.worker) return;
       this.exited = true;
+      void this.sourceWatches.revoke(generation).catch(() => {});
       const sqlite = this.workerMetrics.sqlite;
       this.workerMetrics = { ...this.workerMetrics, sourceWatchers: 0, coordinatorConnections: 0, indexConnections: 0,
         ...(sqlite ? { sqlite: { ...sqlite, active: 0 } } : {}) };
@@ -174,7 +183,7 @@ export class WorkQueryExecutor {
   }
 
   metrics() {
-    return { ...this.workerMetrics, executor: { active: this.active ? 1 : 0, queued: this.queue.length,
+    return { ...this.workerMetrics, sourceSubscriptions: this.sourceWatches.metrics(), executor: { active: this.active ? 1 : 0, queued: this.queue.length,
       clients: this.streams.size, completed: this.completed, singleflightHits: this.coalesced, rejected: this.rejected,
       cancelled: this.cancelled, timeouts: this.timeouts, queueTimeouts: this.queueTimeouts, callerTimeouts: this.callerTimeouts,
       capacity: this.options.capacity ?? 64, waitMs: [...this.waits], readMs: [...this.durations],
@@ -347,6 +356,7 @@ export class WorkQueryExecutor {
     this.queue = []; this.active = undefined;
     for (const connection of this.streams.keys()) this.event(connection, JSON.stringify({ type: "event",
       event: { type: "resync_required", reason: error.message, instanceId: this.instanceId } }) + "\n");
+    void this.sourceWatches.revoke(this.workerGeneration).catch(() => {});
     this.termination = this.worker.terminate();
     this.worker.unref();
   }
@@ -359,7 +369,7 @@ export class WorkQueryExecutor {
     for (const connection of this.streams.keys()) this.detach(connection);
     let timeout: ReturnType<typeof setTimeout> | undefined;
     // Bound graceful close even while native SQLite is still finishing a call.
-    await Promise.race([this.termination, new Promise<void>(resolve => { timeout = setTimeout(resolve, 1000); })]);
+    await Promise.race([Promise.all([this.termination, this.sourceWatches.close().catch(() => {})]), new Promise<void>(resolve => { timeout = setTimeout(resolve, 1000); })]);
     if (timeout) clearTimeout(timeout);
   }
 }

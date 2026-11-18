@@ -27,8 +27,21 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
 const { WorkReadModel } = await import("./read-model.ts");
 const { createWorkBudget } = await import("./work-budget.ts");
 const budget = createWorkBudget(workerData.modelOptions?.budgetBuffer);
+const { workerSourceWatch } = await import("./source-watch.ts");
 const { WorkQueries, workScope, queryEncodingMetrics, snapshotJSON } = await import("./queries.ts");
-const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);
+let model;
+try {
+  model = new WorkReadModel(workerData.agentDir, workerData.instanceId, {
+    ...workerData.modelOptions, watch: workerSourceWatch(parentPort),
+  });
+} catch (error) {
+  // Worker error forwarding retains only String(error). Keep the original
+  // statement's stack for this specific bootstrap failure, without source data.
+  if (/database is locked/.test(String(error))) {
+    console.error(`[runtime-read-bootstrap] WorkReadModel constructor\n${String(error?.stack ?? error).split("\n").slice(0, 12).join("\n").slice(0, 4096)}`);
+  }
+  throw error;
+}
 // One bounded in-flight batch. Remaining obligations stay in the reconstructable
 // inventory index; an acknowledgement cannot erase a newer revision of an ID.
 let terminalLogsPending;
