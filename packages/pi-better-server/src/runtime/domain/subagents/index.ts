@@ -642,7 +642,13 @@ async function tryEnqueueAssignmentOutcome(pi: ExtensionAPI, meta: RunMeta): Pro
     const prior = outcomeTranscriptReceipt(ctx.sessionManager.getBranch(), outcome.eventId);
     if (prior) { receiptOutcome(meta, prior); return; }
     const deliveryHost = outcomeHost;
-    const gate = await requestResumeAdmission(pi, active, { timeoutMs: 50 });
+    // The Goal scheduler can take up to 20 seconds. Keep the short probe only
+    // for a standalone parent, with no bound Goal or acknowledged check.
+    const workflowBudgetMs = 25_000;
+    const gate = await requestResumeAdmission(pi, active, {
+        timeoutMs: active.goalId || outcome.recipient.goalId ? workflowBudgetMs : 50,
+        pendingTimeoutMs: workflowBudgetMs,
+    });
     outcomeAdmission.set(outcome.eventId, () => gate.allowed ? gate.isCurrent?.() !== false : !active.goalId && !outcome.recipient.goalId && gate.revision === -1);
     if (!gate.allowed && (active.goalId || outcome.recipient.goalId || gate.revision !== -1)) {
         // Admission controls model execution, not delivery of an already
@@ -670,7 +676,7 @@ async function tryEnqueueAssignmentOutcome(pi: ExtensionAPI, meta: RunMeta): Pro
         }]);
         try {
             await pi.sendMessage({ customType: "background-completion-batch", display: true,
-                content: packed.text, details }, { triggerTurn: false });
+                content: `${packed.text}\nAutomatic continuation: ${gate.reason}`, details }, { triggerTurn: false });
         } catch (error) {
             // A failed persistence must not look like a durable transcript receipt.
             details.completionEventIds.length = 0;
@@ -681,7 +687,7 @@ async function tryEnqueueAssignmentOutcome(pi: ExtensionAPI, meta: RunMeta): Pro
         receiptOutcome(meta, entry);
         markCompletionCallbackSent(meta.id, Date.now());
         deferOutcome(meta);
-        try { ctx.ui?.notify(`${meta.name ?? meta.id}: ${outcome.outcome}. Automatic continuation is paused or unavailable; inspect subagent_result.`, outcome.outcome === "failed" ? "warning" : "info"); } catch { /* transcript remains visible */ }
+        try { ctx.ui?.notify(`${meta.name ?? meta.id}: ${outcome.outcome}. Automatic continuation: ${gate.reason}. Inspect subagent_result.`, outcome.outcome === "failed" ? "warning" : "info"); } catch { /* transcript remains visible */ }
         return;
     }
     // Admission may yield across a session switch or Goal/workflow change.

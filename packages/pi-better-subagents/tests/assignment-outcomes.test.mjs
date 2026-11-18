@@ -276,6 +276,28 @@ test("ordinary failure uses actual finalizer, callback batcher and result acknow
     } finally { await h.close(); store.close(); }
 });
 
+test("a workflow admission slower than 50ms still wakes the parent", async () => {
+    const { store, meta } = failedAssignment("slow-workflow-admission");
+    const h = host("parent", { noGoal: true });
+    let request;
+    h.pi.events.on("pi-better-goal:operation-resume-admission", (value) => {
+        request = value;
+        request.pending?.();
+    });
+    try {
+        await h.start({ settleMs: 125 });
+        assert.ok(request);
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 0, "the callback waits for the pending workflow check");
+        request.reply({ allowed: true, revision: 1, isCurrent: () => true });
+        await new Promise(resolve => setImmediate(resolve));
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 1);
+        assert.equal(h.sent[0].options.triggerTurn, true);
+        assert.ok(readOutcome(meta).deliveryReceipt);
+    } finally { await h.close(); store.close(); }
+});
+
 test("quoted outcome text is not a recipient receipt", () => {
     assert.equal(outcomeTranscriptReceipt([{ id: "quote", type: "message", message: { role: "custom", customType: "background-completion-batch", content: "[outcome:quoted-event]" } }], "quoted-event"), null);
 });

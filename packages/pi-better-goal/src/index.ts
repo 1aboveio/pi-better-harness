@@ -857,6 +857,7 @@ export default function (pi: ExtensionAPI): void {
     if (goal && currentContinuationState(ctx, goal.goalId)?.blocked) { held("Goal continuation requires human resume"); return; }
     if (goal && !boundCommandReady(goal, ctx)) { held("Bound workflow is not ready"); return; }
     const workflow = getWorkflow(ctx);
+    if (workflow) request.pending?.();
     void (workflow ? operationResumeSchedulerGate(ctx.sessionManager.getBranch(), workflow, {
       scope: operationAdmissionScope,
       revision: JSON.stringify([request.owner.sessionId, request.owner.workspace, request.owner.branchId, goal?.goalId, revision, preferencesRevision]),
