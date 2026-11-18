@@ -135,6 +135,41 @@ it("recovered old-parent child retires its cleanup receipt only after real final
     }
 });
 
+it("a stale health acknowledgement preserves real exit evidence and aggregate completion", async () => {
+    const id = "sa_health_marker_exit_race";
+    const stale = { id, cwd: tmpdir(), sessionId: id, status: "lost", startedAt: 1, endedAt: 2,
+        pid: 4194304, spawnPid: process.pid, callback: true, logPath: logPathFor(id) };
+    const sent = [];
+    const batcher = createCallbackBatcher({ sendMessage: message => sent.push(message) }, { windowMs: 5000 });
+    try {
+        writeMeta(stale);
+        writeFileSync(logPathFor(id), JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
+        finalizeRun(id, 1);
+        assert.equal(readMeta(id).status, "failed");
+        writeMeta(stale, { patch: () => ({ lostCallbackSentAt: 3 }) });
+        const current = readMeta(id);
+        assert.equal(current.status, "failed", "callback metadata cannot restore provisional lost");
+        assert.equal(current.exitCode, 1);
+        assert.ok(current.completionCallbackPendingAt);
+        assert.equal(current.lostCallbackSentAt, 3);
+        const before = readFileSync(join(runDir(id), "meta.json"), "utf8");
+        let notifications = 0;
+        const stop = onMetaChanged(() => { notifications++; });
+        try {
+            writeMeta(stale, { patch: latest => {
+                assert.equal(latest.status, "failed");
+                return undefined;
+            } });
+        } finally { stop(); }
+        assert.equal(readFileSync(join(runDir(id), "meta.json"), "utf8"), before);
+        assert.equal(notifications, 0, "a declined marker patch does not publish a metadata change");
+        batcher.enqueue({ source: "subagent", id, label: id, status: current.status, detailTool: "subagent_result", callback: true });
+        assert.equal(await batcher.flush(), true);
+        assert.ok(sent.some(message => message.customType === "background-completion-batch" && message.content.includes(id)),
+            "the superseding completion remains present in the aggregate callback");
+    } finally { batcher.cancel(); await batcher.settled(); rmSync(runDir(id), { recursive: true, force: true }); }
+});
+
 describe("classifyChildExit", () => {
     // @covers subagent.run-finalization
     // @level unit
