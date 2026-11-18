@@ -36,6 +36,14 @@ test("ordinary background clients share the canonical daemon without hosted owne
   let store: any;
   try {
     const [ready] = await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
+    const waitFor = async (matches: (value: any) => boolean, client = clients[0]!, sessionId = "local-0") => {
+      const deadline = Date.now() + 10000;
+      for (;;) {
+        const value = await client.get({ background: true, cwd: root, sessionId });
+        if (value.status === "ready" && matches(value)) return value;
+        assert.ok(Date.now() < deadline, JSON.stringify(value)); await delay(20);
+      }
+    };
     for (let i = 0; i < 10; i++) {
       const client = new WorkClient(ready.ready, root, ["runtime-background-state-v1"]); clients.push(client);
       const observed = await subscribeBackgroundReady(client, { background: true, cwd: root, sessionId: `local-${i}` }, t.signal);
@@ -54,14 +62,6 @@ test("ordinary background clients share the canonical daemon without hosted owne
       argv: [process.execPath, "-e", "const fs=require('fs');const t=setInterval(()=>{if(fs.existsSync('finish')){clearInterval(t);process.exit(0)}},20)"] });
     taskId = started.taskId;
     store.registerOperation({ operationId: "754-daemon-operation", taskId, launchToken: started.token, owner, observer: { kind: "local-supervisor", version: "1" } });
-    const waitFor = async (matches: (value: any) => boolean) => {
-      const deadline = Date.now() + 10000;
-      for (;;) {
-        const value = await clients[0]!.get({ background: true, cwd: root, sessionId: "local-0" });
-        if (value.status === "ready" && matches(value)) return value;
-        assert.ok(Date.now() < deadline, JSON.stringify(value)); await delay(20);
-      }
-    };
     await waitFor(value => value.activity.active === 1 && value.rows[0]?.meta.id === taskId);
     const shared = (await clients[0]!.request("runtime_get_metrics")).background;
     for (const count of [1, 5, 10]) {

@@ -208,3 +208,66 @@ test("closing a model while the Background exclusive writer remains held settles
     assert.equal(metrics.attempts, 1);
   } finally { if (!closed) await model.close(); writer.exec("ROLLBACK"); writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("partial initialization publication remains non-ready when an already-attached assignment inbox becomes exclusively locked", async t => {
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+  const root = mkdtempSync(join(tmpdir(), "partial-inbox-publication-"));
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const model = new WorkReadModel(root, "partial", { baseDir: join(root, "raw"), durableDir: join(root, "archive"), watch });
+  const background = (model as any).background, initialize = background.initialize.bind(background);
+  let writer: any;
+  background.initialize = () => {
+    writer ??= new DatabaseSync(":memory:");
+    writer.prepare("ATTACH DATABASE ? AS assignment_inbox").run(join(root, "runtime-read-repair", "assignments.sqlite"));
+    writer.prepare("ATTACH DATABASE ? AS background_inbox").run(join(root, "runtime-read-repair", "background.sqlite"));
+    writer.exec("BEGIN EXCLUSIVE");
+    return initialize();
+  };
+  const publications: any[] = [];
+  const stop = model.onChange(() => { publications.push({ metrics: model.metrics, background: model.backgroundMetrics, observation: model.observation() }); });
+  try {
+    await assert.doesNotReject(model.reconcile());
+    assert.ok(publications.length);
+    assert.equal(publications.at(-1).observation.status, "rebuilding");
+    assert.equal(publications.at(-1).metrics.assignments.applied, null);
+    assert.equal(model.snapshot().status, "rebuilding");
+    assert.equal(model.metrics.initialization.attempts, 1);
+    writer.exec("ROLLBACK");
+    background.initialize = initialize;
+    await model.reconcile(); assert.equal(model.metrics.initialization.attempts, 1);
+    t.mock.timers.tick(1000); await model.reconcile();
+    assert.equal(model.snapshot().status, "ready", model.snapshot().reason);
+  } finally { stop(); if (writer?.isTransaction) writer.exec("ROLLBACK"); await model.close(); writer?.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("initialized observation diagnostics report unknown cursors rather than throw under a real derived-owner exclusive lock", async () => {
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+  const root = mkdtempSync(join(tmpdir(), "initialized-inbox-publication-"));
+  const mutation = acquireMutationStore(root);
+  const model = new WorkReadModel(root, "initialized", { baseDir: join(root, "raw"), durableDir: join(root, "archive"), watch });
+  const writer = new DatabaseSync(":memory:");
+  try {
+    await model.reconcile(); model.snapshot({ background: true, cwd: root, sessionId: "parent" });
+    writer.prepare("ATTACH DATABASE ? AS assignment_inbox").run(join(root, "runtime-read-repair", "assignments.sqlite"));
+    writer.prepare("ATTACH DATABASE ? AS background_inbox").run(join(root, "runtime-read-repair", "background.sqlite"));
+    const attempts = model.metrics.initialization.attempts;
+    writer.exec("BEGIN EXCLUSIVE");
+    assert.throws(() => (model as any).reader.changeMetrics, isSqliteLockContention);
+    assert.throws(() => (model as any).background.inbox.metrics, isSqliteLockContention);
+    assert.equal(model.metrics.assignments.applied, null);
+    assert.equal(model.backgroundMetrics.changes.applied, null);
+    assert.equal(model.metrics.initialization.attempts, attempts);
+    writer.exec("ROLLBACK");
+    assert.equal(model.metrics.assignments.applied, 0);
+    assert.equal(model.backgroundMetrics.changes.applied, 0);
+    const reader = (model as any).reader, descriptor = Object.getOwnPropertyDescriptor(reader, "changeMetrics")!;
+    const failure = new Error("non-contention diagnostic failure");
+    Object.defineProperty(reader, "changeMetrics", { configurable: true, get() { throw failure; } });
+    try { assert.throws(() => model.metrics, error => error === failure); }
+    finally { Object.defineProperty(reader, "changeMetrics", descriptor); }
+    const inbox = (model as any).background.inbox;
+    Object.defineProperty(inbox, "metrics", { configurable: true, get() { throw failure; } });
+    try { assert.throws(() => model.backgroundMetrics, error => error === failure); }
+    finally { delete inbox.metrics; }
+  } finally { if (writer.isTransaction) writer.exec("ROLLBACK"); await model.close(); writer.close(); mutation.release(); rmSync(root, { recursive: true, force: true }); }
+});
