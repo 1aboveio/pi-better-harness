@@ -13,6 +13,51 @@ import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { registerHooks } from "node:module";
 const load = (name: string) => import(new URL(`../src/runtime/domain/background-service/${name}.domain.mjs`, import.meta.url).href);
 
+for (const historyActive of [false, true]) test(`repaired legacy watch releases its degraded poll after history activation=${historyActive}`, async t => {
+  const root = mkdtempSync(join(tmpdir(), "background-poll-recovery-"));
+  const lease = acquireMutationStore(root);
+  const owner = { kind: "parent-session", workspace: root, sessionId: "reload-parent" };
+  lease.store.registerOperation({ operationId: "prior-local-operation", taskId: "bgs_00000000000000000822", launchToken: "prior-token",
+    owner, observer: { kind: "local-supervisor", version: "1" } });
+  const registry = await load("registry");
+  const id = "bg_reload_watch";
+  const running = { id, kind: "command_watch", status: "running", startedAt: Date.now(), cwd: root,
+    callbackOrigin: { cwd: root, sessionId: owner.sessionId }, logPath: registry.logPathFor(id), spawnPid: process.pid };
+  registry.writeMeta(running); writeFileSync(running.logPath, "");
+  const model = new WorkReadModel(root, "poll-recovery", { baseDir: join(root, "raw"), durableDir: join(root, "archive"),
+    supervisorDirectory: join(root, "supervisor"), intervalMs: 60000 });
+  const background = (model as any).background;
+  const scope = { background: true, cwd: root, sessionId: owner.sessionId };
+  try {
+    assert.equal(model.snapshot(scope).status, "ready");
+    if (historyActive) {
+      background.historyIndex(scope);
+      const history = background.history;
+      while (history.pending) await history.pending;
+      assert.equal(history.queryStatus, "ready");
+    }
+    const beforeInventories = background.historyMetrics.inventories;
+    writeFileSync(registry.metaPathFor(id), '{"id":');
+    background.refresh();
+    assert.equal(background.status, "degraded");
+    assert.match(background.reason, /Unverified background task.*invalid JSON/);
+    assert.equal(model.snapshot(scope).status, "degraded", "partial metadata is never published ready");
+    const incompleteReason = background.reason;
+    background.refresh();
+    assert.equal(background.status, "degraded");
+    assert.equal(background.reason, incompleteReason, "unrepaired source remains a real error, not a recursively wrapped stale error");
+    if (historyActive) assert.throws(() => background.history.source(), /Unverified background task/,
+      "history consumers still reject actually unverified source state");
+    registry.writeMeta({ ...running, status: "succeeded", endedAt: Date.now() });
+    background.refresh();
+    const recovered = model.snapshot(scope);
+    t.diagnostic(JSON.stringify({ historyActive, status: recovered.status, reason: recovered.reason }));
+    assert.equal(recovered.status, "ready", "the repaired actual source must not be blocked by the prior degraded reason");
+    assert.equal(recovered.rows.find((row: any) => row.meta.id === id)?.meta.status, "succeeded");
+    assert.equal(background.historyMetrics.inventories, beforeInventories, "recovery does not start another history inventory");
+  } finally { await model.close(); lease.release(); rmSync(registry.taskDir(id), { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("cached parent and headless child factories list the parent's newly registered durable operation", { timeout: 10000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), "cached-factory-component-"));
   const lease = acquireMutationStore(root);

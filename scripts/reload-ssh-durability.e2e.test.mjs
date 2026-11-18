@@ -33,7 +33,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
@@ -269,6 +269,17 @@ async function taskTerminal(host, id) {
 }
 
 async function dumpDurableCallbackDiagnostics(host, id, project) {
+  let daemonLog;
+  try {
+    const fd = openSync(join(serverDir, "daemon.log"), "r");
+    try {
+      const size = fstatSync(fd).size, bytes = Buffer.alloc(Math.min(size, 64 * 1024));
+      const read = readSync(fd, bytes, 0, bytes.length, Math.max(0, size - bytes.length));
+      daemonLog = bytes.subarray(0, read).toString("utf8").split("\n")
+        .filter(line => line.startsWith("[background-handoff-server]")).slice(-32);
+    } finally { closeSync(fd); }
+  } catch (error) { daemonLog = { unavailable: String(error) }; }
+  console.error("[reload-server-handoff-tail]", JSON.stringify({ id, daemonLog }));
   if (!String(id).startsWith("bgs_")) {
     const meta = bgRegistry.readMeta(id);
     const branch = host.session.sessionManager.getBranch();
