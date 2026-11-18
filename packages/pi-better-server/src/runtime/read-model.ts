@@ -510,7 +510,7 @@ export class WorkReadModel {
       if ((error as NodeJS.ErrnoException).code === "ENOENT" && this.coordinator === "unknown") return;
       if (error instanceof Error && error.message === "Unsupported assignment source schema") this.unsupportedAssignmentRevision = revision;
       this.assignmentFault ??= { state: this.state, reason: this.reason };
-      if (String(error).includes("no such table: assignment_change_source")) {
+      if (/no such table: (?:coordinator_source\.)?assignment_change_source$/.test(String(error))) {
         // Old sources have no feed. Finish one budgeted compatibility pass;
         // continuous legacy writes do not restart a pass already in progress.
         this.imported = false; this.repairOwed = true; this.state = "rebuilding";
