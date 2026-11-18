@@ -63,8 +63,6 @@ for (const historyActive of [false, true]) test(`repaired legacy watch releases 
 test("cached parent and headless child factories list the parent's newly registered durable operation", { timeout: 10000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), "cached-factory-component-"));
   const lease = acquireMutationStore(root);
-  const executor = new WorkQueryExecutor(root, "cached-factory-component", { modelOptions: {
-    baseDir: join(root, "raw"), durableDir: join(root, "archive"), supervisorDirectory: join(root, "supervisor"), intervalMs: 60000 } });
   const clients: any[] = [], scopes: any[] = [];
   const serviceTools = new Map<string, any>();
   const { registerTools } = await load("tools");
@@ -101,6 +99,9 @@ test("cached parent and headless child factories list the parent's newly registe
   const subagentsModule = new URL("../../pi-better-subagents/index.ts", import.meta.url).href;
   const { default: subagents } = await import(subagentsModule);
   const { initTheme } = await import("@earendil-works/pi-coding-agent"); initTheme("dark", false);
+  // Load the host factories before starting the worker's bootstrap watchdog.
+  const executor = new WorkQueryExecutor(root, "cached-factory-component", { modelOptions: {
+    baseDir: join(root, "raw"), durableDir: join(root, "archive"), supervisorDirectory: join(root, "supervisor"), intervalMs: 60000 } });
   const make = (sessionId: string, tui: boolean) => {
     const handlers = new Map<string, any[]>(), tools = new Map<string, any>();
     const pi: any = { events: { emit: (name: string, value: any) => events.emit(name, value),
@@ -185,6 +186,7 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
   registry.writeMeta(budget); writeFileSync(budget.logPath, "");
   recordFailure(budget, "failure_when", "failure condition matched", "poll", { category: "condition" });
   const executor = new WorkQueryExecutor(root, "history-component", {
+    queryCacheDiagnostics: true,
     modelOptions: { baseDir: join(root, "raw"), durableDir: join(root, "archive"), supervisorDirectory: join(root, "supervisor"), intervalMs: 60000 } });
   const events = new EventEmitter(), tools = new Map<string, any>();
   const pi: any = { events, on() {}, registerTool(tool: any) { tools.set(tool.name, tool); } };
@@ -241,7 +243,13 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
       assert.match(repeated, /Failure journal could not be read/);
       assert.equal(/statusCursor=(\S+)/.exec(repeated)?.[1], /statusCursor=(\S+)/.exec(withGap)?.[1]);
       const afterRepeat = await client.request("runtime_get_metrics");
+      if (afterRepeat.queryCount !== beforeRepeat.queryCount) t.diagnostic(JSON.stringify({
+        cacheComparisonFailure: { legacyCount, before: { queryCount: beforeRepeat.queryCount, comparisons: beforeRepeat.cacheComparisons.slice(-2) },
+          after: { queryCount: afterRepeat.queryCount, comparisons: afterRepeat.cacheComparisons.filter((entry: any) => entry.queryCount >= beforeRepeat.queryCount) } } }).slice(0, 16384));
       assert.equal(afterRepeat.queryCount, beforeRepeat.queryCount, "unchanged scope reuses its cached projection");
+      assert.ok(afterRepeat.cacheComparisons.length <= 16, "opt-in comparison capture remains bounded");
+      assert.ok(afterRepeat.cacheComparisons.some((entry: any) => entry.hit && entry.revision === entry.priorRevision
+        && entry.scope.background && entry.scope.sessionId === owner.sessionId), "capture retains actual scoped cache reuse");
       assert.equal(afterRepeat.background.registry.metadataFileReads, beforeRepeat.background.registry.metadataFileReads,
         "unchanged cache validation does not read metadata");
       assert.equal(afterRepeat.background.registry.indexDirectoryReads, beforeRepeat.background.registry.indexDirectoryReads,
@@ -319,6 +327,7 @@ for (const historyMode of [false, true]) test(historyMode ? "active and incremen
         evidence: [{ kind: "terminal-record", ref: operationId }] });
     }
     const scope = { background: true, cwd: root, sessionId: owner.sessionId };
+    await model?.reconcile();
     observation.read(scope); observation.refresh();
     mkdirSync(join(directory, "observed"), { recursive: true });
     const path = join(directory, "observed", `${taskId("754-operation")}.json`);

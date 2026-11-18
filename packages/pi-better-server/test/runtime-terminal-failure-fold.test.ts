@@ -38,6 +38,7 @@ test("manager folds a changed old terminal log without a foreground and reconnec
   });
   const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true, extensionFactories: [extension, provider] });
   let session: any;
+  let releasingWitness: unknown, owedWitness: unknown;
   try {
     await loader.reload();
     let manager = SessionManager.create(cwd, agentDir + "/sessions");
@@ -71,10 +72,17 @@ test("manager folds a changed old terminal log without a foreground and reconnec
     observer.close();
     appendFileSync(logPathFor(id), "{malformed event\n");
     // This read only observes the ledger; no foreground calls collectRunFailures.
-    await until(() => Boolean(pendingFailureAttention(readRunFailures(id), Date.now(), { terminal: true })), "manager did not durably fold the changed raw log");
+    await until(() => {
+      const state = readRunFailures(id), at = Date.now();
+      const pending = pendingFailureAttention(state, at, { terminal: true });
+      if (pending) releasingWitness = { at, pending, state };
+      return Boolean(pending);
+    }, "manager did not durably fold the changed raw log");
     assert.equal(turns, 0, "no recipient is live to produce the failure ledger");
     assert.equal(existsSync(failurePath(foreign)), false, "foreign-root records do not authorize canonical writes");
-    const owed = pendingFailureAttention(readRunFailures(id), Date.now(), { terminal: true });
+    const owedState = readRunFailures(id), owedAt = Date.now();
+    const owed = pendingFailureAttention(owedState, owedAt, { terminal: true });
+    owedWitness = { at: owedAt, pending: owed ?? null, state: owedState };
     assert.ok(owed.incidents.length);
     manager = SessionManager.open(file); await loader.reload(); await open();
     await until(() => turns === 1, "reconnected original recipient did not receive new failure attention");
@@ -84,6 +92,7 @@ test("manager folds a changed old terminal log without a foreground and reconnec
   } catch (error) {
     const { workObservation } = await import(domain + "work-observation.ts");
     console.error("failure-fold diagnostics", turns, workObservation(), readRunFailures("sa_managed_old_failure"), daemon.diagnostics());
+    console.error("failure-fold wait witness", JSON.stringify({ releasingWitness, owedWitness }).slice(0, 8192));
     throw error;
   } finally {
     if (session) { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); }

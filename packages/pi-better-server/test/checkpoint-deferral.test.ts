@@ -243,7 +243,7 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
     await Promise.all(Array.from({ length: 32 }, () => current.reconcile(true)));
     assert.equal(current.metrics.initialization.attempts, 1);
     assert.equal(current.metrics.checkpoints.acquisitionAttempts, 1, "checkpoint attachment succeeded independently");
-    assert.deepEqual(names(db), ["main", "background_inbox", "log_checkpoints"], "failed assignment inbox ATTACH leaves no owned alias and preserves the Background participant");
+    assert.deepEqual(names(db), ["main", "log_checkpoints"], "failed assignment ATTACH leaves no alias and Background has not acquired yet");
     const frames: any[] = [];
     const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0,
       write(line: string) { frames.push(JSON.parse(line)); }, destroy() {} });
@@ -257,6 +257,9 @@ test("inbox exclusive acquisition shares the repair permission and never verifie
         assert.equal(current.metrics.initialization.attempts, before);
         assert.equal((queries.handle({ type: "runtime_subscribe", scope: {} }) as any).status, "rebuilding");
         assert.equal((queries.handle({ type: "runtime_get_snapshot", scope: { background: true, cwd: root, sessionId: "parent" } }) as any).status, "rebuilding");
+        const history = queries.handle({ type: "runtime_get_snapshot", scope: { background: true, backgroundHistory: true, cwd: root, sessionId: "parent" } }) as any;
+        assert.equal(history.status, "rebuilding", "explicit history also preserves unavailable source coverage");
+        assert.equal(current.backgroundMetrics.history?.inventories ?? 0, 0, "unavailable history never inventories the source");
         assert.equal(current.observation().status, "rebuilding");
         assert.throws(() => current.livenessReasons(), /unverified/);
         assert.throws(() => current.upgradeObligations(), /rebuilding/);
@@ -309,6 +312,29 @@ test("inbox schema contention releases only its newly acquired alias before same
   }
 });
 
+test("Background inbox schema contention preserves the existing assignment alias", () => {
+  const root = fixture(), path = join(root, "background.sqlite");
+  const writer = new DatabaseSync(path), owner = new DatabaseSync(":memory:");
+  const assignment = new AssignmentInbox(join(root, "assignment.sqlite"), owner);
+  writer.exec("CREATE TABLE retained(value); BEGIN IMMEDIATE");
+  try {
+    assert.throws(() => new AssignmentInbox(path, owner, { entityPrefix: "background:" }), /database is locked/);
+    assert.deepEqual(names(owner), ["main", "assignment_inbox"], "cleanup cannot detach the earlier assignment participant");
+    assert.equal(assignment.metrics.repairs, 0);
+    writer.exec("ROLLBACK");
+    const background = new AssignmentInbox(path, owner, { entityPrefix: "background:" });
+    try {
+      assert.deepEqual(names(owner), ["main", "assignment_inbox", "background_inbox"]);
+      assert.equal(background.metrics.repairs, 0);
+    } finally { background.close(); }
+    assert.equal(assignment.metrics.repairs, 0);
+    assert.deepEqual(names(owner), ["main", "assignment_inbox"]);
+  } finally {
+    if (writer.isTransaction) writer.exec("ROLLBACK");
+    assignment.close(); owner.close(); writer.close(); rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("inbox corruption is not lock deferral and close does not require an initialized reader", async t => {
   const root = fixture();
   mkdirSync(join(root, "runtime-read-repair"));
@@ -321,7 +347,7 @@ test("inbox corruption is not lock deferral and close does not require an initia
     assert.match(model.snapshot().reason!, /not a database/);
     assert.equal(model.metrics.initialization.contentions, 0);
     assert.equal(model.metrics.assignments.applied, null);
-    assert.deepEqual(names((model as any).db), ["main", "background_inbox", "log_checkpoints"]);
+    assert.deepEqual(names((model as any).db), ["main", "log_checkpoints"], "corrupt assignment initialization cannot acquire the later Background participant");
     t.mock.timers.tick(1000); await model.reconcile();
     assert.equal(model.metrics.initialization.attempts, 1);
     assert.throws(() => model.livenessReasons(), /unverified/);

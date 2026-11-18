@@ -13,6 +13,8 @@ test("Background constructor attaches its inbox and repair state to the query ow
   try {
     const derived = (model as any).db;
     assert.equal(model.metrics.checkpoints.acquisitionAttempts, 0, "construction must not acquire deferred checkpoints");
+    assert.equal((model as any).background.ready, false);
+    assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main"]);
     await model.reconcile();
     assert.equal((model as any).db, derived, "initialization retains the same query owner");
     const inbox = (model as any).background.inbox;
@@ -90,6 +92,7 @@ test("unchanged Background repair positions do not write the shared derived hand
   const model = new WorkReadModel(root, "idle-repair", { baseDir: root, durableDir: join(root, "archive"), intervalMs: 60000 });
   const observation = (model as any).background;
   try {
+    await model.reconcile();
     observation.read({ background: true, cwd: root, sessionId: "parent" });
     observation.refresh();
     const db = (model as any).db;

@@ -80,7 +80,7 @@ export class WorkReadModel {
   private checkpointAttemptAllowed = true;
   private checkpointFailure = false;
   private initialization = { attempts: 0, contentions: 0 };
-  private get observationInitialized() { return this.checkpoints.ready && Boolean(this.reader); }
+  private get observationInitialized() { return this.checkpoints.ready && Boolean(this.reader) && this.background.ready; }
   private failureJournals = new Map<string, string>();
   private processes = new Map<string, string>();
   private staged?: {
@@ -143,7 +143,7 @@ export class WorkReadModel {
     this.db = new DatabaseSync(":memory:");
     this.checkpoints = new LogCheckpoints(join(agentDir, "runtime-log-checkpoints.sqlite"), this.db, { defer: true });
     mkdirSync(join(agentDir, "runtime-read-repair"), { recursive: true });
-    this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(true), refresh => this.reader?.connection(refresh));
+    this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(true), refresh => this.reader?.connection(refresh), { defer: true });
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
       started REAL, state TEXT, active INTEGER, ended REAL, recipient_pending INTEGER, payload TEXT);
       CREATE INDEX work_folder ON rows(cwd, started DESC, id DESC);
@@ -339,7 +339,7 @@ export class WorkReadModel {
     return { status: this.state, reason: this.reason, observedAt: Date.now(), reasons };
   }
   livenessReasons(options: { refresh?: boolean } = {}) {
-    if (!this.observationInitialized) throw new Error(`Runtime observation ${this.state}: checkpoint coverage is unverified (including assignment inbox)`);
+    if (!this.observationInitialized) throw new Error(`Runtime observation ${this.state}: checkpoint coverage is unverified (including assignment and Background inboxes)`);
     return [
       ...[...this.projected.values()].filter(row => row.meta.status === "running"
         && processMatchesStart(row.meta.pid, row.meta.pidStartTime))
@@ -574,13 +574,14 @@ export class WorkReadModel {
           initialized = this.checkpoints.initialize();
           if (initialized) this.reader ??= createAssignmentReader(join(this.agentDir, "operation-coordinator.sqlite"),
             join(this.agentDir, "runtime-read-repair", "assignments.sqlite"), this.db);
+          if (initialized) this.background.initialize();
         } catch (error) {
           if (isSqliteLockContention(error)) initialized = false;
           else { this.checkpointFailure = true; throw error; }
         }
         if (!initialized) {
           this.initialization.contentions++;
-          const reason = "Derived checkpoint or assignment inbox acquisition is contended; source coverage remains unverified.";
+          const reason = "Derived checkpoint, assignment or Background inbox acquisition is contended; source coverage remains unverified.";
           if (this.reason !== reason) { this.state = "rebuilding"; this.reason = reason; this.publish(); }
           return;
         }
@@ -590,10 +591,11 @@ export class WorkReadModel {
         this.dirty = false;
         // Background progress is independent of whether Subagent repair finds files.
         if (this.background.refresh()) this.publish(true);
+        if (this.rejectUnsupportedAssignmentRevision()) break;
         this.refreshAssignments();
         // Metadata repair cannot verify an incompatible coordinator. Keep its
         // obligations and last verified rows until a different source revision.
-        if (this.unsupportedAssignmentRevision || this.rejectUnsupportedAssignmentRevision()) break;
+        if (this.unsupportedAssignmentRevision) break;
         if (resetRepair && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
         resetRepair = false;
         if (this.hints.size) {
@@ -1090,6 +1092,12 @@ export class WorkReadModel {
 
   snapshot(scope: WorkScope = {}): WorkSnapshot {
     if (scope.background) {
+      if (!this.observationInitialized) return {
+        instanceId: this.instanceId, runtimeEpoch: this.instanceId, seq: this.revision,
+        scopeRevision: hash([scope, this.state, this.reason]),
+        observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
+        status: this.state, reason: this.reason, rows: [], totalMatching: 0, activity: { active: 0 }, nextDeadline: null,
+      };
       if (scope.backgroundHistory && this.background.refresh()) this.publish(true);
       const index = scope.backgroundHistory ? this.background.historyIndex(scope) : undefined;
       const tasks = this.background.read(scope, index);
