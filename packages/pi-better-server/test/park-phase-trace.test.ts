@@ -35,3 +35,19 @@ test("park phase history is bounded and successful disposal removes abort diagno
   controller.abort();
   assert.equal(records.length, 1);
 });
+
+test("SDK phase receipts keep both clocks, reject invalid labels and freeze at failure", () => {
+  const controller = new AbortController(), records: any[] = [];
+  let clock = 100;
+  const trace = parkPhaseTrace(controller.signal, record => records.push(record), () => clock);
+  trace.launchPhase({ index: 0, phase: "launch-bridge", state: "started", elapsedMs: 5 });
+  clock = 120;
+  trace.launchPhase({ index: 0, phase: "launch-bridge", state: "finished", elapsedMs: 15 });
+  trace.launchPhase({ index: 1, phase: "private argument", state: "started", elapsedMs: 16 });
+  trace.launchPhase({ index: 32, phase: "hello", state: "started", elapsedMs: 16 });
+  controller.abort();
+  trace.launchPhase({ index: 0, phase: "launch-bridge", state: "failed", elapsedMs: 30 });
+  assert.deepEqual(records[0].parkPhaseFailure.launchPhases, [{ phase: "launch-bridge", startedMs: 0,
+    sdkStartedMs: 5, endedMs: 20, sdkEndedMs: 15, state: "finished" }]);
+  trace.close();
+});

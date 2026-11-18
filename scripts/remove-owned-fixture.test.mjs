@@ -1,11 +1,59 @@
 import assert from "node:assert/strict";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 import { claimDaemonOwner, inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+
+for (const mode of ["released", "replacement", "ambiguous"]) test(`owned runtime cleanup after token unlink: ${mode}`, async t => {
+  const parent = new URL("../.work/753-ci/", import.meta.url);
+  mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(new URL("release-window-", parent));
+  const lock = join(root, "daemon-owner");
+  const owner = { pid: 4194304, token: "00000000-0000-4000-8000-000000000799" };
+  const file = join(lock, `owner-${owner.token}.json`);
+  mkdirSync(lock); writeFileSync(file, JSON.stringify(owner));
+  // Replace only external process inspection/signalling; the ownership reader,
+  // directory transition and fixture shutdown loop remain real.
+  const processes = createRequire(import.meta.url)("node:child_process");
+  t.mock.method(processes, "execFileSync", () => "");
+  syncBuiltinESMExports();
+  const signals = [];
+  t.mock.method(process, "kill", (pid, signal) => {
+    assert.equal(pid, owner.pid);
+    if (signal !== 0) {
+      signals.push(signal);
+      unlinkSync(file);
+      assert.equal(inspectDaemonOwner(root).status, "ambiguous");
+      if (mode === "released") setImmediate(() => { if (existsSync(lock)) rmdirSync(lock); });
+      if (mode === "replacement") {
+        const replacement = { ...owner, token: "00000000-0000-4000-8000-000000000800" };
+        writeFileSync(join(lock, `owner-${replacement.token}.json`), JSON.stringify(replacement));
+      }
+    }
+    return true;
+  });
+  if (mode === "ambiguous") {
+    let time = 0;
+    t.mock.method(Date, "now", () => time += 10001);
+  }
+  try {
+    if (mode === "released") {
+      await stopOwnedRuntime(root, owner);
+      assert.equal(inspectDaemonOwner(root).status, "missing", "ambiguity alone never proves shutdown");
+    } else {
+      await assert.rejects(stopOwnedRuntime(root, owner), mode === "replacement" ? /ownership changed/ : /did not stop/);
+      assert.equal(existsSync(lock), true, "unproven or replacement ownership is never removed");
+    }
+    assert.deepEqual(signals, ["SIGTERM"], "only the captured owner is signalled once");
+  } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("cleanup works in a clean source layout without a generated runtime client", () => {
   const parent = new URL("../.work/753-ci3/", import.meta.url);

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 
-for (const fixed of [false, true]) test(`${fixed ? "fixed domain" : "canonical"} unavailable captured continuation authority holds its exact durable generation before granting liveness`, async t => {
+for (const fixed of [false, true]) for (const missingAuthority of [false, true]) test(`${fixed ? "fixed domain" : "canonical"} ${missingAuthority ? "missing" : "unavailable"} captured continuation authority holds its exact durable generation before granting liveness`, async t => {
   const subagents = fixed ? "../src/runtime/domain/subagents/" : "../../pi-better-subagents/";
   const suffix = fixed ? ".domain.mjs" : ".ts";
   const { ManagedSubagentHost } = await import(new URL(`${subagents}managed-launch-host${suffix}`, import.meta.url).href);
@@ -48,7 +48,7 @@ for (const fixed of [false, true]) test(`${fixed ? "fixed domain" : "canonical"}
   const journal = (managed as any).journal;
   const epoch = (managed as any).epoch;
   journal.accept("captured-owner", "launch", "digest", epoch);
-  journal.prepare("captured-owner", "launch", epoch, { id: meta.id, sessionId: owner.sessionId, launchAuthority: { permissions: {} } });
+  if (!missingAuthority) journal.prepare("captured-owner", "launch", epoch, { id: meta.id, sessionId: owner.sessionId, launchAuthority: { permissions: {} } });
   const orchestration = createResumeOrchestration({ pi, service: () => background.service,
     rpc: {} as any, context: () => undefined,
     capacity: { tryReserve: () => { throw new Error("authority failure must precede capacity"); } } as any,
@@ -64,7 +64,8 @@ for (const fixed of [false, true]) test(`${fixed ? "fixed domain" : "canonical"}
   assert.deepEqual(readyWaits(), [other.waitId], "foreign ready work must retain its advancing generation");
   assert.equal(store.getOperation("dependency")?.terminalRevision, 1);
   assert.equal(store.listResumeClaims({ waitId: wait.waitId }).length, 0);
-  assert.deepEqual(journal.attempt(meta.id).launchAuthority, { permissions: {} }, "refusal cannot rewrite frozen authority");
+  if (!missingAuthority) assert.deepEqual(journal.attempt(meta.id).launchAuthority, { permissions: {} }, "refusal cannot rewrite frozen authority");
   assert.equal(managed.status().inFlight, 0);
-  assert.match(managed.status().continuationUnavailable[0]!.reason, /Unsupported sandbox permissions file version/);
+  assert.match(managed.status().continuationUnavailable[0]!.reason,
+    missingAuthority ? /Captured continuation launch authority unavailable/ : /Unsupported sandbox permissions file version/);
 });
