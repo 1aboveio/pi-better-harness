@@ -2151,7 +2151,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
     };
 
     const resume = (park: ParkedWait) => options.dispatch
-        ? options.dispatch(park, () => resumeInScope(park))
+        ? options.dispatch(park, () => resumeInScope(park)).catch(error => hold(park, reasonOf(error)))
         : resumeInScope(park);
 
     const adapter: WorkerContinuationAdapter = {

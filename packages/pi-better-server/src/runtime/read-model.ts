@@ -106,6 +106,7 @@ export class WorkReadModel {
   private closed = false;
   private inventory = 0;
   private coordinator = "unknown";
+  private unsupportedAssignmentRevision?: string;
   private coordinatorConversations?: Map<string, string>;
   private revision = 0;
   private scopeSequence = 0;
@@ -429,6 +430,33 @@ export class WorkReadModel {
     return { status: this.state, reason: this.reason };
   }
 
+  private rejectUnsupportedAssignmentRevision(): boolean {
+    let release: (() => void) | undefined;
+    try {
+      if (this.unsupportedAssignmentRevision) {
+        if (this.unsupportedAssignmentRevision === this.reader.revision()) return true;
+        this.unsupportedAssignmentRevision = undefined;
+      }
+      const connection = this.reader.connection(false);
+      const supported = (version: unknown) => version === undefined || (typeof version === "string" && ["1", "2", "3", "4"].includes(version));
+      if (!connection || supported(connection.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value)) return false;
+      const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
+      const version = this.reader.connection(false).prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value;
+      if (!supported(version)) {
+        this.unsupportedAssignmentRevision = snapshot.revision;
+        const reason = "Unsupported assignment source schema";
+        const changed = this.state !== "degraded" || this.reason !== reason;
+        this.state = "degraded"; this.reason = reason;
+        if (changed) this.publish();
+        return true;
+      }
+    } catch {
+      // Missing/initializing sources still follow the ordinary verification path.
+      this.unsupportedAssignmentRevision = undefined;
+    } finally { release?.(); }
+    return false;
+  }
+
   reconcile(drain = true): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.pending) {
@@ -436,11 +464,15 @@ export class WorkReadModel {
     }
     this.pending = (async () => {
       await this.watchRegistrations();
-      if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
+      let resetRepair = drain;
       do {
         this.dirty = false;
         // Background progress is independent of whether Subagent repair finds files.
         if (this.background.refresh()) this.publish(true);
+        // Metadata repair cannot verify this exact incompatible source revision.
+        if (this.rejectUnsupportedAssignmentRevision()) break;
+        if (resetRepair && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
+        resetRepair = false;
         if (this.hints.size) {
           const entries = [...this.hints].slice(0, 32);
           for (const [path, queued] of entries) { this.hints.delete(path); this.scheduling.maxQueueAgeMs = Math.max(this.scheduling.maxQueueAgeMs, Date.now() - queued); }
@@ -474,7 +506,7 @@ export class WorkReadModel {
       this.repair = undefined; this.state = "degraded"; this.reason = String(error).slice(0, 512); this.publish();
     }).finally(() => {
       this.pending = undefined;
-      if ((this.hints.size || this.dirty) && !this.closed) { this.dirty = false; void this.reconcile(false); }
+      if ((this.hints.size || this.dirty) && !this.closed && !this.unsupportedAssignmentRevision) { this.dirty = false; void this.reconcile(false); }
     });
     return this.pending;
   }
@@ -942,6 +974,7 @@ export class WorkReadModel {
     const now = Date.now();
     const rows = page.map((record: any) => {
       const row = JSON.parse(record.payload);
+      if (this.unsupportedAssignmentRevision) row.assignment = { ...row.assignment, verified: false, reason: this.reason };
       if (row.health) row.health.nextDeadline = nextHealthDeadline(row.health, row.meta, now);
       return row;
     });

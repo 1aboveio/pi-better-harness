@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../../src/runtime/query-executor.ts";
 import { WorkClient } from "../../src/runtime/work-client.mjs";
+import { queryBootstrap } from "./query-bootstrap.ts";
 
 export async function fixture(options: { capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
@@ -16,12 +17,12 @@ export async function fixture(options: { capacity?: number; timeoutMs?: number; 
     workerUrl: options.workerUrl ?? new URL("./slow-query-worker.mjs", import.meta.url),
     modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 } });
   const worker = (executor as unknown as { worker: Worker }).worker;
-  const bootstrapped = new Promise<void>((resolve, reject) => {
-    const cleanup = () => { worker.off("message", listener); worker.off("exit", exited); worker.off("error", failed); };
-    const listener = (message: any) => { if (message.type === "fixture-ready") { cleanup(); resolve(); } };
-    const exited = (code: number) => { cleanup(); reject(new Error(`query fixture worker exited before bootstrap (code ${code})`)); };
-    const failed = (error: Error) => { cleanup(); reject(error); };
-    worker.on("message", listener); worker.once("exit", exited); worker.once("error", failed);
+  const bootstrapped = queryBootstrap(worker, () => {
+    const metrics = executor.metrics().executor;
+    const observation = executor.observation();
+    return { observation: { status: observation.status, reason: observation.reason?.slice(0, 1024) }, executor: {
+      worker: metrics.worker, restarts: metrics.restarts, timeouts: metrics.timeouts, status: metrics.status,
+    } };
   });
   // Most fixtures do not need a bootstrap receipt, but awaited receipts must fail on exit.
   void bootstrapped.catch(() => {});
