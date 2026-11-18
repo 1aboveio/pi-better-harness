@@ -1,0 +1,214 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { LogCheckpoints } from "../src/runtime/log-checkpoints.ts";
+import { WorkReadModel } from "../src/runtime/read-model.ts";
+import { WorkQueries } from "../src/runtime/queries.ts";
+const { openStore } = await import(new URL("../src/runtime/domain/subagents/shared-operation-coordinator/index.domain.mjs", import.meta.url).href);
+
+// The SQLite and query owners are real; only filesystem notification and the
+// external socket boundary are replaced. No worker, socket or subprocess opens.
+const watch = (() => Object.assign(new EventEmitter(), { close() {}, ready: Promise.resolve() })) as any;
+const names = (db: DatabaseSync) => db.prepare("PRAGMA database_list").all().map(row => row.name);
+const fixture = () => mkdtempSync(join(tmpdir(), "checkpoint-deferral-"));
+
+test("exclusive checkpoint owner defers once per repair tick, keeps consumer coverage incomplete, then restores on the same owner", async t => {
+  const root = fixture(), baseDir = join(root, "raw"), agent = join(root, "agent");
+  const directory = join(baseDir, "runs", "sa_checkpoint_deferred"), log = join(directory, "output.log");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_checkpoint_deferred", cwd: root,
+    sessionId: "child", status: "completed", startedAt: 1, endedAt: 2 }));
+  writeFileSync(log, JSON.stringify({ type: "message_end", message: { role: "assistant",
+    usage: { input: 3, output: 2, cost: { total: 0.01 } } } }) + "\n");
+  const options = { baseDir, durableDir: join(root, "archive"), intervalMs: 1000, watch };
+  const seed = new WorkReadModel(agent, "seed", options);
+  try { await seed.reconcile(); assert.equal(seed.snapshot().status, "ready"); }
+  finally { await seed.close(); }
+  const writer = new DatabaseSync(":memory:");
+  const checkpoints = new LogCheckpoints(join(agent, "runtime-log-checkpoints.sqlite"), writer);
+  assert.ok(checkpoints.load(log), "normal prior fold was persisted");
+  writer.exec("BEGIN EXCLUSIVE");
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const model = new WorkReadModel(agent, "deferred", options), owner = (model as any).db;
+  const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0,
+    write(line: string) { frames.push(JSON.parse(line)); }, destroy() {} });
+  const frames: any[] = [], queries = new WorkQueries(model, socket as any);
+  let modelClosed = false;
+  const control = openStore({ path: join(agent, "operation-coordinator.sqlite") });
+  const command = { type: "runtime_subscribe", scope: {} };
+  try {
+    assert.equal(owner.prepare("PRAGMA busy_timeout").get().timeout, 0);
+    assert.equal((queries.handle(command) as any).status, "rebuilding");
+    await Promise.all(Array.from({ length: 32 }, () => model.reconcile(true)));
+    assert.equal(model.metrics.checkpoints.acquisitionAttempts, 1);
+    assert.equal(model.metrics.checkpoints.contentions, 1);
+    assert.ok(!names(owner).includes("log_checkpoints"));
+    for (let tick = 0; tick < 3; tick++) {
+      const before: number = model.metrics.checkpoints.acquisitionAttempts;
+      const began = performance.now();
+      control.registerAssignment({ assignmentId: `independent_control_${tick}`,
+        owner: { kind: "worker-conversation", sessionId: "worker", workspace: root },
+        recipient: { kind: "parent-session", sessionId: "parent", workspace: root } });
+      model.fileHint(model.runs, "sa_checkpoint_deferred");
+      await Promise.all(Array.from({ length: 32 }, () => model.reconcile(true)));
+      assert.equal(model.metrics.checkpoints.acquisitionAttempts, before, "callers and hints do not retry");
+      assert.throws(() => model.livenessReasons(), /checkpoint coverage is unverified/);
+      assert.throws(() => model.upgradeObligations(), /Runtime observation rebuilding/);
+      assert.equal(model.observation().status, "rebuilding");
+      assert.equal((queries.handle({ type: "runtime_get_snapshot", scope: {} }) as any).status, "rebuilding");
+      assert.deepEqual(queries.handle({ type: "runtime_unsubscribe" }), { unsubscribed: true });
+      queries.handle(command);
+      t.mock.timers.tick(1000);
+      await model.reconcile(false);
+      assert.equal(model.metrics.checkpoints.acquisitionAttempts, before + 1, "one attempt per existing interval");
+      assert.equal(model.metrics.inventories, 0, "no source coverage or applied cursor before initialization");
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(model.metrics.checkpoints.acquisitionAttempts, before + 1, "no finally recursion or drain spin");
+      const controlMs = performance.now() - began;
+      assert.ok(controlMs < 400, `control and query work must fit the unchanged 400ms caller bound: ${controlMs}`);
+      t.diagnostic(JSON.stringify({ tick, controlMs, callerBoundMs: 400, watchdogBoundMs: 1200,
+        attempts: model.metrics.checkpoints.acquisitionAttempts, status: model.observation().status }));
+    }
+    writer.exec("ROLLBACK");
+    await model.reconcile();
+    assert.equal(model.metrics.checkpoints.acquisitionAttempts, 4, "release alone does not renew the attempt");
+    t.mock.timers.tick(1000);
+    await model.reconcile(false);
+    await model.reconcile();
+    assert.equal((model as any).db, owner);
+    assert.equal(model.metrics.indexConnections, 1);
+    assert.equal(model.snapshot().status, "ready", model.snapshot().reason);
+    assert.equal(model.metrics.checkpoints.restores, 1);
+    assert.ok(model.metrics.checkpoints.commits >= 1);
+    assert.ok((model.snapshot().rows[0] as any).display.spend.includes("0.01"));
+    assert.ok(frames.some(frame => frame.event?.snapshot?.status === "ready"), "actual subscription receives recovered coverage");
+    assert.equal(model.observation().status, "ready");
+    assert.doesNotThrow(() => model.livenessReasons());
+    const acquisitionMetrics = (model as any).checkpoints.metrics;
+    await model.close();
+    modelClosed = true;
+    t.mock.timers.tick(10000);
+    assert.equal(acquisitionMetrics.acquisitionAttempts, 5, "no acquisition after shutdown");
+  } finally {
+    queries.close();
+    if (writer.isTransaction) writer.exec("ROLLBACK");
+    if (!modelClosed) await model.close();
+    checkpoints.close(); writer.close(); control.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("schema contention after ATTACH releases only the participant's attachment and replays after release", () => {
+  const root = fixture(), path = join(root, "checkpoints.sqlite");
+  const writer = new DatabaseSync(":memory:"), owner = new DatabaseSync(":memory:");
+  const first = new LogCheckpoints(path, writer), deferred = new LogCheckpoints(path, owner, { defer: true });
+  owner.exec("CREATE TABLE retained(value); INSERT INTO retained VALUES(42)");
+  try {
+    writer.exec("DROP TABLE log_checkpoints.checkpoints; BEGIN IMMEDIATE");
+    assert.equal(deferred.initialize(), false, "ATTACH succeeds but CREATE cannot acquire the writer");
+    assert.equal(deferred.ready, false);
+    assert.deepEqual(names(owner), ["main"]);
+    assert.throws(() => deferred.load("missing"), /coverage is unavailable/);
+    assert.throws(() => deferred.save("missing", {}), /coverage is unavailable/);
+    writer.exec("ROLLBACK");
+    assert.equal(deferred.initialize(), true);
+    deferred.save("replayed", { offset: 42 });
+    assert.deepEqual(first.load("replayed"), { offset: 42 });
+    deferred.close(); deferred.close();
+    assert.equal(owner.prepare("SELECT value FROM retained").get()!.value, 42);
+  } finally {
+    if (writer.isTransaction) writer.exec("ROLLBACK");
+    deferred.close(); first.close(); owner.close(); writer.close(); rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("uninitialized and duplicate participants never detach another participant or close a borrowed owner", () => {
+  const root = fixture(), owner = new DatabaseSync(":memory:"), path = join(root, "checkpoints.sqlite");
+  const original = new LogCheckpoints(path, owner);
+  const unopened = new LogCheckpoints(path, owner, { defer: true });
+  try {
+    original.save("retained", { n: 1 });
+    const neverAttempted = new LogCheckpoints(path, owner, { defer: true });
+    neverAttempted.close();
+    assert.equal(neverAttempted.metrics.acquisitionAttempts, 0);
+    assert.deepEqual(original.load("retained"), { n: 1 });
+    assert.throws(() => unopened.initialize(), /already in use/);
+    assert.equal(unopened.metrics.contentions, 0);
+    unopened.close(); unopened.close();
+    assert.deepEqual(original.load("retained"), { n: 1 });
+    assert.throws(() => unopened.initialize(), /closed/);
+    owner.exec("BEGIN");
+    const pinned = new LogCheckpoints(path, owner, { defer: true });
+    assert.throws(() => pinned.initialize(), /unpinned owner/);
+    pinned.close(); owner.exec("ROLLBACK");
+  } finally { unopened.close(); original.close(); owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("non-contention bootstrap failure stays degraded, does not retry, and shutdown cancels future acquisition", async t => {
+  const root = fixture();
+  writeFileSync(join(root, "runtime-log-checkpoints.sqlite"), "not a SQLite database");
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const model = new WorkReadModel(root, "corrupt", { baseDir: join(root, "raw"), durableDir: join(root, "archive"), watch });
+  try {
+    await model.reconcile();
+    const acquisitionMetrics = (model as any).checkpoints.metrics;
+    assert.equal(model.snapshot().status, "degraded");
+    assert.match(model.snapshot().reason!, /not a database/);
+    assert.equal(model.metrics.checkpoints.contentions, 0);
+    t.mock.timers.tick(1000); await model.reconcile();
+    assert.equal(acquisitionMetrics.acquisitionAttempts, 1);
+    assert.ok(!names((model as any).db).includes("log_checkpoints"));
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("closing while contended releases pending initialization without waiting for the exact writer", async t => {
+  const root = fixture(), writer = new DatabaseSync(":memory:");
+  const checkpoint = new LogCheckpoints(join(root, "runtime-log-checkpoints.sqlite"), writer);
+  writer.exec("BEGIN EXCLUSIVE");
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const model = new WorkReadModel(root, "closing", { baseDir: join(root, "raw"), durableDir: join(root, "archive"), watch });
+  try {
+    await model.reconcile();
+    const pending = model.reconcile();
+    const acquisitionMetrics = (model as any).checkpoints.metrics;
+    await model.close(); await pending;
+    t.mock.timers.tick(10000);
+    await model.reconcile();
+    assert.equal(acquisitionMetrics.acquisitionAttempts, 1);
+    assert.equal(writer.isTransaction, true, "shutdown did not need writer release");
+  } finally {
+    writer.exec("ROLLBACK"); checkpoint.close(); writer.close(); rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("partial attachment cleanup failure is reported, retained as owned, and never mistaken for deferred success", () => {
+  const root = fixture(), owner = new DatabaseSync(":memory:"), path = join(root, "checkpoints.sqlite");
+  let failCleanup = true;
+  const boundary = new Proxy(owner, { get(target, key) {
+    if (key === "exec") return (sql: string) => {
+      if (sql.startsWith("CREATE TABLE") && failCleanup)
+        throw Object.assign(new Error("injected initialization lock"), { code: "ERR_SQLITE_ERROR", errcode: 5 });
+      if (sql.startsWith("DETACH") && failCleanup) throw new Error("injected owned detach failure");
+      return target.exec(sql);
+    };
+    const value = Reflect.get(target, key, target);
+    return typeof value === "function" ? value.bind(target) : value;
+  } });
+  const checkpoint = new LogCheckpoints(path, boundary, { defer: true });
+  try {
+    assert.throws(() => checkpoint.initialize(), (error: any) => error instanceof AggregateError
+      && error.errors.length === 2 && /owned detach failure/.test(String(error.errors[1])));
+    assert.equal(checkpoint.ready, false);
+    assert.equal(checkpoint.metrics.contentions, 0, "failed cleanup cannot be treated as a safe lock deferral");
+    assert.deepEqual(names(owner), ["main", "log_checkpoints"]);
+    assert.throws(() => checkpoint.close(), /owned detach failure/);
+    failCleanup = false;
+    checkpoint.close();
+    assert.deepEqual(names(owner), ["main"]);
+    assert.equal(owner.prepare("SELECT 42 AS value").get()!.value, 42);
+  } finally { failCleanup = false; checkpoint.close(); owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
