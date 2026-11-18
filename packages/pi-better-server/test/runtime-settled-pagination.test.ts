@@ -29,7 +29,7 @@ for (const missingLogs of [true, false]) test(`registered list paging ${missingL
     await model.reconcile();
     appendFileSync(log, JSON.stringify({ type: "tool_execution_start", toolCallId: "new-tool", toolName: "read", at: 2 }) + "\n");
     await model.reconcile();
-    assert.equal((model.snapshot({ id: "sa_shared_0" }).rows[0] as any).display.tool, "read");
+    assert.equal((model.snapshot({ id: "sa_shared_0" }).rows[0] as any).display.tool, "read", "the exact new log row is already published before paging");
     const path = new URL("../../pi-better-subagents/tools.ts", import.meta.url).href;
     const { subagentListTool } = await import(path);
     const Type = Object.fromEntries(["Object", "String", "Number", "Boolean", "Array", "Optional"].map(key => [key, (value: unknown) => value]));
@@ -38,10 +38,10 @@ for (const missingLogs of [true, false]) test(`registered list paging ${missingL
     const failures = join(runs, "sa_shared_49/failures.jsonl");
     assert.equal(existsSync(failures), false);
     const page = await list.execute("list", params);
-    if (missingLogs) assert.equal(existsSync(failures), true, "the first page discovers missing terminal log evidence");
+    assert.equal(existsSync(failures), missingLogs, "the first page discovers missing terminal log evidence");
     const before = page.details.snapshot;
     const cursor = page.content[0].text.match(/nextCursor=(\S+)/)[1];
-    await model.reconcile();
+    await model.reconcile(); // Import the real files the first handler wrote.
     const after = model.snapshot({ statuses: ["completed"], limit: 2 });
     assert.equal(after.instanceId, before.instanceId);
     assert.equal(after.rows[0]!.meta.id, "sa_shared_49");
@@ -50,9 +50,9 @@ for (const missingLogs of [true, false]) test(`registered list paging ${missingL
       assert.notEqual(after.rows[0]!.sourceRevision, before.rows[0].sourceRevision);
       await assert.rejects(list.execute("list-next", { ...params, cursor }), /resync_required: cursor snapshot changed/);
     } else {
-      const next = await list.execute("list-next", { ...params, cursor });
       assert.equal(existsSync(failures), false);
       assert.equal(after.rows[0]!.sourceRevision, before.rows[0].sourceRevision);
+      const next = await list.execute("list-next", { ...params, cursor });
       assert.notEqual(next.details.snapshot.rows[0].meta.id, before.rows[0].meta.id);
     }
   } finally {

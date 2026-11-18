@@ -40,7 +40,7 @@ export class WorkClient {
                             this.scheduleRecovery();
                         }
                         else if (message.event.type === "runtime_snapshot")
-                            this.accept(message.event.snapshot);
+                            this.accept(message.event.snapshot, message.event.previousSeq);
                     }
                     else {
                         const request = this.pending.get(message.id);
@@ -85,18 +85,19 @@ export class WorkClient {
         this.snapshot = { ...this.snapshot, status: "degraded", reason, rows: this.snapshot?.rows ?? [] };
         this.notify();
     }
-    accept(snapshot) {
+    accept(snapshot, previousSeq) {
         if (this.snapshot?.instanceId === snapshot.instanceId && snapshot.seq < this.snapshot.seq)
             return;
         if (this.snapshot?.instanceId && this.snapshot.instanceId !== snapshot.instanceId) {
             this.degrade("instance-changed: resync required");
             snapshot = { ...snapshot, resyncRequired: true, resyncReason: "instance-changed" };
         }
-        else if (this.snapshot?.seq !== undefined && snapshot.seq > this.snapshot.seq + 1) {
+        else if (this.snapshot?.seq !== undefined && Number.isSafeInteger(previousSeq) && previousSeq > this.snapshot.seq) {
             this.degrade("sequence-gap: replacing with a full authoritative snapshot");
             snapshot = { ...snapshot, resyncRequired: true, resyncReason: "sequence-gap" };
         }
-        // Every event contains a complete bounded snapshot; gaps do not require inferred deltas.
+        // Global seq may skip unrelated changes; only a missing subscription
+        // predecessor indicates loss. The received snapshot is still complete.
         this.snapshot = Object.freeze(snapshot);
         this.notify();
     }

@@ -2,6 +2,7 @@ import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsMana
 import backgroundExtension from "../../../pi-better-background-tasks/src/index.ts";
 import extension, { isHealthTickerActive } from "../../../pi-better-subagents/index.ts";
 import { workObservation } from "../../../pi-better-subagents/work-observation.ts";
+import { observeLaunchPhases } from "./launch-phase-probe.mjs";
 const cwd = process.env.LAUNCH_WORKSPACE, agentDir = process.env.PI_CODING_AGENT_DIR;
 const fixture = process.env.CONTINUATION_CONTEXT ? JSON.parse(process.env.CONTINUATION_CONTEXT) : undefined;
 let policy = fixture?.policy ?? (process.env.LAUNCH_POLICY ? JSON.parse(process.env.LAUNCH_POLICY) : undefined);
@@ -33,6 +34,7 @@ const state = () => ({ entries: sessionManager.getBranch(), sessionId: sessionMa
 if (fixture) session.subscribe(() => queueMicrotask(() => { if (process.connected) process.send({ state: state() }); }));
 process.send({ ready: true, ...state(), tools: ["subagent_spawn", "subagent_spawn_batch", "subagent_result", "subagent_stop", "subagent_settings", "subagent_resume", "subagent_release"].filter(name => session.extensionRunner.getToolDefinition(name)) });
 process.on("message", async request => {
+    let stopTrace;
     try {
         if (request.inspect) { const observed = workObservation(); process.send({ id: request.id, state: state(), result: { pid: process.pid, healthActive: isHealthTickerActive(), uiFailures, observation: observed && { status: observed.status, reason: observed.reason, rows: observed.rows.map(row => ({ id: row.meta.id, status: row.meta.status })) } } }); return; }
         if (request.stop) {
@@ -42,7 +44,11 @@ process.on("message", async request => {
         if (request.policy !== undefined) policy = request.policy;
         if (request.goalComplete) sessionManager.appendCustomEntry("pi-better-goal", { kind: "set", goal: { goalId: "completed-parent-goal", status: "completed" } });
         const tool = session.extensionRunner.getToolDefinition(request.tool ?? "subagent_spawn");
+        if (request.traceLaunch) stopTrace = observeLaunchPhases(message => {
+            if (process.connected) process.send(message, () => {});
+        });
         const result = await tool.execute(request.key, request.params, undefined, undefined, session.extensionRunner.createContext());
+        stopTrace?.(); stopTrace = undefined;
         process.send({ id: request.id, result, ...(fixture ? { state: state() } : {}) });
-    } catch (error) { process.send({ id: request.id, error: String(error), stack: error.stack, ...(fixture ? { state: state() } : {}) }); }
+    } catch (error) { stopTrace?.("failed"); process.send({ id: request.id, error: String(error), stack: error.stack, ...(fixture ? { state: state() } : {}) }); }
 });

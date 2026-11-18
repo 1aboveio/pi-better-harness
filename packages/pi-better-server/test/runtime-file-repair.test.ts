@@ -112,6 +112,34 @@ for (const successor of ["parent", "another-session"]) test(`late archive preser
   }
 });
 
+test("directory self-name callbacks verify their owned source instead of a fictitious child", async () => {
+  const f = fixture();
+  const id = "sa_self_name";
+  f.put(id, { status: "completed", name: "first" });
+  const model = new WorkReadModel(f.agent, "directory-self-name", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile(); await settleHints(model);
+    const trace = sourceEventTrace(model);
+    f.put(id, { status: "completed", name: "latest" });
+    const before = trace().total;
+    (model as any).watchers.get(join(f.runs, id)).emit("change", "change", id);
+    const admitted = trace().records.filter((entry: any) => entry.sequence > before);
+    assert.ok(admitted.some((entry: any) => entry.stage === "raw-callback" && entry.owned === true));
+    assert.ok(admitted.some((entry: any) => entry.stage === "queue-admit" && entry.path === join(f.runs, id, "meta.json")),
+      "a self-name child event must admit its actual metadata path");
+    await settleHints(model);
+    assert.equal(model.snapshot({ id }).rows[0]?.meta.name, "latest");
+    f.put("sa_root_self", { status: "completed", name: "from-root" });
+    const rootBefore = trace().total;
+    (model as any).watchers.get(f.runs).emit("change", "change", "runs");
+    const rootEvents = trace().records.filter((entry: any) => entry.sequence > rootBefore);
+    assert.equal(rootEvents.some((entry: any) => entry.stage === "queue-admit" && entry.path === join(f.runs, "runs", "meta.json")), false,
+      "a source-root self event is not a run named runs");
+    await model.reconcile(); await settleHints(model);
+    assert.equal(model.snapshot({ id: "sa_root_self" }).rows[0]?.meta.name, "from-root");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("retired and current raw callbacks cross only their owned source boundaries", async t => {
   const f = fixture();
   const model = new WorkReadModel(f.agent, "callback-ownership", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
@@ -136,9 +164,10 @@ test("retired and current raw callbacks cross only their owned source boundaries
     assert.equal(model.metrics.scheduling.repairEntries, 0, "callback admission starts with exact entity work");
     await settleHints(model);
     const accepted = trace();
-    for (const stage of ["raw-callback", "hint-entry", "queue-admit", "queue-take", "scan-start"])
+    for (const stage of ["raw-callback", "hint-entry", "queue-admit"])
       assert.ok(admitted.some((entry: any) => entry.stage === stage), `missing boundary ${stage}`);
-    for (const stage of ["publish", "scan-end"])
+    // Taking admitted work now follows the source registration acknowledgement.
+    for (const stage of ["queue-take", "scan-start", "publish", "scan-end"])
       assert.ok(accepted.records.some((entry: any) => entry.stage === stage), `missing boundary ${stage}`);
     assert.equal(model.snapshot().rows[0]?.meta.name, "actual-input");
     t.diagnostic(JSON.stringify({ rejected, admitted, accepted }));
@@ -554,6 +583,28 @@ test("exact deletion hints settle a follow-up turn scheduled when the first turn
     await Promise.all([settleHints(model), followUp]);
     assert.equal(model.observation().status, "ready");
     assert.equal(model.metrics.scheduling.repairEntries, repairs, "follow-up exact hint needs no inventory");
+  } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a repair pass visits each known, failed, or discovered path once and retains deleted paths", async () => {
+  const f = fixture(); f.put("sa_known"); f.put("sa_deleted"); f.put("sa_failed");
+  writeFileSync(join(f.runs, "sa_failed", "meta.json"), "broken");
+  const model = new WorkReadModel(f.agent, "repair-unique", { baseDir: f.base, durableDir: join(f.root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    rmSync(join(f.runs, "sa_deleted"), { recursive: true });
+    f.put("sa_discovered");
+    const paths: string[] = [];
+    for await (const batch of (model as any).repairPaths()) {
+      assert.ok(batch.length <= 128);
+      paths.push(...batch);
+    }
+    const expected = ["sa_known", "sa_deleted", "sa_failed", "sa_discovered"].map(id => join(f.runs, id, "meta.json"));
+    assert.deepEqual(paths.slice().sort(), expected.sort(), "known and failed paths must not be scheduled again by discovery");
+    f.put("sa_failed");
+    await model.reconcile();
+    assert.equal(model.observation().status, "ready", "the next pass still repairs a formerly failed path");
+    assert.deepEqual(model.snapshot().rows.map(row => row.meta.id).sort(), ["sa_discovered", "sa_failed", "sa_known"]);
   } finally { await model.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
 

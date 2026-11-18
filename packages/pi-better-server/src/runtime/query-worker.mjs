@@ -25,10 +25,13 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
   }
 };
 const { WorkReadModel } = await import("./read-model.ts");
+const { workerSourceWatch } = await import("./source-watch.ts");
 const { WorkQueries, workScope, queryEncodingMetrics, snapshotJSON } = await import("./queries.ts");
 let model;
 try {
-  model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);
+  model = new WorkReadModel(workerData.agentDir, workerData.instanceId, {
+    ...workerData.modelOptions, watch: workerSourceWatch(parentPort),
+  });
 } catch (error) {
   // Worker error forwarding retains only String(error). Keep the original
   // statement's stack for this specific bootstrap failure, without source data.
