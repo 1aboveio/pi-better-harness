@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type { Duplex } from "node:stream";
 import type { WorkReadModel } from "./read-model.ts";
 import { workScope } from "./queries.ts";
+import { executionPhases, inventoryPhases } from "./read-watchdog-probe.ts";
 
 export interface EncodedRead { json: string }
 interface Waiter { connection: number; deadline: ReturnType<typeof setTimeout>; resolve(value: EncodedRead): void; reject(error: Error): void }
@@ -17,6 +18,7 @@ interface WorkerMetrics { sourceWatchers?: number; inventories?: number; coordin
 export interface QueryExecutorOptions {
   capacity?: number; timeoutMs?: number; maxConnections?: number; watchdogMs?: number;
   workerUrl?: URL;
+  logWatchdog?: (line: string) => void;
   onTerminalLogsChanged?: (ids: string[]) => Promise<void>;
   modelOptions?: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number };
 }
@@ -42,6 +44,7 @@ export class WorkQueryExecutor {
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private watchdog?: ReturnType<typeof setInterval>;
   private lastResponse = performance.now();
+  private probe?: Int32Array;
   private workerMetrics: WorkerMetrics = {};
   private lastObservation: Omit<ReturnType<WorkReadModel["observation"]>, "observedAt"> & { observedAt: number | null } = {
     status: "rebuilding", reason: "Initial source inventory is rebuilding.", observedAt: null, reasons: [],
@@ -65,7 +68,14 @@ export class WorkQueryExecutor {
     this.lag.enable();
     this.worker = this.startWorker();
     this.watchdog = setInterval(() => {
-      if (!this.closed && !this.failure && performance.now() - this.lastResponse > (this.options.watchdogMs ?? 4000)) {
+      const silenceMs = performance.now() - this.lastResponse;
+      if (!this.closed && !this.failure && silenceMs > (this.options.watchdogMs ?? 4000)) {
+        if (this.probe) {
+          const evidence = { generation: this.workerGeneration, silenceMs: Math.round(silenceMs),
+            mainLoopMaxDelayMs: Math.round(this.lag.max / 1e6), active: !!this.active, queued: this.queue.length,
+            execution: executionPhases[Atomics.load(this.probe, 0)], inventory: inventoryPhases[Atomics.load(this.probe, 1)] };
+          try { this.options.logWatchdog?.(`Read worker watchdog: ${JSON.stringify(evidence)}`); } catch { /* preserve watchdog behavior */ }
+        }
         this.fail(new Error("runtime-unhealthy: read worker unresponsive; watchdog deadline exceeded"));
       }
     }, Math.min(250, (this.options.watchdogMs ?? 4000) / 4));
@@ -74,8 +84,9 @@ export class WorkQueryExecutor {
 
   private startWorker() {
     const instanceId = this.workerGeneration ? `${this.instanceId}:reads:${this.workerGeneration}` : this.instanceId;
+    this.probe = this.options.logWatchdog ? new Int32Array(new SharedArrayBuffer(8)) : undefined;
     const worker = new Worker(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url), {
-      execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: this.options.modelOptions },
+      execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: this.options.modelOptions, probe: this.probe },
     });
     worker.on("message", message => { if (worker === this.worker) this.receive(message); });
     worker.on("error", error => { if (worker === this.worker) this.fail(new Error(`runtime-unhealthy: read worker failed: ${String(error)}`)); });

@@ -8,6 +8,7 @@ import { realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { setImmediate as yieldTurn } from "node:timers/promises";
+import type { InventoryPhase } from "./read-watchdog-probe.ts";
 import { performance } from "node:perf_hooks";
 import { createAssignmentProjector } from "./domain/assignment-projection.mjs";
 import { createAssignmentReader } from "./domain/assignment-observation.mjs";
@@ -117,9 +118,11 @@ export class WorkReadModel {
   readonly markers: string;
   readonly agentDir: string;
   readonly instanceId: string;
+  private readonly inventoryPhase?: (phase: InventoryPhase) => void;
 
-  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number } = {}) {
+  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number; inventoryPhase?: (phase: InventoryPhase) => void } = {}) {
     this.agentDir = agentDir; this.instanceId = instanceId;
+    this.inventoryPhase = options.inventoryPhase;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
     this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"));
@@ -312,6 +315,7 @@ export class WorkReadModel {
         if (!this.dirty || this.closed || this.sourceConflicts > 1) break;
       }
     })().finally(() => {
+      this.inventoryPhase?.("idle");
       this.pending = undefined;
       if (this.dirty && !this.closed) {
         this.dirty = false;
@@ -341,12 +345,14 @@ export class WorkReadModel {
   }
 
   private async scan() {
+    this.inventoryPhase?.("background");
     this.counters.inventories++;
     if (this.background.refresh()) this.publish(true);
     let releaseCoordinator: (() => void) | undefined;
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
       healthRevision: this.healthRevision, coordinator: this.coordinator, coordinatorConversations: this.coordinatorConversations };
     try {
+      this.inventoryPhase?.("metadata");
       const next = new Map<string, { signature: string; meta: any }>();
       let batch = 0;
       let sliceStarted = performance.now();
@@ -420,12 +426,14 @@ export class WorkReadModel {
           }
         }
       }
+      this.inventoryPhase?.("coordinator");
       let coordinator: string;
       try {
         const snapshot = this.reader.beginSnapshot();
         coordinator = snapshot.revision; releaseCoordinator = snapshot.release;
       } catch { coordinator = "unknown"; }
       const coordinatorConversations = coordinator === baseline.coordinator ? baseline.coordinatorConversations : this.reader.conversationRevisions();
+      this.inventoryPhase?.("log-stats");
       const logs = new Map<string, string>();
       const failureJournals = new Map<string, string>();
       const processes = new Map<string, string>();
@@ -469,6 +477,7 @@ export class WorkReadModel {
         if (path.startsWith(this.archives + sep) && marker && marker.attemptId !== entry.meta.id && marker.startedAt >= entry.meta.startedAt) continue;
         metas.set(entry.meta.id, entry.meta);
       }
+      this.inventoryPhase?.("projection");
       const attempts = [...metas.values()];
       const changedAttempts: any[] = [];
       for (const [path, entry] of [...baseline.files, ...next]) {
@@ -540,6 +549,7 @@ export class WorkReadModel {
           await yieldTurn(); sliceStarted = performance.now();
         }
       }
+      this.inventoryPhase?.("verify");
       let after: string;
       try { after = this.reader.revision(); } catch { after = "unknown"; }
       if (after !== coordinator) { this.sourceChanged(); return; }
@@ -571,6 +581,7 @@ export class WorkReadModel {
         }
       }
       if (this.closed) return;
+      this.inventoryPhase?.("commit");
       this.db.exec("BEGIN");
       const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");

@@ -145,6 +145,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const work = () => {
       if (!workModel) {
         workModel = new WorkQueryExecutor(realpathSync(getAgentDir()), instanceId!, {
+          logWatchdog: log,
           onTerminalLogsChanged: async ids => {
             if (!launchInitialization && !hasSubagentManagement(getAgentDir())) return;
             const host = await initializeLaunch();

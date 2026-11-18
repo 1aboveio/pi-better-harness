@@ -10,7 +10,7 @@ import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 
-async function fixture(options: { capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
+async function fixture(options: { capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; logWatchdog?: (line: string) => void; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
   mkdirSync(join(root, "runs"));
   const transport = mkdtempSync("/tmp/query-socket-");
@@ -506,7 +506,8 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
 });
 
 test("the worker watchdog rejects readers and bounds close while native SQLite finishes before worker exit", { timeout: 60000 }, async t => {
-  const f = await fixture({ watchdogMs: 3000 });
+  const evidence: string[] = [];
+  const f = await fixture({ watchdogMs: 3000, logWatchdog: line => evidence.push(line) });
   try {
     const client = await f.client();
     await ready(client);
@@ -516,6 +517,15 @@ test("the worker watchdog rejects readers and bounds close while native SQLite f
     const active = assert.rejects(client.get({ limit: 1 }), /deadline exceeded/);
     const queued = assert.rejects(client.get({ limit: 2 }), /deadline exceeded/);
     await Promise.all([active, queued]);
+    assert.equal(evidence.length, 1, "one diagnostic record per timeout, not one per reader");
+    assert.match(evidence[0]!, /^Read worker watchdog: /);
+    const record = JSON.parse(evidence[0]!.slice("Read worker watchdog: ".length));
+    assert.ok(record.silenceMs >= 3000);
+    assert.equal(record.generation, 0);
+    assert.equal(record.execution, "idle", "the fixture blocks outside instrumented requests");
+    assert.equal(typeof record.inventory, "string");
+    assert.equal(typeof record.mainLoopMaxDelayMs, "number");
+    assert.ok(!evidence[0]!.includes(f.root), "the local source path is not logged");
     const rejectedMs = performance.now() - began;
     assert.equal(f.executor.metrics().executor.active, 0);
     assert.equal(f.executor.metrics().executor.queued, 0);

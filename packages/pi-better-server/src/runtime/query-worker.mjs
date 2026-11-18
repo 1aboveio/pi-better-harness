@@ -26,7 +26,17 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
 };
 const { WorkReadModel } = await import("./read-model.ts");
 const { WorkQueries, workScope, queryEncodingMetrics, snapshotJSON } = await import("./queries.ts");
-const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);
+const { executionPhases, inventoryPhases } = await import("./read-watchdog-probe.ts");
+const probe = workerData.probe;
+const markExecution = phase => { if (probe) Atomics.store(probe, 0, executionPhases.indexOf(phase)); };
+function observeExecution(phase, run) {
+  if (!probe) return run();
+  const previous = Atomics.exchange(probe, 0, executionPhases.indexOf(phase));
+  try { return run(); } finally { Atomics.store(probe, 0, previous); }
+}
+const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, { ...workerData.modelOptions,
+  inventoryPhase: probe ? phase => Atomics.store(probe, 1, inventoryPhases.indexOf(phase)) : undefined });
+markExecution("idle");
 // One bounded in-flight batch. Remaining obligations stay in the reconstructable
 // inventory index; an acknowledgement cannot erase a newer revision of an ID.
 let terminalLogsPending;
@@ -56,7 +66,7 @@ const durations = [];
 const metrics = () => ({ ...model.metrics, background: model.backgroundMetrics, sqlite: { ...connections }, cacheHits, queryCount, serializationCount, eventEncoding: { ...queryEncodingMetrics }, cacheBytes,
   cacheEntries: cache.size, queryDurationMs: [...durations] });
 const snapshot = model.snapshot.bind(model);
-model.snapshot = scope => {
+model.snapshot = scope => observeExecution("snapshot", () => {
   scope = workScope(scope ?? {});
   const key = JSON.stringify(scope ?? {});
   const revision = model.contentRevision(scope);
@@ -82,10 +92,10 @@ model.snapshot = scope => {
     cache.set(key, { value, bytes, revision }); cacheBytes += bytes;
   }
   return value;
-};
+});
 function revision() {
   revisionPending = true;
-  parentPort.postMessage({ type: "revision", metrics: metrics(), observation: model.observation() });
+  observeExecution("publish", () => parentPort.postMessage({ type: "revision", metrics: metrics(), observation: model.observation() }));
 }
 model.onChange(() => {
   if (revisionPending) revisionDirty = true;
@@ -143,18 +153,22 @@ parentPort.on("message", async message => {
     if (["runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(command.type)) {
       await model.reconcile();
       if (request.cancelled) return;
-      const observation = model.observation(command.type === "runtime_get_upgrade_obligations" ? model.upgradeObligations() : model.livenessReasons());
-      parentPort.postMessage({ type: "reply", id: message.id, json: JSON.stringify(observation.reasons), metrics: metrics(), observation });
+      observeExecution("request", () => {
+        const observation = model.observation(command.type === "runtime_get_upgrade_obligations" ? model.upgradeObligations() : model.livenessReasons());
+        parentPort.postMessage({ type: "reply", id: message.id, json: JSON.stringify(observation.reasons), metrics: metrics(), observation });
+      });
       return;
     }
     if (!["runtime_get_snapshot", "runtime_subscribe", "runtime_unsubscribe"].includes(command.type)) throw new Error("Unsupported read operation");
     const indexed = command.type !== "runtime_get_snapshot" || !command.scope?.id || await model.ensureId(command.scope.id);
     if (request.cancelled) return;
-    const state = session(message.connection);
-    state.generation = message.generation; state.pending = undefined;
-    let value = state.queries.handle(command);
-    if (!indexed && !value.rows.length) value = { ...value, status: "rebuilding", reason: "The requested run is being indexed; retry after reconciliation." };
-    parentPort.postMessage({ type: "reply", id: message.id, json: encoded.get(value) ?? JSON.stringify(value), metrics: metrics() });
+    observeExecution("request", () => {
+      const state = session(message.connection);
+      state.generation = message.generation; state.pending = undefined;
+      let value = state.queries.handle(command);
+      if (!indexed && !value.rows.length) value = { ...value, status: "rebuilding", reason: "The requested run is being indexed; retry after reconciliation." };
+      parentPort.postMessage({ type: "reply", id: message.id, json: encoded.get(value) ?? JSON.stringify(value), metrics: metrics() });
+    });
   } catch (error) {
     if (request.cancelled) return;
     parentPort.postMessage({ type: "reply", id: message.id, error: String(error).slice(0, 512), metrics: metrics() });
