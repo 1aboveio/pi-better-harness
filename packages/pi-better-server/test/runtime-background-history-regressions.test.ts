@@ -29,6 +29,7 @@ for (const historyActive of [false, true]) test(`repaired legacy watch releases 
   const background = (model as any).background;
   const scope = { background: true, cwd: root, sessionId: owner.sessionId };
   try {
+    assert.equal(model.snapshot(scope).status, "rebuilding", "deferred inbox coverage is not yet verified");
     await model.reconcile();
     assert.equal(model.snapshot(scope).status, "ready");
     if (historyActive) {

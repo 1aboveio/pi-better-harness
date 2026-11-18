@@ -230,11 +230,11 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId = "naviga
     assert.equal(typeof handlers.session_start, "function", "extension must register session_start");
 
     const navigator = {
-        async start() {
+        async start(widgetReady = () => true) {
             stopRuntime ??= await startWorkRuntimeFixture();
             await handlers.session_start({}, ctx);
             // These assertions inspect real asynchronous observations, not placeholders.
-            await waitFor(() => seededIds.every(id => requestWorkDetail(id)?.detail));
+            await waitFor(() => seededIds.every(id => requestWorkDetail(id)?.detail) && widgetReady());
             assert.ok(ui.factory, "session_start must install the navigator editor factory");
             editor = ui.factory("tui", "theme", "kb");
             assert.equal(typeof editor.handleInput, "function");
@@ -579,7 +579,7 @@ describe("registered extension path: main-window navigator actions", () => {
             callbackOrigin: { cwd: RUNTIME, sessionId: "session-b" },
         });
 
-        await nav.start();
+        await nav.start(() => renderWidgetValue(nav.lastWidget("background-work-list")).includes("session-b-run"));
 
         const mainList = renderWidgetValue(nav.lastWidget("background-work-list"));
         assert.ok(mainList.includes("session-b-run"), mainList);

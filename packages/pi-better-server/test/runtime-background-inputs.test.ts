@@ -41,6 +41,7 @@ test("Background constructor attaches its inbox and repair state to the query ow
     assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main"]);
     assert.equal(model.metrics.checkpoints.acquisitionAttempts, 0, "construction must not acquire checkpoints");
     await model.reconcile();
+    assert.equal((model as any).db, derived, "initialization retains the same query owner");
     assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "log_checkpoints", "assignment_inbox", "background_inbox"]);
     const inbox = (model as any).background.inbox;
     assert.equal(inbox.db, derived);
