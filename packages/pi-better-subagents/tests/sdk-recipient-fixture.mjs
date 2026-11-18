@@ -31,6 +31,7 @@ export async function sdkRecipient({ cwd, sessionId, sent, notes, sendMessage, b
         child.send({ id, type, value }); return done;
     }
     return {
+        knownState: () => ({ connected: child.connected, exitCode: child.exitCode, signalCode: child.signalCode }),
         async diagnostics(id) {
             let timer;
             try { return await Promise.race([request('diagnostics', id), new Promise(resolve => {
