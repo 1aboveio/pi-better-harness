@@ -55,6 +55,12 @@ writeFileSync(join(agent, 'agents/roles/fixture.md'), '---\nschema: pi-agent/v1\
 let errors = '', seq = 0; const children = [], clients = [];
 const report = { root, transport, socketPath, socketBytes: Buffer.byteLength(socketPath), mode: process.env.PI_FULL_RUNTIME_MATRIX_ONLY ? "mixed-adapter-smoke-not-performance" : incremental ? "resource-matrix" : "resource-smoke-not-qualified", platform: process.platform, node: process.version, machine:{release:release(),arch:arch(),cpus:cpus().length,cpuModel:cpus()[0]?.model,totalMemory:totalmem()}, source:sourceProvenance(fileURLToPath(new URL('../../..', import.meta.url))), scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two real RemoteClientSession adapters over loopback Unix transport with HostedSessions (not cross-machine SSH); sampler overhead included', scenarios: [] };
 const output = process.env.PI_FULL_RUNTIME_REPORT ?? join(root, 'report.json');
+function reportPhase(phase) {
+  report.phase = phase;
+  report.phaseAt = Date.now();
+  writeFileSync(output, JSON.stringify(report, null, 2));
+  process.stderr.write(`${JSON.stringify({ event: 'full-runtime-phase', phase, at: report.phaseAt })}\n`);
+}
 if (subject) {
   report.driver = report.source;
   report.source = sourceProvenance(subject.checkout);
@@ -89,21 +95,25 @@ function diagnosticSamples() { return readdirSync(samples).filter(name => name.e
 function observed() { return diagnosticSamples().filter(value => value.identity && processMatchesStart(value.identity.pid,value.identity.start)); }
 let guardian, work; const hostedClients=[], remotes=[];
 try {
-  report.phase = 'startup-admission-preflight';
+  reportPhase('startup-admission-preflight');
   const intent = startupIntentFromEnv(env);
   report.startup = { intent: intent.kind, inheritedGuardedChild: Boolean(env.PI_SERVER_GUARDED_CHILD), inheritedRebind: Boolean(env.PI_SERVER_GUARDIAN_REBIND) };
   checkStartupAdmission({ canonicalServerDir: transport, agentDir: agent, build: readOwnBuild(), intent });
   assert.ok(!env.PI_SERVER_GUARDED_CHILD && !env.PI_SERVER_GUARDIAN_REBIND, 'Primary workload requires its own legitimate guardian bootstrap; inherited guardian authority cannot be reused');
   if (process.platform === 'darwin') {
+    reportPhase('build-native-capture');
     const built = buildDarwinCapture(samples);
     const binding = createRequire(import.meta.url)(built.path);
     report.measurement.nativeCapture = { sourceSha256: built.sourceSha256, binarySha256: built.binarySha256, napiVersion: built.napiVersion };
     nativeCapture = pids => platformCapture(pids, { nativeCapture: binding.capture, nativeBindingId: built.binarySha256 });
   }
+  reportPhase('import-resource-probe');
   ({ fixtureControl } = await import(probe));
-  report.phase = 'start-primary-guardian';
+  reportPhase('start-primary-guardian');
   guardian = start(new URL('../src/cli.ts', import.meta.url));
+  reportPhase('await-server-owner');
   const owner = await until('server owner', () => { const v = inspectDaemonOwner(transport); return v.status === 'live' && v.owner; });
+  reportPhase('await-work-socket');
   await until('socket', async () => { try { work = new WorkClient(join(transport,'pi-server.sock'), agent); await work.ready; return true; } catch { work?.close(); return false; } });
   if (subject) {
     const actual = await work.request('runtime_get_metrics');
@@ -112,41 +122,54 @@ try {
   }
   writeFileSync(join(agent,'server-registration-v1.json'), JSON.stringify({ version:1, agentDir:agent, serverDir:transport }));
   for (let i=0;i<2;i++) {
+    reportPhase(`hosted-${i}-connect`);
     const client=await DaemonClient.connect(join(transport,'pi-server.sock'));hostedClients.push(client);
+    reportPhase(`hosted-${i}-create-session`);
     const result=await client.call({type:'create_session',cwd,model:{provider:'openai',modelId:'gpt-4.1'}});assert.ok(result.sessionId);
+    reportPhase(`hosted-${i}-remote-connect`);
     const remote=await RemoteClientSession.connect(client,result.sessionId);remotes.push(remote);
     assert.equal(remote.extensionRunner.hasHandlers(),false);assert.deepEqual(remote.resourceLoader.getExtensions().extensions,[]);
   }
+  reportPhase('remote-background-prompt');
   await remotes[0].prompt('/resource_background');
+  reportPhase('await-remote-tool-proof');
   const remoteProof=await until('remote adapter hosted tool proof',()=>remotes[0].sessionManager.getBranch().find(entry=>entry.type==='custom_message'&&entry.customType==='remote-resource-proof'));
   const remoteLaunch=remoteProof.details;
   assert.ok(remoteLaunch?.operationId,JSON.stringify(remoteProof));
   report.mixed={transport:'loopback Unix RemoteClientSession, not cross-machine SSH',recipient:remotes[0].sessionId,otherRecipient:remotes[1].sessionId,operationId:remoteLaunch.operationId,localExtensionHandlers:false};
+  reportPhase('await-first-frontend');
   const first = start(new URL('./measure-full-runtime/frontend.ts', import.meta.url)); await message(first,m=>m.ready); clients.push(first);
+  reportPhase('spawn-managed-worker');
   const launch = await call(first,'subagent_spawn',{ prompt:'Execute fixture',role:'fixture',model:'openai/gpt-4.1',callback:false,tools:'read',skills:[] });
   assert.equal(launch.details.launched,true,JSON.stringify(launch));
   const metaPath = join(root,'pi-better-subagents/runs',launch.details.runId,'meta.json');
   const worker = JSON.parse(readFileSync(metaPath,'utf8'));
   assert.equal(worker.management.root,agent);assert.equal(remoteLaunch.owner.sessionId,remotes[0].sessionId);
   Object.assign(report.mixed,{canonicalRoot:agent,localWorker:worker.id,serverInstance:owner.token});
+  reportPhase('await-worker-entry');
   await until('worker entered', () => { try { return JSON.parse(readFileSync(env.LAUNCH_ENTERED,'utf8')); } catch { return false; } });
+  reportPhase('spawn-background-command');
   const bg = await call(first,'bg_task_spawn',{ shell:false,callback:true,argv:[execPath,'-e',`const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(join(cwd,'command-pid'))},String(process.pid));const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(cwd,'finish'))})){clearInterval(t);console.log('done')}},50)`] });
   assert.ok(bg.details?.id,JSON.stringify(bg));
   const db = new (await import('node:sqlite')).DatabaseSync(join(agent,'operation-coordinator.sqlite'),{readOnly:true});
   const grant = JSON.parse(db.prepare("SELECT value FROM coordinator_state WHERE key=?").get(`result-supervision-v1:${bg.details.operationId}`).value);
   const remoteGrant=JSON.parse(db.prepare("SELECT value FROM coordinator_state WHERE key=?").get(`result-supervision-v1:${remoteLaunch.operationId}`).value);
+  reportPhase('await-runner-claims');
   const remoteClaim=await until('remote runner claim',()=>{try{return JSON.parse(readFileSync(join(remoteGrant.directory,'tasks',remoteLaunch.id,'claim.json'),'utf8'));}catch{return false;}});
   const claim = await until('runner claim', () => { try { return JSON.parse(readFileSync(join(grant.directory,'tasks',bg.details.id,'claim.json'),'utf8')); } catch { return false; } });
   db.close();
+  reportPhase('spawn-legacy-batch');
   const legacy=await call(first,'bg_task_spawn_batch',{jobs:[0,1].map(index=>({shell:false,callback:false,argv:[execPath,'-e',`const fs=require('node:fs');setImmediate(()=>{console.log('resource-ready');fs.writeFileSync(${JSON.stringify(join(cwd,'legacy-pid-'))}+${index},String(process.pid))});const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(cwd,'finish'))})){clearInterval(timer)}},50)`]}))});
   assert.equal(legacy.details.launched.length,2,JSON.stringify(legacy));
   await until('legacy commands',()=>[0,1].every(index=>{try{return Number(readFileSync(join(cwd,`legacy-pid-${index}`),'utf8'))>0;}catch{return false;}}));
   await work.request('runtime_cancellation_status');
   for (const count of (incremental ? [incremental.clients] : process.env.PI_FULL_RUNTIME_MATRIX_ONLY?[1]:[1,5,10])) {
+    reportPhase(`clients-${count}-warmup`);
     while(clients.length<count) { const child=start(new URL('./measure-full-runtime/frontend.ts',import.meta.url)); await message(child,m=>m.ready); clients.push(child); }
     await work.get({cwd,active:true});
     const warmup=[];
     (report.warmups??=[]).push({clients:count,observations:warmup});
+    reportPhase(`clients-${count}-await-projection-barrier`);
     await until('all native projections completed at stable Background revision',async()=>{
       const scope={background:true,cwd,sessionId:JSON.parse(readFileSync(sessionFile,'utf8').split('\n')[0]).id};
       const before=await work.get(scope);
@@ -171,6 +194,7 @@ try {
     const required=[process.pid,...legacyPids,remoteClaim.pid,remoteCommandPid,owner.pid,guardian.pid,worker.pid,claim.pid,commandPid,...clients.map(c=>c.pid)];
     const sampleAll=(afterAt = 0)=>until('all actual processes sampled in this measurement generation',()=>{const values=observed();return required.every(pid=>values.some(value=>value.identity.pid===pid&&value.generation===String(count)&&value.at>=afterAt
       && (!incremental || (value.gcThreads?.complete && value.gcThreads.records.every(record => record.observedAt >= afterAt)))))?values:false;});
+    reportPhase(`clients-${count}-capture-before`);
     let before=await sampleAll();
     const role = pid => pid===process.pid?'remote-adapters-and-measurement':pid===remoteClaim.pid?'remote-runner':pid===remoteCommandPid?'remote-command':pid===owner.pid ? 'server' : pid===guardian.pid ? 'guardian' : pid===worker.pid ? 'worker' : pid===claim.pid ? 'runner' : pid===commandPid ? 'command' : legacyPids.includes(pid)?'legacy-command':'pi';
     for(const pid of required) assert.ok(before.some(v=>v.identity.pid===pid),`Missing instrumented actual process ${pid}`);
@@ -186,6 +210,7 @@ try {
     const captureCohort = () => {
       aggregateCohorts.push(batchCapture());
     };
+    reportPhase(`clients-${count}-measurement`);
     const startedAt = Date.now();
     const measurementStart=performance.now(), latencies=[], queueAges=[]; const duration=incremental?.durationMs ?? (process.env.PI_FULL_RUNTIME_MATRIX_ONLY?100:count===10?60000:3000);
     while(performance.now()-measurementStart<duration) { const began=performance.now(); await work.request('runtime_get_status'); latencies.push(performance.now()-began);
@@ -310,6 +335,7 @@ try {
     }
   }
   writeFileSync(join(cwd,'finish'),'done');
+  reportPhase('await-remote-terminal-receipt');
   const receipt=`background-terminal:${remoteLaunch.operationId}`;
   await until('exact remote native recipient receipt',()=>remotes[0].sessionManager.getBranch().some(entry=>entry.type==='custom_message'&&entry.details?.completionEventIds?.includes(receipt)));
   assert.equal(remotes[1].sessionManager.getBranch().some(entry=>entry.type==='custom_message'&&entry.details?.completionEventIds?.includes(receipt)),false,'other remote recipient must not consume completion');
@@ -333,9 +359,16 @@ try {
   }
 } catch(error) { report.failure=String(error); throw error; }
 finally {
+  reportPhase('cleanup-observe-owned');
   const owned = observed().map(value => value.identity).filter(identity=>identity.pid!==process.pid);
   writeFileSync(join(cwd,'release'),'done'); writeFileSync(join(cwd,'finish'),'done');
-  work?.close(); for(const remote of remotes) await remote.dispose(); for(const client of hostedClients) client.close();
+  work?.close();
+  for (const [index, remote] of remotes.entries()) {
+    reportPhase(`cleanup-remote-${index}-dispose`);
+    await remote.dispose();
+  }
+  reportPhase('cleanup-stop-children');
+  for(const client of hostedClients) client.close();
   for(const child of clients) if(child.connected) child.send({stop:true});
   await delay(1000);
   for(const child of children) if(child.exitCode===null&&child.signalCode===null) child.kill('SIGTERM');
@@ -343,5 +376,6 @@ finally {
   for (const identity of owned) if (processMatchesStart(identity.pid, identity.start)) { try { process.kill(identity.pid, 'SIGTERM'); } catch(error) { if(error.code !== 'ESRCH') throw error; } }
   await delay(500);
   for (const identity of owned) if (processMatchesStart(identity.pid, identity.start)) { try { process.kill(identity.pid, 'SIGKILL'); } catch(error) { if(error.code !== 'ESRCH') throw error; } }
+  reportPhase('cleanup-finished');
   writeFileSync(output,JSON.stringify({...report,errors:errors.slice(-4000)},null,2)); console.log(`Full runtime report: ${output}`);
 }

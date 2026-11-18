@@ -72,7 +72,7 @@ test('baseline inventory totals accept measured source sums but reject hidden wo
 });
 
 test('recorded primary admission refusal and malformed reports cannot qualify or yield CPU comparisons', () => {
-  const recorded = JSON.parse(readFileSync(new URL('../../../docs/evidence/issue-808/transport-r3/native-report.json', import.meta.url), 'utf8'));
+  const recorded = JSON.parse(readFileSync(new URL('./fixtures/808-native-admission-refused.json', import.meta.url), 'utf8'));
   for (const value of [recorded, null, {}, { scenarios: [null] }, { scenarios: [{ resources: [null], resourceBefore: [null], requiredProcesses: [null] }] }]) {
     const result = validatePairedReports(value, value, expected);
     assert.equal(result.qualified, false); assert.equal(result.cpuComparison, null); assert.ok(result.issues.length);
@@ -80,10 +80,10 @@ test('recorded primary admission refusal and malformed reports cannot qualify or
 });
 
 test('paired validator CLI rejects the retained refused run without invoking measurement code', () => {
-  const report = fileURLToPath(new URL('../../../docs/evidence/issue-808/transport-r3/native-report.json', import.meta.url));
+  const report = fileURLToPath(new URL('./fixtures/808-native-admission-refused.json', import.meta.url));
   const cli = fileURLToPath(new URL('../scripts/measure-full-runtime/paired-report.mjs', import.meta.url));
   // The refusal report is also deliberately NOT an approved-identity document.
-  const result = spawnSync(process.execPath, ['--import', 'tsx', cli, report, report, report], { encoding: 'utf8', timeout: 10000 });
+  const result = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), cli, report, report, report], { encoding: 'utf8', timeout: 10000 });
   assert.equal(result.status, 1, result.stderr);
   const output = JSON.parse(result.stdout);
   assert.equal(output.qualified, false); assert.equal(output.cpuComparison, null);

@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,7 +19,7 @@ test('approved baseline real parser modules reread and refold after eviction of 
   let model: any;
   const load = async (name: string) => {
     const modelSource = name === 'read-model';
-    let source = execFileSync('git', ['show', `eec7b3e256a7548bbf67f69cd468f12eb3b91dc8:packages/pi-better-server/src/runtime/${modelSource ? 'read-model.ts' : `domain/${name}.mjs`}`], { encoding: 'utf8' });
+    let source = readFileSync(new URL(`./fixtures/baseline-eec7b3e2/${modelSource ? 'read-model.ts' : `${name}.mjs`}.txt`, import.meta.url), 'utf8');
     source = adapter.instrumentBaselineModule(source, name);
     source = source.replace(/from "(\.\.?\/[^\"]+)"/g, (_: string, path: string) => {
       const dependency = path.split('/').at(-1)!.replace(/\.(mjs|ts)$/, '');
@@ -92,7 +91,7 @@ test('approved baseline real parser modules reread and refold after eviction of 
 
 test('original executor queue observations use actual queued timestamps and observed empty membership', async () => {
   const { instrumentBaselineQueue } = await import('../scripts/measure-full-runtime/baseline-observation.mjs');
-  const source = instrumentBaselineQueue(execFileSync('git', ['show', 'eec7b3e256a7548bbf67f69cd468f12eb3b91dc8:packages/pi-better-server/src/runtime/query-executor.ts'], { encoding: 'utf8' }));
+  const source = instrumentBaselineQueue(readFileSync(new URL('./fixtures/baseline-eec7b3e2/query-executor.ts.txt', import.meta.url), 'utf8'));
   const tree = ts.createSourceFile('executor.ts', source, ts.ScriptTarget.Latest, true);
   let method = '';
   const visit = (node: ts.Node) => { if (ts.isMethodDeclaration(node) && node.name.getText(tree) === 'metrics') method = node.getText(tree); ts.forEachChild(node, visit); };
