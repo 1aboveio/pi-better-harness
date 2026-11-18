@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackgroundObservation } from "../src/runtime/background.ts";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
+import { EventEmitter } from "node:events";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 
 test("shared Background projection retains committed authority without deriving it from display state", async () => {
@@ -32,14 +33,17 @@ test("shared Background projection retains committed authority without deriving 
 
 test("Background constructor attaches its inbox and repair state to the query owner's handle", async () => {
   const root = mkdtempSync(join(tmpdir(), "background-connection-"));
-  const model = new WorkReadModel(root, "shared-inboxes", { baseDir: join(root, "runs"), durableDir: join(root, "archive"), intervalMs: 60000 });
+  const watch = (() => Object.assign(new EventEmitter(), { close() {}, ready: Promise.resolve() })) as any;
+  const model = new WorkReadModel(root, "shared-inboxes", { baseDir: join(root, "runs"), durableDir: join(root, "archive"), intervalMs: 60000, watch });
   try {
     const derived = (model as any).db;
     const inbox = (model as any).background.inbox;
     assert.equal(inbox.db, derived);
     assert.equal(inbox.prefix, "background_inbox.");
     assert.equal((model as any).checkpoints.db, derived);
-    assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "log_checkpoints", "assignment_inbox", "background_inbox"]);
+    assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "background_inbox"]);
+    await model.reconcile();
+    assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "background_inbox", "log_checkpoints", "assignment_inbox"]);
     assert.ok(derived.prepare("SELECT name FROM log_checkpoints.sqlite_master WHERE name='checkpoints'").get());
     assert.ok(derived.prepare("SELECT name FROM background_inbox.sqlite_master WHERE name='background_file_repair'").get());
     assert.equal(derived.prepare("SELECT name FROM main.sqlite_master WHERE name='background_file_repair'").get(), undefined);

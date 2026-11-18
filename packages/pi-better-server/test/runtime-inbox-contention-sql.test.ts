@@ -72,7 +72,7 @@ test("failed deferred checkpoint acquisition releases its attachment and shutdow
     assert.match(model.snapshot().reason!, /Unsupported checkpoint schema/);
     assert.equal(model.metrics.checkpoints.contentions, 0, "unknown schema is not safe lock deferral");
     assert.equal((model as any).checkpoints.ready, false);
-    assert.deepEqual((model as any).db.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "assignment_inbox", "background_inbox"]);
+    assert.deepEqual((model as any).db.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main", "background_inbox"]);
     await model.close(); model = undefined;
     assert.equal(active, 0);
   } finally { await model?.close(); sqlite.DatabaseSync = Original; rmSync(root, { recursive: true, force: true }); }
