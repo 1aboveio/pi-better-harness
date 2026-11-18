@@ -10,6 +10,7 @@ import { observeMetasForOrigin, observeRecentMetasForOrigin, recentMetaDeadline,
 import { BackgroundHistory } from "./background-history.ts";
 import type { WorkScope } from "./read-model.ts";
 import { ENTITY_BUDGET } from "./work-budget.ts";
+import { isSqliteLockContention } from "./log-checkpoints.ts";
 // @ts-expect-error Shared durable observation inbox, not execution authority.
 import { AssignmentInbox } from "./domain/assignment-inbox.mjs";
 
@@ -80,8 +81,16 @@ export class BackgroundObservation {
     return deadlines.length ? Math.min(...deadlines) : null;
   }
   get registryMetrics() { return getRegistryIoMetrics(); }
-  get changeMetrics() { return { ...(this.ready ? this.inbox.metrics : { available: false, received: null, applied: null, pending: null }), coverage: this.hasInputVersions ? "cooperative-journal-and-exact-files" : "legacy-bounded-repair",
-    operationRepairComplete: this.ready && this.repairComplete, repairAfter: this.ready ? this.repairAfter : null, queuedHints: this.dirtyOperations.size,
+  private get inboxMetrics() {
+    if (this.ready) {
+      try { return this.inbox.metrics; }
+      catch (error) { if (!isSqliteLockContention(error)) throw error; }
+    }
+    return { available: false, received: null, applied: null, pending: null };
+  }
+  get changeMetrics() { const metrics = this.inboxMetrics, available = this.ready && metrics.available !== false;
+    return { ...metrics, coverage: this.hasInputVersions ? "cooperative-journal-and-exact-files" : "legacy-bounded-repair",
+    operationRepairComplete: available && this.repairComplete, repairAfter: available ? this.repairAfter : null, queuedHints: this.dirtyOperations.size,
     fileCoverage: "active-and-retained; historical-files-only-when-history-requested" }; }
   livenessReasons(options: { refresh?: boolean } = {}) {
     if (!this.ready) throw new Error("Background inbox coverage is unverified");

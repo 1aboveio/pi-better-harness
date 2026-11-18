@@ -104,7 +104,14 @@ export class WorkQueryExecutor {
       })) return;
       if (worker === this.worker) this.receive(message);
     });
-    worker.on("error", error => { if (worker === this.worker) this.fail(new Error(`runtime-unhealthy: read worker failed: ${String(error)}`)); });
+    worker.on("error", error => {
+      if (worker !== this.worker) return;
+      const original = String(error);
+      // Preserve the SQLite producer that the forwarded Error message omits.
+      const producer = /database (?:is locked|table is locked)/.test(original)
+        ? `\n${String(error instanceof Error ? error.stack ?? error : error).split("\n").slice(0, 12).join("\n").slice(0, 4096)}` : "";
+      this.fail(new Error(`runtime-unhealthy: read worker failed: ${original}${producer}`));
+    });
     worker.on("exit", code => {
       if (worker !== this.worker) return;
       this.exited = true;

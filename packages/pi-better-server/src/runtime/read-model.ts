@@ -126,8 +126,15 @@ export class WorkReadModel {
   private reason: string | undefined = "Initial source inventory is rebuilding.";
   private counters = { inventories: 0, metadataReads: 0, projections: 0, assignmentProjections: 0, logProjections: 0, healthProjections: 0, failureProjections: 0, healthRecomputations: 0, healthConfigInvalidations: 0 };
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, healthDeadline: 0, unverified: 0, initial: 0 };
+  private get assignmentMetrics() {
+    if (this.observationInitialized) {
+      try { return this.reader.changeMetrics; }
+      catch (error) { if (!isSqliteLockContention(error)) throw error; }
+    }
+    return { available: false, received: null, applied: null, pending: null };
+  }
   get metrics() {
-    return { ...this.counters, assignments: this.reader?.changeMetrics ?? { available: false, received: null, applied: null, pending: null }, initialization: { ...this.initialization }, checkpoints: { ...this.checkpoints.metrics, hotDisplay: this.parseStates.size, hotHealth: this.healthStates.size }, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader?.connection(false))) + this.background.connectionCount,
+    return { ...this.counters, assignments: this.assignmentMetrics, initialization: { ...this.initialization }, checkpoints: { ...this.checkpoints.metrics, hotDisplay: this.parseStates.size, hotHealth: this.healthStates.size }, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader?.connection(false))) + this.background.connectionCount,
       indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size, sourceParentWatchers: this.rootParents.size, rootParentWatchers: this.rootParents.size };
   }
   readonly runs: string;
@@ -1118,10 +1125,10 @@ export class WorkReadModel {
   }
 
   snapshot(scope: WorkScope = {}): WorkSnapshot {
+    if (!this.observationInitialized && !this.closed) return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, this.state, this.reason]), seq: this.revision,
+      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, status: this.state, reason: this.reason,
+      rows: [], totalMatching: 0, activity: { active: 0 }, nextDeadline: null };
     if (scope.background) {
-      if (!this.observationInitialized) return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, this.state, this.reason]), seq: this.revision,
-        observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, status: this.state, reason: this.reason,
-        rows: [], totalMatching: 0, activity: { active: 0 }, nextDeadline: null };
       if (scope.backgroundHistory && this.background.refresh()) this.publish(true);
       const index = scope.backgroundHistory ? this.background.historyIndex(scope) : undefined;
       const tasks = this.background.read(scope, index);
