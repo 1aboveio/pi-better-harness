@@ -332,6 +332,7 @@ export interface WorkerAcknowledgeView {
 export interface WorkerWaitReadyEvent {
     readonly waitId: string;
     readonly generation: number;
+    readonly parkedAttemptId?: string;
     readonly owner: { kind: string; sessionId: string; workspace: string; branchId?: string | null; goalId?: string | null };
     readonly parentOrigin?: { cwd: string; sessionId?: string };
     readonly taskIds: readonly string[];
@@ -2158,7 +2159,16 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
         version: 1,
         id: `subagents-continuation:${randomUUID()}`,
         async onWaitReady(event) {
-            const park = parkedWaitByGeneration(event.waitId, event.generation);
+            let park: ParkedWait | null;
+            if (event.parkedAttemptId !== undefined) {
+                const meta = readMeta(event.parkedAttemptId);
+                const record = meta && readParkRecord(meta.id);
+                if (!meta || meta.sessionId !== event.owner.sessionId || !record
+                    || record.waitId !== event.waitId || record.generation !== event.generation) return "deferred";
+                park = parkedEntry(meta, record);
+            } else {
+                park = parkedWaitByGeneration(event.waitId, event.generation);
+            }
             if (!park) return "delivered";
             const outcome = await resume(park);
             return outcome === "skipped" ? "deferred" : "delivered";

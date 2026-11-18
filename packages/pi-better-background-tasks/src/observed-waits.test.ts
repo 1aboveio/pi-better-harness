@@ -965,7 +965,7 @@ describe("worker operation service", () => {
       checkpointId: "checkpoint-1",
     })).toThrow(/continuation adapter/);
 
-    const ready: Array<{ waitId: string; taskIds: readonly string[]; evidence: readonly { operationId: string; terminalRevision: number }[] }> = [];
+    const ready: Parameters<ContinuationAdapter["onWaitReady"]>[0][] = [];
     const adapter: ContinuationAdapter = {
       version: 1,
       id: "subagents-test",
@@ -1008,6 +1008,7 @@ describe("worker operation service", () => {
     expect(checkpointed.phase).toBe("waiting");
 
     await until(host, () => ready.length === 1);
+    expect(ready[0]?.parkedAttemptId).toBe("attempt-1");
     expect(ready[0]?.taskIds).toEqual([launch.id]);
     expect(ready[0]?.evidence.length).toBeGreaterThan(0);
     // The parent callback belongs to the parent owner; a worker wait is not a

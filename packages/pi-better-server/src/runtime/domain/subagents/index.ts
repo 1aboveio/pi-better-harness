@@ -2160,7 +2160,8 @@ function revalidateContinuationUnderLease(
         id: plan.prior.id,
         prior: current,
         origin,
-        others: listMetas(),
+        // Archived attempts are completed and cannot be competing writers.
+        others: listMetas({ includeArchived: false }),
     });
     if (fresh.conversation.sessionId !== plan.conversation.sessionId || fresh.conversation.path !== plan.conversation.path) {
         throw new ContinuationError(
@@ -3629,7 +3630,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 id: prior.id,
                 prior,
                 origin: { cwd: input.park.record.ownerWorkspace ?? prior.callbackOrigin?.cwd ?? prior.cwd, sessionId: input.park.record.ownerSessionId ?? prior.callbackOrigin?.sessionId },
-                others: listMetas(),
+                others: listMetas({ includeArchived: false }),
             });
         } catch (error) {
             throw new PreSpawnResumeError(error instanceof Error ? error.message : String(error));

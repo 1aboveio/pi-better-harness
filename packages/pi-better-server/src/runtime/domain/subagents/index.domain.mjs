@@ -2139,7 +2139,8 @@ function revalidateContinuationUnderLease(plan, origin) {
         id: plan.prior.id,
         prior: current,
         origin,
-        others: listMetas(),
+        // Archived attempts are completed and cannot be competing writers.
+        others: listMetas({ includeArchived: false }),
     });
     if (fresh.conversation.sessionId !== plan.conversation.sessionId || fresh.conversation.path !== plan.conversation.path) {
         throw new ContinuationError(`Cannot continue ${plan.prior.id}: the saved conversation it would reopen changed while this launch was being prepared ` +
@@ -3569,7 +3570,7 @@ export default function (pi, managed) {
                 id: prior.id,
                 prior,
                 origin: { cwd: input.park.record.ownerWorkspace ?? prior.callbackOrigin?.cwd ?? prior.cwd, sessionId: input.park.record.ownerSessionId ?? prior.callbackOrigin?.sessionId },
-                others: listMetas(),
+                others: listMetas({ includeArchived: false }),
             });
         }
         catch (error) {

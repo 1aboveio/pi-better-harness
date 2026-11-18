@@ -215,6 +215,7 @@ export interface WaitEvidenceView {
 export interface WaitDispatchEvent {
   readonly waitId: string;
   readonly generation: number;
+  readonly parkedAttemptId?: string;
   readonly owner: OwnerIdentity;
   /** Parent session origin captured when the supervised task launched. */
   readonly parentOrigin?: BackgroundTaskCallbackOrigin;
@@ -3737,6 +3738,7 @@ export class ObservedWaitHost {
             const outcome = await adapter.onWaitReady({
               waitId: event.waitId,
               generation: event.generation,
+              ...(wait?.park?.attemptId ? { parkedAttemptId: wait.park.attemptId } : {}),
               owner,
               ...(taskId && this.launches.get(taskId)?.parentOrigin
                 ? { parentOrigin: this.launches.get(taskId)!.parentOrigin }

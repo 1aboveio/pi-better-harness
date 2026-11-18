@@ -1610,7 +1610,18 @@ export function createResumeOrchestration(options) {
         version: 1,
         id: `subagents-continuation:${randomUUID()}`,
         async onWaitReady(event) {
-            const park = parkedWaitByGeneration(event.waitId, event.generation);
+            let park;
+            if (event.parkedAttemptId !== undefined) {
+                const meta = readMeta(event.parkedAttemptId);
+                const record = meta && readParkRecord(meta.id);
+                if (!meta || meta.sessionId !== event.owner.sessionId || !record
+                    || record.waitId !== event.waitId || record.generation !== event.generation)
+                    return "deferred";
+                park = parkedEntry(meta, record);
+            }
+            else {
+                park = parkedWaitByGeneration(event.waitId, event.generation);
+            }
             if (!park)
                 return "delivered";
             const outcome = await resume(park);

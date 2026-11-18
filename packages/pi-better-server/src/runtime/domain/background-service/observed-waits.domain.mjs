@@ -3250,6 +3250,7 @@ export class ObservedWaitHost {
                         const outcome = await adapter.onWaitReady({
                             waitId: event.waitId,
                             generation: event.generation,
+                            ...(wait?.park?.attemptId ? { parkedAttemptId: wait.park.attemptId } : {}),
                             owner,
                             ...(taskId && this.launches.get(taskId)?.parentOrigin
                                 ? { parentOrigin: this.launches.get(taskId).parentOrigin }
