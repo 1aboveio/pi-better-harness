@@ -80,3 +80,31 @@ test("config creation, namespace precedence, malformed input and removal retain 
     assert.equal(removed.revision, absent.revision);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("absent, legacy and namespaced sources preserve environment fallback and explicit threshold precedence", async () => {
+  const root = mkdtempSync(join(tmpdir(), "health-source-env-"));
+  const keys = ["PI_BETTER_STALL_QUIET_MS", "PI_BETTER_STALL_MS"] as const;
+  const saved = keys.map(key => process.env[key]);
+  try {
+    process.env.PI_BETTER_STALL_QUIET_MS = "1234";
+    process.env.PI_BETTER_STALL_MS = "5678";
+    const absent = await readHealthConfig(root);
+    assert.deepEqual(healthThresholdsForConfig(absent.config), {
+      quietMs: 1234, staleMs: 5678, longToolMs: 120000, longCompactionMs: 120000,
+    });
+    mkdirSync(join(root, "extensions"));
+    writeFileSync(join(root, "extensions/pi-better-subagents-config.json"), JSON.stringify({ healthQuietMs: 2000 }));
+    const legacy = await readHealthConfig(root);
+    assert.equal(healthThresholdsForConfig(legacy.config).quietMs, 2000);
+    assert.equal(healthThresholdsForConfig(legacy.config).staleMs, 5678);
+    assert.notEqual(legacy.revision, absent.revision);
+    writeFileSync(join(root, "settings.json"), JSON.stringify({ piBetterHarness: { subagents: { healthQuietMs: 3000, healthStaleMs: 7000 } } }));
+    const explicit = await readHealthConfig(root);
+    assert.equal(healthThresholdsForConfig(explicit.config).quietMs, 3000);
+    assert.equal(healthThresholdsForConfig(explicit.config).staleMs, 7000);
+    assert.notEqual(explicit.revision, legacy.revision);
+  } finally {
+    keys.forEach((key, index) => { if (saved[index] === undefined) delete process.env[key]; else process.env[key] = saved[index]; });
+    rmSync(root, { recursive: true, force: true });
+  }
+});

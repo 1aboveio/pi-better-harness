@@ -8,6 +8,8 @@ import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+import { withFixtureCleanup } from "./support/fixture-outcome.ts";
+import { assertGuardedServerReleased } from "./support/guardian-owner-outcome.ts";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 const { createLocalSupervisor, supervisorPaths } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
 
@@ -38,7 +40,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
     const [ready] = await Promise.race([once(child, "message"), exited.then(() => { throw new Error(errors); })]);
     return { child, ready, exited };
   };
-  try {
+  await withFixtureCleanup(async () => {
     let server = await start(guarded ? "./support/guarded-work-daemon.ts" : "./support/work-daemon.ts");
     const frontends = await Promise.all(Array.from({ length: crash === "concurrent-frontends" ? 2 : 1 }, () => start("./support/result-frontend.ts")));
     const frontend = frontends[0]!;
@@ -79,6 +81,12 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       }
       assert.ok(status.livenessReasons.some((reason: any) => reason.kind === "runner" && reason.id === taskId),
         "Exact runner start identity must retain the server after every frontend exits, using the captured non-default supervisor directory");
+      if (guarded) {
+        assert.equal(status.instanceId, server.ready.instanceId, "startup must retain the original guarded server until runner supervision takes over");
+        const released = once(server.child, "message");
+        server.child.send({ releaseStartup: true });
+        assert.equal((await released)[0].startupReleased, true);
+      }
       client.close();
     }
     const negative = crash.startsWith("missing-");
@@ -192,25 +200,26 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
         assert.equal(signal, null);
         assert.ok(Date.now() - detachedAt < 5000, "idle exit must remain within the existing shutdown budget");
         const checkpoint = JSON.parse(readFileSync(join(transport, "clean-stop.json"), "utf8"));
+        assert.equal(checkpoint.token, server.ready.instanceId, "clean stop must belong to the originally announced guarded server");
         assert.equal(checkpoint.reason, "clean-stop");
         assert.equal(checkpoint.idleEvidence.lifecycle.runtimeIdleMs, 1000);
         assert.deepEqual(checkpoint.idleEvidence.obligations, []);
         assert.ok(checkpoint.idleEvidence.at >= checkpoint.idleEvidence.deadline);
         assert.ok(checkpoint.idleEvidence.at - checkpoint.idleEvidence.deadline < 2000, "idle deadline must not wait for derived read rebuilding");
         const { inspectDaemonOwner } = await import("../src/daemon-owner.ts");
-        assert.equal(inspectDaemonOwner(transport).status, "missing");
+        assertGuardedServerReleased(inspectDaemonOwner(transport), checkpoint);
         assert.equal(inspectDaemonOwner(transport, "guardian-owner").status, "missing");
         if (crash === "idle-guardian-held") assert.equal(store.getWait({ waitId: wait.waitId })?.phase, "held");
       }
     } finally { store.close(); }
-  } finally {
+  }, async () => {
     for (const client of clients) client.close();
     for (const child of children) if (child.exitCode === null && child.signalCode === null) {
       const exited = once(child, "exit"); child.send(stops.get(child) as any); await exited;
     }
     for (const id of taskIds) await createLocalSupervisor({ directory }).stop(id);
     rmSync(transport, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
-  }
+  });
 });
 }
 

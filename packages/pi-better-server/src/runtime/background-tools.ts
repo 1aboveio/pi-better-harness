@@ -7,7 +7,8 @@ import { existsSync } from 'node:fs';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { acquireMutationStore } from './mutation-store.ts';
 /** Fixed canonical adapter. It never owns a native parent transcript. */
-export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>, verificationMs = 30000) {
+export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>, verificationMs = 30000,
+    trace?: (slot: number, phase: 'queued' | 'executing' | 'recovery' | 'read-pending' | 'read-returned' | 'tool-pending' | 'tool-returned' | 'settled') => void) {
     const load = (file: string) => import(`./domain/background-service/${file}.domain.mjs`);
     const [{ createObservedWaitHost }, { registerTools }, { createBackgroundTaskRuntime }, sandbox, authority, permissions, registry, navigator, failures] = await Promise.all([
         load('observed-waits'), load('tools'), load('runtime'), load('sandbox'), load('managed-authority'),
@@ -19,9 +20,20 @@ export async function createBackgroundTools(root: string, instance: string, drai
     let journal: ReturnType<typeof lease.store.backgroundRequests>;
     let pi: any, service: any, session: any, runtime: any, current: any;
     let tail: Promise<unknown> = Promise.resolve(), pending = 0;
+    let traceSlot = 0;
     const projections = new Map<string, any>(), metrics = { scopeRefreshes: 0, exactDetailReads: 0, reconciles: 0 };
     const recoveryVersions = new Map<string, string>();
     const scopes = new Map<string, any>(), deliveries = new Map<string, any>();
+    const traceSeen = new Set<string>();
+    const traceHandoff = (stage: string, facts: Record<string, unknown>) => {
+        if (process.env.PI_BG_OBSERVED_WAITS_DEBUG !== '1') return;
+        const full = JSON.stringify({ stage, ...facts });
+        const line = full.length <= 4096 ? full : JSON.stringify({ stage, truncated: true });
+        if (traceSeen.has(line) || traceSeen.size >= 128) return;
+        const output = traceSeen.size === 127 ? JSON.stringify({ stage: 'capture-limit', limit: 128 }) : line;
+        traceSeen.add(line);
+        try { console.error('[background-handoff-server]', output); } catch { /* diagnostics never own delivery */ }
+    };
     const ownerKey = (owner: any) => JSON.stringify([owner.workspace, owner.sessionId]);
     const forgetView = (view: string) => { projections.delete(view); recoveryVersions.delete(view); };
     const forgetOwner = (key: string) => {
@@ -38,16 +50,21 @@ export async function createBackgroundTools(root: string, instance: string, drai
     };
     const notifyParent = (notification: any, delivery: any) => {
         const owner = { workspace: notification.origin?.cwd, sessionId: notification.origin?.sessionId }, scope = scopes.get(ownerKey(owner));
+        const facts = { taskId: notification.taskId, receiptId: delivery.receiptId, sessionId: owner.sessionId, urgent: notification.urgent === true };
+        traceHandoff('notify', facts);
         if (!scope || deliveries.size >= 256) {
+            traceHandoff('defer', { ...facts, scopeKnown: Boolean(scope), backlog: deliveries.size });
             delivery.defer('Native recipient unavailable or delivery backlog full');
             return;
         }
         if ([...deliveries.values()].some(item => item.receiptId === delivery.receiptId && ownerKey(item.scope.owner) === ownerKey(owner))) {
+            traceHandoff('duplicate', facts);
             delivery.defer('Delivery already pending');
             return;
         }
         const token = randomUUID();
         deliveries.set(token, { token, notification, receiptId: delivery.receiptId ?? `background-terminal:${notification.operationId}`, delivery, scope, createdAt: Date.now() });
+        traceHandoff('enqueued', facts);
     };
     try {
         journal = lease.store.backgroundRequests();
@@ -150,7 +167,10 @@ export async function createBackgroundTools(root: string, instance: string, drai
             if (pending >= 64)
                 return Promise.reject(new Error('runtime-overloaded: Background request capacity'));
             pending++;
+            const slot = ++traceSlot;
+            trace?.(slot, 'queued');
             const request = tail.catch(() => undefined).then(async () => {
+                trace?.(slot, 'executing');
                 const record = authority.readBackgroundAuthority(root, instance, command.authority), key = ownerKey(record.owner);
                 // A warmed branch view must not overwrite another foreground's progress.
                 const viewKey = JSON.stringify([key, authority.backgroundDigest(record.branchIds)]);
@@ -180,6 +200,8 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     }
                 if (record.tool === '__background_receipt') {
                     const item = deliveries.get(record.params.token);
+                    traceHandoff('receipt', { sessionId: record.owner.sessionId, taskId: item?.notification.taskId,
+                        receiptId: item?.receiptId, found: Boolean(item), delivered: record.params.delivered === true });
                     if (!item || ownerKey(item.scope.owner) !== key)
                         throw new Error('delivery-receipt-refused');
                     if (record.params.delivered === true && !service.isParentOriginActive(item.notification.origin, item.notification.branchId))
@@ -194,6 +216,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     return { receipted: record.params.delivered === true };
                 }
                 if (record.tool === '__background_poll') {
+                    traceHandoff('poll-enter', { sessionId: record.owner.sessionId });
                     if (!observe)
                         throw new Error('Shared Background observation unavailable');
                     // Recovery is indexed and bounded independently of display readiness.
@@ -201,11 +224,14 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     if (recoveryVersions.get(viewKey) !== recoveryVersion || service.hasPendingParentCallbackRecovery()) {
                         metrics.reconciles++;
                         service.noteParentContext(ctx);
+                        trace?.(slot, 'recovery');
                         await service.reconcileNow();
                         if (!recoveryVersions.has(viewKey) && recoveryVersions.size >= 128) forgetView(recoveryVersions.keys().next().value!);
                         recoveryVersions.set(viewKey, recoveryVersion);
                     }
+                    trace?.(slot, 'read-pending');
                     const snapshot = await observe({ background: true, cwd: record.owner.workspace, sessionId: record.owner.sessionId });
+                    trace?.(slot, 'read-returned');
                     if (snapshot.status !== 'ready')
                         throw new Error(snapshot.reason ?? 'Shared Background observation unverified');
                     const revision = authority.backgroundDigest([snapshot.scopeRevision, record.branchIds]);
@@ -222,7 +248,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
                             forgetView(projections.keys().next().value!);
                         projections.set(viewKey, projection);
                     }
-                    return { ...projection, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: [...deliveries.values()].filter(item => ownerKey(item.scope.owner) === key).map(({ token, notification, receiptId }) => ({ token, notification, receiptId })) };
+                    const outgoing = [...deliveries.values()].filter(item => ownerKey(item.scope.owner) === key).map(({ token, notification, receiptId }) => ({ token, notification, receiptId }));
+                    traceHandoff('poll-return', { sessionId: record.owner.sessionId, total: outgoing.length, deliveries: outgoing.slice(0, 8).map(item => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
+                    return { ...projection, recoveryPending: service.hasPendingParentCallbackRecovery(), deliveries: outgoing };
                 }
                 const origin = { cwd: record.owner.workspace, sessionId: record.owner.sessionId };
                 if (record.tool === '__background_detail' || record.tool === '__background_action') {
@@ -272,7 +300,9 @@ export async function createBackgroundTools(root: string, instance: string, drai
                 assertAdmission();
                 let result;
                 try {
+                    trace?.(slot, 'tool-pending');
                     result = await tool.execute(record.key, record.params, undefined, undefined, ctx);
+                    trace?.(slot, 'tool-returned');
                 }
                 catch (error) {
                     if (mutation)
@@ -291,7 +321,10 @@ export async function createBackgroundTools(root: string, instance: string, drai
                 if (mutation)
                     journal.finish(key, record.key, result);
                 return result;
-            }).finally(() => { pending--; });
+            }).catch(error => {
+                traceHandoff('request-error', { tool: current?.record.tool, sessionId: current?.record.owner.sessionId, error: String(error).slice(0, 256) });
+                throw error;
+            }).finally(() => { pending--; trace?.(slot, 'settled'); });
             tail = request;
             return request;
         },

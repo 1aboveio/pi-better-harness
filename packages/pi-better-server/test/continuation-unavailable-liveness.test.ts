@@ -56,16 +56,29 @@ for (const fixed of [false, true]) for (const missingAuthority of [false, true])
     dispatch: (value: any, run: () => Promise<"resumed" | "held" | "skipped">) => (managed as any).dispatchContinuation(value, run) });
   // Register after seeding so automatic outbox dispatch cannot precede the assertion.
   background.service.registerContinuationAdapter(orchestration.adapter);
-  const readyWaits = () => store.listWaits({ pendingOnly: true }).filter((wait: any) => wait.phase === "ready").map((wait: any) => wait.waitId);
-  assert.equal(readyWaits().length, 2);
+  assert.equal(background.advancingWaits().length, 2);
   assert.equal(await orchestration.resume(park), "held");
   assert.equal(store.getWait({ waitId: wait.waitId, generation: wait.generation })?.phase, "held");
   assert.equal(readParkRecord(meta.id)?.phase, "held");
-  assert.deepEqual(readyWaits(), [other.waitId], "foreign ready work must retain its advancing generation");
+  assert.deepEqual(background.advancingWaits().map((reason: any) => reason.id), [other.waitId], "foreign ready work must retain liveness");
   assert.equal(store.getOperation("dependency")?.terminalRevision, 1);
   assert.equal(store.listResumeClaims({ waitId: wait.waitId }).length, 0);
   if (!missingAuthority) assert.deepEqual(journal.attempt(meta.id).launchAuthority, { permissions: {} }, "refusal cannot rewrite frozen authority");
   assert.equal(managed.status().inFlight, 0);
   assert.match(managed.status().continuationUnavailable[0]!.reason,
     missingAuthority ? /Captured continuation launch authority unavailable/ : /Unsupported sandbox permissions file version/);
+  const missing = { runId: "missing-authority", waitId: "missing-wait", generation: 1 };
+  const neverDispatch = async () => { assert.fail("missing captured authority must not dispatch"); };
+  await assert.rejects((managed as any).dispatchContinuation(missing, neverDispatch), /Captured continuation launch authority unavailable/);
+  const refusal = managed.status().continuationUnavailable.find((value: any) => value.key === "missing-wait:1");
+  assert.equal(await (managed as any).dispatchContinuation(missing, neverDispatch), "skipped", "existing backoff defers without a second dispatch");
+  assert.deepEqual(managed.status().continuationUnavailable.find((value: any) => value.key === "missing-wait:1"), refusal);
+  assert.equal(managed.busy, false);
+  for (let i = 0; i < 130; i++) {
+    await (managed as any).dispatchContinuation({ ...missing, waitId: `flood-${i}` }, neverDispatch).catch((error: unknown) => {
+      assert.match(String(error), /Captured continuation launch authority unavailable/);
+    });
+  }
+  assert.equal(managed.status().continuationUnavailable.length, 32, "admission still bounds distinct failed generations");
+  assert.equal(managed.busy, false);
 });

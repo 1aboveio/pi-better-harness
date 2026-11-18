@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { persistRecipientForHandoff } from "./persist-recipient.ts";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 const root = process.env.PI_CODING_AGENT_DIR!;
 // This process already runs under tsx. Use the SDK's real factory entry point
@@ -56,5 +57,7 @@ try {
 } finally { db.close(); }
 const waited = await tool("wait_for_operations").execute("wait-760", { task_ids: [taskId], continuation_note: "Interpret the independent result" });
 if (!(waited.details as any)?.waitId) throw new Error(JSON.stringify(waited));
-process.send?.({ taskId, wait: waited.details, sessionId: session.sessionId, sessionFile: sessionManager.getSessionFile() });
+const sessionFile = process.env.PI_TEST_PERSIST_RECIPIENT === "1"
+  ? persistRecipientForHandoff(sessionManager) : sessionManager.getSessionFile();
+process.send?.({ taskId, wait: waited.details, sessionId: session.sessionId, sessionFile });
 process.on("message", () => { session.dispose(); process.exit(0); });

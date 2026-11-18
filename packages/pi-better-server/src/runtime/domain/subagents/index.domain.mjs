@@ -33,7 +33,8 @@ import { disposeBackgroundWorkNavigator, ensureBackgroundWorkNavigator, isNaviga
 import { spawnDetached } from "./spawn.domain.mjs";
 import { abortUncommittedLaunch } from "./launch-abort.domain.mjs";
 import { parseRun, parseRunForLifecycle, resetParseRunCursor } from "./parse.domain.mjs";
-import { finalizeRun as finalizeRunCore } from "./finalization.domain.mjs";
+import { finalizeRun as finalizeRunCore, reconcileInterruptedRun } from "./finalization.domain.mjs";
+import { completeOwnedExit } from "./owned-exit.domain.mjs";
 import { selectSessionByName } from "./session-selection.domain.mjs";
 import { isWithinWorkspace } from "./workspace-scope.domain.mjs";
 import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.domain.mjs";
@@ -1250,10 +1251,24 @@ function reconcileHealth(ids) {
         // Interrupted work whose child already exited is finalized from its own
         // coherent log before any other verdict (and before timing can mislabel
         // an already-finished run as stopped) (#625).
+        let interruptedReconciliation;
         if (meta.status === "running" || meta.status === "orphaned") {
             try {
-                if (finalizeInterruptedRunFromLog(pi, meta, now))
-                    continue;
+                if (pi && !directlySupervisedRunIds.has(meta.id) && meta.supervisionInterruptedAt !== undefined) {
+                    const observed = reconcileInterruptedRun(meta, realProcessProbe, now, {
+                        renderWidget,
+                        notify: (message, level) => { try {
+                            ctx?.ui.notify(message, level);
+                        }
+                        catch { /* unavailable UI */ } },
+                        sendMessage: () => enqueueCompletionCallback(pi, meta.id),
+                    });
+                    if (observed.finalization?.applied) {
+                        syncHealthTicker();
+                        continue;
+                    }
+                    interruptedReconciliation = observed.reconciliation;
+                }
             }
             catch { /* best-effort; the ordinary reconciliation below still runs */ }
         }
@@ -1263,7 +1278,7 @@ function reconcileHealth(ids) {
         }
         catch { /* timing is best-effort per tick; supervision below still runs */ }
         if (meta.status === "running" || meta.status === "orphaned") {
-            const result = reconcileRun(meta, realProcessProbe, now);
+            const result = interruptedReconciliation ?? reconcileRun(meta, realProcessProbe, now);
             if (result.changed) {
                 Object.assign(meta, result.patch, { status: result.status });
                 writeMeta(meta);
@@ -3373,13 +3388,7 @@ export default function (pi, managed) {
             // Register exit supervision before any fallible post-spawn publication.
             // A failed metadata write must not strand a running child without a close
             // handler; the lease stays held until that child has actually exited.
-            void spawned.exit.then(async (code) => {
-                try {
-                    finalizeRun(pi, ctx, id, code);
-                }
-                finally {
-                    lease?.release();
-                }
+            const exitCompletion = completeOwnedExit(spawned.exit, code => finalizeRun(pi, ctx, id, code), () => { lease?.release(); }, async () => {
                 if (workerBridge)
                     workerOperations.release(id, "attempt-exited");
                 // Reconcile this attempt's earlier published writer before its
@@ -3400,6 +3409,7 @@ export default function (pi, managed) {
                 });
                 await settleParkedExit(id);
             });
+            managed?.observeExit?.(id, exitCompletion);
             writeMeta(meta);
             committed = true;
             // `meta.json` is now the record of this run; the claim has served its

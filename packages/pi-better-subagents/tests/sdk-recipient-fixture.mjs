@@ -3,6 +3,10 @@ import { once } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+export async function decideRecipientSend(child, request, sendMessage) {
+    try { await sendMessage(request.message, request.options, []); child.send({ type: 'send-decision', id: request.id }); }
+    catch (error) { child.send({ type: 'send-decision', id: request.id, error: String(error) }); }
+}
 export async function sdkRecipient({ cwd, sessionId, sent, notes, sendMessage, batchWindowMs }) {
     const directory = mkdtempSync(join(tmpdir(), 'sdk-recipient-'));
     const child = fork(new URL('./sdk-recipient-worker.mjs', import.meta.url), [], { execArgv: ['--import', 'tsx'],
@@ -12,8 +16,7 @@ export async function sdkRecipient({ cwd, sessionId, sent, notes, sendMessage, b
     child.on('message', message => {
         if (message.sendRequest) {
             const request = message.sendRequest;
-            try { sendMessage(request.message, request.options, []); child.send({ type: 'send-decision', id: request.id }); }
-            catch (error) { child.send({ type: 'send-decision', id: request.id, error: String(error) }); }
+            void decideRecipientSend(child, request, sendMessage);
         }
         if (message.delivery) sent.push(message.delivery);
         if (message.notice) notes.push(message.notice);

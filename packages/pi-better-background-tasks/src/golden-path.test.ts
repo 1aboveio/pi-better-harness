@@ -9,6 +9,7 @@ beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
 afterAll(async () => { await stopRuntime(); });
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { nativeBackground } from "./test-support/native-background.js";
+import { waitForPublicStatus } from './test-support/public-status.js';
 
 type ToolResult = { content: Array<{ type: string; text: string }>; details?: unknown };
 type RegisteredTool = {
@@ -51,8 +52,9 @@ describe("golden path: background process journey", () => {
 
       writeFileSync(release, "finish");
       const finalStatus = await waitForPublicStatus(harness, id, (status) => status.status === "succeeded");
-      expect(finalStatus).toMatchObject({ id, kind: "process", status: "succeeded", lastExitCode: 0 });
-      expect(finalStatus.result).toMatchObject({ exitCode: 0, signal: null });
+      expect(finalStatus).toMatchObject({ id, kind: "process", status: "succeeded", exitCode: 0, signal: null,
+        terminal: true, terminalOutcome: 'succeeded' });
+      expect(finalStatus.terminalRevision).toBeGreaterThan(0);
 
       let page = await harness.execute("bg_task_status", { id, verbose: true, max_bytes: 1024 });
       expect(Buffer.byteLength(page)).toBeLessThanOrEqual(1024);
@@ -84,28 +86,8 @@ describe("golden path: background process journey", () => {
   }, 10_000);
 });
 
-async function waitForPublicStatus(
-  harness: Awaited<ReturnType<typeof nativeBackground>>,
-  id: string,
-  done: (status: Record<string, unknown>) => boolean,
-  timeoutMs = 5000,
-) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const status = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true })) as Record<string, unknown>;
-    if (done(status)) return status;
-    await sleep(50);
-  }
-  const status = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true })) as Record<string, unknown>;
-  throw new Error(`task ${id} did not reach expected golden-path state: ${JSON.stringify(status)}`);
-}
-
 function extractTaskId(text: string): string {
   const match = text.match(/bgs_[0-9a-f]{20}|bg_[a-z0-9_]+/);
   if (!match) throw new Error(`no task id in text: ${text}`);
   return match[0]!;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -4,11 +4,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { startWorkRuntime } from "./test-support/work-runtime.js";
+import { startWorkRuntime, retainWorkRuntimeFailure } from "./test-support/work-runtime.js";
 
 let stopRuntime: () => Promise<void>;
 const harnessCleanup = new Set<() => Promise<void>>();
-afterEach(async () => { for (const close of harnessCleanup) await close(); harnessCleanup.clear(); });
+afterEach(async context => {
+  if (context.task.result?.state === 'fail') await retainWorkRuntimeFailure();
+  for (const close of harnessCleanup) await close(); harnessCleanup.clear();
+});
 beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
 afterAll(async () => { await stopRuntime(); });
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

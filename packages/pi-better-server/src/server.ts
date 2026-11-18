@@ -44,6 +44,8 @@ export interface DaemonOptions extends Partial<LifecycleConfig> {
   onDraining?: () => void;
   /** Trusted fault-injection seam; never exposed through the socket protocol. */
   cancellationFault?: (stage: import("./runtime/cancellation.ts").CancellationStage) => void;
+  /** Private fixture hook; no protocol command, parameters or authority are passed. */
+  rpcEvidence?: { bind(read: () => unknown): void; event(plane: string, slot: number, phase: string): void };
 }
 
 export interface Daemon {
@@ -97,7 +99,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     let launchInitialization: ReturnType<typeof createSubagentLaunch> | undefined;
     let backgroundInitialization: ReturnType<typeof createBackgroundTools> | undefined;
     let backgroundTools: Awaited<ReturnType<typeof createBackgroundTools>> | undefined;
-    const initializeBackground = () => backgroundInitialization ??= createBackgroundTools(realpathSync(getAgentDir()), instanceId!, () => Boolean(pendingUpgrade), scope => work().snapshot(scope), config.runtimeIdleMs).then(host => backgroundTools = host).catch(error => { backgroundInitialization = undefined; throw error; });
+    const initializeBackground = () => backgroundInitialization ??= (() => {
+      options.rpcEvidence?.event('background', 0, 'init-pending');
+      return createBackgroundTools(realpathSync(getAgentDir()), instanceId!, () => Boolean(pendingUpgrade), scope => work().snapshot(scope), config.runtimeIdleMs,
+        options.rpcEvidence ? (slot, phase) => options.rpcEvidence!.event('adapter', slot, phase) : undefined)
+        .then(host => { options.rpcEvidence?.event('background', 0, 'init-returned'); return backgroundTools = host; })
+        .catch(error => { options.rpcEvidence?.event('background', 0, 'init-failed'); backgroundInitialization = undefined; throw error; });
+    })();
     let cancellations: RuntimeCancellation | undefined;
     const controlStore = acquireMutationStore(realpathSync(getAgentDir()));
     let resultSupervision: RuntimeResultSupervision | undefined;
@@ -196,6 +204,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     let inFlight = 0;
     let requestCounter = 0, connectionCounter = 0;
     const requests = new Map<number, { kind: string; id: number; connection: number; operation?: { kind: string; id: string }; lastProgressAt: number; nextDeadline: null; executionDeadline: null; recovery: string }>();
+    options.rpcEvidence?.bind(() => ({ lanes: controlStore.budget.metrics().lanes,
+      read: workModel?.metrics().executor, observation: workModel?.observation().status }));
     let draining = false;
     let idleStopping = false;
     let idleEvidence: unknown;
@@ -243,6 +253,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         }
         inFlight++;
         const request = ++requestCounter;
+        const evidencePlane = type === 'runtime_background_tool' ? 'background'
+          : ['runtime_cancel_task', 'runtime_query_cancellation', 'runtime_cancellation_status'].includes(type) ? 'cancel'
+          : ['runtime_get_snapshot', 'runtime_subscribe', 'runtime_get_metrics'].includes(type) ? 'read' : undefined;
+        if (evidencePlane) options.rpcEvidence?.event(evidencePlane, request, 'request-pending');
         requests.set(request, { kind: 'transport-request', id: request, connection, lastProgressAt: now(),
           nextDeadline: null, executionDeadline: null,
           recovery: 'dispatch-drains-to-settlement-read-waiters-use-existing-caller-cancellation-accepted-effects-use-durable-owner' });
@@ -250,6 +264,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           const record = requests.get(request);
           if (record) { record.operation = { kind, id: operationId }; record.lastProgressAt = now(); }
         };
+        let evidenceFailed = false;
         try {
           if (!type) {
             send(failure(id, "unknown", "Missing command type"));
@@ -503,8 +518,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           const response = await hosted.handle(rpc as RpcCommand);
           send({ ...response, sessionId } as ServerMessage);
         } catch (error) {
+          evidenceFailed = true;
           send(failure(id, type || "unknown", error instanceof Error ? error.message : String(error)));
         } finally {
+          if (evidencePlane) {
+            options.rpcEvidence?.event(evidencePlane, request, evidenceFailed ? 'request-failed' : 'request-returned');
+            options.rpcEvidence?.event(evidencePlane, request, 'settled');
+          }
           releaseSessionOperation?.();
           inFlight--;
           requests.delete(request);

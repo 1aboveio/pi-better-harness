@@ -47,8 +47,6 @@ function copyLaunchDomain(source, destination) {
       `// Generated fixed launch domain from ${from.slice(root.length)}. Do not edit directly.\n${output}`);
   }
 }
-writeFileSync(join(root, "packages/pi-better-subagents/shared-work-client.mjs"), readFileSync(join(root, "packages/pi-better-server/src/runtime/work-client.mjs")));
-writeFileSync(join(root, "packages/pi-better-background-tasks/src/shared-work-client.mjs"), readFileSync(join(root, "packages/pi-better-server/src/runtime/work-client.mjs")));
 copyLaunchDomain(join(root, "packages/pi-better-subagents"), subagents);
 copyLaunchDomain(join(root, "packages/pi-better-background-tasks/src"), join(target, "background-service"));
 copyLaunchDomain(join(root, "packages/pi-better-sandbox"), join(target, "sandbox-policy"));
