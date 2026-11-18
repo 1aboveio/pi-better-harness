@@ -621,6 +621,8 @@ test("an exact-ID client stops retrying a stalled inventory within its retry bud
 
 test("a failed worker recovers existing subscriptions under a new observation epoch", { timeout: 10000 }, async () => {
   const f = await fixture();
+  let phase = "create source";
+  let observedClient: WorkClient | undefined;
   try {
     const directory = join(f.root, "runs", "sa_recovery");
     mkdirSync(directory);
@@ -628,9 +630,13 @@ test("a failed worker recovers existing subscriptions under a new observation ep
       id: "sa_recovery", cwd: f.root, status: "completed", startedAt: 1, name,
     }));
     write("first");
-    const client = await f.client();
+    phase = "connect client";
+    const client = observedClient = await f.client();
+    phase = "initial ready subscription";
     await ready(client);
+    phase = "exact-ID subscription";
     await client.subscribe({ id: "sa_recovery", limit: 1 });
+    phase = "publish latest source to original subscription";
     write("latest");
     const until = Date.now() + 3000;
     while (client.snapshot?.rows[0]?.meta.name !== "latest") {
@@ -649,12 +655,25 @@ test("a failed worker recovers existing subscriptions under a new observation ep
         }
       });
     });
+    phase = "terminate original worker";
     await f.worker.terminate();
+    phase = "recover existing subscription";
     await recovered;
     assert.equal(client.closed, false);
     assert.equal(resynced, true);
     assert.equal(f.executor.metrics().executor.worker, "running");
+    phase = "verify recovered exact-ID read";
     assert.equal((await client.get({ id: "sa_recovery", limit: 1 })).rows[0]!.meta.name, "latest");
+  } catch (error) {
+    // Cached evidence only: diagnosing a failed read must not issue another RPC
+    // or give recovery more time before the original failure is reported.
+    console.error(JSON.stringify({ case: "worker-subscription-recovery", phase,
+      error: String(error), observation: f.executor.observation(), metrics: f.executor.metrics(),
+      client: observedClient && { closed: observedClient.closed, instanceId: observedClient.snapshot?.instanceId,
+        seq: observedClient.snapshot?.seq, status: observedClient.snapshot?.status, reason: observedClient.snapshot?.reason,
+        rows: observedClient.snapshot?.rows.map(row => ({ id: row.meta.id, name: row.meta.name })) },
+    }));
+    throw error;
   } finally { await f.close(); }
 });
 
