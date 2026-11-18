@@ -90,6 +90,9 @@ jobs:
             ${{ runner.temp }}/full-runtime-resources.json
             .work/standalone-*/measurements.json
             .work/standalone-*/packaged-domain.log
+            .work/standalone-*/recovery-timeline.jsonl
+            .work/standalone-*/background-recovery.log
+            .work/standalone-*/daemon.log
           if-no-files-found: warn
           include-hidden-files: true
 

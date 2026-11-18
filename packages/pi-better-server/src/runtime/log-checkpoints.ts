@@ -31,8 +31,13 @@ export class LogCheckpoints {
       }
       return;
     }
-    this.db.exec(`PRAGMA ${this.prefix}journal_mode=DELETE; PRAGMA ${this.prefix}auto_vacuum=FULL;
-      CREATE TABLE IF NOT EXISTS ${this.prefix}checkpoints(path TEXT PRIMARY KEY, version INTEGER, payload TEXT, bytes INTEGER, used INTEGER);`);
+    this.db.exec(`PRAGMA ${this.prefix}journal_mode=DELETE`);
+    // Setting an already-enabled auto_vacuum still requests a write lock.
+    // Reopening a checkpoint reader must not contend with a reserved writer.
+    if (this.db.prepare(`PRAGMA ${this.prefix}auto_vacuum`).get().auto_vacuum !== 1) {
+      this.db.exec(`PRAGMA ${this.prefix}auto_vacuum=FULL`);
+    }
+    this.db.exec(`CREATE TABLE IF NOT EXISTS ${this.prefix}checkpoints(path TEXT PRIMARY KEY, version INTEGER, payload TEXT, bytes INTEGER, used INTEGER)`);
   }
   load(path: string): any {
     const row = this.db.prepare(`SELECT payload FROM ${this.prefix}checkpoints WHERE path=? AND version=?`).get(path, LOG_CHECKPOINT_VERSION);

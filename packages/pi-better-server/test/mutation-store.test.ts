@@ -21,9 +21,17 @@ if (Number(process.versions.node.split(".")[0]) < 24) {
     const version = await execute(runtime, ["-p", "process.versions.node"]);
     assert.ok(Number(version.stdout.trim().split(".")[0]) >= 24, "Private runtime must support the managed domain");
     const { NODE_TEST_CONTEXT: _context, ...env } = process.env;
-    const result = await execute(runtime, ["--import", "tsx", "--import", "../../scripts/isolate-registry.mjs",
-      "--test", fileURLToPath(import.meta.url)], { cwd: fileURLToPath(new URL("..", import.meta.url)), env, maxBuffer: 4 * 1024 * 1024 });
-    t.diagnostic(result.stdout);
+    try {
+      const result = await execute(runtime, ["--import", "tsx", "--import", "../../scripts/isolate-registry.mjs",
+        "--test", fileURLToPath(import.meta.url)], { cwd: fileURLToPath(new URL("..", import.meta.url)), env, maxBuffer: 4 * 1024 * 1024 });
+      t.diagnostic(result.stdout);
+    } catch (error) {
+      const child = error as Error & { stdout?: string; stderr?: string };
+      // Retain the actual inner TAP failure, not just the execFile wrapper.
+      if (child.stdout) t.diagnostic(child.stdout.slice(-64 * 1024));
+      if (child.stderr) t.diagnostic(child.stderr.slice(-16 * 1024));
+      throw error;
+    }
   });
 } else {
 test("server controlStore, RuntimeCancellation and RuntimeResultSupervision share one physical store", async () => {
@@ -114,14 +122,17 @@ test("unavailable continuation authority backs off without retaining active work
   try {
     const park = { runId: "missing-authority", waitId: "wait", generation: 1 };
     const run = async () => { throw new Error("unavailable authority must not dispatch"); };
-    assert.equal(await host.dispatchContinuation(park, run), "skipped");
+    await assert.rejects(host.dispatchContinuation(park, run), /authority unavailable/);
     const first = host.status().continuationUnavailable[0];
     assert.match(first.reason, /authority unavailable/);
     assert.equal(first.failures, 1);
     assert.equal(await host.dispatchContinuation(park, run), "skipped");
     assert.deepEqual(host.status().continuationUnavailable[0], first);
     assert.equal(host.busy, false);
-    for (let i = 0; i < 130; i++) await host.dispatchContinuation({ ...park, waitId: `wait-${i}` }, run);
+    for (let i = 0; i < 130; i++) {
+      try { await host.dispatchContinuation({ ...park, waitId: `wait-${i}` }, run); }
+      catch (error) { assert.match(String(error), /authority unavailable/); }
+    }
     assert.equal(host.status().continuationUnavailable.length, 32, "global admission budget also bounds a flood of distinct generations");
     assert.equal(host.busy, false);
   } finally { await host.close(); }

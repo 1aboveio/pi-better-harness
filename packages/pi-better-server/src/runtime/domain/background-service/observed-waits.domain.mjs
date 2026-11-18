@@ -451,6 +451,7 @@ export class ObservedWaitHost {
     discoveryToken;
     discoveryRole;
     reconcileInFlight;
+    reconcileScope;
     authorityPassCache;
     /** Running operations this follower is currently assigned to supervise. */
     followerRunningTasks = new Set();
@@ -749,21 +750,31 @@ export class ObservedWaitHost {
     }
     /** A deterministic, awaitable reconciliation pass for tests and session activation. */
     async reconcileNow() {
-        if (this.reconcileInFlight)
-            return this.reconcileInFlight;
+        const scope = this.recoveryScopeState();
+        if (this.reconcileInFlight) {
+            const sameScope = this.reconcileScope === scope;
+            await this.reconcileInFlight;
+            // Startup or another foreground's pass cannot verify this scope's recovery.
+            if (!sameScope)
+                return this.reconcileNow();
+            return;
+        }
         const release = this.options.enterControl?.();
         if (this.options.enterControl && !release) {
             this.managedDirty = true;
             return;
         }
+        this.reconcileScope = scope;
         const pass = this.reconcilePass().finally(() => release?.());
         this.reconcileInFlight = pass;
         try {
             await pass;
         }
         finally {
-            if (this.reconcileInFlight === pass)
+            if (this.reconcileInFlight === pass) {
                 this.reconcileInFlight = undefined;
+                this.reconcileScope = undefined;
+            }
         }
     }
     async reconcilePass() {
@@ -1668,6 +1679,10 @@ export class ObservedWaitHost {
         const client = await this.resultSupervisionClient();
         try {
             const manager = await client.request("runtime_result_supervision");
+            // Already granted dependencies need no discovery scope transfer. Legacy
+            // holders may keep supervising unrelated work beside server-owned tasks.
+            if (operations.every(operation => this.requireStore().resultSupervision(operation.operationId)))
+                return;
             const discovery = this.requireStore().readDiscoveryClaim(this.discoveryScope);
             if (!newManaged && discovery && discovery.hostId !== this.hostId && this.discoveryHolderState(discovery.hostId) !== "dead") {
                 throw new Error("permission-unavailable: live or unknown original discovery holder prevents scope handoff");

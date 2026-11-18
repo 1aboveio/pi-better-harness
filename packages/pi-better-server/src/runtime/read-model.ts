@@ -1,8 +1,8 @@
 import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
 import { opendir, readFile, stat, writeFile, mkdir, rename } from "node:fs/promises";
-import { watch, type FSWatcher } from "node:fs";
-import { dirname, relative, join, resolve, sep } from "node:path";
+import { watchSource, type SourceWatch, type SourceWatcher as FSWatcher } from "./source-watch.ts";
+import { basename, dirname, relative, join, resolve, sep } from "node:path";
 import { realpathSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -11,7 +11,7 @@ import { performance } from "node:perf_hooks";
 import { createAssignmentProjector } from "./domain/assignment-projection.mjs";
 import { createAssignmentReader } from "./domain/assignment-observation.mjs";
 import { parseArchivedAttempt, parseArchivedSessionState } from "./domain/session-store.mjs";
-import { parseRun, readRunTranscript, encodeParseLogState, decodeParseLogState } from "./domain/parse.mjs";
+import { parseRun, parseRunDisplay, readRunTranscript, encodeParseLogState, decodeParseLogState } from "./domain/parse.mjs";
 import { withLogReadBatch, logReadMetrics } from "./domain/log-cursor.mjs";
 import { fmtSpend } from "./domain/widget.mjs";
 import { effectiveStatus } from "./domain/process-status.mjs";
@@ -102,6 +102,7 @@ export class WorkReadModel {
   private repairWrite: Promise<void> = Promise.resolve();
   private repairPersistencePending = false;
   private sourceErrors = new Map<string, string>();
+  private sourceRace?: { reason: string; paths: Set<string>; rows: any[] };
   private sourceStats = 0;
   private sourceWork = { entity: { batches: 0, paths: 0, stats: 0, metadataReads: 0, logBytes: 0, logReads: 0 }, repair: { batches: 0, paths: 0, stats: 0, metadataReads: 0, logBytes: 0, logReads: 0 } };
   private scheduling = { entityBatches: 0, repairBatches: 0, repairEntries: 0, overflows: 0, maxQueueAgeMs: 0, maxPublicationMs: 0 };
@@ -110,9 +111,11 @@ export class WorkReadModel {
   private coordinator = "unknown";
   private assignmentBaseline?: { key: string; seq: string };
   private assignmentFault?: { state: WorkSnapshot["status"]; reason?: string };
+  private unsupportedAssignmentRevision?: string;
+  private coordinatorConversations?: Map<string, string>;
   private revision = 0;
   private scopeSequence = 0;
-  private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number }>();
+  private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number; status: string }>();
   private changedRows: Array<{ before?: any; after?: any }> = [];
   private foldQueueSequence = 0;
   private state: WorkSnapshot["status"] = "rebuilding";
@@ -129,8 +132,10 @@ export class WorkReadModel {
   readonly agentDir: string;
   readonly instanceId: string;
 
-  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number; budgetBuffer?: SharedArrayBuffer } = {}) {
+  private watch: SourceWatch;
+  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number; watch?: SourceWatch; budgetBuffer?: SharedArrayBuffer } = {}) {
     this.budget = createWorkBudget(options.budgetBuffer);
+    this.watch = options.watch ?? watchSource;
     this.agentDir = agentDir; this.instanceId = instanceId;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
@@ -180,7 +185,7 @@ export class WorkReadModel {
         const identity = `${info.dev}:${info.ino}`;
         if (previous?.path === parent && previous.identity === identity) return;
         const entry = relative(parent, root).split(sep)[0];
-        const watcher = watch(parent, (_event, filename) => {
+        const watcher = this.watch(parent, (_event, filename) => {
           if (this.closed || this.rootParents.get(root)?.watcher !== watcher) return;
           if (!filename || String(filename) === entry || String(filename) === relative(dirname(parent), parent)) void this.reconcile();
         });
@@ -197,9 +202,24 @@ export class WorkReadModel {
     }
   }
   private watchDirectory(path: string) {
-    if (this.closed || this.watchers.has(path)) return;
+    if (this.closed) return;
+    let identity: string | undefined;
+    if ([this.runs, this.archives, this.markers].includes(path)) {
+      try {
+        const info = statSync(path, { bigint: true });
+        identity = `${info.dev}:${info.ino}`;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
+      }
+      if (!identity || this.rootWatchIdentities.get(path) !== identity) {
+        this.unwatchDirectory(path); this.rootWatchIdentities.delete(path);
+        if (path === this.runs) for (const child of this.watchers.keys()) if (child.startsWith(this.runs + sep)) this.unwatchDirectory(child);
+      }
+      if (!identity) return;
+    }
+    if (this.watchers.has(path)) return;
     try {
-      const watcher = watch(path, (_event, filename) => {
+      const watcher = this.watch(path, (_event, filename) => {
         if (this.closed || this.watchers.get(path) !== watcher) return;
         if (path === this.runs) {
           // A raw directory may itself have been removed/replaced. Reattach
@@ -215,11 +235,17 @@ export class WorkReadModel {
         this.invalidate("Watcher overflow or failure; reconciling source inventory.");
       });
       this.watchers.set(path, watcher);
+      if (identity) this.rootWatchIdentities.set(path, identity);
     } catch { /* Missing roots are discovered by the existing compatibility inventory. */ }
   }
 
   /** File notifications are hints, never authority. Unknown names owe scoped repair. */
   fileHint(directory: string, name?: string) {
+    // Some fs.watch backends report the watched directory's own name for a
+    // contained write. It identifies a source to verify, not a child entry.
+    if (name === basename(directory)) {
+      name = directory.startsWith(this.runs + sep) ? "meta.json" : undefined;
+    }
     let path: string | undefined;
     if (directory === this.runs && name && safeId.test(name)) path = join(directory, name, "meta.json");
     else if ([this.archives, this.markers].includes(directory) && name && /^[A-Za-z0-9_-]+\.json$/.test(name)) path = join(directory, name);
@@ -252,14 +278,19 @@ export class WorkReadModel {
 
   private async *repairPaths(): AsyncGenerator<string[]> {
     // Check known paths too: an incomplete walk never deletes unseen records.
+    // Discovery and failed-source repair can overlap these paths. Retry each
+    // source once per pass, not once per inventory route.
+    const seen = new Set<string>();
     let batch: string[] = [];
     for (const path of this.files.keys()) {
+      seen.add(path);
       batch.push(path);
       if (batch.length === 128) { yield batch; batch = []; }
     }
     // Failed first reads have no verified file entry, but still owe repair.
     for (const path of this.sourceErrors.keys()) {
-      if (this.files.has(path)) continue;
+      if (seen.has(path)) continue;
+      seen.add(path);
       batch.push(path);
       if (batch.length === 128) { yield batch; batch = []; }
     }
@@ -273,7 +304,7 @@ export class WorkReadModel {
           this.unwatchDirectory(directory);
           if (directory === this.runs) for (const path of this.watchers.keys()) if (path.startsWith(this.runs + sep)) this.unwatchDirectory(path);
         }
-        this.rootWatchIdentities.set(directory, identity); this.watchDirectory(directory);
+        this.watchDirectory(directory);
         handle = await opendir(directory);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -284,7 +315,10 @@ export class WorkReadModel {
       }
       for await (const entry of handle) {
         if (directory === this.runs ? safeId.test(entry.name) : /^[A-Za-z0-9_-]+\.json$/.test(entry.name)) {
-          batch.push(directory === this.runs ? join(directory, entry.name, "meta.json") : join(directory, entry.name));
+          const path = directory === this.runs ? join(directory, entry.name, "meta.json") : join(directory, entry.name);
+          if (seen.has(path)) continue;
+          seen.add(path);
+          batch.push(path);
           if (batch.length === 128) { yield batch; batch = []; }
         }
       }
@@ -356,7 +390,7 @@ export class WorkReadModel {
     if (!entry) {
       if (scope.cursor) throw new Error("resync_required: cursor retention expired");
       if (this.scopes.size >= 128) this.scopes.delete(this.scopes.keys().next().value!);
-      entry = { scope: { ...scope, cursor: undefined }, token: ++this.scopeSequence, revision: 0, used: now };
+      entry = { scope: { ...scope, cursor: undefined }, token: ++this.scopeSequence, revision: 0, used: now, status: hash(this.scopeStatus(scope)) };
       this.scopes.set(key, entry);
     }
     entry.used = now;
@@ -388,9 +422,11 @@ export class WorkReadModel {
     this.revision++;
     for (const entry of this.scopes.values()) {
       if (backgroundOnly) continue;
-      if (!this.changedRows.length || this.changedRows.some(({ before, after }) =>
+      const status = hash(this.scopeStatus(entry.scope));
+      if (entry.status !== status || this.changedRows.some(({ before, after }) =>
         this.matchesScope(entry.scope, before) || this.matchesScope(entry.scope, after)
         || this.matchesScope(entry.scope, before, true) !== this.matchesScope(entry.scope, after, true))) entry.revision++;
+      entry.status = status;
     }
     this.changedRows = [];
     for (const listener of this.listeners) listener();
@@ -475,6 +511,45 @@ export class WorkReadModel {
     } finally { release?.(); }
   }
 
+  private scopeStatus(scope: WorkScope): { status: WorkSnapshot["status"]; reason?: string } {
+    const race = this.sourceRace;
+    // Only a validated, entity-attributed retry can leave another scope ready.
+    // Root, coordinator, unattributed and initial-import failures stay global.
+    if (this.imported && this.state === "degraded" && race && this.reason === race.reason
+        && [...this.sourceErrors.keys()].every(path => race.paths.has(path))
+        && !race.rows.some(row => this.matchesScope({ id: scope.id, cwd: scope.cwd, sessionId: scope.sessionId }, row))) {
+      return { status: "ready" };
+    }
+    return { status: this.state, reason: this.reason };
+  }
+
+  private rejectUnsupportedAssignmentRevision(): boolean {
+    let release: (() => void) | undefined;
+    try {
+      if (this.unsupportedAssignmentRevision) {
+        if (this.unsupportedAssignmentRevision === this.reader.revision()) return true;
+        this.unsupportedAssignmentRevision = undefined;
+      }
+      const connection = this.reader.connection(false);
+      const supported = (version: unknown) => version === undefined || (typeof version === "string" && ["1", "2", "3", "4"].includes(version));
+      if (!connection || supported(connection.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value)) return false;
+      const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
+      const version = this.reader.connection(false).prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value;
+      if (!supported(version)) {
+        this.unsupportedAssignmentRevision = snapshot.revision;
+        const reason = "Unsupported assignment source schema";
+        const changed = this.state !== "degraded" || this.reason !== reason;
+        this.state = "degraded"; this.reason = reason;
+        if (changed) this.publish();
+        return true;
+      }
+    } catch {
+      // Missing/initializing sources still follow the ordinary verification path.
+      this.unsupportedAssignmentRevision = undefined;
+    } finally { release?.(); }
+    return false;
+  }
+
   reconcile(drain = true): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.pending) {
@@ -484,12 +559,17 @@ export class WorkReadModel {
     if (!release) return Promise.resolve();
     this.pending = (async () => {
       for (const root of [this.runs, this.archives, this.markers]) this.watchRootParent(root);
-      if (drain && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
+      await this.watchRegistrations();
+      let resetRepair = drain;
       do {
         this.dirty = false;
         // Background progress is independent of whether Subagent repair finds files.
         if (this.background.refresh()) this.publish(true);
         this.refreshAssignments();
+        // Metadata repair cannot verify this exact incompatible source revision.
+        if (this.rejectUnsupportedAssignmentRevision()) break;
+        if (resetRepair && this.repair) { await this.repair.return(undefined); this.repair = undefined; }
+        resetRepair = false;
         if (this.hints.size) {
           const entries = workPage(this.hints);
           for (const [path, queued] of entries) { this.hints.delete(path); this.scheduling.maxQueueAgeMs = Math.max(this.scheduling.maxQueueAgeMs, Date.now() - queued); }
@@ -505,6 +585,7 @@ export class WorkReadModel {
         this.repair ??= this.repairPaths();
         const next = await this.repair.next();
         if (next.done) {
+          await this.watchRegistrations();
           this.repair = undefined; this.repairOwed = false;
           // An empty metadata inventory still needs a journal baseline before
           // later exact hints can be treated as incremental updates.
@@ -527,7 +608,7 @@ export class WorkReadModel {
     }).finally(() => {
       release();
       this.pending = undefined;
-      if ((this.hints.size || this.dirty) && !this.closed) { this.dirty = false; void this.reconcile(false); }
+      if ((this.hints.size || this.dirty) && !this.closed && !this.unsupportedAssignmentRevision) { this.dirty = false; void this.reconcile(false); }
     });
     return this.pending;
   }
@@ -548,16 +629,22 @@ export class WorkReadModel {
     }
   }
 
+  private async watchRegistrations() {
+    await Promise.all([...this.watchers.values(), ...[...this.rootParents.values()].map(value => value.watcher)].map(watcher => watcher.ready));
+  }
+
   private async scan(paths: string[], kind: "entity" | "repair" = "repair") {
     this.assignmentFault = undefined;
     const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
     let releaseCoordinator: (() => void) | undefined;
+    let sourceRace: WorkReadModel["sourceRace"];
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
       healthRevision: this.healthRevision, coordinator: this.coordinator };
     try {
       const next = new Map(baseline.files);
       const failedPaths = new Map<string, string>();
+      const malformedPaths = new Set<string>();
       let batch = 0;
       let sliceStarted = performance.now();
       for (const [directory, archived] of [[this.markers, true], [this.archives, true], [this.runs, false]] as const) {
@@ -600,11 +687,20 @@ export class WorkReadModel {
               }
               next.set(path, entry!);
             } catch (error) {
+              if (!archived && error instanceof SyntaxError && this.files.has(path)) malformedPaths.add(path);
               if ((error as NodeJS.ErrnoException).code === "ENOENT") {
                 try {
                   await sourceStat(directory);
                   next.delete(path);
-                  if (!archived) this.unwatchDirectory(join(directory, name));
+                  if (!archived) {
+                    // A mkdir notification can arrive before its metadata commit.
+                    // Retire the inode watcher only when the directory is gone.
+                    try { await sourceStat(join(directory, name)); }
+                    catch (error) {
+                      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+                      this.unwatchDirectory(join(directory, name));
+                    }
+                  }
                 } catch {
                   failedPaths.set(path, `Source directory unavailable; retaining verified records: ${directory}`);
                 }
@@ -688,6 +784,15 @@ export class WorkReadModel {
       const changed = next.size !== baseline.files.size || [...next].some(([path, entry]) => baseline.files.get(path)?.signature !== entry.signature);
       const now = Date.now();
       const deadlineExpired = [...baseline.projected.values()].some(row => healthDeadlineExpired(row, now));
+      const rawDirectories = [...new Set(paths.filter(path => path.startsWith(this.runs + sep) && next.has(path)).map(path => dirname(path)))];
+      const rearmRawDirectories = () => {
+        if (!rawDirectories.length) return;
+        this.watchDirectory(this.runs);
+        for (const directory of rawDirectories) this.watchDirectory(directory);
+      };
+      // A delayed mkdir notification may retire a watch during the awaited reads.
+      rearmRawDirectories();
+      await this.watchRegistrations();
       if (!this.staged && !changed && !failedPaths.size && !this.sourceErrors.size && !logFamilies.size && !assignmentChanges?.size && !deadlineExpired && coordinator === this.coordinator && healthConfig.revision === this.healthRevision && !healthConfig.reason && this.state === "ready") return;
       const metas = new Map<string, any>();
       const markers = new Map([...next].filter(([path]) => path.startsWith(this.markers + sep)).map(([, entry]) => [entry.meta.sessionId, entry.meta]));
@@ -807,8 +912,8 @@ export class WorkReadModel {
                 } catch { this.parseStates.delete(logPath); this.healthStates.delete(logPath); }
               }
             }
-            const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRun(meta.id, { logPath, states: this.parseStates, summaryOnly: true }) : undefined;
-            display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.toolCalls.at(-1) ?? "" };
+            const parsed = logs.get(meta.id) && logs.get(meta.id) !== "missing" ? parseRunDisplay(meta.id, { logPath, states: this.parseStates, summaryOnly: true }) : undefined;
+            display = { spend: parsed ? fmtSpend(parsed.usage) : "", tool: parsed?.tool ?? "" };
             health = logs.has(meta.id) ? extractChildEventFactsFromLog(meta.id, { logPath, states: this.healthStates }) : undefined;
             const displayState = this.parseStates.get(logPath), healthState = this.healthStates.get(logPath);
             const readError = displayState?.error ?? health?.rawLog?.error;
@@ -849,6 +954,7 @@ export class WorkReadModel {
           await yieldTurn(); sliceStarted = performance.now();
         }
       }
+      const globallyUnverified = !!healthConfig.reason || rows.some(row => !row.assignment.verified);
       // The pinned source snapshot is a valid baseline even while writers advance.
       // Subsequent commits remain beyond the durable received position.
       // revision() validates the source inode while the transaction pins data_version.
@@ -869,7 +975,7 @@ export class WorkReadModel {
           try { return { info: await sourceStat(path, { bigint: true }) }; }
           catch (error) { return { error }; }
         }));
-        for (const [index, [, entry]] of group.entries()) {
+        for (const [index, [path, entry]] of group.entries()) {
           const observation = observations[index]!;
           if (!observation.info) {
             if ((observation.error as NodeJS.ErrnoException)?.code === "ENOENT") {
@@ -884,7 +990,26 @@ export class WorkReadModel {
           const info = observation.info;
           if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
             this.dirty = true;
-            throw new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
+            const error = new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
+            if (!globallyUnverified && (this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
+                && path.startsWith(this.runs + sep) && info.size <= 1024n * 1024n && !failedPaths.size && [...this.sourceErrors].every(([path, reason]) =>
+              this.sourceRace?.paths.has(path) && reason === this.sourceRace.reason)) {
+              // Recheck only for error routing: a concurrent move can affect a
+              // new workspace/recipient. Never publish this uncommitted row.
+              try {
+                this.counters.metadataReads++;
+                const current = JSON.parse(await readFile(path, "utf8"));
+                const checked = await sourceStat(path, { bigint: true });
+                if (current?.id === entry.meta.id && typeof current.cwd === "string" && Number.isFinite(current.startedAt)
+                    && typeof current.status === "string" && checked.size <= 1024n * 1024n
+                    && `${checked.dev}:${checked.ino}:${checked.size}:${checked.mtimeNs}:${checked.ctimeNs}` === `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`) {
+                  sourceRace = { reason: String(error), paths: new Set(paths), rows: [
+                    ...[...uncommitted].flatMap(id => [this.projected.get(id), this.staged?.projected.get(id)].filter(Boolean)),
+                    { meta: current, assignment: { state: current.status } }] };
+                }
+              } catch { /* Unreadable/unstable routing evidence keeps degradation global. */ }
+            }
+            throw error;
           }
           if (++batch % 256 === 0 || performance.now() - sliceStarted >= 8) {
             await yieldTurn(); sliceStarted = performance.now();
@@ -892,6 +1017,8 @@ export class WorkReadModel {
         }
       }
       if (this.closed) return;
+      rearmRawDirectories();
+      await this.watchRegistrations();
       this.db.exec("BEGIN");
       const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");
@@ -931,15 +1058,26 @@ export class WorkReadModel {
         if (error) this.sourceErrors.set(path, error);
         else this.sourceErrors.delete(path);
       }
+      // Incomplete raw writes retain their verified namespace, not partial JSON.
+      // New/unknown records and mixed failures cannot be narrowed this way.
+      if (globallyUnverified) this.sourceRace = undefined;
+      if (!globallyUnverified && failedPaths.size && failedPaths.size === malformedPaths.size
+          && (previousState === "ready" || this.sourceRace && previousReason === this.sourceRace.reason)
+          && [...this.sourceErrors.keys()].every(path => malformedPaths.has(path))) {
+        this.sourceRace = { reason: failedPaths.values().next().value!, paths: malformedPaths,
+          rows: [...malformedPaths].map(path => this.projected.get(this.files.get(path)!.meta.id)) };
+      }
+      if (!this.sourceErrors.size) this.sourceRace = undefined;
       this.state = this.sourceErrors.size || healthConfig.reason || logError ? "degraded" : !this.imported ? "rebuilding" : rows.some(row => !row.assignment.verified) ? "degraded" : "ready";
       this.reason = this.sourceErrors.values().next().value ?? healthConfig.reason ?? logError ?? (this.state === "rebuilding" ? "Initial source inventory is rebuilding." : this.state === "degraded" ? "Some assignment sources could not be verified." : undefined);
       if ((this.imported || paths.length === 128) && (semanticChange || previousState !== this.state || previousReason !== this.reason)) {
-        this.changedRows = previousState === this.state && previousReason === this.reason ? changedRows : [];
+        this.changedRows = changedRows;
         this.publish();
       }
     } catch (error) {
       if (this.closed) return;
       const reason = String(error).slice(0, 512);
+      this.sourceRace = sourceRace;
       if (this.dirty) for (const path of paths) if (!this.hints.has(path)) this.hints.set(path, Date.now());
       for (const path of paths) this.sourceErrors.set(path, reason);
       const changed = this.state !== "degraded" || this.reason !== reason;
@@ -1002,12 +1140,13 @@ export class WorkReadModel {
     const now = Date.now();
     const rows = page.map((record: any) => {
       const row = JSON.parse(record.payload);
+      if (this.unsupportedAssignmentRevision) row.assignment = { ...row.assignment, verified: false, reason: this.reason };
       if (row.health) row.health.nextDeadline = nextHealthDeadline(row.health, row.meta, now);
       return row;
     });
     const deadlines = rows.map((row: any) => row.health?.nextDeadline).filter((deadline: any) => typeof deadline === "number");
     return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([key, entry.token, entry.revision]), seq: this.revision,
-      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, status: this.state, reason: this.reason,
+      observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision }, ...this.scopeStatus(scope),
       totalMatching,
       rows: page.map((record: any, index: number) => {
         const row = rows[index];

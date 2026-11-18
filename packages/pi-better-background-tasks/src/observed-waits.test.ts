@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -596,6 +597,31 @@ describe("supervision authority", () => {
     host.start(createCtx(root, "current-session"));
     expect(pendingReads.length).toBeGreaterThanOrEqual(2);
     expect(pendingReads.every(scope => scope.sessionId === "current-session" && scope.workspace === root && scope.limit === 256)).toBe(true);
+  });
+
+  it("the first scoped recovery cannot coalesce into an unscoped startup pass", async () => {
+    const root = workspace("startup-scoped-recovery");
+    const store = openStore({ path: join(root, "operations.sqlite") });
+    cleanups.push(() => store.close());
+    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store,
+      supervisorDirectory: join(root, "supervisor"), pollMs: 0, serverOwnedResults: true });
+    cleanups.push(() => host.close());
+    host.start();
+    host.noteParentContext(createCtx(root, "first-owner"), { recover: false });
+    expect(host.hasPendingParentCallbackRecovery()).toBe(true);
+    const revision = store.getChangeRevision();
+    host.noteParentContext(createCtx(root, "first-owner"));
+    await host.reconcileNow();
+    expect(host.hasPendingParentCallbackRecovery(), "the first observation must recover its own scope").toBe(false);
+    expect(store.getChangeRevision()).toBe(revision);
+    for (let index = 0; index < 10; index++) {
+      host.noteParentContext(createCtx(root, "first-owner"), { recover: false });
+      expect(host.hasPendingParentCallbackRecovery()).toBe(false);
+    }
+    host.noteParentContext(createCtx(root, "first-owner", "other-branch"), { recover: false });
+    expect(host.hasPendingParentCallbackRecovery()).toBe(true);
+    await host.reconcileNow();
+    expect(host.hasPendingParentCallbackRecovery()).toBe(false);
   });
 
   it("recovers first and tail callback pages without claim-scan starvation or unbounded retries", async () => {
@@ -2560,7 +2586,19 @@ describe("callback origin and delivery receipt", () => {
   });
 
   it("discovers a terminal result recorded after this host's initial scan", async () => {
-    const root = workspace("late-terminal-discovery");
+    const root = mkdtempSync(join(tmpdir(), "observed-waits-late-terminal-discovery-"));
+    let runnerClosed = false;
+    let runnerExit = Promise.resolve();
+    let runnerResult: string | undefined;
+    cleanups.push(async () => {
+      const before = { closed: runnerClosed, terminal: runnerResult ? existsSync(runnerResult) : false };
+      await runnerExit;
+      expect(runnerClosed, "the owned fixture writer must exit before its directory is removed").toBe(true);
+      expect(runnerResult).toBeDefined();
+      expect(JSON.parse(readFileSync(runnerResult!, "utf8")).attestedBy).toBe("runner");
+      console.log(JSON.stringify({ fixtureWriterQuiescence: { before, closed: runnerClosed, terminal: true } }));
+      rmSync(root, { recursive: true, force: true });
+    });
     const options = {
       storePath: join(root, "operations.sqlite"),
       supervisorDirectory: join(root, "supervisor"),
@@ -2579,12 +2617,29 @@ describe("callback origin and delivery receipt", () => {
     // records terminal while the watcher is not reconciling.
     const launcherHarness = createHarness();
     const launcher = createObservedWaitHost(launcherHarness.pi, { ...options, notifyParent: () => {} });
+    cleanups.push(() => launcher.close());
     launcher.start(ctx);
+    const childProcess = createRequire(import.meta.url)("node:child_process") as typeof import("node:child_process");
+    const originalSpawn = childProcess.spawn;
+    const capture = vi.spyOn(childProcess, "spawn").mockImplementation((...args: Parameters<typeof spawn>) => {
+      const child = originalSpawn(...args);
+      if (args[1]?.[1] === options.supervisorDirectory) {
+        runnerResult = join(options.supervisorDirectory, "tasks", args[1][2]!, "result.json");
+        runnerExit = new Promise<void>((resolve, reject) => {
+          child.once("error", reject);
+          child.once("close", code => { runnerClosed = true; code === 0 ? resolve() : reject(new Error(`fixture runner exit ${code}`)); });
+        });
+        // Cleanup still awaits the original promise and propagates any failure.
+        void runnerExit.catch(() => {});
+      }
+      return child;
+    });
+    syncBuiltinESMExports();
     const launch = await launcher.launchParent({
       kind: "process",
       params: { argv: nodeCommand('setTimeout(() => { console.log("late-terminal"); }, 300)'), shell: false, callback: true },
       ctx,
-    });
+    }).finally(() => { capture.mockRestore(); syncBuiltinESMExports(); });
     launcher.close();
     recordTerminalFromChild(root, launch.operationId, launch.owner, "late-terminal");
 

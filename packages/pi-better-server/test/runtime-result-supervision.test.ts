@@ -308,8 +308,11 @@ test("two actual HostedSessions share server supervision without a discovery hos
   }
 });
 
-test("scope handoff refuses live, unknown and untransferred dead legacy holders", { timeout: 30000 }, async () => {
-  const { createObservedWaitHost } = await import(new URL("../../pi-better-background-tasks/src/observed-waits.ts", import.meta.url).href);
+for (const domain of ["source", "generated"]) {
+test(`${domain}: managed waits coexist with fenced legacy discovery holders`, { timeout: 30000 }, async () => {
+  const { createObservedWaitHost } = await import(new URL(domain === "source"
+    ? "../../pi-better-background-tasks/src/observed-waits.ts"
+    : "../src/runtime/domain/background-service/observed-waits.domain.mjs", import.meta.url).href);
   mkdirSync(resolve(".work/760"), { recursive: true });
   const root = mkdtempSync(resolve(".work/760/holder-"));
   const transport = mkdtempSync("/tmp/p760-");
@@ -338,14 +341,20 @@ test("scope handoff refuses live, unknown and untransferred dead legacy holders"
       const scopeBefore = createHash("sha256").update(`${join(root, "operation-coordinator.sqlite")}\0${join(root, "supervisor")}`).digest("hex");
       const claimBefore = store.readDiscoveryClaim(scopeBefore);
       const managedLive = await host.launchParent({ kind: "process", params: { shell: false, callback: false,
-        argv: [process.execPath, "-e", "process.exit(0)"] }, ctx });
-      const managedWait = host.waitForParent(ctx, [managedLive.id], "managed result beside legacy");
+        argv: [process.execPath, "-e", "setTimeout(() => process.exit(0), 150)"] }, ctx });
+      const grantBefore = store.resultSupervision(managedLive.operationId);
+      assert.ok(grantBefore, "the timer has server supervision before registering its wait");
+      await assert.rejects(host.superviseParentWait(ctx, [managedLive.id, taskId], "mixed legacy dependency must remain fenced"), /live or unknown original/);
+      assert.equal(store.resultSupervision(op.operationId), null);
+      const managedWait = await host.superviseParentWait(ctx, [managedLive.id], "managed result beside legacy");
       const managedDeadline = Date.now() + 5000;
       while (store.getOperation(managedLive.operationId)?.terminalRevision === 0 && Date.now() < managedDeadline) await delay(25);
       assert.equal(store.getOperation(managedLive.operationId)?.terminalRevision, 1);
       assert.equal(host.waitViewForParent(ctx, managedWait.waitId, managedWait.generation)?.phase, "ready");
       host.cancelWaitForParent(ctx, managedWait.waitId, managedWait.generation, "regression complete");
+      assert.deepEqual(store.resultSupervision(managedLive.operationId), grantBefore);
       assert.deepEqual(store.readDiscoveryClaim(scopeBefore), claimBefore);
+      assert.equal(store.resultScopeManaged(scopeBefore), false, "registering an existing grant must not retire legacy discovery");
       assert.equal(store.getOperation(op.operationId)?.supervision.hostId, op.supervision.hostId);
       assert.equal(original.child.exitCode, null);
 
@@ -355,7 +364,17 @@ test("scope handoff refuses live, unknown and untransferred dead legacy holders"
       const scope = createHash("sha256").update(`${join(root, "operation-coordinator.sqlite")}\0${join(root, "supervisor")}`).digest("hex");
       const claim = store.readDiscoveryClaim(scope);
       if (claim) store.releaseDiscoveryClaim(claim);
+      const unknownClaim = store.tryClaimDiscovery({ scope, expected: null,
+        hostId: `${original.child.pid}:legacy`, token: "unknown-discovery-token" });
+      assert.ok(unknownClaim);
+      const unknownWait = await host.superviseParentWait(ctx, [managedLive.id], "managed result beside unknown discovery");
+      assert.equal(unknownWait.phase, "ready");
+      host.cancelWaitForParent(ctx, unknownWait.waitId, unknownWait.generation, "unknown discovery regression complete");
+      assert.deepEqual(store.readDiscoveryClaim(scope), unknownClaim);
+      assert.equal(store.resultScopeManaged(scope), false);
       await assert.rejects(host.superviseParentWait(ctx, [taskId], "unknown holder must remain fenced"), /live or unknown original|original supervision owner/);
+      store.releaseDiscoveryClaim(unknownClaim);
+      await assert.rejects(host.superviseParentWait(ctx, [taskId], "unknown operation owner must remain fenced"), /original supervision owner/);
       assert.equal(store.getOperation(op.operationId)?.supervision.hostId, `${original.child.pid}:legacy`);
       assert.equal(store.resultSupervision(op.operationId), null);
       assert.equal(store.getOperation(op.operationId)?.terminalRevision, 0);
@@ -389,3 +408,4 @@ test("scope handoff refuses live, unknown and untransferred dead legacy holders"
     rmSync(transport, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
   }
 });
+}

@@ -1405,7 +1405,7 @@ export function parseRun(id: string, options: { logPath?: string; states?: Map<s
 }
 
 /** Keep only the incremental facts needed by task-list displays. Detail reads use their own cursor. */
-export function parseRunDisplay(id: string, options: { logPath?: string; states: Map<string, ParseState> }): { usage: Usage; tool: string } {
+export function parseRunDisplay(id: string, options: { logPath?: string; states: Map<string, ParseState>; summaryOnly?: boolean }): { usage: Usage; tool: string; diagnostics: string[] } {
     const parsed = parseRun(id, options);
     const state = options.states.get(options.logPath ?? id);
     if (state) {
@@ -1415,7 +1415,7 @@ export function parseRunDisplay(id: string, options: { logPath?: string; states:
         state.openToolCalls.clear();
         state.modelError = undefined;
     }
-    return { usage: parsed.usage, tool: parsed.toolCalls.at(-1) ?? "" };
+    return { usage: parsed.usage, tool: parsed.toolCalls.at(-1) ?? "", diagnostics: parsed.diagnostics };
 }
 
 /** Build the human-readable body for subagent_output. Exported for unit testing. */

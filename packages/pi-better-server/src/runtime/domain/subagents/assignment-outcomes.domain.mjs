@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { join, relative, isAbsolute, dirname, resolve } from "node:path";
 import { openSync, closeSync, fstatSync, readSync, realpathSync, constants } from "node:fs";
-import { openStore, ownerDiff, StoreError } from "./shared-operation-coordinator/index.domain.mjs";
+import { openStore, ownerDiff } from "./shared-operation-coordinator/index.domain.mjs";
 import { processStartToken, readMeta } from "./registry.domain.mjs";
 import { credentialFilePaths } from "./shared-sandbox-core.domain.mjs";
 import { readAssignmentReport } from "./assignment-report.domain.mjs";
@@ -147,10 +147,12 @@ export function commitAssignmentTerminal(meta, recoveryFailure = false) {
         catch (error) {
             // A competing finalizer may commit after our initial read. The store
             // still refuses rewrites; return only the same captured binding's winner.
-            if (error instanceof StoreError && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
+            // Borrowed runtime stores use a different coordinator module's StoreError constructor.
+            if (error instanceof Error && error.name === "StoreError" && "code" in error
+                && error.code === "validation" && error.message === "A terminal assignment cannot be rewritten or reopened.") {
                 const winner = store.getAssignmentOutcome(binding.assignmentId);
                 const current = readMeta(meta.id);
-                if (winner && winner.assignmentId === binding.assignmentId && ownerDiff(winner.owner, binding.owner) === "none"
+                if (winner && winner.assignmentId === binding.assignmentId && winner.revision === 1 && ownerDiff(winner.owner, binding.owner) === "none"
                     && ownerDiff(winner.recipient, binding.recipient) === "none"
                     && current?.assignment?.assignmentId === binding.assignmentId
                     && ownerDiff(current.assignment.owner, binding.owner) === "none" && ownerDiff(current.assignment.recipient, binding.recipient) === "none"

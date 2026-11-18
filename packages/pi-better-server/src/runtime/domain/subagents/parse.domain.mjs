@@ -1194,7 +1194,7 @@ export function parseRunDisplay(id, options) {
         state.openToolCalls.clear();
         state.modelError = undefined;
     }
-    return { usage: parsed.usage, tool: parsed.toolCalls.at(-1) ?? "" };
+    return { usage: parsed.usage, tool: parsed.toolCalls.at(-1) ?? "", diagnostics: parsed.diagnostics };
 }
 /** Build the human-readable body for subagent_output. Exported for unit testing. */
 export function formatSubagentOutputBody(head, tools, parsedBody, rawTail, diagnostics) {

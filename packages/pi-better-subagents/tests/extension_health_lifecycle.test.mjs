@@ -1301,10 +1301,29 @@ describe("terminal exit evidence supersedes provisional health reconciliation", 
                 assert.notEqual(final.status, "lost", "provisional lost must not remain");
                 assert.ok("exitCode" in final, "the real exit code is recorded");
                 assert.equal(await h.recipient.flush(), true);
-                assert.ok(
-                    h.sent.some((s) => s.message.customType === "background-completion-batch" && s.message.content.includes(id)),
-                    "the superseding completion remains present in the aggregate callback",
-                );
+                try {
+                    assert.ok(
+                        h.sent.some((s) => s.message.customType === "background-completion-batch" && s.message.content.includes(id)),
+                        "the superseding completion remains present in the aggregate callback",
+                    );
+                } catch (error) {
+                    let recipient;
+                    try {
+                        const state = await h.recipient.diagnostics(id);
+                        recipient = { status: state.observation?.status, reason: state.observation?.reason,
+                            seq: state.observation?.seq, rowStatus: state.observation?.row?.meta?.status,
+                            pendingBatch: state.pendingBatch, trace: state.trace, unavailable: state.unavailable };
+                    } catch (diagnosticError) { recipient = { diagnosticError: String(diagnosticError) }; }
+                    const current = readMeta(id);
+                    console.error("Superseding terminal callback failure:", JSON.stringify({
+                        final: { status: final.status, exitCode: final.exitCode },
+                        current: { status: current?.status, pending: current?.completionCallbackPendingAt,
+                            sent: current?.completionCallbackSentAt, suppressed: current?.completionCallbackSuppressedAt },
+                        recipient, sent: h.sent.slice(-8).map(s => ({ customType: s.message.customType,
+                            containsRun: s.message.content.includes(id) })),
+                    }));
+                    throw error;
+                }
             } finally {
                 setIdentityProbeForTests(undefined);
                 await h.shutdown();

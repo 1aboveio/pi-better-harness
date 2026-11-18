@@ -1,4 +1,16 @@
-import { parentPort } from "node:worker_threads";
+import { parentPort, workerData } from "node:worker_threads";
+import { bootstrapHeartbeat } from "./bootstrap-heartbeat.mjs";
+const stopBootstrapHeartbeat = bootstrapHeartbeat(parentPort);
+if (workerData.fixtureHoldBootstrap) {
+  await new Promise(resolve => {
+    const release = message => {
+      if (message.type !== "release-bootstrap") return;
+      parentPort.off("message", release); resolve();
+    };
+    parentPort.on("message", release);
+    parentPort.postMessage({ type: "bootstrap-held" });
+  });
+}
 const { WorkReadModel } = await import("../../src/runtime/read-model.ts");
 const ensureId = WorkReadModel.prototype.ensureId;
 let release;
@@ -17,4 +29,5 @@ parentPort.on("message", message => {
   }
 });
 await import("../../src/runtime/query-worker.mjs");
+stopBootstrapHeartbeat();
 parentPort.postMessage({ type: "fixture-ready" });
