@@ -50,3 +50,21 @@ test("diagnostic failure never replaces the original bootstrap exit", async () =
   await assert.rejects(receipt, /exited before bootstrap \(code 1\).*diagnostic unavailable/);
   assert.deepEqual(worker.eventNames(), []);
 });
+
+test("bootstrap failure retains the actual import substage and heartbeat count without claiming readiness", async () => {
+  const worker = new EventEmitter();
+  let now = 100;
+  const receipt = queryBootstrap(worker, () => ({ observation: { status: "degraded", reason: "watchdog deadline exceeded" },
+    executor: { worker: "stopped" } }), () => now);
+  worker.emit("message", { type: "fixture-bootstrap-phase", phase: "bootstrap-held" });
+  for (let n = 0; n < 6; n++) worker.emit("message", { type: "heartbeat" });
+  now = 1600;
+  worker.emit("message", { type: "fixture-bootstrap-phase", phase: "read-model-import-start" });
+  worker.emit("exit", 1);
+  await assert.rejects(receipt, error => {
+    assert.match(String(error), /"phase":"read-model-import-start","elapsedMs":1500,"heartbeats":6/);
+    assert.match(String(error), /watchdog deadline exceeded/);
+    return true;
+  });
+  assert.deepEqual(worker.eventNames(), []);
+});
