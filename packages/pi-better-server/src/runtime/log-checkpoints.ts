@@ -8,6 +8,12 @@ export const LOG_CHECKPOINT_BUDGET = 32 * 1024 * 1024;
 export const LOG_CHECKPOINT_ENTRY_BUDGET = 256 * 1024;
 export const LOG_CHECKPOINT_MAX_ENTRIES = 4096;
 
+export function isSqliteLockContention(error: unknown): boolean {
+  const sqlite = error as { code?: string; errcode?: number } | null;
+  return sqlite?.code === "ERR_SQLITE_ERROR" && typeof sqlite.errcode === "number"
+    && [5, 6].includes(sqlite.errcode & 255);
+}
+
 export class LogCheckpoints {
   private db: any;
   private shared: boolean;
@@ -34,9 +40,7 @@ export class LogCheckpoints {
   initialize(): boolean {
     try { this.acquire(); return true; }
     catch (error) {
-      const sqlite = error as { code?: string; errcode?: number };
-      if (sqlite.code === "ERR_SQLITE_ERROR" && typeof sqlite.errcode === "number"
-          && [5, 6].includes(sqlite.errcode & 255)) {
+      if (isSqliteLockContention(error)) {
         this.metrics.contentions++;
         return false;
       }

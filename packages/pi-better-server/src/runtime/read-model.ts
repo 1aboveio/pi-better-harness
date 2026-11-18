@@ -16,7 +16,7 @@ import { withLogReadBatch, logReadMetrics } from "./domain/log-cursor.mjs";
 import { fmtSpend } from "./domain/widget.mjs";
 import { effectiveStatus } from "./domain/process-status.mjs";
 import { extractChildEventFactsFromLog, healthThresholdsForConfig, encodeHealthLogState, decodeHealthLogState } from "./domain/health-observation.mjs";
-import { LogCheckpoints } from "./log-checkpoints.ts";
+import { LogCheckpoints, isSqliteLockContention } from "./log-checkpoints.ts";
 import { BackgroundObservation } from "./background.ts";
 import { workPage } from "./work-budget.ts";
 // @ts-expect-error Generated canonical read-only failure projection.
@@ -70,7 +70,7 @@ export class WorkReadModel {
   onTerminalLogsChanged?: () => void;
   private background: BackgroundObservation;
   private db: any;
-  private reader: ReturnType<typeof createAssignmentReader>;
+  private reader!: ReturnType<typeof createAssignmentReader>;
   private files = new Map<string, { signature: string; meta: any }>();
   private projected = new Map<string, { meta: any; assignment: any; sourceRevision: string; display?: { spend: string; tool: string; diagnostics?: string[]; coverage?: any }; health?: any; recipientPending?: boolean; failurePending?: boolean }>();
   private logs = new Map<string, string>();
@@ -79,6 +79,8 @@ export class WorkReadModel {
   private checkpoints: LogCheckpoints;
   private checkpointAttemptAllowed = true;
   private checkpointFailure = false;
+  private initialization = { attempts: 0, contentions: 0 };
+  private get observationInitialized() { return this.checkpoints.ready && Boolean(this.reader); }
   private failureJournals = new Map<string, string>();
   private processes = new Map<string, string>();
   private staged?: {
@@ -124,7 +126,7 @@ export class WorkReadModel {
   private counters = { inventories: 0, metadataReads: 0, projections: 0, assignmentProjections: 0, logProjections: 0, healthProjections: 0, failureProjections: 0, healthRecomputations: 0, healthConfigInvalidations: 0 };
   private invalidations = { assignmentInput: 0, process: 0, log: 0, failureAttention: 0, healthConfig: 0, healthDeadline: 0, unverified: 0, initial: 0 };
   get metrics() {
-    return { ...this.counters, assignments: this.reader.changeMetrics, checkpoints: { ...this.checkpoints.metrics, hotDisplay: this.parseStates.size, hotHealth: this.healthStates.size }, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader.connection(false))) + this.background.connectionCount,
+    return { ...this.counters, assignments: this.reader?.changeMetrics ?? { available: false, received: null, applied: null, pending: null }, initialization: { ...this.initialization }, checkpoints: { ...this.checkpoints.metrics, hotDisplay: this.parseStates.size, hotHealth: this.healthStates.size }, sourceWork: structuredClone(this.sourceWork), scheduling: { ...this.scheduling, queued: this.hints.size }, invalidations: { ...this.invalidations }, logReads: { ...logReadMetrics }, coordinatorConnections: Number(Boolean(this.reader?.connection(false))) + this.background.connectionCount,
       indexConnections: this.closed ? 0 : 1, sourceWatchers: this.watchers.size, sourceParentWatchers: this.rootParents.size, rootParentWatchers: this.rootParents.size };
   }
   readonly runs: string;
@@ -141,8 +143,7 @@ export class WorkReadModel {
     this.db = new DatabaseSync(":memory:");
     this.checkpoints = new LogCheckpoints(join(agentDir, "runtime-log-checkpoints.sqlite"), this.db, { defer: true });
     mkdirSync(join(agentDir, "runtime-read-repair"), { recursive: true });
-    this.reader = createAssignmentReader(join(agentDir, "operation-coordinator.sqlite"), join(agentDir, "runtime-read-repair", "assignments.sqlite"), this.db);
-    this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(true), refresh => this.reader.connection(refresh));
+    this.background = new BackgroundObservation(agentDir, options.supervisorDirectory, this.db, () => this.publish(true), refresh => this.reader?.connection(refresh));
     this.db.exec(`CREATE TABLE rows (id TEXT PRIMARY KEY, cwd TEXT, origin_cwd TEXT, origin_session TEXT,
       started REAL, state TEXT, active INTEGER, ended REAL, recipient_pending INTEGER, payload TEXT);
       CREATE INDEX work_folder ON rows(cwd, started DESC, id DESC);
@@ -334,11 +335,11 @@ export class WorkReadModel {
     return () => { this.listeners.delete(notify); release?.(); };
   }
   get backgroundMetrics() { return { ...this.background.metrics, registry: this.background.registryMetrics, changes: this.background.changeMetrics, scopes: this.background.scopeCount, history: this.background.historyMetrics }; }
-  observation(reasons = this.checkpoints.ready ? this.livenessReasons({ refresh: false }) : []) {
+  observation(reasons = this.observationInitialized ? this.livenessReasons({ refresh: false }) : []) {
     return { status: this.state, reason: this.reason, observedAt: Date.now(), reasons };
   }
   livenessReasons(options: { refresh?: boolean } = {}) {
-    if (!this.checkpoints.ready) throw new Error(`Runtime observation ${this.state}: checkpoint coverage is unverified`);
+    if (!this.observationInitialized) throw new Error(`Runtime observation ${this.state}: checkpoint coverage is unverified (including assignment inbox)`);
     return [
       ...[...this.projected.values()].filter(row => row.meta.status === "running"
         && processMatchesStart(row.meta.pid, row.meta.pidStartTime))
@@ -558,19 +559,28 @@ export class WorkReadModel {
   reconcile(drain = true): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.pending) {
-      return drain && this.checkpoints.ready ? this.pending.then(() => this.reconcile()) : this.pending;
+      return drain && this.observationInitialized ? this.pending.then(() => this.reconcile()) : this.pending;
     }
     this.pending = (async () => {
       await this.watchRegistrations();
       if (this.closed) return;
-      if (!this.checkpoints.ready) {
+      if (!this.observationInitialized) {
         if (!this.checkpointAttemptAllowed || this.checkpointFailure) return;
         this.checkpointAttemptAllowed = false;
+        this.initialization.attempts++;
         let initialized: boolean;
-        try { initialized = this.checkpoints.initialize(); }
-        catch (error) { this.checkpointFailure = true; throw error; }
+        try {
+          if (this.db.isTransaction) throw new Error("Derived observation initialization requires an unpinned owner");
+          initialized = this.checkpoints.initialize();
+          if (initialized) this.reader ??= createAssignmentReader(join(this.agentDir, "operation-coordinator.sqlite"),
+            join(this.agentDir, "runtime-read-repair", "assignments.sqlite"), this.db);
+        } catch (error) {
+          if (isSqliteLockContention(error)) initialized = false;
+          else { this.checkpointFailure = true; throw error; }
+        }
         if (!initialized) {
-          const reason = "Checkpoint acquisition is contended; source coverage remains unverified.";
+          this.initialization.contentions++;
+          const reason = "Derived checkpoint or assignment inbox acquisition is contended; source coverage remains unverified.";
           if (this.reason !== reason) { this.state = "rebuilding"; this.reason = reason; this.publish(); }
           return;
         }
@@ -623,7 +633,7 @@ export class WorkReadModel {
       this.repair = undefined; this.state = "degraded"; this.reason = String(error).slice(0, 512); this.publish();
     }).finally(() => {
       this.pending = undefined;
-      if (this.checkpoints.ready && (this.hints.size || this.dirty) && !this.closed && !this.unsupportedAssignmentRevision) { this.dirty = false; void this.reconcile(false); }
+      if (this.observationInitialized && (this.hints.size || this.dirty) && !this.closed && !this.unsupportedAssignmentRevision) { this.dirty = false; void this.reconcile(false); }
     });
     return this.pending;
   }
@@ -1083,11 +1093,11 @@ export class WorkReadModel {
       if (scope.backgroundHistory && this.background.refresh()) this.publish(true);
       const index = scope.backgroundHistory ? this.background.historyIndex(scope) : undefined;
       const tasks = this.background.read(scope, index);
-      const status = this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
+      const status = !this.observationInitialized ? this.state : this.background.status === "degraded" ? "degraded" : index ? this.background.historyStatus : this.background.status;
       const active = (index ? this.background.read({ ...scope, backgroundHistory: false, active: true }) : tasks).filter(task => task.durable ? task.active : task.status === "running").length;
       return { instanceId: this.instanceId, runtimeEpoch: this.instanceId, scopeRevision: hash([scope, tasks, status, index?.page, active]), seq: this.revision,
         observedRevisionVector: { inventory: this.inventory, coordinator: this.coordinator, healthConfig: this.healthRevision },
-        status, reason: this.background.reason ?? (index ? this.background.historyReason : undefined),
+        status, reason: !this.observationInitialized ? this.reason : this.background.reason ?? (index ? this.background.historyReason : undefined),
         rows: tasks.map(meta => ({ meta, assignment: null, sourceRevision: hash(meta) })), totalMatching: index?.page.total ?? tasks.length,
         ...(index?.page.nextCursor ? { nextCursor: index.page.nextCursor } : {}),
         ...(index ? { backgroundIndex: index } : {}),
@@ -1161,7 +1171,7 @@ export class WorkReadModel {
     for (const { watcher } of this.rootParents.values()) watcher.close();
     this.rootParents.clear();
     this.watchers.clear(); this.rootWatchIdentities.clear();
-    await this.pending; await this.repairWrite; this.listeners.clear(); await this.background.close(); this.reader.close(); this.checkpoints.close(); this.db.close();
+    await this.pending; await this.repairWrite; this.listeners.clear(); await this.background.close(); this.reader?.close(); this.checkpoints.close(); this.db.close();
     await this.repair?.return(undefined);
   }
 }
