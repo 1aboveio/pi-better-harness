@@ -11,6 +11,27 @@ const originalTarget = new URL('../../src/runtime/background-tools.ts', import.m
 const target = process.env.PI_FULL_RUNTIME_SUBJECT ? subjectModuleUrl(originalTarget, parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT)) : originalTarget;
 const recorder = new URL('./recovery-trace.mjs', import.meta.url).href;
 
+export function instrumentHostedCreation(source) {
+  for (const [anchor, phase] of [
+    ['async create(request: CreateSessionRequest): Promise<SessionSummary> {', 'registry-create'],
+    ['private async start(entry: IndexEntry, manager?: SessionManager, useDefaultModel = false): Promise<HostedSession> {', 'registry-start'],
+  ]) {
+    if (source.split(anchor).length !== 2) throw Error(`Hosted creation fixture anchor changed: ${anchor}`);
+    source = source.replace(anchor, `${anchor}\nrecordHostedCreationPhase(${JSON.stringify(phase)});`);
+  }
+  for (const [anchor, phase] of [
+    ['await resourceLoader.reload();', 'resource-loader-reload'],
+    ['({ session } = await createAgentSession(', 'sdk-create-agent-session'],
+    ['await runtime.bindUi();', 'hosted-bind-ui'],
+    ['const models = await hosted.session.modelRuntime.getAvailable();', 'model-get-available'],
+    ['await hosted.session.setModel(model);', 'model-set'],
+  ]) {
+    if (source.split(anchor).length !== 2) throw Error(`Hosted creation fixture anchor changed: ${anchor}`);
+    source = source.replace(anchor, `recordHostedCreationPhase(${JSON.stringify(phase)});\n${anchor}`);
+  }
+  return `import { recordHostedCreationPhase } from ${JSON.stringify(recorder)};\n${source}`;
+}
+
 export function instrumentRecoveryTrace(source) {
   const baselineScope = source.includes('scopes.delete(oldest); recoveryVersions.delete(oldest);');
   const replace = (from, to) => {
@@ -54,6 +75,11 @@ export function instrumentRecoveryTrace(source) {
 export async function load(url, context, nextLoad) {
   const helper = new URL('./owned-fixture.mjs', import.meta.url).href;
   const baseline = process.env.PI_FULL_RUNTIME_BASELINE_OBSERVER === 'eec7b3e256a7548bbf67f69cd468f12eb3b91dc8';
+  if (process.env.PI_FULL_RUNTIME_CREATION_REPORT && url.startsWith('file:') && new URL(url).pathname.endsWith('/src/registry.ts')) {
+    return { format: 'module', shortCircuit: true, source: ts.transpileModule(instrumentHostedCreation(readFileSync(new URL(url), 'utf8')), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+    }).outputText };
+  }
   if (baseline && process.env.PI_FULL_RUNTIME_SUBJECT) {
     const binding = parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT);
     const worker = pathToFileURL(join(binding.artifactRoot, 'src/runtime/query-worker.mjs'));

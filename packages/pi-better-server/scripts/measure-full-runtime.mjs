@@ -55,6 +55,7 @@ writeFileSync(join(agent, 'agents/roles/fixture.md'), '---\nschema: pi-agent/v1\
 let errors = '', seq = 0; const children = [], clients = [];
 const report = { root, transport, socketPath, socketBytes: Buffer.byteLength(socketPath), mode: process.env.PI_FULL_RUNTIME_MATRIX_ONLY ? "mixed-adapter-smoke-not-performance" : incremental ? "resource-matrix" : "resource-smoke-not-qualified", platform: process.platform, node: process.version, machine:{release:release(),arch:arch(),cpus:cpus().length,cpuModel:cpus()[0]?.model,totalMemory:totalmem()}, source:sourceProvenance(fileURLToPath(new URL('../../..', import.meta.url))), scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two real RemoteClientSession adapters over loopback Unix transport with HostedSessions (not cross-machine SSH); sampler overhead included', scenarios: [] };
 const output = process.env.PI_FULL_RUNTIME_REPORT ?? join(root, 'report.json');
+env.PI_FULL_RUNTIME_CREATION_REPORT = `${output}.hosted-create.json`;
 function reportPhase(phase) {
   report.phase = phase;
   report.phaseAt = Date.now();

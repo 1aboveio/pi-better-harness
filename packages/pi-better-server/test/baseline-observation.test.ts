@@ -11,7 +11,7 @@ import ts from 'typescript';
 
 test('approved baseline real parser modules reread and refold after eviction of their exact loaded caches', async () => {
   const adapter = await import('../scripts/measure-full-runtime/baseline-observation.mjs');
-  const restoreFs = adapter.installBaselineFsObservation();
+  let restoreFs: (() => void) | undefined;
   const root = mkdtempSync(join(tmpdir(), '808-baseline-observation-'));
   const log = join(root, 'output.log');
   writeFileSync(log, JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'actual baseline' }] } }) + '\n');
@@ -38,6 +38,9 @@ test('approved baseline real parser modules reread and refold after eviction of 
     await load('shared-log-utils'); await load('log-cursor');
     const parse = await load('parse'), health = await load('health-observation');
     const { WorkReadModel } = await load('read-model');
+    // Loading/transpiling component modules is setup, not subject filesystem work.
+    // Install before constructing the real model; builtin ESM bindings stay live.
+    restoreFs = adapter.installBaselineFsObservation();
     const run = join(root, 'runs', 'inventory'); mkdirSync(run, { recursive: true });
     writeFileSync(join(run, 'output.log'), '');
     writeFileSync(join(run, 'meta.json'), JSON.stringify({ id: 'inventory', cwd: root, sessionId: '808-group', status: 'completed', startedAt: 1, callback: false }));
@@ -49,6 +52,7 @@ test('approved baseline real parser modules reread and refold after eviction of 
     const observe = () => adapter.baselineObservation(expected);
     parse.parseRun('baseline', { logPath: log }); health.extractChildEventFactsFromLog('baseline', { logPath: log });
     const cold = observe();
+    assert.equal(cold.sourceWork.complete, true, JSON.stringify(cold.sourceWork.unavailable));
     assert.equal(cold.complete, true); assert.equal(cold.durableCheckpoints, false);
     assert.equal(cold.threadId, threadId); assert.deepEqual(cold.moduleUrls, expected);
     assert.ok(cold.sourceWork.sources.uncategorized.otherReadBytes >= Buffer.byteLength('uncategorized source work'));
@@ -86,7 +90,7 @@ test('approved baseline real parser modules reread and refold after eviction of 
     assert.equal(incomplete.sourceWork.complete, false);
     assert.equal(incomplete.sourceWork.unavailable.open, 1);
     assert.throws(() => workloadCounterDelta({ ...model.metrics, baselineObservation: incomplete, logReads: incomplete.logReads }, { ...model.metrics, baselineObservation: incomplete, logReads: incomplete.logReads }), /Incomplete baseline inventory total/);
-  } finally { await model?.close(); restoreFs(); rmSync(root, { recursive: true, force: true }); }
+  } finally { await model?.close(); restoreFs?.(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test('original executor queue observations use actual queued timestamps and observed empty membership', async () => {

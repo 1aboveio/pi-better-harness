@@ -1,3 +1,5 @@
+import { writeFileSync } from 'node:fs';
+
 const LIMIT = 128;
 const records = [];
 let sequence = 0;
@@ -13,4 +15,10 @@ export function recordRecoveryTrace(record) {
 
 export function recoveryTraceSnapshot() {
   return { total: sequence, dropped: sequence - records.length, records: [...records] };
+}
+
+// The f41 native report stops inside the first registry.create await on both OSes.
+export function recordHostedCreationPhase(phase) {
+  const output = process.env.PI_FULL_RUNTIME_CREATION_REPORT;
+  if (output) writeFileSync(output, JSON.stringify({ phase, at: Date.now(), pid: process.pid }));
 }

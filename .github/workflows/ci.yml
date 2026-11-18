@@ -88,6 +88,7 @@ jobs:
           path: |
             ${{ runner.temp }}/shared-read-resources.json
             ${{ runner.temp }}/full-runtime-resources.json
+            ${{ runner.temp }}/full-runtime-resources.json.hosted-create.json
             .work/standalone-*/measurements.json
             .work/standalone-*/packaged-domain.log
             .work/standalone-*/recovery-timeline.jsonl
