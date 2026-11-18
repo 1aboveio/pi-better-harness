@@ -66,4 +66,18 @@ for (const fixed of [false, true]) test(`${fixed ? "fixed domain" : "canonical"}
   assert.deepEqual(journal.attempt(meta.id).launchAuthority, { permissions: {} }, "refusal cannot rewrite frozen authority");
   assert.equal(managed.status().inFlight, 0);
   assert.match(managed.status().continuationUnavailable[0]!.reason, /Unsupported sandbox permissions file version/);
+  const missing = { runId: "missing-authority", waitId: "missing-wait", generation: 1 };
+  const neverDispatch = async () => { assert.fail("missing captured authority must not dispatch"); };
+  await assert.rejects((managed as any).dispatchContinuation(missing, neverDispatch), /Captured continuation launch authority unavailable/);
+  const refusal = managed.status().continuationUnavailable.find((value: any) => value.key === "missing-wait:1");
+  assert.equal(await (managed as any).dispatchContinuation(missing, neverDispatch), "skipped", "existing backoff defers without a second dispatch");
+  assert.deepEqual(managed.status().continuationUnavailable.find((value: any) => value.key === "missing-wait:1"), refusal);
+  assert.equal(managed.busy, false);
+  for (let i = 0; i < 130; i++) {
+    await (managed as any).dispatchContinuation({ ...missing, waitId: `flood-${i}` }, neverDispatch).catch((error: unknown) => {
+      assert.match(String(error), /Captured continuation launch authority unavailable/);
+    });
+  }
+  assert.equal(managed.status().continuationUnavailable.length, 32, "admission still bounds distinct failed generations");
+  assert.equal(managed.busy, false);
 });
