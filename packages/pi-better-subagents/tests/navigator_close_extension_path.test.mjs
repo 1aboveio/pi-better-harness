@@ -533,7 +533,7 @@ describe("registered extension path: main-window navigator actions", () => {
             startedAt: Date.now() + 1000,
         });
 
-        await nav.start();
+        await nav.start(() => renderWidgetValue(nav.lastWidget("background-work-list")).includes("live-job"));
         nav.focusViaLeftKey();
 
         nav.pressX();
