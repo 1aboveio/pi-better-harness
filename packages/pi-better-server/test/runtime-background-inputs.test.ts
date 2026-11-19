@@ -38,6 +38,7 @@ test("Background constructor attaches its inbox and repair state to the query ow
   try {
     const derived = (model as any).db;
     assert.equal((model as any).background.inbox, undefined);
+    assert.equal((model as any).background.ready, false);
     assert.deepEqual(derived.prepare("PRAGMA database_list").all().map((row: any) => row.name), ["main"]);
     assert.equal(model.metrics.checkpoints.acquisitionAttempts, 0, "construction must not acquire checkpoints");
     await model.reconcile();

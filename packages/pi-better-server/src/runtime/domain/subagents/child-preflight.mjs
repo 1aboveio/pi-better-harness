@@ -15,12 +15,19 @@ export default function childPreflight(pi) {
     catch (error) {
         fail(error);
     }
+    const reported = new Set();
     // The task guard activates its adapters on session_start. Check after every
     // startup handler has finished, before the first request (and subsequent runs).
     const check = async (ctx, tools) => {
         try {
-            await checkChildPreflight({ ...plan, tools }, { registry: ctx.modelRegistry,
-                tools: pi.getActiveTools(), model: ctx.model });
+            const inactive = await checkChildPreflight({ ...plan, tools }, { registry: ctx.modelRegistry,
+                tools: pi.getActiveTools(), registeredTools: pi.getAllTools?.().map(tool => tool.name), model: ctx.model });
+            const newlyInactive = inactive.filter(tool => !reported.has(tool));
+            if (newlyInactive.length) {
+                for (const tool of newlyInactive)
+                    reported.add(tool);
+                process.stderr.write(`Subagent child preflight: inherited trusted tools are inactive in this child: ${newlyInactive.join(', ')}. Continuing without them.\n`);
+            }
         }
         catch (error) {
             fail(error);

@@ -61,6 +61,16 @@ test("ordinary background clients share the canonical daemon without hosted owne
     const started = await supervisor.start({ token: "754-daemon-runner", kind: "process", cwd: root,
       argv: [process.execPath, "-e", "const fs=require('fs');const t=setInterval(()=>{if(fs.existsSync('finish')){clearInterval(t);process.exit(0)}},20)"] });
     taskId = started.taskId;
+    // start() can return after the runner claims the task but before command.json is published.
+    // Wait before registering the operation so the first projection sees the command record.
+    const commandDeadline = Date.now() + 10000;
+    for (;;) {
+      const snapshot = supervisor.snapshot(taskId);
+      if (snapshot?.command && !snapshot.terminal) break;
+      assert.ok(!snapshot?.terminal && Date.now() < commandDeadline,
+        `Expected a live command record for ${taskId}; last status: ${snapshot?.status ?? "missing"}`);
+      await delay(20, undefined, { signal: t.signal });
+    }
     store.registerOperation({ operationId: "754-daemon-operation", taskId, launchToken: started.token, owner, observer: { kind: "local-supervisor", version: "1" } });
     await waitFor(value => value.activity.active === 1 && value.rows[0]?.meta.id === taskId);
     const shared = (await clients[0]!.request("runtime_get_metrics")).background;

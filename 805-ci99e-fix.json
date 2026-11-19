@@ -1,0 +1,79 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "exact-ci-diagnosed-independent-navigator-fixture-premise-fixed-other-owner-failures-retained",
+  "head": "3aa9f0cee72b3958844533525ef6838851cfa349",
+  "headKind": "Single-line fixture correction; later report-only commit does not change tests or production behavior.",
+  "standingOrders": [],
+  "run": { "id": 44261502524, "head": "99e459c47f302771f7fc846f75cee4d05d264564", "conclusion": "failure", "jobs": { "success": 27, "cancelled": 1, "failure": 4, "total": 32 }, "metadata": [".private-805/logs/ci99e-run.json", ".private-805/logs/ci99e-jobs.json"] },
+  "primaryEvidence": ".private-805/logs/ci99e-primary-summary.txt",
+  "failures": [
+    {
+      "job": 134655735908, "lane": "pi-1x-compat (3/3)",
+      "case": "cold bootstrap caller deadline does not imply a wedged read worker", "caseNumber": 98,
+      "durationMs": 1634.544769,
+      "error": "runtime-timeout: caller read deadline exceeded; source was not verified",
+      "location": "query-executor.test.ts:512 callback; asynchronous response exception originates work-client.mjs:40",
+      "evidence": ".private-805/logs/ci99e-compat3.log:1086-1102",
+      "causeBoundary": "The original cold400ms deadline and post-bootstrap readiness test still fails. The generic response stack does not identify which awaited read failed. No SQLite constructor stack, dereference failure, or writer-removal error is present. Do not conflate a live control endpoint/bootstrap receipt with a source-verified query, and do not silently retry or enlarge its deadline.",
+      "upstreamContrast": "Previous52ee compat case94 now explicitlyPASS on99e; only98fails in this shard. Reviewedb4 runtime-work hooks also now explicitlyPASS as native cases244-246, and the shard completes315reported tests (311PASS/1FAIL/3SKIP), rather than the prior15-minute hang. New upstream8022c64eed0006babdd2dbb86fc79b0b8e3294f39fe concerns Background history before derived initialization; this failing subscribe uses scope{} and does not exercise Background history. That patch is not a demonstrated cure for98 and was not merged speculatively."
+    },
+    {
+      "job": 134655736012, "lane": "server-tests (1/3)",
+      "case": "committed activation survives observer cancellation and waits for shutdown owner release before adoption", "caseNumber": 16,
+      "durationMs": 20707.673633,
+      "error": "Timed out waiting for old owner shutdown hook",
+      "capturedState": { "enteredShutdown": false, "ownerStatus": "live", "phase": "prepared", "reason": "Waiting for idle sessions and reconnect-capable controllers", "activationOutcome": "deferred", "operationId": "shutdown-upgrade" },
+      "evidence": ".private-805/logs/ci99e-server1.log:403-415",
+      "causeBoundary": "The failure occurs BEFORE entering the old shutdown hook: activation remains prepared/deferred with a live old owner. It is not an observed owner-release failure after shutdown, nor a late callback/reap ENOTEMPTY failure. The primary capture does not contain exact blocker IDs, so it cannot support a new controller/upgrade authority policy.",
+      "upstreamContrast": "Read-only inspection of existing807 at138ac0591e46a8ef927a189fa1e1a3091e2fccd8 finds bounded runtime_upgrade_status blocker capture in this exact catch (first8blockers/4096chars; bounded capture failure).99e has only generic reason/owner/phase. That already-owned capture must not be duplicated here; it is evidence instrumentation, not a claim that the activation cause is repaired. No parent/owner fencing or shutdown deadline changed."
+    },
+    {
+      "job": 134655736069, "lane": "workspace-ci (workspaces-2)",
+      "case": "running run: registered shared navigator x stops via shared stopRun and dismisses", "suiteNumber": 386, "subcaseNumber": 5,
+      "durationMs": 96.39311,
+      "error": "main-list x must mark killed via shared stopRun: actual running vs expected killed",
+      "location": "navigator_close_extension_path.test.mjs:548",
+      "evidence": ".private-805/logs/ci99e-workspace2.log:8529-8552",
+      "demonstratedPremiseDefect": "The test calls nav.start() with its default readiness predicate, which waits for real detail records but does not require the independent main-list publication used by focus/down/x. Its setup can return while that list has no live-job row. Key presses can therefore remain on Main instead of targeting the seeded run. The session-filter case already uses the explicit widget predicate from57b and PASSes here; the stop case did not.",
+      "correction": "Pass a widgetReady predicate requiring live-job in the actual background-work-list before driving the existing keys. Reuse the SAME existing3000ms setup wait. No production stopRun, confirmations, process identity/recipient/branch fence, key sequence, process-exit assertion or deadline changes.",
+      "qualificationLimit": "Controlled actual-fixture prefix reproduction proves this readiness gap, not the full native stop outcome. The original native stop case remains FAILED on99e until exact new-head qualification. No false claim that a running process was stopped locally."
+    },
+    { "job": 134658383281, "lane": "ci", "error": "workspace-ci failure and server-tests failure", "classification": "Downstream aggregate, not a fourth independent producer.", "evidence": ".private-805/logs/ci99e-gate.log" }
+  ],
+  "linuxCancellation": {
+    "job": 134655735896, "conclusion": "cancelled",
+    "providerAnnotation": "The job has exceeded the maximum execution time of10m0s; The operation was canceled.",
+    "lastBoundary": "Final harness-session.e2e batch reports9tests/9PASS/0FAIL/0cancelled at07:56:44, immediately before job cancellation. Primary log contains no not-ok case. A passed final batch does not establish job completion or justify increasing the job limit.",
+    "evidence": [".private-805/logs/ci99e-linux-sandbox.log", ".private-805/logs/ci99e-linux-annotations.json"],
+    "action": "No blind retry or timeout change; preserve cumulative job-limit failure separately from the three real test failures."
+  },
+  "existingProducerAndReapDiagnostics": {
+    "inspection": "Searched complete three failed-job logs for timing-reap-writer/timing-reap-writer-unavailable, ENOTEMPTY and runtime-read-bootstrap producer stacks.",
+    "result": "No emitted reap-residue or bootstrap producer-stack marker found. No original removal failure in these logs. Do not recycle earlier SQLite attachment or writer-reap explanations for the new actual signatures.",
+    "inprocessQualification": "Existing owned-exit removal/recipient/metadata boundary tests and cold mailbox test PASS12/12; original deletion error priority, no retry, bounded metadata/no contents and expired-read non-authority remain. This is not a native writer/reap reproduction."
+  },
+  "causalProof": {
+    "file": ".private-805/ci99e-navigator-premise.mjs",
+    "method": "Parse and execute the ACTUAL failed stop-case setup prefix up to focusViaLeftKey plus actual bootRegisteredNavigator helper. Replace only external runtime/module/process boundaries: detail records are ready, widget publication is withheld. No native child, socket, SDK or UI-source replay.",
+    "red": { "command": "node .private-805/ci99e-navigator-premise.mjs", "exit": 1, "error": "actual stop-case setup must not return before its main-list row is published: true!==false", "evidence": ".private-805/logs/ci99e-navigator-causal-red.log" },
+    "green": { "command": "node .private-805/ci99e-navigator-premise.mjs", "exit": 0, "result": "Actual stop-case prefix remains pending until live-job list publication, then returns before driving original keys.", "evidence": ".private-805/logs/ci99e-navigator-green.log" },
+    "retainedHarnessIteration": "Initial diagnostic AST walker omitted an empty-call argument guard and failed before exercising the fixture; ci99e-navigator-red.log retains that parser error and is NOT counted as causalRED. Guarded walker then produced the actual assertionRED above."
+  },
+  "checks": [
+    { "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-goal/test/activity.test.ts packages/pi-better-goal/test/activity-notifications.test.ts packages/pi-better-goal/test/admission-scheduler.test.ts packages/pi-better-server/test/goal-recovery-readiness.test.ts", "exit": 0, "passed": 39, "failed": 0, "skipped": 0, "evidence": ".private-805/logs/ci99e-goal-regression.log" },
+    { "command": "node --import tsx --test packages/pi-better-subagents/tests/owned-exit.test.mjs packages/pi-better-server/test/cold-bootstrap.test.ts", "exit": 0, "passed": 12, "failed": 0, "skipped": 0, "evidence": ".private-805/logs/ci99e-producer-diagnostics.log" },
+    { "command": "npm run typecheck --workspace packages/pi-better-subagents --workspace packages/pi-better-goal --workspace packages/pi-better-server", "exit": 0, "evidence": ".private-805/logs/ci99e-types.log" },
+    { "command": "AST compare against99e Navigator fixture", "exit": 0, "result": "All71 original assertion/wait calls unchanged; same3000ms setup bound.", "evidence": ".private-805/logs/ci99e-navigator-guards.log" },
+    { "command": "node .private-805/navigator-widget-premise-check.mjs", "exit": 0, "result": "Existing scoped widget publication fixture remains correct.", "evidence": ".private-805/logs/ci99e-existing-widget-guard.log" },
+    { "command": "node .private-805/scripts2-phase-check.mjs", "exit": 0, "result": "All77 protected SSH assertion/wait calls retained.", "evidence": ".private-805/logs/ci99e-ssh-guards.log" },
+    { "command": "Read-only byte comparison of production Goal/query/read-model and existing diagnostics against99e", "exit": 0, "result": "Goal unknown coverage, admission marker, runtime-work cleanup, activation fixture and writer/reap diagnostics unchanged.", "evidence": ".private-805/logs/ci99e-preserved.log" },
+    { "command": "node --check navigator_close_extension_path.test.mjs; git diff --check", "exit": 0 }
+  ],
+  "remaining": [
+    "Coordinator qualifies the original Navigator stop case on this exact candidate; the in-process fixture proof does not replace its original native process/metadata assertions.",
+    "Existing query/bootstrap owner must diagnose recurrent compat98 within original bounds; no parent deadline or retry policy duplicated here.",
+    "Existing activation owner/blocker capture must establish the exact prepared-state blockers before any upgrade-policy change; old live owner is not removed or bypassed.",
+    "Linux cumulative10-minute cancellation remains explicit. No whole264-loop, native replay, shared runtime reinstall/change, unapproved upstream merge, CI retry, push or external wait performed."
+  ]
+}

@@ -52,7 +52,8 @@ export async function startWorkRuntime() {
   })();
   try {
     await Promise.race([once(daemon, "message"), once(daemon, "exit").then(() => { throw new Error(errors); })]);
-    return stop;
+    return Object.assign(stop, { diagnostics: () => ({ pid: daemon.pid, connected: daemon.connected,
+      exitCode: daemon.exitCode, signalCode: daemon.signalCode, shutdownRequested: Boolean(shutdown) }) });
   } catch (error) {
     await stop();
     throw error;

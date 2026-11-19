@@ -46,6 +46,7 @@ export class WorkQueryExecutor {
   private internalRecoveryDemand = false;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private watchdog?: ReturnType<typeof setInterval>;
+  private watchdogCheck?: ReturnType<typeof setImmediate>;
   private lastResponse = performance.now();
   private workerMetrics: WorkerMetrics = {};
   private lastObservation: Omit<ReturnType<WorkReadModel["observation"]>, "observedAt"> & { observedAt: number | null } = {
@@ -80,7 +81,15 @@ export class WorkQueryExecutor {
     this.worker = this.startWorker();
     this.watchdog = setInterval(() => {
       if (!this.closed && !this.failure && performance.now() - this.lastResponse > (this.options.watchdogMs ?? 4000)) {
-        this.fail(new Error("runtime-unhealthy: read worker unresponsive; watchdog deadline exceeded"));
+        // An overdue host timer can precede already-queued worker responses.
+        // Recheck after poll before attributing that host delay to the worker.
+        this.watchdogCheck ??= setImmediate(() => {
+          this.watchdogCheck = undefined;
+          if (!this.closed && !this.failure && performance.now() - this.lastResponse > (this.options.watchdogMs ?? 4000)) {
+            this.fail(new Error("runtime-unhealthy: read worker unresponsive; watchdog deadline exceeded"));
+          }
+        });
+        this.watchdogCheck.unref();
       }
     }, Math.min(250, (this.options.watchdogMs ?? 4000) / 4));
     this.watchdog.unref();
@@ -374,6 +383,7 @@ export class WorkQueryExecutor {
   async close() {
     this.closed = true;
     if (this.watchdog) clearInterval(this.watchdog);
+    if (this.watchdogCheck) clearImmediate(this.watchdogCheck);
     if (this.recoveryTimer) { clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined; }
     this.fail(new Error("runtime-unavailable: query executor closed"));
     for (const connection of this.streams.keys()) this.detach(connection);

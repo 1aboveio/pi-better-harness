@@ -109,6 +109,16 @@ test('child preflight accepts actual prefix candidate and rejects missing provid
   await assert.rejects(checkChildPreflight(plan(), { ...env(), model: models[0] }), /Selected child model/);
 });
 
+test('preflight tolerates an inherited trusted tool only if registered but inactive', async () => {
+  const selected = { ...plan(), tools: ['read', 'xai_analyze_image'] };
+  const actual = { ...env(models, ['read']), registeredTools: ['read', 'xai_analyze_image'] };
+  const optional = { ...selected, optionalTrustedTools: ['xai_analyze_image'] };
+  assert.deepEqual(await checkChildPreflight(optional, actual), ['xai_analyze_image']);
+  assert.deepEqual(await checkChildPreflight(optional, { ...actual, tools: selected.tools }), []);
+  await assert.rejects(checkChildPreflight(selected, actual), /tool xai_analyze_image is unavailable/);
+  await assert.rejects(checkChildPreflight(optional, { ...actual, registeredTools: ['read'] }), /tool xai_analyze_image is unavailable/);
+});
+
 test('preflight rejects changed config files and dynamic declaration output', async t => {
   const f = fixture(t); const path = join(f.root, 'model-router.json'); writeFileSync(path, '{}');
   const frozen = { ...plan(), configSnapshot: configSnapshot([f.root]) };

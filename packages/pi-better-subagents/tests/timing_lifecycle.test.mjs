@@ -40,7 +40,8 @@ const HEALTH_TICK_MS = 15_000;
 // ---- fake pi binary: echo its launch facts into the log, then idle ---------
 const binDir = mkdtempSync(join(tmpdir(), "fake-pi-timing-"));
 const fakePiPath = join(binDir, "pi");
-const IDLE_SCRIPT = "#!/bin/sh\necho \"{\\\"type\\\":\\\"fake_launch\\\",\\\"steerFile\\\":\\\"$PI_SUBAGENT_STEER_FILE\\\"}\"\necho \"$@\"\nsleep 300\n";
+// Keep the idle fixture in the tracked PID, without a separate sleep child to reap.
+const IDLE_SCRIPT = "#!/bin/sh\necho \"{\\\"type\\\":\\\"fake_launch\\\",\\\"steerFile\\\":\\\"$PI_SUBAGENT_STEER_FILE\\\"}\"\necho \"$@\"\nexec sleep 300\n";
 function writeFakePi(script) {
     writeFileSync(fakePiPath, script);
     chmodSync(fakePiPath, 0o755);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,39 @@ import { ensureDaemon } from "../src/startup/ensure.ts";
 import { parseRuntime, remoteRuntimeScript, shellQuote } from "../src/startup/runtime.ts";
 import { resolveTarget } from "../src/remote/target.ts";
 import { makeEnv, waitFor, type Env } from "./helpers.ts";
+import { inspectDaemonOwner } from "../src/daemon-owner.ts";
+const { captureRunRemovalEvidence } = await import(new URL("../../pi-better-subagents/tests/fixture-run-ownership.mjs", import.meta.url).href);
+
+function retainStartupOwnerFailure(serverDir: string): void {
+  try {
+    const inspected = inspectDaemonOwner(serverDir);
+    const owner = "owner" in inspected ? { pid: inspected.owner.pid, token: inspected.owner.token,
+      boot: inspected.owner.boot, start: inspected.owner.start?.slice(0, 128), startTruncated: (inspected.owner.start?.length ?? 0) > 128 } : undefined;
+    let logTail: string;
+    try {
+      const logPath = join(serverDir, "daemon.log");
+      if (lstatSync(logPath).isSymbolicLink()) throw Object.assign(new Error("Log symlink"), { code: "symlink-log-unavailable" });
+      const fd = openSync(logPath, "r");
+      try {
+        const size = fstatSync(fd).size, buffer = Buffer.alloc(Math.min(2000, size));
+        readSync(fd, buffer, 0, buffer.length, Math.max(0, size - buffer.length));
+        logTail = buffer.toString("utf8");
+      } finally { closeSync(fd); }
+    } catch (error) { logTail = (error as NodeJS.ErrnoException).code ?? "log-unavailable"; }
+    const evidence = { status: inspected.status, owner, reason: "reason" in inspected ? inspected.reason?.slice(0, 512) : undefined,
+      residual: captureRunRemovalEvidence(join(serverDir, "daemon-owner")), logTail,
+      identitySource: "existing inspectDaemonOwner; no alternate probe or additional identity verification" };
+    let encoded = JSON.stringify(evidence);
+    if (Buffer.byteLength(encoded) > 32768) {
+      evidence.residual.entries = evidence.residual.entries.slice(0, 4);
+      evidence.residual.truncated = true;
+      encoded = JSON.stringify(evidence);
+    }
+    console.error("[startup-owner-failure]", encoded);
+  } catch (captureError) {
+    try { console.error("[startup-owner-failure-unavailable]", (captureError as NodeJS.ErrnoException).code ?? "capture-failed"); } catch {}
+  }
+}
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
@@ -167,11 +200,13 @@ describe("on-demand Pi startup", { concurrency: false, timeout: 120_000 }, () =>
     mkdirSync(setup.serverDir);
     writeFileSync(join(setup.serverDir, "sessions.json"), "broken index");
     const result = await run([cli, "ensure", "--timeout-ms", "2500"], env).result;
-    assert.equal(result.code, 1);
-    assert.equal(result.stdout, "");
-    assert.match(result.stderr, /readiness timed out after 2500ms/);
-    assert.ok(result.stderr.includes(join(setup.serverDir, "daemon.log")));
-    assert.equal(existsSync(join(setup.serverDir, "daemon-owner")), false, result.stderr);
+    try {
+      assert.equal(result.code, 1);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /readiness timed out after 2500ms/);
+      assert.ok(result.stderr.includes(join(setup.serverDir, "daemon.log")));
+      assert.equal(existsSync(join(setup.serverDir, "daemon-owner")), false, result.stderr);
+    } catch (error) { retainStartupOwnerFailure(setup.serverDir); throw error; }
   });
 
   it("refuses an incompatible installed runtime before creating daemon state", async (t) => {
