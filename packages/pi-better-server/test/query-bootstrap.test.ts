@@ -7,6 +7,7 @@ import { queryBootstrap, querySourceReady } from "./support/query-bootstrap.ts";
 import { fixture } from "./support/query-fixture.ts";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { performance } from "node:perf_hooks";
+const nativeTimers = { setTimeout, clearTimeout };
 
 test("bootstrap exit retains a prior watchdog cause without claiming source readiness", async () => {
   const worker = new EventEmitter();
@@ -200,4 +201,77 @@ test("an overdue watchdog polls queued responses before failing but preserves ca
     assert.match(executor.observation().reason!, /watchdog deadline exceeded/);
     client.close();
   } finally { await executor.close(); }
+});
+
+test("a real Worker heartbeat queued before the watchdog is delivered after microtasks and before failure commitment", { timeout: 10000 }, async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let now = 0, delivered = false;
+  t.mock.method(performance, "now", () => now);
+  const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(`
+    import { parentPort } from 'node:worker_threads';
+    const gate = new Int32Array(new SharedArrayBuffer(8));
+    parentPort.on('message', () => {});
+    parentPort.postMessage({ type: 'test-gate', buffer: gate.buffer });
+    while (Atomics.load(gate, 0) === 0) Atomics.wait(gate, 0, 0);
+    parentPort.postMessage({ type: 'heartbeat' });
+    Atomics.store(gate, 1, 1); Atomics.notify(gate, 1);
+  `)}`);
+  const executor = new WorkQueryExecutor("unused-real-worker-root", "real-poll-order", { watchdogMs: 800, workerUrl });
+  const worker = (executor as any).worker;
+  let gate!: Int32Array;
+  let accept!: () => void, reject!: (error: Error) => void;
+  let rejectSetup: (error: Error) => void = () => {};
+  const heartbeat = new Promise<void>((resolve, fail) => { accept = resolve; reject = fail; });
+  void heartbeat.catch(() => {});
+  const exit = () => {
+    const error = new Error("worker terminated before its queued heartbeat was accepted");
+    reject(error); rejectSetup(error);
+  };
+  const observe = (message: any) => {
+    if (message.type === "heartbeat") {
+      delivered = true;
+      try {
+        assert.equal((executor as any).lastResponse, now, "the actual executor message listener accepted this heartbeat");
+        accept();
+      } catch (error) { reject(error as Error); }
+    }
+  };
+  worker.on("message", observe); worker.once("exit", exit);
+  const guard = nativeTimers.setTimeout(() => {
+    const error = new Error("real Worker heartbeat proof did not settle");
+    reject(error); rejectSetup(error);
+  }, 5000);
+  try {
+    gate = await new Promise<Int32Array>((resolve, fail) => {
+      rejectSetup = fail;
+      const setup = (message: any) => {
+        if (message.type !== "test-gate") return;
+        worker.off("message", setup); resolve(new Int32Array(message.buffer));
+      };
+      worker.on("message", setup);
+    });
+    // A real timer turn reproduces the overdue-timer-before-poll boundary.
+    // The atomic gate, not an elapsed sleep, proves the message is already sent.
+    await new Promise<void>((resolve, fail) => nativeTimers.setTimeout(() => {
+      void (async () => {
+        Atomics.store(gate, 0, 1); Atomics.notify(gate, 0);
+        while (Atomics.load(gate, 1) === 0) {
+          assert.notEqual(Atomics.wait(gate, 1, 0, 5000), "timed-out", "worker must post before the host watchdog callback");
+        }
+        assert.equal(delivered, false, "posting is not synchronous executor delivery");
+        now = 801; t.mock.timers.tick(801);
+        await Promise.resolve();
+        assert.equal(delivered, false, "a microtask checkpoint is not Worker message delivery");
+        assert.equal(executor.metrics().executor.worker, "running", "neither synchronous nor microtask termination may precede poll");
+        await heartbeat;
+        await new Promise<void>(done => setImmediate(done));
+        assert.equal(executor.metrics().executor.worker, "running");
+      })().then(resolve, fail);
+    }, 0));
+  } finally {
+    worker.off("message", observe); worker.off("exit", exit);
+    if (gate) { Atomics.store(gate, 0, 1); Atomics.notify(gate, 0); }
+    try { await executor.close(); }
+    finally { nativeTimers.clearTimeout(guard); }
+  }
 });
