@@ -43,7 +43,9 @@ export class WorkClient {
                 } catch (error) { this.fail(error); }
             }
         });
-        this.socket.on("error", error => this.fail(error));
+        this.socket.on("error", error => this.fail(["ECONNRESET", "EPIPE"].includes(error.code)
+            ? Object.assign(new Error(`runtime-unavailable: disconnected (${error.code}); resync required`, { cause: error }), { code: error.code })
+            : error));
         this.socket.on("close", () => this.fail(new Error("runtime-unavailable: disconnected; resync required")));
         this.ready = this.request("hello", { protocolVersion: 1, runtimeRoot: agentDir, requiredCapabilities: ["runtime-state-v1", "runtime-subscriptions-v1", ...requiredCapabilities] })
             .then(async hello => { if (typeof socketPath === "string" && hello.capabilities?.includes("runtime-client-retention-v1")) await this.request("runtime_register_client", { clientId: `work-${process.pid}` }); return hello; });

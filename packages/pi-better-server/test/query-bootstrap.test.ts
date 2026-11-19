@@ -174,7 +174,10 @@ test("an overdue watchdog polls queued responses before failing but preserves ca
   t.mock.method(performance, "now", () => now);
   const worker = { postMessage() {}, async terminate() { terminations++; return 0; }, unref() {} };
   const prototype = WorkQueryExecutor.prototype as any, startWorker = prototype.startWorker;
-  prototype.startWorker = () => worker;
+  prototype.startWorker = function () {
+    this.heartbeat = new BigInt64Array(new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT));
+    return worker;
+  };
   let executor: WorkQueryExecutor;
   try { executor = new WorkQueryExecutor("unused-controlled-root", "poll-order", { timeoutMs: 400, watchdogMs: 800 }); }
   finally { prototype.startWorker = startWorker; }
