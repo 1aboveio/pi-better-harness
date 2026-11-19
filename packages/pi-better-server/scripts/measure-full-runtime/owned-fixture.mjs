@@ -10,17 +10,17 @@ import { register } from 'node:module';
 import { baselineModuleUrls, baselineObservation, evictBaselineParsers } from './baseline-observation.mjs';
 
 let executor, gc, gcObserver;
-function publish(name, value) {
-  const path = join(process.env.PI_RESOURCE_REPORT_DIR, `${process.pid}-${name}`);
+function publish(name, value, directory = process.env.PI_RESOURCE_REPORT_DIR) {
+  const path = join(directory, `${process.pid}-${name}`);
   writeFileSync(path + '.tmp', JSON.stringify(value)); renameSync(path + '.tmp', path);
 }
 export function registerOwnedLoader() {
   publish(`loader-${threadId}.expected`, { thread: `loader-${threadId}` });
-  register(new URL('./recovery-trace-loader.mjs', import.meta.url), { data: { resourceParentThreadId: threadId } });
+  register(new URL('./recovery-trace-loader.mjs', import.meta.url), { data: { resourceParentThreadId: threadId, resourceReportDir: process.env.PI_RESOURCE_REPORT_DIR } });
 }
-export function observeGcThread(key = `worker-${threadId}`) {
+export function observeGcThread(key = `worker-${threadId}`, directory = process.env.PI_RESOURCE_REPORT_DIR) {
   threadGc();
-  const sample = () => publish(`${key}.gc`, { thread: key, physicalThreadId: threadId, ...threadGc() });
+  const sample = () => publish(`${key}.gc`, { thread: key, physicalThreadId: threadId, ...threadGc() }, directory);
   sample(); setInterval(sample, 250).unref();
 }
 export function gcThreads() {
