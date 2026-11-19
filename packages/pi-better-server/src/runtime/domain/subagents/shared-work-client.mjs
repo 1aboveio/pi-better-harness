@@ -240,8 +240,10 @@ export async function connectWorkClient(socketPath, agentDir, capabilities = [],
                 if (!recovery) {
                     const controller = new AbortController();
                     const budget = Math.ceil(remaining());
-                    const timer = setTimeout(() => controller.abort(recoveryDeadline()), budget);
-                    const promise = waitForRecovery(Promise.resolve().then(() => options.recover({ timeoutMs: budget, signal: controller.signal })), budget, controller.signal)
+                    const timer = setTimeout(() => {
+                        controller.abort(new Error("runtime-unavailable: reconnect deadline exceeded during recovery"));
+                    }, budget);
+                    const promise = waitForRecovery(Promise.resolve().then(() => options.recover({ timeoutMs: budget, signal: controller.signal })), controller.signal)
                         .finally(() => clearTimeout(timer));
                     recovery = { promise, controller, key };
                     recoveries.set(key, recovery);
@@ -276,17 +278,13 @@ export async function connectWorkClient(socketPath, agentDir, capabilities = [],
         }
     }
 }
-function recoveryDeadline() {
-    return new Error("runtime-unavailable: reconnect deadline exceeded during recovery");
-}
-function waitForRecovery(recovery, timeoutMs, signal) {
+function waitForRecovery(recovery, signal) {
     return new Promise((resolve, reject) => {
-        const finish = (callback, value) => { clearTimeout(timer); signal?.removeEventListener("abort", abort); callback(value); };
+        const finish = (callback, value) => { signal.removeEventListener("abort", abort); callback(value); };
         const abort = () => finish(reject, signal.reason);
-        const timer = setTimeout(() => finish(reject, recoveryDeadline()), timeoutMs);
-        signal?.addEventListener("abort", abort, { once: true });
+        signal.addEventListener("abort", abort, { once: true });
         recovery.then(value => finish(resolve, value), error => finish(reject, error));
-        if (signal?.aborted)
+        if (signal.aborted)
             abort();
     });
 }
