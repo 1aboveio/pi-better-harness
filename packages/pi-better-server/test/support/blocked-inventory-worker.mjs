@@ -2,7 +2,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import { bootstrapHeartbeat } from "./bootstrap-heartbeat.mjs";
 // The fixture imports the model before the production worker can own control
 // messages. Keep that async bootstrap responsive without claiming source readiness.
-const stopBootstrapHeartbeat = bootstrapHeartbeat(parentPort);
+const stopBootstrapHeartbeat = bootstrapHeartbeat(parentPort, workerData.heartbeat);
 const { readFileSync, statSync } = await import("node:fs");
 const { join } = await import("node:path");
 if (Number(process.versions.node.split(".")[0]) < 24) {

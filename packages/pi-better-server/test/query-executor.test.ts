@@ -623,6 +623,7 @@ test("cold bootstrap caller deadline does not imply a wedged read worker", { tim
 test("delayed parent receipt does not kill a responsive read worker", { timeout: 10000 }, async () => {
   const f = await fixture({ watchdogMs: 800 });
   try {
+    await f.waitForSourceReady();
     const client = await f.client();
     await ready(client);
     const epoch = client.snapshot!.instanceId;
@@ -794,6 +795,7 @@ test("an exact-ID query returns rebuilding without blocking all reads on the ini
     assert.equal(f.executor.metrics().executor.timeouts, 0);
     assert.equal(f.executor.metrics().executor.worker, "running");
     f.worker.postMessage({ type: "release-inventory" });
+    await f.waitForSourceReady();
     await ready(client);
     assert.equal((await client.get({ id: "sa_initial_inventory", limit: 1 })).status, "ready");
   } finally { await f.close(); }
