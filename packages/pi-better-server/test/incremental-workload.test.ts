@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { workloadSettings, seedWorkload, workloadTransport } from '../scripts/measure-full-runtime/incremental-workload.mjs';
+import { workloadSettings, seedWorkload, workloadTransport, reconcileTask } from '../scripts/measure-full-runtime/incremental-workload.mjs';
+import { WorkClient } from '../src/runtime/work-client.mjs';
 import { socketPathFor } from '../src/runtime/socket.ts';
 
 test('workload transport uses the explicit direct owned directory without a nested suffix', () => {
@@ -71,4 +72,43 @@ test('seeded native workload has exact durable history, group logs and expected 
     }
     assert.equal(bytes, manifest.seededLogBytes);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('native workload group log still reconciles over the socket after launch cleanup', { timeout: 15000 }, async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'p808-launch-cleanup-')));
+  const manifest = seedWorkload({ root, agent: join(root, 'agent'), cwd: root,
+    settings: { ...workloadSettings({ PI_INCREMENTAL_WORKLOAD: '1' })!, history: 0, group: 1 } });
+  const cleanupEnv = { TMPDIR: root, PI_CODING_AGENT_DIR: manifest.agent, PI_SUBAGENT_DURABLE_DIR: manifest.durable };
+  const saved = Object.fromEntries(Object.keys(cleanupEnv).map(key => [key, process.env[key]]));
+  const cleanupModule = '../../pi-better-subagents/cleanup.ts';
+  const socketFixture = '../../pi-better-subagents/tests/work-runtime-fixture.mjs';
+  const { runDailyCleanupOnce } = await import(cleanupModule);
+  const { startWorkRuntimeFixture } = await import(socketFixture);
+  let stop, client;
+  try {
+    Object.assign(process.env, cleanupEnv);
+    try {
+      const cleanup = runDailyCleanupOnce();
+      assert.equal(cleanup.ran, true);
+      assert.deepEqual(cleanup.errors, []);
+      t.diagnostic(`Launch cleanup removed ${cleanup.removedRunDirs} run directories`);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+    stop = await startWorkRuntimeFixture({ ...process.env, ...cleanupEnv });
+    client = new WorkClient(stop.socketPath, manifest.agent);
+    const task = manifest.tasks[0]!;
+    const detail = await client.get({ id: task.id, detail: true });
+    assert.equal(detail.status, 'ready', detail.reason);
+    assert.equal(detail.rows.length, 1);
+    const row = detail.rows[0] as { detail?: { parsed: { diagnostics?: string[] } } };
+    t.diagnostic(`${task.id}: ${JSON.stringify(row.detail?.parsed.diagnostics)}`);
+    reconcileTask(task, row, manifest.cwd);
+  } finally {
+    client?.close();
+    try { await stop?.(); }
+    finally { rmSync(root, { recursive: true, force: true }); }
+  }
 });

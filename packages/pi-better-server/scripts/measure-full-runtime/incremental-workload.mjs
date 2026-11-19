@@ -37,17 +37,19 @@ export function seedWorkload({ root, agent, cwd, settings }) {
   const durable = join(agent, 'subagents'), archives = join(durable, 'attempts');
   const runs = join(root, 'pi-better-subagents', 'runs');
   mkdirSync(archives, { recursive: true }); mkdirSync(runs, { recursive: true });
-  const meta = (id, sessionId = id) => ({ id, cwd, sessionId, status: 'completed', startedAt: 1, endedAt: 2, callback: false,
+  const meta = (id, sessionId = id, endedAt = 2) => ({ id, cwd, sessionId, status: 'completed', startedAt: endedAt - 1, endedAt, callback: false,
     recipe: { version: 1, sessionId, cwd, sessionDir: join(durable, 'sessions') } });
   for (let i = 0; i < settings.history; i++) {
     const id = `sa_808_history_${i}`;
     writeFileSync(join(archives, `${id}.json`), JSON.stringify({ version: 1, meta: meta(id) }));
   }
+  // The real launch runs daily cleanup. Only history is old; these logs must still be retained.
+  const endedAt = Date.now();
   const tasks = [];
   for (let i = 0; i < settings.group; i++) {
     const id = `sa_808_group_${i}`, directory = join(runs, id);
     mkdirSync(directory, { recursive: true });
-    writeFileSync(join(directory, 'meta.json'), JSON.stringify(meta(id, '808-group')));
+    writeFileSync(join(directory, 'meta.json'), JSON.stringify(meta(id, '808-group', endedAt)));
     const finalText = `808 final result ${i}`;
     const event = { type: 'message_end', message: { role: 'assistant',
       content: [{ type: 'text', text: finalText }], usage: { input: 3, output: 7, cost: { total: 0.01 } } } };
