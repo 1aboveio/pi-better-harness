@@ -542,23 +542,30 @@ test("shared callers have separate deadlines and queue timeouts retain bounded a
   } finally { await f.close(); }
 });
 
-test("responsive fixture imports outlive the wedge watchdog without source readiness", { timeout: 10000 }, async () => {
+test("responsive fixture imports outlive the wedge watchdog without source readiness", { timeout: 10000 }, async t => {
   const implementation = new URL("./support/cancellable-query-worker.mjs", import.meta.url).href;
   const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(`
     import { workerData } from "node:worker_threads";
     workerData.fixtureHoldBootstrap = true;
     await import(${JSON.stringify(implementation)});
   `)}`);
-  const f = await fixture({ timeoutMs: 400, watchdogMs: 1200, workerUrl });
+  // Hold past the real watchdog budget. The shortened wedge-test budget is
+  // for a deliberate stall, not for loading the model and verifying inventory.
+  const watchdogMs = 4000;
+  const f = await fixture({ timeoutMs: 400, watchdogMs, workerUrl, logWatchdog: line => t.diagnostic(line) });
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     await new Promise<void>((resolve, reject) => {
-      let heartbeats = 0;
+      let firstHeartbeat: number | undefined;
       const cleanup = () => { clearTimeout(timeout); f.worker.off("message", message); f.worker.off("exit", exit); };
-      const message = (value: any) => { if (value.type === "heartbeat" && ++heartbeats === 6) { cleanup(); resolve(); } };
+      const message = (value: any) => {
+        if (value.type !== "heartbeat") return;
+        firstHeartbeat ??= performance.now();
+        if (performance.now() - firstHeartbeat > watchdogMs) { cleanup(); resolve(); }
+      };
       const exit = () => { cleanup(); reject(new Error("responsive fixture worker exited before bootstrap")); };
       f.worker.on("message", message); f.worker.once("exit", exit);
-      timeout = setTimeout(() => { cleanup(); reject(new Error("fixture bootstrap heartbeat did not progress")); }, 3000);
+      timeout = setTimeout(() => { cleanup(); reject(new Error("fixture bootstrap heartbeat did not progress past the watchdog deadline")); }, 6000);
     });
     assert.equal(f.executor.metrics().executor.restarts, 0);
     assert.equal(f.executor.observation().status, "rebuilding");
