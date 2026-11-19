@@ -117,6 +117,8 @@ try {
   reportPhase('await-work-socket');
   await until('socket', async () => { try { work = new WorkClient(join(transport,'pi-server.sock'), agent); await work.ready; return true; } catch { work?.close(); return false; } });
   if (subject) {
+    // Metrics read the executor's cache. A snapshot waits for the worker reply that fills it.
+    await work.get({ cwd, limit: 1 });
     const actual = await work.request('runtime_get_metrics');
     report.subject.observations = { logReads: Boolean(actual.logReads), checkpoints: Boolean(actual.checkpoints), baseline: actual.baselineObservation ?? null };
     assert.ok(actual.logReads && (actual.checkpoints || actual.baselineObservation?.complete && actual.baselineObservation.durableCheckpoints === false), 'Approved subject lacks complete actual parser observations; external fixture compatibility remains unqualified');
