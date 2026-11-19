@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "1.4.0",
     "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
     "@earendil-works/pi-tui": "1.4.0",
     "proper-lockfile": "4.1.2",
     "shell-quote": "1.12.0",
@@ -18,5 +18,8 @@
     "@earendil-works/pi-mcp": "1.4.0",
     "@earendil-works/pi-codemode": "1.4.0",
     "@earendil-works/pi-telemetry": "1.4.0"
+  },
+  "optionalDependencies": {
+    "fsevents": "2.3.3"
   }
 }
