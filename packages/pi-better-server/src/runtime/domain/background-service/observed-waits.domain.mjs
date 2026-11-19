@@ -800,7 +800,8 @@ export class ObservedWaitHost {
             if (role === "holder") {
                 this.discoverObservedTasks();
                 this.reconcileGlobalRunning();
-                await this.reconcileAssignmentCleanup();
+                if (discovery.hasAssignmentTasks)
+                    await this.reconcileAssignmentCleanup();
             }
             else {
                 this.reconcileFollowerRunning();
