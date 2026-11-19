@@ -180,7 +180,6 @@ try {
       const dueAt = anchorAt + worker.timing.stuckMs;
       const key = `stuck:${anchorAt}`;
       const logPath = join(dirname(metaPath), 'output.log');
-      const receiptPath = join(dirname(metaPath), 'timing-receipts', `${createHash('sha256').update(key).digest('hex')}.json`);
       const countersBefore = await work.request('runtime_get_metrics');
       report.preWindowActivity = { worker: worker.id, key, dueAt, countersBefore };
       reportPhase(`clients-${count}-await-owned-worker-wake`);
@@ -196,17 +195,12 @@ try {
         // The original baseline exposes the log fingerprint, but not a display checkpoint.
         if (!countersBefore.baselineObservation && (!row.display?.coverage?.complete || row.display.coverage.offset !== size)) return;
         const timing = row.meta.timing;
-        let at;
-        if (timing?.stuckAnchorAt === anchorAt) at = timing.stuckWakeSentAt;
-        else if (timing?.pendingWakes?.some(wake => wake.kind === 'stuck' && wake.key === key)) {
-          try {
-            const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
-            if (receipt.key === key) at = receipt.at;
-          } catch (error) { if (error.code !== 'ENOENT') throw error; }
-        }
+        // The receipt file can arrive before the manager folds it into the projected row.
+        if (timing?.stuckAnchorAt !== anchorAt || timing.pendingWakes?.some(wake => wake.key === key)) return;
+        const at = timing.stuckWakeSentAt;
         if (Number.isFinite(at) && at >= dueAt && at <= Date.now()) return { at, sourceRevision: row.sourceRevision, logBytes: size, logMtimeMs: rawLog.mtimeMs };
       };
-      await until('owned worker launch log projection and exact default stuck wake receipt', observe);
+      await until('owned worker launch log projection and folded default stuck wake', observe);
       workerWarmup = observe;
     }
     reportPhase(`clients-${count}-await-projection-barrier`);
