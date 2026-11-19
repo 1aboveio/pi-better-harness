@@ -83,15 +83,22 @@ export class WorkQueryExecutor {
     this.options = options; this.instanceId = instanceId; this.agentDir = agentDir;
     this.lag.enable();
     this.worker = this.startWorker();
+    const watchdogMs = this.options.watchdogMs ?? 4000;
+    let previousCheck = performance.now();
+    let resumedAt = previousCheck;
     this.watchdog = setInterval(() => {
-      if (this.closed || this.failure || performance.now() - this.lastResponse <= (this.options.watchdogMs ?? 4000)) return;
+      const now = performance.now();
+      // After system sleep both threads can resume with an expired heartbeat.
+      if (now - previousCheck > watchdogMs) resumedAt = now;
+      previousCheck = now;
+      if (this.closed || this.failure || now - Math.max(this.lastResponse, resumedAt) <= watchdogMs) return;
       // Drain queued worker responses before treating a delayed timer as worker silence.
       this.watchdogCheck ??= setImmediate(() => {
         this.watchdogCheck = undefined;
         this.checkWatchdog();
       });
       this.watchdogCheck.unref();
-    }, Math.min(250, (this.options.watchdogMs ?? 4000) / 4));
+    }, Math.min(250, watchdogMs / 4));
     this.watchdog.unref();
   }
 
