@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import { seedWorkload, mutateWorkload, workloadCounterDelta, reconcileWorkload } from '../scripts/measure-full-runtime/incremental-workload.mjs';
 import { parseRun, encodeParseLogState, decodeParseLogState } from '../src/runtime/domain/parse.mjs';
 import { LogCheckpoints } from '../src/runtime/log-checkpoints.ts';
@@ -17,15 +18,21 @@ test('existing external file writer returns source-byte receipts and preserves i
     settings: { history: 0, group: 48, clients: 1, durationMs: 600000, baseline: '' } });
   const manifestPath = join(root, 'manifest.json'); writeFileSync(manifestPath, JSON.stringify(manifest));
   const children: ReturnType<typeof fork>[] = [];
-  const start = async (args: string[]) => {
+  const start = async (args: string[], env = process.env) => {
     const child = fork(new URL('../scripts/event-publication/writer.mjs', import.meta.url), args,
-      { execArgv: ['--import', 'tsx'], env: process.env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+      { execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
     children.push(child);
     assert.equal((await once(child, 'message'))[0].ready, true);
     return child;
   };
   try {
-    const child = await start([manifestPath, '--incremental-workload']);
+    const probe = new URL('../scripts/measure-full-runtime/probe.mjs', import.meta.url);
+    const child = await start([manifestPath, '--incremental-workload'], {
+      ...process.env, PI_RESOURCE_REPORT_DIR: root, NODE_OPTIONS: `--import ${probe.href}`,
+    });
+    // The native driver awaits recovery capabilities and reads metrics before its first write.
+    const exited = once(child, 'exit');
+    assert.equal(await Promise.race([exited, delay(250, 'still running')]), 'still running', 'Ready writer exited before its first request');
     const pending = once(child, 'message');
     child.send({ id: 7, mutation: { kind: 'append', id: manifest.tasks[0]!.id, cents: 2, text: 'external writer bytes' } });
     const [receipt] = await pending;
@@ -33,6 +40,8 @@ test('existing external file writer returns source-byte receipts and preserves i
     assert.ok(receipt.result.afterBytes > receipt.result.beforeBytes);
     const parsed = parseRun(manifest.tasks[0]!.id, { logPath: join(manifest.runs, manifest.tasks[0]!.id, 'output.log') });
     assert.equal(parsed.finalText, 'external writer bytes'); assert.equal(parsed.usage.costUSD, 0.03);
+    child.disconnect();
+    assert.deepEqual(await exited, [0, null], 'The writer must exit naturally when the parent disconnects');
     const metaPath = join(manifest.runs, manifest.tasks[1]!.id, 'meta.json');
     const legacy = await start([metaPath]);
     const committed = once(legacy, 'message'); legacy.send({ marker: 'legacy-still-works' });

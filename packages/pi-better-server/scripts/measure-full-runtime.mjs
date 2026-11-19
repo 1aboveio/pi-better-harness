@@ -3,7 +3,6 @@ import { sourceProvenance } from './source-provenance.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { fork } from 'node:child_process';
 import { cpus, totalmem, release, arch, tmpdir, hostname } from 'node:os';
-import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,6 +52,7 @@ writeFileSync(join(agent, 'auth.json'), JSON.stringify({ openai: { type: 'api_ke
 writeFileSync(join(agent, 'settings.json'), JSON.stringify({ piBetterHarness: { subagents: { providerExtensions: { openai: fileURLToPath(new URL('../test/support/subagent-offline-model.ts', import.meta.url)) }, defaultTools: 'read', maxConcurrent: 1 } } }));
 writeFileSync(join(agent, 'agents/roles/fixture.md'), '---\nschema: pi-agent/v1\nkind: role\nid: role.fixture\nname: Fixture\ndefaults:\n  model: openai/gpt-4.1\n---\nOffline resource fixture.\n');
 let errors = '', seq = 0; const children = [], clients = [];
+const childState = new WeakMap();
 const report = { root, transport, socketPath, socketBytes: Buffer.byteLength(socketPath), mode: process.env.PI_FULL_RUNTIME_MATRIX_ONLY ? "mixed-adapter-smoke-not-performance" : incremental ? "resource-matrix" : "resource-smoke-not-qualified", platform: process.platform, node: process.version, machine:{release:release(),arch:arch(),cpus:cpus().length,cpuModel:cpus()[0]?.model,totalMemory:totalmem()}, source:sourceProvenance(fileURLToPath(new URL('../../..', import.meta.url))), scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two real RemoteClientSession adapters over loopback Unix transport with HostedSessions (not cross-machine SSH); sampler overhead included', scenarios: [] };
 const output = process.env.PI_FULL_RUNTIME_REPORT ?? join(root, 'report.json');
 env.PI_FULL_RUNTIME_CREATION_REPORT = `${output}.hosted-create.json`;
@@ -89,13 +89,49 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
   activeWorkload: { subagents: 1, durableCommands: 2, legacyCommands: 2, hostedSessions: 2, offline: true },
   coverage: { workerGc: false, aggregatePeak: false, queueAge: false, eventLatency: false, recovery: false, exit: false } };
 if (incremental) Object.assign(report, { incremental, workload: structuredClone(workload), qualification: 'notRun', missing: ['fault matrix', 'scope/UI matrix', 'native dual-platform runs', 'paired fixed-host comparison'] });
-function start(url, args = []) { const target = subject ? new URL(subjectModuleUrl(url.href, subject)) : url; const child = fork(target, args, { execPath, execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); children.push(child); child.stdout.resume(); child.stderr.on('data', d => { errors += d; }); return child; }
+function start(url, args = []) {
+  const target = subject ? new URL(subjectModuleUrl(url.href, subject)) : url;
+  const child = fork(target, args, { execPath, execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  const state = { name: target.pathname.split('/').at(-1), stderr: '', error: undefined };
+  childState.set(child, state);
+  children.push(child);
+  child.stdout.resume();
+  child.stderr.on('data', data => { errors += data; state.stderr = (state.stderr + data).slice(-4000); });
+  child.on('error', error => { state.error ??= error; });
+  return child;
+}
 async function until(label, fn, timeout = 30000) { const deadline = Date.now()+timeout; while (Date.now()<deadline) { const value = await fn(); if (value) return value; await delay(25); } throw new Error(`${label} timed out: ${errors.slice(-4000)}`); }
-function message(child, predicate) { return new Promise((resolve, reject) => { const timer = setTimeout(() => { cleanup(); reject(new Error(`IPC timeout: ${errors.slice(-2000)}`)); }, 30000); const on = value => { if (predicate(value)) { cleanup(); resolve(value); } }; const exit = () => { cleanup(); reject(new Error(`Child exited: ${errors}`)); }; function cleanup() { clearTimeout(timer); child.off('message', on); child.off('exit', exit); } child.on('message', on); child.once('exit', exit); }); }
-async function call(child, tool, params, key = `resource-${++seq}`) { const id = ++seq, pending = message(child, m => m.id === id); child.send({ id, key, tool, params }); const reply = await pending; assert.equal(reply.error, undefined, reply.stack); return reply.result; }
+function send(child, payload) {
+  return new Promise((resolve, reject) => child.send(payload, error => error ? reject(error) : resolve()));
+}
+function message(child, predicate, payload) {
+  return new Promise((resolve, reject) => {
+    const state = childState.get(child);
+    const fail = error => {
+      cleanup();
+      reject(new Error(`${state.name} IPC ${error?.message ?? 'closed'} (exit=${child.exitCode}, signal=${child.signalCode}): ${state.stderr}`, { cause: error }));
+    };
+    const onMessage = value => { if (predicate(value)) { cleanup(); resolve(value); } };
+    const onExit = () => fail(state.error);
+    const timer = setTimeout(() => fail(new Error('response timed out')), 30000);
+    function cleanup() {
+      clearTimeout(timer);
+      child.off('message', onMessage);
+      child.off('exit', onExit);
+      child.off('error', fail);
+    }
+    child.on('message', onMessage);
+    child.once('exit', onExit);
+    child.once('error', fail);
+    if (state.error || !child.connected) fail(state.error);
+    else if (payload !== undefined) send(child, payload).catch(fail);
+  });
+}
+async function call(child, tool, params, key = `resource-${++seq}`) { const id = ++seq, reply = await message(child, m => m.id === id, { id, key, tool, params }); assert.equal(reply.error, undefined, reply.stack); return reply.result; }
 function diagnosticSamples() { return readdirSync(samples).filter(name => name.endsWith('.json')).flatMap(name => { try { const value = JSON.parse(readFileSync(join(samples,name),'utf8')); return value && typeof value === 'object' ? [value] : []; } catch { return []; } }); }
 function observed() { return diagnosticSamples().filter(value => value.identity && processMatchesStart(value.identity.pid,value.identity.start)); }
 let guardian, work; const hostedClients=[], remotes=[];
+let firstFailure, failed = false;
 try {
   reportPhase('startup-admission-preflight');
   const intent = startupIntentFromEnv(env);
@@ -208,7 +244,7 @@ try {
       const scope={background:true,cwd,sessionId:JSON.parse(readFileSync(sessionFile,'utf8').split('\n')[0]).id};
       const before=await work.get(scope);
       const workerBefore=await workerWarmup?.();
-      await Promise.all(clients.map(async child=>{const id=++seq,pending=message(child,m=>m.id===id);child.send({id,barrier:true});const reply=await pending;assert.equal(reply.error,undefined,reply.stack);}));
+      await Promise.all(clients.map(async child=>{const id=++seq,reply=await message(child,m=>m.id===id,{id,barrier:true});assert.equal(reply.error,undefined,reply.stack);}));
       const after=await work.get(scope), management=(await work.request('runtime_get_status')).backgroundManagement;
       const workerAfter=await workerWarmup?.();
       const legacyReady=after.rows.filter(row=>!row.meta.durable).map(row=>{
@@ -321,6 +357,7 @@ try {
     assert.ok(connections.coordinator<=2,`Root coordinator budget exceeded: ${JSON.stringify(connections)}`); assert.ok(connections.derived<=2);
   }
   if (workload && process.env.PI_INCREMENTAL_MUTATIONS === '1') {
+    reportPhase('mutation-writer-startup');
     const manifestPath = join(root, 'mutation-manifest.json');
     writeFileSync(manifestPath, JSON.stringify(workload));
     const writer = start(new URL('./event-publication/writer.mjs', import.meta.url), [manifestPath, '--incremental-workload']);
@@ -337,11 +374,11 @@ try {
       if (action === 'restart') recoveryTimes.push(receipt.elapsedMs);
       return { ...receipt, ...(action === 'restart' ? { client: work } : {}) };
     } }]));
+    reportPhase('run-mutation-sequence');
     const mutationState = await runMutationSequence({ manifest: workload, client: work, evidenceScope: 'runtime', recovery,
       write: async mutation => {
-        const id = ++seq, pending = message(writer, value => value.id === id);
-        writer.send({ id, mutation });
-        const receipt = await pending; assert.equal(receipt.error, undefined, receipt.error); return receipt.result;
+        const id = ++seq, receipt = await message(writer, value => value.id === id, { id, mutation });
+        assert.equal(receipt.error, undefined, receipt.error); return receipt.result;
       },
       observe: async (mutation, receipt, before, client) => {
         await until('external mutation observed by actual source inventory', async () => {
@@ -372,17 +409,19 @@ try {
     assert.ok(mutationState.complete, 'Required owned recovery capabilities are missing; dependent phases did not execute');
     report.scenarios.at(-1).recovery = distribution(recoveryTimes);
     report.measurement.coverage.recovery = report.scenarios.every(value => value.recovery?.samples > 0);
+    reportPhase('mutation-writer-exit');
     if (writer.exitCode === null && writer.signalCode === null) {
       if (writer.connected) writer.disconnect();
       await until('owned mutation writer exit after its IPC lifetime ends', () => writer.exitCode !== null || writer.signalCode !== null);
     }
+    assert.equal(writer.exitCode, 0, `Owned mutation writer exited abnormally: ${childState.get(writer).stderr}`);
   }
   writeFileSync(join(cwd,'finish'),'done');
   reportPhase('await-remote-terminal-receipt');
   const receipt=`background-terminal:${remoteLaunch.operationId}`;
   await until('exact remote native recipient receipt',()=>remotes[0].sessionManager.getBranch().some(entry=>entry.type==='custom_message'&&entry.details?.completionEventIds?.includes(receipt)));
   assert.equal(remotes[1].sessionManager.getBranch().some(entry=>entry.type==='custom_message'&&entry.details?.completionEventIds?.includes(receipt)),false,'other remote recipient must not consume completion');
-  const localEntries=await (async()=>{const id=++seq,pending=message(first,m=>m.id===id);first.send({id,entries:true});return (await pending).result;})();
+  const localEntries=await (async()=>{const id=++seq;return (await message(first,m=>m.id===id,{id,entries:true})).result;})();
   assert.equal(localEntries.some(entry=>entry.type==='custom_message'&&entry.details?.completionEventIds?.includes(receipt)),false,'ordinary local recipient must not consume remote completion');
   report.mixed.exactRecipientReceipt=receipt;report.mixed.isolation=true;
   if (incremental) {
@@ -390,7 +429,7 @@ try {
     writeFileSync(join(cwd, 'release'), 'done');
     for (const remote of remotes) await remote.dispose();
     for (const [index, client] of hostedClients.entries()) await client.call({ type: 'close_session', sessionId: remotes[index].sessionId });
-    for (const child of clients) if (child.connected) child.send({ stop: true });
+    for (const child of clients) if (child.connected) await send(child, { stop: true });
     work.close(); for (const client of hostedClients) client.close();
     const lifecycle = readLifecycleConfig(transport);
     assert.ok(lifecycle.daemonIdleMs > 0, 'Natural hosted-runtime exit is disabled by actual lifecycle policy');
@@ -400,25 +439,47 @@ try {
     report.scenarios.at(-1).exit = distribution([performance.now() - exitStarted]);
     report.measurement.coverage.exit = report.scenarios.every(value => value.exit?.samples > 0);
   }
-} catch(error) { report.failure=String(error); throw error; }
-finally {
-  reportPhase('cleanup-observe-owned');
-  const owned = observed().map(value => value.identity).filter(identity=>identity.pid!==process.pid);
-  writeFileSync(join(cwd,'release'),'done'); writeFileSync(join(cwd,'finish'),'done');
-  work?.close();
-  for (const [index, remote] of remotes.entries()) {
-    reportPhase(`cleanup-remote-${index}-dispose`);
-    await remote.dispose();
-  }
-  reportPhase('cleanup-stop-children');
-  for(const client of hostedClients) client.close();
-  for(const child of clients) if(child.connected) child.send({stop:true});
-  await delay(1000);
-  for(const child of children) if(child.exitCode===null&&child.signalCode===null) child.kill('SIGTERM');
-  await delay(1000);
-  for (const identity of owned) if (processMatchesStart(identity.pid, identity.start)) { try { process.kill(identity.pid, 'SIGTERM'); } catch(error) { if(error.code !== 'ESRCH') throw error; } }
-  await delay(500);
-  for (const identity of owned) if (processMatchesStart(identity.pid, identity.start)) { try { process.kill(identity.pid, 'SIGKILL'); } catch(error) { if(error.code !== 'ESRCH') throw error; } }
-  reportPhase('cleanup-finished');
-  writeFileSync(output,JSON.stringify({...report,errors:errors.slice(-4000)},null,2)); console.log(`Full runtime report: ${output}`);
+} catch (error) {
+  failed = true;
+  firstFailure = error;
+  report.failure = String(error);
+  report.failurePhase = report.phase;
 }
+finally {
+  const cleanupFailures = [];
+  async function cleanupStep(step, run) {
+    try { return await run(); }
+    catch (error) {
+      cleanupFailures.push({ step, error });
+      console.error(`Full runtime cleanup ${step}: ${error}`);
+    }
+  }
+  await cleanupStep('observe phase', () => reportPhase('cleanup-observe-owned'));
+  const owned = await cleanupStep('observe identities', () => observed().map(value => value.identity).filter(identity=>identity.pid!==process.pid)) ?? [];
+  for (const gate of ['release', 'finish']) await cleanupStep(`write ${gate} gate`, () => writeFileSync(join(cwd, gate), 'done'));
+  await cleanupStep('close WorkClient', () => work?.close());
+  for (const [index, remote] of remotes.entries()) {
+    await cleanupStep(`record remote ${index} phase`, () => reportPhase(`cleanup-remote-${index}-dispose`));
+    await cleanupStep(`dispose remote ${index}`, () => remote.dispose());
+  }
+  await cleanupStep('stop children phase', () => reportPhase('cleanup-stop-children'));
+  for (const [index, client] of hostedClients.entries()) await cleanupStep(`close hosted client ${index}`, () => client.close());
+  for (const child of clients) if (child.connected) await cleanupStep(`stop client ${child.pid}`, () => send(child, { stop: true }));
+  await delay(1000);
+  for (const child of children) if (child.exitCode === null && child.signalCode === null) await cleanupStep(`terminate child ${child.pid}`, () => child.kill('SIGTERM'));
+  for (const [waitMs, signal] of [[1000, 'SIGTERM'], [500, 'SIGKILL']]) {
+    await delay(waitMs);
+    for (const identity of owned) await cleanupStep(`${signal} owned ${identity.pid}`, () => {
+      if (!processMatchesStart(identity.pid, identity.start)) return;
+      try { process.kill(identity.pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    });
+  }
+  await cleanupStep('finish phase', () => reportPhase('cleanup-finished'));
+  await cleanupStep('write final report', () => {
+    const cleanupErrors = cleanupFailures.map(({ step, error }) => ({ step, error: String(error) }));
+    writeFileSync(output, JSON.stringify({ ...report, errors: errors.slice(-4000), cleanupErrors }, null, 2));
+    console.log(`Full runtime report: ${output}`);
+  });
+  if (!failed && cleanupFailures.length) throw cleanupFailures[0].error;
+}
+if (failed) throw firstFailure;
