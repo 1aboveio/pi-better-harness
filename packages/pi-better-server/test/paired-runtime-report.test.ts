@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { validatePairedReports } from '../scripts/measure-full-runtime/paired-report.mjs';
+import { summarizeCohorts } from '../scripts/measure-full-runtime/aggregate-samples.mjs';
 import { baseline } from '../scripts/measure-full-runtime/incremental-workload.mjs';
 
 // Adversarial schema specimens only. No specimen is a measurement or can qualify:
@@ -20,7 +21,7 @@ function specimen() {
   const tasks = Array.from({ length: 48 }, (_, i) => ({ id: `task-${i}`, finalText: 'schema-only', costUSD: 1, input: 1, output: 1 }));
   return { mode: 'resource-matrix', source: { kind: 'git-checkout', head: baseline, dirty: '', manifest: { sha256: 'a'.repeat(64) } },
     measurement: { schemaVersion: 1, fixedHostId: 'schema-host', hostname: 'schema-hostname', artifact: { contentId: 'b'.repeat(64) }, fixtureSha256: 'c'.repeat(64),
-      diagnosticBudget: { samplerIntervalMs: 250, controlIntervalMs: 100 },
+      diagnosticBudget: { samplerIntervalMs: 250, controlIntervalMs: 100, batchCapturePeriodMs: 100 },
       activeWorkload: { subagents: 1, durableCommands: 2, legacyCommands: 2, hostedSessions: 2, offline: true }, coverage: {} },
     machine: { release: 'schema-os', arch: 'arm64', cpus: 1, cpuModel: 'schema-cpu', totalMemory: 1 }, node: 'schema-node', platform: 'darwin',
     incremental: { history: 4416, clients: 1, group: 48, durationMs: 600000 }, workload: { tasks, seededLogBytes: 1 },
@@ -99,6 +100,26 @@ test('valid counter arithmetic does not hide incomplete windows or coverage and 
   assert.equal(result.cpuThreshold.status, 'not-specified');
 });
 
+test('paired report accepts the exact native diagnostic budget on both sides', () => {
+  const result = validatePairedReports(specimen(), specimen(), expected);
+  assert.deepEqual(result.issues.filter(issue => issue.path.endsWith('.diagnosticBudget')), []);
+});
+
+for (const [name, invalidBudget] of [
+  ['wrong batch period', { samplerIntervalMs: 250, controlIntervalMs: 100, batchCapturePeriodMs: 101 }],
+  ['missing batch period', { samplerIntervalMs: 250, controlIntervalMs: 100 }],
+  ['extra budget field', { samplerIntervalMs: 250, controlIntervalMs: 100, batchCapturePeriodMs: 100, extra: 1 }],
+] as const) test(`paired report rejects a matching budget with ${name} on both sides`, () => {
+  const [before, after] = [specimen(), specimen()].map(report => ({
+    ...report, measurement: { ...report.measurement, diagnosticBudget: invalidBudget },
+  }));
+  const result = validatePairedReports(before, after, expected);
+  assert.deepEqual(result.issues.filter(issue => issue.path.endsWith('.diagnosticBudget')), [
+    { path: 'before[0].diagnosticBudget', code: 'missing-or-changed-budget' },
+    { path: 'after[0].diagnosticBudget', code: 'missing-or-changed-budget' },
+  ]);
+});
+
 for (const [name, change, path, code] of [
   ['host', (r: any) => { r.measurement.fixedHostId = 'other'; }, 'fixed-host', 'mismatch'],
   ['missing host', (r: any) => { delete r.measurement.fixedHostId; }, '.host', 'missing-fixed-host'],
@@ -157,6 +178,32 @@ test('claimed aggregate peak is rejected unless its retained cohort stream repro
   const result = validatePairedReports(report, report, expected);
   assert.ok(has(result, '.coverage.aggregatePeak', 'missing-or-inconsistent-cohort-stream'));
   assert.equal(result.cpuComparison, null); assert.equal(result.qualified, false);
+});
+
+test('a valid native budget does not excuse a 251 ms cohort gap', () => {
+  const before = specimen();
+  const window = before.scenarios[0]!;
+  const { startedAt, endedAt, requiredProcesses } = window;
+  const cohorts = Array.from({ length: (endedAt - startedAt) / 250 + 1 }, (_, index) =>
+    requiredProcesses.map(({ identity }) => ({ identity, generation: '1', sequence: index + 1,
+      at: startedAt + index * 250, cpu: { user: index, system: 0 }, rss: 100 })));
+  const summarize = (frames: typeof cohorts) => summarizeCohorts(frames,
+    { required: requiredProcesses, generation: '1' }, { startedAt, endedAt });
+  Object.assign(before.measurement.coverage, { aggregatePeak: true });
+  Object.assign(window, { aggregatePeak: summarize(cohorts), aggregateCohorts: cohorts });
+
+  const after = structuredClone(before);
+  const gappedCohorts = structuredClone(cohorts);
+  for (const sample of gappedCohorts[1]!) sample.at++;
+  Object.assign(after.scenarios[0]!, { aggregatePeak: summarize(gappedCohorts), aggregateCohorts: gappedCohorts });
+
+  const result = validatePairedReports(before, after, expected);
+  assert.deepEqual(result.issues.filter(issue => issue.path.endsWith('.coverage.aggregatePeak')), [
+    { path: 'after[0].scenarios[0].coverage.aggregatePeak', code: 'not-qualified' },
+    { path: 'after[0].scenarios[0].coverage.aggregatePeak', code: 'missing-or-inconsistent-cohort-stream' },
+  ]);
+  assert.equal(result.qualified, false);
+  assert.equal(result.cpuComparison, null);
 });
 
 test('batch capture cannot hide unobserved external observer cost behind coverage flags', () => {

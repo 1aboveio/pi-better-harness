@@ -6,6 +6,8 @@ import { summarizeCohorts } from './aggregate-samples.mjs';
 
 export const requiredWindows = [4416, 10000].flatMap(history => [1, 5, 10].flatMap(clients =>
   [48, 96, 192].map(group => ({ history, clients, group }))));
+// Pin the native driver's report contract. The batch target is not the allowed cohort gap.
+const nativeDiagnosticBudget = { samplerIntervalMs: 250, controlIntervalMs: 100, batchCapturePeriodMs: 100 };
 const key = value => `${value?.history}/${value?.clients}/${value?.group}`;
 const identity = value => `${value?.pid}:${value?.start}`;
 const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -47,7 +49,7 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
       else equal(report.measurement?.fixedHostId, expected.fixedHostId, path + '.approved-host');
       for (const field of ['release', 'arch', 'cpus', 'cpuModel', 'totalMemory']) if (!report.machine?.[field]) issue(path + '.machine.' + field, 'missing-machine-field');
       if (!report.node || !['darwin', 'linux'].includes(report.platform)) issue(path + '.platform', 'missing-runtime-platform');
-      if (!isDeepStrictEqual(report.measurement?.diagnosticBudget, { samplerIntervalMs: 250, controlIntervalMs: 100 })) issue(path + '.diagnosticBudget', 'missing-or-changed-budget');
+      if (!isDeepStrictEqual(report.measurement?.diagnosticBudget, nativeDiagnosticBudget)) issue(path + '.diagnosticBudget', 'missing-or-changed-budget');
       if (!digest(expected.fixtureSha256) || !digest(report.measurement?.fixtureSha256)) issue(path + '.fixture', 'missing-fixture-identity');
       else equal(report.measurement.fixtureSha256, expected.fixtureSha256, path + '.fixture');
       if (!report.measurement?.activeWorkload || !report.workload?.tasks?.length || !report.incremental) issue(path + '.workload', 'missing-workload');
