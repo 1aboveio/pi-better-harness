@@ -27,7 +27,7 @@ This slice adds no repair loop, terminal outcome store or always-running daemon.
 
 Use background operations for established commands and external waits. Use model execution for judgment before an operation and interpretation after it. A worker may retain necessary synchronous checks, including long ones; duration alone does not determine ownership. A command-only polling assignment does not become model work because its requested final report is detailed.
 
-A waiting parent remains responsive. A waiting worker may end its execution attempt while preserving its conversation and assignment, then resume in a new attempt when its dependency resolves. Waiting is neither completion of the assignment nor a stalled model. A terminal observation makes evidence available; the owner must interpret it before claiming success. Failure, cancellation and lost execution evidence also require explicit resolution.
+A waiting parent remains responsive. A waiting worker may end its execution attempt while preserving its conversation and assignment, then resume in a new attempt when its dependency resolves. Waiting is neither completion of the assignment nor a stalled model. A terminal observation makes evidence available; the owner must interpret it before claiming success. Failure, cancellation and lost execution evidence also require explicit resolution. Stopping an assignment's owned background tasks is governed by [ADR 0025](0025-assignment-terminal-task-cleanup.md) and does not apply to parking.
 
 ## Context and trade-off
 
