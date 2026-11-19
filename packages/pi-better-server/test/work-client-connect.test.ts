@@ -39,6 +39,21 @@ test('unavailable connection has a bounded deadline and supports cancellation',a
  controller.abort();await assert.rejects(pending,{name:'AbortError'});
 });
 
+test('an expired shared recovery reports a reconnect deadline to a later waiter', async t => {
+ const f = await fixture(t, reply);
+ let entered!: () => void;
+ const recovering = new Promise<void>(resolve => { entered = resolve; });
+ const recover = async ({ signal }: { signal: AbortSignal }) => {
+  entered();
+  await delay(5000, undefined, { signal });
+ };
+ const first = assert.rejects(transport.connectWorkClient(f.path, f.root, [], { timeoutMs: 950, recover }), /reconnect deadline/);
+ void first.catch(() => {});
+ await recovering;
+ await assert.rejects(transport.connectWorkClient(f.path, f.root, [], { timeoutMs: 2500, recover }), /reconnect deadline/);
+ await first;
+});
+
 test('a compatible replacement can connect after a pinned installer rejects its build', async t => {
  const f=await fixture(t,reply);
  const client=await transport.connectWorkClient(f.path,f.root,[],{timeoutMs:1500,recover:async()=>{
