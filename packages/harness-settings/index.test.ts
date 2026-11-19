@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { closeSync, lstatSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -77,18 +77,50 @@ test("malformed global settings cannot be discarded by a preference save", t => 
   }
 });
 
-test("independent Pi and Harness processes update settings without losing sibling values", async t => {
+test("independent Pi and Harness processes update settings without losing sibling values", { timeout: 15000 }, async t => {
   const f = fixture(t);
   writeFileSync(f.path, '{"theme":"dark"}');
   const module = new URL("./index.ts", import.meta.url).href;
+  const releaseOwner = join(f.root, "release-owner"), ownerReleased = join(f.root, "owner-released");
+  const waitForGate = `
+    function waitForGate(path) {
+      const deadline = performance.now() + 5000;
+      const word = new Int32Array(new SharedArrayBuffer(4));
+      while (!existsSync(path)) {
+        if (performance.now() >= deadline) throw new Error('Settings fixture gate did not open: ' + path);
+        Atomics.wait(word, 0, 0, 5);
+      }
+    }`;
   const children = ["goal", "callbacks", "sandbox", "subagents", "pi"].map(key => {
     const initialize = key === "pi"
       ? `import assert from 'node:assert/strict'; import {SettingsManager} from '@earendil-works/pi-coding-agent'; const pi=SettingsManager.create(${JSON.stringify(f.root)},${JSON.stringify(f.root)}); assert.deepEqual(pi.drainErrors(),[]);`
       : `import {updateHarnessSetting} from ${JSON.stringify(module)};`;
     const writes = key === "pi"
-      ? `for(let i=0;i<10;i++){pi.setTheme('light'); await pi.flush(); assert.deepEqual(pi.drainErrors(),[]);}`
-      : `for(let i=0;i<10;i++) updateHarnessSetting(${JSON.stringify(key)},()=>({saved:true}),{agentDir:()=>${JSON.stringify(f.root)}});`;
-    const code = `import {once} from 'node:events'; ${initialize}
+      ? `
+        const sdkLock = createRequire(import.meta.resolve('@earendil-works/pi-coding-agent'))('proper-lockfile');
+        const lockSync = sdkLock.lockSync;
+        let contended = false;
+        sdkLock.lockSync = (path, options) => {
+          try { return lockSync(path, options); }
+          catch (error) {
+            if (!contended && error.code === 'ELOCKED' && path === ${JSON.stringify(f.path)}) {
+              contended = true;
+              process.send('contended');
+              waitForGate(${JSON.stringify(ownerReleased)});
+            }
+            throw error;
+          }
+        };
+        pi.setTheme('light');
+        await pi.flush();
+        assert.deepEqual(pi.drainErrors(), []);
+        assert.equal(contended, true, 'Pi must observe a real Harness lock collision');`
+      : `updateHarnessSetting(${JSON.stringify(key)}, () => {
+        ${key === "goal" ? `process.send('holding'); waitForGate(${JSON.stringify(releaseOwner)});` : ""}
+        return { saved: true };
+      }, { agentDir: () => ${JSON.stringify(f.root)} });`;
+    const code = `import {once} from 'node:events'; import {existsSync} from 'node:fs';
+      import {createRequire} from 'node:module'; ${waitForGate} ${initialize}
       process.send('ready'); await once(process,'message'); ${writes} process.disconnect();`;
     const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
       code], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
@@ -99,13 +131,34 @@ test("independent Pi and Harness processes update settings without losing siblin
       child.on("close", code => code === 0 ? resolve() : reject(new Error(`${key}: ${stderr || `exit ${code}`}`)));
     });
     const ready = Promise.race([once(child, "message"), exited.then(() => { throw new Error(`${key} exited before ready`); })]);
-    return { child, ready, exited };
+    return { key, child, ready, exited };
   });
   try {
     // Pi retains an initial read error and silently skips later saves. Exercise
     // concurrent writes only after every independent manager has loaded safely.
     await Promise.all(children.map(value => value.ready));
-    for (const { child } of children) child.send("write");
+    const owner = children.find(value => value.key === "goal")!;
+    const pi = children.find(value => value.key === "pi")!;
+    const nextMessage = (value: typeof owner) => Promise.race([
+      once(value.child, "message"), value.exited.then(() => { throw new Error(`${value.key} exited before its lock checkpoint`); }),
+    ]);
+    const holding = nextMessage(owner);
+    owner.child.send("write");
+    const [holdingMessage] = await holding;
+    assert.equal(holdingMessage, "holding");
+    const contention = nextMessage(pi);
+    pi.child.send("write");
+    const [contentionMessage] = await contention;
+    assert.equal(contentionMessage, "contended");
+    assert.equal(lstatSync(f.path + ".lock").isDirectory(), true);
+    assert.deepEqual(JSON.parse(readFileSync(f.path, "utf8")), { theme: "dark" });
+    // Resume Pi's normal retry only after the proven lock owner has released.
+    writeFileSync(releaseOwner, "release");
+    await owner.exited;
+    assert.equal(existsSync(f.path + ".lock"), false);
+    writeFileSync(ownerReleased, "released");
+    await pi.exited;
+    for (const value of children) if (value !== owner && value !== pi) value.child.send("write");
     await Promise.all(children.map(value => value.exited));
   } finally {
     for (const { child } of children) if (child.exitCode === null && child.signalCode === null) child.kill();
