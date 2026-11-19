@@ -4,6 +4,8 @@ import {createServer, type Socket} from 'node:net';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
+import { claimDaemonOwner, inspectDaemonOwner } from '../src/daemon-owner.ts';
+import { runtimeStatus, waitForRuntimeOwner } from '../src/runtime/client.ts';
 import * as transport from '../src/runtime/work-client.mjs';
 
 async function fixture(t: TestContext, handler: (socket: Socket, message: any) => void) {
@@ -37,6 +39,31 @@ test('unavailable connection has a bounded deadline and supports cancellation',a
  const controller=new AbortController();
  const pending=transport.connectWorkClient(f.path,f.root,[],{signal:controller.signal,timeoutMs:2000});
  controller.abort();await assert.rejects(pending,{name:'AbortError'});
+});
+
+test('a shared recovery deadline refuses a live owner without reporting caller cancellation', async t => {
+ const { root, path } = await fixture(t, reply);
+ const release = claimDaemonOwner(root);
+ const before = inspectDaemonOwner(root);
+ assert.equal(before.status, 'live');
+ let recoveries = 0;
+ const recover = ({ signal }: { signal: AbortSignal }) => {
+  recoveries++;
+  // Let the transport budget expire while the installer would still wait for the owner.
+  return waitForRuntimeOwner(root, () => runtimeStatus(path, root, {} as any), 3000, signal);
+ };
+ try {
+  // The longer call can see the shared recovery's error after the shorter call expires.
+  await Promise.all([
+   assert.rejects(transport.connectWorkClient(path, root, [], { recover, timeoutMs: 1200 }), /reconnect deadline/),
+   assert.rejects(transport.connectWorkClient(path, root, [], { recover, timeoutMs: 2500 }),
+    /runtime-unavailable: reconnect deadline exceeded during recovery/),
+  ]);
+  assert.equal(recoveries, 1);
+  assert.deepEqual(inspectDaemonOwner(root), before);
+ } finally {
+  release();
+ }
 });
 
 test('a compatible replacement can connect after a pinned installer rejects its build', async t => {

@@ -67,9 +67,10 @@ describe("manager-domain SDK integration and native server acceptance", () => {
     writeFileSync(logPath, "checkpoint\n");
     const permissions = { enabled: false, commands: true, network: true, processAccess: "read",
       projectFiles: "read-write", outsideProject: "read", storedCredentials: "read" };
-    let backgroundAccess = "off";
+    let backgroundEnabled = true;
     harness.events.on(FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, () => harness.events.emit(FOREGROUND_SANDBOX_POLICY_CHANNEL, {
-      state: "disabled", permissions, background: { state: "disabled", permissions: { ...permissions, processAccess: backgroundAccess } },
+      state: "disabled", permissions, background: { state: backgroundEnabled ? "enabled" : "disabled",
+        permissions: { ...permissions, enabled: backgroundEnabled, processAccess: "off" } },
     }));
     try {
       for (const tool of ["bg_task_status", "bg_task", "bg_status"]) {
@@ -77,7 +78,7 @@ describe("manager-domain SDK integration and native server acceptance", () => {
         expect(result.processDiagnostics).toMatchObject({ availability: "blocked" });
         expect(result.sandbox.confinement).toBe("unconfined");
       }
-      backgroundAccess = "read";
+      backgroundEnabled = false;
       const result = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true, diagnostics: true }));
       if (process.platform === "darwin" || process.platform === "linux") {
         expect(result.processDiagnostics).toMatchObject({ availability: "available", identity: "matches" });

@@ -185,9 +185,10 @@ missing profile files or current process-tool denials are not confinement proof.
 Remote execution also reports unknown remote confinement.
 
 Use `bg_task_status` with `diagnostics:true` (or either wrapper's `status`
-action) for a bounded, current process snapshot. Both Main and Background tasks
-must currently permit **Process access: Read**, even when sandbox switches are
-Off. The result checks the recorded PID and start identity, then reports process
+action) for a bounded, current process snapshot. An enabled Background tasks
+profile must permit **Process access: Read**. A disabled profile's retained
+setting does not deny access. The adapter is unavailable under Main confinement.
+The result checks the recorded PID and start identity, then reports process
 state, accumulated CPU time, and available wait evidence. It never reads command
 arguments or environment values and never probes a remote host or descendants.
 A snapshot cannot establish useful work or a hang. Watch poll PIDs are not

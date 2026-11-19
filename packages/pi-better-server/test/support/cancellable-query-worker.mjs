@@ -1,6 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { bootstrapHeartbeat } from "./bootstrap-heartbeat.mjs";
-const stopBootstrapHeartbeat = bootstrapHeartbeat(parentPort);
+const stopBootstrapHeartbeat = bootstrapHeartbeat(parentPort, workerData.heartbeat);
 const phase = value => parentPort.postMessage({ type: "fixture-bootstrap-phase", phase: value });
 if (workerData.fixtureHoldBootstrap) {
   phase("bootstrap-held");
