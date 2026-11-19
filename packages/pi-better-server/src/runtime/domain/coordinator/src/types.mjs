@@ -19,6 +19,6 @@
  *   spawned, so a crash is reconciled instead of relaunched.
  */
 /** Schema version this build writes after creating or migrating a store. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 4;
 /** Phases that no longer accept automatic continuation. */
 export const TERMINAL_WAIT_PHASES = ["consumed", "cancelled"];

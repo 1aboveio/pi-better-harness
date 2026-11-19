@@ -20,7 +20,7 @@
  */
 
 /** Schema version this build writes after creating or migrating a store. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 4;
 
 /** Who receives an operation's result and decides what happens next. */
 export type OwnerKind = "parent-session" | "worker-conversation";

@@ -553,7 +553,7 @@ export class WorkReadModel {
         this.unsupportedAssignmentRevision = undefined;
       }
       const connection = this.reader.connection(false);
-      const supported = (version: unknown) => version === undefined || (typeof version === "string" && ["1", "2", "3", "4", "5"].includes(version));
+      const supported = (version: unknown) => version === undefined || (typeof version === "string" && ["1", "2", "3", "4"].includes(version));
       if (!connection || supported(connection.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value)) return false;
       const snapshot = this.reader.beginSnapshot(); release = snapshot.release;
       const version = this.reader.connection(false).prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value;

@@ -60,7 +60,7 @@ const ASSIGNMENT_ATTEMPTS_DDL = `CREATE TABLE IF NOT EXISTS assignment_attempts 
     assignment_id TEXT NOT NULL REFERENCES assignment_bindings (assignment_id)
 )`;
 const ASSIGNMENT_ATTEMPT_COLUMN = `assignment_attempt_id TEXT REFERENCES assignment_attempts (attempt_id)`;
-const ASSIGNMENT_CLEANUP_INDEX = `CREATE INDEX operations_assignment_cleanup
+const ASSIGNMENT_CLEANUP_INDEX = `CREATE INDEX IF NOT EXISTS operations_assignment_cleanup
     ON operations (operation_id, assignment_attempt_id)
     WHERE assignment_attempt_id IS NOT NULL`;
 const DDL = [
@@ -342,15 +342,25 @@ export function ensureSchema(ctx) {
             else if (recorded === 3) {
                 ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE assignment_repairs")));
             }
-            ctx.db.exec(ASSIGNMENT_ATTEMPTS_DDL);
-            // Legacy operations have no exact attempt provenance. Leave them unbound.
-            ctx.db.exec(`ALTER TABLE operations ADD COLUMN ${ASSIGNMENT_ATTEMPT_COLUMN}`);
-            ctx.db.exec(ASSIGNMENT_CLEANUP_INDEX);
+            ensureAssignmentCleanupSchema(ctx);
             run(ctx, "UPDATE schema_meta SET value = ? WHERE key = ?", String(SCHEMA_VERSION), SCHEMA_VERSION_KEY);
         });
         return;
     }
     ensureAdditiveSchema(ctx);
+    ensureAssignmentCleanupSchema(ctx);
+}
+function ensureAssignmentCleanupSchema(ctx) {
+    const hasColumn = () => getRows(ctx, "PRAGMA table_info(operations)").some(row => row.name === "assignment_attempt_id");
+    if (hasColumn() && getRow(ctx, "SELECT 1 FROM sqlite_master WHERE name = 'operations_assignment_cleanup'"))
+        return;
+    ctx.transaction(() => {
+        ctx.db.exec(ASSIGNMENT_ATTEMPTS_DDL);
+        // Legacy writers leave the nullable provenance unset.
+        if (!hasColumn())
+            ctx.db.exec(`ALTER TABLE operations ADD COLUMN ${ASSIGNMENT_ATTEMPT_COLUMN}`);
+        ctx.db.exec(ASSIGNMENT_CLEANUP_INDEX);
+    });
 }
 /**
  * Schema version 1 is extended additively: older readers ignore the new column,

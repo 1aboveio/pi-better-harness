@@ -179,7 +179,7 @@ test("v4 migration keeps legacy operations unbound even when their owner has a c
         db.exec("UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'");
     } finally { db.close(); }
     h.reopen();
-    assert.equal(h.store.schemaVersion, 5);
+    assert.equal(h.store.schemaVersion, 4);
     assert.equal(h.store.getAssignmentOutcome(assignment.assignmentId)?.outcome, "failed");
     assert.equal(h.store.getOperation("op-build-1")?.assignmentAttemptId, undefined);
     assert.equal(registerOperation(h.store).created, false);

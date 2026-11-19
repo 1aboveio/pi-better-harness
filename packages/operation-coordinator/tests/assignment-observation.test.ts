@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { existsSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { cleanupHarnesses, createHarness, parentOwner, registerOperation, removeAssignmentOperationBinding, settleOperation, workerOwner } from "./support.ts";
+import { cleanupHarnesses, createHarness, parentOwner, registerOperation, settleOperation, workerOwner } from "./support.ts";
 
 afterEach(cleanupHarnesses);
 
@@ -34,9 +34,9 @@ const readers = await Promise.all([
 ].map(async (path) => (await import(new URL(path, import.meta.url).href)).readAssignmentWaits));
 const [readAssignmentWaits] = readers;
 
-test("observers read v4 and the canonical reader reads v5 without modifying storage", async () => {
+test("v4 observers read real assignment waits and terminal outcomes without modifying storage", () => {
     const h = createHarness();
-    assert.equal(h.store.schemaVersion, 5);
+    assert.equal(h.store.schemaVersion, 4);
     registerOperation(h.store);
     h.store.registerAssignment({ assignmentId: "observed-assignment", owner: workerOwner, recipient: parentOwner });
     const wait = h.store.registerWait({ owner: workerOwner, dependencies: [{ operationId: "op-build-1" }],
@@ -47,13 +47,9 @@ test("observers read v4 and the canonical reader reads v5 without modifying stor
         revision: 1, outcome: "failed", reason: "Retained failure", processUncertain: true,
         evidence: [{ kind: "summary", ref: "retained-evidence" }],
         waits: [{ waitId: wait.waitId, generation: wait.generation, cancelEpoch: wait.cancelEpoch }] });
-    const { createAssignmentReader } = await import(new URL('../assignment-observation.mjs', import.meta.url).href);
-    const reader = createAssignmentReader(h.path);
-    try {
-        assert.equal(reader.read(owner).verified, true);
-        assert.ok(reader.conversationRevisions().has(JSON.stringify([owner.sessionId, owner.workspace])));
-    } finally { reader.close(); }
-    const assertReadsOutcome = (read: typeof readAssignmentWaits) => {
+    h.closeStore();
+    const before = readFileSync(h.path);
+    for (const read of readers) {
         const observed = read(h.path, owner);
         assert.equal(observed.verified, true);
         assert.deepEqual(observed.outcome, terminal);
@@ -61,26 +57,14 @@ test("observers read v4 and the canonical reader reads v5 without modifying stor
         assert.equal(observed.waits[0].phase, "held");
         assert.equal(observed.waits[0].acknowledgement, null);
         assert.equal(read(h.path, { ...owner, sessionId: "foreign-worker" }).verified, false);
-    };
-    h.closeStore();
-    const v5 = readFileSync(h.path);
-    assertReadsOutcome(readAssignmentWaits);
-    assert.deepEqual(readFileSync(h.path), v5, "the canonical observer must not write v5 storage");
-
-    const db = new DatabaseSync(h.path);
-    try {
-        removeAssignmentOperationBinding(db);
-        db.exec("UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'");
-    } finally { db.close(); }
-    const before = readFileSync(h.path);
-    for (const read of readers) assertReadsOutcome(read);
+    }
     assert.deepEqual(readFileSync(h.path), before, "observers must not migrate or write v4 storage");
 });
 
 test("observers refuse unknown schema versions without migration or evidence disclosure", () => {
     const h = createHarness();
     h.closeStore();
-    for (const version of ["6", "999", "0", "5.0", "invalid"]) {
+    for (const version of ["5", "999", "0", "4.0", "invalid"]) {
         const db = new DatabaseSync(h.path);
         try { db.prepare("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'").run(version); }
         finally { db.close(); }
@@ -96,11 +80,11 @@ test("observers refuse unknown schema versions without migration or evidence dis
     }
 });
 
-test("missing required fields remain unverified and missing storage is never created", () => {
+test("v4 missing required fields remains unverified and missing storage is never created", () => {
     const h = createHarness();
     h.closeStore();
     const db = new DatabaseSync(h.path);
-    try { db.exec("DROP TABLE waits; UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'"); } finally { db.close(); }
+    try { db.exec("DROP TABLE waits"); } finally { db.close(); }
     const before = readFileSync(h.path);
     for (const read of readers) {
         assert.equal(read(h.path, workerOwner).verified, false);

@@ -104,7 +104,7 @@ export class BackgroundObservation {
       // The file may be visible before its writer commits the initial schema.
       // Keep publication alive and report unverified background state until refresh.
       const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
-      if (!["1", "2", "3", "4", "5"].includes(version)) return [];
+      if (!["1", "2", "3", "4"].includes(version)) return [];
       operations = this.db.prepare("SELECT * FROM operations WHERE phase = 'running' AND observer_kind = 'local-supervisor' AND terminal_revision = 0").all();
     }
     catch (error) { this.status = "degraded"; this.reason = String(error); return []; }
@@ -226,7 +226,7 @@ export class BackgroundObservation {
         else this.ownDb ??= new DatabaseSync(path, { readOnly: true });
         this.knownCoordinator = true;
         const version = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value;
-        if (!["1", "2", "3", "4", "5"].includes(version)) throw new Error("Unsupported coordinator schema");
+        if (!["1", "2", "3", "4"].includes(version)) throw new Error("Unsupported coordinator schema");
         this.hasInputVersions = Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_input_versions'").get());
       }
       this.metrics.activeQueries++;

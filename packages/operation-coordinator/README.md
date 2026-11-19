@@ -11,8 +11,9 @@ tool execution, no model call, no provider transport and no permission decision.
 
 ## Requirements and configuration
 
-Storage schema 5 adds exact operation-to-attempt bindings, with transactional
-upgrades from schemas 1 through 4. `registerAssignment` captures immutable worker/recipient and
+Storage schema 4 gains nullable operation-to-attempt bindings in an additive
+upgrade. Older clients can still read and write the database; their new operations
+are unbound. `registerAssignment` captures immutable worker/recipient and
 attempt bindings before dispatch. `recordAssignmentOutcome` atomically commits
 the terminal decision, typed parent event, dispatch disarming and evidence-pin
 transfer. Published writer claims require independent exit proof; neither delivery

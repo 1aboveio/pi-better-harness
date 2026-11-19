@@ -11,16 +11,14 @@ function sourceSQL(sql) {
     return sql.replace(/'(?:''|[^'])*'|\b[A-Za-z_][A-Za-z_0-9]*\b/g, token => sourceTables.has(token) ? `coordinator_source.${token}` : token);
 }
 
-// v5 adds operation launch provenance; the observed wait/outcome fields are unchanged.
-const SUPPORTED_SCHEMA_VERSIONS = new Set(["1", "2", "3", "4", "5"]);
-
 /** Read-only, bounded projection input. Never creates/migrates a database. */
 export function readAssignmentWaits(path, owner, connection) {
     let db;
     try {
         const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
         db = connection ?? new DatabaseSync(path, { readOnly: true });
-        if (!SUPPORTED_SCHEMA_VERSIONS.has(db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value)) {
+        // v4 adds repair accounting; the observed wait/outcome fields are unchanged.
+        if (!["1", "2", "3", "4"].includes(db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get()?.value)) {
             return { verified: false, waits: [], reason: "Unsupported coordinator schema; assignment state is unverified." };
         }
         const rows = db.prepare(`SELECT wait_id, generation, phase, phase_reason,
@@ -132,7 +130,7 @@ export function createAssignmentReader(path, inboxPath = ":memory:", derivedConn
                 throw error;
             }
             const version = db.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get()?.value;
-            if (!SUPPORTED_SCHEMA_VERSIONS.has(version)) throw new Error("Unsupported coordinator schema during upgrade");
+            if (!["1", "2", "3", "4"].includes(version)) throw new Error("Unsupported coordinator schema during upgrade");
             const obligations = db.prepare("SELECT operation_id, task_id, observer_kind FROM operations WHERE phase='running' AND terminal_revision=0").all()
                 .map(row => ({ kind: "unsettled-operation", id: row.task_id, operationId: row.operation_id, observer: row.observer_kind }));
             const reasons = db.prepare("SELECT claim_id AS id, state FROM resume_claims WHERE state IN ('claimed', 'published')").all()
