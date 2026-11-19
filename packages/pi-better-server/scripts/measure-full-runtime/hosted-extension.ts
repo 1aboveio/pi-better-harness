@@ -1,10 +1,18 @@
 /** Offline resource fixture: commands invoke the actual hosted extension tools. */
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import background from '../../../pi-better-background-tasks/src/index.ts';
-import subagents from '../../../pi-better-subagents/index.ts';
 import { join } from 'node:path';
-export default function hostedResourceFixture(pi: ExtensionAPI) {
+import { parseSubjectBinding, subjectModuleUrl } from './subject-binding.mjs';
+
+export default async function hostedResourceFixture(pi: ExtensionAPI) {
+  const subject = process.env.PI_FULL_RUNTIME_SUBJECT ? parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT) : undefined;
+  // The SDK's extension loader can resolve static imports outside the Node ESM hook.
+  const extensionUrl = (path: string) => {
+    const url = new URL(path, import.meta.url).href;
+    return subject ? subjectModuleUrl(url, subject) : url;
+  };
+  const { default: background } = await import(extensionUrl('../../../pi-better-background-tasks/src/index.ts'));
+  const { default: subagents } = await import(extensionUrl('../../../pi-better-subagents/index.ts'));
   const tools = new Map<string, any>();
   const capture = { ...pi, registerTool(tool: any) { tools.set(tool.name, tool); pi.registerTool(tool); } };
   background(capture); subagents(capture);
