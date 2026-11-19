@@ -132,7 +132,19 @@ function durableCompletion(meta) {
  * the age and size bounds must retain the whole run rather than reclaim it.
  */
 export function archivePublicationPending(meta) {
-    return durableCompletion(meta) && isSafeRunId(meta.id) && !publishedAttemptIds().has(meta.id);
+    if (!durableCompletion(meta) || !isSafeRunId(meta.id))
+        return false;
+    // Cleanup can publish several attempts in one pass. Each atomic rename
+    // invalidates the archive listing, so verify only this attempt's record.
+    try {
+        return readPublishedAttempt(meta.id, true) === undefined;
+    }
+    catch (error) {
+        const code = error.code;
+        if (code !== "ENOENT" && code !== "ENOTDIR")
+            throw error;
+        return true;
+    }
 }
 /**
  * Publish the compact record for a completed attempt, atomically.
@@ -312,12 +324,8 @@ function archivedAttempts() {
             metas.push(entry.meta);
     }
     archiveFiles = files;
-    archiveListCache = { signature, metas, ids: new Set(metas.map((meta) => meta.id)) };
+    archiveListCache = { signature, metas };
     return metas;
-}
-function publishedAttemptIds() {
-    archivedAttempts();
-    return archiveListCache.ids;
 }
 let visibleArchiveCache;
 /** Every archived completed attempt that may still speak for its conversation. */

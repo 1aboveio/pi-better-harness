@@ -145,7 +145,16 @@ function durableCompletion(meta: RunMeta): boolean {
  * the age and size bounds must retain the whole run rather than reclaim it.
  */
 export function archivePublicationPending(meta: RunMeta): boolean {
-    return durableCompletion(meta) && isSafeRunId(meta.id) && !publishedAttemptIds().has(meta.id);
+    if (!durableCompletion(meta) || !isSafeRunId(meta.id)) return false;
+    // Cleanup can publish several attempts in one pass. Each atomic rename
+    // invalidates the archive listing, so verify only this attempt's record.
+    try {
+        return readPublishedAttempt(meta.id, true) === undefined;
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+        return true;
+    }
 }
 
 /**
@@ -247,7 +256,7 @@ export function readArchivedAttempt(id: string): RunMeta | undefined {
     return meta && !archiveSuperseded(meta) ? meta : undefined;
 }
 
-let archiveListCache: { signature: string; metas: RunMeta[]; ids: Set<string> } | undefined;
+let archiveListCache: { signature: string; metas: RunMeta[] } | undefined;
 let archiveFiles = new Map<string, { signature: string; meta?: RunMeta }>();
 
 function attemptsSignature(): string {
@@ -297,13 +306,8 @@ function archivedAttempts(): RunMeta[] {
         if (entry.meta) metas.push(entry.meta);
     }
     archiveFiles = files;
-    archiveListCache = { signature, metas, ids: new Set(metas.map((meta) => meta.id)) };
+    archiveListCache = { signature, metas };
     return metas;
-}
-
-function publishedAttemptIds(): ReadonlySet<string> {
-    archivedAttempts();
-    return archiveListCache!.ids;
 }
 
 let visibleArchiveCache: { metas: RunMeta[]; signature: string; visible: RunMeta[] } | undefined;
