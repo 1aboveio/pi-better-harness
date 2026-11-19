@@ -357,7 +357,8 @@ test("stalled diagnostic completion rejects when its worker exits", { timeout: 1
 });
 
 test("slow caller cancellation preserves other clients and ignores late replies", { timeout: 10000 }, async t => {
-  const f = await fixture({ timeoutMs: 700, watchdogMs: 2000,
+  const queryPhaseDiagnostics = createQueryPhaseBuffer();
+  const f = await fixture({ timeoutMs: 700, watchdogMs: 2000, queryPhaseDiagnostics,
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   let phase = "bootstrap";
   const requests: Array<Record<string, unknown>> = [];
@@ -413,7 +414,8 @@ test("slow caller cancellation preserves other clients and ignores late replies"
     t.diagnostic(JSON.stringify({ timeoutMs, controlMs, rebuilding: fresh.status, restart: f.executor.metrics().executor.restarts,
       queueMs: f.executor.metrics().executor.waitMs, executionMs: f.executor.metrics().executor.readMs }));
   } catch (error) {
-    try { t.diagnostic(JSON.stringify({ slowCallerFailure: { phase, requests, executor: f.executor.metrics().executor } }).slice(0, 8192)); } catch {}
+    try { t.diagnostic(JSON.stringify({ slowCallerFailure: { phase, requests, executor: f.executor.metrics().executor,
+      queryPhases: readQueryPhases(queryPhaseDiagnostics) } }).slice(0, 8192)); } catch {}
     throw error;
   } finally { await f.close(); }
 });

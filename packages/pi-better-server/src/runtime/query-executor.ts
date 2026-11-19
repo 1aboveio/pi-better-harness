@@ -18,7 +18,7 @@ export type ReadStream = Pick<Duplex, "destroyed" | "writableLength" | "write" |
 interface Stream { socket: ReadStream; paused: boolean; generation: number; drain: () => void; close: () => void }
 interface WorkerMetrics { sourceWatchers?: number; inventories?: number; coordinatorConnections?: number; indexConnections?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
 export interface QueryExecutorOptions {
-  /** Temporary #805 evidence; only the three held-startup regression fixtures supply it. */
+  /** Temporary #805 evidence; only the held-startup and cancellation fixtures supply it. */
   queryPhaseDiagnostics?: SharedArrayBuffer;
   queryCacheDiagnostics?: boolean;
   capacity?: number; timeoutMs?: number; maxConnections?: number; watchdogMs?: number;

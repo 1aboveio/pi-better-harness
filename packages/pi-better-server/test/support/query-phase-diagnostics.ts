@@ -27,7 +27,8 @@ test("held bootstrap and import catches emit bounded failure context and rethrow
   const source = readFileSync(path, "utf8");
   const tree = ts.createSourceFile(path.pathname, source, ts.ScriptTarget.Latest, true);
   const ready = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "ready")!;
-  for (const name of ["an 800 ms setup subscription cannot verify a source while fixture bootstrap is held",
+  for (const name of ["slow caller cancellation preserves other clients and ignores late replies",
+    "an 800 ms setup subscription cannot verify a source while fixture bootstrap is held",
     "responsive fixture imports outlive the wedge watchdog without source readiness"]) {
     const statement = tree.statements.find(node => {
       if (!ts.isExpressionStatement(node) || !ts.isCallExpression(node.expression)) return false;
@@ -47,9 +48,11 @@ test("held bootstrap and import catches emit bounded failure context and rethrow
       }], after: [context => node => context.factory.updateSourceFile(node,
         node.statements.filter(statement => !ts.isExportDeclaration(statement)))] },
     }).outputText;
-    const original = new Error("runtime-timeout: caller read deadline exceeded; source was not verified");
+    const original = new Error(name.startsWith("an 800")
+      ? "runtime-timeout: caller read deadline exceeded; source was not verified"
+      : "query fixture worker exited before source inventory readiness (code 1); runtime-unhealthy: read worker unresponsive; watchdog deadline exceeded");
     const diagnostics: string[] = [];
-    let closed = false, subscriptions = 0;
+    let closed = false, subscriptions = 0, clients = 0;
     const fixture = async (options: { queryPhaseDiagnostics: SharedArrayBuffer }) => {
       const buffer = options.queryPhaseDiagnostics;
       const client = {
@@ -65,10 +68,16 @@ test("held bootstrap and import catches emit bounded failure context and rethrow
       };
       const worker = Object.assign(new EventEmitter(), { postMessage() {} });
       setImmediate(() => { for (let index = 0; index < 6; index++) worker.emit("message", { type: "heartbeat" }); });
-      return { bootstrapped: Promise.resolve(), client: async () => ({ ...client }), worker,
-        waitForSourceReady: async () => { recordQueryPhase(buffer, queryPhase.inventoryBegin, 0, 7); throw original; },
+      return { bootstrapped: Promise.resolve(), client: async () => { clients++; return { ...client }; }, worker,
+        waitForSourceReady: async () => {
+          recordQueryPhase(buffer, queryPhase.inventoryBegin, 0, 7);
+          recordQuerySample(buffer, "response"); recordQuerySample(buffer, "watchdog");
+          recordQueryPhase(buffer, queryPhase.watchdogFired, 0, 7);
+          throw original;
+        },
         executor: { observation: () => ({ status: "rebuilding" }), metrics: () => ({ executor: {
-          callerTimeouts: 1, queueTimeouts: 0, singleflightHits: 0, restarts: 0, active: 1, queued: 0, completed: 0, readMs: [] } }) },
+          callerTimeouts: subscriptions ? 1 : 0, queueTimeouts: 0, singleflightHits: 0, restarts: 0,
+          clients, active: subscriptions ? 1 : 0, queued: 0, completed: 0, readMs: [] } }) },
         close: async () => { closed = true; } };
     };
     const run = new Function("fixture", "createQueryPhaseBuffer", "readQueryPhases", "recordQueryPhase", "queryPhase", "assert", emitted)(
@@ -78,10 +87,20 @@ test("held bootstrap and import catches emit bounded failure context and rethrow
     assert.equal(diagnostics.length, 1);
     assert.ok(Buffer.byteLength(diagnostics[0]!) <= 8192);
     const data = JSON.parse(diagnostics[0]!);
-    const context = data.heldFixtureFailure;
-    assert.equal(context.phase, name.startsWith("an 800") ? "post-bootstrap-subscription" : "inventory-ready");
-    assert.ok(context.trace.records.some((row: any) => row.generation === 7));
-    assert.equal(context.trace.dropped, 0);
+    const context = data.heldFixtureFailure ?? data.slowCallerFailure;
+    assert.equal(context.phase, name.startsWith("slow") ? "source-inventory-ready"
+      : name.startsWith("an 800") ? "post-bootstrap-subscription" : "inventory-ready");
+    const trace = context.trace ?? context.queryPhases;
+    assert.ok(trace.records.some((row: any) => row.generation === 7));
+    assert.equal(trace.dropped, 0);
+    if (name.startsWith("slow")) {
+      assert.equal(clients, 0);
+      assert.equal(subscriptions, 0);
+      assert.deepEqual(context.requests, []);
+      assert.equal(context.executor.active, 0);
+      assert.equal(trace.samples.watchdog.count, 1);
+      assert.ok(BigInt(trace.samples.watchdog.lastNs) >= BigInt(trace.samples.response.lastNs));
+    }
   }
 });
 
