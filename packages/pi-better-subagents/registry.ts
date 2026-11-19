@@ -20,6 +20,7 @@ export { processStartToken } from "./process-identity.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { processExists } from "./spawn.ts";
@@ -528,6 +529,28 @@ export function listParkRecordCandidates(metas: readonly RunMeta[] = listMetas()
     catch { volatileIds = new Set(); }
     return metas.filter((meta) => meta.park !== undefined
         || (volatileIds.has(meta.id) && existsSync(parkRecordPath(meta.id))));
+}
+
+/** Read recovery sidecars in batches so a large registry does not block socket replies. */
+export async function* scanParkRecords(metas: readonly RunMeta[] = listMetas()): AsyncGenerator<{ meta: RunMeta; record: ParkRecord }> {
+    const runs = join(baseDir(), "runs");
+    const volatileIds = new Set(await readdir(runs).catch(() => [] as string[]));
+    const batchSize = 32;
+    for (let offset = 0; offset < metas.length; offset += batchSize) {
+        const batch = await Promise.all(metas.slice(offset, offset + batchSize).map(async (meta) => {
+            if (!meta.park && !volatileIds.has(meta.id)) return;
+            try {
+                const record = parseParkRecord(JSON.parse(await readFile(join(runs, meta.id, "park.json"), "utf-8")));
+                if (record) return { meta, record };
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code === "ENOENT" && meta.park) {
+                    const record = readMeta(meta.id)?.park;
+                    if (record) return { meta, record };
+                }
+            }
+        }));
+        for (const entry of batch) if (entry) yield entry;
+    }
 }
 
 /**

@@ -224,7 +224,10 @@ test("packed standalone packages use one pinned socket runtime, including cached
       trace('before-first-list');await listed();trace('first-list-ready');await probe();const first=owner().pid;
       await readyActivity(); // retain this exact production client's connection
       await stop();trace('clean-stop');assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
-      assert.deepEqual((await readyActivity()).items,[]);trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
+      assert.deepEqual((await readyActivity()).items,[]);
+      // Activity can be cached. Exercise a transport read before inspecting the new owner.
+      assert.deepEqual((await backgroundObservation(pi,ctx)).rows,[]);
+      trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
       const crashedOwner=owner(),crashed=crashedOwner.pid;paused=crashed;process.kill(crashed,'SIGSTOP');
       // Observe the stop before sending: SIGSTOP delivery alone is not an acknowledgment.
       const stoppedBy=Date.now()+5000;

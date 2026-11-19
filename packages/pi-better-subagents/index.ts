@@ -3531,8 +3531,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 if (workerBridge) workerOperations.release(id, "attempt-exited");
                 // Reconcile this attempt's earlier published writer before its
                 // next park can admit another continuation of the conversation.
-                await settleResumedAttemptExit({
+                if (internal?.resumeWait && resume) await settleResumedAttemptExit({
                     attemptId: id,
+                    priorPark: { runId: resume.prior.id, ...internal.resumeWait },
                     service: workerOperations.service,
                     status: readMeta(id)?.status ?? "exited",
                     // The exit handler releases the conversation writer lease just

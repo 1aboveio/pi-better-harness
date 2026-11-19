@@ -464,8 +464,11 @@ test("slow caller cancellation preserves other clients and ignores late replies"
 
 test("an 800 ms setup subscription cannot verify a source while fixture bootstrap is held", { timeout: 10000 }, async t => {
   const implementation = new URL("./support/cancellable-query-worker.mjs", import.meta.url).href;
+  const heartbeat = new URL("./support/bootstrap-heartbeat.mjs", import.meta.url).href;
   const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(`
-    import { parentPort } from "node:worker_threads";
+    import { parentPort, workerData } from "node:worker_threads";
+    import { bootstrapHeartbeat } from ${JSON.stringify(heartbeat)};
+    const stopHeartbeat = bootstrapHeartbeat(parentPort, workerData.heartbeat);
     const deferred = [];
     const buffer = message => {
       if (["query", "cancel"].includes(message.type)) deferred.push(message);
@@ -478,6 +481,7 @@ test("an 800 ms setup subscription cannot verify a source while fixture bootstra
       };
       parentPort.on("message", release);
     });
+    stopHeartbeat();
     await import(${JSON.stringify(implementation)});
     parentPort.off("message", buffer);
     for (const message of deferred) parentPort.emit("message", message);
@@ -627,8 +631,9 @@ test("cold bootstrap caller deadline does not imply a wedged read worker", { tim
   } finally { await f.close(); }
 });
 
-test("delayed parent receipt does not kill a responsive read worker", { timeout: 10000 }, async () => {
-  const f = await fixture({ watchdogMs: 800 });
+test("delayed parent receipt does not kill a responsive read worker", { timeout: 20000 }, async () => {
+  const watchdogMs = 4000;
+  const f = await fixture({ watchdogMs });
   try {
     await f.waitForSourceReady();
     const client = await f.client();
@@ -642,7 +647,7 @@ test("delayed parent receipt does not kill a responsive read worker", { timeout:
     const hold = (message: unknown) => queued.push(message);
     f.worker.off("message", receive).on("message", hold);
     try {
-      await new Promise<void>(resolve => setTimeout(resolve, 1100));
+      await new Promise<void>(resolve => setTimeout(resolve, watchdogMs + 300));
       assert.equal(f.executor.metrics().executor.status, "ready");
     } finally {
       f.worker.off("message", hold).on("message", receive);
