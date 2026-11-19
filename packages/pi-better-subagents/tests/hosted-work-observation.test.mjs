@@ -72,7 +72,7 @@ test('actual SDK startup awaits Subagents subscribe and real scoped collection b
     assert.deepEqual(requests, ['hello', 'runtime_subscribe']);
     const waiting = JSON.parse(readFileSync(marker, 'utf8'));
     assert.equal(waiting.phase, 'subagents:session_start:2');
-    assert.equal(waiting.dependency.type, 'runtime_subscribe'); assert.equal(waiting.dependency.state, 'pending');
+    assert.equal(waiting.dependency.type, 'runtime_subscribe'); assert.equal(waiting.dependency.state, 'submitted');
     t.diagnostic(JSON.stringify({ controlledHeldBoundary: waiting, completed, requests }));
     releaseSubscribe(); await pending;
     assert.deepEqual(failures, []);

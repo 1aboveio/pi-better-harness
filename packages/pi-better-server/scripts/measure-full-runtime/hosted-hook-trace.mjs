@@ -25,7 +25,9 @@ export function traceHostedRequests(Client) {
     }
     const dependency = { sequence, type: String(type).slice(0, 64), state: 'pending' };
     recordHook(hook, 'entered', dependency);
-    return Reflect.apply(request, this, [type, ...args]).then(value => {
+    const pending = Reflect.apply(request, this, [type, ...args]);
+    recordHook(hook, 'entered', { ...dependency, state: 'submitted' });
+    return pending.then(value => {
       if (activeHook === hook && hook.requests <= MAX_REQUESTS) recordHook(hook, 'entered', { ...dependency, state: 'returned',
         ...(['ready', 'rebuilding', 'degraded'].includes(value?.status) ? { sourceStatus: value.status } : {}) });
       return value;

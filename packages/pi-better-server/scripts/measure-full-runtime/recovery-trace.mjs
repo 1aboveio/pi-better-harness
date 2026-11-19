@@ -1,4 +1,5 @@
 import { writeFileSync } from 'node:fs';
+import { threadId } from 'node:worker_threads';
 
 const LIMIT = 128;
 const records = [];
@@ -21,4 +22,12 @@ export function recoveryTraceSnapshot() {
 export function recordHostedCreationPhase(phase) {
   const output = process.env.PI_FULL_RUNTIME_CREATION_REPORT;
   if (output) writeFileSync(output, JSON.stringify({ phase, at: Date.now(), pid: process.pid }));
+}
+
+let readRecords = 0;
+// Overwrite separate server/worker files, bounded to the initial subscribe diagnosis.
+export function recordHostedReadPhase(plane, phase, id) {
+  const output = process.env.PI_FULL_RUNTIME_CREATION_REPORT;
+  if (!output || ++readRecords > 32) return;
+  writeFileSync(`${output}.${plane}.json`, JSON.stringify({ plane, phase, id, pid: process.pid, threadId, at: Date.now(), sequence: readRecords }));
 }

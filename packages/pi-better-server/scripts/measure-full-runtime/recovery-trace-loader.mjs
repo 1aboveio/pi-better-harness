@@ -11,6 +11,32 @@ const originalTarget = new URL('../../src/runtime/background-tools.ts', import.m
 const target = process.env.PI_FULL_RUNTIME_SUBJECT ? subjectModuleUrl(originalTarget, parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT)) : originalTarget;
 const recorder = new URL('./recovery-trace.mjs', import.meta.url).href;
 
+export function instrumentHostedRead(source, plane) {
+  const anchors = plane === 'server' ? [
+    ['workQueries ??= work().connect(socket);', 'work-owner-enter'],
+    ['const data = await workQueries.handle(command);', 'query-dispatch'],
+    ['if (type === "runtime_get_metrics") {', 'query-returned'],
+    ['if (!socket.destroyed) socket.write(envelope.slice(0, -1) + \',"data":\' + data.json + "}\\n");', 'socket-reply'],
+  ] : [
+    ['let value = state.queries.handle(command);', 'snapshot-enter'],
+    ['if (!indexed && !value.rows.length)', 'snapshot-returned'],
+    ['parentPort.postMessage({ type: "reply", id: message.id, json: encoded.get(value) ?? JSON.stringify(value), metrics: metrics() });', 'reply-build'],
+  ];
+  for (const [anchor, phase] of anchors) {
+    if (source.split(anchor).length !== 2) throw Error(`Hosted read fixture anchor changed: ${anchor}`);
+    const condition = plane === 'server' ? 'type === "runtime_subscribe"' : 'command.type === "runtime_subscribe"';
+    source = source.replace(anchor, `if (${condition}) recordHostedReadPhase(${JSON.stringify(plane)},${JSON.stringify(phase)},${plane === 'server' ? 'id' : 'message.id'});\n${anchor}`);
+  }
+  if (plane === 'worker') {
+    const anchor = 'parentPort.postMessage({ type: "reply", id: message.id, json: encoded.get(value) ?? JSON.stringify(value), metrics: metrics() });';
+    source = source.replace(anchor, `${anchor}\nif (command.type === "runtime_subscribe") recordHostedReadPhase("worker","reply-posted",message.id);`);
+  } else {
+    const anchor = 'if (!socket.destroyed) socket.write(envelope.slice(0, -1) + \',"data":\' + data.json + "}\\n");';
+    source = source.replace(anchor, `${anchor}\nif (type === "runtime_subscribe") recordHostedReadPhase("server",socket.destroyed ? "socket-destroyed" : "socket-written",id);`);
+  }
+  return `import { recordHostedReadPhase } from ${JSON.stringify(recorder)};\n${source}`;
+}
+
 export function instrumentHostedCreation(source) {
   for (const [anchor, phase] of [
     ['async create(request: CreateSessionRequest): Promise<SessionSummary> {', 'registry-create'],
@@ -75,6 +101,11 @@ export function instrumentRecoveryTrace(source) {
 export async function load(url, context, nextLoad) {
   const helper = new URL('./owned-fixture.mjs', import.meta.url).href;
   const baseline = process.env.PI_FULL_RUNTIME_BASELINE_OBSERVER === 'eec7b3e256a7548bbf67f69cd468f12eb3b91dc8';
+  if (process.env.PI_FULL_RUNTIME_CREATION_REPORT && url.startsWith('file:') && new URL(url).pathname.endsWith('/src/server.ts')) {
+    return { format: 'module', shortCircuit: true, source: ts.transpileModule(instrumentHostedRead(readFileSync(new URL(url), 'utf8'), 'server'), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+    }).outputText };
+  }
   if (process.env.PI_FULL_RUNTIME_CREATION_REPORT && url.startsWith('file:') && new URL(url).pathname.endsWith('/src/registry.ts')) {
     return { format: 'module', shortCircuit: true, source: ts.transpileModule(instrumentHostedCreation(readFileSync(new URL(url), 'utf8')), {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
@@ -104,6 +135,7 @@ export async function load(url, context, nextLoad) {
   }
   if (url.startsWith('file:') && new URL(url).pathname.endsWith('/src/runtime/query-worker.mjs')) {
     let source = readFileSync(new URL(url), 'utf8');
+    if (process.env.PI_FULL_RUNTIME_CREATION_REPORT) source = instrumentHostedRead(source, 'worker');
     const anchor = 'const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);';
     if (source.split(anchor).length !== 2) throw Error('Fixture model creation anchor changed');
     source = source.replace(anchor, anchor + '\nbindOwnedModel(model,parentPort,import.meta.url);');
