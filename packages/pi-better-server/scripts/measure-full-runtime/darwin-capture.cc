@@ -3,8 +3,8 @@
 #include <mach/mach_time.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
-#include <sys/time.h>
 #include <time.h>
+#include <uuid/uuid.h>
 #include <cerrno>
 #include <climits>
 #include <cmath>
@@ -39,9 +39,17 @@ static napi_value Capture(napi_env env, napi_callback_info info) {
   uint32_t length = 0; napi_get_array_length(env, args[0], &length);
   if (!length || length > 4096) { napi_throw_range_error(env, nullptr, "Invalid PID batch size"); return nullptr; }
   mach_timebase_info_data_t scale{};
-  timeval boot{}; size_t bootSize = sizeof(boot); int mib[] = {CTL_KERN, KERN_BOOTTIME};
-  if (mach_timebase_info(&scale) != KERN_SUCCESS || !scale.denom || sysctl(mib, 2, &boot, &bootSize, nullptr, 0) != 0) {
+  if (mach_timebase_info(&scale) != KERN_SUCCESS || !scale.denom) {
     napi_throw_error(env, nullptr, "Kernel clock identity unavailable"); return nullptr;
+  }
+  // KERN_BOOTTIME can move when the wall clock is adjusted within one boot.
+  uuid_string_t boot{};
+  size_t bootSize = sizeof(boot);
+  uuid_t parsedBoot{};
+  if (sysctlbyname("kern.bootsessionuuid", boot, &bootSize, nullptr, 0) != 0 ||
+      bootSize != sizeof(boot) || boot[sizeof(boot) - 1] != '\0' ||
+      uuid_parse(boot, parsedBoot) != 0 || uuid_is_null(parsedBoot)) {
+    napi_throw_error(env, nullptr, "Kernel boot session UUID unavailable"); return nullptr;
   }
   napi_value result, records;
   napi_create_object(env, &result); napi_create_array_with_length(env, length, &records);
@@ -63,7 +71,7 @@ static napi_value Capture(napi_env env, napi_callback_info info) {
     napi_create_object(env, &record); napi_create_object(env, &identity); napi_create_object(env, &cpu);
     Put(env, identity, "pid", Number(env, value));
     Put(env, identity, "start", Text(env, std::to_string(usage.ri_proc_start_abstime)));
-    Put(env, identity, "boot", Text(env, std::to_string(boot.tv_sec) + ":" + std::to_string(boot.tv_usec)));
+    Put(env, identity, "boot", Text(env, boot));
     // XNU fill_task_rusage copies task_power_info's Mach-time counters.
     const long double ticks = static_cast<long double>(usage.ri_user_time) + usage.ri_system_time;
     Put(env, cpu, "totalMicros", Number(env, static_cast<double>(ticks * scale.numer / scale.denom / 1000.0L)));
