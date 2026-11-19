@@ -1,6 +1,10 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { bootstrapHeartbeat } from "./bootstrap-heartbeat.mjs";
-const stopBootstrapHeartbeat = bootstrapHeartbeat(parentPort);
+import { traceInitialInventory } from "./query-init-diagnostics.mjs";
+import { queryPhase, recordQueryPhase } from "./query-phase-diagnostics.mjs";
+const data = { ...workerData, queryPhaseDiagnostics: workerData.modelOptions?.queryPhaseDiagnostics };
+const trace = value => recordQueryPhase(data.queryPhaseDiagnostics, value);
+const stopBootstrapHeartbeat = bootstrapHeartbeat(parentPort, data.queryPhaseDiagnostics);
 const phase = value => parentPort.postMessage({ type: "fixture-bootstrap-phase", phase: value });
 if (workerData.fixtureHoldBootstrap) {
   phase("bootstrap-held");
@@ -13,9 +17,13 @@ if (workerData.fixtureHoldBootstrap) {
     parentPort.postMessage({ type: "bootstrap-held" });
   });
   phase("bootstrap-released");
+  trace(queryPhase.fixtureReleased);
 }
 phase("read-model-import-start");
+trace(queryPhase.modelImportBegin);
 const { WorkReadModel } = await import("../../src/runtime/read-model.ts");
+trace(queryPhase.modelImportEnd);
+traceInitialInventory(WorkReadModel, data);
 phase("read-model-import-complete");
 const ensureId = WorkReadModel.prototype.ensureId;
 let release;
@@ -34,7 +42,10 @@ parentPort.on("message", message => {
   }
 });
 phase("production-worker-import-start");
+trace(queryPhase.moduleEntered);
 await import("../../src/runtime/query-worker.mjs");
+trace(queryPhase.handlerInstalled);
 phase("production-worker-import-complete");
 stopBootstrapHeartbeat();
+trace(queryPhase.bootstrapHandoff);
 parentPort.postMessage({ type: "fixture-ready" });

@@ -8,6 +8,7 @@ import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../../src/runtime/query-executor.ts";
 import { WorkClient } from "../../src/runtime/work-client.mjs";
 import { queryBootstrap, querySourceReady } from "./query-bootstrap.ts";
+import { createQueryPhaseBuffer, recordQueryPhase, recordQuerySample, readQueryPhases, queryPhase } from "./query-phase-diagnostics.mjs";
 
 const STALL_RECEIPT_MS = 5000;
 
@@ -36,9 +37,31 @@ export async function fixture(options: { intervalMs?: number; capacity?: number;
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
   mkdirSync(join(root, "runs"));
   const transport = mkdtempSync("/tmp/query-socket-");
+  const traceBuffer = process.env.PI_QUERY_STARTUP_TRACE === "1" ? createQueryPhaseBuffer() : undefined;
+  recordQueryPhase(traceBuffer, queryPhase.workerStart);
   const executor = new WorkQueryExecutor(root, "query-instance", { ...options,
     workerUrl: options.workerUrl ?? new URL("./slow-query-worker.mjs", import.meta.url),
-    modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: options.intervalMs ?? 60000 } });
+    modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: options.intervalMs ?? 60000,
+      ...(traceBuffer ? { queryPhaseDiagnostics: traceBuffer } : {}) } });
+  if (traceBuffer) {
+    const observed = executor as any;
+    const receive = observed.receive;
+    observed.receive = function(this: any, message: any) {
+      const before = this.lastResponse;
+      const result = receive.call(this, message);
+      if (this.lastResponse !== before) recordQuerySample(traceBuffer, "response");
+      if (message.type === "heartbeat" && !this.failure) recordQuerySample(traceBuffer, "accepted");
+      if (message.observation?.observedAt) recordQueryPhase(traceBuffer, queryPhase.sourceReady);
+      return result;
+    };
+    const fail = observed.fail;
+    observed.fail = function(this: any, error: unknown) {
+      if (String(error).includes("watchdog deadline")) {
+        recordQuerySample(traceBuffer, "watchdog"); recordQueryPhase(traceBuffer, queryPhase.watchdogFired);
+      }
+      return fail.call(this, error);
+    };
+  }
   const worker = (executor as unknown as { worker: Worker }).worker;
   const diagnostic = () => {
     const metrics = executor.metrics().executor;
@@ -148,6 +171,11 @@ export async function fixture(options: { intervalMs?: number; capacity?: number;
     clients.forEach(client => client.close()); sockets.forEach(socket => socket.destroy());
     try { await new Promise<void>(resolve => server.close(() => resolve())); }
     finally {
+      if (traceBuffer) {
+        const { status, reason, observedAt } = executor.observation();
+        console.log(JSON.stringify({ startupTrace290d: { worker: options.workerUrl?.href.slice(0, 160),
+          observation: { status, reason: reason?.slice(0, 512), observedAt }, trace: readQueryPhases(traceBuffer) } }));
+      }
       await executor.close();
       rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
     }
