@@ -423,6 +423,8 @@ test("registered Navigator preserves older active rows and the same consumers re
     await until("initial:201-history-list", async () => (await observation.observedList({ cwd: root })).totalMatching === 201);
     phase("initial:201-history-list-confirmation");
     assert.equal((await observation.observedList({ cwd: root })).totalMatching, 201);
+    // History can still report indexed rows while Navigator shows a degraded warning.
+    await until("initial:navigator-ready", () => observation.workObservation()?.status === "ready");
     const hooks = (globalThis as any)[Symbol.for("pi-better-subagents.acceptance-hooks")];
     const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("subagents");
     assert.equal(hooks.listRows().find((row: any) => row.id === "sa_review_0")?.status, "running");
