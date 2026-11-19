@@ -612,17 +612,19 @@ describe("manager-domain SDK integration and native server acceptance", () => {
     const failed = await waitForMeta(failedId, (meta) => meta?.status === "failed" && typeof meta.endedAt === "number");
     const succeeded = await waitForMeta(succeededId, (meta) => meta?.status === "succeeded" && typeof meta.endedAt === "number");
     await harness.fireSessionStart();
-    let list = renderWidget(harness.lastWidget("background-work-list"));
+    const list = renderWidget(harness.lastWidget("background-work-list"));
     expect(list).toContain("recent-failure");
     expect(list).toContain("recent-success");
 
-    writeMeta({ ...failed!, endedAt: Date.now() - 31_000 });
-    writeMeta({ ...succeeded!, endedAt: Date.now() - 31_000 });
-    await harness.fireSessionStart();
-
-    list = renderWidget(harness.lastWidget("background-work-list"));
-    expect(list).not.toContain("recent-failure");
-    expect(list).not.toContain("recent-success");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Math.max(failed!.endedAt!, succeeded!.endedAt!, Date.now()) + 31_000);
+    try {
+      await harness.fireSessionStart();
+      const expired = renderWidget(harness.lastWidget("background-work-list"));
+      expect(expired).not.toContain("recent-failure");
+      expect(expired).not.toContain("recent-success");
+    } finally {
+      clock.mockRestore();
+    }
     expect(readMeta(failedId)?.status).toBe("failed");
     expect(readMeta(succeededId)?.status).toBe("succeeded");
   });
