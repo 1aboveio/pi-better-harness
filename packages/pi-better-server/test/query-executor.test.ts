@@ -771,7 +771,7 @@ test("metadata present before the held initial inventory is included in the firs
     const observed = await firstReady;
     assert.equal(observed.rows[0]?.meta.name, "present-before-inventory");
     assert.ok(f.executor.metrics().inventories! >= 1);
-    t.diagnostic(JSON.stringify({ beforeRelease: state, firstReady: observed }));
+    t.diagnostic(JSON.stringify({ beforeRelease: state, firstReady: observed }, (_, value) => typeof value === "bigint" ? String(value) : value));
   } finally { await f.close(); }
 });
 
@@ -978,7 +978,7 @@ test("a failed worker recovers existing subscriptions under a new observation ep
     const previous = client.snapshot!;
     assert.ok(previous.seq > 1);
     t.diagnostic(JSON.stringify({ phase: "observed-original-publication-before-exit", sourceWrites,
-      frames, workerFrames, source: await captureSource() }).slice(0, 65536));
+      frames, workerFrames, source: await captureSource() }, (_, value) => typeof value === "bigint" ? String(value) : value).slice(0, 65536));
     let resynced = false;
     const recovered = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { stop(); reject(new Error("read worker never recovered the existing subscription")); }, 3000);
