@@ -5,6 +5,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { queryBootstrap, querySourceReady } from "./support/query-bootstrap.ts";
 import { fixture } from "./support/query-fixture.ts";
+import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
+import { performance } from "node:perf_hooks";
 
 test("bootstrap exit retains a prior watchdog cause without claiming source readiness", async () => {
   const worker = new EventEmitter();
@@ -163,4 +165,39 @@ test("held real inventory settles separately before the first uncached subscript
     assert.equal(f.executor.metrics().executor.callerTimeouts, 0);
     assert.equal(f.executor.metrics().executor.restarts, 0);
   } finally { await f.close(); }
+});
+
+test("an overdue watchdog polls queued responses before failing but preserves caller and wedge deadlines", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let now = 0, terminations = 0;
+  t.mock.method(performance, "now", () => now);
+  const worker = { postMessage() {}, async terminate() { terminations++; return 0; }, unref() {} };
+  const prototype = WorkQueryExecutor.prototype as any, startWorker = prototype.startWorker;
+  prototype.startWorker = () => worker;
+  let executor: WorkQueryExecutor;
+  try { executor = new WorkQueryExecutor("unused-controlled-root", "poll-order", { timeoutMs: 400, watchdogMs: 800 }); }
+  finally { prototype.startWorker = startWorker; }
+  const advance = (ms: number) => { now += ms; t.mock.timers.tick(ms); };
+  try {
+    advance(799);
+    (executor as any).receive({ type: "heartbeat" });
+    advance(800);
+    assert.equal(terminations, 0, "an accepted heartbeat owns the next full watchdog window");
+    advance(1);
+    assert.equal(terminations, 0, "an overdue host timer must poll queued worker responses before termination");
+    (executor as any).receive({ type: "heartbeat" });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(executor.metrics().executor.worker, "running");
+    const stream = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0, write() { return true; } });
+    const client = executor.connect(stream as any);
+    const expired = assert.rejects(client.handle({ type: "runtime_subscribe", scope: {} }), /runtime-timeout: caller read deadline exceeded/);
+    advance(400);
+    await expired;
+    assert.equal(executor.metrics().executor.callerTimeouts, 1, "polling the worker does not extend caller deadlines");
+    advance(600);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(terminations, 1, "an actually unresponsive worker still fails after the unchanged 800ms window");
+    assert.match(executor.observation().reason!, /watchdog deadline exceeded/);
+    client.close();
+  } finally { await executor.close(); }
 });
