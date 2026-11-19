@@ -1231,10 +1231,23 @@ export function observeArchivePublication(id: string, error?: unknown): void {
     } catch { /* the journal is best-effort; retaining the run is the safety net */ }
 }
 
-export function writeMeta(meta: RunMeta, options: { ifAbsent?: boolean } = {}): void {
+export function writeMeta(meta: RunMeta, options: {
+    ifAbsent?: boolean;
+    /** Build a field update from current metadata under the existing run lock. */
+    patch?: (current: Readonly<RunMeta>) => Partial<RunMeta> | undefined;
+} = {}): void {
+    if (options.patch && !readMeta(meta.id)) return;
     mkdirSync(runDir(meta.id), { recursive: true });
+    let written = false;
     withRunMetaLock(meta.id, (owns) => {
         if (options.ifAbsent && existsSync(metaPathFor(meta.id))) return;
+        if (options.patch) {
+            const current = readMeta(meta.id);
+            if (!current) return;
+            const patch = options.patch(current);
+            if (!patch) return;
+            meta = { ...current, ...patch, id: meta.id };
+        }
         metaWriteBarrier?.();
         if (!owns()) throw new MetadataLockLost();
         writeMetaFile(meta);
@@ -1253,7 +1266,9 @@ export function writeMeta(meta: RunMeta, options: { ifAbsent?: boolean } = {}): 
             }
         }
         owns();
+        written = true;
     });
+    if (options.patch && !written) return;
     for (const listener of metaChangedListeners) {
         try { listener(); } catch { /* best effort */ }
     }

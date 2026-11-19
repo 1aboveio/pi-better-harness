@@ -86,7 +86,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
         }
         // Read-only SDK snapshots support the existing assertions, never tool execution.
         return { tools, sent, delivered, notes, ready, ctx: { cwd, sessionManager: { getSessionId: () => actualSessionId, getBranch: () => entries } },
-            pid: child.pid,
+            pid: child.pid, runTeardownOwner: "continuation-fixture",
             get sessionFile() { return actualSessionFile; },
             async inspect() { await ready; const id = ++sequence; return new Promise((resolve, reject) => { requests.set(id, { resolve, reject }); child.send({ id, inspect: true }, error => { if (error) { requests.delete(id); reject(new Error(`${error.message}: ${errors}`)); } }); }); },
             publishPolicy(next) { policy = next; },

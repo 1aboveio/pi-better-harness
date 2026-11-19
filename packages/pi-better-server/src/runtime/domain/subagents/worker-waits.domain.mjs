@@ -1614,7 +1614,7 @@ export function createResumeOrchestration(options) {
         }
     };
     const resume = (park) => options.dispatch
-        ? options.dispatch(park, () => resumeInScope(park))
+        ? options.dispatch(park, () => resumeInScope(park)).catch(error => hold(park, reasonOf(error)))
         : resumeInScope(park);
     const adapter = {
         version: 1,

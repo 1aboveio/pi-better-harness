@@ -29,7 +29,9 @@ const stopRuntime = await startWorkRuntimeFixture();
 const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: betterSubagents, progressCacheIdsForTests, isHealthTickerActive, forgetProgressCacheForTests } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
-const { readMeta, writeMeta, runDir } = await import("../registry.ts");
+const { readMeta, writeMeta, runDir, processStartToken } = await import("../registry.ts");
+const { realProcessProbe } = await import("../health.ts");
+const { registerFixtureRun, retireFixtureRun, settleFixtureRun, captureRunRemovalEvidence } = await import("./fixture-run-ownership.mjs");
 const { timingWakeReceipt } = await import("../timing-notifications.ts");
 const { killProcessTree } = await import("../spawn.ts");
 
@@ -48,6 +50,7 @@ const originalPath = process.env.PATH ?? "";
 process.env.PATH = `${binDir}:${originalPath}`;
 
 const liveRuns = [];
+const ownedExits = new Map();
 const recipients = [];
 const { sdkRecipient } = await import("./sdk-recipient-fixture.mjs");
 
@@ -71,7 +74,28 @@ async function makeHarness(options = {}) {
         model: undefined,
         sessionManager: { getSessionId: () => options.sessionId ?? "timing-session" },
     };
-    betterSubagents(pi, managedDomainPort());
+    const port = managedDomainPort();
+    const spawned = port.spawned;
+    port.spawned = (id, pid) => {
+        spawned(id, pid);
+        ownedExits.set(id, { pid, start: processStartToken(pid), pi, recipientEvidence: () => ({
+            sessionId: String(ctx.sessionManager.getSessionId()).slice(0, 128), recipient: recipient?.knownState() ?? null,
+            receiptSettlement: "not observed by local exit owner",
+            recentDeliveriesOmitted: Math.max(0, sent.length - 4),
+            recentDeliveries: sent.slice(-4).map(({ message }) => ({ customType: String(message.customType).slice(0, 80),
+                urgentEventId: typeof message.details?.urgentEventId === "string" ? message.details.urgentEventId.slice(0, 128) : undefined,
+                urgentEventIdTruncated: (message.details?.urgentEventId?.length ?? 0) > 128,
+                completionEventIds: message.details?.completionEventIds?.slice(0, 2).map(id => ({ id: String(id).slice(0, 128), truncated: String(id).length > 128 })),
+                completionEventIdsOmitted: Math.max(0, (message.details?.completionEventIds?.length ?? 0) - 2) })) }) });
+    };
+    port.observeExit = (id, completion) => {
+        const owned = ownedExits.get(id);
+        assert.ok(owned, "timing fixture must own the child exit observer");
+        owned.completion = completion;
+        owned.completionState = "pending";
+        void completion.then(() => { owned.completionState = "fulfilled"; }, () => { owned.completionState = "rejected"; });
+    };
+    betterSubagents(pi, port);
     if (!options.manager) await Promise.all(recipients.filter(item => item.sessionId === ctx.sessionManager.getSessionId()).map(item => item.recipient.close()));
     const recipient = options.manager ? undefined : await sdkRecipient({ cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), sent, notes });
     if (recipient) { recipients.push({ recipient, sessionId: ctx.sessionManager.getSessionId(), failSend: options.failSend }); await recipient.failure(Boolean(options.failSend?.())); }
@@ -87,7 +111,7 @@ async function spawnRun(h, { noWaitForLaunch, ...overrides } = {}) {
     const out = res.content[0].text;
     const id = out.match(/id=(\S+)/)[1];
     const pid = Number(out.match(/\(pid (\d+)\)/)[1]);
-    liveRuns.push({ id, pid });
+    registerFixtureRun({ id, pid }, ownedExits, liveRuns);
     // The fake child writes its launch lines through a non-append fd; appending test
     // events before it has written would let those lines overwrite them.
     if (!noWaitForLaunch) {
@@ -117,12 +141,45 @@ async function tick() {
 }
 
 async function reap({ id, pid }) {
-    killProcessTree(pid, "SIGKILL");
-    await waitFor(() => {
-        const m = readMeta(id);
-        return m && m.status !== "running" && m.status !== "orphaned" ? m : undefined;
-    }, { timeoutMs: 2000 });
-    rmSync(runDir(id), { recursive: true, force: true });
+    const owned = ownedExits.get(id);
+    assert.ok(owned?.completion && owned.pid === pid, "timing cleanup requires its exact child exit acknowledgement");
+    const batcher = getCallbackBatcher(owned.pi);
+    batcher.cancel();
+    if (realProcessProbe.pidExists(pid)) {
+        assert.ok(owned.start && processStartToken(pid) === owned.start && realProcessProbe.groupId(pid) === pid,
+            "timing cleanup must never signal an unverified or recycled child");
+        killProcessTree(pid, "SIGKILL");
+    }
+    await settleFixtureRun(owned, batcher, () => {
+        assert.equal(realProcessProbe.groupAlive(pid), false, "timing child group must be quiescent before removal");
+    });
+    try { rmSync(runDir(id), { recursive: true, force: true }); }
+    catch (error) {
+        try {
+            // Snapshot the original failure before any later teardown can change its residue.
+            const residual = captureRunRemovalEvidence(runDir(id));
+            const runtime = stopRuntime.diagnostics();
+            const evidence = { id, errorCode: error.code,
+                residual, localOwner: { pid: owned.pid, startCaptured: Boolean(owned.start), completion: owned.completionState,
+                    groupProof: "passed before removal", pendingCallbacks: batcher.pendingCount(), exactReceipt: ownedExits.get(id) === owned },
+                recipient: owned.recipientEvidence?.(), daemon: { exitCode: runtime.exitCode, foldSettlement: "not observed by local exit owner" } };
+            let encoded = JSON.stringify(evidence);
+            if (Buffer.byteLength(encoded) > 32768) {
+                evidence.residual.entries = evidence.residual.entries.slice(0, 8);
+                evidence.residual.truncated = true;
+                if (evidence.recipient) {
+                    evidence.recipient.recentDeliveriesOmitted = (evidence.recipient.recentDeliveriesOmitted ?? 0) + Math.max(0, evidence.recipient.recentDeliveries.length - 1);
+                    evidence.recipient.recentDeliveries = evidence.recipient.recentDeliveries.slice(-1);
+                }
+                encoded = JSON.stringify(evidence);
+            }
+            console.error("[timing-reap-writer]", encoded);
+        } catch (captureError) {
+            try { console.error("[timing-reap-writer-unavailable]", captureError.code ?? "capture-failed"); } catch {}
+        }
+        throw error;
+    }
+    retireFixtureRun({ id, pid }, owned, ownedExits, liveRuns);
 }
 
 /** Health-tick until the deadline steer is requested (the 60 ms deadline passes on its own). */
@@ -143,12 +200,12 @@ const MINUTE = 60_000;
 
 async function withFakeClock(fn) {
     mock.timers.enable({ apis: ["setInterval"] });
-    const firstRun = liveRuns.length;
+    const priorRuns = new Set(liveRuns.map(run => run.id));
     try { await fn(); } finally {
         // An assertion failure must not leave owed alerts for the next test's
         // same-session recipient. Reload cases intentionally share that scope.
         try {
-            for (const run of liveRuns.slice(firstRun)) if (existsSync(runDir(run.id))) await reap(run);
+            for (const run of [...liveRuns]) if (!priorRuns.has(run.id)) await reap(run);
         } finally { mock.timers.reset(); }
     }
 }
@@ -180,10 +237,7 @@ after(async () => {
     await Promise.all(recipients.map(({ recipient }) => recipient.close()));
     await stopRuntime();
     process.env.PATH = originalPath;
-    for (const { id, pid } of liveRuns) {
-        killProcessTree(pid, "SIGKILL");
-        rmSync(runDir(id), { recursive: true, force: true });
-    }
+    for (const run of [...liveRuns]) await reap(run);
     rmSync(binDir, { recursive: true, force: true });
 });
 
@@ -257,7 +311,7 @@ describe("harness timing: launch", () => {
             }, undefined, undefined, h.ctx);
             const ids = [...res.content[0].text.matchAll(/(sa_[a-z0-9]+_[a-z0-9]+)/g)].map((m) => m[1]);
             const metas = [...new Set(ids)].map((id) => readMeta(id));
-            for (const meta of metas) liveRuns.push({ id: meta.id, pid: meta.pid });
+            for (const meta of metas) registerFixtureRun({ id: meta.id, pid: meta.pid }, ownedExits, liveRuns);
             const one = metas.find((m) => m.name === "one");
             const two = metas.find((m) => m.name === "two");
             assert.equal(one.timing.deadlineAt - one.startedAt, 12 * 60_000);

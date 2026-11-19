@@ -17,7 +17,9 @@ for(const target of targets){
  }
  writeFileAtomically(join(target,'index.ts'),'// Generated from packages/operation-coordinator/index.ts. Do not edit directly.\n'+readFileSync(join(source,'index.ts'),'utf8'));
  writeFileAtomically(join(target,'assignment-observation.mjs'),'// Generated from packages/operation-coordinator/assignment-observation.mjs. Do not edit directly.\n'+readFileSync(join(source,'assignment-observation.mjs'),'utf8'));
+ writeFileAtomically(join(target,'assignment-inbox.mjs'),readFileSync(join(source,'assignment-inbox.mjs'),'utf8'));
 }
+writeFileAtomically(join(root,'packages/pi-better-goal/src/assignment-inbox.mjs'),readFileSync(join(source,'assignment-inbox.mjs'),'utf8'));
 writeFileAtomically(join(root,'packages/pi-better-goal/src/shared-assignment-observation.mjs'),
  '// Generated from packages/operation-coordinator/assignment-observation.mjs. Do not edit directly.\n'+readFileSync(join(source,'assignment-observation.mjs'),'utf8'));
 writeFileAtomically(join(root,'packages/pi-better-goal/src/shared-assignment-projection.mjs'),

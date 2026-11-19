@@ -60,7 +60,9 @@ async function collect(candidate, current) {
                     if (first.status === "rebuilding") {
                         snapshot = { ...first, rows: snapshot?.rows ?? [] };
                         refresh();
-                        return;
+                        // A newer publication may already be owed while this page
+                        // was in flight. Drain that demand, but never poll for it.
+                        break;
                     }
                     const rows = [...first.rows];
                     let cursor = first.nextCursor;

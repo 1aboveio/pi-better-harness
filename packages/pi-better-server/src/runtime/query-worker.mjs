@@ -25,6 +25,9 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
   }
 };
 const { WorkReadModel } = await import("./read-model.ts");
+const { createWorkBudget } = await import("./work-budget.ts");
+const budget = createWorkBudget(workerData.modelOptions?.budgetBuffer);
+const { workerSourceWatch } = await import("./source-watch.ts");
 const { WorkQueries, workScope, queryEncodingMetrics, snapshotJSON } = await import("./queries.ts");
 const { executionPhases, inventoryPhases } = await import("./read-watchdog-probe.ts");
 const probe = workerData.probe;
@@ -34,8 +37,20 @@ function observeExecution(phase, run) {
   const previous = Atomics.exchange(probe, 0, executionPhases.indexOf(phase));
   try { return run(); } finally { Atomics.store(probe, 0, previous); }
 }
-const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, { ...workerData.modelOptions,
-  inventoryPhase: probe ? phase => Atomics.store(probe, 1, inventoryPhases.indexOf(phase)) : undefined });
+let model;
+try {
+  model = new WorkReadModel(workerData.agentDir, workerData.instanceId, {
+    ...workerData.modelOptions, watch: workerSourceWatch(parentPort),
+    inventoryPhase: probe ? phase => Atomics.store(probe, 1, inventoryPhases.indexOf(phase)) : undefined,
+  });
+} catch (error) {
+  // Worker error forwarding retains only String(error). Keep the original
+  // statement's stack for this specific bootstrap failure, without source data.
+  if (/database is locked/.test(String(error))) {
+    console.error(`[runtime-read-bootstrap] WorkReadModel constructor\n${String(error?.stack ?? error).split("\n").slice(0, 12).join("\n").slice(0, 4096)}`);
+  }
+  throw error;
+}
 markExecution("idle");
 // One bounded in-flight batch. Remaining obligations stay in the reconstructable
 // inventory index; an acknowledgement cannot erase a newer revision of an ID.
@@ -67,8 +82,9 @@ const encoded = new WeakMap();
 let cacheBytes = 0, cacheHits = 0, queryCount = 0, serializationCount = 0;
 let revisionPending = false, revisionDirty = false;
 const durations = [];
+const cacheComparisons = workerData.queryCacheDiagnostics ? [] : undefined;
 const metrics = () => ({ ...model.metrics, background: model.backgroundMetrics, sqlite: { ...connections }, cacheHits, queryCount, serializationCount, eventEncoding: { ...queryEncodingMetrics }, cacheBytes,
-  cacheEntries: cache.size, queryDurationMs: [...durations] });
+  cacheEntries: cache.size, queryDurationMs: [...durations], ...(cacheComparisons ? { cacheComparisons: [...cacheComparisons] } : {}) });
 const snapshot = model.snapshot.bind(model);
 model.snapshot = scope => observeExecution("snapshot", () => {
   scope = workScope(scope ?? {});
@@ -76,12 +92,26 @@ model.snapshot = scope => observeExecution("snapshot", () => {
   const revision = model.contentRevision(scope);
   const cacheable = !scope?.backgroundHistory;
   const previous = cacheable ? cache.get(key) : undefined;
-  if (previous?.revision === revision && (previous.value.nextDeadline === null || previous.value.nextDeadline > Date.now())) {
+  const comparedAt = Date.now();
+  const hit = previous?.revision === revision && (previous.value.nextDeadline === null || previous.value.nextDeadline > comparedAt);
+  // Only the original regression fixture opts in; no extra source reads.
+  let comparison;
+  if (cacheComparisons) {
+    comparison = { queryCount, scope, revision, priorRevision: previous?.revision ?? null,
+      priorScopeRevision: previous?.value.scopeRevision ?? null, priorSeq: previous?.value.seq ?? null,
+      priorObservedRevisionVector: previous?.value.observedRevisionVector ?? null, priorDeadline: previous?.value.nextDeadline ?? null,
+      comparedAt, hit: Boolean(hit) };
+    cacheComparisons.push(comparison);
+    if (cacheComparisons.length > 16) cacheComparisons.shift();
+  }
+  if (hit) {
     cacheHits++; cache.delete(key); cache.set(key, previous); return previous.value;
   }
   if (previous) { cacheBytes -= previous.bytes; cache.delete(key); }
   const started = performance.now();
   const value = snapshot(scope);
+  if (comparison) Object.assign(comparison, { scopeRevision: value.scopeRevision,
+    nextDeadline: value.nextDeadline, seq: value.seq, observedRevisionVector: value.observedRevisionVector });
   const json = snapshotJSON(value);
   serializationCount++;
   const bytes = Buffer.byteLength(json);
@@ -152,7 +182,9 @@ parentPort.on("message", async message => {
   if (message.type !== "query") return;
   const request = { connection: message.connection, cancelled: false };
   requests.set(message.id, request);
+  const release = budget.enter("query");
   try {
+    if (!release) throw new Error("runtime-overloaded: shared source query budget exhausted");
     const command = message.command;
     if (["runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(command.type)) {
       await model.reconcile();
@@ -176,6 +208,6 @@ parentPort.on("message", async message => {
   } catch (error) {
     if (request.cancelled) return;
     parentPort.postMessage({ type: "reply", id: message.id, error: String(error).slice(0, 512), metrics: metrics() });
-  } finally { requests.delete(message.id); }
+  } finally { release?.(); requests.delete(message.id); }
 });
 void model.reconcile();

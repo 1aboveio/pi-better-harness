@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Socket } from "node:net";
 import { BackgroundObservation } from "../src/runtime/background.ts";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
+import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { workScope } from "../src/runtime/queries.ts";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 const { writeMeta, taskDir } = await import(new URL("../../pi-better-background-tasks/src/registry.ts", import.meta.url).href);
@@ -43,6 +44,7 @@ test("Background history queries observe work completed between shared active re
     const history = await read();
     assert.equal(history.rows.length, 1, "a warmed history scope must include a newly completed operation");
     assert.equal(history.rows[0].meta.status, "succeeded");
+    const beforeWait = JSON.parse((await client.handle({ type: "runtime_get_metrics" })).json).background.history;
     const events: any[] = [];
     socket.write = (line: string) => { events.push(JSON.parse(line)); return true; };
     await client.handle({ type: "runtime_subscribe", scope });
@@ -52,6 +54,9 @@ test("Background history queries observe work completed between shared active re
       assert.ok(Date.now() < deadline, "coordinator-only terminal history changes did not notify the subscriber"); await delay(20);
     }
     assert.equal((await read()).rows[0].meta.waits[0].waitId, "terminal-wait", "waits added after completion invalidate the indexed projection");
+    const afterWait = JSON.parse((await client.handle({ type: "runtime_get_metrics" })).json).background.history;
+    assert.equal(afterWait.inventories, beforeWait.inventories, "a dependent wait updates history without restarting its baseline");
+    assert.ok(afterWait.incrementalBatches > beforeWait.incrementalBatches);
   } finally {
     client.close(); await executor.close(); writer.close(); rmSync(root, { recursive: true, force: true });
   }
@@ -146,7 +151,10 @@ test("Background history applies bounded pages, status filters and stable cursor
     assert.equal(active.activity.active, 1);
     assert.notEqual(active.scopeRevision, first.scopeRevision, "independent activity participates in a filtered history revision");
     const metrics = JSON.parse((await client.handle({ type: "runtime_get_metrics" })).json);
-    assert.equal(metrics.sqlite.active, 2, "history shares one derived index and one coordinator reader");
+    assert.equal(metrics.sqlite.active, 1, "history composes its coordinator reader on the sole derived handle");
+    assert.equal(metrics.sqlite.maximum, 1);
+    assert.equal(metrics.coordinatorConnections, 1);
+    assert.equal(metrics.indexConnections, 1);
     assert.equal(metrics.executor.restarts, 0, "indexed history does not restart the read worker");
   } finally {
     client?.close(); await executor?.close(); writer.close(); rmSync(root, { recursive: true, force: true });
@@ -225,6 +233,70 @@ test("Background indexed pages merge legacy rows and fence cursors and off-page 
     assert.equal(metrics.background.history.metadataReads, 7, "six initial records and one changed record are the only legacy metadata reads");
   } finally {
     client.close(); await executor.close(); writer.close();
+    for (const id of ids) rmSync(taskDir(id), { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an off-page failure hint cannot publish ready before its queued projection runs", { timeout: 15000 }, async () => {
+  const root = mkdtempSync("/tmp/p754-offpage-boundary-");
+  const baseDir = join(root, "raw");
+  const model = new WorkReadModel(root, "offpage-boundary", { baseDir, durableDir: join(root, "archive"), intervalMs: 60000 });
+  const ids = ["bg_boundary_old", "bg_boundary_middle", "bg_boundary_new"];
+  const scope = { background: true, backgroundHistory: true, cwd: root, sessionId: "parent", limit: 1 };
+  let history: any, refresh: any;
+  const drain = async () => {
+    const deadline = Date.now() + 10000;
+    for (;;) {
+      const value = model.snapshot(scope);
+      if (value.status === "ready") return value;
+      assert.ok(Date.now() < deadline, value.reason);
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+  };
+  try {
+    ids.forEach((id, i) => writeMeta({ id, status: "succeeded", kind: "process", startedAt: i + 1, endedAt: i + 2,
+      logPath: join(taskDir(id), "output.log"), cwd: root, callbackOrigin: { cwd: root, sessionId: "parent" } }));
+    await model.reconcile();
+    const stable = await drain();
+    const foreign = model.snapshot({ ...scope, sessionId: "foreign" });
+    assert.deepEqual(stable.rows.map(row => row.meta.id), [ids[2]]);
+    history = (model as any).background.history;
+    refresh = history.startRefresh;
+    let held = false;
+    history.startRefresh = () => { held = true; };
+    const before = history.db.prepare("SELECT failure FROM background_history WHERE key=?").get(`l:${ids[0]}`).failure;
+    appendFileSync(join(taskDir(ids[0]), "failures.jsonl"), '{"id":"boundary-incident","operation":"test","kind":"failure","summary":"off-page failure"}\n');
+    // Deliver the real file's notification at a controlled point, independently
+    // of OS event coalescing. The production watcher callback queues the work.
+    const watcher = history.watchers.get(join(taskDir(ids[0]), "../.."));
+    assert.ok(watcher);
+    watcher.emit("change", "change", `tasks/${ids[0]}/failures.jsonl`);
+    const deadline = Date.now() + 10000;
+    while (!held) {
+      assert.ok(Date.now() < deadline, "off-page notification did not schedule its projection");
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    assert.ok(history.dirtyLegacy.has(ids[0]), "the exact off-page ID remains owed while refresh is held");
+    // Run real source work while the already-notified history projection is held.
+    const directory = join(baseDir, "runs", "sa_boundary_source");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "meta.json"), JSON.stringify({ id: "sa_boundary_source", cwd: root, sessionId: "worker", status: "completed", startedAt: 1 }));
+    await model.reconcile();
+    assert.equal(history.db.prepare("SELECT failure FROM background_history WHERE key=?").get(`l:${ids[0]}`).failure, before);
+    assert.equal(model.snapshot(scope).status, "rebuilding", "queued off-page facts must fence ready publication before the scheduled refresh starts");
+    history.startRefresh = refresh;
+    refresh.call(history);
+    const changed = await drain();
+    assert.notEqual(changed.scopeRevision, stable.scopeRevision, "the actual off-page failure changes the public scope revision");
+    assert.notEqual(changed.backgroundIndex.page.failureRevision, stable.backgroundIndex.page.failureRevision);
+    assert.equal(changed.backgroundIndex.page.contentRevision, stable.backgroundIndex.page.contentRevision);
+    const unchanged = model.snapshot({ ...scope, sessionId: "foreign" });
+    assert.equal(unchanged.rows.length, 0);
+    assert.equal(unchanged.scopeRevision, foreign.scopeRevision, "off-page failure revisions stay within the owning scope");
+  } finally {
+    if (history && refresh) history.startRefresh = refresh;
+    await model.close();
     for (const id of ids) rmSync(taskDir(id), { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }

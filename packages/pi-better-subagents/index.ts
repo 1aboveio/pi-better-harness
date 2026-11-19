@@ -45,7 +45,8 @@ import {
 import { spawnDetached, killProcessTree, type SpawnResult } from "./spawn.ts";
 import { abortUncommittedLaunch } from "./launch-abort.ts";
 import { parseRun, parseRunForLifecycle, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
-import { finalizeRun as finalizeRunCore } from "./finalization.ts";
+import { finalizeRun as finalizeRunCore, reconcileInterruptedRun } from "./finalization.ts";
+import { completeOwnedExit } from "./owned-exit.ts";
 import { selectSessionByName } from "./session-selection.ts";
 import { isWithinWorkspace } from "./workspace-scope.ts";
 import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
@@ -128,6 +129,7 @@ import {
     type ChildEventFacts,
     type HealthObservation,
     type ProcessProbe,
+    type ReconcileResult,
     type RawLogDiagnostic,
 } from "./health.ts";
 import {
@@ -811,16 +813,12 @@ function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, no
 
 function markHealthCallbackSuppressed(meta: RunMeta, status: "orphaned" | "lost", reason: string, now: number): void {
     if (isConversationIdentityReason(reason)) return;
-    if (status === "orphaned") {
-        if (meta.orphanedCallbackSuppressedAt !== undefined) return;
-        meta.orphanedCallbackSuppressedAt = now;
-        meta.orphanedCallbackSuppressedReason = reason;
-    } else {
-        if (meta.lostCallbackSuppressedAt !== undefined) return;
-        meta.lostCallbackSuppressedAt = now;
-        meta.lostCallbackSuppressedReason = reason;
-    }
-    writeMeta(meta);
+    writeMeta(meta, { patch: current => {
+        if (isHealthCallbackHandled(current, status)) return;
+        return status === "orphaned"
+            ? { orphanedCallbackSuppressedAt: now, orphanedCallbackSuppressedReason: reason }
+            : { lostCallbackSuppressedAt: now, lostCallbackSuppressedReason: reason };
+    } });
 }
 
 function isHealthCallbackHandled(meta: RunMeta, status: "orphaned" | "lost"): boolean {
@@ -966,6 +964,7 @@ function stopTicker(): void {
 /** How often supervision is reconciled. Independent of TUI render scheduling. */
 const HEALTH_TICK_MS = 15_000;
 let healthTicker: ReturnType<typeof setInterval> | undefined;
+let managedHealthClose: (() => void) | undefined;
 /** ExtensionAPI retained so health transitions can deliver coordinator follow-ups (#65). */
 let healthPi: ExtensionAPI | undefined;
 
@@ -1002,9 +1001,10 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
         try { uiCtx.ui.notify(notice, "warning"); }
         catch { return; }
         // The marker acknowledges quiet delivery, never a model turn.
-        if (status === "orphaned") meta.orphanedCallbackSentAt = now;
-        else meta.lostCallbackSentAt = now;
-        writeMeta(meta);
+        writeMeta(meta, { patch: current => {
+            if (current.status !== status || isHealthCallbackHandled(current, status) || callbackSuppressionReason(current)) return;
+            return status === "orphaned" ? { orphanedCallbackSentAt: now } : { lostCallbackSentAt: now };
+        } });
         return;
     }
     void getCallbackBatcher(pi).deliverUrgent({
@@ -1026,9 +1026,10 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
                 markFailureAttentionDelivered(failurePath(meta.id), attention, at);
                 if (attention.incidents.some((incident) => pendingFailureAttention(collectRunFailures(meta.id, meta.cwd), at, { terminal: true })?.incidents.includes(incident))) return;
             }
-            if (status === "orphaned") current.orphanedCallbackSentAt = at;
-            else current.lostCallbackSentAt = at;
-            writeMeta(current);
+            writeMeta(current, { patch: current => {
+                if (isHealthCallbackHandled(current, status)) return;
+                return status === "orphaned" ? { orphanedCallbackSentAt: at } : { lostCallbackSentAt: at };
+            } });
         },
         onSuppressed: (reason, at) => {
             const current = readMeta(meta.id);
@@ -1341,12 +1342,13 @@ function enforceTiming(pi: ExtensionAPI | undefined, meta: RunMeta, now: number)
 }
 
 /** One reconciliation + durable health-callback recovery pass. */
-function reconcileHealth(): void {
+function reconcileHealth(ids?: readonly string[]): void {
     if (!managementPort) return;
     try { managementPort.assertCurrent(); } catch { stopHealthTicker(); return; }
     const ctx = uiCtx;
     const pi = healthPi;
-    for (const summary of supervisedMetas()) {
+    const selected = ids ? ids.map(id => readMeta(id)).filter((meta): meta is NonNullable<typeof meta> => Boolean(meta)) : supervisedMetas();
+    for (const summary of selected) {
         if (!ownedByThisParent(summary)) continue;
         // running/orphaned: process reconcile. lost: durable callback recovery only.
         if (summary.status !== "running" && summary.status !== "orphaned" && summary.status !== "lost") continue;
@@ -1364,9 +1366,18 @@ function reconcileHealth(): void {
         // Interrupted work whose child already exited is finalized from its own
         // coherent log before any other verdict (and before timing can mislabel
         // an already-finished run as stopped) (#625).
+        let interruptedReconciliation: ReconcileResult | undefined;
         if (meta.status === "running" || meta.status === "orphaned") {
             try {
-                if (finalizeInterruptedRunFromLog(pi, meta, now)) continue;
+                if (pi && !directlySupervisedRunIds.has(meta.id) && meta.supervisionInterruptedAt !== undefined) {
+                    const observed = reconcileInterruptedRun(meta, realProcessProbe, now, {
+                        renderWidget,
+                        notify: (message, level) => { try { ctx?.ui.notify(message, level); } catch { /* unavailable UI */ } },
+                        sendMessage: () => enqueueCompletionCallback(pi, meta.id),
+                    });
+                    if (observed.finalization?.applied) { syncHealthTicker(); continue; }
+                    interruptedReconciliation = observed.reconciliation;
+                }
             } catch { /* best-effort; the ordinary reconciliation below still runs */ }
         }
         try {
@@ -1374,7 +1385,7 @@ function reconcileHealth(): void {
         } catch { /* timing is best-effort per tick; supervision below still runs */ }
 
         if (meta.status === "running" || meta.status === "orphaned") {
-            const result = reconcileRun(meta, realProcessProbe, now);
+            const result = interruptedReconciliation ?? reconcileRun(meta, realProcessProbe, now);
             if (result.changed) {
                 Object.assign(meta, result.patch, { status: result.status });
                 writeMeta(meta);
@@ -1417,7 +1428,7 @@ function reconcileHealth(): void {
     // is the human's own interrupted work, not another session's live run, and
     // `finalizeInterruptedRunFromLog` still requires all process evidence to be
     // absent, so a live writer is never touched.
-    for (const summary of listMetas({ includeArchived: false })) {
+    for (const summary of ids ? selected : listMetas({ includeArchived: false })) {
         if (summary.status !== "running" && summary.status !== "orphaned") continue;
         if (ownedByThisParent(summary) || !ownsInterruptedSupervision(summary)) continue;
         const meta = readMeta(summary.id);
@@ -1425,7 +1436,7 @@ function reconcileHealth(): void {
         try { finalizeInterruptedRunFromLog(pi, meta, Date.now()); } catch { /* the next tick retries */ }
     }
     // Completed runs can still have failed completion handoffs to retry.
-    for (const summary of supervisedMetas()) {
+    for (const summary of selected) {
         if (!pi || !ownedByThisParent(summary) || summary.status === "running" || summary.status === "orphaned" || summary.status === "lost") continue;
         const meta = readMeta(summary.id);
         if (meta && meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined) enqueueCompletionCallback(pi!, meta.id);
@@ -1518,6 +1529,7 @@ function syncHealthTicker(): void {
         stopHealthTicker();
         return;
     }
+    if (managementPort.observeHealth) { ensureHealthTicker(); return; }
     if (needsMonitoring(supervisedMetas()) || needsInterruptedSupervision()) ensureHealthTicker();
     else stopHealthTicker();
 }
@@ -1525,6 +1537,10 @@ function syncHealthTicker(): void {
 /** Start the reconciliation loop if it isn't already running. */
 function ensureHealthTicker(): void {
     if (!managementPort) return;
+    if (managementPort.observeHealth) {
+        managedHealthClose ??= managementPort.observeHealth(ids => reconcileHealth(ids));
+        return;
+    }
     // Not gated on `sessionTornDown`: a spawn always means the current session is
     // doing new work. Only `syncHealthTicker` — the path a late child finalizer
     // takes — stays closed in a replaced instance.
@@ -1534,12 +1550,13 @@ function ensureHealthTicker(): void {
 }
 
 function stopHealthTicker(): void {
+    managedHealthClose?.(); managedHealthClose = undefined;
     if (healthTicker) { clearInterval(healthTicker); healthTicker = undefined; }
 }
 
 /** Test/diagnostic seam: whether the periodic reconciliation loop is active. */
 export function isHealthTickerActive(): boolean {
-    return healthTicker !== undefined;
+    return healthTicker !== undefined || managedHealthClose !== undefined;
 }
 
 /**
@@ -3505,9 +3522,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             // Register exit supervision before any fallible post-spawn publication.
             // A failed metadata write must not strand a running child without a close
             // handler; the lease stays held until that child has actually exited.
-            void spawned.exit.then(async (code) => {
-                try { finalizeRun(pi, ctx, id, code); }
-                finally { lease?.release(); }
+            const exitCompletion = completeOwnedExit(spawned.exit,
+                code => finalizeRun(pi, ctx, id, code),
+                () => { lease?.release(); }, async () => {
                 if (workerBridge) workerOperations.release(id, "attempt-exited");
                 // Reconcile this attempt's earlier published writer before its
                 // next park can admit another continuation of the conversation.
@@ -3524,6 +3541,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 });
                 await settleParkedExit(id);
             });
+            managed?.observeExit?.(id, exitCompletion);
             writeMeta(meta);
             committed = true;
             // `meta.json` is now the record of this run; the claim has served its

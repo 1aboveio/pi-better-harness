@@ -400,6 +400,7 @@ export function createCallbackBatcher(host, options = {}) {
     const pending = new Map();
     const inFlight = new Set();
     const urgentInFlight = new Set();
+    const urgentSettlements = new Set();
     const handedOff = new Map();
     const activeTools = new Set();
     let sequence = 0;
@@ -583,7 +584,9 @@ export function createCallbackBatcher(host, options = {}) {
             const handoff = host.sendMessage({ customType: event.customType, content: formatUrgentCallback(event, { maxBytes }), display: true,
                 ...(event.receiptId ? { details: { urgentEventId: event.receiptId } } : {}) }, { deliverAs: "followUp", triggerTurn: true });
             if (isPromiseLike(handoff)) {
-                return Promise.resolve(handoff).then(() => acknowledge(), () => false).finally(() => urgentInFlight.delete(key));
+                const settlement = Promise.resolve(handoff).then(() => acknowledge(), () => false).finally(() => { urgentInFlight.delete(key); urgentSettlements.delete(settlement); });
+                urgentSettlements.add(settlement);
+                return settlement;
             }
             const acknowledged = acknowledge();
             urgentInFlight.delete(key);
@@ -634,6 +637,10 @@ export function createCallbackBatcher(host, options = {}) {
             return pending.size > 0 ? api.flush() : true;
         },
         deliverUrgent,
+        async settled() {
+            await flushPromise;
+            await Promise.all([...urgentSettlements]);
+        },
         cancel() {
             cancelTimer();
             pending.clear();

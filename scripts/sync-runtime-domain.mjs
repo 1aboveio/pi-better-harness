@@ -4,6 +4,10 @@ import { join } from "node:path";
 import ts from "typescript";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
+// Refresh client sources before embedding them in the fixed launch domain.
+for (const destination of ["packages/pi-better-subagents/shared-work-client.mjs", "packages/pi-better-background-tasks/src/shared-work-client.mjs"]) {
+  writeFileSync(join(root, destination), readFileSync(join(root, "packages/pi-better-server/src/runtime/work-client.mjs")));
+}
 const target = join(root, "packages/pi-better-server/src/runtime/domain");
 mkdirSync(target, { recursive: true });
 // The launch adapter is fixed build content, never a client-selected import.
@@ -92,6 +96,7 @@ writeFileSync(join(background, "snapshot.mjs"), ts.transpileModule(
 for (const [name, source] of [
   ["assignment-projection.mjs", "packages/pi-better-subagents/assignment-projection.mjs"],
   ["assignment-observation.mjs", "packages/operation-coordinator/assignment-observation.mjs"],
+  ["assignment-inbox.mjs", "packages/operation-coordinator/assignment-inbox.mjs"],
 ]) {
   const text = readFileSync(join(root, source), "utf8").replace("./shared-operation-coordinator/assignment-observation.mjs", "./assignment-observation.mjs");
   writeFileSync(join(target, name), `// Generated from ${source}. Do not edit directly.\n${text}`);

@@ -28,21 +28,32 @@ test("a redundant terminal publication during verification preserves the first v
   // Notifications are not the proof: force the actual writer between inventory
   // and the unchanged source-signature guard, without a scheduling sleep.
   (model as any).watchers.forEach((watcher: any) => watcher.close());
-  const reader = (model as any).reader;
-  const revision = reader.revision.bind(reader);
   let calls = 0;
+  let sourceStats = (model as any).sourceStats;
   let publication = meta;
-  reader.revision = () => {
-    if (++calls === 2) archiveCompletedAttempt(publication as never);
-    return revision();
-  };
   const socket = new Socket();
   const queries = new WorkQueries(model, socket);
   const observations: WorkSnapshot[] = [];
   const off = model.onChange(() => observations.push(queries.handle({ type: "runtime_get_scope", scope: { id: meta.id } }) as WorkSnapshot));
   try {
+    // Reconciliation acquires the reader before scanning. Hook that boundary,
+    // not construction, so the first verified publication is still exercised.
+    const scan = (model as any).scan.bind(model);
+    (model as any).scan = async (paths: string[]) => {
+      const reader = (model as any).reader;
+      const changes = reader.changes.bind(reader);
+      reader.changes = () => {
+        if (calls === 0 && (model as any).sourceStats > sourceStats) {
+          calls++;
+          archiveCompletedAttempt(publication as never);
+        }
+        return changes();
+      };
+      try { return await scan(paths); }
+      finally { reader.changes = changes; }
+    };
     await model.reconcile();
-    assert.ok(calls >= 2, "the real publication must run within source verification");
+    assert.equal(calls, 1, "the real publication must run within source verification");
     assert.ok(observations.length > 0);
     assert.deepEqual(observations.map(snapshot => snapshot.status), ["ready"], "no transient unverified first assignment may be published for unchanged terminal metadata");
     assert.equal(observations[0]!.rows[0]!.meta.id, meta.id);
@@ -55,6 +66,7 @@ test("a redundant terminal publication during verification preserves the first v
     archiveCompletedAttempt({ ...meta, endedAt: 3 } as never);
     publication = { ...meta, endedAt: 4 };
     calls = 0;
+    sourceStats = (model as any).sourceStats;
     observations.length = 0;
     await model.reconcile();
     assert.deepEqual(observations.map(snapshot => snapshot.status), ["ready"], "one recoverable source race stays internal");

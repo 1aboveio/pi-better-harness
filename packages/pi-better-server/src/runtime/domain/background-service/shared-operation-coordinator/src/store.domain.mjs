@@ -13,12 +13,13 @@ import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgro
 import { BackgroundRequests } from "./background-requests.domain.mjs";
 import { StoreError } from "./errors.domain.mjs";
 import { SubagentLaunchJournal } from "./subagent-launch.domain.mjs";
-import { resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.domain.mjs";
+import { resultSupervisionChanges, resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.domain.mjs";
 import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.domain.mjs";
 import { repairFailedResume } from "./recovery.domain.mjs";
 import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.domain.mjs";
 import { describeOwnerDiff, normalizeOwner, requireCounter, requireId, requirePath, } from "./validate.domain.mjs";
 import { ensureSchema } from "./schema.domain.mjs";
+import { ensureAssignmentChanges } from "./assignment-changes.domain.mjs";
 import { createContext, openDatabase } from "./sqlite.domain.mjs";
 import { getOperation as readOperationRecord, listOperations as readOperationRecords, listRunningSupervisedBy as readRunningSupervisedBy, releaseSupervision as writeSupervisionRelease, recordSupervision as writeSupervision, recordTerminalOutcome as writeTerminalOutcome, registerOperation as writeOperation, } from "./operations.domain.mjs";
 import { getChangeRevision as readChangeRevision, readDiscoveryClaim as readClaim, readDiscoveryState, releaseDiscoveryClaim as deleteDiscoveryClaim, tryClaimDiscovery as writeDiscoveryClaim, } from "./discovery.domain.mjs";
@@ -32,6 +33,7 @@ export function openStore(options) {
     const ctx = createContext(db, options.now ? { now: options.now } : {});
     try {
         ensureSchema(ctx);
+        ensureAssignmentChanges(ctx);
     }
     catch (error) {
         try {
@@ -53,6 +55,8 @@ export function openStore(options) {
         resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
         handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
         resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
+        hasSubagentManagement() { alive(); return Boolean(ctx.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='subagent_management'").get()); },
+        resultSupervisionChanges(after) { alive(); return resultSupervisionChanges(ctx, after); },
         resultSupervisions(activeOnly) { alive(); return resultSupervisions(ctx, activeOnly); },
         handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
         handoffResultSupervisions(input) { alive(); return handoffResultSupervisions(ctx, input); },

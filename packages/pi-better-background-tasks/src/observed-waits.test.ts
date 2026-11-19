@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -97,6 +98,7 @@ function createBranchCtx(cwd: string, sessionId: string, branchIds: readonly str
 }
 
 function startHost(options: {
+  storePath?: string;
   harness?: Harness;
   root: string;
   supervisor?: LocalSupervisor;
@@ -106,7 +108,7 @@ function startHost(options: {
   const harness = options.harness ?? createHarness();
   const notifications: ParentNotification[] = [];
   const host = createObservedWaitHost(harness.pi, {
-    storePath: join(options.root, "operations.sqlite"),
+    storePath: options.storePath ?? join(options.root, "operations.sqlite"),
     supervisorDirectory: join(options.root, "supervisor"),
     pollMs: 0,
     ...(options.supervisor ? { supervisor: options.supervisor } : {}),
@@ -598,9 +600,10 @@ describe("supervision authority", () => {
 
   it("the first scoped recovery cannot coalesce into an unscoped startup pass", async () => {
     const root = workspace("startup-scoped-recovery");
-    const store = openStore({ path: join(root, "operations.sqlite") });
+    const storePath = join(root, "operation-coordinator.sqlite");
+    const store = openStore({ path: storePath });
     cleanups.push(() => store.close());
-    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store,
+    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store, storePath,
       supervisorDirectory: join(root, "supervisor"), pollMs: 0, serverOwnedResults: true });
     cleanups.push(() => host.close());
     host.start();
@@ -623,7 +626,8 @@ describe("supervision authority", () => {
 
   it("recovers first and tail callback pages without claim-scan starvation or unbounded retries", async () => {
     const root = workspace("paged-callback-recovery"), directory = join(root, "supervisor");
-    const store = openStore({ path: join(root, "operations.sqlite") });
+    const storePath = join(root, "operation-coordinator.sqlite");
+    const store = openStore({ path: storePath });
     cleanups.push(() => store.close());
     mkdirSync(join(directory, "observed"), { recursive: true });
     const delivered: string[] = [];
@@ -635,10 +639,13 @@ describe("supervision authority", () => {
       store.recordTerminalOutcome({ operationId, owner, eventId: operationId, outcome: "succeeded", evidence: [{ kind: "summary", ref: id, summary: "done" }] });
       writeFileSync(join(directory, "observed", `${id}.json`), JSON.stringify({ kind: "process", cwd: root, callback: true, branchId, parentOrigin: { cwd: root, sessionId: owner.sessionId } }));
     }
-    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store, supervisorDirectory: directory, pollMs: 0, serverOwnedResults: true,
+    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store, storePath, supervisorDirectory: directory, pollMs: 0, serverOwnedResults: true,
       notifyParent(notification, delivery) { delivered.push(notification.taskId); delivery.delivered(); } });
     cleanups.push(() => host.close());
+    expect(existsSync(storePath)).toBe(true);
     const ctx = createCtx(root, "paged-owner", "current"); host.start(ctx);
+    expect((host as unknown as { storePath: string }).storePath).toBe(storePath);
+    expect((host as unknown as { changeWatcher?: unknown }).changeWatcher).toBeDefined();
     for (let page = 0; page < 10; page++) {
       host.noteParentContext(createCtx(root, "interleaved-owner")); await host.reconcileNow();
       host.noteParentContext(ctx); await host.reconcileNow();
@@ -654,6 +661,9 @@ describe("supervision authority", () => {
     host.noteParentContext(ctx, { recover: false });
     expect(host.hasPendingParentCallbackRecovery()).toBe(true);
     expect((host as unknown as { callbackRecoveryScopes: Map<string, unknown> }).callbackRecoveryScopes.size).toBeLessThanOrEqual(128);
+    host.close();
+    expect((host as unknown as { changeWatcher?: unknown; changeRepair?: unknown }).changeWatcher).toBeUndefined();
+    expect((host as unknown as { changeRepair?: unknown }).changeRepair).toBeUndefined();
   // This exercises 600 durable records and sidecars, not a wall-clock performance budget.
   }, 30_000);
 
@@ -1378,7 +1388,14 @@ describe("Subagents request/reply surface", () => {
   it("registers a run, executes a tool, stages then releases a checkpoint, and acknowledges", async () => {
     const root = workspace("rpc");
     const harness = createHarness();
-    const { host } = startHost({ root, harness });
+    const { host } = startHost({ root, harness, storePath: join(root, "operation-coordinator.sqlite") });
+    const { WorkReadModel } = await import(new URL("../../pi-better-server/src/runtime/read-model.ts", import.meta.url).href);
+    mkdirSync(join(root, "runs", "attempt-rpc"), { recursive: true });
+    writeFileSync(join(root, "runs", "attempt-rpc", "meta.json"), JSON.stringify({ id: "attempt-rpc", sessionId: "conv-rpc", cwd: root, status: "completed", startedAt: 1, operations: { conversationId: "conv-rpc", workspace: root } }));
+    const model = new WorkReadModel(root, "tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+    cleanups.push(() => model.close());
+    await model.reconcile();
+    const inventories = model.metrics.inventories;
     const call = rpcClient(harness.events);
     const readyEvents: Array<Record<string, unknown>> = [];
     harness.events.on(OBSERVED_WAITS_READY_CHANNEL, (value: unknown) => readyEvents.push(value as Record<string, unknown>));
@@ -1431,6 +1448,11 @@ describe("Subagents request/reply surface", () => {
     expect(admitted.phase).toBe("parking");
     const waitId = String(admitted.waitId);
     const generation = Number(admitted.generation);
+
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-rpc" }).rows[0].assignment.state).toBe("waiting");
+    expect(model.snapshot({ id: "attempt-rpc" }).activity.active).toBe(1);
+    expect(model.metrics.inventories).toBe(inventories);
 
     // Stage while the child is alive: the wait must not look parked yet.
     const staged = await call("checkpoint", {
@@ -1497,13 +1519,23 @@ describe("Subagents request/reply surface", () => {
       note: "rpc worker result interpreted",
     });
     expect(ack.phase).toBe("consumed");
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-rpc" }).rows[0].assignment.state).toBe("completed");
+    expect(model.metrics.inventories).toBe(inventories);
     expect(await call("release-run", { runId })).toMatchObject({ released: true });
   });
 
   it("claims, publishes, releases and cancels resume generations through the service", async () => {
     const root = workspace("rpc-resume");
     const harness = createHarness();
-    const { host } = startHost({ root, harness });
+    const { host } = startHost({ root, harness, storePath: join(root, "operation-coordinator.sqlite") });
+    const { WorkReadModel } = await import(new URL("../../pi-better-server/src/runtime/read-model.ts", import.meta.url).href);
+    mkdirSync(join(root, "runs", "attempt-resume"), { recursive: true });
+    writeFileSync(join(root, "runs", "attempt-resume", "meta.json"), JSON.stringify({ id: "attempt-resume", sessionId: "conv-resume", cwd: root, status: "completed", startedAt: 1, operations: { conversationId: "conv-resume", workspace: root } }));
+    const model = new WorkReadModel(root, "claim-tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+    cleanups.push(() => model.close());
+    await model.reconcile();
+    const inventories = model.metrics.inventories;
     const call = rpcClient(harness.events);
     const runId = "run-resume";
     const conversationId = "conv-resume";
@@ -1558,6 +1590,8 @@ describe("Subagents request/reply surface", () => {
     });
     expect(typeof first.claimId).toBe("string");
     expect(typeof first.claimToken).toBe("string");
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-resume" }).rows[0].assignment.reason).toBe("resume-claimed");
     const released = await call("release-resume", {
       runId, waitId, generation,
       claimId: first.claimId,
@@ -1595,6 +1629,10 @@ describe("Subagents request/reply surface", () => {
       reason: "owner cancelled the parked assignment",
     });
     expect(cancelled.phase).toBe("cancelled");
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-resume" }).rows[0].assignment.state).toBe("cancelled");
+    expect(model.snapshot({ id: "attempt-resume" }).activity.active).toBe(0);
+    expect(model.metrics.inventories).toBe(inventories);
     expect((await call("wait-snapshot", { waitId, generation })).claim).toBeNull();
   });
 
@@ -2556,7 +2594,19 @@ describe("callback origin and delivery receipt", () => {
   });
 
   it("discovers a terminal result recorded after this host's initial scan", async () => {
-    const root = workspace("late-terminal-discovery");
+    const root = mkdtempSync(join(tmpdir(), "observed-waits-late-terminal-discovery-"));
+    let runnerClosed = false;
+    let runnerExit = Promise.resolve();
+    let runnerResult: string | undefined;
+    cleanups.push(async () => {
+      const before = { closed: runnerClosed, terminal: runnerResult ? existsSync(runnerResult) : false };
+      await runnerExit;
+      expect(runnerClosed, "the owned fixture writer must exit before its directory is removed").toBe(true);
+      expect(runnerResult).toBeDefined();
+      expect(JSON.parse(readFileSync(runnerResult!, "utf8")).attestedBy).toBe("runner");
+      console.log(JSON.stringify({ fixtureWriterQuiescence: { before, closed: runnerClosed, terminal: true } }));
+      rmSync(root, { recursive: true, force: true });
+    });
     const options = {
       storePath: join(root, "operations.sqlite"),
       supervisorDirectory: join(root, "supervisor"),
@@ -2575,12 +2625,29 @@ describe("callback origin and delivery receipt", () => {
     // records terminal while the watcher is not reconciling.
     const launcherHarness = createHarness();
     const launcher = createObservedWaitHost(launcherHarness.pi, { ...options, notifyParent: () => {} });
+    cleanups.push(() => launcher.close());
     launcher.start(ctx);
+    const childProcess = createRequire(import.meta.url)("node:child_process") as typeof import("node:child_process");
+    const originalSpawn = childProcess.spawn;
+    const capture = vi.spyOn(childProcess, "spawn").mockImplementation((...args: Parameters<typeof spawn>) => {
+      const child = originalSpawn(...args);
+      if (args[1]?.[1] === options.supervisorDirectory) {
+        runnerResult = join(options.supervisorDirectory, "tasks", args[1][2]!, "result.json");
+        runnerExit = new Promise<void>((resolve, reject) => {
+          child.once("error", reject);
+          child.once("close", code => { runnerClosed = true; code === 0 ? resolve() : reject(new Error(`fixture runner exit ${code}`)); });
+        });
+        // Cleanup still awaits the original promise and propagates any failure.
+        void runnerExit.catch(() => {});
+      }
+      return child;
+    });
+    syncBuiltinESMExports();
     const launch = await launcher.launchParent({
       kind: "process",
       params: { argv: nodeCommand('setTimeout(() => { console.log("late-terminal"); }, 300)'), shell: false, callback: true },
       ctx,
-    });
+    }).finally(() => { capture.mockRestore(); syncBuiltinESMExports(); });
     launcher.close();
     recordTerminalFromChild(root, launch.operationId, launch.owner, "late-terminal");
 
