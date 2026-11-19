@@ -8,7 +8,7 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { buildDarwinCapture } from '../scripts/measure-full-runtime/build-darwin-capture.mjs';
 
-test('real peak capture survives a delayed control loop but still rejects a physical miss', { timeout: 15000 }, async t => {
+test('real peak capture has complete generation coverage, survives a control delay, and rejects a physical miss', { timeout: 15000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'p808-peak-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const binding = process.platform === 'darwin' ? buildDarwinCapture(root) : null;
@@ -17,7 +17,7 @@ test('real peak capture survives a delayed control loop but still rejects a phys
   for (const mode of ['delay-control', 'pause-collector']) {
     const gcDirectory = join(root, mode);
     mkdirSync(gcDirectory);
-    const child = fork(new URL('./support/peak-cadence.mjs', import.meta.url), [mode, gcDirectory, JSON.stringify(binding)], { execArgv: [] });
+    const child = fork(new URL('./support/peak-cadence.mjs', import.meta.url), [mode, gcDirectory, JSON.stringify(binding)], { execArgv: ['--import', 'tsx'] });
     const messages = on(child, 'message', { close: ['exit'], signal: t.signal });
     const exited = once(child, 'exit');
     try {
@@ -31,8 +31,8 @@ test('real peak capture survives a delayed control loop but still rejects a phys
         [message] = (await messages.next()).value ?? [];
       }
       assert.equal(message?.type, 'result');
-      const { elapsedMs, frames, gapMs, peak } = message;
-      t.diagnostic(JSON.stringify({ mode, elapsedMs, frames, gapMs, issues: peak.issues }));
+      const { elapsedMs, frames, gapMs, peak, coverage } = message;
+      t.diagnostic(JSON.stringify({ mode, elapsedMs, frames, gapMs, issues: peak.issues, coverage }));
       assert.deepEqual(await exited, [0, null]);
       assert.ok(elapsedMs >= 600, 'The injected stall did not span the peak gap limit');
       if (mode === 'delay-control') {

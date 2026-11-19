@@ -278,7 +278,7 @@ try {
     for(const pid of required) assert.ok(before.some(v=>v.identity.pid===pid),`Missing instrumented actual process ${pid}`);
     const workloadBefore = workload ? await reconcileWorkload(work, cwd, workload, { baseline: Boolean(report.subject?.observations?.baseline) }) : undefined;
     const countersBefore = await work.request('runtime_get_metrics');
-    peakSampler = openPeakSampler({ pids: required, generation: String(count), nativeBinding, gcDirectory: samples });
+    peakSampler = openPeakSampler({ pids: required, generation: String(count), nativeBinding });
     before = await sampleAll(await peakSampler.ready);
     reportPhase(`clients-${count}-measurement`);
     const firstCohort = await peakSampler.start();
