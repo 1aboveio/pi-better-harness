@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { randomUUID } from 'node:crypto';
-import { performance, PerformanceObserver } from 'node:perf_hooks';
+import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,9 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { threadId } from 'node:worker_threads';
 import { register } from 'node:module';
 import { baselineModuleUrls, baselineObservation, evictBaselineParsers } from './baseline-observation.mjs';
+import { observeGcThread, threadGc } from './worker-gc.cjs';
 
-let executor, gc, gcObserver;
-const observedGcThreads = new Set();
+export { observeGcThread, threadGc };
+
+let executor;
 function publish(name, value, directory = process.env.PI_RESOURCE_REPORT_DIR) {
   const path = join(directory, `${process.pid}-${name}`);
   writeFileSync(path + '.tmp', JSON.stringify(value)); renameSync(path + '.tmp', path);
@@ -19,13 +21,6 @@ function publish(name, value, directory = process.env.PI_RESOURCE_REPORT_DIR) {
 export function registerOwnedLoader() {
   publish(`loader-${threadId}.expected`, { thread: `loader-${threadId}` });
   register(new URL('./recovery-trace-loader.mjs', import.meta.url), { data: { resourceParentThreadId: threadId, resourceReportDir: process.env.PI_RESOURCE_REPORT_DIR } });
-}
-export function observeGcThread(key = `worker-${threadId}`, directory = process.env.PI_RESOURCE_REPORT_DIR) {
-  if (observedGcThreads.has(key)) return;
-  observedGcThreads.add(key);
-  threadGc();
-  const sample = () => publish(`${key}.gc`, { thread: key, physicalThreadId: threadId, ...threadGc() }, directory);
-  sample(); setInterval(sample, 250).unref();
 }
 export function gcThreads() {
   const names = readdirSync(process.env.PI_RESOURCE_REPORT_DIR).filter(name => name.startsWith(`${process.pid}-`));
@@ -40,14 +35,6 @@ export function gcThreads() {
         && Number.isSafeInteger(record.physicalThreadId) && record.physicalThreadId > 0
         && (value.physicalThreadId === undefined || value.physicalThreadId === record.physicalThreadId)
         && record.observedAt >= now - 250)) };
-}
-export function threadGc() {
-  if (!gc) {
-    gc = { observed: true, count: 0, durationMs: 0, startedAt: Date.now() };
-    gcObserver = new PerformanceObserver(list => { for (const entry of list.getEntries()) { gc.count++; gc.durationMs += entry.duration; } });
-    gcObserver.observe({ entryTypes: ['gc'] });
-  }
-  return { ...gc, observedAt: Date.now() };
 }
 export function bindOwnedExecutor(value) {
   assert.ok(process.env.PI_RESOURCE_REPORT_DIR && value.agentDir === process.env.PI_CODING_AGENT_DIR, 'Fixture executor ownership mismatch');
@@ -112,7 +99,8 @@ export async function controlOwnedExecutor(executor, action) {
 export function installOwnedRouter() {
   const cp = createRequire(import.meta.url)('node:child_process'), fork = cp.fork, spawn = cp.spawn, children = new Set();
   const threads = createRequire(import.meta.url)('node:worker_threads'), OriginalWorker = threads.Worker;
-  const workerGcPreload = fileURLToPath(new URL('./worker-gc-preload.mjs', import.meta.url));
+  // --import misses eval workers; keep --require on a CommonJS-only graph for Node 22.
+  const workerGcPreload = fileURLToPath(new URL('./worker-gc-preload.cjs', import.meta.url));
   threads.Worker = class extends OriginalWorker {
     constructor(entry, options) {
       const execArgv = options?.execArgv ?? process.execArgv;

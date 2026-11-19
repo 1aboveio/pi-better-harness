@@ -78,7 +78,7 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
     './measure-full-runtime/aggregate-samples.mjs',
     './measure-full-runtime/mutation-sequence.mjs',
     './measure-full-runtime/batch-capture.mjs', './measure-full-runtime/owned-fixture.mjs', './measure-full-runtime/owned-query-worker.mjs',
-    './measure-full-runtime/worker-gc-preload.mjs',
+    './measure-full-runtime/worker-gc-preload.cjs', './measure-full-runtime/worker-gc.cjs',
     './measure-full-runtime/darwin-capture.cc', './measure-full-runtime/build-darwin-capture.mjs',
     './measure-full-runtime/subject-binding.mjs', './measure-full-runtime/measure-subject.mjs',
     './measure-full-runtime/subject-probe.mjs',
