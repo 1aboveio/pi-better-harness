@@ -1,5 +1,6 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { logPathFor, taskDir, writeMeta } from "./registry.js";
 import { renderBackgroundTaskLogDisplay, registerTools } from "./tools.js";
 
@@ -24,6 +25,11 @@ const theme = {
 
 function plain(lines: string[]): string {
   return lines.join("\n").replace(/<\/?[a-zA-Z][\w-]*>/g, "").replace(/<\/>/g, "");
+}
+
+/** Terminal columns of one rendered line; Pi rejects any line wider than the width it asked for. */
+function widthOf(line: string): number {
+  return visibleWidth(plain([line]));
 }
 
 function textOf(result: { content: Array<{ text?: string }> }): string {
@@ -143,7 +149,43 @@ describe("background task log folded display", () => {
     const lines = component.render(32);
     expect(plain(lines)).toContain("x".repeat(32));
     for (const line of lines) {
-      expect(plain([line]).length).toBeLessThanOrEqual(32);
+      expect(widthOf(line)).toBeLessThanOrEqual(32);
+    }
+  });
+
+  it("keeps double-width text within the requested width", () => {
+    // A log line mixing ASCII and CJK: 114 characters but 127 terminal columns,
+    // which Pi answers by exiting the whole process.
+    const cjk = '   "stderr": "Usage of env wait:\\n  -interval duration\\n    \\t状态查询间隔 (default 5s)\\n  -status string\\n    \\t等待进入的环境';
+    const result = {
+      content: [{ type: "text", text: `[log]\n${cjk}` }],
+      details: { kind: "background-task-log-display", head: "[log]", fullLineCount: 2, compactLines: [cjk], foldedLineCount: 0 },
+    };
+    for (const expanded of [false, true]) {
+      for (const width of [32, 80, 114]) {
+        const lines = renderBackgroundTaskLogDisplay(result, { expanded }, theme).render(width);
+        expect(lines.length).toBeGreaterThan(0);
+        for (const line of lines) {
+          expect(widthOf(line), `expanded=${expanded} width=${width}`).toBeLessThanOrEqual(width);
+        }
+      }
+    }
+  });
+
+  it("keeps emoji and styled text within the requested width", () => {
+    const wide = ` 🪜 汉字与 emoji 混排行 ${"⚙️".repeat(6)}${"🪟".repeat(30)}`;
+    const styled = `${theme.fg("accent", "bg_task_log")} ${wide.repeat(3)}`;
+    const result = {
+      content: [{ type: "text", text: `[log]\n${wide}` }],
+      details: { kind: "background-task-log-display", head: styled, fullLineCount: 2, compactLines: [wide, styled], foldedLineCount: 0 },
+    };
+    for (const expanded of [false, true]) {
+      for (const width of [24, 87, 115]) {
+        const lines = renderBackgroundTaskLogDisplay(result, { expanded }, theme).render(width);
+        for (const line of lines) {
+          expect(widthOf(line), `expanded=${expanded} width=${width}`).toBeLessThanOrEqual(width);
+        }
+      }
     }
   });
 });
