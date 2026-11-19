@@ -636,7 +636,7 @@ export function treeRows<T extends BackgroundWorkRow>(rows: T[]): T[] {
   const result: T[] = [], attached = new Set<T>();
   for (const [key, agent] of ordered) {
     const children = tasks.filter(row => (row.parentAgentId ?? "main") === key);
-    result.push({...agent, treeDepth: 0, groupStart: result.length > 0});
+    result.push({...agent, treeDepth: 0, groupStart: children.length > 0 && result.length > 0});
     children.forEach((row, i) => { result.push({...row, treeDepth: 1, lastChild: i === children.length - 1}); attached.add(row); });
   }
   // Never hide live work when its owner's observation has not arrived yet.
