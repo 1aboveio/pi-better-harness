@@ -28,6 +28,10 @@ WorkReadModel.prototype.ensureId = async function(id) {
 };
 parentPort.on("message", message => {
   if (message.type === "release-query") release?.();
+  if (message.type === "sleep") {
+    parentPort.postMessage({ type: "sleeping" });
+    Atomics.wait(message.gate, 0, 0, 5000);
+  }
   if (message.type === "wedge") {
     parentPort.postMessage({ type: "wedged" });
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);

@@ -631,6 +631,31 @@ test("cold bootstrap caller deadline does not imply a wedged read worker", { tim
   } finally { await f.close(); }
 });
 
+test("system sleep gives the worker time to resume before the watchdog fires", async () => {
+  const f = await fixture({ watchdogMs: 800, workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
+  try {
+    await f.bootstrapped;
+    const client = await f.client();
+    await ready(client);
+    const gate = new Int32Array(new SharedArrayBuffer(4));
+    const sleeping = new Promise<void>(resolve => {
+      const listener = (message: any) => {
+        if (message.type === "sleeping") { f.worker.off("message", listener); resolve(); }
+      };
+      f.worker.on("message", listener);
+    });
+    f.worker.postMessage({ type: "sleep", gate });
+    await sleeping;
+    Atomics.wait(gate, 0, 0, 1100);
+    // The parent resumes first, while the worker heartbeat is still stale.
+    await new Promise(resolve => setTimeout(resolve, 250));
+    Atomics.store(gate, 0, 1);
+    Atomics.notify(gate, 0);
+    assert.equal((await client.get({})).status, "ready");
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+  } finally { await f.close(); }
+});
+
 test("delayed parent receipt does not kill a responsive read worker", { timeout: 20000 }, async () => {
   const watchdogMs = 4000;
   const f = await fixture({ watchdogMs });
