@@ -29,8 +29,8 @@ test("a redundant terminal publication during verification preserves the first v
   // and the unchanged source-signature guard, without a scheduling sleep.
   (model as any).watchers.forEach((watcher: any) => watcher.close());
   let calls = 0;
-  let sourceStats = (model as any).sourceStats;
   let publication = meta;
+  let churn = false;
   const socket = new Socket();
   const queries = new WorkQueries(model, socket);
   const observations: WorkSnapshot[] = [];
@@ -42,9 +42,12 @@ test("a redundant terminal publication during verification preserves the first v
     (model as any).scan = async (paths: string[]) => {
       const reader = (model as any).reader;
       const changes = reader.changes.bind(reader);
+      const scansArchive = paths.includes(join(durable, "attempts", `${meta.id}.json`));
+      const sourceStats = (model as any).sourceStats;
       reader.changes = () => {
-        if (calls === 0 && (model as any).sourceStats > sourceStats) {
+        if ((calls === 0 || churn) && scansArchive && (model as any).sourceStats > sourceStats) {
           calls++;
+          if (churn) publication = { ...publication, endedAt: publication.endedAt + 1 };
           archiveCompletedAttempt(publication as never);
         }
         return changes();
@@ -66,30 +69,31 @@ test("a redundant terminal publication during verification preserves the first v
     archiveCompletedAttempt({ ...meta, endedAt: 3 } as never);
     publication = { ...meta, endedAt: 4 };
     calls = 0;
-    sourceStats = (model as any).sourceStats;
     observations.length = 0;
     await model.reconcile();
-    assert.deepEqual(observations.map(snapshot => snapshot.status), ["ready"], "one recoverable source race stays internal");
-    assert.equal(observations[0]!.rows[0]!.meta.endedAt, 4);
+    assert.equal(observations[0]!.status, "degraded");
+    assert.match(observations[0]!.reason!, /Source changed during observation/);
+    assert.equal(observations[0]!.rows[0]!.meta.endedAt, 2);
+    assert.equal(observations.at(-1)!.status, "ready");
+    assert.equal(observations.at(-1)!.rows[0]!.meta.endedAt, 4);
+    assert.ok(observations.at(-1)!.seq > observations[0]!.seq);
     // Continuous publications are surfaced, but cannot spin inventories or leak staged rows.
-    let writes = 5;
-    archiveCompletedAttempt({ ...meta, endedAt: writes } as never);
-    reader.revision = () => { archiveCompletedAttempt({ ...meta, endedAt: ++writes } as never); return revision(); };
+    publication = { ...meta, endedAt: 5 };
+    archiveCompletedAttempt(publication as never);
+    churn = true;
     observations.length = 0;
     await model.reconcile();
     assert.equal(model.snapshot({ id: meta.id }).status, "degraded");
     assert.equal(model.snapshot({ id: meta.id }).rows[0]!.meta.endedAt, 4);
-    const before = writes;
+    const before = calls;
     for (let i = 0; i < 20; i++) await model.reconcile();
-    assert.equal(writes, before, "watcher bursts respect the conflict cooldown");
+    assert.equal(calls, before, "watcher bursts respect the conflict cooldown");
     assert.ok(observations.length <= 1, "persistent churn does not spam identical errors");
-    reader.revision = revision;
+    churn = false;
     const deadline = Date.now() + 3000;
     while (model.snapshot().status !== "ready" && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(model.snapshot().status, "ready");
-    assert.equal(model.snapshot({ id: meta.id }).rows[0]!.meta.endedAt, writes);
-
-
+    assert.equal(model.snapshot({ id: meta.id }).rows[0]!.meta.endedAt, publication.endedAt);
   } finally {
     off(); queries.close(); socket.destroy(); await model.close();
     if (saved === undefined) delete process.env.PI_SUBAGENT_DURABLE_DIR; else process.env.PI_SUBAGENT_DURABLE_DIR = saved;

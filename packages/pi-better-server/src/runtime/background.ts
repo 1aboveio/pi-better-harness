@@ -358,7 +358,8 @@ export class BackgroundObservation {
         const dependencyVersion = this.hasInputVersions
           ? Number(this.db.prepare("SELECT revision FROM background_input_versions WHERE operation_id=?").get(op.operation_id)?.revision ?? 0)
           : undefined;
-        const paths = [join(directory, "observed", `${op.task_id}.json`),
+        const observedPath = join(directory, "observed", `${op.task_id}.json`);
+        const paths = [observedPath,
           ...["launch.json", "claim.json", "command.json", "result.json", "lost.json", "stop.json", "cleanup.json"]
             .map(name => join(directory, "tasks", op.task_id, name))];
         const identities = paths.map(path => {
@@ -380,7 +381,7 @@ export class BackgroundObservation {
             .map((w: any) => ({ waitId: w.wait_id, generation: w.generation, phase: w.phase }));
         }
         const readContext = () => {
-          try { return JSON.parse(readFileSync(paths[0], "utf8")); }
+          try { return JSON.parse(readFileSync(observedPath, "utf8")); }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; return {}; }
         };
         const workerContext = op.owner_kind === "worker-conversation" ? readContext() : undefined;
