@@ -5,7 +5,7 @@ import { fork } from 'node:child_process';
 import { cpus, totalmem, release, arch, tmpdir, hostname } from 'node:os';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
@@ -173,20 +173,65 @@ try {
     await work.get({cwd,active:true});
     const warmup=[];
     (report.warmups??=[]).push({clients:count,observations:warmup});
+    let workerWarmup;
+    if (workload) {
+      assert.equal(worker.timing.stuckMs, 600000, 'The owned worker must use the default no-progress timing');
+      const anchorAt = worker.startedAt;
+      const dueAt = anchorAt + worker.timing.stuckMs;
+      const key = `stuck:${anchorAt}`;
+      const logPath = join(dirname(metaPath), 'output.log');
+      const receiptPath = join(dirname(metaPath), 'timing-receipts', `${createHash('sha256').update(key).digest('hex')}.json`);
+      const countersBefore = await work.request('runtime_get_metrics');
+      report.preWindowActivity = { worker: worker.id, key, dueAt, countersBefore };
+      reportPhase(`clients-${count}-await-owned-worker-wake`);
+      // The real launch log and default supervision wake are activity, not unchanged work.
+      await delay(Math.max(0, dueAt - Date.now()));
+      const observe = async () => {
+        const snapshot = await work.get({ id: worker.id });
+        const row = snapshot.rows[0];
+        if (snapshot.status !== 'ready' || row?.meta.id !== worker.id || row.meta.status !== 'running') return;
+        const { size, mtimeMs } = statSync(logPath);
+        const rawLog = row.health?.rawLog;
+        if (!size || !rawLog || rawLog.error || rawLog.sizeBytes !== size || rawLog.mtimeMs !== Math.trunc(mtimeMs)) return;
+        // The original baseline exposes the log fingerprint, but not a display checkpoint.
+        if (!countersBefore.baselineObservation && (!row.display?.coverage?.complete || row.display.coverage.offset !== size)) return;
+        const timing = row.meta.timing;
+        let at;
+        if (timing?.stuckAnchorAt === anchorAt) at = timing.stuckWakeSentAt;
+        else if (timing?.pendingWakes?.some(wake => wake.kind === 'stuck' && wake.key === key)) {
+          try {
+            const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+            if (receipt.key === key) at = receipt.at;
+          } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        }
+        if (Number.isFinite(at) && at >= dueAt && at <= Date.now()) return { at, sourceRevision: row.sourceRevision, logBytes: size, logMtimeMs: rawLog.mtimeMs };
+      };
+      await until('owned worker launch log projection and exact default stuck wake receipt', observe);
+      workerWarmup = observe;
+    }
     reportPhase(`clients-${count}-await-projection-barrier`);
     await until('all native projections completed at stable Background revision',async()=>{
       const scope={background:true,cwd,sessionId:JSON.parse(readFileSync(sessionFile,'utf8').split('\n')[0]).id};
       const before=await work.get(scope);
+      const workerBefore=await workerWarmup?.();
       await Promise.all(clients.map(async child=>{const id=++seq,pending=message(child,m=>m.id===id);child.send({id,barrier:true});const reply=await pending;assert.equal(reply.error,undefined,reply.stack);}));
       const after=await work.get(scope), management=(await work.request('runtime_get_status')).backgroundManagement;
+      const workerAfter=await workerWarmup?.();
       const legacyReady=after.rows.filter(row=>!row.meta.durable).map(row=>{
         const meta=row.meta;
         try {const mtimeMs=Math.trunc(statSync(meta.logPath).mtimeMs);return {id:meta.id,mtimeMs,lastProgressAt:meta.lastProgressAt,ready:readFileSync(meta.logPath,'utf8').includes('resource-ready')&&(meta.lastProgressAt??meta.startedAt)>=mtimeMs};}
         catch{return {id:meta.id,ready:false};}
       });
       warmup.push({before:before.scopeRevision,after:after.scopeRevision,management,legacyReady});
-      return before.status==='ready'&&after.status==='ready'&&before.scopeRevision===after.scopeRevision
+      const workerSettled = !workerWarmup || workerBefore && workerAfter && workerBefore.sourceRevision === workerAfter.sourceRevision;
+      const settled = workerSettled && before.status==='ready'&&after.status==='ready'&&before.scopeRevision===after.scopeRevision
         &&legacyReady.length===2&&legacyReady.every(row=>row.ready)&&after.rows.some(row=>row.meta.id===bg.details.id);
+      if (settled && workerAfter) {
+        const countersAfter = await work.request('runtime_get_metrics');
+        Object.assign(report.preWindowActivity, { ...workerAfter, settledAt: Date.now(), countersAfter,
+          delta: workloadCounterDelta(report.preWindowActivity.countersBefore, countersAfter) });
+      }
+      return settled;
     });
     const observedLegacy=await work.get({background:true,cwd,sessionId:JSON.parse(readFileSync(sessionFile,'utf8').split('\n')[0]).id});
     assert.equal(observedLegacy.rows.filter(row=>!row.meta.durable).length,2);
