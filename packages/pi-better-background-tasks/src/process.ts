@@ -66,8 +66,8 @@ export function validateCommandSpec(spec: CommandSpec): void {
 /** Convert a Windows path to the `/c/...` form MSYS bash resolves in redirections. Exposed for tests and reuse. */
 export function toMsysPath(path: string): string {
   const forward = path.replace(/\\/g, "/");
-  const drive = /^([A-Za-z]):(\/.+)$/.exec(forward);
-  return drive ? `/${drive[1].toLowerCase()}${drive[2]}` : forward;
+  const [, drive, rest] = /^([A-Za-z]):(\/.+)$/.exec(forward) ?? [];
+  return drive && rest ? `/${drive.toLowerCase()}${rest}` : forward;
 }
 
 /** Single-quote a value for safe literal use in a bash script line. Exposed for tests and reuse. */
@@ -155,7 +155,7 @@ export function parseStepGateFailure(logText: string, id: string): StepGateFailu
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     if (!line.startsWith(marker) || !line.endsWith(" ---")) continue;
     const match = /^--- step gate \[[^\]]+\]: first failing step exit=(-?\d+); shell exit=(-?\d+): (.*) ---$/.exec(line);
-    if (!match) continue;
+    if (!match || match[3] === undefined) continue;
     const stepExitCode = Number(match[1]);
     const shellExitCode = Number(match[2]);
     if (!Number.isInteger(stepExitCode) || stepExitCode === 0) continue;

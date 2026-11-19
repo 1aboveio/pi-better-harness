@@ -175,6 +175,8 @@ export function prepareTaskRuntime(options: {
     root: string; controlDir: string; tools: readonly string[]; piBin?: string;
     permissions?: SandboxPermissions & Partial<CommandSettings>; extensionPaths?: readonly string[]; runtimeRoots?: readonly string[];
     capturedDenyWrite?: readonly string[];
+    /** Trusted launcher-selected bridge from the pinned worker release. */
+    operationBridgePath?: string;
     applyPatch?: boolean; extensionTools?: readonly TaskExtensionTool[];
 }): { file: string; fileArgs: string[]; policy: TaskPolicy; policyPath: string } {
     if (typeof PiCodingAgent.getAgentDir !== "function" || typeof PiCodingAgent.getPackageDir !== "function") {
@@ -216,7 +218,7 @@ export function prepareTaskRuntime(options: {
         tools: options.tools,
         applyPatch: options.applyPatch === true,
         operationBridge: options.tools.some(name => (OPERATION_BRIDGE_TOOL_NAMES as readonly string[]).includes(name)) &&
-            (options.extensionPaths ?? []).some(path => canonicalizePath(path) === canonicalizePath(fileURLToPath(new URL("./child-operations.ts", import.meta.url)))),
+            (options.extensionPaths ?? []).some(path => canonicalizePath(path) === canonicalizePath(options.operationBridgePath ?? fileURLToPath(new URL("./child-operations.ts", import.meta.url)))),
         extensionTools: (options.extensionTools ?? []).map((tool) => ({ ...tool, root: canonicalizePath(tool.root) })),
     });
     compileWritePolicy({ writableRoot: root, home, permissions: policy.permissions, denyWrite: policy.denyWrite, runtimeCompatibility: true });

@@ -15,13 +15,13 @@ export async function requestBackgroundTool(pi: ExtensionAPI, ctx: ExtensionCont
     if (registration.version !== 1 || registration.agentDir !== root)
         throw new Error('Invalid runtime registration');
     const module = new URL('./shared-work-client.mjs', import.meta.url).href;
-    const { WorkClient } = await import(module);
+    const { connectWorkClient } = await import(module);
     const directory = join(root, 'background-tool-admission');
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const stat = lstatSync(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o077))
         throw new Error('Unsafe Background admission directory');
-    const client = new WorkClient(join(registration.serverDir, 'pi-server.sock'), root, ['runtime-background-execution-v1']);
+    const client = await connectWorkClient(join(registration.serverDir, 'pi-server.sock'), root, ['runtime-background-execution-v1'], { signal });
     const id = randomUUID(), secret = randomBytes(32).toString('hex'), path = join(directory, `${id}.json`);
     let off: unknown;
     const abort = () => client.close();

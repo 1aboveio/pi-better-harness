@@ -30,6 +30,8 @@ import { currentProcessStartToken, readProcessStartToken } from "./process-ident
 import { assertBackgroundExecutionAllowed, backgroundExecutionLimits, confineCommandSpec, resolveForegroundSandboxPlan, currentForegroundSandboxPolicy, resolveWorkerSandboxPlan, sandboxProvenance, } from "./sandbox.domain.mjs";
 import { openStore, cancellationCredential, } from "./shared-operation-coordinator/index.domain.mjs";
 import { createLocalSupervisor, defaultSupervisorDirectory, supervisorPaths, supervisorTaskIdForToken, } from "./supervisor/index.domain.mjs";
+import { processGroupAlive } from "./supervisor/identity.domain.mjs";
+import { readStopRequest } from "./supervisor/store.domain.mjs";
 export const OBSERVED_WAITS_SERVICE_VERSION = 2;
 export const OBSERVED_WAITS_SERVICE_CHANNEL = "pi-better-background-tasks:observed-waits-service";
 export const OBSERVED_WAITS_SERVICE_REQUEST_CHANNEL = "pi-better-background-tasks:observed-waits-service-request";
@@ -437,6 +439,7 @@ export class ObservedWaitHost {
     continuationError;
     launches = new Map();
     localCancels = new Set();
+    assignmentCleanupCursor;
     resultHandoffs = new Set();
     rpcRuns = new Map();
     waitOwners = new Map();
@@ -797,6 +800,8 @@ export class ObservedWaitHost {
             if (role === "holder") {
                 this.discoverObservedTasks();
                 this.reconcileGlobalRunning();
+                if (discovery.hasAssignmentTasks)
+                    await this.reconcileAssignmentCleanup();
             }
             else {
                 this.reconcileFollowerRunning();
@@ -807,6 +812,43 @@ export class ObservedWaitHost {
         }
         finally {
             this.authorityPassCache = undefined;
+        }
+    }
+    async reconcileAssignmentCleanup() {
+        const store = this.requireStore();
+        const [candidate] = store.listAssignmentCleanupOperations(1, this.assignmentCleanupCursor);
+        this.assignmentCleanupCursor = candidate?.operationId;
+        if (!candidate || candidate.resultManaged || this.supervisionAuthority(candidate) !== "self")
+            return;
+        const { taskId, launchToken } = candidate;
+        try {
+            const inspection = this.supervisor.snapshot(taskId);
+            const stop = readStopRequest(this.directory, taskId);
+            if (inspection?.token !== launchToken || (stop && stop.token !== launchToken))
+                return;
+            if (inspection.terminal) {
+                if (inspection.status !== "lost" && inspection.result?.groupCleanup !== "unproven")
+                    return;
+                const pgid = inspection.command?.pgid ?? inspection.command?.pid;
+                if (inspection.cleanup?.groupEmpty === true || (pgid && !processGroupAlive(pgid))) {
+                    store.verifyAssignmentCleanup(candidate.operationId, launchToken, candidate.terminalRevision);
+                    return;
+                }
+                if (!pgid)
+                    return;
+            }
+            if (!this.localCancels.has(taskId)) {
+                this.localCancels.add(taskId);
+                try {
+                    await this.supervisor.stop(taskId, { token: launchToken, reason: "owning assignment ended" });
+                }
+                finally {
+                    this.localCancels.delete(taskId);
+                }
+            }
+        }
+        catch (error) {
+            this.options.logger?.(`Assignment cleanup for ${taskId}: ${String(error)}`);
         }
     }
     reconcileGlobalRunning() {
@@ -1791,8 +1833,10 @@ export class ObservedWaitHost {
             supervision: this.supervision(),
             authorityRef: authorityReference(`worker:${run.authorityReference}`),
             intentRef: typeof input.params.operation_id === "string" ? input.params.operation_id : null,
+            ...(run.assignmentAttemptId ? { assignmentAttemptId: run.assignmentAttemptId } : {}),
         });
         const launchContext = {
+            workerAttemptId: run.runId,
             kind: input.kind,
             parentOrigin: this.parentOrigin,
             gated: prepared.gated,
@@ -2157,6 +2201,7 @@ export class ObservedWaitHost {
             : {};
         this.rpcRuns.set(runId, Object.freeze({
             runId,
+            assignmentTaskOwnership: params.assignmentTaskOwnership === true,
             conversationId,
             attemptId,
             workspace,
@@ -2510,6 +2555,7 @@ export class ObservedWaitHost {
     rpcScope(binding) {
         return {
             runId: binding.runId,
+            ...(binding.assignmentTaskOwnership ? { assignmentAttemptId: binding.attemptId } : {}),
             conversationId: binding.conversationId,
             workspace: binding.workspace,
             authorityReference: binding.authorityReference,
@@ -3318,6 +3364,7 @@ export class ObservedWaitHost {
                         const outcome = await adapter.onWaitReady({
                             waitId: event.waitId,
                             generation: event.generation,
+                            ...(wait?.park?.attemptId ? { parkedAttemptId: wait.park.attemptId } : {}),
                             owner,
                             ...(taskId && this.launches.get(taskId)?.parentOrigin
                                 ? { parentOrigin: this.launches.get(taskId).parentOrigin }

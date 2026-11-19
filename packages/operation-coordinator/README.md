@@ -11,8 +11,9 @@ tool execution, no model call, no provider transport and no permission decision.
 
 ## Requirements and configuration
 
-Assignment outcomes use storage schema 3, with transactional upgrades from
-schemas 1 and 2. `registerAssignment` captures immutable worker/recipient and
+Storage schema 4 gains nullable operation-to-attempt bindings in an additive
+upgrade. Older clients can still read and write the database; their new operations
+are unbound. `registerAssignment` captures immutable worker/recipient and
 attempt bindings before dispatch. `recordAssignmentOutcome` atomically commits
 the terminal decision, typed parent event, dispatch disarming and evidence-pin
 transfer. Published writer claims require independent exit proof; neither delivery
@@ -109,13 +110,27 @@ without a result remains `accepted`, and must be queried with the same key.
 
 **Launch.** `registerOperation` records the launch intent and unique execution
 token before a runner starts. Re-registering the same launch is idempotent; a
-changed task id, launch token, owner or observer is refused, so a store cannot be
+changed task id, launch token, owner, observer or assignment attempt is refused, so a store cannot be
 used to prove ownership of a launch that was swapped underneath it.
 `recordSupervision` replaces the supervising host and reports observer health
 (`active`, `unmonitored`, `lost`) separately from the wait phase.
 A host that closes calls `releaseSupervision` with its exact host id; a newer
 takeover is left untouched, and running work becomes explicitly unmonitored for
 the next host.
+
+**Assignment cleanup (ADR [0025](../../docs/adr/0025-assignment-terminal-task-cleanup.md)).**
+Pass `assignmentAttemptId` when the launch comes from an exact registered worker
+attempt. The store checks the captured owner and refuses new launches after that
+assignment has a terminal outcome. An exact replay returns `created: false`;
+it does not admit another launch. Operations without the field, including
+existing operations at migration, remain unbound.
+`listAssignmentCleanupOperations(limit, afterOperationId?)` lists bound operations
+without a terminal revision whose assignment has a committed outcome. It returns
+at most 256 rows in ascending operation ID order. Use the last returned operation
+ID as the exclusive cursor and start each new sweep without a cursor. Parking,
+dependency links, and a shared conversation do not create obligations. Only a
+recorded operation terminal revision closes an obligation; a stop request or
+parent outcome receipt does not. The caller owns supervised stop and verification.
 
 **Registering a wait.** `registerWait` reads each dependency's current terminal
 revision *inside* its transaction, so a task that finished before registration is
@@ -176,6 +191,7 @@ dependency still resolves for interpretation.
 ```ts
 registerOperation / recordSupervision / releaseSupervision / recordTerminalOutcome
 getOperation / listOperations / listOperationEvidence
+listAssignmentCleanupOperations
 listRunningSupervisedBy / readDiscoveryClaim / tryClaimDiscovery / releaseDiscoveryClaim
 getChangeRevision
 

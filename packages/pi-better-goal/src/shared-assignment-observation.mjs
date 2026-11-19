@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 // Only first-party source SQL passes this facade; quoted values stay untouched.
 const sourceTables = new Set(["schema_meta", "sqlite_master", "sqlite_schema", "assignment_change_source", "assignment_changes",
     "waits", "wait_dependencies", "resume_claims", "operations", "coordinator_state", "assignment_outcomes",
-    "subagent_launch_intents", "background_input_versions", "background_parent_callbacks", "assignments"]);
+    "subagent_launch_intents", "background_input_versions", "background_parent_callbacks", "assignments", "assignment_bindings", "assignment_attempts"]);
 function sourceSQL(sql) {
     if (/^PRAGMA\s+data_version\s*$/i.test(sql)) return "PRAGMA coordinator_source.data_version";
     return sql.replace(/'(?:''|[^'])*'|\b[A-Za-z_][A-Za-z_0-9]*\b/g, token => sourceTables.has(token) ? `coordinator_source.${token}` : token);

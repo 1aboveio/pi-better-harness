@@ -138,6 +138,8 @@ export interface LaunchRecipe {
     extensionArgs?: string[];
     /** Provider/tool runtime arguments, excluding permission-dependent trusted tools. */
     baseExtensionArgs?: string[];
+    /** Published worker closure retained for this conversation across server upgrades. */
+    runtimeRoot?: string;
     /** Initial trusted implementations survive revocation so re-grants cannot replace them. */
     trustedExtensions?: { name: string; package: string; loadPath: string }[];
 }

@@ -5,6 +5,10 @@ import { acquireMutationStore } from "./mutation-store.ts";
 import { ENTITY_BUDGET } from "./work-budget.ts";
 // @ts-expect-error Generated canonical supervisor.
 import { createLocalSupervisor } from "./domain/background/supervisor/supervisor.mjs";
+// @ts-expect-error Generated canonical durable stop records.
+import { readStopRequest } from "./domain/background/supervisor/store.mjs";
+// @ts-expect-error Generated canonical process identity checks.
+import { processGroupAlive } from "./domain/background/supervisor/identity.mjs";
 // @ts-expect-error Generated canonical terminal evidence rules.
 import { supervisorTerminalPublication } from "./domain/background/terminal-publication.mjs";
 
@@ -17,7 +21,7 @@ export function hasResultSupervision(root: string): boolean {
   finally { db.close(); }
 }
 
-/** Mechanical observation only. Never launches, stops, claims resumes or consumes results. */
+/** Observes managed task results and stops exact tasks of terminal assignments. */
 export class RuntimeResultSupervision {
   private store: any;
   private budget: ReturnType<typeof acquireMutationStore>["budget"];
@@ -33,7 +37,11 @@ export class RuntimeResultSupervision {
   readonly metrics = { restores: 0, feedPages: 0, inspections: 0, publications: 0, deadlineLatenessMs: 0, passes: 0 };
   readonly hostId: string;
   readonly epoch: string;
-  reason?: string;
+  private observationReason?: string;
+  private assignmentCleanup?: Promise<void>;
+  private assignmentCleanupCursor?: string;
+  private assignmentCleanupReason?: string;
+  get reason() { return this.assignmentCleanupReason ?? this.observationReason; }
   private verificationMs: number;
   constructor(root: string, epoch: string, verificationMs = 30_000) {
     this.verificationMs = verificationMs;
@@ -87,7 +95,7 @@ export class RuntimeResultSupervision {
     }
     this.metrics.passes++;
     try {
-      this.reason = undefined;
+      this.observationReason = undefined;
       try {
       const page = this.store.resultSupervisionChanges(this.position);
       this.metrics.feedPages++;
@@ -108,7 +116,7 @@ export class RuntimeResultSupervision {
       if (page.more) this.schedule();
       } catch (error) {
         // Feed recovery must not suppress deadlines for already captured work.
-        this.reason = String(error);
+        this.observationReason = String(error);
       }
       const now = Date.now();
       for (const [id, entry] of this.active) if (entry.due <= now) this.dirty.add(id);
@@ -122,7 +130,7 @@ export class RuntimeResultSupervision {
         if (!operation || operation.terminalRevision > 0) { this.forget(id); continue; }
         entry.reason = undefined;
         const uncertain = (reason: string) => {
-          this.reason = reason;
+          this.observationReason = reason;
           entry.failure = reason;
           entry.uncertainSince ??= now;
           if (now < entry.uncertainSince + this.verificationMs) entry.reason = {
@@ -168,8 +176,10 @@ export class RuntimeResultSupervision {
         }
         } catch (error) { uncertain(String(error)); }
       }
-      this.reason ??= [...this.active.values()].find(entry => entry.failure)?.failure;
-    } catch (error) { this.reason = String(error); }
+      this.observationReason ??= [...this.active.values()].find(entry => entry.failure)?.failure;
+      try { this.reconcileAssignmentCleanup(); }
+      catch (error) { this.assignmentCleanupReason = `Assignment cleanup: ${String(error)}`; }
+    } catch (error) { this.observationReason = String(error); }
     finally {
       release();
       if (this.timer) clearTimeout(this.timer);
@@ -180,6 +190,42 @@ export class RuntimeResultSupervision {
       this.timer = setTimeout(() => this.reconcile(), Math.max(1, next - Date.now()));
       this.timer.unref();
     }
+  }
+  private reconcileAssignmentCleanup() {
+    if (this.assignmentCleanup) return;
+    const [operation] = this.store.listAssignmentCleanupOperations(1, this.assignmentCleanupCursor);
+    this.assignmentCleanupCursor = operation?.operationId;
+    if (!operation) {
+      if (!this.store.listAssignmentCleanupOperations(1).length) this.assignmentCleanupReason = undefined;
+      return;
+    }
+    const grant = this.store.resultSupervision(operation.operationId);
+    if (!grant || (operation.terminalRevision === 0 && grant.epoch !== this.epoch) || grant.launchToken !== operation.launchToken || grant.hostId !== operation.supervision?.hostId ||
+        grant.capability?.adapter !== "background-results-v1" || !grant.capability.captured || !grant.capability.current) {
+      this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: exact supervision authority unavailable`;
+      return;
+    }
+    const supervisor = createLocalSupervisor({ directory: grant.directory });
+    const inspection = supervisor.snapshot(operation.taskId);
+    const stop = readStopRequest(grant.directory, operation.taskId);
+    if (inspection?.token !== operation.launchToken || (stop && stop.token !== operation.launchToken)) {
+      this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: exact launch evidence unavailable`;
+      return;
+    }
+    this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: waiting for supervisor evidence`;
+    if (inspection.terminal) {
+      if (inspection.status !== "lost" && inspection.result?.groupCleanup !== "unproven") return;
+      const pgid = inspection.command?.pgid ?? inspection.command?.pid;
+      if (inspection.cleanup?.groupEmpty === true || (pgid && !processGroupAlive(pgid))) {
+        this.store.verifyAssignmentCleanup(operation.operationId, operation.launchToken, operation.terminalRevision);
+        return;
+      }
+      this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: process group exit unverified`;
+      if (!pgid) return;
+    }
+    this.assignmentCleanup = supervisor.stop(operation.taskId, { token: operation.launchToken, reason: "owning assignment ended" })
+      .catch((error: unknown) => { this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: ${String(error)}`; })
+      .finally(() => { this.assignmentCleanup = undefined; });
   }
   close() {
     this.closed = true; if (this.timer) clearTimeout(this.timer); this.watcher?.close();

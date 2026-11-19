@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 
 const hostedClients = new WeakSet<object>();
+const connectionAborts = new WeakMap<object, AbortController>();
 const clients = new WeakMap<object, Promise<any>>();
 const generations = new WeakMap<object, number>();
 const listeners = new WeakMap<object, Set<() => void>>();
@@ -62,6 +63,8 @@ function observationClient(pi: ExtensionAPI, scope: { background: boolean; cwd: 
   };
   let pending = clients.get(pi);
   if (!pending) {
+    const controller = new AbortController();
+    connectionAborts.set(pi, controller);
     pending = (async () => {
       let hosted: any;
       let rejected: unknown;
@@ -78,45 +81,39 @@ function observationClient(pi: ExtensionAPI, scope: { background: boolean; cwd: 
       const requestedRoot = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
       mkdirSync(requestedRoot, { recursive: true, mode: 0o700 });
       const root = realpathSync(requestedRoot);
-      const ensure = async () => {
-        checkOpen();
+      const ensure = async (timeoutMs?: number, signal?: AbortSignal) => {
         const installer = new URL("../runtime-client/src/runtime/client.mjs", import.meta.url).href;
         const { ensureRuntime } = await import(installer);
-        checkOpen();
-        await ensureRuntime({ agentDir: root, serverDir: process.env.PI_SERVER_DIR });
+        await ensureRuntime({ agentDir: root, serverDir: process.env.PI_SERVER_DIR, timeoutMs, signal });
       };
       let registration;
       try { registration = JSON.parse(readFileSync(join(root, "server-registration-v1.json"), "utf8")); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        await ensure();
+        await ensure(undefined, controller.signal);
         registration = JSON.parse(readFileSync(join(root, "server-registration-v1.json"), "utf8"));
       }
       if (registration.version !== 1 || registration.agentDir !== root) throw new Error("Invalid canonical runtime registration");
       const module = new URL("./shared-work-client.mjs", import.meta.url).href;
-      const { WorkClient } = await import(module);
+      const { connectWorkClient } = await import(module);
       const connect = async () => {
         checkOpen();
-        const client = new WorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-background-state-v1"]);
+        const client = await connectWorkClient(join(registration.serverDir, "pi-server.sock"), root, ["runtime-background-state-v1"], {
+          signal: controller.signal, recover: ({ timeoutMs, signal }: { timeoutMs: number; signal: AbortSignal }) => ensure(timeoutMs, signal),
+        });
         let subscribed = false;
         client.onChange(() => {
           if (!subscribed || clients.get(pi) !== pending) return;
           if (client.closed) clients.delete(pi);
           for (const notify of listeners.get(pi) ?? []) notify();
         });
-        try { await client.subscribe(scope); }
+        try { checkOpen(); await client.subscribe(scope); checkOpen(); }
         catch (error) { client.close(); throw error; }
         subscribed = true;
         activityScopes.set(client, JSON.stringify({ ...scope, processId: process.pid }));
         return client;
       };
-      try { return await connect(); }
-      catch (error) {
-        if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
-        // Registration chooses transport; only the owner-safe installer may recover it.
-        await ensure();
-        return connect();
-      }
+      return connect();
     })();
     clients.set(pi, pending);
     pending.catch(() => { if (clients.get(pi) === pending) clients.delete(pi); });
@@ -126,6 +123,7 @@ function observationClient(pi: ExtensionAPI, scope: { background: boolean; cwd: 
 
 export function closeBackgroundObservation(pi: ExtensionAPI): void {
   generations.set(pi, (generations.get(pi) ?? 0) + 1);
+  connectionAborts.get(pi)?.abort(); connectionAborts.delete(pi);
   const pending = clients.get(pi); clients.delete(pi);
   void pending?.then(client => client.close(), () => {});
 }

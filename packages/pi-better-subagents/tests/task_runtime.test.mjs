@@ -43,6 +43,20 @@ function fixture(t, permissions = {}, fixtureParent = process.platform === 'win3
 
 const supported = describeSandboxSupport().supported;
 
+test('a pinned worker bridge uses current permissions and protects its saved release', { skip: !supported }, t => {
+    const f = fixture(t);
+    const bridge = join(f.base, 'old-runtime', 'child-operations.ts');
+    mkdirSync(join(f.base, 'old-runtime')); writeFileSync(bridge, '');
+    const prepared = prepareTaskRuntime({root: f.project, controlDir: f.control,
+        tools: ['read', 'wait_for_operations'], permissions: {...parseTaskPolicy(f.policy).permissions, network: false, commands: false},
+        extensionPaths: [bridge], operationBridgePath: bridge});
+    t.after(() => rmSync(prepared.policy.scratch, { recursive: true, force: true }));
+    assert.equal(prepared.policy.operationBridge, true);
+    assert.equal(prepared.policy.permissions.network, false);
+    assert.equal(prepared.policy.permissions.commands, false);
+    assert.ok(prepared.policy.denyWrite.some(path => bridge.startsWith(path + '/')));
+});
+
 test('standalone launch defaults allow credential maintenance but keep process inventory Off', { skip: !supported }, (t) => {
     const f = fixture(t);
     const prepared = prepareTaskRuntime({ root: f.project, controlDir: f.control, tools: ['read'],
