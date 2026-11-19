@@ -5,9 +5,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildDarwinCapture } from '../scripts/measure-full-runtime/build-darwin-capture.mjs';
+import { buildNativeCapture } from '../scripts/measure-full-runtime/build-darwin-capture.mjs';
 
-test('Darwin build inputs retain the default content UUID and exact byte identities without native compilation', () => {
+test('native build inputs retain platform flags and exact byte identities without compilation', () => {
   const root = mkdtempSync(join(tmpdir(), '808-darwin-inputs-'));
   const includeDirectory = join(root, 'include'); mkdirSync(includeDirectory);
   writeFileSync(join(includeDirectory, 'node_api.h'), 'component header marker; never compiled');
@@ -15,22 +15,26 @@ test('Darwin build inputs retain the default content UUID and exact byte identit
   // Opaque compiler-boundary specimen only, never a native addon or capture observation.
   const specimen = Buffer.from('component compiler output bytes; not Mach-O');
   try {
-    const result = buildDarwinCapture(root, { includeDirectory, compile: (command, args, options) => {
-      assert.equal(command, 'clang++');
-      assert.equal(args.includes('-Wl,-no_uuid'), false, 'canonical dyld requires the default LC_UUID load command');
-      assert.equal(args.includes('-Wl,-random_uuid'), false, 'retain content-based UUID generation');
-      assert.equal(args[args.indexOf('-arch') + 1], process.arch === 'arm64' ? 'arm64' : 'x86_64');
-      for (const flag of ['-bundle', 'dynamic_lookup', '-std=c++17', '-O2', '-fvisibility=hidden', '-DNAPI_VERSION=8', '-lproc']) assert.ok(args.includes(flag));
+    const darwin = process.platform === 'darwin';
+    const result = buildNativeCapture(root, { includeDirectory, compile: (command, args, options) => {
+      assert.equal(command, darwin ? 'clang++' : 'c++');
+      if (darwin) {
+        assert.equal(args.includes('-Wl,-no_uuid'), false, 'canonical dyld requires the default LC_UUID load command');
+        assert.equal(args.includes('-Wl,-random_uuid'), false, 'retain content-based UUID generation');
+        assert.equal(args[args.indexOf('-arch') + 1], process.arch === 'arm64' ? 'arm64' : 'x86_64');
+      }
+      const linkFlags = darwin ? ['-bundle', 'dynamic_lookup', '-lproc'] : ['-shared', '-fPIC'];
+      for (const flag of [...linkFlags, '-std=c++17', '-O2', '-fvisibility=hidden', '-DNAPI_VERSION=8']) assert.ok(args.includes(flag));
       assert.equal(args[args.indexOf('-I') + 1], includeDirectory);
       assert.ok(args.includes(source));
       assert.deepEqual(options, { stdio: 'pipe', timeout: 30000 });
       writeFileSync(args[args.indexOf('-o') + 1]!, specimen);
     } });
-    assert.equal(result.path, join(root, 'darwin-capture.node'));
+    assert.equal(result.path, join(root, darwin ? 'darwin-capture.node' : 'linux-capture-clock.node'));
     assert.equal(result.sourceSha256, createHash('sha256').update(readFileSync(source)).digest('hex'));
     assert.equal(result.binarySha256, createHash('sha256').update(specimen).digest('hex'));
     assert.equal(result.napiVersion, 8);
     const failure = new Error('component compiler failure');
-    assert.throws(() => buildDarwinCapture(root, { includeDirectory, compile: () => { throw failure; } }), error => error === failure);
+    assert.throws(() => buildNativeCapture(root, { includeDirectory, compile: () => { throw failure; } }), error => error === failure);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

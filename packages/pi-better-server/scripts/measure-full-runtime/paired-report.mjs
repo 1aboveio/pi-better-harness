@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { baseline, workloadCounterDelta } from './incremental-workload.mjs';
 import { summarizeCohorts } from './aggregate-samples.mjs';
+import { continuousClock, elapsedMsBetween, isNs } from './batch-capture.mjs';
 
 export const requiredWindows = [4416, 10000].flatMap(history => [1, 5, 10].flatMap(clients =>
   [48, 96, 192].map(group => ({ history, clients, group }))));
@@ -43,7 +44,9 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
       // source. Private caches/evidence outside its scope are not code changes.
       if (typeof report.source?.dirty !== 'string' || report.source.dirty.split('\n').some(line => line && !line.startsWith('?? '))) issue(path + '.source.dirty', 'unclean-source');
       if (report.mode !== 'resource-matrix' || report.failure) issue(path, 'failed-or-smoke-report');
-      if (report.measurement?.schemaVersion !== 1) issue(path + '.measurement', 'unsupported-schema');
+      if (report.measurement?.schemaVersion !== 2) issue(path + '.measurement', 'unsupported-schema');
+      const clock = continuousClock(report.platform), binding = report.measurement?.nativeCapture;
+      if (!clock || binding?.clock !== clock || !digest(binding.sourceSha256) || !digest(binding.binarySha256)) issue(path + '.native-capture-binding', 'missing-or-mismatched-native-binding');
       if (typeof report.measurement?.fixedHostId !== 'string' || !report.measurement.fixedHostId.trim() || !report.measurement?.hostname) issue(path + '.host', 'missing-fixed-host');
       if (typeof expected.fixedHostId !== 'string' || !expected.fixedHostId.trim()) issue(path + '.host', 'missing-approved-host');
       else equal(report.measurement?.fixedHostId, expected.fixedHostId, path + '.approved-host');
@@ -63,7 +66,10 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
         windows.set(windowKey, { report, scenario, path: p });
         if (!requiredWindows.some(value => key(value) === windowKey) || scenario.clients !== report.incremental?.clients) issue(p, 'unexpected-workload');
         if (!finite(scenario.elapsedMs) || scenario.elapsedMs < 600000 || !finite(report.incremental?.durationMs) || report.incremental.durationMs < 600000) issue(p + '.elapsedMs', 'short-or-missing-duration');
-        if (!finite(scenario.startedAt) || !finite(scenario.endedAt) || scenario.endedAt - scenario.startedAt < 600000 || Math.abs(scenario.endedAt - scenario.startedAt - scenario.elapsedMs) > 250) issue(p + '.timestamps', 'invalid-window');
+        const { startedContinuousNs, endedContinuousNs } = scenario;
+        const windowElapsed = isNs(startedContinuousNs) && isNs(endedContinuousNs) ? elapsedMsBetween(startedContinuousNs, endedContinuousNs) : NaN;
+        if (!finite(scenario.startedAt) || !finite(scenario.endedAt) || !finite(windowElapsed) || windowElapsed < 600000
+          || windowElapsed !== scenario.elapsedMs) issue(p + '.timestamps', 'invalid-window');
         const resources = scenario.resources, starts = scenario.resourceBefore, required = scenario.requiredProcesses;
         if (![resources, starts, required].every(value => Array.isArray(value) && value.length)) { issue(p + '.resources', 'missing-process-inventory'); continue; }
         if ([resources, starts, required].some(list => list.some(value => !value || typeof value !== 'object'))) { issue(p + '.resources', 'malformed-process'); continue; }
@@ -87,8 +93,12 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
           if (!finite(value.cpuMs) || !finite(cpuMs) || Math.abs(cpuMs - value.cpuMs) > 0.000001) issue(p + '.cpuMs', 'incorrect-process-total');
           for (const [delta, counter] of [['fsRead', 'fsRead'], ['fsWrite', 'fsWrite']]) if (!finite(value[delta]) || !finite(prior.usage?.[counter]) || !finite(value.usage?.[counter]) || value.usage[counter] - prior.usage[counter] !== value[delta]) issue(p + '.' + delta, 'missing-or-reset-counter');
           if (!finite(value.rss)) issue(p + '.rss', 'missing-counter');
-          if (!finite(value.at) || !finite(prior.at) || prior.at > scenario.startedAt || value.at < scenario.endedAt - 250 || scenario.startedAt - prior.at > 500 || value.at - scenario.endedAt > 500) issue(p + '.sample-times', 'stale-or-outside-window');
-          if (!finite(value.at) || !finite(prior.at) || value.at - prior.at < 600000) issue(p + '.sample-duration', 'short-process-window');
+          const startNs = prior.observedContinuousNs, endNs = value.observedContinuousNs;
+          const sampleTimesPresent = isNs(startNs) && isNs(endNs);
+          const beforeMs = sampleTimesPresent && isNs(startedContinuousNs) ? elapsedMsBetween(startNs, startedContinuousNs) : NaN;
+          const afterMs = sampleTimesPresent && isNs(endedContinuousNs) ? elapsedMsBetween(endedContinuousNs, endNs) : NaN;
+          if (!finite(value.at) || !finite(prior.at) || !finite(beforeMs) || beforeMs > 500 || !finite(afterMs + 250) || afterMs > 500) issue(p + '.sample-times', 'stale-or-outside-window');
+          if (!sampleTimesPresent || elapsedMsBetween(startNs, endNs) < 600000) issue(p + '.sample-duration', 'short-process-window');
           if (!finite(value.window?.diagnostics?.samples) || value.window.diagnostics.samples < 1 || !finite(value.window?.diagnostics?.cpuMicros) || !finite(value.window?.diagnostics?.sampleWallMs)) issue(p + '.diagnostics', 'missing-sampler-cost');
           if (value.window?.sampleIntervalMs !== 250) issue(p + '.diagnostics', 'changed-process-sampler-budget');
         }
@@ -113,15 +123,15 @@ export function validatePairedReports(beforeInput, afterInput, expected = {}) {
         // Coverage requires the observations, never flags alone.
         const peak = scenario.aggregatePeak;
         if (report.measurement?.coverage?.aggregatePeak !== true || peak?.scope !== 'simultaneous-related-processes' || !finite(peak.cpuPercent) || !finite(peak.rssBytes) || !Number.isSafeInteger(peak.samples) || peak.samples < 1) issue(p + '.coverage.aggregatePeak', 'not-qualified');
-        const rebuiltPeak = summarizeCohorts(scenario.aggregateCohorts, { required, generation: String(scenario.clients) }, { startedAt: scenario.startedAt, endedAt: scenario.endedAt });
+        const rebuiltPeak = summarizeCohorts(scenario.aggregateCohorts, { required, generation: String(scenario.clients), clock }, scenario);
         if (!rebuiltPeak.qualified || !isDeepStrictEqual(peak, rebuiltPeak)) issue(p + '.coverage.aggregatePeak', 'missing-or-inconsistent-cohort-stream');
         if (Array.isArray(scenario.aggregateCohorts) && scenario.aggregateCohorts.some(frame => Array.isArray(frame) && frame.some(sample => sample?.cpu?.totalMicros !== undefined
           && (sample.sourceCohort?.diagnosticCost?.coverage !== 'complete-no-child-process'
             || !finite(sample.sourceCohort?.diagnosticCost?.ownerCpuMicros)
             || sample.sourceCohort?.diagnosticCost?.childCpuMicros !== 0)))) issue(p + '.diagnostics.batch', 'unobserved-external-capture-cost');
-        if (Array.isArray(scenario.aggregateCohorts) && scenario.aggregateCohorts.some(frame => Array.isArray(frame) && frame.some(sample => sample?.sourceCohort?.kind === 'darwin-libproc-batch'
-          && (!digest(report.measurement?.nativeCapture?.binarySha256) || !digest(report.measurement?.nativeCapture?.sourceSha256)
-            || sample.sourceCohort.nativeBindingId !== report.measurement.nativeCapture.binarySha256)))) issue(p + '.native-capture-binding', 'missing-or-mismatched-native-binding');
+        const captureKind = report.platform === 'darwin' ? 'darwin-libproc-batch' : 'proc-batch';
+        if (Array.isArray(scenario.aggregateCohorts) && scenario.aggregateCohorts.some(frame => Array.isArray(frame) && frame.some(sample =>
+          sample?.sourceCohort?.kind !== captureKind || sample.sourceCohort.nativeBindingId !== binding?.binarySha256))) issue(p + '.native-capture-binding', 'missing-or-mismatched-native-binding');
         const gc = scenario.workerGc;
         if (report.measurement?.coverage?.workerGc !== true || gc?.threadCoverage !== 'all' || !Array.isArray(gc.processes)
           || gc.processes.some(value => !value?.identity || !finite(value.count) || !finite(value.durationMs))

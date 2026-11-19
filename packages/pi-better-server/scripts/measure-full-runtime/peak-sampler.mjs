@@ -25,7 +25,7 @@ export function openPeakSampler({ pids, generation, nativeBinding }) {
   return {
     ready: receive('ready'),
     start: () => receive('started', { type: 'start' }),
-    stop: endedAt => receive('stopped', { type: 'stop', endedAt }),
+    stop: endedContinuousNs => receive('stopped', { type: 'stop', endedContinuousNs }),
     read: () => receive('frames', { type: 'read' }),
     async close() {
       await worker.terminate();
@@ -36,9 +36,9 @@ export function openPeakSampler({ pids, generation, nativeBinding }) {
 
 if (!isMainThread) {
   const { pids, generation, nativeBinding } = workerData;
-  const options = process.platform === 'darwin'
-    ? { nativeCapture: createRequire(import.meta.url)(nativeBinding.path).capture, nativeBindingId: nativeBinding.binarySha256 }
-    : { units: linuxCaptureUnits() };
+  const native = createRequire(import.meta.url)(nativeBinding.path);
+  const options = { continuousNs: native.continuousNs, nativeCapture: native.capture, nativeBindingId: nativeBinding.binarySha256,
+    ...(process.platform === 'linux' ? { units: linuxCaptureUnits() } : {}) };
   const capture = createBatchCapture({ pids, generation, capture: pids => platformCapture(pids, options) });
   const frames = [];
   let timer;
@@ -46,17 +46,17 @@ if (!isMainThread) {
     frames.push(capture());
     timer = setTimeout(tick, peakCapturePeriodMs);
   }
-  parentPort.on('message', ({ type, endedAt }) => {
+  parentPort.on('message', ({ type, endedContinuousNs }) => {
     if (type === 'start') {
       tick();
       parentPort.postMessage({ type: 'started', value: frames[0] });
     } else if (type === 'stop') {
       clearTimeout(timer);
-      if (frames.at(-1)[0].at < endedAt) frames.push(capture());
+      if (BigInt(frames.at(-1)[0].sourceCohort.capturedContinuousNs) < BigInt(endedContinuousNs)) frames.push(capture());
       parentPort.postMessage({ type: 'stopped' });
     } else if (type === 'read') {
       parentPort.postMessage({ type: 'frames', value: frames });
     }
   });
-  parentPort.postMessage({ type: 'ready', value: Date.now() });
+  parentPort.postMessage({ type: 'ready', value: native.continuousNs() });
 }

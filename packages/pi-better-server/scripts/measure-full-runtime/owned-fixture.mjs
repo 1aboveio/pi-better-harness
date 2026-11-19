@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { threadId } from 'node:worker_threads';
 import { register } from 'node:module';
 import { baselineModuleUrls, baselineObservation, evictBaselineParsers } from './baseline-observation.mjs';
-import { observeGcThread, threadGc } from './worker-gc.cjs';
+import { observeGcThread, threadGc, observedContinuousNs } from './worker-gc.cjs';
+import { elapsedMsBetween, isNs } from './batch-capture.mjs';
 
 export { observeGcThread, threadGc };
 
@@ -29,12 +30,19 @@ export function gcThreads() {
   const expected = lifecycle.filter(value => !value.exitedAt);
   const records = names.filter(name => name.endsWith('.gc')).map(read).filter(value => expected.some(item => item.thread === value.thread));
   const now = Date.now();
+  const nowNs = observedContinuousNs();
+  const fresh = record => {
+    if (nowNs === undefined) return record.observedAt >= now - 250;
+    if (!isNs(record.observedContinuousNs)) return false;
+    const ageMs = elapsedMsBetween(record.observedContinuousNs, nowNs);
+    return ageMs >= 0 && ageMs <= 250;
+  };
   return { expected: expected.map(value => value.thread), lifecycle, records,
     complete: records.length === expected.length && new Set(records.map(record => record.physicalThreadId)).size === records.length
       && expected.every(value => records.some(record => record.thread === value.thread && record.observed === true
         && Number.isSafeInteger(record.physicalThreadId) && record.physicalThreadId > 0
         && (value.physicalThreadId === undefined || value.physicalThreadId === record.physicalThreadId)
-        && record.observedAt >= now - 250)) };
+        && fresh(record))) };
 }
 export function bindOwnedExecutor(value) {
   assert.ok(process.env.PI_RESOURCE_REPORT_DIR && value.agentDir === process.env.PI_CODING_AGENT_DIR, 'Fixture executor ownership mismatch');

@@ -10,24 +10,27 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { WorkReadModel } from '../src/runtime/read-model.ts';
+const ns = (ms: number) => String(ms * 1000000);
 
 test('fresh platform batch composition retains independent observed times and qualifies compatible source cohorts', () => {
   let time = 1000;
   const capture = createBatchCapture({ pids: [11,22], generation: '1', capture: pids => ({ captureStartedAt: time - 2, capturedAt: time,
-    source: { kind: 'injected-external-OS-boundary' }, records: pids.map((pid,i) => ({ identity: { pid, start: `birth-${pid}` },
-      observedAt: time - i, cpu: { totalMicros: time * pid }, rss: pid * 100 })) }) });
+    captureStartedContinuousNs: ns(time - 2), capturedContinuousNs: ns(time),
+    source: { kind: 'injected-external-OS-boundary', platform: 'darwin', clock: 'mach-continuous' }, records: pids.map((pid,i) => ({ identity: { pid, start: `birth-${pid}` },
+      observedAt: time - i, observedContinuousNs: ns(time - 1 + i), cpu: { totalMicros: time * pid }, rss: pid * 100 })) }) });
   const first = capture(); time += 200; const second = capture();
   assert.notEqual(first[0]!.sourceCohort.id, second[0]!.sourceCohort.id);
   assert.equal(second[1]!.observedAt, 1199);
   assert.equal(second[1]!.at, second[0]!.at);
-  const result = summarizeCohorts([first,second], { required: first, generation: '1' }, { startedAt: 1000, endedAt: 1200 });
+  const result = summarizeCohorts([first,second], { required: first, generation: '1' }, { startedAt: 1000, endedAt: 1200, startedContinuousNs: ns(1000), endedContinuousNs: ns(1200) });
   assert.equal(result.qualified, true, result.issues.join(',')); assert.equal(result.cpuPercent, 3.3);
   assert.equal(result.rssBytes, 3300);
 });
 
 test('batch owner refuses changed birth identity, missing PID and malformed platform output', () => {
-  let rows = [{ identity: { pid: 11, start: 'a' }, cpu: { totalMicros: 1 }, rss: 2 }];
-  const capture = createBatchCapture({ pids: [11], generation: '1', capture: () => ({ captureStartedAt: 1, capturedAt: 2, records: rows }) });
+  let rows = [{ identity: { pid: 11, start: 'a' }, observedAt: 1, observedContinuousNs: ns(1), cpu: { totalMicros: 1 }, rss: 2 }];
+  const capture = createBatchCapture({ pids: [11], generation: '1', capture: () => ({ captureStartedAt: 1, capturedAt: 2,
+    captureStartedContinuousNs: ns(1), capturedContinuousNs: ns(2), records: rows }) });
   capture(); rows = [{ ...rows[0]!, identity: { pid: 11, start: 'b' } }]; assert.throws(capture, /start identity/);
   rows = []; assert.throws(capture, /PID set/);
   assert.throws(() => platformCapture([11], { platform: 'darwin', now: () => 1 }), /binding required/);
@@ -35,7 +38,8 @@ test('batch owner refuses changed birth identity, missing PID and malformed plat
 
 test('batch producer cannot relabel previously timestamped independent records as a new capture', () => {
   const capture = createBatchCapture({ pids: [11], generation: '1', capture: () => ({ captureStartedAt: 1000, capturedAt: 1002,
-    source: { kind: 'old-independent-probe' }, records: [{ identity: { pid: 11, start: 'a' }, at: 999, cpu: { totalMicros: 1 }, rss: 2 }] }) });
+    captureStartedContinuousNs: ns(1000), capturedContinuousNs: ns(1002), source: { kind: 'old-independent-probe' },
+    records: [{ identity: { pid: 11, start: 'a' }, at: 999, observedAt: 999, observedContinuousNs: ns(999), cpu: { totalMicros: 1 }, rss: 2 }] }) });
   assert.throws(capture, /independent|timestamp/i);
 });
 
@@ -43,8 +47,9 @@ test('batch producer rejects observations outside the acquisition and fences nat
   let time = 1000, observedAt = 999, nativeBindingId = 'first-binding';
   const capture = createBatchCapture({ pids: [11], generation: '1', capture: () => ({
     captureStartedAt: time, capturedAt: time + 2,
-    source: { kind: 'darwin-libproc-batch', platform: 'darwin', nativeBindingId, cpuResolutionMs: .000041 },
-    records: [{ identity: { pid: 11, start: 'kernel-birth' }, observedAt, cpu: { totalMicros: time }, rss: 100 }],
+    captureStartedContinuousNs: ns(time), capturedContinuousNs: ns(time + 2),
+    source: { kind: 'darwin-libproc-batch', platform: 'darwin', clock: 'mach-continuous', nativeBindingId, cpuResolutionMs: .000041 },
+    records: [{ identity: { pid: 11, start: 'kernel-birth' }, observedAt, observedContinuousNs: ns(observedAt), cpu: { totalMicros: time }, rss: 100 }],
   }) });
   assert.throws(capture, /outside actual acquisition span/);
   observedAt = 1003;
@@ -53,7 +58,7 @@ test('batch producer rejects observations outside the acquisition and fences nat
   const first = capture();
   time = 1200; observedAt = 1201; nativeBindingId = 'replacement-binding';
   const second = capture();
-  const result = summarizeCohorts([first, second], { required: first, generation: '1' }, { startedAt: 1002, endedAt: 1202 });
+  const result = summarizeCohorts([first, second], { required: first, generation: '1' }, { startedAt: 1002, endedAt: 1202, startedContinuousNs: ns(1002), endedContinuousNs: ns(1202) });
   assert.equal(result.qualified, false);
   assert.ok(result.issues.includes('changed-counter-source'));
   assert.equal(result.cpuPercent, null);
@@ -65,7 +70,8 @@ test('Darwin in-process boundary preserves native batch and accounts for an abse
   const result = platformCapture([11], { platform: 'darwin', now: () => 1000,
     run: () => { throw Error('A per-capture helper process must not be launched'); },
     nativeCapture: pids => { calls++; return { captureStartedAt:1000,capturedAt:1002,cpuResolutionMs:.000041,
-      records:pids.map(pid=>({identity:{pid,start:'kernel-birth',boot:'boot-time'},cpu:{totalMicros:62500000},rss:43008,observedAt:1001})) }; } });
+      captureStartedContinuousNs: ns(1000), capturedContinuousNs: ns(1002),
+      records:pids.map(pid=>({identity:{pid,start:'kernel-birth',boot:'boot-time'},cpu:{totalMicros:62500000},rss:43008,observedAt:1001, observedContinuousNs:ns(1001)})) }; } });
   assert.equal(calls, 1); assert.deepEqual(result.records[0]!.cpu, { totalMicros: 62500000 });
   assert.equal(result.records[0]!.rss, 43008);
   assert.equal(result.records[0]!.observedAt,1001); assert.equal(result.capturedAt,1002);
@@ -93,14 +99,16 @@ test('owned executor controls use only its captured physical worker, acknowledge
 });
 
 test('Linux batch owner retains kernel birth/tick/page units and individual acquisition observations', () => {
-  let time = 1000;
+  let time = 1000, elapsed = 100;
   const fields = ['S', ...Array(21).fill('0')]; fields[11] = '10'; fields[12] = '5'; fields[19] = '777'; fields[21] = '3';
-  const result = platformCapture([11,22], { platform: 'linux', now: () => time++, units: { ticks: 100, pageBytes: 4096 },
+  const result = platformCapture([11,22], { platform: 'linux', now: () => time++, continuousNs: () => ns(elapsed++), units: { ticks: 100, pageBytes: 4096 },
     run: () => { throw Error('No external process permitted in this component test'); },
     read: path => path.endsWith('boot_id') ? 'boot-observation' : `${path.includes('/11/') ? 11 : 22} (name with spaces) ${fields.join(' ')}` });
   assert.equal(result.records[0]!.cpu.totalMicros,150000); assert.equal(result.records[0]!.rss,12288);
   assert.equal(result.records[1]!.identity.start,'777'); assert.equal(result.records[1]!.identity.boot,'boot-observation');
   assert.notEqual(result.records[0]!.observedAt,result.records[1]!.observedAt); assert.equal(result.capturedAt,1003);
+  assert.deepEqual(result.records.map(value => value.observedContinuousNs), [ns(101), ns(102)]);
+  assert.equal(result.capturedContinuousNs, ns(103));
 });
 
 test('campaign retains required workload duration and original baseline applicability; missing observations fail closed', async () => {

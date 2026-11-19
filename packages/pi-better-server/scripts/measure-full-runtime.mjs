@@ -6,6 +6,7 @@ import { cpus, totalmem, release, arch, tmpdir, hostname } from 'node:os';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
 import { inspectDaemonOwner, processMatchesStart } from '../src/daemon-owner.ts';
@@ -21,7 +22,8 @@ import { openPeakSampler, peakCapturePeriodMs } from './measure-full-runtime/pea
 import { distribution } from './measure-full-runtime/owned-fixture.mjs';
 import { measureEventPublication } from './event-publication/measure.mjs';
 import { readLifecycleConfig } from '../src/lifecycle-config.ts';
-import { buildDarwinCapture } from './measure-full-runtime/build-darwin-capture.mjs';
+import { buildNativeCapture } from './measure-full-runtime/build-darwin-capture.mjs';
+import { continuousClock, elapsedMsBetween, isNs } from './measure-full-runtime/batch-capture.mjs';
 import { parseSubjectBinding, subjectModuleUrl } from './measure-full-runtime/subject-binding.mjs';
 const subject = process.env.PI_FULL_RUNTIME_SUBJECT ? parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT) : undefined;
 if (process.argv.includes('--campaign') || (!process.argv.includes('--smoke') && process.env.PI_INCREMENTAL_WORKLOAD !== '1' && !process.env.PI_FULL_RUNTIME_MATRIX_ONLY)) {
@@ -40,7 +42,7 @@ writeFileSync(sessionFile,JSON.stringify({type:'session',version:3,id:randomUUID
 const probe = new URL('./measure-full-runtime/probe.mjs', import.meta.url).href;
 const preload = subject ? new URL('./measure-full-runtime/subject-probe.mjs', import.meta.url).href : probe;
 const execPath = process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath;
-process.env.PI_RESOURCE_REPORT_DIR=samples;let fixtureControl, nativeBinding, peakSampler;
+process.env.PI_RESOURCE_REPORT_DIR=samples;let fixtureControl, nativeBinding, peakSampler, continuousNs;
 const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root, TMP: root, TEMP: root, PI_RESOURCE_REPORT_DIR: samples,
   BACKGROUND_SESSION_FILE:sessionFile,NODE_OPTIONS: `--import ${preload}`, LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: join(cwd, 'entered'), LAUNCH_RELEASE: join(cwd, 'release'), PI_OFFLINE: '1' };
 const workload = incremental ? seedWorkload({ root, agent, cwd, settings: incremental }) : undefined;
@@ -68,7 +70,7 @@ if (subject) {
     moduleOrigins: Object.fromEntries(['../src/daemon-owner.ts', '../src/runtime/work-client.mjs', '../src/client.ts',
       '../src/remote-client/session.ts', '../src/startup/admission.ts', '../src/startup/artifact.ts'].map(path => [path, import.meta.resolve(path)])) };
 }
-report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIME_HOST_ID ?? null, hostname: hostname(),
+report.measurement = { schemaVersion: 2, fixedHostId: process.env.PI_FULL_RUNTIME_HOST_ID ?? null, hostname: hostname(),
   artifact: readOwnBuild() ?? null,
   fixtureSha256: createHash('sha256').update(JSON.stringify([
     './measure-full-runtime.mjs', './measure-full-runtime/frontend.ts', './measure-full-runtime/hosted-extension.ts',
@@ -138,12 +140,13 @@ try {
   report.startup = { intent: intent.kind, inheritedGuardedChild: Boolean(env.PI_SERVER_GUARDED_CHILD), inheritedRebind: Boolean(env.PI_SERVER_GUARDIAN_REBIND) };
   checkStartupAdmission({ canonicalServerDir: transport, agentDir: agent, build: readOwnBuild(), intent });
   assert.ok(!env.PI_SERVER_GUARDED_CHILD && !env.PI_SERVER_GUARDIAN_REBIND, 'Primary workload requires its own legitimate guardian bootstrap; inherited guardian authority cannot be reused');
-  if (process.platform === 'darwin') {
-    reportPhase('build-native-capture');
-    nativeBinding = buildDarwinCapture(samples);
-    const { sourceSha256, binarySha256, napiVersion } = nativeBinding;
-    report.measurement.nativeCapture = { sourceSha256, binarySha256, napiVersion };
-  }
+  reportPhase('build-native-capture');
+  nativeBinding = buildNativeCapture(samples);
+  ({ continuousNs } = createRequire(import.meta.url)(nativeBinding.path));
+  process.env.PI_RESOURCE_CLOCK_BINDING = env.PI_RESOURCE_CLOCK_BINDING = nativeBinding.path;
+  const { sourceSha256, binarySha256, napiVersion } = nativeBinding;
+  const clock = continuousClock(process.platform);
+  report.measurement.nativeCapture = { sourceSha256, binarySha256, napiVersion, clock };
   reportPhase('import-resource-probe');
   ({ fixtureControl } = await import(probe));
   reportPhase('start-primary-guardian');
@@ -270,8 +273,10 @@ try {
     const legacyPids=[0,1].map(index=>Number(readFileSync(join(cwd,`legacy-pid-${index}`),'utf8')));
     const remoteCommandPid=Number(readFileSync(join(cwd,'remote-command-pid'),'utf8'));
     const required=[process.pid,...legacyPids,remoteClaim.pid,remoteCommandPid,owner.pid,guardian.pid,worker.pid,claim.pid,commandPid,...clients.map(c=>c.pid)];
-    const sampleAll=(afterAt = 0)=>until('all actual processes sampled in this measurement generation',()=>{const values=observed();return required.every(pid=>values.some(value=>value.identity.pid===pid&&value.generation===String(count)&&value.at>=afterAt
-      && (!incremental || (value.gcThreads?.complete && value.gcThreads.records.every(record => record.observedAt >= afterAt)))))?values:false;});
+    const sampleAll=(afterNs = '0')=>until('all actual processes sampled in this measurement generation',()=>{const values=observed();return required.every(pid=>values.some(value=>value.identity.pid===pid&&value.generation===String(count)
+      && isNs(value.observedContinuousNs) && elapsedMsBetween(afterNs, value.observedContinuousNs) >= 0
+      && (!incremental || (value.gcThreads?.complete && value.gcThreads.records.every(record => isNs(record.observedContinuousNs)
+        && elapsedMsBetween(afterNs, record.observedContinuousNs) >= 0)))))?values:false;});
     reportPhase(`clients-${count}-capture-before`);
     let before=await sampleAll();
     const role = pid => pid===process.pid?'remote-adapters-and-measurement':pid===remoteClaim.pid?'remote-runner':pid===remoteCommandPid?'remote-command':pid===owner.pid ? 'server' : pid===guardian.pid ? 'guardian' : pid===worker.pid ? 'worker' : pid===claim.pid ? 'runner' : pid===commandPid ? 'command' : legacyPids.includes(pid)?'legacy-command':'pi';
@@ -287,19 +292,20 @@ try {
       identity: requiredProcesses.find(row => row.identity.pid === value.identity.pid).identity });
     before = before.map(batchIdentity);
     const startedAt = Date.now();
-    const measurementStart=performance.now(), latencies=[], queueAges=[]; const duration=incremental?.durationMs ?? (process.env.PI_FULL_RUNTIME_MATRIX_ONLY?100:count===10?60000:3000);
-    while(performance.now()-measurementStart<duration) { const began=performance.now(); await work.request('runtime_get_status'); latencies.push(performance.now()-began);
+    const startedContinuousNs=continuousNs(), latencies=[], queueAges=[]; const duration=incremental?.durationMs ?? (process.env.PI_FULL_RUNTIME_MATRIX_ONLY?100:count===10?60000:3000);
+    while(elapsedMsBetween(startedContinuousNs,continuousNs())<duration) { const began=performance.now(); await work.request('runtime_get_status'); latencies.push(performance.now()-began);
       const actual = await work.request('runtime_get_metrics');
       if (Number.isFinite(actual.executor?.oldestQueuedAgeMs)) queueAges.push(actual.executor.oldestQueuedAgeMs);
       await delay(100); }
-    const elapsedMs = performance.now() - measurementStart, endedAt = Date.now();
-    await peakSampler.stop(endedAt);
-    const after=(await sampleAll(endedAt)).map(batchIdentity);
+    const endedContinuousNs = continuousNs(), endedAt = Date.now();
+    const elapsedMs = elapsedMsBetween(startedContinuousNs, endedContinuousNs);
+    await peakSampler.stop(endedContinuousNs);
+    const after=(await sampleAll(endedContinuousNs)).map(batchIdentity);
     const aggregateCohorts = await peakSampler.read();
     await peakSampler.close();
     peakSampler = undefined;
     const metrics=await work.request('runtime_get_metrics'), status=await work.request('runtime_get_status');
-    const aggregatePeak = summarizeCohorts(aggregateCohorts, { required: requiredProcesses, generation: String(count) }, { startedAt, endedAt });
+    const aggregatePeak = summarizeCohorts(aggregateCohorts, { required: requiredProcesses, generation: String(count), clock }, { startedAt, endedAt, startedContinuousNs, endedContinuousNs });
     const workloadAfter = workload ? await reconcileWorkload(work, cwd, workload, { baseline: Boolean(metrics.baselineObservation) }) : undefined;
     if (workload) {
       assert.deepEqual(workloadAfter, workloadBefore, 'Exact authoritative fixture results must survive the observation window');
@@ -319,7 +325,7 @@ try {
     const backgroundAfter=await work.get({background:true,cwd,sessionId:JSON.parse(readFileSync(sessionFile,'utf8').split('\n')[0]).id});
     const managementDelta=Object.fromEntries(['scopeRefreshes','reconciles'].map(key=>[key,managementAfter[key]-managementBefore[key]]));
     const registryDelta=Object.fromEntries(Object.keys(managementAfter.registry).map(key=>[key,managementAfter.registry[key]-managementBefore.registry[key]]));
-    report.scenarios.push({warmup,backgroundBefore:observedLegacy,backgroundAfter,managementBefore,managementAfter,managementDelta,registryDelta,legacyRows:2,clients:count,startedAt,endedAt,elapsedMs,
+    report.scenarios.push({warmup,backgroundBefore:observedLegacy,backgroundAfter,managementBefore,managementAfter,managementDelta,registryDelta,legacyRows:2,clients:count,startedAt,endedAt,startedContinuousNs,endedContinuousNs,elapsedMs,
       requiredProcesses, resourceBefore: before, aggregateCohorts, aggregatePeak,
       resources,connections,metrics,countersBefore,totalCpuMs:resources.reduce((s,v)=>s+v.cpuMs,0),totalRss:resources.reduce((s,v)=>s+v.rss,0),rpcMs:{p50:latencies.sort((a,b)=>a-b)[Math.floor(latencies.length*.5)],p95:latencies[Math.floor(latencies.length*.95)],p99:latencies[Math.floor(latencies.length*.99)]}});
     report.measurement.coverage.aggregatePeak = report.scenarios.every(scenario => scenario.aggregatePeak.qualified);

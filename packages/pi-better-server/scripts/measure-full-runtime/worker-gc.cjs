@@ -5,6 +5,10 @@ const { threadId } = require('node:worker_threads');
 
 let gc, gcObserver;
 const observedGcThreads = new Set();
+function observedContinuousNs() {
+  const binding = process.env.PI_RESOURCE_CLOCK_BINDING;
+  return binding ? require(binding).continuousNs() : undefined;
+}
 
 function threadGc() {
   if (!gc) {
@@ -17,7 +21,7 @@ function threadGc() {
     });
     gcObserver.observe({ entryTypes: ['gc'] });
   }
-  return { ...gc, observedAt: Date.now() };
+  return { ...gc, observedAt: Date.now(), observedContinuousNs: observedContinuousNs() };
 }
 
 function observeGcThread(key = `worker-${threadId}`, directory = process.env.PI_RESOURCE_REPORT_DIR) {
@@ -35,3 +39,4 @@ function observeGcThread(key = `worker-${threadId}`, directory = process.env.PI_
 
 exports.observeGcThread = observeGcThread;
 exports.threadGc = threadGc;
+exports.observedContinuousNs = observedContinuousNs;

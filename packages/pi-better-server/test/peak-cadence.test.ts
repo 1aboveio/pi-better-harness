@@ -6,12 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { buildDarwinCapture } from '../scripts/measure-full-runtime/build-darwin-capture.mjs';
+import { buildNativeCapture } from '../scripts/measure-full-runtime/build-darwin-capture.mjs';
 
 test('real peak capture has complete generation coverage, survives a control delay, and rejects a physical miss', { timeout: 15000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'p808-peak-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const binding = process.platform === 'darwin' ? buildDarwinCapture(root) : null;
+  const binding = buildNativeCapture(root);
   assert.ok(process.platform === 'darwin' || process.platform === 'linux', 'Unsupported peak sampler test platform');
 
   for (const mode of ['delay-control', 'pause-collector']) {
