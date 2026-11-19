@@ -104,6 +104,7 @@ const subagentRegistry = await import("../packages/pi-better-subagents/registry.
 const subagentFailures = await import("../packages/pi-better-subagents/failures.ts");
 const observations = await import("../packages/pi-better-subagents/shared-failure-observations.ts");
 const bgRegistry = await import("../packages/pi-better-background-tasks/src/registry.ts");
+const { isTerminalStatus } = await import("../packages/pi-better-background-tasks/src/types.ts");
 const { defaultSupervisorDirectory, supervisorPaths } = await import("../packages/pi-better-background-tasks/src/supervisor/index.ts");
 const { openStore } = await import("../packages/pi-better-background-tasks/src/shared-operation-coordinator/index.ts");
 const { stopProcessGroup } = await import("../packages/pi-better-background-tasks/src/process.ts");
@@ -455,26 +456,29 @@ async function cleanupExitChildren(host, project, children) {
     // A spawn can persist its task before the tool returns (or throws). Recover
     // only this session's tasks: legacy metas from the registry and durable bgs
     // ids from the public list (or from the failed-spawn record).
-    const ids = new Set(children.map((child) => child.id).filter(Boolean));
-    for (const meta of bgRegistry.listMetasForOrigin({ cwd: project, sessionId: host.sessionId })) ids.add(meta.id);
+    const origin = { cwd: project, sessionId: host.sessionId };
+    const legacyIds = new Set(children.map((child) => child.id).filter((id) => id?.startsWith("bg_")));
+    for (const meta of bgRegistry.listMetasForOrigin(origin)) legacyIds.add(meta.id);
     const durableIds = await durableIdsFor(host, children);
-    const legacyMetas = [...ids].map((id) => bgRegistry.readMeta(id)).filter((meta) => meta?.pid);
+    const legacyProcesses = [...legacyIds].map((id) => bgRegistry.readMeta(id)).filter((meta) =>
+      meta && bgRegistry.belongsToOrigin(meta, origin) && Number.isSafeInteger(meta.pid) && meta.pid > 0
+      && (meta.pgid === undefined || (Number.isSafeInteger(meta.pgid) && meta.pgid > 0)));
     for (const { marker } of children) {
       try { writeFileSync(marker, ""); } catch { /* Stop still works if release fails. */ }
     }
-    const gone = () => legacyMetas.every((meta) => !processGroupAlive(meta)) && durableIds.every(durableGone);
+    const gone = () => legacyProcesses.every((meta) => !processGroupAlive(meta)) && durableIds.every(durableGone);
     // Keep markers and supervision alive until terminal evidence (durable runner
     // or legacy process group) confirms exit. Release must not kill an owned
     // durable command; an explicit stop is only the bounded fallback.
     if (!await waitFor("released children to exit", gone, 1_000).catch(() => false)) {
-      for (const meta of legacyMetas.filter(processGroupAlive)) {
+      for (const meta of legacyProcesses.filter(processGroupAlive)) {
         try { await host.call("bg_task_stop", { id: meta.id }); } catch { /* Reload may have failed. */ }
       }
       for (const id of durableIds.filter((taskId) => !durableGone(taskId))) {
         try { await host.call("bg_task_stop", { id }); } catch { /* Reload may have failed. */ }
       }
       if (!await waitFor("stopped children to exit", gone, 1_000).catch(() => false)) {
-        for (const meta of legacyMetas.filter(processGroupAlive)) {
+        for (const meta of legacyProcesses.filter(processGroupAlive)) {
           try { stopProcessGroup(meta.pid, meta.pgid, "SIGKILL"); } catch { /* Attempt both groups; verify exit below. */ }
         }
         for (const id of durableIds.filter((taskId) => !durableGone(taskId))) {
@@ -486,8 +490,16 @@ async function cleanupExitChildren(host, project, children) {
         await waitFor("killed children to exit", gone, 1_000);
       }
     }
+    // The process group can disappear before the runtime's close handler
+    // publishes the terminal record. Do not hand its pending write to the
+    // next fixture session. An unreadable record supplies no process identity,
+    // but its independently known ID still needs terminal proof.
+    await waitFor("legacy children to publish terminal metadata", () => [...legacyIds].every((id) => {
+      const { meta } = bgRegistry.inspectMeta(id);
+      return meta && bgRegistry.belongsToOrigin(meta, origin) && isTerminalStatus(meta.status) && Number.isFinite(meta.endedAt);
+    }), 1_000);
   } catch (error) {
-    // Do not remove release markers if even the termination fallback failed.
+    // Preserve release markers and evidence if exit or publication is unverified.
     retainFixtures = true;
     throw error;
   }
