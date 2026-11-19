@@ -464,8 +464,11 @@ test("slow caller cancellation preserves other clients and ignores late replies"
 
 test("an 800 ms setup subscription cannot verify a source while fixture bootstrap is held", { timeout: 10000 }, async t => {
   const implementation = new URL("./support/cancellable-query-worker.mjs", import.meta.url).href;
+  const heartbeat = new URL("./support/bootstrap-heartbeat.mjs", import.meta.url).href;
   const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(`
-    import { parentPort } from "node:worker_threads";
+    import { parentPort, workerData } from "node:worker_threads";
+    import { bootstrapHeartbeat } from ${JSON.stringify(heartbeat)};
+    const stopHeartbeat = bootstrapHeartbeat(parentPort, workerData.heartbeat);
     const deferred = [];
     const buffer = message => {
       if (["query", "cancel"].includes(message.type)) deferred.push(message);
@@ -478,6 +481,7 @@ test("an 800 ms setup subscription cannot verify a source while fixture bootstra
       };
       parentPort.on("message", release);
     });
+    stopHeartbeat();
     await import(${JSON.stringify(implementation)});
     parentPort.off("message", buffer);
     for (const message of deferred) parentPort.emit("message", message);
