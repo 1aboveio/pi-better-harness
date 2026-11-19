@@ -62,8 +62,8 @@
     {
       "ac": 8,
       "command": "git diff eec7b3e256a7548bbf67f69cd468f12eb3b91dc8 -- packages/pi-better-server/src/runtime docs/plans/unified-server-runtime.md",
-      "implemented": "No production scan/poll/invalidation removal made in unit808; this map records actual incomplete state",
-      "missing": ["audit superseded paths after measured qualification", "compatibility source/budget/scope documentation", "design implementation and acceptance update from actual runs"]
+      "implemented": "docs/plans/unified-server-runtime.md sections 14.1 and 15.1 record replaced paths, retained compatibility sources/scopes/budgets, and qualified limits of the evidence. The historical macOS steady loop ran at least 600 seconds but failed the unchanged-work assertion (4515 vs 4513); no natural exit trial ran.",
+      "missing": ["audit retained versus superseded work against qualifying native measurements", "coordinator-owned exact-candidate CI and fixed-host paired qualification; no CPU improvement established"]
     }
   ]
 }

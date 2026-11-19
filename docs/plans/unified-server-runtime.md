@@ -2,7 +2,7 @@
 
 ## 1. 状态与结论
 
-本文记录已接受、待实现的目标设计，覆盖 Subagents、Background Tasks、Agent Catalog 与 `pi-better-server` 的统一管理和进程生命周期。当前代码尚未具备本文描述的统一能力。本次文档不启动后台进程、不迁移数据、不改变任务权限或现有 server 配置。
+本文记录 Subagents、Background Tasks、Agent Catalog 与 `pi-better-server` 的统一管理和进程生命周期。统一运行时及多条增量读取路径已实现；[#808](https://github.com/1aboveio/pi-better-harness/issues/808) 的完整原生验收和固定机器前后对照尚未完成。下文保留已接受的目标设计；当前实现与兼容成本见第 14.1 节，实测证据与缺口见第 15.1 节。本次文档不启动后台进程、不迁移数据、不改变任务权限或现有 server 配置。
 
 建议扩展 `pi-better-server`，由同一个 server 进程承担共享状态读取、监督调度和可选的 Pi 会话托管，不再增加一个与 server 并行的 runtime daemon。server 内部拆分模块，但共享一个启动入口、实例所有权、通信端点、升级流程和退出判定。普通本地 Pi 可以只使用状态服务，不必把前台会话迁入 server。
 
@@ -19,6 +19,8 @@
 - 局部性能测试没有约束完整 provider、健康检查、外部写入和多个前台进程叠加后的成本。
 
 ### 2.2 可复用的实现
+
+本节记录接受设计时的实现基础。
 
 | 现有模块 | 已有职责 | 本设计的处理 |
 | --- | --- | --- |
@@ -348,9 +350,21 @@ schema 迁移在独占维护状态执行。read-model schema 可以丢弃重建�
 
 直接读取持久结果的只读诊断工具可以保留，但必须明确标为观察数据。所有自动 launch、resume、全局 cleanup 和监督 mutation 只有一个管理 owner；不能在 server 故障时静默恢复前台全局扫描和派发。
 
+### 14.1 已实现的路径与保留的兼容成本
+
+托管运行时由 `pi-better-server` 提供共享读取、Catalog、后台监督和按需恢复；普通本地 Pi 通过 socket 接入，不因此创建 HostedSession。权威 mutation 仍由原有协调器、执行 token 和 writer 约束。下表记录已落地的行为及 [#831 候选 `af1ef0dd`](https://github.com/1aboveio/pi-better-harness/commit/af1ef0dd5b65c1c60d6b585b7f4c693714ab60fb) 中能核对的预算，不替换第 15 节的验收标准。
+
+| 路径 | 已替换的工作 | 保留的工作与预算 |
+| --- | --- | --- |
+| Subagents 文件与归档 | 精确文件提示合并到对应记录；日志追加复用已验证的折叠进度，列表投影只更新受影响的行和 scope。清理完成的 durable attempt 前，`archivePublicationPending` [只查同 ID 的已发布归档](https://github.com/1aboveio/pi-better-harness/commit/e0e9130ef0a44a5133986bf357d0bcc94823b22a)，不再为每次原子写入重查整份归档列表。 | 首次导入、漏通知、溢出、旧写入和来源替换仍需要共享核对。读模型默认每 1 秒安排修复，遍历已知路径及 run、归档、marker 目录；每批最多 128 条并让出执行，精确提示队列最多 256 条、每批取 32 条。完整核对仍可能随历史增长，签名未变不重读元数据。日志 checkpoint 总预算 32 MiB、单条 256 KiB；淘汰、失配或不兼容时从可验证来源回放。缺失或不可读的原始日志保留已验证值并标记 `degraded`、`complete: false`，归档记录本身不承诺原始日志覆盖。 |
+| Assignment 与 Background Tasks | 支持变化记录的来源按事务、实体和 owner scope 更新，查询 worker 读取固定 SQLite 视图，后续提交不废弃同一来源的在途视图。派生状态可重建；来源身份不匹配时禁止发布。 | 未提供变化记录的旧 coordinator 保留共享修复；Background 使用全局 `change_revision` 兼容旧来源，并对 `local-supervisor` 操作按 ID 每批核对最多 32 条。已使用的 Background 历史索引每 30 秒核对旧 task 文件签名，遍历时每 128 项让出，按签名变化重读元数据。已获授权的 legacy watch、远程轮询、交接、进程期限和日志保留仍执行；托管调度按 owner、类型和任务合并，普通观察在 root 内最多 8 个并发、每个非 runtime owner 最多 2 个，不挤占控制期限所需配额。 |
+| Catalog、Navigator 与 Goal | Catalog 在 server 按来源、项目与信任作用域共享解析；无关设置不触发任务日志读取。Navigator 按 scope 消费快照，未变化的绘制使用本地快照；Goal 以精确活动变化和期限更新，替代为判断活动而轮询整份历史。 | Catalog 有订阅时每 1 秒运行共享核对，每轮跨活跃 scope 最多 128 个修复步骤，最多 64 个订阅。丢提示或外部编辑由核对发现；可信项目以外不读取项目定义。慢订阅保留合并与重新同步路径，socket 写入缓冲以 4 MiB 为控制界限。 |
+
+物理资源检查区分连接与租约：主线程的控制、取消和结果监督共用一个 mutation 句柄；查询 worker 使用一个派生库句柄组合 coordinator 只读来源及 inbox、checkpoint 附加库。组件检查核对了这两个物理句柄；整机夹具仍要求普通前台的 coordinator 连接为 0，root 的 coordinator 与派生索引连接各不超过 2。必要传输、授权执行和修复分别计入成本；共享给一个 server 并不证明工作量与客户端数无关。
+
 ## 15. 性能与正确性验收
 
-以下均为实现验收预算，尚未达成。先以操作计数约束架构，再用固定机器测 CPU，不能用不稳定的 CI 毫秒阈值替代读取预算。
+以下是保留的实现验收预算，已取得的证据与未通过的验收见第 15.1 节。先以操作计数约束架构，再用固定机器测 CPU，不能用不稳定的 CI 毫秒阈值替代读取预算。
 
 | 场景 | 必须满足的预算或结果 |
 | --- | --- |
@@ -375,6 +389,14 @@ schema 迁移在独占维护状态执行。read-model schema 可以丢弃重建�
 真实 TUI、真实子进程、Unix socket、真实 SQLite 和外部独立 writer 必须进入验收。固定机器补充测量总 CPU、event-loop lag、RSS、文件打开、连接数、索引重建耗时与事件延迟；同时报告单个 Pi 与所有相关进程的总量，避免把 CPU 从前台移到 server 后误称优化完成。
 
 guardian 也计入 CPU 与退出测试。验证进程数量必须用 PID/start/token，而非命令行字符串计数。测试包括单独安装 Subagents、单独 Background、组合包、server 托管多会话、普通本地会话和远程客户端同时存在。
+
+### 15.1 验收证据与缺口（#808）
+
+已合并的功能 PR 提供各自的证据：[无关设置隔离 #809](https://github.com/1aboveio/pi-better-harness/pull/809)、[单日志追加 #811](https://github.com/1aboveio/pi-better-harness/pull/811)、[精确文件更新与修复 #814](https://github.com/1aboveio/pi-better-harness/pull/814)、[scope 与分页隔离 #812](https://github.com/1aboveio/pi-better-harness/pull/812)、[日志 checkpoint #816](https://github.com/1aboveio/pi-better-harness/pull/816)、[Assignment 变化和恢复 #820](https://github.com/1aboveio/pi-better-harness/pull/820)、[Background 增量更新 #823](https://github.com/1aboveio/pi-better-harness/pull/823)、[Catalog 作用域 #817](https://github.com/1aboveio/pi-better-harness/pull/817)、[Goal 活动更新 #827](https://github.com/1aboveio/pi-better-harness/pull/827)、[读取故障隔离 #810](https://github.com/1aboveio/pi-better-harness/pull/810) 和 [监督与空闲退出 #826](https://github.com/1aboveio/pi-better-harness/pull/826)。例如，Catalog 的[历史 CI](https://github.com/1aboveio/pi-better-harness/actions/runs/44212167779)记录了共享读取和信任隔离检查；监督的[历史 CI](https://github.com/1aboveio/pi-better-harness/actions/runs/44293124991/attempts/2)记录了 macOS guardian 空闲退出和 headless SDK 崩溃恢复。两项都只对应各自的候选和测试范围。
+
+- **候选实现与组件证据。** `af1ef0dd` 的审查记录有 17 项针对性检查和 56 项测量组件检查通过（Node v24.21.0），覆盖真实文件与 SQLite 的持续提交、来源替换、归档发布竞态、读取计数，以及采样和配对拒绝规则。历史组件日志也记录了[归档竞态修复](../evidence/issue-808/concurrent-archive-r9/r9-focused-green.log)和[配对校验](../evidence/issue-808/paired-validator-r5/component-tests-final.log)。候选已接入外部 writer 的变更序列、夹具自有的淘汰与重启控制、普通与修复计数、进程采样及自然退出检查；夹具控制不提供生产 RPC。macOS/Linux 的 CI 资源 lane 使用 `--smoke`，另有独立包检查；[PR #831 的候选 CI](https://github.com/1aboveio/pi-better-harness/pull/831/checks)由协调者跟踪。
+- **历史 macOS 尝试未通过。** Node v24.14.1 上，历史驱动 `781692ce` 配合封存的 `2753defe` 构建运行了 4,416 条历史、1 个 Pi、48 个同组任务的稳态循环，时长至少 600 秒。循环后的结果核对通过，随后不变工作量断言失败：`Unchanged work must not be reprojected`（实际 4515，预期 4513）。保留的日志 `808-darwin-boot-fixed-window.log` 和报告 `808-darwin-boot-fixed-window.json` 记录了这次失败。变更序列和自然退出试验未执行；失败后的清理不计作自然退出。
+- **仍待协调者验收。** 仍须完成 macOS/Linux 的真实进程、SQLite 和 socket 验证：在固定活动工作量下核对普通观察与投影是否随客户端数或未变历史增长，并覆盖完整变更矩阵、多个 scope、零 I/O 绘制、慢订阅、故障恢复、资源释放和自然退出。夹具仍须通过现有启动准入，Unix socket 路径最多 103 字节。固定机器配对使用[原始基线 `eec7b3e2`](https://github.com/1aboveio/pi-better-harness/commit/eec7b3e256a7548bbf67f69cd468f12eb3b91dc8)、待验候选和同一驱动：4,416/10,000 条历史 × 1/5/10 个 Pi × 48/96/192 个同组任务，每组前后窗口各至少 10 分钟。配对报告须覆盖所有相关进程的总 CPU 和峰值、RSS、GC、I/O、队列年龄、事件延迟、恢复与退出时间，并核算采样自身开销（进程采样间隔 250 ms，控制循环间隔 100 ms）。目前没有合格的固定机器配对结果，也没有总 CPU 改善结论；保留[验收映射](../../packages/pi-better-server/scripts/measure-full-runtime/acceptance-map.json)中的未验证项。
 
 ## 16. 可观察性与故障处理
 
@@ -403,4 +425,4 @@ guardian 也计入 CPU 与退出测试。验证进程数量必须用 PID/start/t
 
 主要风险是 server 故障影响多个会话、混合版本绕过新 fencing、派生索引与文件来源不一致，以及孤立坏记录让进程误保活。分别通过独立 runner、固定构建与明确接管、可重建索引/持久 intent、可检查的有限保活理由控制。不能用“有统一管理器”代替这些证明。
 
-实施前仍需通过打包与平台实验验证三个工程细节：轻量客户端和固定 server artifact 的安装体积、离线行为与完整性；macOS/Linux 进程开始身份及 guardian 接管原语；文件观察器失效时的核对吞吐与预算。这些实验不改变本文的所有权、单实例、退出和授权契约。若实验无法满足契约，应修订设计，不能静默降级为多份全局扫描或无限守护。
+实施和验收仍须核对三个工程细节：轻量客户端和固定 server artifact 的安装体积、离线行为与完整性；macOS/Linux 进程开始身份及 guardian 接管原语；文件观察器失效时的核对吞吐与预算。这些实验不改变本文的所有权、单实例、退出和授权契约。若实验无法满足契约，应修订设计，不能静默降级为多份全局扫描或无限守护。
