@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../../src/runtime/query-executor.ts";
 import { WorkClient } from "../../src/runtime/work-client.mjs";
-import { queryBootstrap } from "./query-bootstrap.ts";
+import { queryBootstrap, querySourceReady } from "./query-bootstrap.ts";
 
 export async function fixture(options: { intervalMs?: number; capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
@@ -103,5 +103,6 @@ export async function fixture(options: { intervalMs?: number; capacity?: number;
   // A test timeout does not unwind a suspended body into its finally block.
   after(close);
   server.listen(path); await once(server, "listening");
-  return { executor, client, stall, worker, bootstrapped, close, root, path, sockets, peerErrors, peerActivity };
+  const waitForSourceReady = () => querySourceReady(worker, () => executor.observation());
+  return { executor, client, stall, worker, bootstrapped, waitForSourceReady, close, root, path, sockets, peerErrors, peerActivity };
 }

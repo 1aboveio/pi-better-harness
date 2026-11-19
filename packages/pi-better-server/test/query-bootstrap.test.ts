@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { queryBootstrap } from "./support/query-bootstrap.ts";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { queryBootstrap, querySourceReady } from "./support/query-bootstrap.ts";
+import { fixture } from "./support/query-fixture.ts";
 
 test("bootstrap exit retains a prior watchdog cause without claiming source readiness", async () => {
   const worker = new EventEmitter();
@@ -67,4 +70,91 @@ test("bootstrap failure retains the actual import substage and heartbeat count w
     return true;
   });
   assert.deepEqual(worker.eventNames(), []);
+});
+
+test("source readiness waits for verified pushed inventory, not heartbeat or bootstrap", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const worker = new EventEmitter();
+  let observation = { status: "rebuilding", observedAt: null as number | null };
+  let settled = false;
+  const pending = querySourceReady(worker, () => observation).then(() => { settled = true; });
+  worker.emit("message", { type: "fixture-ready" });
+  worker.emit("message", { type: "heartbeat" });
+  t.mock.timers.tick(4000);
+  await Promise.resolve();
+  assert.equal(settled, false, "startup has its own budget, not either measured caller deadline");
+  observation = { status: "ready", observedAt: null };
+  worker.emit("message", { type: "revision" });
+  await Promise.resolve();
+  assert.equal(settled, false, "executor status without a source observation is not readiness");
+  observation = { status: "ready", observedAt: 1 };
+  worker.emit("message", { type: "revision" });
+  await pending;
+  assert.equal(settled, true);
+  assert.deepEqual(worker.eventNames(), []);
+  await querySourceReady(worker, () => observation);
+  assert.deepEqual(worker.eventNames(), [], "an already verified inventory needs no future event");
+});
+
+test("source startup timeout and worker failure remain distinct from caller read deadlines", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const observation = () => ({ status: "rebuilding", observedAt: null });
+  const worker = new EventEmitter();
+  const startup = assert.rejects(querySourceReady(worker, observation), /source inventory did not become ready within 5000 ms/);
+  t.mock.timers.tick(5000);
+  await startup;
+  assert.deepEqual(worker.eventNames(), []);
+  const exited = assert.rejects(querySourceReady(worker, observation), /exited before source inventory readiness \(code 9\)/);
+  worker.emit("exit", 9);
+  await exited;
+  const original = new Error("source worker failed");
+  const failed = assert.rejects(querySourceReady(worker, observation), error => error === original);
+  worker.emit("error", original);
+  await failed;
+  assert.deepEqual(worker.eventNames(), []);
+});
+
+test("held real inventory settles separately before the first uncached subscription", { timeout: 10000 }, async () => {
+  const f = await fixture({ timeoutMs: 400, watchdogMs: 2000,
+    workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
+  try {
+    const id = "sa_source_ready";
+    mkdirSync(join(f.root, "runs", id));
+    writeFileSync(join(f.root, "runs", id, "meta.json"), JSON.stringify({
+      id, cwd: f.root, status: "completed", startedAt: 1, name: "present-before-ready",
+    }));
+    await f.bootstrapped;
+    let settled = false;
+    const inventory = f.waitForSourceReady().then(() => { settled = true; });
+    const held = await new Promise<any>(resolve => {
+      const status = (message: any) => {
+        if (message.type !== "inventory-status") return;
+        f.worker.off("message", status); resolve(message);
+      };
+      f.worker.on("message", status);
+      f.worker.postMessage({ type: "inventory-status" });
+    });
+    assert.equal(held.rpcInstalled, true);
+    assert.equal(held.held, true);
+    assert.equal(settled, false);
+    assert.equal(f.executor.observation().status, "rebuilding");
+    assert.equal(f.executor.metrics().executor.completed, 0);
+    assert.equal(f.executor.metrics().executor.clients, 0);
+    f.worker.postMessage({ type: "release-inventory" });
+    await inventory;
+    const before = f.executor.metrics() as ReturnType<typeof f.executor.metrics> & { queryCount: number; cacheEntries: number };
+    assert.equal(f.executor.observation().status, "ready");
+    assert.ok(f.executor.observation().observedAt !== null);
+    assert.equal(before.queryCount, 0, "inventory startup must not issue a query or warm snapshots");
+    assert.equal(before.cacheEntries, 0);
+    assert.equal(before.executor.completed, 0);
+    assert.equal(before.executor.callerTimeouts, 0);
+    const client = await f.client();
+    const first = await client.subscribe({ id, limit: 1 });
+    assert.equal(first.status, "ready");
+    assert.equal(first.rows[0]?.meta.name, "present-before-ready");
+    assert.equal(f.executor.metrics().executor.completed, 1);
+    assert.equal(f.executor.metrics().executor.callerTimeouts, 0);
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+  } finally { await f.close(); }
 });

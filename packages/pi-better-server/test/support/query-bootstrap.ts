@@ -1,5 +1,30 @@
 import type { EventEmitter } from "node:events";
 
+/** Await pushed verified inventory, without admitting a read or warming its cache. */
+export function querySourceReady(worker: Pick<EventEmitter, "on" | "once" | "off">, observation: () => {
+  status: string; reason?: string; observedAt: number | null;
+}) {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`query fixture source inventory did not become ready within 5000 ms; ${JSON.stringify(observation())}`));
+    }, 5000);
+    const cleanup = () => {
+      clearTimeout(timer);
+      worker.off("message", changed); worker.off("exit", exited); worker.off("error", failed);
+    };
+    const changed = () => {
+      const value = observation();
+      if (value.status !== "ready" || value.observedAt === null) return;
+      cleanup(); resolve();
+    };
+    const exited = (code: number) => { cleanup(); reject(new Error(`query fixture worker exited before source inventory readiness (code ${code})`)); };
+    const failed = (error: Error) => { cleanup(); reject(error); };
+    worker.on("message", changed); worker.once("exit", exited); worker.once("error", failed);
+    changed();
+  });
+}
+
 /** Retain the executor's first failure when an early exit prevents the receipt. */
 export function queryBootstrap(worker: Pick<EventEmitter, "on" | "once" | "off">, diagnostic: () => {
   observation: { status: string; reason?: string };

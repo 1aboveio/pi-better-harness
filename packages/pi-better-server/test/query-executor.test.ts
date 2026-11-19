@@ -375,6 +375,8 @@ test("slow caller cancellation preserves other clients and ignores late replies"
   };
   try {
     await f.bootstrapped;
+    phase = "source-inventory-ready";
+    await f.waitForSourceReady();
     phase = "client-hello";
     const a = await f.client(), b = await f.client();
     observe(a, "slow-client"); observe(b, "other-client");
@@ -546,6 +548,7 @@ test("cold bootstrap caller deadline does not imply a wedged read worker", { tim
     assert.equal((await client.request("ping")).ok, true);
     assert.equal(f.executor.metrics().executor.callerTimeouts, 1);
     await f.bootstrapped;
+    await f.waitForSourceReady();
     await ready(client);
     assert.equal(client.snapshot?.status, "ready");
     assert.equal(f.executor.metrics().executor.restarts, 0);
