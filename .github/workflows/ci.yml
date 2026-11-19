@@ -251,6 +251,7 @@ jobs:
       - name: pi-better-server suite on supported native Pi 1.2
         env:
           TEST_SHARD: ${{ matrix.shard }}/3
+          PI_QUERY_STARTUP_TRACE: '1'
         run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.2.0 "$RUNNER_TEMP/pi-compat"
 
   # Exercise the affected extensions against the minimum and current Pi 1.x
