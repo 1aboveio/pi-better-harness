@@ -806,7 +806,8 @@ function statusGlyph(row: InternalRow): string {
 function statusIndicator(row: InternalRow, now = Date.now()): { glyph: string; color: string } {
   void now;
   if (row.statusTone !== "running") return { glyph: statusGlyph(row), color: toneColor(row.statusTone, row.status) };
-  return { glyph: RUNNING_DOT_GLYPH, color: "accent" };
+  const glyph = row.treeDepth === 1 && row.providerId === "background-tasks" ? ">_" : RUNNING_DOT_GLYPH;
+  return { glyph, color: "accent" };
 }
 
 function mainListSignature(rows: InternalRow[], options: { selectedId?: string; focused?: boolean; closeHint?: string | null } = {}): string {

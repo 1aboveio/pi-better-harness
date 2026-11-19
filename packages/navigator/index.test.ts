@@ -85,7 +85,8 @@ describe("shared background work navigator", () => {
       const lines = renderWidget(widget, 100);
       const mainTask = lines.findIndex(line => line.includes("main-task"));
       assert.ok(mainTask >= 0);
-      assert.match(lines[mainTask + 1]!, /leaf-a/);
+      assert.match(lines[mainTask]!, /└─ >_ main-task/);
+      assert.match(lines[mainTask + 1]!, /●\s+leaf-a/);
       assert.match(lines[mainTask + 2]!, /leaf-b/);
       assert.equal(lines[mainTask + 3]?.trim(), "");
       assert.match(lines[mainTask + 4]!, /with-task/);

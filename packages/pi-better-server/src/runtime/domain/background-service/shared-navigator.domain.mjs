@@ -727,7 +727,8 @@ function statusIndicator(row, now = Date.now()) {
     void now;
     if (row.statusTone !== "running")
         return { glyph: statusGlyph(row), color: toneColor(row.statusTone, row.status) };
-    return { glyph: RUNNING_DOT_GLYPH, color: "accent" };
+    const glyph = row.treeDepth === 1 && row.providerId === "background-tasks" ? ">_" : RUNNING_DOT_GLYPH;
+    return { glyph, color: "accent" };
 }
 function mainListSignature(rows, options = {}) {
     return JSON.stringify({
