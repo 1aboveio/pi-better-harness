@@ -36,7 +36,7 @@ jobs:
           const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
           writeFileSync(process.env.DIAGNOSTIC_REPORT, JSON.stringify({
             mode: 'hosted-bind-diagnostic-not-acceptance',
-            sourceBase: 'a7ced4f8ff4b5e8b738dd6ad5d14a63d0b74abf5',
+            sourceBase: '6f6f179d97dee1dd891248ba21b783ec78835101',
             checkout: git('rev-parse', 'HEAD'),
             parents: git('show', '-s', '--format=%P', 'HEAD'),
             dirty: git('status', '--porcelain'),
