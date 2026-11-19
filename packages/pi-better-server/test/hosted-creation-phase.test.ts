@@ -61,6 +61,9 @@ test("actual registry start retains the awaited creation stage without advancing
     assert.ok(Buffer.byteLength(readFileSync(output)) < 256);
     const transformed = await load(target.href, {}, () => assert.fail("owned registry should be observed"));
     assert.equal(transformed.shortCircuit, true);
+    const backgroundRegistry = new URL("../../pi-better-background-tasks/src/registry.ts", import.meta.url);
+    const unchanged = { format: "module", source: readFileSync(backgroundRegistry, "utf8") };
+    assert.equal(await load(backgroundRegistry.href, {}, () => unchanged), unchanged);
     assert.throws(() => instrumentHostedCreation(original.replace("await runtime.bindUi();", "await runtime.other();")), /anchor changed/);
   } finally {
     resources.resolve(); sdk.resolve(); ui.resolve(); await pending.catch(() => {});

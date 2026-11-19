@@ -8,7 +8,10 @@ import { baselineModuleUrls, instrumentBaselineModule, instrumentBaselineQueue }
 export function initialize(data) { observeGcThread(`loader-${data.resourceParentThreadId}`); }
 
 const originalTarget = new URL('../../src/runtime/background-tools.ts', import.meta.url).href;
-const target = process.env.PI_FULL_RUNTIME_SUBJECT ? subjectModuleUrl(originalTarget, parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT)) : originalTarget;
+const subject = process.env.PI_FULL_RUNTIME_SUBJECT ? parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT) : undefined;
+const target = subject ? subjectModuleUrl(originalTarget, subject) : originalTarget;
+const originalHostedRegistry = new URL('../../src/registry.ts', import.meta.url).href;
+const hostedRegistry = subject ? subjectModuleUrl(originalHostedRegistry, subject) : originalHostedRegistry;
 const recorder = new URL('./recovery-trace.mjs', import.meta.url).href;
 
 export function instrumentHostedCreation(source) {
@@ -75,7 +78,7 @@ export function instrumentRecoveryTrace(source) {
 export async function load(url, context, nextLoad) {
   const helper = new URL('./owned-fixture.mjs', import.meta.url).href;
   const baseline = process.env.PI_FULL_RUNTIME_BASELINE_OBSERVER === 'eec7b3e256a7548bbf67f69cd468f12eb3b91dc8';
-  if (process.env.PI_FULL_RUNTIME_CREATION_REPORT && url.startsWith('file:') && new URL(url).pathname.endsWith('/src/registry.ts')) {
+  if (process.env.PI_FULL_RUNTIME_CREATION_REPORT && url === hostedRegistry) {
     return { format: 'module', shortCircuit: true, source: ts.transpileModule(instrumentHostedCreation(readFileSync(new URL(url), 'utf8')), {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
     }).outputText };
