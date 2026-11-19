@@ -243,7 +243,10 @@ test("packed standalone packages use one pinned socket runtime, including cached
       startupClient.close();startupClient=undefined;
       trace('foreground-ready');await probe();const first=owner().pid;
       await stop();trace('clean-stop');assert.equal(readFileSync(process.env.PI_CODING_AGENT_DIR+'/server-registration-v1.json','utf8'),registration);
-      assert.deepEqual((await readyActivity()).items,[]);trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
+      assert.deepEqual((await readyActivity()).items,[]);
+      // Activity can be cached. Exercise a transport read before inspecting the new owner.
+      assert.deepEqual((await backgroundObservation(pi,ctx)).rows,[]);
+      trace('clean-recovery-ready');assert.notEqual(owner().pid,first);await listed();
       const crashedOwner=owner(),crashed=crashedOwner.pid;paused=crashed;process.kill(crashed,'SIGSTOP');
       const stoppedBy=Date.now()+5000;
       while(!execFileSync('ps',['-o','state=','-p',String(crashed)],{encoding:'utf8'}).trim().startsWith('T')) {

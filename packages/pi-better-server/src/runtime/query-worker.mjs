@@ -3,6 +3,20 @@ import { createRequire } from "node:module";
 import { EventEmitter } from "node:events";
 import { performance } from "node:perf_hooks";
 
+// Publish liveness during async imports too. This clock measures the worker's
+// own event loop, independently of parent delivery and source readiness.
+let heartbeatPending = false;
+let rpcInstalled = false;
+const heartbeat = workerData.heartbeat;
+const markHeartbeat = () => { if (heartbeat) Atomics.store(heartbeat, 0, process.hrtime.bigint()); };
+markHeartbeat();
+setInterval(() => {
+  markHeartbeat();
+  if (!rpcInstalled || heartbeatPending) return;
+  heartbeatPending = true;
+  parentPort.postMessage({ type: "heartbeat" });
+}, 250).unref();
+
 // The fixed Node 24 artifact strips types natively and does not depend on tsx.
 // Development on Node 22 uses the workspace loader without inheriting test preloads.
 if (Number(process.versions.node.split(".")[0]) < 24) {
@@ -65,18 +79,6 @@ const sendTerminalLogs = () => {
 model.onTerminalLogsChanged = sendTerminalLogs;
 const sessions = new Map();
 const requests = new Map();
-// A heartbeat proves the worker can service control messages between bounded
-// indexing batches; it does not claim that a source snapshot is fresh.
-let heartbeatPending = false;
-const heartbeat = workerData.heartbeat;
-const markHeartbeat = () => { if (heartbeat) Atomics.store(heartbeat, 0, process.hrtime.bigint()); };
-markHeartbeat();
-setInterval(() => {
-  markHeartbeat();
-  if (heartbeatPending) return;
-  heartbeatPending = true;
-  parentPort.postMessage({ type: "heartbeat" });
-}, 250).unref();
 const cache = new Map();
 const encoded = new WeakMap();
 let cacheBytes = 0, cacheHits = 0, queryCount = 0, serializationCount = 0;
@@ -210,4 +212,5 @@ parentPort.on("message", async message => {
     parentPort.postMessage({ type: "reply", id: message.id, error: String(error).slice(0, 512), metrics: metrics() });
   } finally { release?.(); requests.delete(message.id); }
 });
+rpcInstalled = true;
 void model.reconcile();

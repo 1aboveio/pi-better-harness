@@ -35,7 +35,9 @@ function waitForStallHandler(worker: Worker, failure: (detail: string, cause?: u
 export async function fixture(options: { intervalMs?: number; capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; logWatchdog?: (line: string) => void; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
   mkdirSync(join(root, "runs"));
-  const transport = mkdtempSync("/tmp/query-socket-");
+  // A short relative directory lets constrained test runs keep the socket in
+  // their workspace without exceeding the platform's Unix socket path limit.
+  const transport = mkdtempSync(join(process.env.PI_TEST_QUERY_SOCKET_DIR ?? "/tmp", "query-socket-"));
   const executor = new WorkQueryExecutor(root, "query-instance", { ...options,
     workerUrl: options.workerUrl ?? new URL("./slow-query-worker.mjs", import.meta.url),
     modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: options.intervalMs ?? 60000 } });

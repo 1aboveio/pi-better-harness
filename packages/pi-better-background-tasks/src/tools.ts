@@ -178,7 +178,7 @@ const IdParams = Type.Object({
   ...CursorFields,
 });
 const HistoryField = {
-  diagnostics: Type.Optional(Type.Boolean({ description: "For status: sample registered task process identity, CPU time, state and wait evidence. Requires current Process access Read in both Main and Background tasks. No arguments, environment or remote probes; a snapshot cannot prove useful work or a hang." })),
+  diagnostics: Type.Optional(Type.Boolean({ description: "For status: sample registered task process identity, CPU time, state and wait evidence. Requires Process access Read in each enabled sandbox profile (Main and Background tasks); unavailable under Main confinement. No arguments, environment or remote probes; a snapshot cannot prove useful work or a hang." })),
   history: Type.Optional(Type.Boolean({ description: "If true, return an incident page that also lists failure history: expected failures and recovered or superseded incidents. Default output lists only failures that need action and counts the rest." })),
 };
 const StatusParams = Type.Object({

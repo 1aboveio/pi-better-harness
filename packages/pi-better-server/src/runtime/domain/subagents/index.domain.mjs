@@ -48,11 +48,11 @@ import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeD
 import { resolveChildClosure, resolveChildLaunch, configSnapshot } from "./child-dependencies.mjs";
 import { PREFLIGHT_ENV } from "./child-preflight.mjs";
 import { resolveExtensions, extensionArgs } from "./extensions.domain.mjs";
-import { prepareTaskRuntime, applyDirectApplicationLoadout, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.domain.mjs";
+import { prepareTaskRuntime, applyDirectApplicationLoadout, DEFAULT_TASK_PERMISSIONS, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.domain.mjs";
 import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.domain.mjs";
 import { TASK_BUILTINS } from "./shared-task-sandbox.domain.mjs";
 import { APPLY_PATCH, describeTaskTools, planTaskTools, selectEffectiveTaskTools } from "./subagent-tools.domain.mjs";
-import { announceExecutionAdapter, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions, } from "./permission-policy.domain.mjs";
+import { announceExecutionAdapter, describeSubagentProcessPolicy, effectiveWorkerProcessAccess, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions, } from "./permission-policy.domain.mjs";
 import { resolveSubagentWorkspace } from "./git-workspace.domain.mjs";
 import { dirname, isAbsolute, join } from "node:path";
 import { baseDir, taskWorkspaceDir, sessionsDir, runDir, recordTaskRuntimeProvenance, recordLaunchAttempt, clearLaunchAttempt, logPathFor, promptPathFor, nextRunId, writeMeta, readMeta, listMetas, listActiveMetasForParent, listMetasForOrigin, listMetasForParent, onMetaChanged, effectiveStatus, ownedByThisParent as ownedByFrontend, navigatorVisibleRuns, dismissRun, } from "./registry.domain.mjs";
@@ -2852,11 +2852,12 @@ export default function (pi, managed) {
         // frozen confinement intent. Historical metadata can never widen authority,
         // and a profile that would change confinement refuses instead of silently
         // moving a live conversation into a different sandbox.
-        const permissionPlan = resolveSubagentPermissions(pi, resume ? resume.recipe.sandbox : p.sandbox);
-        if (resume && permissionPlan.sandboxEnabled !== resume.recipe.sandbox) {
-            throw new ContinuationError(`Cannot continue ${resume.prior.id}: current sandbox permissions would change its confinement. ` +
-                `Launch a new run instead of continuing this conversation.`);
-        }
+        const permissionPlan = resolveSubagentPermissions(pi, p.sandbox, resume && { runId: resume.prior.id, sandbox: resume.recipe.sandbox });
+        const processPolicy = describeSubagentProcessPolicy(permissionPlan, process.platform);
+        const processAccess = effectiveWorkerProcessAccess(permissionPlan);
+        const taskPermissions = permissionPlan.inactiveProfile
+            ? { ...DEFAULT_TASK_PERMISSIONS, processAccess }
+            : permissionPlan.permissions;
         const cfg = loadConfig();
         // Harness-owned timing (soft deadline, ceiling, tool-wait and stuck windows); validated before any side effect.
         resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt: 0 });
@@ -3057,7 +3058,7 @@ export default function (pi, managed) {
                     names.push(...permissionPlan.tools.trusted.map((entry) => entry.name));
                 allow = [...new Set(names)].join(",");
             }
-            if (sandboxEnabled && requestedTools === undefined && permissionPlan.permissions?.processAccess === "read") {
+            if (sandboxEnabled && requestedTools === undefined && processAccess === "read") {
                 allow = [...new Set([...allow.split(","), "process_list"])].join(",");
             }
             // Shell Off confines the child to directly launched applications: a requested bash
@@ -3087,7 +3088,7 @@ export default function (pi, managed) {
             const taskTools = sandboxEnabled ? planTaskTools({
                 requested: plannedTools,
                 settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
-                processAccess: permissionPlan.permissions?.processAccess ?? "off",
+                processAccess,
                 builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
                 toolExtensions: cfg.toolExtensions, resolvePath: workerResolvePath,
             }) : undefined;
@@ -3109,7 +3110,7 @@ export default function (pi, managed) {
                     .map((tool) => `${tool.name} (${withheldBridgeReasons.get(tool.name) ?? tool.reason})`).join(", ");
                 throw resume
                     ? new ContinuationError(`Cannot continue ${resume.prior.id}: its frozen launch requires tool(s) this parent can no longer provide: ${detail}. ` +
-                        `Launch a new run instead of continuing this conversation.`)
+                        `Launch a new run instead of continuing this conversation. ${processPolicy}`)
                     : new Error(`Requested tool(s) are not available in the task sandbox: ${detail}. ` +
                         `Remove them from the tools list, or make them available in /sandbox (Subagents · Tools); nothing was launched.`);
             }
@@ -3216,7 +3217,7 @@ export default function (pi, managed) {
             const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
                 root: requestedSandboxDir, controlDir: join(runDir(id), "control"),
                 tools: selectedTools,
-                permissions: permissionPlan.permissions && { ...permissionPlan.permissions, ...commandSettings },
+                permissions: taskPermissions && { ...taskPermissions, ...commandSettings },
                 applyPatch: taskTools?.applyPatch === true,
                 extensionTools: taskTools?.trusted.map(({ loadPath: _loadPath, ...tool }) => ({ ...tool, root: workerPath(tool.root) })) ?? [],
                 // The sandboxed child's policy enables the guarded operation bridge
@@ -3463,20 +3464,22 @@ export default function (pi, managed) {
                     workerOperations.release(id, "attempt-exited");
                 // Reconcile this attempt's earlier published writer before its
                 // next park can admit another continuation of the conversation.
-                await settleResumedAttemptExit({
-                    attemptId: id,
-                    service: workerOperations.service,
-                    status: readMeta(id)?.status ?? "exited",
-                    // The exit handler releases the conversation writer lease just
-                    // above, before this call.
-                    writerLeaseReleased: true,
-                    notify: (message) => {
-                        try {
-                            uiCtx?.ui?.notify?.(message, "warning");
-                        }
-                        catch { /* ignore UI failures */ }
-                    },
-                });
+                if (internal?.resumeWait && resume)
+                    await settleResumedAttemptExit({
+                        attemptId: id,
+                        priorPark: { runId: resume.prior.id, ...internal.resumeWait },
+                        service: workerOperations.service,
+                        status: readMeta(id)?.status ?? "exited",
+                        // The exit handler releases the conversation writer lease just
+                        // above, before this call.
+                        writerLeaseReleased: true,
+                        notify: (message) => {
+                            try {
+                                uiCtx?.ui?.notify?.(message, "warning");
+                            }
+                            catch { /* ignore UI failures */ }
+                        },
+                    });
                 await settleParkedExit(id);
             });
             managed?.observeExit?.(id, exitCompletion);
@@ -3508,7 +3511,9 @@ export default function (pi, managed) {
             const modelNote = catalogDefaultNote(resume ? undefined : p.catalog, model, thinking);
             // The resolved skill exposure rides with the runtime summary, which every
             // launch and continuation message already prints.
-            return { id, meta, spawned, runtime: `${runtime}${describeSkillExposure(skills)}\n${meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""}`, warn, sandboxDir, modelNote };
+            const inventoryNote = taskRuntime?.policy.permissions?.processAccess === "read" &&
+                !taskRuntime.policy.tools.includes("process_list") ? " process_list is not in this launch's tool loadout." : "";
+            return { id, meta, spawned, runtime: `${runtime}${processPolicy}${inventoryNote}\n${describeSkillExposure(skills)}\n${meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""}`, warn, sandboxDir, modelNote };
         }
         catch (error) {
             // A launch that never committed metadata is not a run: drop
@@ -3640,7 +3645,7 @@ export default function (pi, managed) {
                     claim: input.claim,
                     owner,
                     admissionRevision: input.admissionRevision,
-                    permissionsUnchanged: () => samePermissionPlan(permissionPlan, resolveSubagentPermissions(pi, target.recipe.sandbox)),
+                    permissionsUnchanged: () => samePermissionPlan(permissionPlan, resolveSubagentPermissions(pi, undefined, { runId: target.prior.id, sandbox: target.recipe.sandbox })),
                     capacityAvailable: () => resumeCapacity().recheck(),
                 }),
                 onSpawned: () => { spawned = true; },
@@ -3674,7 +3679,10 @@ export default function (pi, managed) {
             };
             return JSON.stringify(sort(value));
         };
-        return canonical(left) === canonical(right);
+        // Describe provenance to the caller, but fence on authority, not its display label.
+        const { activationSource: _leftSource, ...leftAuthority } = left;
+        const { activationSource: _rightSource, ...rightAuthority } = right;
+        return canonical(leftAuthority) === canonical(rightAuthority);
     }
     /** Preserve the original assignment deadline across parking; never extend it. */
     function continuationTiming(prior) {

@@ -9,6 +9,25 @@ import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { performance } from "node:perf_hooks";
 const nativeTimers = { setTimeout, clearTimeout };
 
+test("bootstrap liveness advances while the parent has not acknowledged its heartbeat", async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const { bootstrapHeartbeat } = await import(String("./support/bootstrap-heartbeat.mjs"));
+  const clock = new BigInt64Array(new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT));
+  const messages: unknown[] = [];
+  const port = Object.assign(new EventEmitter(), { postMessage(message: unknown) { messages.push(message); } });
+  const stop = bootstrapHeartbeat(port, clock);
+  try {
+    const first = Atomics.load(clock, 0);
+    assert.ok(first > 0n, "watchdog evidence starts before imports");
+    t.mock.timers.tick(250);
+    assert.ok(Atomics.load(clock, 0) > first, "pending parent delivery must not stop liveness evidence");
+    assert.deepEqual(messages, [{ type: "heartbeat" }], "only one message is in flight");
+    port.emit("message", { type: "heartbeat-consumed" });
+    t.mock.timers.tick(250);
+    assert.deepEqual(messages, [{ type: "heartbeat" }, { type: "heartbeat" }]);
+  } finally { stop(); }
+});
+
 test("bootstrap exit retains a prior watchdog cause without claiming source readiness", async () => {
   const worker = new EventEmitter();
   const receipt = queryBootstrap(worker, () => ({

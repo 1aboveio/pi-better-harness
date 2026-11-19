@@ -33,6 +33,7 @@ export const SANDBOX_COMMAND_DESCRIPTION =
 const USAGE = [
     "Usage:",
     "  /sandbox",
+    "  /sandbox status",
     "  /sandbox on",
     "  /sandbox off",
     "  /sandbox default on",
@@ -84,6 +85,7 @@ export type SandboxCommandDeps = {
     setDefault: (enabled: boolean) => ForegroundSandboxStatus;
     /** Persist the session change before mutating enforcement. */
     setSessionEnabled?: (enabled: boolean) => ForegroundSandboxStatus;
+    describeProcessAccess?: (status: ForegroundSandboxStatus) => string;
     openPermissions?: (ctx: ExtensionCommandContext) => Promise<void>;
 };
 
@@ -94,6 +96,7 @@ export function createSandboxCommandHandler({
     onStateChange,
     setDefault,
     setSessionEnabled,
+    describeProcessAccess,
     openPermissions,
 }: SandboxCommandDeps) {
     return async function handleSandboxCommand(
@@ -112,12 +115,13 @@ export function createSandboxCommandHandler({
             return;
         }
 
-        if (subcommand === "") {
-            if (openPermissions && ctx.mode === "tui") {
-                await openPermissions(ctx);
-                return;
-            }
-            ctx.ui.notify(formatSandboxReport(controller.status()), "info");
+        if (subcommand === "" && openPermissions && ctx.mode === "tui") {
+            await openPermissions(ctx);
+            return;
+        }
+        if (subcommand === "" || subcommand === "status") {
+            const status = controller.status();
+            ctx.ui.notify([formatSandboxReport(status), describeProcessAccess?.(status)].filter(Boolean).join("\n\n"), "info");
             return;
         }
 
@@ -280,10 +284,11 @@ function announce(ctx: ExtensionCommandContext, change: () => DenyRuleReport): v
     }
 }
 
-const SUBCOMMANDS = ["on", "off", "default", "deny", "rules", "diagnostics"] as const;
+const SUBCOMMANDS = ["on", "off", "default", "deny", "rules", "diagnostics", "status"] as const;
 const DENY_ACTIONS = ["list", "add", "remove", "reset"] as const;
 
 const COMPLETION_DESCRIPTIONS: Readonly<Record<string, string>> = {
+    status: "Show effective Main sandbox and process-tool access",
     on: "Enable confinement for this session",
     off: "Disable confinement for this session",
     default: "Change the persistent activation default",

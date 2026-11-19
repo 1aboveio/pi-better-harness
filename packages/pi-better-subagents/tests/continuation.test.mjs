@@ -956,7 +956,7 @@ describe("completed-subagent continuation", () => {
             } });
             await assert.rejects(
                 resumeRun(successor, { id: confinedId, prompt: "SANDWICH" }),
-                /cannot bypass it|would change its confinement/,
+                /saved launch recipe has confinement Off.*current Subagents profile requires it On.*new recipe/,
             );
             assert.equal(listMetas().filter((meta) => meta.sessionId === confinedId).length, 1, "no attempt launched under refused policy");
         } finally {

@@ -234,9 +234,29 @@ literal name filtering and a bounded result limit. It does not expose command
 arguments, environment variables, debugger attachment, signals, termination,
 or emulator/ADB operations. Explicit saved values are preserved, and legacy
 saved profiles without this setting stay Off until a human enables Read;
-subagents snapshot the setting at launch. Background tasks uses this row for
-explicit task-status process diagnostics, not `process_list`. Those diagnostics
-require current Read in both Main and Background tasks. They check a registered
+subagents snapshot the setting at launch. Use `/sandbox status` to see Main's
+`process_list` setting and where this session got it. While Main confinement is
+Off, its retained Process access setting cannot deny the fixed inventory tool.
+To change the value for confined use, edit **Main > Process access** in `/sandbox`
+(Main confinement must be On to edit the detail rows).
+No restart is needed for a local edit. Defaults saved in another session do not
+change an already running session, and reloading a saved branch restores its
+branch settings. Start a new session to use the saved defaults instead.
+
+A worker launch reports confinement and Process access separately. A fresh
+worker uses the current session's Subagents profile unless the launch requests
+confinement explicitly. A continuation keeps its saved recipe's confinement
+choice but applies the current Subagents permissions only if that profile is On.
+Switching Subagents confinement Off does not unconfine a saved confined recipe:
+its task sandbox uses the default permissions with guarded Process Read, subject
+to any independent captured authority. If the current profile requires
+confinement but the recipe is unconfined, the continuation is refused. Start a
+new run for a new recipe. A continuation cannot silently drop `process_list`
+if the saved loadout requires it and an active profile sets Process access Off.
+
+Background tasks uses this row for explicit task-status process diagnostics, not
+`process_list`. An active Background tasks profile must allow Process Read.
+Those diagnostics check a registered
 PID's start identity and can report state, CPU time and wait evidence without
 arguments or environment values. They are unavailable under Main confinement;
 no unconfined fallback runs. Task confinement remains the policy recorded when

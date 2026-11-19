@@ -62,8 +62,8 @@ function cellHint(key: string, profile: PermissionProfile | undefined, column?: 
     if (key === "shell") return "Shell scripts run inside the sandbox. Requires Run applications.";
     if (key === "commandTimeoutSeconds") return "Commands stop after this long. No limit lets them run until they finish.";
     if (key === "processAccess") return column === "background"
-        ? "Task status diagnostics: requires Read here and in Main. No process control; shell access is unchanged."
-        : "Read process IDs/names and macOS ps identity queries. Main also gates task diagnostics. No process control.";
+        ? "Task status diagnostics: gated by this row when Background tasks is On. Unavailable under Main confinement."
+        : "Fixed process reads and macOS ps identity. This setting applies while the profile is On. No process control.";
     return undefined;
 }
 const columns = ["main", "subagents", "background"] as const;
