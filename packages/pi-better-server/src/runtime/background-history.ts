@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdir, stat } from "node:fs/promises";
 import { watch, statSync, type FSWatcher } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { setImmediate as yieldTurn } from "node:timers/promises";
 import type { WorkScope } from "./read-model.ts";
 import { workPage } from "./work-budget.ts";
@@ -96,7 +96,19 @@ export class BackgroundHistory {
           }
           if (!file || /(?:meta|result|lost|launch|claim)\.json$|failures\.jsonl(?:\.observed)?$|^observed[/\\].*\.json$/.test(String(file))) this.invalidateLegacy();
         });
-        watcher.on("error", () => { this.watchers.delete(path); watcher.close(); this.status = "degraded"; this.reason = "Background history watcher failed; reconciling source signatures"; this.invalidate(); });
+        watcher.on("error", (error: NodeJS.ErrnoException) => {
+          // Node's recursive watcher can stat a child just before it is removed.
+          // A failed child listing leaves the watcher live, but owes a full signature pass.
+          if (error.code === "ENOENT" && error.syscall === "scandir" && error.path) {
+            const child = relative(path, error.path);
+            if (child && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child)) {
+              this.invalidate();
+              return;
+            }
+          }
+          this.watchers.delete(path); watcher.close(); this.status = "degraded";
+          this.reason = "Background history watcher failed; reconciling source signatures"; this.invalidate();
+        });
         this.watchers.set(path, watcher);
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     }

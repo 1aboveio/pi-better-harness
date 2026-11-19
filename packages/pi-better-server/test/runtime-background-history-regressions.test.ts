@@ -1,17 +1,66 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { acquireMutationStore } from "../src/runtime/mutation-store.ts";
 import { WorkQueryExecutor } from "../src/runtime/query-executor.ts";
 import { createLocalWorkClient } from "../src/runtime/local-client.ts";
 import { BackgroundObservation } from "../src/runtime/background.ts";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
-import { registerHooks } from "node:module";
+import { createRequire, registerHooks } from "node:module";
+import { BackgroundHistory } from "../src/runtime/background-history.ts";
+import { waitFor } from "./helpers.ts";
 const load = (name: string) => import(new URL(`../src/runtime/domain/background-service/${name}.domain.mjs`, import.meta.url).href);
+
+test("Linux recursive watch reconciles a disappearing task directory without reporting watcher failure", {
+  skip: process.platform !== "linux",
+  timeout: 5000,
+}, async t => {
+  const registry = await load("registry");
+  const ownedId = "bg_history_owned_during_watch_race";
+  const transientId = "bg_history_removed_during_watch_race";
+  const transient = registry.taskDir(transientId);
+  const root = mkdtempSync(join(tmpdir(), "history-watch-race-"));
+  const db = new DatabaseSync(":memory:");
+  const history = new BackgroundHistory(db, join(root, "supervisor"), () => undefined, () => [], () => {});
+  t.after(async () => {
+    await history.close(); db.close();
+    rmSync(registry.taskDir(ownedId), { recursive: true, force: true });
+    rmSync(transient, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+  const scope = { cwd: root, processId: process.pid, limit: 100 };
+  const logPath = registry.logPathFor(ownedId);
+  registry.writeMeta({ id: ownedId, kind: "command_watch", status: "succeeded", startedAt: 1, endedAt: 2, cwd: root,
+    callbackOrigin: { cwd: root }, spawnPid: process.pid, logPath });
+  writeFileSync(logPath, "");
+  history.read(scope);
+  await waitFor("initial Background history", () => history.queryStatus === "ready");
+
+  const fs = createRequire(import.meta.url)("node:fs");
+  const readdir = fs.readdirSync;
+  const removeBeforeScan = t.mock.method(fs, "readdirSync", (path: string, ...args: any[]) => {
+    if (path === transient) rmSync(transient, { recursive: true });
+    return readdir(path, ...args);
+  });
+  const watcher = (history as any).watchers.get(dirname(registry.tasksDir()));
+  const errored = once(watcher, "error");
+  mkdirSync(transient);
+  const [error] = await errored;
+  removeBeforeScan.mock.restore();
+  assert.equal(error.code, "ENOENT");
+  assert.equal(error.syscall, "scandir");
+  assert.equal(error.path, transient);
+  assert.equal(history.queryStatus, "rebuilding", history.reason);
+  await waitFor("Background history signature repair", () => history.queryStatus === "ready");
+  assert.deepEqual(history.read(scope).records.map((row: { id: string }) => row.id), [ownedId]);
+  watcher.emit("error", Object.assign(new Error("Permission denied"), { code: "EACCES", syscall: "scandir", path: transient }));
+  assert.equal(history.queryStatus, "degraded", "permission errors still report failed observation");
+});
 
 for (const historyActive of [false, true]) test(`repaired legacy watch releases its degraded poll after history activation=${historyActive}`, async t => {
   const root = mkdtempSync(join(tmpdir(), "background-poll-recovery-"));
