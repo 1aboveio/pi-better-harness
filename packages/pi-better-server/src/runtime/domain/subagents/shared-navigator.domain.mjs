@@ -566,7 +566,7 @@ export function treeRows(rows) {
     const result = [], attached = new Set();
     for (const [key, agent] of ordered) {
         const children = tasks.filter(row => (row.parentAgentId ?? "main") === key);
-        result.push({ ...agent, treeDepth: 0, groupStart: children.length > 0 && result.length > 0 });
+        result.push({ ...agent, treeDepth: 0 });
         children.forEach((row, i) => { result.push({ ...row, treeDepth: 1, lastChild: i === children.length - 1 }); attached.add(row); });
     }
     // Never hide live work when its owner's observation has not arrived yet.
@@ -578,7 +578,7 @@ export function treeRows(rows) {
         }
     for (const [key, children] of missing)
         children.forEach((row, i) => result.push({ ...row,
-            treeDepth: 1, groupStart: i === 0, lastChild: i === children.length - 1,
+            treeDepth: 1, lastChild: i === children.length - 1,
             ownerGroupLabel: i === 0 ? (key === "main" ? "Main" : `Agent ${key} · not running`) : undefined }));
     return result;
 }
@@ -647,8 +647,6 @@ function buildMainListLayout(rows, width, truncate, fg, options = {}) {
     if (getNavigatorView() === "tree") {
         push(providerGroupLabel("work", fg));
         for (const row of rows) {
-            if (row.groupStart)
-                push("");
             if (row.ownerGroupLabel)
                 push(`  ${dim(row.ownerGroupLabel, fg)}`);
             push(formatMainListRow(row, options.focused === true && row.navigatorId === options.selectedId, fg, width), row.navigatorId);
