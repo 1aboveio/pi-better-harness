@@ -36,7 +36,7 @@ jobs:
           const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
           writeFileSync(process.env.DIAGNOSTIC_REPORT, JSON.stringify({
             mode: 'hosted-bind-diagnostic-not-acceptance',
-            sourceBase: '6f6f179d97dee1dd891248ba21b783ec78835101',
+            sourceBase: '613cdca86ec41629452733948c8e74738a07f63d',
             checkout: git('rev-parse', 'HEAD'),
             parents: git('show', '-s', '--format=%P', 'HEAD'),
             dirty: git('status', '--porcelain'),
@@ -72,6 +72,8 @@ jobs:
             ${{ runner.temp }}/808-hosted-bind-provenance.json
             ${{ runner.temp }}/808-hosted-bind.json
             ${{ runner.temp }}/808-hosted-bind.json.hosted-create.json
+            ${{ runner.temp }}/808-hosted-bind.json.hosted-create.json.server.json
+            ${{ runner.temp }}/808-hosted-bind.json.hosted-create.json.worker.json
             ${{ runner.temp }}/808-hosted-bind.log
           if-no-files-found: error
           include-hidden-files: true
