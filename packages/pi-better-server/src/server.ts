@@ -134,7 +134,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         }
       }
     };
-    if (controlStore.store.resultSupervisions(true).length) resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
+    if (controlStore.store.resultSupervisions(true).length || controlStore.store.listAssignmentCleanupOperations(1).length) {
+      resultSupervision = new RuntimeResultSupervision(resultRoot, instanceId!, config.runtimeIdleMs);
+    }
     resultPorts.set(resultRoot, resultPort);
     if (controlStore.store.pendingTaskCancellations().length) cancellations = new RuntimeCancellation(realpathSync(getAgentDir()), instanceId!, options.cancellationFault);
     const catalog = new SharedCatalog(realpathSync(getAgentDir()), instanceId!);
@@ -156,6 +158,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     const work = () => {
       if (!workModel) {
         workModel = new WorkQueryExecutor(realpathSync(getAgentDir()), instanceId!, {
+          logWatchdog: log,
           budgetBuffer: controlStore.budget.buffer,
           onTerminalLogsChanged: async ids => {
             if (!launchInitialization && !controlStore.store.hasSubagentManagement()) return;

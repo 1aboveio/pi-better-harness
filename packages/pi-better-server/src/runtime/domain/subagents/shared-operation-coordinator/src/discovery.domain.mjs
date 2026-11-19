@@ -36,9 +36,11 @@ export function readDiscoveryClaim(ctx, scope) {
 /** Read scope transfer and its discovery claim from one SQLite snapshot. */
 export function readDiscoveryState(ctx, scope) {
     scope = requireId("scope", scope);
-    const row = getRow(ctx, `SELECT d.*, EXISTS(SELECT 1 FROM coordinator_state WHERE key = ?) AS managed
+    const row = getRow(ctx, `SELECT d.*, EXISTS(SELECT 1 FROM coordinator_state WHERE key = ?) AS managed,
+        EXISTS(SELECT 1 FROM operations INDEXED BY operations_assignment_cleanup
+            WHERE assignment_attempt_id IS NOT NULL) AS has_assignment_tasks
         FROM (SELECT 1) LEFT JOIN discovery_claims d ON d.scope = ?`, "result-scope-v1:" + scope, scope);
-    return { managed: Number(row.managed) === 1, claim: row.scope == null ? null : mapClaim(row) };
+    return { managed: Number(row.managed) === 1, claim: row.scope == null ? null : mapClaim(row), hasAssignmentTasks: Number(row.has_assignment_tasks) === 1 };
 }
 export function tryClaimDiscovery(ctx, input) {
     const scope = requireId("scope", input.scope);

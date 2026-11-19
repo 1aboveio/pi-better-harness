@@ -1,3 +1,4 @@
+import { affectedAttempts } from "./attempt-invalidation.ts";
 import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
 import { opendir, readFile, stat, writeFile, mkdir, rename } from "node:fs/promises";
@@ -7,6 +8,7 @@ import { realpathSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { setImmediate as yieldTurn } from "node:timers/promises";
+import type { InventoryPhase } from "./read-watchdog-probe.ts";
 import { performance } from "node:perf_hooks";
 import { createAssignmentProjector } from "./domain/assignment-projection.mjs";
 import { createAssignmentReader } from "./domain/assignment-observation.mjs";
@@ -99,6 +101,9 @@ export class WorkReadModel {
   private timer?: ReturnType<typeof setInterval>;
   private pending?: Promise<void>;
   private dirty = false;
+  private sourceConflicts = 0;
+  private conflictRetry?: ReturnType<typeof setTimeout>;
+  private conflictDelay = 100;
   private hints = new Map<string, number>();
   private repair?: AsyncGenerator<string[]>;
   private repairOwed = false;
@@ -116,7 +121,6 @@ export class WorkReadModel {
   private assignmentBaseline?: { key: string; seq: string };
   private assignmentFault?: { state: WorkSnapshot["status"]; reason?: string };
   private unsupportedAssignmentRevision?: string;
-  private coordinatorConversations?: Map<string, string>;
   private revision = 0;
   private scopeSequence = 0;
   private scopes = new Map<string, { scope: WorkScope; token: number; revision: number; used: number; status: string }>();
@@ -142,12 +146,14 @@ export class WorkReadModel {
   readonly markers: string;
   readonly agentDir: string;
   readonly instanceId: string;
+  private readonly inventoryPhase?: (phase: InventoryPhase) => void;
 
   private watch: SourceWatch;
-  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number; watch?: SourceWatch; budgetBuffer?: SharedArrayBuffer } = {}) {
+  constructor(agentDir: string, instanceId: string, options: { supervisorDirectory?: string; baseDir?: string; durableDir?: string; intervalMs?: number; watch?: SourceWatch; budgetBuffer?: SharedArrayBuffer; inventoryPhase?: (phase: InventoryPhase) => void } = {}) {
     this.budget = createWorkBudget(options.budgetBuffer);
     this.watch = options.watch ?? watchSource;
     this.agentDir = agentDir; this.instanceId = instanceId;
+    this.inventoryPhase = options.inventoryPhase;
     const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
     this.db = new DatabaseSync(":memory:");
     try { this.checkpoints = new LogCheckpoints(join(agentDir, "runtime-log-checkpoints.sqlite"), this.db, { defer: true }); }
@@ -573,7 +579,7 @@ export class WorkReadModel {
   }
 
   reconcile(drain = true): Promise<void> {
-    if (this.closed) return Promise.resolve();
+    if (this.closed || this.conflictRetry) return Promise.resolve();
     if (this.pending) {
       return drain && this.observationInitialized ? this.pending.then(() => this.reconcile()) : this.pending;
     }
@@ -609,6 +615,7 @@ export class WorkReadModel {
       do {
         this.dirty = false;
         // Background progress is independent of whether Subagent repair finds files.
+        this.inventoryPhase?.("background");
         if (this.background.refresh()) this.publish(true);
         if (this.rejectUnsupportedAssignmentRevision()) break;
         this.refreshAssignments();
@@ -624,6 +631,7 @@ export class WorkReadModel {
           const started = performance.now();
           await this.measuredScan("entity", entries.map(([path]) => path));
           this.scheduling.maxPublicationMs = Math.max(this.scheduling.maxPublicationMs, performance.now() - started);
+          if (this.sourceConflicts > 1) break;
         }
         if (!this.repair && this.imported && !drain && !this.repairOwed) {
           if (this.hints.size) { await yieldTurn(); continue; }
@@ -648,14 +656,25 @@ export class WorkReadModel {
         }
         else { this.scheduling.repairBatches++; this.scheduling.repairEntries += next.value.length; await this.measuredScan("repair", next.value); }
         await yieldTurn();
-        if (this.closed || (!drain && !this.hints.size)) break;
+        if (this.closed || this.sourceConflicts > 1 || (!drain && !this.hints.size)) break;
       } while (this.repair || this.hints.size);
     })().catch(error => {
       this.repair = undefined; this.state = "degraded"; this.reason = String(error).slice(0, 512); this.publish();
     }).finally(() => {
+      this.inventoryPhase?.("idle");
       release();
       this.pending = undefined;
-      if (this.observationInitialized && (this.hints.size || this.dirty) && !this.closed && !this.unsupportedAssignmentRevision) { this.dirty = false; void this.reconcile(false); }
+      if (this.observationInitialized && (this.hints.size || this.dirty) && !this.closed && !this.unsupportedAssignmentRevision) {
+        this.dirty = false;
+        if (this.sourceConflicts > 1) {
+          this.conflictRetry = setTimeout(() => {
+            this.conflictRetry = undefined;
+            void this.reconcile(false);
+          }, this.conflictDelay);
+          this.conflictRetry.unref();
+          this.conflictDelay = Math.min(1000, this.conflictDelay * 2);
+        } else void this.reconcile(false);
+      }
     });
     return this.pending;
   }
@@ -681,6 +700,7 @@ export class WorkReadModel {
   }
 
   private async scan(paths: string[], kind: "entity" | "repair" = "repair") {
+    let sourceConflict = false;
     this.assignmentFault = undefined;
     const sourceStat: typeof stat = ((...args: any[]) => { this.sourceStats++; return (stat as any)(...args); }) as typeof stat;
     this.counters.inventories++;
@@ -692,6 +712,7 @@ export class WorkReadModel {
     const baseline = this.staged ?? { files: this.files, projected: this.projected, logs: this.logs, failureJournals: this.failureJournals, processes: this.processes,
       healthRevision: this.healthRevision, coordinator: this.coordinator };
     try {
+      this.inventoryPhase?.("metadata");
       const next = new Map(baseline.files);
       const failedPaths = new Map<string, string>();
       const malformedPaths = new Set<string>();
@@ -768,6 +789,7 @@ export class WorkReadModel {
           }
         }
       }
+      this.inventoryPhase?.("coordinator");
       let assignmentChanges: Map<string, string> | undefined;
       try { assignmentChanges = this.reader.changes(); } catch { /* Legacy sources retain bounded repair. */ }
       let coordinator: string;
@@ -786,6 +808,7 @@ export class WorkReadModel {
           }
         }
       }
+      this.inventoryPhase?.("log-stats");
       const logs = new Map<string, string>();
       const failureJournals = new Map<string, string>();
       const processes = new Map<string, string>();
@@ -855,36 +878,14 @@ export class WorkReadModel {
         if (path.startsWith(this.archives + sep) && marker && marker.attemptId !== entry.meta.id && marker.startedAt >= entry.meta.startedAt) continue;
         metas.set(entry.meta.id, entry.meta);
       }
+      this.inventoryPhase?.("projection");
       const attempts = [...metas.values()];
-      const affected = new Set<string>();
-      const family = (meta: any) => JSON.stringify([meta.sessionId, meta.cwd]);
-      const lineage = new Map<string, any[]>();
-      for (const candidate of [...baseline.projected.values()].map(row => row.meta).concat(attempts)) {
-        if (!candidate.operations?.resumeLaunchToken) continue;
-        const key = family(candidate), group = lineage.get(key) ?? [];
-        group.push(candidate); lineage.set(key, group);
-      }
-      const invalidateAttempt = (meta: any) => {
-        const related = lineage.get(family(meta)) ?? [];
-        const ids = new Set([meta.id]);
-        let grew = true;
-        while (grew) {
-          grew = false;
-          for (const candidate of related) {
-            if (!candidate.operations?.resumeLaunchToken || family(candidate) !== family(meta)
-                || (meta.assignment && candidate.assignment?.assignmentId !== meta.assignment.assignmentId)) continue;
-            if (ids.has(candidate.id) || ids.has(candidate.resumedFrom)) {
-              for (const id of [candidate.id, candidate.resumedFrom]) if (id && !ids.has(id)) { ids.add(id); grew = true; }
-            }
-          }
-        }
-        for (const id of ids) affected.add(id);
-      };
+      const changedAttempts = new Set<any>();
       for (const [path, entry] of [...baseline.files, ...next]) {
         if (baseline.files.get(path)?.signature !== next.get(path)?.signature) {
           if (path.startsWith(this.markers + sep)) {
-            for (const meta of attempts) if (meta.sessionId === entry.meta.sessionId) invalidateAttempt(meta);
-          } else invalidateAttempt(entry.meta);
+            for (const meta of attempts) if (meta.sessionId === entry.meta.sessionId) changedAttempts.add(meta);
+          } else changedAttempts.add(entry.meta);
         }
       }
       const assignmentGeneration = this.reader.changeMetrics.generation;
@@ -900,8 +901,11 @@ export class WorkReadModel {
         if ((changedScope("*") && paths.some(path => next.get(path)?.meta.id === meta.id))
             || changedScope(JSON.stringify([session, workspace, meta.assignment?.assignmentId ?? null]))
             || changedScope(JSON.stringify([session, workspace, null]))
-            || (!assignmentChanges && paths.some(path => next.get(path)?.meta.id === meta.id))) invalidateAttempt(meta);
+             || (!assignmentChanges && paths.some(path => next.get(path)?.meta.id === meta.id))) changedAttempts.add(meta);
       }
+      const affected = await affectedAttempts(
+        [...baseline.projected.values()].map(row => row.meta).concat(attempts), changedAttempts);
+      if (this.closed) return;
       const project = createAssignmentProjector({ attempts, observe: (owner: any) => this.reader.read(owner) });
       const touched = new Set(paths.map(path => next.get(path)?.meta.id));
       const rows = [];
@@ -1009,6 +1013,7 @@ export class WorkReadModel {
           await yieldTurn(); sliceStarted = performance.now();
         }
       }
+      this.inventoryPhase?.("verify");
       const globallyUnverified = !!healthConfig.reason || rows.some(row => !row.assignment.verified);
       // The pinned source snapshot is a valid baseline even while writers advance.
       // Subsequent commits remain beyond the durable received position.
@@ -1044,6 +1049,7 @@ export class WorkReadModel {
           }
           const info = observation.info;
           if (`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` !== entry.signature) {
+            sourceConflict = true;
             this.dirty = true;
             const error = new Error("Source changed during observation; retaining the previous snapshot while reconciling.");
             if (!globallyUnverified && (this.state === "ready" || this.sourceRace && this.reason === this.sourceRace.reason)
@@ -1074,6 +1080,7 @@ export class WorkReadModel {
       if (this.closed) return;
       rearmRawDirectories();
       await this.watchRegistrations();
+      this.inventoryPhase?.("commit");
       if (!commitCoordinator) this.db.exec("BEGIN");
       const insert = this.db.prepare("INSERT OR REPLACE INTO rows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       const remove = this.db.prepare("DELETE FROM rows WHERE id = ?");
@@ -1111,6 +1118,7 @@ export class WorkReadModel {
         if (!metas.has(path.slice(this.runs.length + 1).split(sep)[0])) states.delete(path);
       }
       this.staged = undefined;
+      this.sourceConflicts = 0; this.conflictDelay = 100;
       if (terminalLogChanges.length) this.onTerminalLogsChanged?.();
       const previousState = this.state;
       const previousReason = this.reason;
@@ -1139,6 +1147,7 @@ export class WorkReadModel {
       releaseCoordinator?.(); releaseCoordinator = undefined;
       this.parseStates = parseBefore; this.healthStates = healthBefore;
       if (this.closed) return;
+      if (sourceConflict) this.sourceConflicts++;
       const reason = String(error).slice(0, 512);
       this.sourceRace = sourceRace;
       if (this.dirty) for (const path of paths) if (!this.hints.has(path)) this.hints.set(path, Date.now());
@@ -1253,6 +1262,7 @@ export class WorkReadModel {
 
   async close() {
     this.closed = true; if (this.timer) clearInterval(this.timer);
+    if (this.conflictRetry) clearTimeout(this.conflictRetry);
     for (const watcher of this.watchers.values()) watcher.close();
     for (const { watcher } of this.rootParents.values()) watcher.close();
     this.rootParents.clear();

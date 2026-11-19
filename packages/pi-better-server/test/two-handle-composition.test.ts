@@ -28,7 +28,7 @@ test("actual mutation root and composed read model preserve readonly snapshots, 
   const owner = { kind: "worker-conversation" as const, sessionId: "captured", workspace: root, branchId: null, goalId: null };
   const binding = { version: 1 as const, assignmentId: "assignment", owner, recipient: { ...owner, kind: "parent-session" as const, sessionId: "parent" } };
   store.registerAssignment({ ...binding, attemptId: "sa_test" });
-  store.registerOperation({ operationId: "operation", taskId: "task", launchToken: "token", owner, observer: { kind: "local-supervisor", version: "1" } });
+  store.registerOperation({ operationId: "operation", taskId: "bgs_aaaaaaaaaaaaaaaaaaaa", launchToken: "token", owner, observer: { kind: "local-supervisor", version: "1" } });
   store.registerWait({ waitId: "wait", owner, dependencies: [{ operationId: "operation" }], continuationNote: "Interpret evidence", origin: { assignmentRef: "assignment", attemptId: "sa_test" } });
   mkdirSync(join(root, "runs/sa_test"), { recursive: true });
   writeFileSync(join(root, "runs/sa_test/meta.json"), JSON.stringify({ id: "sa_test", cwd: root, sessionId: "captured", status: "completed", startedAt: 1, assignment: binding }));

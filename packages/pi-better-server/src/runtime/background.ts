@@ -324,6 +324,27 @@ export class BackgroundObservation {
       return changed;
     } finally { observation?.release(); }
   }
+  /** Captured assignment, never the newest assignment in a reused conversation. */
+  private workerParent(op: any, context: any): any {
+    if (op.owner_kind !== "worker-conversation") return undefined;
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='assignment_bindings'").get()) return undefined;
+    let bindings: any[];
+    if (typeof context.workerAttemptId === "string") {
+      bindings = this.db.prepare(`SELECT b.* FROM assignment_bindings b JOIN assignment_attempts a
+        ON a.assignment_id=b.assignment_id WHERE a.attempt_id=?`).all(context.workerAttemptId);
+    } else {
+      // Older launches are visible only when a durable wait proves the assignment.
+      bindings = this.db.prepare(`SELECT DISTINCT b.* FROM assignment_bindings b JOIN waits w
+        ON json_extract(w.origin_json,'$.assignmentRef')=b.assignment_id
+        JOIN wait_dependencies d ON d.wait_id=w.wait_id AND d.generation=w.generation
+        WHERE d.operation_id=?`).all(op.operation_id);
+    }
+    if (bindings.length !== 1) return undefined;
+    const owner = JSON.parse(bindings[0].owner_json), recipient = JSON.parse(bindings[0].recipient_json);
+    if (owner.kind !== op.owner_kind || owner.sessionId !== op.owner_session_id || owner.workspace !== op.owner_workspace
+      || (owner.branchId ?? null) !== (op.owner_branch_id ?? null) || (owner.goalId ?? null) !== (op.owner_goal_id ?? null) || recipient.kind !== "parent-session") return undefined;
+    return {parentAgentId: owner.sessionId, parentRecipient: recipient, readOnly: true};
+  }
   private project(operations: any[], useCache = true) {
       return operations.map((op: any) => {
         try {
@@ -337,7 +358,8 @@ export class BackgroundObservation {
         const dependencyVersion = this.hasInputVersions
           ? Number(this.db.prepare("SELECT revision FROM background_input_versions WHERE operation_id=?").get(op.operation_id)?.revision ?? 0)
           : undefined;
-        const paths = [join(directory, "observed", `${op.task_id}.json`),
+        const observedPath = join(directory, "observed", `${op.task_id}.json`);
+        const paths = [observedPath,
           ...["launch.json", "claim.json", "command.json", "result.json", "lost.json", "stop.json", "cleanup.json"]
             .map(name => join(directory, "tasks", op.task_id, name))];
         const identities = paths.map(path => {
@@ -358,7 +380,13 @@ export class BackgroundObservation {
             ORDER BY w.wait_id, w.generation`).all(op.operation_id, op.owner_kind, op.owner_session_id, op.owner_workspace)
             .map((w: any) => ({ waitId: w.wait_id, generation: w.generation, phase: w.phase }));
         }
-        const version = JSON.stringify([op, directory, identities, waits]);
+        const readContext = () => {
+          try { return JSON.parse(readFileSync(observedPath, "utf8")); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; return {}; }
+        };
+        const workerContext = op.owner_kind === "worker-conversation" ? readContext() : undefined;
+        const parent = workerContext && this.workerParent(op, workerContext);
+        const version = JSON.stringify([op, directory, identities, waits, parent]);
         // Both paths validate authority, file identities and dependencies above.
         // History mode changes accounting/invalidation, not projection identity.
         if (cached?.version === version) { cached.dependencyVersion = dependencyVersion; this.terminalProjections.set(op.operation_id, cached); this.metrics.projectionHits++; return cached.row; }
@@ -366,12 +394,10 @@ export class BackgroundObservation {
         this.metrics.runnerSnapshots++;
         work.snapshots++;
         const inspection = snapshot(directory, op.task_id);
-        let context: any = {};
-        try { context = JSON.parse(readFileSync(join(directory, "observed", `${op.task_id}.json`), "utf8")); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        const context = workerContext ?? readContext();
         const terminal = inspection?.terminal === true || op.terminal_revision > 0;
         const status = inspection?.terminal ? inspection.status : op.terminal_revision > 0 ? op.terminal_outcome : inspection?.status ?? "running";
-        const row = { durable: true, id: op.task_id, operationId: op.operation_id, kind: context.kind ?? inspection?.kind ?? "process",
+        const row = { ...parent, durable: true, id: op.task_id, operationId: op.operation_id, kind: context.kind ?? inspection?.kind ?? "process",
           status, active: !terminal, terminal, attention: terminal && status !== "succeeded", waits,
           terminalRevision: op.terminal_revision, terminalOutcome: op.terminal_outcome,
           owner: { kind: op.owner_kind, sessionId: op.owner_session_id, workspace: op.owner_workspace, branchId: op.owner_branch_id ?? null },
@@ -402,14 +428,23 @@ export class BackgroundObservation {
         status: op.terminal_outcome, terminal: true, active: false, startedAt: op.created_at, endedAt: op.terminal_at }));
     entry.pendingRevision = revision;
   }
+  private belongsToDurableOrigin(row: any, origin: { cwd?: string; sessionId?: string }): boolean {
+    return row.owner.kind === "parent-session"
+      ? row.owner.workspace === origin.cwd && row.owner.sessionId === origin.sessionId
+      : row.parentRecipient?.workspace === origin.cwd && row.parentRecipient?.sessionId === origin.sessionId;
+  }
   private refreshRecent(entry: BackgroundScope, revision: number): void {
     if (!this.db) return;
     if (entry.recentRevision === undefined || !this.hasInputVersions && entry.recentRevision !== revision) {
-      const operations = this.db.prepare(`SELECT * FROM operations WHERE owner_kind='parent-session'
-        AND owner_workspace=? AND owner_session_id=? AND observer_kind='local-supervisor'
-        AND terminal_revision>0 AND terminal_at>=? ORDER BY terminal_at DESC,operation_id DESC LIMIT ?`)
+      const operations = this.db.prepare(`SELECT * FROM operations o WHERE observer_kind='local-supervisor' AND (
+          (owner_kind='parent-session' AND owner_workspace=?1 AND owner_session_id=?2) OR
+          ${this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='assignment_bindings'").get() ? `(owner_kind='worker-conversation' AND EXISTS (SELECT 1 FROM assignment_bindings b
+            WHERE json_extract(b.owner_json,'$.sessionId')=o.owner_session_id
+              AND json_extract(b.owner_json,'$.workspace')=o.owner_workspace
+              AND json_extract(b.recipient_json,'$.workspace')=?1 AND json_extract(b.recipient_json,'$.sessionId')=?2))` : '0'})
+        AND terminal_revision>0 AND terminal_at>=?3 ORDER BY terminal_at DESC,operation_id DESC LIMIT ?4`)
         .all(entry.origin.cwd, entry.origin.sessionId ?? "", Date.now() - 30000, DISCOVERY_PAGE_SIZE);
-      entry.recent = this.project(operations);
+      entry.recent = this.project(operations).filter(row => this.belongsToDurableOrigin(row, entry.origin));
       entry.recentRevision = revision;
     } else {
       const rows = new Map(entry.recent.filter(row => Date.now() - row.endedAt < 30000).map(row => [row.operationId, row]));
@@ -418,14 +453,16 @@ export class BackgroundObservation {
       for (const id of rows.keys()) if (!this.changedOperations.has(id)) {
         let op = this.terminalProjections.get(id)?.operation;
         if (!op) { this.metrics.exactOperationQueries++; op = this.db.prepare("SELECT * FROM operations WHERE operation_id=?").get(id); }
-        if (op) rows.set(id, this.project([op])[0]);
+        const row = op && this.project([op])[0];
+        if (row && this.belongsToDurableOrigin(row, entry.origin)) rows.set(id, row);
         else rows.delete(id);
       }
       for (const [id, op] of this.changedOperations) {
-        if (op?.owner_kind === "parent-session" && op.owner_workspace === entry.origin.cwd && op.owner_session_id === (entry.origin.sessionId ?? "")
-          && op.observer_kind === "local-supervisor" && op.terminal_revision > 0 && Date.now() - op.terminal_at < 30000) {
-          rows.set(id, this.project([op])[0]);
-        } else rows.delete(id);
+        const direct = op?.owner_kind === "parent-session" && op.owner_workspace === entry.origin.cwd && op.owner_session_id === (entry.origin.sessionId ?? "");
+        const row = (direct || op?.owner_kind === "worker-conversation") && op.observer_kind === "local-supervisor"
+          && op.terminal_revision > 0 && Date.now() - op.terminal_at < 30000 && this.project([op])[0];
+        if (row && this.belongsToDurableOrigin(row, entry.origin)) rows.set(id, row);
+        else rows.delete(id);
       }
       entry.recent = [...rows.values()].sort((a, b) => b.endedAt - a.endedAt || b.operationId.localeCompare(a.operationId)).slice(0, DISCOVERY_PAGE_SIZE);
       entry.recentRevision = revision;
@@ -473,10 +510,12 @@ export class BackgroundObservation {
     // be observed even before its watcher notification is delivered.
     if (!this.observationActive && this.status !== "degraded" && this.db) this.refreshRecent(legacy, legacy.recentRevision ?? 0);
     const legacyRows = this.observationActive || this.status === "degraded" ? legacy.rows : this.visibleLegacy(legacy.origin);
-    const rows = [...new Map([...this.pendingRows(legacy), ...(scope.backgroundAll ? this.rows : [...this.rows, ...legacy.recent])].map(row => [row.id, row])).values()];
-    return [...rows.filter(row => row.owner.kind === "parent-session" && row.dismissedAt === undefined
-      && (scope.backgroundAll || row.owner.workspace === scope.cwd && row.owner.sessionId === scope.sessionId) && (!scope.active || row.active)),
-      ...legacyRows.filter((row: any) => (scope.backgroundAll || !row.callbackOrigin || row.callbackOrigin && belongsToOrigin(row, legacy.origin)
+    const exact = scope.id && this.status !== "degraded" && this.db
+      ? this.project(this.db.prepare("SELECT * FROM operations WHERE task_id=? AND observer_kind='local-supervisor'").all(scope.id)) : [];
+    const rows = [...new Map([...this.pendingRows(legacy), ...this.rows, ...(scope.backgroundAll ? [] : legacy.recent), ...exact].map(row => [row.id, row])).values()];
+    return [...rows.filter(row => (!scope.id || row.id === scope.id) && row.dismissedAt === undefined
+      && (scope.backgroundAll ? row.owner.kind === "parent-session" : this.belongsToDurableOrigin(row, scope)) && (!scope.active || row.active)),
+      ...legacyRows.filter((row: any) => (!scope.id || row.id === scope.id) && (scope.backgroundAll || !row.callbackOrigin || belongsToOrigin(row, legacy.origin)
         && (scope.sessionId || row.spawnPid === scope.processId)) && (!scope.active || row.status === "running"))];
   }
   close(): Promise<void> {

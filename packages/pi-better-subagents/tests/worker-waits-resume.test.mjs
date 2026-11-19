@@ -298,9 +298,15 @@ test("full capacity leaves the generation ready and creates no claim", async () 
     const launched = [];
     const orchestration = orchestrationFor(stack, { capacity: cap.value, launch: async (input) => launched.push(input) });
 
-    const outcome = await orchestration.resume(seeded.park);
-
-    assert.equal(outcome, "skipped");
+    const ready = { waitId: seeded.waitId, generation: seeded.generation,
+        owner: { kind: "worker-conversation", sessionId: "sa_capacity", workspace: stack.workspace },
+        taskIds: [seeded.taskId], continuationNote: "", evidence: [] };
+    assert.equal(await orchestration.adapter.onWaitReady({ ...ready, parkedAttemptId: "sa_wrong" }), "deferred");
+    assert.equal(cap.calls.reserve, 0, "a mismatched attempt cannot dispatch another conversation");
+    const before = registry.getRegistryIoMetrics().fullDirectoryReads;
+    assert.equal(await orchestration.adapter.onWaitReady({ ...ready, parkedAttemptId: "sa_capacity" }), "deferred");
+    assert.equal(registry.getRegistryIoMetrics().fullDirectoryReads, before, "exact delivery must not enumerate history");
+    assert.equal(cap.calls.reserve, 1);
     assert.deepEqual(launched, []);
     const view = stack.service.listWorkerWaits({ runId: "sa_capacity", conversationId: "sa_capacity", workspace: stack.workspace, authorityReference: "x", branchId: OWNER.branchId, goalId: null }, { pendingOnly: true })
         .find((entry) => entry.waitId === seeded.waitId);

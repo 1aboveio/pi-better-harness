@@ -4,10 +4,13 @@ import { requestBackgroundTool } from "./managed-client.domain.mjs";
 import { onBackgroundObservation } from "./work-observation.domain.mjs";
 import { getCallbackBatcher } from "./shared-callback-batcher.domain.mjs";
 import { registerObservedWaitClient } from "./observed-waits.domain.mjs";
+import { observeNavigatorLaunch } from "./shared-navigator.domain.mjs";
 /** Native transcript delivery and cached UI projections; no coordinator or supervisor. */
 export function createManagedBackgroundFrontend(pi) {
     let ctx, generation = 0, refresh, dirty = false;
     let rows = [], legacyRows = [], details = new Map(), logs = new Map();
+    const retainedTasks = new Map();
+    const cachedTask = (id) => rows.find(row => row.id === id) ?? retainedTasks.get(id);
     let adoptedScope;
     const scopeOf = (context) => JSON.stringify([context.cwd, context.sessionManager.getSessionId()]);
     const ownership = new Map();
@@ -18,6 +21,7 @@ export function createManagedBackgroundFrontend(pi) {
             legacyRows = [];
             details.clear();
             logs.clear();
+            retainedTasks.clear();
             generation++;
         }
         ctx = context;
@@ -71,14 +75,24 @@ export function createManagedBackgroundFrontend(pi) {
         const captured = ctx, version = generation;
         refresh = (async () => {
             trace('poll-start');
-            const snapshot = await request('__background_poll', {});
+            const snapshot = await request('__background_poll', { knownActiveIds: rows.filter(row => row.active).map(row => row.id).slice(0, 200) });
             trace('poll-received', { stale: version !== generation, total: snapshot.deliveries?.length ?? 0, deliveries: (snapshot.deliveries ?? []).slice(0, 8).map((item) => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
             if (version !== generation)
                 return;
             if (snapshot.recoveryPending === true)
                 dirty = true;
-            rows = snapshot.tasks ?? [];
-            legacyRows = snapshot.legacyRows ?? [];
+            // A rebuilding snapshot is not evidence that visible tasks vanished.
+            if (snapshot.status !== 'rebuilding' && snapshot.status !== 'degraded') {
+                rows = snapshot.tasks ?? [];
+                // Detail remains inspectable while Navigator retains a terminal row.
+                for (const task of rows) {
+                    retainedTasks.delete(task.id);
+                    retainedTasks.set(task.id, task);
+                    if (retainedTasks.size > 256)
+                        retainedTasks.delete(retainedTasks.keys().next().value);
+                }
+                legacyRows = snapshot.legacyRows ?? [];
+            }
             notify();
             for (const item of snapshot.deliveries ?? []) {
                 if (queued.has(item.token))
@@ -121,13 +135,13 @@ export function createManagedBackgroundFrontend(pi) {
             await refresh; },
         start(context) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
         noteParentContext(context) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
-        close() { ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); queued.clear(); ownership.clear(); },
+        close() { ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
         isParentOriginActive: active,
         onDurableTaskChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-        listDurableTasks(origin, options = {}) { return active(origin) ? rows.filter(row => !options.retentionMs || !row.terminal || Date.now() - (row.endedAt ?? Date.now()) < options.retentionMs) : []; },
-        readDurableTask(origin, id) { return active(origin) ? rows.find(row => row.id === id) : undefined; },
+        listDurableTasks(origin, _options = {}) { return active(origin) ? rows : []; },
+        readDurableTask(origin, id) { const task = cachedTask(id); return active(origin, task?.parentRecipient?.branchId) ? task : undefined; },
         ownsDurableTask(id) { if (!ctx || adoptedScope !== scopeOf(ctx))
-            return false; return ownership.has(id) || rows.some(row => row.id === id); },
+            return false; return ownership.has(id) || rows.some(row => row.id === id && !row.readOnly); },
         readDurableTaskLog(origin, id, lines = 40) {
             if (!active(origin))
                 return;
@@ -159,7 +173,10 @@ export function createManagedBackgroundFrontend(pi) {
                             throw new Error('Native Background context unavailable');
                         adoptContext(context);
                         const capturedGeneration = generation, capturedScope = adoptedScope;
-                        const result = await requestBackgroundTool(pi, context, id, definition.name, params, definition.parameters, signal);
+                        const launch = () => requestBackgroundTool(pi, context, id, definition.name, params, definition.parameters, signal);
+                        const spawning = ['bg_task_spawn', 'bg_task_spawn_batch', 'bg_task_watch'].includes(definition.name)
+                            || definition.name === 'bg_task' && ['spawn', 'watch'].includes(params?.action);
+                        const result = spawning ? await observeNavigatorLaunch(context, 'background-tasks', id, params?.name || 'Background task launch', launch) : await launch();
                         if (ctx === context && generation === capturedGeneration && adoptedScope === capturedScope)
                             rememberOwnership(result.details?.backgroundOwnership, context);
                         await host.reconcileNow().catch(() => undefined);
@@ -170,10 +187,10 @@ export function createManagedBackgroundFrontend(pi) {
         } });
     registerObservedWaitClient(proxy, host);
     const ui = {
-        rows: () => legacyRows.filter(row => !row.expiresAt || row.expiresAt > Date.now()),
+        rows: () => legacyRows,
         prepareDetail(id, options) {
             const lines = options?.logTailLines ?? 40, key = `${id}:${lines}`;
-            const durable = rows.some(row => row.id === id), cache = durable ? logs : details;
+            const durable = Boolean(cachedTask(id)), cache = durable ? logs : details;
             const version = generation;
             if (cache.has(key))
                 return;
@@ -185,7 +202,8 @@ export function createManagedBackgroundFrontend(pi) {
                 cache.delete(key); });
         },
         detail(id, now, options) { return details.get(`${id}:${options?.logTailLines ?? 40}`) ?? null; },
-        close(id) { void request('__background_action', { id, action: rows.find(row => row.id === id)?.active || legacyRows.find(row => row.id === id)?.status === 'running' ? 'stop' : 'dismiss' }).then(() => reconcile()).catch(() => undefined); return { action: 'requested', providerId: 'background-tasks', id }; }
+        close(id) { if (cachedTask(id)?.readOnly)
+            return { action: 'not-closable', providerId: 'background-tasks', id }; void request('__background_action', { id, action: rows.find(row => row.id === id)?.active || legacyRows.find(row => row.id === id)?.status === 'running' ? 'stop' : 'dismiss' }).then(() => reconcile()).catch(() => undefined); return { action: 'requested', providerId: 'background-tasks', id }; }
     };
     return { host, proxy, ui };
 }

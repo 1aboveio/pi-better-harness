@@ -10,6 +10,8 @@ import {
   isNavigatorUiAvailable,
   refreshBackgroundWorkNavigator,
   registerBackgroundWorkProvider,
+  getNavigatorView,
+  setNavigatorView,
   wrapLogText,
   type BackgroundWorkProvider,
 } from "./index.ts";
@@ -55,6 +57,48 @@ function renderWidget(value: unknown, width: number, theme: unknown = { fg: (_co
 }
 
 describe("shared background work navigator", () => {
+  it("packs leaf agents together while separating groups with child tasks", () => {
+    const previousView = getNavigatorView();
+    setNavigatorView("tree");
+    const agents = provider("subagents", "Subagents", 10, 100, () => {});
+    const tasks = provider("background-tasks", "Background Tasks", 20, 100, () => {});
+    const unregisterAgents = registerBackgroundWorkProvider({ ...agents, listRows: (now) =>
+      ["main", "leaf-a", "leaf-b", "with-task"].map((id, i) => ({
+        ...agents.listRows(now)[0]!, id, name: id, sortStartedAt: 100 - i,
+      })) });
+    const unregisterTasks = registerBackgroundWorkProvider({ ...tasks, listRows: (now) =>
+      ["main", "with-task"].map((parentAgentId) => ({ ...tasks.listRows(now)[0]!,
+        id: `${parentAgentId}-task`, name: `${parentAgentId}-task`, parentAgentId,
+      })) });
+    let widget: unknown;
+    const ctx = { mode: "tui", hasUI: true, ui: { factory: undefined as any, setStatus() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      setWidget(key: string, value: unknown) { if (key === MAIN_LIST_WIDGET_KEY) widget = value; },
+    } } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: data => data === "left", matchKey: (data, key) => data === key,
+        truncate: truncateToWidth,
+      });
+      const lines = renderWidget(widget, 100);
+      const mainTask = lines.findIndex(line => line.includes("main-task"));
+      assert.ok(mainTask >= 0);
+      assert.match(lines[mainTask]!, /└─ >_ main-task/);
+      assert.match(lines[mainTask + 1]!, /●\s+leaf-a/);
+      assert.match(lines[mainTask + 2]!, /leaf-b/);
+      assert.equal(lines[mainTask + 3]?.trim(), "");
+      assert.match(lines[mainTask + 4]!, /with-task/);
+      assert.match(lines[mainTask + 5]!, /└.*with-task-task/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregisterAgents();
+      unregisterTasks();
+      setNavigatorView(previousView);
+    }
+  });
+
   it("refreshes an open loading detail when its observation arrives without another key or list change", () => {
     let ready = false;
     let paints = 0;

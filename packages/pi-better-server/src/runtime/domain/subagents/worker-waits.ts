@@ -332,6 +332,7 @@ export interface WorkerAcknowledgeView {
 export interface WorkerWaitReadyEvent {
     readonly waitId: string;
     readonly generation: number;
+    readonly parkedAttemptId?: string;
     readonly owner: { kind: string; sessionId: string; workspace: string; branchId?: string | null; goalId?: string | null };
     readonly parentOrigin?: { cwd: string; sessionId?: string };
     readonly taskIds: readonly string[];
@@ -864,6 +865,8 @@ export interface WorkerOperationsHost {
 
 function scopeOf(registration: {
     runId: string;
+    attemptId?: string;
+    assignment?: AssignmentBinding;
     conversationId: string;
     workspace: string;
     authorityReference: string;
@@ -873,6 +876,7 @@ function scopeOf(registration: {
     return {
         runId: registration.runId,
         conversationId: registration.conversationId,
+        ...(registration.assignment && registration.attemptId ? { assignmentAttemptId: registration.attemptId } : {}),
         workspace: registration.workspace,
         authorityReference: registration.authorityReference,
         branchId: registration.branchId ?? null,
@@ -971,6 +975,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             tools: [...registration.tools],
             capabilities: registration.capabilities as unknown as JsonRecord,
             assignmentOutcomesVersion: 1,
+            assignmentTaskOwnership: registration.assignment !== undefined,
             owner,
             ...(registration.writerLeaseId ? { writerLeaseId: registration.writerLeaseId } : {}),
         }) : { assignmentOutcomesVersion: 1 };
@@ -1559,6 +1564,7 @@ export function ownerBindingFromContext(ctx: ExtensionContext): WaitOwnerBinding
 export interface ResumeAdmissionRequest {
     version: 1;
     owner: { sessionId: string; workspace: string; branchId?: string | null; goalId?: string | null };
+    pending?(): void;
     reply(gate: { allowed: boolean; reason?: string; revision: number; isCurrent?: () => boolean }): void;
 }
 
@@ -1573,7 +1579,7 @@ export type ResumeAdmission =
 export async function requestResumeAdmission(
     pi: unknown,
     owner: WaitOwnerBinding,
-    options: { timeoutMs?: number } = {},
+    options: { timeoutMs?: number; pendingTimeoutMs?: number } = {},
 ): Promise<ResumeAdmission> {
     const bus = serviceBusOf(pi);
     if (!bus) {
@@ -1588,8 +1594,9 @@ export async function requestResumeAdmission(
             clearTimeout(timer);
             resolve(value);
         };
-        const timer = setTimeout(() => finish(null), timeoutMs);
+        let timer = setTimeout(() => finish(null), timeoutMs);
         timer.unref?.();
+        let pending = false;
         const request: ResumeAdmissionRequest = {
             version: 1,
             owner: {
@@ -1597,6 +1604,14 @@ export async function requestResumeAdmission(
                 workspace: owner.workspace,
                 branchId: owner.branchId,
                 goalId: owner.goalId,
+            },
+            pending: () => {
+                if (pending || settled || options.pendingTimeoutMs === undefined) return;
+                pending = true;
+                clearTimeout(timer);
+                const budget = Math.max(timeoutMs, Math.min(60_000, options.pendingTimeoutMs));
+                timer = setTimeout(() => finish({ allowed: false, reason: `Workflow admission did not answer within ${budget} ms`, revision: 0 }), budget);
+                timer.unref?.();
             },
             reply: (gate) => {
                 if (!gate || typeof gate.allowed !== "boolean") {
@@ -2158,7 +2173,16 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
         version: 1,
         id: `subagents-continuation:${randomUUID()}`,
         async onWaitReady(event) {
-            const park = parkedWaitByGeneration(event.waitId, event.generation);
+            let park: ParkedWait | null;
+            if (event.parkedAttemptId !== undefined) {
+                const meta = readMeta(event.parkedAttemptId);
+                const record = meta && readParkRecord(meta.id);
+                if (!meta || meta.sessionId !== event.owner.sessionId || !record
+                    || record.waitId !== event.waitId || record.generation !== event.generation) return "deferred";
+                park = parkedEntry(meta, record);
+            } else {
+                park = parkedWaitByGeneration(event.waitId, event.generation);
+            }
             if (!park) return "delivered";
             const outcome = await resume(park);
             return outcome === "skipped" ? "deferred" : "delivered";

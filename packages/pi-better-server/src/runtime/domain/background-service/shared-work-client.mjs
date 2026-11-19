@@ -1,6 +1,7 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/shared-work-client.mjs. Do not edit directly.
 import { connect } from "node:net";
 import { performance } from "node:perf_hooks";
+import { setTimeout as delay } from "node:timers/promises";
 /** SDK-free observation stream. Cached snapshots are the only synchronous read API. */
 export class WorkClient {
     socket;
@@ -59,7 +60,9 @@ export class WorkClient {
                 }
             }
         });
-        this.socket.on("error", error => this.fail(error));
+        this.socket.on("error", error => this.fail(["ECONNRESET", "EPIPE"].includes(error.code)
+            ? Object.assign(new Error(`runtime-unavailable: disconnected (${error.code}); resync required`, { cause: error }), { code: error.code })
+            : error));
         this.socket.on("close", () => this.fail(new Error("runtime-unavailable: disconnected; resync required")));
         this.ready = this.request("hello", { protocolVersion: 1, runtimeRoot: agentDir, requiredCapabilities: ["runtime-state-v1", "runtime-subscriptions-v1", ...requiredCapabilities] })
             .then(async (hello) => { if (typeof socketPath === "string" && hello.capabilities?.includes("runtime-client-retention-v1"))
@@ -188,4 +191,99 @@ export class WorkClient {
             listener({ status: "revoked" });
     }
     close() { this.fail(new Error("runtime-unavailable: client closed")); this.listeners.clear(); this.catalogListeners.clear(); }
+}
+// Shared across the standalone extension copies, but never across agent roots.
+const recoveryKey = Symbol.for("pi-better-runtime.connection-recovery.v2");
+const recoveries = globalThis[recoveryKey] ??= new Map();
+const connectionDemands = globalThis[Symbol.for("pi-better-runtime.connection-demand.v2")] ??= new Map();
+/** Establish a transport only. Never replay an application request after dispatch. */
+export async function connectWorkClient(socketPath, agentDir, capabilities = [], options = {}) {
+    const timeoutMs = options.timeoutMs ?? 60000;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+        throw new Error("Invalid connection timeout");
+    const deadline = performance.now() + timeoutMs;
+    const started = performance.now();
+    let backoff = 100, recovered = false, lastError, recoveryError, ownedRecovery;
+    const remaining = () => Math.max(1, deadline - performance.now());
+    const key = JSON.stringify([agentDir, socketPath]);
+    connectionDemands.set(key, (connectionDemands.get(key) ?? 0) + 1);
+    try {
+        while (performance.now() < deadline) {
+            options.signal?.throwIfAborted();
+            const client = new WorkClient(socketPath, agentDir, capabilities);
+            const abort = () => client.close();
+            options.signal?.addEventListener("abort", abort, { once: true });
+            const timer = setTimeout(() => client.close(), remaining());
+            try {
+                await client.ready;
+                options.signal?.throwIfAborted();
+                return client;
+            }
+            catch (error) {
+                client.close();
+                options.signal?.throwIfAborted();
+                lastError = error;
+                if (recoveryError)
+                    throw recoveryError;
+                if (!["ENOENT", "ECONNREFUSED", "ECONNRESET", "EPIPE"].includes(error?.code)
+                    && !/runtime-unavailable: (?:disconnected|server closed)/.test(String(error)))
+                    throw error;
+            }
+            finally {
+                clearTimeout(timer);
+                options.signal?.removeEventListener("abort", abort);
+            }
+            // Most replacement gaps need only a reconnect. Startup remains owner-safe.
+            if (!recovered && options.recover && performance.now() - started >= 250 && performance.now() < deadline) {
+                recovered = true;
+                let recovery = recoveries.get(key);
+                if (!recovery) {
+                    const controller = new AbortController();
+                    const budget = Math.ceil(remaining());
+                    const timer = setTimeout(() => controller.abort(), budget);
+                    const promise = waitForRecovery(Promise.resolve().then(() => options.recover({ timeoutMs: budget, signal: controller.signal })), budget, controller.signal)
+                        .finally(() => clearTimeout(timer));
+                    recovery = { promise, controller, key };
+                    recoveries.set(key, recovery);
+                    void recovery.promise.finally(() => { if (recoveries.get(key) === recovery)
+                        recoveries.delete(key); }).catch(() => { });
+                }
+                // A caller can cancel its wait without cancelling another caller's recovery.
+                // Keep trying the transport while the owner-safe installer waits.
+                // A replacement can accept compatible clients before the pinned
+                // installer finishes; waiting for it would stall all subscribers.
+                ownedRecovery = recovery;
+                void recovery.promise.catch(error => { recoveryError = error; });
+            }
+            if (performance.now() >= deadline)
+                break;
+            await delay(Math.min(backoff, remaining()), undefined, { signal: options.signal });
+            backoff = Math.min(1000, backoff * 2);
+        }
+        throw new Error("runtime-unavailable: reconnect deadline exceeded; task state is unknown, retry after recovery", { cause: lastError });
+    }
+    finally {
+        const remainingDemand = connectionDemands.get(key) - 1;
+        if (remainingDemand)
+            connectionDemands.set(key, remainingDemand);
+        else {
+            connectionDemands.delete(key);
+            const recovery = recoveries.get(key) ?? ownedRecovery;
+            if (recovery) {
+                recoveries.delete(key);
+                recovery.controller.abort();
+            }
+        }
+    }
+}
+function waitForRecovery(recovery, timeoutMs, signal) {
+    return new Promise((resolve, reject) => {
+        const finish = (callback, value) => { clearTimeout(timer); signal?.removeEventListener("abort", abort); callback(value); };
+        const abort = () => finish(reject, signal.reason);
+        const timer = setTimeout(() => finish(reject, new Error("runtime-unavailable: reconnect deadline exceeded during recovery")), timeoutMs);
+        signal?.addEventListener("abort", abort, { once: true });
+        recovery.then(value => finish(resolve, value), error => finish(reject, error));
+        if (signal?.aborted)
+            abort();
+    });
 }

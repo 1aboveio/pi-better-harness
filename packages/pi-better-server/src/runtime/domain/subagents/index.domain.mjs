@@ -30,7 +30,7 @@ import { withAssignmentObservations } from "./assignment-projection.mjs";
 import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { disposeBackgroundWorkNavigator, ensureBackgroundWorkNavigator, isNavigatorUiAvailable, refreshBackgroundWorkNavigator, registerBackgroundWorkProvider, renderRegisteredWorkDetail, } from "./shared-navigator.domain.mjs";
+import { disposeBackgroundWorkNavigator, ensureBackgroundWorkNavigator, isNavigatorUiAvailable, refreshBackgroundWorkNavigator, registerBackgroundWorkProvider, observeNavigatorLaunch, renderRegisteredWorkDetail, } from "./shared-navigator.domain.mjs";
 import { spawnDetached } from "./spawn.domain.mjs";
 import { abortUncommittedLaunch } from "./launch-abort.domain.mjs";
 import { parseRun, parseRunForLifecycle, resetParseRunCursor } from "./parse.domain.mjs";
@@ -60,7 +60,7 @@ import { captureProcessIdentity, extractChildEventFactsFromLog, loadHealthThresh
 import { assignBatchJobNames, batchLaunchOutputSchema, batchLaunchResult, mergeJobOptions, nextBatchId, planBatchLaunches, validateBatchPlan, } from "./batch.mjs";
 import { formatCapacityRejectMessage, getSharedCapacityGate, } from "./capacity.mjs";
 import { buildHealthCallbackDelivery } from "./completion.domain.mjs";
-import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.domain.mjs";
+import { cancelCallbackBatch, getCallbackBatcher, packCallbackBatch, setCallbackBatchContext } from "./shared-callback-batcher.domain.mjs";
 let managementPort;
 const ownedByThisParent = (meta) => managementPort ? managementPort.owns(meta) : ownedByFrontend(meta);
 const supervisedMetas = () => managementPort ? managementPort.supervised() : listMetasForParent(process.pid);
@@ -72,6 +72,7 @@ import { stopRun } from "./stop.domain.mjs";
 import { WIDGET_CLEAR, fmtElapsed, fmtSpend, fmtTokens, shortModel, isSpendCacheFresh, resolveHealthLogExtraction, withinRefreshFloor, } from "./widget.domain.mjs";
 import { executeNavigatorClose, pendingNavigatorPark, buildNavigatorDetail, } from "./navigator.domain.mjs";
 import { enforceRegistrySizeCapOnce, runDailyCleanupOnce } from "./cleanup.domain.mjs";
+import { managedRuntimeRoot, selectContinuationRuntime } from "./continuation-runtime.domain.mjs";
 import { ContinuationError, acquireConversationLease, assertContinuationExtensions, buildLaunchRecipe, planContinuation, } from "./continuation.domain.mjs";
 import { createHash } from "node:crypto";
 import { assertThinkingLevel, parseModelThinking } from "./thinking.domain.mjs";
@@ -485,10 +486,57 @@ async function tryEnqueueAssignmentOutcome(pi, meta) {
         return;
     }
     const deliveryHost = outcomeHost;
-    const gate = await requestResumeAdmission(pi, active, { timeoutMs: 50 });
+    // The Goal scheduler can take up to 20 seconds. Keep the short probe only
+    // for a standalone parent, with no bound Goal or acknowledged check.
+    const workflowBudgetMs = 25_000;
+    const gate = await requestResumeAdmission(pi, active, {
+        timeoutMs: active.goalId || outcome.recipient.goalId ? workflowBudgetMs : 50,
+        pendingTimeoutMs: workflowBudgetMs,
+    });
     outcomeAdmission.set(outcome.eventId, () => gate.allowed ? gate.isCurrent?.() !== false : !active.goalId && !outcome.recipient.goalId && gate.revision === -1);
     if (!gate.allowed && (active.goalId || outcome.recipient.goalId || gate.revision !== -1)) {
-        deferOutcome(meta, gate.reason ?? "Parent admission refused; automatic reconciliation will retry.");
+        // Admission controls model execution, not delivery of an already
+        // committed result. Paused Goals still owe their human a notification.
+        if (sessionTornDown || outcomeHost !== deliveryHost || uiCtx !== ctx || callbackSuppressionReason(meta)
+            || (outcome.recipient.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === outcome.recipient.branchId))) {
+            deferOutcome(meta, "Recorded parent delivery scope changed; automatic reconciliation will retry.");
+            return;
+        }
+        // Native Pi queues messages during a turn even with triggerTurn:false.
+        // Wait for idle so replay cannot enqueue the same unreceipted message.
+        if (!ctx.isIdle()) {
+            deferOutcome(meta, "Waiting for an idle parent to append the outcome without starting a turn.");
+            return;
+        }
+        if (!claimOutcome(meta, deliveryHost)) {
+            deferOutcome(meta, "Outcome dispatch is owned by another host; automatic reconciliation will retry.");
+            return;
+        }
+        const details = { completionEventIds: [outcome.eventId] };
+        const packed = packCallbackBatch([{
+                source: "subagent", id: outcome.eventId, inspectId: meta.id, receiptId: outcome.eventId,
+                label: meta.name ?? meta.id, status: outcome.outcome, outcome: outcome.reason,
+                detailTool: "subagent_result", callback: true,
+            }]);
+        try {
+            await pi.sendMessage({ customType: "background-completion-batch", display: true,
+                content: `${packed.text}\nAutomatic continuation: ${gate.reason}`, details }, { triggerTurn: false });
+        }
+        catch (error) {
+            // A failed persistence must not look like a durable transcript receipt.
+            details.completionEventIds.length = 0;
+            throw error;
+        }
+        const entry = outcomeTranscriptReceipt(ctx.sessionManager.getBranch(), outcome.eventId);
+        if (!entry)
+            throw new Error("Awaiting durable recipient transcript receipt.");
+        receiptOutcome(meta, entry);
+        markCompletionCallbackSent(meta.id, Date.now());
+        deferOutcome(meta);
+        try {
+            ctx.ui?.notify(`${meta.name ?? meta.id}: ${outcome.outcome}. Automatic continuation: ${gate.reason}. Inspect subagent_result.`, outcome.outcome === "failed" ? "warning" : "info");
+        }
+        catch { /* transcript remains visible */ }
         return;
     }
     // Admission may yield across a session switch or Goal/workflow change.
@@ -1638,13 +1686,11 @@ function subagentWorkRows(now) {
             if (!undismissed.has(id))
                 pendingNavigatorDismissals.delete(id);
     }
-    const rows = sourceRows.filter((row) => !pendingNavigatorDismissals.has(row.meta.id) && !row.meta.dismissedAt &&
-        (["running", "waiting"].includes(row.assignment.state) || typeof (row.meta.endedAt ?? row.meta.lostAt) !== "number" ||
-            now - (row.meta.endedAt ?? row.meta.lostAt) < TERMINAL_NAVIGATOR_RETENTION_MS)).map((row) => {
+    const rows = sourceRows.filter((row) => !pendingNavigatorDismissals.has(row.meta.id) && !row.meta.dismissedAt).map((row) => {
         const meta = row.meta;
         const health = row.health ? observeRunHealth({ ...row.health, status: row.assignment.processStatus === "exited" ? meta.status : row.assignment.processStatus, now, startedAt: meta.startedAt }) : undefined;
         const terminal = !["running", "waiting"].includes(row.assignment.state);
-        return { providerId: "subagents", id: meta.id, name: meta.name || meta.id,
+        return { providerId: "subagents", id: meta.id, agentId: meta.sessionId ?? meta.id, name: meta.name || meta.id,
             model: shortModel(meta.model), effort: meta.effort, status: row.assignment.state,
             tool: row.display?.tool, tokens: row.display?.spend,
             statusTone: statusTone(row.assignment.state), kind: "subagent", elapsed: fmtElapsed((meta.endedAt ?? now) - meta.startedAt),
@@ -1652,8 +1698,8 @@ function subagentWorkRows(now) {
             expiresAt: terminal && typeof meta.endedAt === "number" ? meta.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS : undefined };
     });
     if (!snapshot || snapshot.status !== "ready")
-        rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Subagents",
-            status: snapshot?.status ?? "degraded", statusTone: "warning", kind: "observation", elapsed: "", primary: workObservationFailure(), sortStartedAt: now });
+        rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Status sync",
+            status: snapshot?.status ?? "degraded", statusTone: "warning", kind: "observation", readOnly: true, elapsed: "", primary: "Task status unconfirmed · enter for details", sortStartedAt: now });
     return rows;
 }
 const DELEGATION_BLURB = {
@@ -1736,6 +1782,14 @@ function mainAgentWorkDetail(now) {
 function subagentWorkDetail(id, now, options) {
     if (id === "main")
         return mainAgentWorkDetail(now);
+    if (id === "runtime-observation")
+        return {
+            providerId: "subagents", id, title: "Subagent status sync", status: workObservation()?.status ?? "rebuilding", statusTone: "warning",
+            subtitle: "Shared status service · task status unconfirmed",
+            metadata: [{ label: "scope", value: "Subagent status reads; not an individual task" }],
+            evidence: { label: "Full diagnostic", text: workObservationFailure() },
+            footerActions: [],
+        };
     const row = requestWorkDetail(id);
     if (!row?.detail)
         return { providerId: "subagents", id, title: id, status: row?.observationError ? "degraded" : "rebuilding", statusTone: "warning", metadata: [], evidence: { label: "observation", text: row?.observationError ?? workObservationFailure() } };
@@ -1837,7 +1891,8 @@ function ensureSubagentProvider() {
         label: "Subagents",
         priority: 10,
         visibleCount: () => navigatorRunningCount(),
-        showSection: (rows) => rows.some((row) => row.status === "running" || ["parking", "waiting", "ready", "resuming", "held", "degraded", "rebuilding"].includes(row.status)),
+        // The last worker becoming terminal must not hide its retained result.
+        showSection: (rows) => rows.length > 0,
         parentRow: (now) => mainAgentWorkRow(now),
         listRows: (now) => subagentWorkRows(now),
         detail: (id, now, options) => subagentWorkDetail(id, now, options),
@@ -1855,6 +1910,8 @@ function ensureSubagentProvider() {
         },
         armCloseLabel: (row) => pendingNavigatorPark(workObservation()?.rows.find((observed) => observed.meta.id === row.id)?.meta) ? "x again to cancel resume" : row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",
         close: (id) => {
+            if (id === "runtime-observation")
+                return { action: "not-closable", providerId: "subagents", id };
             const outcome = navigatorCloseRun(id);
             return { ...outcome, providerId: "subagents" };
         },
@@ -2110,7 +2167,8 @@ function revalidateContinuationUnderLease(plan, origin) {
         id: plan.prior.id,
         prior: current,
         origin,
-        others: listMetas(),
+        // Archived attempts are completed and cannot be competing writers.
+        others: listMetas({ includeArchived: false }),
     });
     if (fresh.conversation.sessionId !== plan.conversation.sessionId || fresh.conversation.path !== plan.conversation.path) {
         throw new ContinuationError(`Cannot continue ${plan.prior.id}: the saved conversation it would reopen changed while this launch was being prepared ` +
@@ -2679,7 +2737,7 @@ export default function (pi, managed) {
                 ctx = captureLaunchContext(ctx);
                 catalogHostFrom(ctx);
                 const { submitManagedLaunch } = await import("./managed-launch-client.domain.mjs");
-                return await submitManagedLaunch(pi, ctx, key, definition.name, params);
+                return await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, params));
             } });
     };
     announceExecutionAdapter(pi, {
@@ -3019,12 +3077,19 @@ export default function (pi, managed) {
             // Candidates for the task-tool plan: exclusions and bridge-supplied
             // names never reach extension admission.
             const plannedTools = allow.split(",").filter((name) => name && !requestedExcludes.has(name) && !bridgeToolNames.has(name));
+            const continuationRuntime = selectContinuationRuntime({ currentDir: selfDir(), recipe: resume?.recipe });
+            const workerPath = (path) => continuationRuntime?.mapPath(path) ?? path;
+            const workerArgs = (args) => continuationRuntime?.mapArgs(args) ?? args;
+            const workerResolvePath = (spec) => {
+                const path = resolveExtensionPath(spec);
+                return path ? workerPath(path) : path;
+            };
             const taskTools = sandboxEnabled ? planTaskTools({
                 requested: plannedTools,
                 settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
                 processAccess: permissionPlan.permissions?.processAccess ?? "off",
                 builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
-                toolExtensions: cfg.toolExtensions, resolvePath: resolveExtensionPath,
+                toolExtensions: cfg.toolExtensions, resolvePath: workerResolvePath,
             }) : undefined;
             // One effective selection feeds the task policy, child preflight, worker
             // bridge and frozen recipe, so a refused tool cannot leak into any of them
@@ -3058,8 +3123,8 @@ export default function (pi, managed) {
                 model, virtual: (() => {
                     const slash = model?.indexOf("/") ?? -1;
                     return slash > 0 && ctx.modelRegistry?.find?.(model.slice(0, slash), model.slice(slash + 1))?.api === "pi-virtual";
-                })(), config: cfg, resolvePath: resolveExtensionPath,
-                configPaths: [configPath(), join(selfDir(), "config.json")],
+                })(), config: cfg, resolvePath: workerResolvePath,
+                configPaths: [configPath(), workerPath(join(selfDir(), "config.json"))],
             };
             // Bridge tools are supplied by the worker bridge extension, not by a
             // configured toolExtensions mapping: keep them out of extension
@@ -3074,19 +3139,19 @@ export default function (pi, managed) {
                     tools: sandboxEnabled ? allow.split(",").filter((name) => SDK_BUILTIN_TOOLS.includes(name)).join(",") : extensionAllowlist(),
                     model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
                 }) }, taskTools?.trusted.map(tool => tool.loadPath) ?? []);
-            const { args: resolvedExtArgs, missing } = extensionArgs(resolution, (spec) => resolution.paths[spec] ?? resolveExtensionPath(spec));
+            const { args: resolvedExtArgs, missing } = extensionArgs(resolution, (spec) => resolution.paths[spec] ?? workerResolvePath(spec));
             const trustedExtArgs = fullResolution.specs.map(spec => fullResolution.paths[spec])
                 .filter(path => !resolvedExtArgs.includes(path)).flatMap(path => ["--extension", path]);
             // Harness child controls ride along in every mode, including clean and unsandboxed runs.
             // They deliver deadline steers and keep external monitoring with the coordinator.
             const codemodeArgs = !sandboxEnabled && allow.split(",").includes("codemode") && !requestedExcludes.has("codemode")
                 ? ["--extension", join(selfDir(), "child-codemode.ts")] : [];
-            const extArgs = [...resolvedExtArgs, ...trustedExtArgs, ...codemodeArgs,
+            const extArgs = workerArgs([...resolvedExtArgs, ...trustedExtArgs, ...codemodeArgs,
                 "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
-                .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
-            const baseExtensionArgs = [...resolvedExtArgs, ...codemodeArgs,
+                .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value));
+            const baseExtensionArgs = workerArgs([...resolvedExtArgs, ...codemodeArgs,
                 "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
-                .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
+                .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value));
             if (resume?.recipe.extensionArgs) {
                 // A model escalation may change provider auth, but an unchanged tool
                 // must not silently switch implementations with current configuration.
@@ -3096,11 +3161,11 @@ export default function (pi, managed) {
                         model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
                     })
                 });
-                const referenceArgs = [...extensionArgs(reference, (spec) => reference.paths[spec] ?? resolveExtensionPath(spec)).args, ...codemodeArgs,
+                const referenceArgs = [...extensionArgs(reference, (spec) => reference.paths[spec] ?? workerResolvePath(spec)).args, ...codemodeArgs,
                     ...(!resume.recipe.baseExtensionArgs ? trustedExtArgs : []),
                     "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
                     .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
-                assertContinuationExtensions(resume.prior.id, resume.recipe, referenceArgs, taskTools?.trusted ?? []);
+                assertContinuationExtensions(resume.prior.id, resume.recipe, workerArgs(referenceArgs), (taskTools?.trusted ?? []).map(tool => ({ ...tool, loadPath: workerPath(tool.loadPath) })));
             }
             if (sandboxEnabled && resolution.mode === "inherit") {
                 throw new Error("Task confinement requires explicit extensions; inheritExtensions is unsupported while sandboxing is enabled.");
@@ -3129,7 +3194,7 @@ export default function (pi, managed) {
             // supervision capability, not a tool implementation, so it must not
             // invalidate a conversation's saved recipe when it appears later.
             const commandExtArgs = bridgeEnabled
-                ? [...extArgs, "--extension", childBridgeExtensionPath(selfDir())]
+                ? [...extArgs, "--extension", workerPath(childBridgeExtensionPath(selfDir()))]
                 : extArgs;
             const args = [
                 "-p", "--mode", "json",
@@ -3153,14 +3218,15 @@ export default function (pi, managed) {
                 tools: selectedTools,
                 permissions: permissionPlan.permissions && { ...permissionPlan.permissions, ...commandSettings },
                 applyPatch: taskTools?.applyPatch === true,
-                extensionTools: taskTools?.trusted.map(({ loadPath: _loadPath, ...tool }) => tool) ?? [],
+                extensionTools: taskTools?.trusted.map(({ loadPath: _loadPath, ...tool }) => ({ ...tool, root: workerPath(tool.root) })) ?? [],
                 // The sandboxed child's policy enables the guarded operation bridge
                 // only when the fixed bridge adapter path is among its extension
                 // paths; the task guard then admits those tools by exact source.
                 extensionPaths: [
                     ...extArgs.flatMap((arg, index) => arg === "--extension" && extArgs[index + 1] ? [extArgs[index + 1]] : []),
-                    ...(bridgeEnabled ? [childBridgeExtensionPath(selfDir())] : []),
+                    ...(bridgeEnabled ? [workerPath(childBridgeExtensionPath(selfDir()))] : []),
                 ],
+                operationBridgePath: workerPath(childBridgeExtensionPath(selfDir())),
                 runtimeRoots: [baseDir()],
                 capturedDenyWrite: internal?.resumeWait
                     ? resume?.prior.operations?.policy.sandbox?.denyWrite
@@ -3187,9 +3253,10 @@ export default function (pi, managed) {
                     catch { /* ignore */ }
                 });
             }
-            const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] }
+            const currentCommand = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] }
                 : managed ? managed.workerCommand(args)
                     : { file: process.execPath, fileArgs: [join(selfDir(), "child-runtime.mjs"), resolvePiBinary(), ...args] };
+            const cmd = continuationRuntime?.command(currentCommand) ?? currentCommand;
             const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
             // Reservations prevent competing admissions, but do not grandfather
             // unstarted work after a cap reduction. No await separates this live
@@ -3306,6 +3373,7 @@ export default function (pi, managed) {
                 sandbox: sandboxEnabled, sandboxDir: requestedSandboxDir, gitCloneWorkspace, callback: callbackEnabled, name: launchName,
                 agent: resume ? resume.recipe.agent : p.agent, role: resume ? resume.recipe.role : p.role,
                 alias: resume ? resume.recipe.alias : p.alias, catalog: launchCatalog, extensionArgs: extArgs, baseExtensionArgs,
+                runtimeRoot: continuationRuntime?.root ?? managedRuntimeRoot(selfDir()),
                 trustedExtensions: resume?.recipe.trustedExtensions ?? taskTools?.trusted.map(({ name, package: owner, loadPath }) => ({ name, package: owner, loadPath })),
             });
             const startedAt = Date.now();
@@ -3527,7 +3595,7 @@ export default function (pi, managed) {
                 id: prior.id,
                 prior,
                 origin: { cwd: input.park.record.ownerWorkspace ?? prior.callbackOrigin?.cwd ?? prior.cwd, sessionId: input.park.record.ownerSessionId ?? prior.callbackOrigin?.sessionId },
-                others: listMetas(),
+                others: listMetas({ includeArchived: false }),
             });
         }
         catch (error) {

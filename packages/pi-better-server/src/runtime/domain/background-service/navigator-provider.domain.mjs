@@ -92,9 +92,13 @@ export function createBackgroundTasksNavigator(runtime = { stopTask }, managed) 
         },
         armCloseLabel: (row) => row.status === "running" || row.status === "starting" ? "x again to stop" : "x again to dismiss",
         close: (id) => {
+            if (durableTask(id)?.readOnly)
+                return { action: "not-closable", providerId: "background-tasks", id };
             if (managed)
                 return managed.close(id);
             const durable = durableTask(id);
+            if (durable?.readOnly)
+                return { action: "not-closable", providerId: "background-tasks", id };
             if (durable) {
                 const host = navigatorHost();
                 const origin = activeNavigatorOrigin;
@@ -180,6 +184,8 @@ export function createBackgroundTasksNavigator(runtime = { stopTask }, managed) 
         return {
             providerId: "background-tasks",
             id: task.id,
+            parentAgentId: task.parentAgentId,
+            readOnly: task.readOnly,
             name: task.name,
             status: task.status,
             statusTone: toneForDurableStatus(task.status),
@@ -204,6 +210,7 @@ export function createBackgroundTasksNavigator(runtime = { stopTask }, managed) 
         const metadata = [
             { label: "provider", value: "Background Tasks (durable)" },
             { label: "kind", value: task.kind },
+            ...(task.parentAgentId ? [{ label: "agent", value: task.parentAgentId }] : []),
             { label: "operation", value: task.operationId },
             { label: "status", value: `${task.status}${task.terminalOutcome ? ` (${task.terminalOutcome})` : ""}` },
             { label: "started", value: new Date(task.startedAt).toISOString() },
@@ -242,7 +249,7 @@ export function createBackgroundTasksNavigator(runtime = { stopTask }, managed) 
                 label: log?.truncated ? "log tail" : "log",
                 text: evidenceText,
             },
-            footerActions: [task.active ? "x stop" : "x dismiss"],
+            footerActions: task.readOnly ? ["Managed by owning agent"] : [task.active ? "x stop" : "x dismiss"],
         };
     }
     function durableCommandLabel(task) {

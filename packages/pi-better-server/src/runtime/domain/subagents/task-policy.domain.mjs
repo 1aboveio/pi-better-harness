@@ -184,7 +184,7 @@ export function prepareTaskRuntime(options) {
         tools: options.tools,
         applyPatch: options.applyPatch === true,
         operationBridge: options.tools.some(name => OPERATION_BRIDGE_TOOL_NAMES.includes(name)) &&
-            (options.extensionPaths ?? []).some(path => canonicalizePath(path) === canonicalizePath(fileURLToPath(new URL("./child-operations.ts", import.meta.url)))),
+            (options.extensionPaths ?? []).some(path => canonicalizePath(path) === canonicalizePath(options.operationBridgePath ?? fileURLToPath(new URL("./child-operations.ts", import.meta.url)))),
         extensionTools: (options.extensionTools ?? []).map((tool) => ({ ...tool, root: canonicalizePath(tool.root) })),
     });
     compileWritePolicy({ writableRoot: root, home, permissions: policy.permissions, denyWrite: policy.denyWrite, runtimeCompatibility: true });

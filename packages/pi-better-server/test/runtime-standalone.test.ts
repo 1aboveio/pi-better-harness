@@ -278,7 +278,7 @@ test("packed standalone packages use one pinned socket runtime, including cached
   try {
     const ownerBefore = inspectDaemonOwner(serverDir);
     const backgroundRefusal = await execute(process.execPath, ["--input-type=module", "-e", entryScript + `
-      try {registerTools(pi);await assert.rejects(tools.get('bg_task_list').execute('live-owner',{},undefined,undefined,ctx),/existing live owner/)}
+      try {registerTools(pi);await assert.rejects(tools.get('bg_task_list').execute('live-owner',{},undefined,undefined,ctx),/existing live owner|reconnect deadline/)}
       finally {closeBackgroundObservation(pi)}
     `], workspace, env);
     writeFileSync(join(evidence, "background-live-owner-refusal.log"), backgroundRefusal.stdout + backgroundRefusal.stderr);

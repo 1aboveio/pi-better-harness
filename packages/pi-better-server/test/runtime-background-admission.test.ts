@@ -33,7 +33,17 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
         }
     };
     try {
-        service = await createBackgroundTools(root, 'instance', () => draining);
+        const childLog = join(root, 'child.log');
+        writeFileSync(childLog, 'one\ntwo\nchild-log-proof');
+        const child = {id:'bgs_0123456789abcdef0123',readOnly:true,parentAgentId:'worker',parentRecipient:{sessionId:'native',workspace:root,branchId:'branch'},
+          status:'running',logPaths:{stdout:childLog,stderr:childLog,events:childLog}};
+        service = await createBackgroundTools(root, 'instance', () => draining, async scope => ({status:'ready',scopeRevision:'fixture',
+          rows:scope.cwd===root && scope.sessionId==='native' ? [{meta:child}] : []}));
+        const childLogResult = await invoke('__background_log', {id:child.id,lines:1}, 'child-log', r => r.branchIds=['branch']);
+        assert.equal(childLogResult.stdout,'child-log-proof');
+        await assert.rejects(invoke('__background_log', {id:child.id}, 'wrong-branch'), /outside the captured scope/);
+        await assert.rejects(invoke('__background_log', {id:child.id}, 'wrong-parent', r => {r.owner.sessionId='foreign';r.branchIds=['branch'];}), /outside the captured scope/);
+        await assert.rejects(invoke('__background_action', {id:child.id,action:'stop'}, 'child-stop', r=>r.branchIds=['branch']), /outside the captured scope/);
         draining = true;
         await assert.rejects(invoke('bg_task_spawn', { shell: false, argv: [process.execPath, '-e', 'process.exit(0)'] }, 'new'), /runtime-draining/);
         await assert.rejects(invoke('bg_task_spawn', { shell: false, argv: [process.execPath, '-e', 'process.exit(0)'] }, 'schema', r => r.parametersDigest = 'wrong'), /capability-mismatch/);

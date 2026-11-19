@@ -404,7 +404,9 @@ test("stalled diagnostic completion rejects when its worker exits", { timeout: 1
 });
 
 test("slow caller cancellation preserves other clients and ignores late replies", { timeout: 10000 }, async t => {
-  const f = await fixture({ timeoutMs: 700, watchdogMs: 2000,
+  // Cold inventory still runs after the RPC receipt. Use the normal watchdog
+  // for setup; the 700 ms caller deadline is the bound this test exercises.
+  const f = await fixture({ timeoutMs: 700,
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   let phase = "bootstrap";
   const requests: Array<Record<string, unknown>> = [];
@@ -623,6 +625,31 @@ test("cold bootstrap caller deadline does not imply a wedged read worker", { tim
   } finally { await f.close(); }
 });
 
+test("delayed parent receipt does not kill a responsive read worker", { timeout: 10000 }, async () => {
+  const f = await fixture({ watchdogMs: 800 });
+  try {
+    const client = await f.client();
+    await ready(client);
+    const epoch = client.snapshot!.instanceId;
+    // Simulate the watchdog running before queued worker messages are drained.
+    // Keep the worker running and withhold only the executor's message delivery.
+    const [receive] = f.worker.listeners("message") as ((message: unknown) => void)[];
+    assert.ok(receive);
+    const queued: unknown[] = [];
+    const hold = (message: unknown) => queued.push(message);
+    f.worker.off("message", receive).on("message", hold);
+    try {
+      await new Promise<void>(resolve => setTimeout(resolve, 1100));
+      assert.equal(f.executor.metrics().executor.status, "ready");
+    } finally {
+      f.worker.off("message", hold).on("message", receive);
+      for (const message of queued) receive(message);
+    }
+    assert.equal((await client.get({ limit: 1 })).instanceId, epoch);
+    assert.equal(f.executor.metrics().executor.restarts, 0);
+  } finally { await f.close(); }
+});
+
 test("responsive rebuilding outlives the watchdog without claiming source readiness", { timeout: 10000 }, async t => {
   const { bootstrapHeartbeat } = await import(String("./support/bootstrap-heartbeat.mjs"));
   const { port1, port2 } = new MessageChannel();
@@ -752,7 +779,7 @@ test("metadata present before the held initial inventory is included in the firs
     const observed = await firstReady;
     assert.equal(observed.rows[0]?.meta.name, "present-before-inventory");
     assert.ok(f.executor.metrics().inventories! >= 1);
-    t.diagnostic(JSON.stringify({ beforeRelease: state, firstReady: observed }));
+    t.diagnostic(JSON.stringify({ beforeRelease: state, firstReady: observed }, (_, value) => typeof value === "bigint" ? String(value) : value));
   } finally { await f.close(); }
 });
 
@@ -963,7 +990,7 @@ test("a failed worker recovers existing subscriptions under a new observation ep
     const previous = client.snapshot!;
     assert.ok(previous.seq > 1);
     t.diagnostic(JSON.stringify({ phase: "observed-original-publication-before-exit", sourceWrites,
-      frames, workerFrames, source: await captureSource() }).slice(0, 65536));
+      frames, workerFrames, source: await captureSource() }, (_, value) => typeof value === "bigint" ? String(value) : value).slice(0, 65536));
     let resynced = false;
     const recovered = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { stop(); reject(new Error("read worker never recovered the existing subscription")); }, 3000);
@@ -1082,7 +1109,8 @@ test("slow real SQLite work leaves socket RPC responsive and overlapping reads s
 });
 
 test("the worker watchdog rejects readers and bounds close while native SQLite finishes before worker exit", { timeout: 60000 }, async t => {
-  const f = await fixture({ watchdogMs: 3000 });
+  const evidence: string[] = [];
+  const f = await fixture({ watchdogMs: 3000, logWatchdog: line => evidence.push(line) });
   try {
     const client = await f.client();
     await ready(client);
@@ -1092,6 +1120,15 @@ test("the worker watchdog rejects readers and bounds close while native SQLite f
     const active = assert.rejects(client.get({ limit: 1 }), /deadline exceeded/);
     const queued = assert.rejects(client.get({ limit: 2 }), /deadline exceeded/);
     await Promise.all([active, queued]);
+    assert.equal(evidence.length, 1, "one diagnostic record per timeout, not one per reader");
+    assert.match(evidence[0]!, /^Read worker watchdog: /);
+    const record = JSON.parse(evidence[0]!.slice("Read worker watchdog: ".length));
+    assert.ok(record.silenceMs >= 3000);
+    assert.equal(record.generation, 0);
+    assert.equal(record.execution, "idle", "the fixture blocks outside instrumented requests");
+    assert.equal(typeof record.inventory, "string");
+    assert.equal(typeof record.mainLoopMaxDelayMs, "number");
+    assert.ok(!evidence[0]!.includes(f.root), "the local source path is not logged");
     const rejectedMs = performance.now() - began;
     assert.equal(f.executor.metrics().executor.active, 0);
     assert.equal(f.executor.metrics().executor.queued, 0);

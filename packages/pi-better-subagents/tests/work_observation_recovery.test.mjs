@@ -76,3 +76,48 @@ for (const mode of ["recover", "stop", "final-page-stop", "final-anchor-stop", "
         stopWorkObservation(); server.close(); await once(server, "close"); rmSync(root, { recursive: true, force: true });
     }
 });
+
+test('list waits through a missing socket during server replacement', async () => {
+    const { observedList } = await import('../work-observation.ts');
+    const root = realpathSync(mkdtempSync('/tmp/pi-obs-gap-'));
+    const sockets = new Set();
+    const server = createServer(socket => {
+        sockets.add(socket); socket.on('close', () => sockets.delete(socket));
+        let buffer = '';
+        socket.on('data', chunk => {
+            buffer += chunk;
+            while (buffer.includes('\n')) {
+                const i = buffer.indexOf('\n'), request = JSON.parse(buffer.slice(0, i)); buffer = buffer.slice(i + 1);
+                const data = request.type === 'hello' ? { capabilities: [] } : { instanceId: 'replacement', seq: 1, scopeRevision: '1', status: 'ready', rows: [], totalMatching: 0 };
+                socket.write(JSON.stringify({ id: request.id, success: true, data }) + '\n');
+            }
+        });
+    });
+    writeFileSync(join(root, 'server-registration-v1.json'), JSON.stringify({ version: 1, agentDir: root, serverDir: root }));
+    const timer = setTimeout(() => server.listen(join(root, 'pi-server.sock')), 100);
+    try {
+        const start = startWorkObservation(root, { cwd: root }, () => {});
+        const result = await observedList({ cwd: root });
+        await start;
+        assert.equal(result.instanceId, 'replacement');
+        assert.equal(result.status, 'ready');
+    } finally {
+        clearTimeout(timer); stopWorkObservation();
+        for (const socket of sockets) socket.destroy();
+        if (server.listening) await new Promise(resolve => server.close(resolve));
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('closing observation cancels a pending list without restarting a stopped generation', async () => {
+    const { observedList } = await import('../work-observation.ts');
+    const root = realpathSync(mkdtempSync('/tmp/pi-obs-cancel-'));
+    writeFileSync(join(root, 'server-registration-v1.json'), JSON.stringify({ version: 1, agentDir: root, serverDir: root }));
+    try {
+        const start = startWorkObservation(root, { cwd: root }, () => {});
+        const pending = assert.rejects(observedList({ cwd: root }), /abort|closed/i);
+        stopWorkObservation();
+        await pending; await start; await delay(30);
+        assert.equal(workObservation(), undefined);
+    } finally { stopWorkObservation(); rmSync(root, { recursive: true, force: true }); }
+});

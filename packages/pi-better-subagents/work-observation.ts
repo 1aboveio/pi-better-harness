@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { WorkClient } from "./shared-work-client.mjs";
+import { WorkClient, connectWorkClient } from "./shared-work-client.mjs";
 export const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 
 let client: WorkClient | undefined;
@@ -15,6 +15,7 @@ let retry: ReturnType<typeof setTimeout> | undefined;
 let backoff = 100;
 let failure = "Shared runtime observation is connecting.";
 let generation = 0;
+let connectionAbort = new AbortController();
 const details = new Map<string, any>();
 const pendingDetails = new Set<string>();
 let refresh = () => {};
@@ -72,7 +73,10 @@ async function collect(candidate: WorkClient, current: number) {
                         if (page.scopeRevision !== first.scopeRevision || page.instanceId !== first.instanceId) throw new Error("resync_required: active pages changed");
                         rows.push(...page.rows); cursor = page.nextCursor;
                     }
-                    const history = await candidate.get({ ...context!.origin, active: false, endedAfter: Date.now() - TERMINAL_NAVIGATOR_RETENTION_MS, limit: 200 });
+                    // Cover the disconnect interval, not merely the last 30 s of
+                    // worker time. The navigator starts its own visibility clock.
+                    const endedAfter = Math.min(Date.now() - TERMINAL_NAVIGATOR_RETENTION_MS, snapshot?.observedAtLocal ?? Date.now());
+                    const history = await candidate.get({ ...context!.origin, active: false, endedAfter, limit: 200 });
                     if (history.instanceId !== first.instanceId) throw new Error("resync_required: history changed");
                     if (current !== generation || candidate !== client) return;
                     const owed = [];
@@ -83,11 +87,20 @@ async function collect(candidate: WorkClient, current: number) {
                         owed.push(...page.rows); owedCursor = page.nextCursor;
                     } while (owedCursor);
                     if (current !== generation || candidate !== client) return;
+                    const historyRows = [...history.rows];
+                    let historyCursor = history.nextCursor;
+                    while (historyCursor) {
+                        const page = await candidate.get({ ...context!.origin, active: false, endedAfter, limit: 200, cursor: historyCursor });
+                        if (page.scopeRevision !== history.scopeRevision || page.instanceId !== first.instanceId) throw new Error("resync_required: history pages changed");
+                        historyRows.push(...page.rows); historyCursor = page.nextCursor;
+                    }
+                    if (current !== generation || candidate !== client) return;
                     const confirmed = await candidate.get(anchorScope);
                     if (current !== generation || candidate !== client) return;
                     if (confirmed.instanceId !== anchor.instanceId || confirmed.scopeRevision !== anchor.scopeRevision) throw new Error("resync_required: conversation changed during collection");
-                    const allRows = [...new Map([...rows, ...history.rows, ...owed].map(row => [row.meta.id, row])).values()];
+                    const allRows = [...new Map([...rows, ...historyRows, ...owed].map(row => [row.meta.id, row])).values()];
                     snapshot = { ...first, seq: anchor.seq, observedRevisionVector: anchor.observedRevisionVector, rows: allRows, nextCursor: undefined,
+                        observedAtLocal: Date.now(),
                         totalMatching: first.totalMatching + history.totalMatching, activity: { active: rows.length } };
                     completed = true; refresh();
                 } catch (error) {
@@ -109,6 +122,7 @@ async function collect(candidate: WorkClient, current: number) {
 
 async function connectObservation(current: number) {
     const saved = context!;
+    const signal = connectionAbort.signal;
     mkdirSync(saved.agentDir, { recursive: true, mode: 0o700 });
     saved.agentDir = realpathSync(saved.agentDir);
     let registration;
@@ -117,13 +131,21 @@ async function connectObservation(current: number) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         const path = "./runtime-client/src/runtime/client.mjs";
         const { ensureRuntime } = await import(path);
-        await ensureRuntime({ agentDir: saved.agentDir });
+        await ensureRuntime({ agentDir: saved.agentDir, signal });
         registration = JSON.parse(readFileSync(join(saved.agentDir, "server-registration-v1.json"), "utf8"));
     }
     if (current !== generation) return;
     if (registration.version !== 1 || registration.agentDir !== saved.agentDir) throw new Error("Invalid canonical runtime registration");
     client?.close();
-    const candidate = new WorkClient(join(registration.serverDir, "pi-server.sock"), saved.agentDir);
+    const candidate = await connectWorkClient(join(registration.serverDir, "pi-server.sock"), saved.agentDir, [], {
+        signal,
+        recover: async ({ timeoutMs, signal }) => {
+            const path = "./runtime-client/src/runtime/client.mjs";
+            const { ensureRuntime } = await import(path);
+            await ensureRuntime({ agentDir: saved.agentDir, serverDir: registration.serverDir, timeoutMs, signal });
+        },
+    });
+    if (current !== generation) { candidate.close(); return; }
     client = candidate;
     candidate.onChange(() => {
         if (current !== generation || candidate !== client) return;
@@ -166,9 +188,14 @@ async function ensureObservation() {
 }
 
 async function query(scope: object) {
+    const current = generation;
     for (let attempt = 0; ; attempt++) {
-        try { await ensureObservation(); return await client!.get(scope); }
-        catch (error) { if ((client && !client.closed) || attempt === 1) throw error; }
+        try {
+            await ensureObservation();
+            if (current !== generation) throw new Error("runtime-unavailable: observation closed");
+            return await client!.get(scope);
+        }
+        catch (error) { if (current !== generation || (client && !client.closed) || attempt === 1) throw error; }
     }
 }
 
@@ -183,6 +210,7 @@ export async function observedList(scope: object) { return query(scope); }
 
 export function stopWorkObservation() {
     generation++; context = undefined;
+    connectionAbort.abort(); connectionAbort = new AbortController();
     if (retry) clearTimeout(retry); retry = undefined;
     client?.close(); client = undefined; snapshot = undefined;
     connecting = undefined; collecting = undefined; collectingClient = undefined; dirty = false;

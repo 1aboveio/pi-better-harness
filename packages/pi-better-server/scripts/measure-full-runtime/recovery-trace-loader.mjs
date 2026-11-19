@@ -108,7 +108,11 @@ export async function load(url, context, nextLoad) {
     const current = `model = new WorkReadModel(workerData.agentDir, workerData.instanceId, {
     ...workerData.modelOptions, watch: workerSourceWatch(parentPort),
   });`;
-    const anchor = source.includes(legacy) ? legacy : current;
+    const observed = `model = new WorkReadModel(workerData.agentDir, workerData.instanceId, {
+    ...workerData.modelOptions, watch: workerSourceWatch(parentPort),
+    inventoryPhase: probe ? phase => Atomics.store(probe, 1, inventoryPhases.indexOf(phase)) : undefined,
+  });`;
+    const anchor = source.includes(legacy) ? legacy : source.includes(current) ? current : observed;
     if (source.split(anchor).length !== 2) throw Error('Fixture model creation anchor changed');
     source = source.replace(anchor, anchor + '\nbindOwnedModel(model,parentPort,import.meta.url);');
     const metricsAnchor = '...model.metrics, background:';

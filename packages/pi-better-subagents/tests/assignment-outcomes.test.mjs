@@ -124,7 +124,50 @@ function endedAssignment(id, conversationId) {
     return { store, meta: readMeta(id) };
 }
 
-test("ended outcomes retry admission without input for two assignments in one conversation", async () => {
+test("paused Goal still receives failed assignment notification without starting a turn", async () => {
+    const { store, meta } = failedAssignment("paused-notification");
+    const h = host("parent", { allowed: false });
+    try {
+        await h.start();
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 1, "failure must be visible while Goal admission is refused");
+        assert.equal(h.sent[0].options.triggerTurn, false);
+        assert.equal(h.sent[0].message.display, true);
+        assert.match(h.sent[0].message.content, /failed/);
+        assert.ok(readOutcome(meta).deliveryReceipt);
+        await h.close();
+        const replay = host("parent", { allowed: false, entries: h.entries });
+        try { await replay.start(); assert.equal(replay.sent.length, 0); }
+        finally { await replay.close(); }
+    } finally { await h.close(); store.close(); }
+});
+
+test("passive notification retries a failed transcript write without losing or duplicating the outcome", async () => {
+    const { store, meta } = failedAssignment("paused-write-retry");
+    const h = host("parent", { allowed: false });
+    const send = h.pi.sendMessage;
+    let fail = true;
+    h.pi.sendMessage = (message, options) => {
+        if (fail) throw new Error("fixture transcript unavailable");
+        return send(message, options);
+    };
+    try {
+        await h.start();
+        assert.equal(readOutcome(meta).deliveryReceipt, null);
+        assert.equal(h.sent.length, 0);
+        fail = false;
+        await h.handlers.get("agent_settled")({}, h.ctx);
+        await observeFixture();
+        assert.equal(h.sent.length, 1);
+        assert.equal(h.sent[0].options.triggerTurn, false);
+        assert.ok(readOutcome(meta).deliveryReceipt);
+        await h.handlers.get("agent_settled")({}, h.ctx);
+        await observeFixture();
+        assert.equal(h.sent.length, 1);
+    } finally { await h.close(); store.close(); }
+});
+
+test("ended outcomes notify without admission for two assignments in one conversation", async () => {
     mock.timers.enable({ apis: ["setInterval"] });
     const options = { allowed: false };
     const h = host("parent", options);
@@ -138,16 +181,15 @@ test("ended outcomes retry admission without input for two assignments in one co
         await h.handlers.get("agent_start")({}, h.ctx);
         mock.timers.tick(1000);
         await observeFixture();
-        assert.equal(first.store.listOutbox().find((e) => e.eventId === readOutcome(first.meta).eventId).attempts, 0);
-        assert.equal(h.sent.length, 0);
-        const firstDeferral = readMeta(first.meta.id).outcomeDeliveryDeferredReason;
+        assert.equal(readOutcome(first.meta).deliveryReceipt, null);
+        assert.equal(h.sent.length, 0, "busy passive delivery waits for an idle transcript");
         options.allowed = true; // No workflow event, human input or result poll.
         h.ctx.isIdle = () => true;
         await h.handlers.get("agent_settled")({}, h.ctx);
         await observeFixture();
         await getCallbackBatcher(h.pi).flush();
         assert.ok(readOutcome(first.meta).deliveryReceipt);
-        // The first callback triggers a parent interpretation turn.
+        // A later explicit parent turn can inspect the retained notification.
         h.ctx.isIdle = () => false;
         await h.handlers.get("agent_start")({}, h.ctx);
         const call = (meta, params) => h.tools.get("subagent_result").execute("result", { id: meta.id, ...params }, undefined, undefined, h.ctx);
@@ -163,15 +205,14 @@ test("ended outcomes retry admission without input for two assignments in one co
         options.allowed = false;
         mock.timers.tick(1000);
         await observeFixture();
-        const secondDeferral = readMeta(second.meta.id).outcomeDeliveryDeferredReason;
+        assert.ok(readOutcome(second.meta).deliveryReceipt, "no user input is needed for notification");
         options.allowed = true;
         mock.timers.tick(1000);
         await observeFixture();
         assert.equal(readMeta(second.meta.id).outcomeDeliveryDeferredReason, undefined, "retry obtains fresh admission");
         await getCallbackBatcher(h.pi).flush();
         assert.ok(readOutcome(second.meta).deliveryReceipt, "ended follow-up must retry even with no running children or lifecycle event");
-        assert.match(firstDeferral, /Goal refused/);
-        assert.match(secondDeferral, /Goal refused/);
+        assert.equal(h.sent[1].options.triggerTurn, false);
         assert.equal(unfinished.details.assignment.state, "failed");
         assert.match(unfinished.details.assignment.reason, /continue unfinished work/);
         assert.equal(readOutcome(second.meta).outcome, "failed");
@@ -271,6 +312,28 @@ test("ordinary failure uses actual finalizer, callback batcher and result acknow
     } finally { await h.close(); store.close(); }
 });
 
+test("a workflow admission slower than 50ms still wakes the parent", async () => {
+    const { store, meta } = failedAssignment("slow-workflow-admission");
+    const h = host("parent", { noGoal: true });
+    let request;
+    h.pi.events.on("pi-better-goal:operation-resume-admission", (value) => {
+        request = value;
+        request.pending?.();
+    });
+    try {
+        await h.start({ settleMs: 125 });
+        assert.ok(request);
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 0, "the callback waits for the pending workflow check");
+        request.reply({ allowed: true, revision: 1, isCurrent: () => true });
+        await new Promise(resolve => setImmediate(resolve));
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 1);
+        assert.equal(h.sent[0].options.triggerTurn, true);
+        assert.ok(readOutcome(meta).deliveryReceipt);
+    } finally { await h.close(); store.close(); }
+});
+
 test("an earlier legal batch cannot stand in for a later exact outcome or its receipt", async () => {
     const earlier = failedAssignment("controlled-earlier-outcome");
     const h = host();
@@ -337,8 +400,8 @@ test("quoted outcome text is not a recipient receipt", () => {
     assert.equal(outcomeTranscriptReceipt([{ id: "quote", type: "message", message: { role: "custom", customType: "background-completion-batch", content: "[outcome:quoted-event]" } }], "quoted-event"), null);
 });
 
-test("admission returning after parent teardown cannot claim a retained outcome", async () => {
-    const { store, meta } = failedAssignment("late-parent-admission");
+for (const allowed of [true, false]) test(`admission returning after parent teardown cannot claim a retained outcome (allowed=${allowed})`, async () => {
+    const { store, meta } = failedAssignment(`late-parent-admission-${allowed}`);
     const h = host("parent", { noGoal: true });
     let request;
     h.pi.events.on("pi-better-goal:operation-resume-admission", (value) => { request = value; });
@@ -357,7 +420,7 @@ test("admission returning after parent teardown cannot claim a retained outcome"
         assert.ok(expirations.length);
         assert.equal(store.listOutbox().find((e) => e.eventId === readOutcome(meta).eventId).attempts, 0, "admission must still be pending before teardown");
         await h.close();
-        request.reply({ allowed: true, revision: 1, isCurrent: () => true });
+        request.reply({ allowed, revision: 1, isCurrent: () => true });
         for (const expire of expirations) expire();
         await new Promise(resolve => setImmediate(resolve));
         await getCallbackBatcher(h.pi).flush();
@@ -471,12 +534,10 @@ test("same-session different branch cannot receive or inspect the outcome", asyn
     } finally { await right.close(); store.close(); }
 });
 
-test("inactive and paused parents retain outcomes; transcript replay repairs lost receipts without another model handoff", async () => {
+test("inactive parents retain outcomes; transcript replay repairs lost receipts without another model handoff", async () => {
     const { store, meta } = failedAssignment("replay-outcome");
     const wrong = host("unrelated");
     try { await wrong.start(); await getCallbackBatcher(wrong.pi).flush(); assert.equal(wrong.sent.length, 0); } finally { await wrong.close(); }
-    const paused = host("parent", { allowed: false });
-    try { await paused.start(); await getCallbackBatcher(paused.pi).flush(); assert.equal(paused.sent.length, 0); assert.equal(readOutcome(meta).deliveryReceipt, null); } finally { await paused.close(); }
     const eventId = readOutcome(meta).eventId;
     const entries = [{ id: "durable-handoff", type: "message", message: { role: "custom", customType: "background-completion-batch", details: { completionEventIds: [eventId] }, content: "Retained outcome delivery" } }];
     const replay = host("parent", { entries: JSON.parse(JSON.stringify(entries)) });
