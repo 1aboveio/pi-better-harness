@@ -69,3 +69,4 @@ parentPort.on("message", message => {
   } finally { db.close(); }
   parentPort.postMessage({ type: "diagnostic-finished", durationMs: performance.now() - started });
 });
+parentPort.postMessage({ type: "diagnostic-stall-handler-ready" });
