@@ -826,13 +826,17 @@ export class ObservedWaitHost {
             if (inspection?.token !== launchToken || (stop && stop.token !== launchToken))
                 return;
             if (inspection.terminal) {
+                if (inspection.status !== "lost" && inspection.result?.groupCleanup !== "unproven")
+                    return;
                 const pgid = inspection.command?.pgid ?? inspection.command?.pid;
                 if (inspection.cleanup?.groupEmpty === true || (pgid && !processGroupAlive(pgid))) {
                     store.verifyAssignmentCleanup(candidate.operationId, launchToken, candidate.terminalRevision);
+                    return;
                 }
-                return;
+                if (!pgid)
+                    return;
             }
-            if (!stop && !this.localCancels.has(taskId)) {
+            if (!this.localCancels.has(taskId)) {
                 this.localCancels.add(taskId);
                 try {
                     await this.supervisor.stop(taskId, { token: launchToken, reason: "owning assignment ended" });

@@ -213,15 +213,16 @@ export class RuntimeResultSupervision {
       return;
     }
     this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: waiting for supervisor evidence`;
-    if (inspection.terminal && operation.terminalRevision > 0) {
+    if (inspection.terminal) {
+      if (inspection.status !== "lost" && inspection.result?.groupCleanup !== "unproven") return;
       const pgid = inspection.command?.pgid ?? inspection.command?.pid;
       if (inspection.cleanup?.groupEmpty === true || (pgid && !processGroupAlive(pgid))) {
         this.store.verifyAssignmentCleanup(operation.operationId, operation.launchToken, operation.terminalRevision);
-      } else {
-        this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: process group exit unverified`;
+        return;
       }
+      this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: process group exit unverified`;
+      if (!pgid) return;
     }
-    if (inspection.terminal || stop) return;
     this.assignmentCleanup = supervisor.stop(operation.taskId, { token: operation.launchToken, reason: "owning assignment ended" })
       .catch((error: unknown) => { this.assignmentCleanupReason = `Assignment cleanup for ${operation.taskId}: ${String(error)}`; })
       .finally(() => { this.assignmentCleanup = undefined; });
