@@ -47,7 +47,13 @@ process.on("message", async request => {
         if (request.traceLaunch) stopTrace = observeLaunchPhases(message => {
             if (process.connected) process.send(message, () => {});
         });
-        const result = await tool.execute(request.key, request.params, undefined, undefined, session.extensionRunner.createContext());
+        const context = session.extensionRunner.createContext();
+        // Independent oracle: read the actual SDK foreground before tool preparation yields.
+        if (fixture) process.send({ invocation: request.id, entry: {
+            cwd: context.cwd, sessionId: context.sessionManager.getSessionId(),
+            branchId: context.sessionManager.getLeafId(),
+        } });
+        const result = await tool.execute(request.key, request.params, undefined, undefined, context);
         stopTrace?.(); stopTrace = undefined;
         process.send({ id: request.id, result, ...(fixture ? { state: state() } : {}) });
     } catch (error) { stopTrace?.("failed"); process.send({ id: request.id, error: String(error), stack: error.stack, ...(fixture ? { state: state() } : {}) }); }

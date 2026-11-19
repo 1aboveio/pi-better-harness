@@ -1,5 +1,6 @@
 // Generated fixed launch domain from packages/pi-better-subagents/index.ts. Do not edit directly.
 import { appendTimingWake, removeTimingReceipt, receiptTimingWake, timingWakeReceipt } from "./timing-notifications.domain.mjs";
+import { captureLaunchContext } from "./launch-context.domain.mjs";
 /**
  * pi-better-subagents — Claude Code-style async subagents for pi.
  *
@@ -168,7 +169,7 @@ function callbackOriginFromContext(ctx) {
     catch {
         sessionId = undefined;
     }
-    return { cwd: ctx.cwd, sessionId };
+    return { cwd: ctx.cwd, sessionId, branchId: ctx.sessionManager?.getLeafId?.() ?? null };
 }
 /** Origin with a readable session id, or undefined when identity is unavailable. */
 function verifiedOriginFromContext(ctx) {
@@ -2728,10 +2729,12 @@ export default function (pi, managed) {
     const registerSpawnTool = (definition) => {
         registeredSpawnSchemas.set(definition.name, definition.parameters);
         pi.registerTool(managed ? { ...definition, async execute(key, params, signal, onUpdate, ctx) {
+                ctx = captureLaunchContext(ctx);
                 restoreDelegationMode(ctx);
                 await workerOperations.start();
                 return definition.execute(key, params, signal, onUpdate, ctx);
             } } : { ...definition, async execute(key, params, _signal, _onUpdate, ctx) {
+                ctx = captureLaunchContext(ctx);
                 catalogHostFrom(ctx);
                 const { submitManagedLaunch } = await import("./managed-launch-client.domain.mjs");
                 return await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, params));

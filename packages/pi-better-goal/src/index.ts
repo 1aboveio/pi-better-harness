@@ -10,6 +10,7 @@ import { OPERATION_RESUME_ADMISSION, operationOwnerMatches, type OperationResume
 
 import {
   collectActivitySnapshot,
+  hasUnverifiedActivity,
   planBackgroundDrainWake,
   summarizeActiveBackground,
   terminalAttentionSignature,
@@ -56,6 +57,7 @@ import {
   type ActivitySnapshot,
   type BackgroundActivityProvider,
   type BackgroundWorkItem,
+  type BackgroundProviderSnapshot,
   type GoalSnapshot,
 } from "./types.js";
 
@@ -203,6 +205,7 @@ export function finishedSinceQuestion(
   activeAtStart: ReadonlyMap<string, BackgroundWorkItem>,
   snapshot: ActivitySnapshot,
 ): BackgroundWorkItem[] {
+  if (hasUnverifiedActivity(snapshot)) return [];
   const stillActive = activeItemsByKey(snapshot);
   const current = new Map<string, BackgroundWorkItem>();
   for (const provider of snapshot.providers) {
@@ -309,6 +312,12 @@ export default function (pi: ExtensionAPI): void {
   initializeNavigatorPanels(pi);
   const providers = new Map<string, BackgroundActivityProvider>();
   const providerUnsubscribers = new Map<string, () => void>();
+  const providerCache = new Map<string, BackgroundProviderSnapshot>();
+  const providerCacheSequences = new Map<string, number>();
+  const dirtyProviders = new Set<string>();
+  const providerBindings = new Map<string, number>();
+  const compatibilityReadAt = new Map<string, number>();
+  let providerDeadline: ReturnType<typeof setTimeout> | undefined;
   providers.set("subagents", {
     id: "subagents",
     label: "Subagents",
@@ -622,7 +631,7 @@ export default function (pi: ExtensionAPI): void {
     if (!auditIsCurrent() || !isPokeable(goal)) return;
     if (!boundCommandReady(goal, ctx)) return;
     const snapshot = await publishSnapshot(ctx);
-    if (!snapshot || !auditIsCurrent() || snapshot.foregroundRunning || snapshot.backgroundRunning) return;
+    if (!snapshot || !auditIsCurrent() || snapshot.foregroundRunning || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) return;
 
     continuationQueuedFor = goal.goalId;
     const content = kind === "background-drained"
@@ -668,14 +677,49 @@ export default function (pi: ExtensionAPI): void {
     return goal;
   };
 
-  const publishSnapshot = async (ctx: ExtensionContext): Promise<ActivitySnapshot | null> => {
+  const publishSnapshot = async (ctx: ExtensionContext, explicit = true): Promise<ActivitySnapshot | null> => {
+    bindProviderSubscriptions();
     const execution = executionGeneration;
     const sequence = ++snapshotSequence;
-    const snapshot = await collectActivitySnapshot(ctx, providers.values(), foregroundRunning);
+    const snapshot = await collectActivitySnapshot(ctx, [...providers.values()].map(provider => ({
+      ...provider,
+      getActivity: async () => {
+        const cached = providerCache.get(provider.id);
+        if (cached && !provider.onActivityChanged && !explicit && Date.now() < (compatibilityReadAt.get(provider.id) ?? 0)) return cached;
+        if (cached && provider.onActivityChanged && !dirtyProviders.has(provider.id) &&
+            !(typeof cached.nextDeadline === "number" && cached.nextDeadline <= Date.now())) return cached;
+        dirtyProviders.delete(provider.id);
+        let value: BackgroundProviderSnapshot;
+        try {
+          value = await provider.getActivity(ctx);
+          if (provider.activityVersion === 1 && value.nextDeadline !== null &&
+              (typeof value.nextDeadline !== "number" || !Number.isFinite(value.nextDeadline))) {
+            throw new Error(`${provider.id}: activity v1 requires an explicit nextDeadline`);
+          }
+        } catch (error) {
+          // A failed fresh read must not resurrect an older verified cache.
+          if (execution === executionGeneration && providers.get(provider.id) === provider &&
+              sequence >= (providerCacheSequences.get(provider.id) ?? 0)) {
+            providerCacheSequences.set(provider.id, sequence);
+            providerCache.delete(provider.id);
+          }
+          throw error;
+        }
+        // Explicit inspections may finish before an older notification read.
+        if (execution === executionGeneration && providers.get(provider.id) === provider &&
+            sequence >= (providerCacheSequences.get(provider.id) ?? 0)) {
+          providerCacheSequences.set(provider.id, sequence);
+          providerCache.set(provider.id, value);
+          if (!provider.onActivityChanged) compatibilityReadAt.set(provider.id, Date.now() + POLL_INTERVAL_MS);
+        }
+        return value;
+      },
+    })), foregroundRunning);
     if (execution !== executionGeneration) return null;
     if (sequence < lastAppliedSnapshotSequence) return latestSnapshot;
     lastAppliedSnapshotSequence = sequence;
     latestSnapshot = snapshot;
+    armProviderDeadline();
 
     const goal = currentGoalSnapshot(ctx);
     const wakePlan = planBackgroundDrainWake(backgroundDrainTracker, goal, snapshot);
@@ -688,7 +732,7 @@ export default function (pi: ExtensionAPI): void {
       scheduleIdleContinuation(goal, ctx, "background-drained", snapshot);
     }
 
-    if (snapshot.foregroundRunning || snapshot.backgroundRunning) {
+    if (snapshot.foregroundRunning || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) {
       clearIdleContinuation();
     }
 
@@ -732,7 +776,7 @@ export default function (pi: ExtensionAPI): void {
     }
     collecting = true;
     const session = sessionGeneration;
-    void publishSnapshot(ctx).finally(() => {
+    void publishSnapshot(ctx, false).finally(() => {
       if (session !== sessionGeneration) return;
       collecting = false;
       if (collectionPending) {
@@ -761,14 +805,48 @@ export default function (pi: ExtensionAPI): void {
   };
 
   const syncPollingState = (): void => {
+    bindProviderSubscriptions();
+    armProviderDeadline();
     const ctx = currentCtx;
     const goal = ctx ? currentGoalSnapshot(ctx) : null;
-    if (ctx && (isPokeable(goal) || latestSnapshot?.backgroundRunning === true)) {
+    if (ctx && [...providers.values()].some(provider => !provider.onActivityChanged) &&
+        (isPokeable(goal) || latestSnapshot?.backgroundRunning === true)) {
       startPolling();
     } else {
       stopPolling();
     }
   };
+
+  function armProviderDeadline(): void {
+    if (providerDeadline) clearTimeout(providerDeadline);
+    providerDeadline = undefined;
+    if (!currentCtx) return;
+    const goal = getGoal(currentCtx);
+    if (isForegroundBusy(currentCtx) || (goal && (!isPokeable(goal) || currentContinuationState(currentCtx, goal.goalId)?.blocked))) return;
+    const deadlines = [...providerCache.values()].map(value => value.nextDeadline)
+      .filter((value): value is number => typeof value === "number" && value > Date.now());
+    if (!deadlines.length) return;
+    const execution = executionGeneration;
+    providerDeadline = setTimeout(() => {
+      providerDeadline = undefined;
+      if (execution === executionGeneration) collectIfPossible();
+    }, Math.min(MAX_TIMER_DELAY_MS, Math.max(1, Math.min(...deadlines) - Date.now())));
+    providerDeadline.unref?.();
+  }
+
+  function bindProviderSubscriptions(): void {
+    for (const provider of providers.values()) {
+      if (!provider.onActivityChanged || providerBindings.get(provider.id) === executionGeneration) continue;
+      providerUnsubscribers.get(provider.id)?.();
+      const execution = executionGeneration;
+      providerBindings.set(provider.id, execution);
+      providerUnsubscribers.set(provider.id, provider.onActivityChanged(() => {
+        if (!currentCtx || execution !== executionGeneration || providers.get(provider.id) !== provider) return;
+        dirtyProviders.add(provider.id);
+        collectIfPossible();
+      }, currentCtx));
+    }
+  }
 
   const installGoalWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) {
@@ -899,12 +977,16 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     const accepted = candidate as BackgroundActivityProvider;
+    if (accepted.activityVersion !== undefined && accepted.activityVersion !== 1) return;
+    if (accepted.activityVersion === 1 && typeof accepted.onActivityChanged !== "function") return;
     providerUnsubscribers.get(accepted.id)?.();
     providerUnsubscribers.delete(accepted.id);
     providers.set(accepted.id, accepted);
-    if (typeof accepted.onActivityChanged === "function") {
-      providerUnsubscribers.set(accepted.id, accepted.onActivityChanged(collectIfPossible));
-    }
+    providerCache.delete(accepted.id);
+    providerCacheSequences.set(accepted.id, ++snapshotSequence);
+    dirtyProviders.add(accepted.id);
+    providerBindings.delete(accepted.id);
+    bindProviderSubscriptions();
     if (latestSnapshot) collectIfPossible();
   });
 
@@ -935,7 +1017,7 @@ export default function (pi: ExtensionAPI): void {
     if (!previous.autoContinue && preferences.autoContinue) {
       const snapshot = await publishSnapshot(ctx);
       const goal = getGoal(ctx);
-      if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning) {
+      if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning && !hasUnverifiedActivity(snapshot)) {
         scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
       }
     }
@@ -1269,6 +1351,8 @@ export default function (pi: ExtensionAPI): void {
     lastAgentEvidence = null;
     collecting = false;
     collectionPending = false;
+    providerCache.clear();
+    dirtyProviders.clear();
     currentCtx = ctx;
     foregroundRunning = !ctx.isIdle();
     agentLoopActive = false;
@@ -1306,12 +1390,22 @@ export default function (pi: ExtensionAPI): void {
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
     syncPollingState();
-    if (restoredGoal?.status === "active" && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning && !snapshot.backgroundRunning) {
+    if (restoredGoal?.status === "active" && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning && !snapshot.backgroundRunning && !hasUnverifiedActivity(snapshot)) {
       scheduleIdleContinuation(restoredGoal, ctx, "continuation");
     }
   });
 
   pi.on("ui_prompt_start", () => { uiPromptDepth += 1; });
+  pi.on("session_tree", async (_event, ctx) => {
+    executionGeneration += 1;
+    clearIdleContinuation();
+    backgroundDrainTracker = null;
+    continuationQueuedFor = null;
+    providerCache.clear();
+    currentCtx = ctx;
+    await publishSnapshot(ctx);
+    syncPollingState();
+  });
   pi.on("ui_prompt_end", () => { uiPromptDepth = Math.max(0, uiPromptDepth - 1); });
 
   pi.on("input", async (event, ctx) => {
@@ -1405,7 +1499,9 @@ export default function (pi: ExtensionAPI): void {
     }
 
     if (!isPokeable(goal)) return;
-    const backgroundInstruction = snapshot.backgroundRunning
+    const backgroundInstruction = hasUnverifiedActivity(snapshot)
+      ? " Background activity is unverified. Do not infer completion or drained work from missing activity; inspect a verified observation before completing the goal."
+      : snapshot.backgroundRunning
       ? ` The goal still has delegated background work running (${summarizeActiveBackground(snapshot)}). Foreground idleness alone is not goal completion; keep any structured plan current and do not mark verification, the plan, or the goal complete until every relevant delegated task reaches a terminal state and its result or failure has been inspected and integrated.`
       : "";
     if (harnessPresent) {
@@ -1524,7 +1620,7 @@ export default function (pi: ExtensionAPI): void {
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
     const goal = getGoal(ctx);
-    if (!isPokeable(goal) || snapshot.backgroundRunning) {
+    if (!isPokeable(goal) || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) {
       return;
     }
     // A run the scheduler says is only waiting (a retry is due at a known time) is not stuck: wake at
@@ -1565,6 +1661,7 @@ export default function (pi: ExtensionAPI): void {
       updatedAt: Math.floor(now / 1000),
     });
     if (blocked) {
+      syncPollingState();
       refreshGoalWidget?.();
       if (ctx.hasUI) {
         ctx.ui.notify(
@@ -1613,6 +1710,11 @@ export default function (pi: ExtensionAPI): void {
     terminalInputIsEditor = undefined;
     uiPromptDepth = 0;
     stopPolling();
+    if (providerDeadline) clearTimeout(providerDeadline);
+    providerDeadline = undefined;
+    for (const off of providerUnsubscribers.values()) off();
+    providerUnsubscribers.clear();
+    providerCache.clear();
     foregroundRunning = false;
     pendingQuestions.clear();
     clearIdleContinuation();

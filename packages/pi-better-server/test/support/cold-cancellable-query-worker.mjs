@@ -6,7 +6,8 @@ const buffer = message => {
 };
 parentPort.on("message", buffer);
 await new Promise(resolve => setTimeout(resolve, 600));
-// Stop capture before RPC installation so already-owned messages cannot replay twice.
-parentPort.off("message", buffer);
 await import("./cancellable-query-worker.mjs");
+// That module installs RPC at the end of evaluation, with no later async work.
+// Transfer the mailbox in this continuation before another message can arrive.
+parentPort.off("message", buffer);
 for (const message of deferred) parentPort.emit("message", message);

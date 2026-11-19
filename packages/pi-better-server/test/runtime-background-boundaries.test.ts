@@ -161,10 +161,12 @@ test("Background history applies bounded pages, status filters and stable cursor
   }
 });
 
-test("Background indexed pages merge legacy rows and fence cursors and off-page incidents", { timeout: 15000 }, async () => {
+test("Background indexed pages merge legacy rows and fence cursors and off-page incidents", { timeout: 15000 }, async t => {
   const root = mkdtempSync("/tmp/p754-mixed-");
   const writer = openStore({ path: join(root, "operation-coordinator.sqlite") });
-  const executor = new WorkQueryExecutor(root, "mixed-instance", { modelOptions: { baseDir: join(root, "subagents"), durableDir: join(root, "archives"), intervalMs: 50 } });
+  const executor = new WorkQueryExecutor(root, "mixed-instance", {
+    workerUrl: new URL("./support/history-metadata-evidence-worker.mjs", import.meta.url),
+    modelOptions: { baseDir: join(root, "subagents"), durableDir: join(root, "archives"), intervalMs: 50 } });
   const socket = Object.assign(new EventEmitter(), { destroyed: false, writableLength: 0, write: (_line: string): boolean => true });
   const client = executor.connect(socket as unknown as Socket);
   const scope = { background: true, backgroundHistory: true, cwd: root, sessionId: "parent", limit: 2, statuses: ["succeeded"] };
@@ -230,6 +232,10 @@ test("Background indexed pages merge legacy rows and fence cursors and off-page 
       assert.ok(Date.now() < deadline, "a completed-history subscriber was not notified"); await delay(20);
     }
     const metrics = JSON.parse((await client.handle({ type: "runtime_get_metrics" })).json);
+    if (metrics.background.history.metadataReads !== 7) {
+      try { t.diagnostic(JSON.stringify({ mixedHistoryReadFailure: { metadataReads: metrics.background.history.metadataReads,
+        reads: metrics.historyMetadataEvidence } }).slice(0, 8192)); } catch {}
+    }
     assert.equal(metrics.background.history.metadataReads, 7, "six initial records and one changed record are the only legacy metadata reads");
   } finally {
     client.close(); await executor.close(); writer.close();

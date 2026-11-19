@@ -19,6 +19,10 @@ export interface BackgroundDrainPlan {
   wakeSignature: string | null;
 }
 
+export function hasUnverifiedActivity(snapshot: ActivitySnapshot): boolean {
+  return snapshot.coverage === "unverified" || snapshot.providers.some(provider => provider.coverage === "unverified");
+}
+
 export function activeItems(snapshot: ActivitySnapshot): BackgroundWorkItem[] {
   return snapshot.providers.flatMap((provider) => provider.items.filter((item) => item.active));
 }
@@ -50,6 +54,10 @@ export function planBackgroundDrainWake(
     return { nextTracker: null, wakeSignature: null };
   }
 
+  if (hasUnverifiedActivity(snapshot)) {
+    return { nextTracker: tracker?.goalId === goal.goalId ? tracker : null, wakeSignature: null };
+  }
+
   const active = activeSignature(snapshot);
   if (active) {
     return {
@@ -69,6 +77,7 @@ export function planBackgroundDrainWake(
 }
 
 export function summarizeActiveBackground(snapshot: ActivitySnapshot): string {
+  if (hasUnverifiedActivity(snapshot)) return "Background activity is unverified.";
   const active = activeItems(snapshot);
   if (active.length === 0) {
     return "No active background work.";
@@ -95,7 +104,10 @@ export async function collectActivitySnapshot(
       const snapshot = await provider.getActivity(ctx);
       const normalized: BackgroundProviderSnapshot = {
         providerId: snapshot.providerId || provider.id,
+        coverage: snapshot.coverage ?? "verified",
         items: snapshot.items,
+        ...(snapshot.nextDeadline !== undefined ? { nextDeadline: snapshot.nextDeadline } : {}),
+        ...(!provider.onActivityChanged ? { compatibilityIntervalMs: 2_000 } : {}),
       };
       const label = snapshot.label ?? provider.label;
       if (label !== undefined) {
@@ -105,6 +117,7 @@ export async function collectActivitySnapshot(
     } catch (error) {
       const failedSnapshot: BackgroundProviderSnapshot = {
         providerId: provider.id,
+        coverage: "unverified",
         items: [
           {
             id: `${provider.id}:provider-error`,
@@ -138,14 +151,16 @@ export async function collectActivitySnapshot(
     0,
   );
 
+  const coverage = providerSnapshots.some(provider => provider.coverage === "unverified") ? "unverified" : "verified";
   const category: ActivityCategory = foregroundRunning
     ? "foreground-running"
-    : activeBackgroundCount > 0
+    : coverage === "unverified" ? "unverified" : activeBackgroundCount > 0
       ? "background-running"
       : "idle-waiting";
 
   return {
     version: 1,
+    coverage,
     category,
     foregroundRunning,
     backgroundRunning: activeBackgroundCount > 0,

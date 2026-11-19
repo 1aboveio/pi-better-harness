@@ -29,6 +29,7 @@ for (const historyActive of [false, true]) test(`repaired legacy watch releases 
   const background = (model as any).background;
   const scope = { background: true, cwd: root, sessionId: owner.sessionId };
   try {
+    assert.equal(model.snapshot(scope).status, "rebuilding", "deferred inbox coverage is not yet verified");
     await model.reconcile();
     assert.equal(model.snapshot(scope).status, "ready");
     if (historyActive) {
@@ -206,6 +207,12 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([(async () => {
+      // Background rows can be ready before the worker publishes its initial coordinator revision.
+      // Finish and verify startup before warming either cache scope used by the list.
+      await executor.livenessReasons();
+      const baseline = await executor.snapshot({});
+      assert.equal(baseline.status, "ready", baseline.reason);
+      assert.notEqual(baseline.observedRevisionVector.coordinator, "unknown", "coordinator revision is verified before warming the list cache");
       const cachedList = (await run("bg_task_list")).content[0].text;
       assert.match(cachedList, new RegExp(budgetId));
       // Original output.test.ts afterEach removes files without registry removal.
@@ -325,7 +332,6 @@ for (const historyMode of [false, true]) test(historyMode ? "active and incremen
       lease.store.recordTerminalOutcome({ operationId, eventId: operationId, owner: recipient, outcome: "succeeded",
         evidence: [{ kind: "terminal-record", ref: operationId }] });
     }
-    await model?.reconcile();
     const scope = { background: true, cwd: root, sessionId: owner.sessionId };
     await model?.reconcile();
     observation.read(scope); observation.refresh();

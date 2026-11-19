@@ -48,6 +48,7 @@ export class WorkQueryExecutor {
   private internalRecoveryDemand = false;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private watchdog?: ReturnType<typeof setInterval>;
+  private watchdogCheck?: ReturnType<typeof setImmediate>;
   private lastResponse = performance.now();
   private heartbeat!: BigInt64Array;
   private probe?: Int32Array;
@@ -83,6 +84,18 @@ export class WorkQueryExecutor {
     this.lag.enable();
     this.worker = this.startWorker();
     this.watchdog = setInterval(() => {
+      if (this.closed || this.failure || performance.now() - this.lastResponse <= (this.options.watchdogMs ?? 4000)) return;
+      // Drain queued worker responses before treating a delayed timer as worker silence.
+      this.watchdogCheck ??= setImmediate(() => {
+        this.watchdogCheck = undefined;
+        this.checkWatchdog();
+      });
+      this.watchdogCheck.unref();
+    }, Math.min(250, (this.options.watchdogMs ?? 4000) / 4));
+    this.watchdog.unref();
+  }
+
+  private checkWatchdog() {
       const silenceMs = performance.now() - this.lastResponse;
       if (!this.closed && !this.failure && silenceMs > (this.options.watchdogMs ?? 4000)) {
         const tick = Atomics.load(this.heartbeat, 0);
@@ -98,8 +111,6 @@ export class WorkQueryExecutor {
         }
         this.fail(new Error("runtime-unhealthy: read worker unresponsive; watchdog deadline exceeded"));
       }
-    }, Math.min(250, (this.options.watchdogMs ?? 4000) / 4));
-    this.watchdog.unref();
   }
 
   private startWorker() {
@@ -391,6 +402,7 @@ export class WorkQueryExecutor {
   async close() {
     this.closed = true;
     if (this.watchdog) clearInterval(this.watchdog);
+    if (this.watchdogCheck) clearImmediate(this.watchdogCheck);
     if (this.recoveryTimer) { clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined; }
     this.fail(new Error("runtime-unavailable: query executor closed"));
     for (const connection of this.streams.keys()) this.detach(connection);

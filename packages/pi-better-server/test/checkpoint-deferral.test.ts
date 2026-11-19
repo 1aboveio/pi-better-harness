@@ -400,7 +400,7 @@ test("inbox corruption is not lock deferral and close does not require an initia
     assert.match(model.snapshot().reason!, /not a database/);
     assert.equal(model.metrics.initialization.contentions, 0);
     assert.equal(model.metrics.assignments.applied, null);
-    assert.deepEqual(names((model as any).db), ["main", "log_checkpoints"]);
+    assert.deepEqual(names((model as any).db), ["main", "log_checkpoints"], "corrupt assignment initialization cannot acquire the later Background participant");
     t.mock.timers.tick(1000); await model.reconcile();
     assert.equal(model.metrics.initialization.attempts, 1);
     assert.throws(() => model.livenessReasons(), /unverified/);

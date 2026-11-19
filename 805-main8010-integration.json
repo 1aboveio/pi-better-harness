@@ -1,0 +1,67 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "ordinary-main-integration-complete-canonical-qualification-pending",
+  "head": "d8a0e90fd1c14cc68caa204645ff72cf11a76957",
+  "parents": ["2957229c480069886591dc5abff29ff63117f3a5", "8010e1a0f7e09b67d8ba882787e1a72cdf5ad6de"],
+  "standingOrders": [],
+  "modelReadback": { "session": "sa_mwkb0p9t_17", "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "source": "Actual session model_change and thinking_level_change JSONL records reread this turn." },
+  "integration": {
+    "method": "Fetch exact approved main8010 object, then ordinary --no-ff merge into existing published805 history. No reset/rebase/force or whole-side conflict selection.",
+    "conflictingFiles": ["packages/pi-better-server/src/runtime/read-model.ts", "packages/pi-better-server/test/runtime-unsupported-schema.test.ts"],
+    "readModelResolution": "Keep805 assignmentBaseline/assignmentFault/refreshAssignments and main coordinator fields plus schema preflight. Refresh existing assignment state first; reject unsupported source before resetting/advancing metadata repair. Preserve main deferred repair reset and805 rejection memoization/restoration path, bounded workPage and closed watcher fences.",
+    "testResolution": "Retain detailed restored-status assertion and failure-state evidence from805. The same unsupported-schema regression's original assertions and limits remain; no test removed or waived.",
+    "diagnostics": "scripts/reload-ssh-durability.e2e.test.mjs is byte-identical to2957229c, including723f legacy callback capture, body/teardown phase markers, first-error logging and all77 original assertion/wait calls. Recovery failure-phase diagnostics in query-executor remain present.",
+    "generatedSources": "Fixed runtime domain regenerated through existing script, with no unstaged generated drift. Canonical Subagents index and launch-context sources match embedded TS copies.",
+    "localMergeability": "No unresolved entries, tracked worktree clean after merge, exactmain8010 and prior2957229c are both verified ancestors.",
+    "remoteMergeability": "Coordinator must verify after publication; no remote status inferred from local ancestry alone."
+  },
+  "proof": [
+    { "command": "git fetch origin 8010e1a0f7e09b67d8ba882787e1a72cdf5ad6de", "exit": 0, "evidence": ".private-805/logs/main8010-fetch.log" },
+    { "command": "git merge --no-ff --no-commit 8010e1a0f7e09b67d8ba882787e1a72cdf5ad6de", "exit": 1, "expected": true, "error": "Content conflict read-model.ts and add/add runtime-unsupported-schema.test.ts; semantically resolved before checks/commit.", "evidence": ".private-805/logs/main8010-merge.log" },
+    { "command": "node scripts/sync-runtime-domain.mjs", "exit": 0, "evidence": ".private-805/logs/main8010-sync.log" },
+    { "command": "npm run typecheck --workspace packages/pi-better-server", "exit": 0, "evidence": ".private-805/logs/main8010-server-types.log" },
+    { "command": "npm run typecheck --workspace packages/pi-better-subagents", "exit": 0, "evidence": ".private-805/logs/main8010-subagents-types.log" },
+    { "command": "npm run typecheck --workspace packages/pi-better-background-tasks", "exit": 0, "evidence": ".private-805/logs/main8010-background-types.log" },
+    { "command": "npm run typecheck --workspace packages/pi-better-goal", "exit": 0, "evidence": ".private-805/logs/main8010-goal-types.log" },
+    {
+      "command": "node --import tsx --test packages/pi-better-server/test/work-client-recovery.test.ts packages/pi-better-subagents/tests/launch-context.test.mjs packages/pi-better-subagents/tests/capacity_gate.test.mjs packages/pi-better-goal/test/activity-notifications.test.ts",
+      "exit": 0, "passed": 39, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/main8010-focused.log"
+    },
+    {
+      "command": "node --import tsx --test --test-name-pattern 'unsubscribe revokes|failed native stop|watch event overflow|backend registration failure' packages/pi-better-server/test/source-watch.test.ts",
+      "exit": 0, "passed": 4, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/main8010-watch-controls.log",
+      "scope": "Existing in-process injected-backend host controls only; no real native watch test replay."
+    },
+    {
+      "command": "node .private-805/scripts2-phase-check.mjs",
+      "exit": 0,
+      "result": "Four actual-fixture AST/VM phase checks pass; all77 original assert/waitFor calls unchanged. Diagnostic proof only, not callback delivery or acceptance.",
+      "evidence": ".private-805/logs/main8010-phase-check.log"
+    },
+    { "command": "node --check scripts/reload-ssh-durability.e2e.test.mjs", "exit": 0 },
+    { "command": "node --check packages/pi-better-server/test/support/subagent-launch-sdk.mjs", "exit": 0 },
+    { "command": "cmp packages/pi-better-subagents/launch-context.ts packages/pi-better-server/src/runtime/domain/subagents/launch-context.ts", "exit": 0 },
+    { "command": "cmp packages/pi-better-subagents/index.ts packages/pi-better-server/src/runtime/domain/subagents/index.ts", "exit": 0 },
+    { "command": "git diff --cached --check", "exit": 0 },
+    { "command": "git ls-files -u", "exit": 0, "result": "Empty; no unmerged paths before commit." },
+    { "command": "git merge-base --is-ancestor 8010e1a0f7e09b67d8ba882787e1a72cdf5ad6de HEAD", "exit": 0 },
+    { "command": "git merge-base --is-ancestor 2957229c HEAD", "exit": 0 },
+    { "command": "git diff 2957229c HEAD --exit-code -- scripts/reload-ssh-durability.e2e.test.mjs", "exit": 0, "result": "No changes: exact phase fixture retained." }
+  ],
+  "checkpoint": {
+    "advanced": "Coherent local candidate now contains exactmain8010 while preserving published805 history and diagnostics; focused composition passes.",
+    "nativeAcceptanceAdvanced": false,
+    "newCauseOrFixClaimed": false,
+    "sourceTestsNotRun": "Native unsupported-schema/read-model fixture and original scripts2 SSH lifecycle trigger were not replayed locally; canonical qualification remains required."
+  },
+  "remainingFailures": [
+    "Exact04375 CI44210431272 scripts2 job134487207860 exceeded its10-minute limit afterok93. Cause during next case/teardown remains unknown. Phase diagnostics have not yet qualified that original trigger.",
+    "04375 recovery/history/oldfold/continuation case-level PASS evidence retained separately; it neither explains scripts2 nor constitutes full CI success.",
+    "Prior004/10f and all earlier failure/progress/nonconvergence history remains; merge and diagnostics do not reset counters."
+  ],
+  "boundaries": "No unrelated source fix, assertion/deadline/resource/gate change, native/socket/process/probe/admission replay, alternate runtime/path/channel/identity, shared runtime/settings intervention, push, PR, CI dispatch or external watcher. Control16/query8/repair8-total32 and physical2/2/2 unchanged.",
+  "remaining": "Coordinator owns publication, remote PR827 mergeability, original native qualification and delivery. No remaining local merge blocker."
+}

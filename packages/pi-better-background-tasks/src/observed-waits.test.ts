@@ -17,6 +17,7 @@ import {
   OBSERVED_WAITS_RPC_CHANNEL,
   type BackgroundOperationService,
   type ContinuationAdapter,
+  type DurableTaskChange,
   type ObservedWaitHost,
   type ParentDelivery,
   type ParentNotification,
@@ -1848,7 +1849,7 @@ describe("durable read-only projections", () => {
   it("leaves a warmed active projection untouched for foreign-session discovery and terminal changes", async () => {
     const root = workspace("projection-foreign-isolation");
     const { host } = startHost({ root });
-    const ctx = createCtx(root, "session-current");
+    const ctx = createCtx(root, "session-current", "projection-branch");
     const origin = { cwd: root, sessionId: "session-current" };
     const current = await host.launchParent({
       kind: "process",
@@ -1867,7 +1868,7 @@ describe("durable read-only projections", () => {
       await host.reconcileNow();
       expect(host.listDurableTasks(origin).map((task) => task.id)).toEqual([current.id]);
       host.resetDurableProjectionMetrics();
-      const changes: Array<{ sessionId: string; workspace: string }> = [];
+      const changes: DurableTaskChange[] = [];
       const off = host.onDurableTaskChange((change) => { changes.push(change); });
       try {
         const store = openStore({ path: join(root, "operations.sqlite") });
@@ -1900,7 +1901,7 @@ describe("durable read-only projections", () => {
         recordTerminalFromChild(root, current.operationId, current.owner, "own-terminal");
         host.resetDurableProjectionMetrics();
         await host.reconcileNow();
-        expect(changes).toEqual([{ sessionId: "session-current", workspace: root }]);
+        expect(changes).toEqual([{ sessionId: "session-current", workspace: root, branchId: "projection-branch" }]);
         expect(host.listDurableTasks(origin)[0]).toMatchObject({ id: current.id, status: "succeeded", terminal: true });
         expect(host.getDurableProjectionMetrics()).toMatchObject({ queries: 1, rowsRead: 1 });
       } finally {

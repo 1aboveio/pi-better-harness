@@ -1,0 +1,71 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "admission-fixture-cause-fixed-staging-environment-precondition-documented",
+  "head": "853461a4e591ae2cb55a68871c913014f145a7ab",
+  "headKind": "Implementation/test correction; subsequent report-only commit does not change the tested code.",
+  "parent": "d90486820ad75445c1ed10ab2f956ef80daf7e45",
+  "standingOrders": [],
+  "scope": "Only the two retained broader Goal failures. No repeat of the264-case suite, shared harness reinstall, generated-package/staging policy changes, native producer/SDK replay, push or CI wait.",
+  "parentComparison": {
+    "beforeCoverageFix": "892f6b44575c0ee827259013e08620ef31b0623d",
+    "afterCoverageFix": "d90486820ad75445c1ed10ab2f956ef80daf7e45",
+    "method": "Read exact git blobs and assert byte/SHA256 identity for workflow-gates.ts, workflow.ts, admission-scheduler.test.ts, permission-producer-fixture.ts, stage-harness-dependencies.mjs, model-router stage-dependencies.mjs/package.json and package-lock.json.",
+    "result": "Both residual paths and dependency specifications existed unchanged in the pre-coverage parent. The causal admission experiment keeps the NEW Goal coverage implementation constant while restoring only the OLD fixture marker position. No parent reset/rebase or alternate native runtime.",
+    "evidence": ".private-805/logs/goal-residual-parent-identity.log",
+    "limit": "Not a rerun of either parent's full suite or a claim that every timing under all native CI loads is equivalent."
+  },
+  "admission": {
+    "originalFailure": ".private-805/logs/unverified-goal-suite.log:295-310; target assertion103 fails after20076ms, without per-gate reasons.",
+    "case": "admission isolates authority, execution revision, timeout and run while sharing equivalent checks",
+    "cause": "Inherited fake-scheduler fixture published its launches/PID marker before installing its release observer. Parent waits only for that marker/count before publishing release. The marker therefore did not establish the test's required observer-readiness premise. In the focused file this produced real child timeouts, not an authority/current-input rejection or failure to coalesce. Readiness marker ordering is the discriminating intervention; production scheduler/gates and Goal coverage stay unchanged.",
+    "correction": "Move the existing PID append after watch installation AND initial finish/release check. Add bounded JSON details to the same all-gates-ok assertion: each of6 indexes records ok and, if false, first400characters of reason. No added wait or timer; no scheduler policy change.",
+    "preserved": "Same6 gate requests, equivalent-request sharing,4 launches in first run and1 in the other, same16-way overlap cases, authority/scope/execution revision/run isolation, input invalidation and cancellation/cleanup assertions. Production20s default, explicit10s check,10s launch-observation bound and3s timeout fixture are unchanged.",
+    "focusedCommands": {
+      "singleOriginal": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test --test-name-pattern '^admission isolates authority, execution revision, timeout and run while sharing equivalent checks$' packages/pi-better-goal/test/admission-scheduler.test.ts",
+      "file": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-goal/test/admission-scheduler.test.ts"
+    },
+    "actualProof": [
+      { "step": "Original single case", "exit": 0, "passed": 1, "durationMs": 116.232459, "evidence": ".private-805/logs/goal-residual-admission-original.log", "meaning": "A single isolated success is not evidence that the retained20s failure was environmental or fixed." },
+      { "step": "Focused file with OLD marker and new reason capture", "exit": 1, "passed": 14, "failed": 1, "caseDurationMs": 20012.514792, "firstBodyEvidence": "All6 gate results are scheduler timeouts: five at20000ms and one explicit10000ms; launches were already observed.", "evidence": ".private-805/logs/goal-residual-admission-file.log" },
+      { "step": "Marker moved after watcher/initial check", "exit": 0, "passed": 15, "failed": 0, "evidence": ".private-805/logs/goal-residual-admission-marker.log" },
+      { "step": "Causal RED: restore ONLY old marker position", "exit": 1, "passed": 14, "failed": 1, "caseDurationMs": 20013.486125, "firstBodyEvidence": "Gate indexes2,4,5 time out at their original20000/10000/20000ms; indexes0,1,3 succeed. No authority/input-change verdict. All other code/failure capture/limits retained.", "evidence": ".private-805/logs/goal-residual-admission-marker-red.log" },
+      { "step": "Restore corrected marker, final GREEN", "exit": 0, "passed": 15, "failed": 0, "skipped": 0, "fileDurationMs": 5073.887542, "evidence": ".private-805/logs/goal-residual-admission-marker-green.log" }
+    ],
+    "qualification": "Focused fixture cause corrected; no full-suite or canonical-native acceptance inferred from these component passes."
+  },
+  "staging": {
+    "originalFailure": "trusted harness producers record diagnostics without gating continuation: installedHarnessFixture -> stage-harness-dependencies -> model-router stage-dependencies -> MODULE_NOT_FOUND pi-ollama-cloud/package.json",
+    "source": "permission-producer-fixture.ts copies packages to a temporary root and symlinks tmpRoot/node_modules to repoRoot/node_modules. stage-dependencies resolves the required real installed package through parent/local createRequire; it does not download it.",
+    "exactMissingPrecondition": "/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/805/node_modules does not exist. The fixture therefore creates a dangling dependency link in its copied root. Moving the packages outside ancestor resolution makes the artifact unavailable to that copied fixture.",
+    "existingArtifact": "/Users/exoulster/projects/pi-better-harness/node_modules/pi-ollama-cloud/package.json",
+    "version": "0.13.1",
+    "concreteDependencyRoot": "/Users/exoulster/projects/pi-better-harness/node_modules",
+    "finding": "The provider artifact itself IS installed in the ancestor checkout and matches the lockfile. This is an owned-workspace dependency-layout precondition, not a missing generated provider implementation or a new Goal regression. Parent fixture/staging/package/lock blobs are identical.",
+    "actualProof": {
+      "operation": "Read-only createRequire lookup plus disposable temporary fixture-layout reproduction; no packaging or SDK/producer load.",
+      "exit": 0,
+      "sequence": "Create only fake package directory and exact fixture symlink to missing805/node_modules outside workspace ancestor lookup. Assert MODULE_NOT_FOUND. Change ONLY the disposable dependency link to the existing ancestor node_modules. Assert resolution returns the exact installed pi-ollama-cloud/package.json/version0.13.1. Remove entire owned temporary directory in finally.",
+      "evidence": [".private-805/logs/goal-residual-dependencies.log", ".private-805/logs/goal-residual-staging-resolution.log"]
+    },
+    "requiredPrecondition": "Before a full installedHarnessFixture qualification, the owned checkout's repoRoot/node_modules must expose the complete already-installed, lockfile-resolved external dependency tree as the existing fixture expects. Current805 checkout lacks that path. Coordinator can satisfy its existing workspace dependency-layout contract; this assignment did not create a link in805, reinstall or mutate the shared dependency tree.",
+    "notDone": "No trusted-producer rerun, stage/pack operation, copied provider artifact substitution, manifest relaxation, generated-package policy shortcut or shared harness reinstall. Original trusted-producer case remains unqualified until the dependency-layout precondition is supplied."
+  },
+  "preservedCoverageFix": {
+    "sourceIdentity": "Unknown-coverage activity/index/types, actual model/WorkClient regression, standalone readiness helper/fixture, production workflow gate and both staging scripts remain byte-identical to acceptedd904.",
+    "identityEvidence": ".private-805/logs/goal-residual-preserved.log",
+    "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/goal-recovery-readiness.test.ts packages/pi-better-goal/test/activity.test.ts packages/pi-better-goal/test/activity-notifications.test.ts",
+    "exit": 0, "passed": 24, "failed": 0, "skipped": 0,
+    "evidence": ".private-805/logs/goal-residual-coverage-preserved.log",
+    "result": "Actual initial rebuilding remains explicit unverified, previous tracker does not wake, same subscription publishes verified ready and drains once; no extra get/resubscribe/poll."
+  },
+  "otherChecks": [
+    { "command": "npm run typecheck --workspace packages/pi-better-goal", "exit": 0, "evidence": ".private-805/logs/goal-residual-types-final.log" },
+    { "command": "git diff --check", "exit": 0 }
+  ],
+  "remaining": [
+    "Coordinator qualifies the corrected fixture on exact-head CI; original full264-suite retained failure history is not relabeled PASS.",
+    "Trusted installed-harness producer qualification requires the concrete owned-workspace dependency-root precondition above; no policy/deadline shortcut used.",
+    "Coordinator owns push, native qualification and CI waits. LocalNode24.21.0 proof is not canonical24.14.1 qualification."
+  ]
+}

@@ -12,6 +12,24 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 
 ## Core Features
 
+### Activity Provider Contract
+
+New providers register `activityVersion: 1`, `getActivity(ctx)`, and
+`onActivityChanged(notify, ctx)`. Each snapshot supplies `nextDeadline` as an
+absolute millisecond timestamp or `null`. Notifications observe the captured
+workspace, session, and branch; they do not authorize a model turn. Goal owns
+continuation admission and transcript writes. Callbacks from replaced execution
+generations are ignored. Deadline timers are cancelled while the Goal is held,
+paused, complete, or foreground-busy, and recalculated on re-entry.
+
+Unversioned providers retain legacy compatibility: at most one scheduled
+collection every 2,000 ms per provider while observation is needed. This cost is
+reported as `compatibilityIntervalMs` in its activity snapshot. Notifying
+providers are cached between events and deadlines, even when legacy providers
+need a compatibility check. A v1 provider without notifications is refused; it
+never falls back to a global scanner. Elapsed-clock rendering reads only session
+memory and does not collect activity.
+
 - `/goal` runtime for starting, pausing, resuming, completing, and clearing the current objective.
 - `/goal settings` opens an interactive settings page in the TUI. Select a row with Up/Down and toggle with Space/Enter; changes save immediately, and Escape closes the page. Automatic continuation, conversational resume, and **Pause on Esc** default to `on`. **Auto-start Goal** defaults to `off` and is also available directly on the `/harness-settings` main page. Automatic continuation controls idle and background-drain wakes; conversational resume controls the agent's Escape-pause resume tool; Pause on Esc controls whether editor Escape pauses the active goal. Goal kickoff, `/goal resume`, and `alt+g` remain available with these controls off. For scripts or non-interactive sessions, use `/goal settings auto-continue on|off`, `/goal settings conversational-resume on|off`, `/goal settings pause-on-escape on|off`, or `/goal settings auto-start-from-outcome on|off`; bare `/goal settings` prints the saved values outside the TUI.
 - `escape` pauses the active goal by default, and it stays paused while you talk to the agent. With **Pause on Esc** off, observed editor Escape leaves the goal active while preserving native streaming interruption and menu/dialog cancellation. Automatic continuation remains independent. Hosts without terminal/focus inspection and unknown custom editors retain generic abort-to-pause behavior because they cannot identify Escape reliably. With conversational resume enabled, say "go" (the agent then calls `goal_resume`), or use `/goal resume` or `alt+g`. `/goal pause` resumes only through `/goal resume` or `alt+g`. Paused goals are never poked. On a macOS terminal without Option-as-Meta, `alt+g` types `©`; use `/goal resume` there.

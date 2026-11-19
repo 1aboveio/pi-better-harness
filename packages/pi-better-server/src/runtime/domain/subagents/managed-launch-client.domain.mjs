@@ -12,8 +12,10 @@ import { catalogHostAuthority } from "./catalog-host-admission.domain.mjs";
 import { openSharedCatalog } from "./shared-catalog.domain.mjs";
 import { SANDBOX_POLICY_CHANNEL } from "./permission-policy.domain.mjs";
 import { canonicalJson } from "./operation-bridge-types.domain.mjs";
+import { captureLaunchContext } from "./launch-context.domain.mjs";
 /** The fixed Pi host issues execution grants. Catalog registration grants no execution. */
 export async function submitManagedLaunch(pi, ctx, key, tool, params) {
+    ctx = captureLaunchContext(ctx);
     mkdirSync(getAgentDir(), { recursive: true });
     const root = realpathSync(getAgentDir());
     const catalog = await openSharedCatalog(ctx.cwd, root);

@@ -19,6 +19,11 @@ let connectionAbort = new AbortController();
 const details = new Map();
 const pendingDetails = new Set();
 let refresh = () => { };
+const observationListeners = new Set();
+export function onWorkObservation(notify) {
+    observationListeners.add(notify);
+    return () => { observationListeners.delete(notify); };
+}
 export function workObservation() { return snapshot; }
 export function workObservationFailure() { return snapshot?.reason ?? failure; }
 function degraded(error) {
@@ -208,7 +213,11 @@ export async function startWorkObservation(agentDir, origin, changed) {
     stopWorkObservation();
     const current = generation;
     context = { agentDir, origin };
-    refresh = changed;
+    refresh = () => {
+        changed();
+        for (const notify of observationListeners)
+            notify();
+    };
     try {
         await ensureObservation();
     }

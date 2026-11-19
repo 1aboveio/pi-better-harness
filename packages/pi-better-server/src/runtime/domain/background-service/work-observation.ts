@@ -9,6 +9,19 @@ const connectionAborts = new WeakMap<object, AbortController>();
 const clients = new WeakMap<object, Promise<any>>();
 const generations = new WeakMap<object, number>();
 const listeners = new WeakMap<object, Set<() => void>>();
+const activityScopes = new WeakMap<object, string>();
+
+/** Goal reads the subscribed observation, never a periodic full-state RPC. */
+export async function backgroundGoalObservation(pi: ExtensionAPI, ctx: ExtensionContext): Promise<any> {
+  const scope = { background: true, cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId(), processId: process.pid };
+  const client = await observationClient(pi, scope);
+  const key = JSON.stringify(scope);
+  if (activityScopes.get(client) !== key) {
+    await client.subscribe(scope);
+    activityScopes.set(client, key);
+  }
+  return client.snapshot;
+}
 export function onBackgroundObservation(pi: ExtensionAPI, notify: () => void): () => void {
   let set = listeners.get(pi);
   if (!set) { set = new Set(); listeners.set(pi, set); }
@@ -62,7 +75,7 @@ function observationClient(pi: ExtensionAPI, scope: { background: boolean; cwd: 
       if (hosted) {
         hostedClients.add(hosted);
         hosted.onChange(() => { for (const notify of listeners.get(pi) ?? []) notify(); });
-        try { await hosted.subscribe(scope); checkOpen(); return hosted; }
+        try { await hosted.subscribe(scope); activityScopes.set(hosted, JSON.stringify({ ...scope, processId: process.pid })); checkOpen(); return hosted; }
         catch (error) { hosted.close(); throw error; }
       }
       const requestedRoot = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
@@ -97,6 +110,7 @@ function observationClient(pi: ExtensionAPI, scope: { background: boolean; cwd: 
         try { checkOpen(); await client.subscribe(scope); checkOpen(); }
         catch (error) { client.close(); throw error; }
         subscribed = true;
+        activityScopes.set(client, JSON.stringify({ ...scope, processId: process.pid }));
         return client;
       };
       return connect();
