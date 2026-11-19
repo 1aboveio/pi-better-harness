@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -209,15 +210,64 @@ test("field updates merge with the selected record read inside the lock", t => {
 test("independent processes preserve sibling updates under the shared lock", async t => {
     const f = fixture(t);
     const module = new URL("../catalog-preferences.ts", import.meta.url).href;
-    const ids = ["agent.one", "agent.two", "role.developer", "role.reviewer"];
-    await Promise.all(ids.map(id => new Promise((resolve, reject) => {
-        const code = `import {writeCatalogPreferences} from ${JSON.stringify(module)}; for(let i=0;i<10;i++) writeCatalogPreferences(${JSON.stringify(f.root)},${JSON.stringify(id)},{bundled:true,model:'openai/alpha',effort:'high'});`;
-        const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], { stdio: ["ignore", "ignore", "pipe"] });
+    const children = [];
+    function startWriter(source) {
+        const code = `
+            import { readFileSync } from "node:fs";
+            import { writeCatalogPreferences } from ${JSON.stringify(module)};
+            const root = ${JSON.stringify(f.root)};
+            ${source}
+        `;
+        const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], { stdio: ["pipe", "ignore", "pipe", "ipc"] });
         let stderr = "";
-        child.stderr.on("data", data => { stderr += data; });
-        child.on("error", reject);
-        child.on("close", code => code === 0 ? resolve() : reject(new Error(stderr || `exit ${code}`)));
-    })));
-    assert.deepEqual(readCatalogPreferences(f.root).settings, Object.fromEntries(ids.map(id => [id, { bundled: true, model: "openai/alpha", effort: "high" }])));
+        child.stderr.setEncoding("utf8").on("data", data => { stderr += data; });
+        const closed = once(child, "close").then(([code, signal]) => {
+            if (code !== 0) throw new Error(stderr || `Catalog writer exited (${signal ?? code})`);
+        });
+        const checkpoint = Promise.race([
+            once(child, "message").then(([message]) => message),
+            closed.then(() => assert.fail("Catalog writer exited before its lock checkpoint")),
+        ]);
+        children.push({ child, closed });
+        return { child, closed, checkpoint };
+    }
+
+    try {
+        const owner = startWriter(`
+            writeCatalogPreferences(root, "agent.one", () => {
+                process.send("holding lock");
+                readFileSync(0);
+                return { bundled: true, model: "openai/alpha", effort: "high" };
+            });
+        `);
+        assert.equal(await owner.checkpoint, "holding lock");
+        const contender = startWriter(`
+            // Pause after a real ELOCKED, so process scheduling cannot spend the retry budget.
+            const wait = Atomics.wait;
+            Atomics.wait = (...args) => {
+                Atomics.wait = wait;
+                process.send("waiting for lock");
+                readFileSync(0);
+                return wait(...args);
+            };
+            writeCatalogPreferences(root, "agent.two", { bundled: true, model: "openai/beta", effort: "low" });
+        `);
+        assert.equal(await contender.checkpoint, "waiting for lock");
+        assert.deepEqual(readdirSync(f.root), ["settings.json.lock"]);
+        owner.child.stdin.end();
+        await owner.closed;
+        contender.child.stdin.end();
+        await contender.closed;
+    } finally {
+        for (const { child } of children) {
+            child.stdin.destroy();
+            if (child.exitCode === null && child.signalCode === null) child.kill();
+        }
+        await Promise.allSettled(children.map(({ closed }) => closed));
+    }
+    assert.deepEqual(readCatalogPreferences(f.root).settings, {
+        "agent.one": { bundled: true, model: "openai/alpha", effort: "high" },
+        "agent.two": { bundled: true, model: "openai/beta", effort: "low" },
+    });
     assert.deepEqual(readdirSync(f.root), ["settings.json"]);
 });
