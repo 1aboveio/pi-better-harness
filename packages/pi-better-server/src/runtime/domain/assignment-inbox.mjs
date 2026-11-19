@@ -19,7 +19,8 @@ export class AssignmentInbox {
                 connection.prepare(`ATTACH DATABASE ? AS ${this.alias}`).run(path);
                 attached = true;
             }
-            // Existing initialized schema needs no write reservation.
+            // A second observer may open while the first holds a derived write
+            // transaction. Existing schema/diagnostics require no write reservation.
             const tables = this.db.prepare(`SELECT count(*) AS n FROM ${this.prefix}sqlite_master
                 WHERE type='table' AND name IN ('position','pending','applied_scopes','diagnostics')`).get().n;
             if (tables === 4 && this.db.prepare(`SELECT 1 FROM ${this.prefix}diagnostics LIMIT 1`).get()) return;

@@ -24,7 +24,7 @@ class Mailbox extends EventEmitter {
   }
 }
 
-test("actual cold fixture retains the expired query and cancel until RPC owns them", async t => {
+for (const admission of ["before-delay", "during-import"]) test(`actual cold fixture retains the expired query and cancel until RPC owns them: ${admission}`, async t => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const mailbox = new Mailbox(), rpc: any[] = [];
   let executor: WorkQueryExecutor;
@@ -48,12 +48,16 @@ test("actual cold fixture retains the expired query and cancel until RPC owns th
       return ts.visitNode(node, visit) as ts.SourceFile;
     }] },
   }).outputText;
+  let beginImport!: () => void, finishImport!: () => void;
+  const importing = new Promise<void>(resolve => { beginImport = resolve; });
+  const releaseImport = new Promise<void>(resolve => { finishImport = resolve; });
   const load = async (path: string): Promise<any> => {
     if (path === "node:worker_threads") return { parentPort: mailbox };
     assert.equal(path, "./cancellable-query-worker.mjs");
     const stopHeartbeat = bootstrapHeartbeat(mailbox);
     // Actual heartbeat ownership starts before the production RPC import settles.
-    await Promise.resolve();
+    beginImport();
+    await releaseImport;
     mailbox.on("message", message => {
       if (!["query", "cancel"].includes(message.type)) return;
       rpc.push(message);
@@ -66,11 +70,13 @@ test("actual cold fixture retains the expired query and cancel until RPC owns th
   const bootstrap = new AsyncFunction("load", output)(load);
   try {
     await new Promise<void>(resolve => setImmediate(resolve));
+    if (admission === "during-import") { t.mock.timers.tick(600); await importing; }
     const timedOut = assert.rejects(client.handle({ type: "runtime_subscribe", scope: {} }), /runtime-timeout: caller read deadline exceeded/);
     t.mock.timers.tick(400); await timedOut;
     assert.equal(executor.metrics().executor.callerTimeouts, 1);
     assert.equal(executor.observation().status, "rebuilding");
-    t.mock.timers.tick(200); await bootstrap;
+    if (admission === "before-delay") { t.mock.timers.tick(200); await importing; }
+    finishImport(); await bootstrap;
     assert.deepEqual(rpc.map(message => message.type), ["query", "cancel"], "expired work must reach the installed RPC exactly once and in order");
     assert.equal(executor.observation().status, "rebuilding", "late expired reply cannot verify source coverage");
     assert.equal(executor.metrics().executor.active, 0, "actual late acknowledgement releases the execution slot");

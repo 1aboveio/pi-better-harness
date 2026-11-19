@@ -148,6 +148,7 @@ export interface DurableProjectionMetrics {
 export interface DurableTaskChange {
   readonly sessionId: string;
   readonly workspace: string;
+  readonly branchId?: string | null;
 }
 
 /** A parent launch is always local; remote launches stay on the legacy task route. */
@@ -443,7 +444,7 @@ export interface DurableTaskProjection {
   readonly logPaths: { stdout: string; stderr: string; events: string };
   readonly waits: readonly WaitView[];
   readonly sandbox?: TaskSandboxProvenance;
-  readonly owner: { sessionId: string; workspace: string };
+  readonly owner: { sessionId: string; workspace: string; branchId?: string | null };
 }
 
 export interface DurableTaskLogView {
@@ -1850,7 +1851,7 @@ export class ObservedWaitHost {
     // request a repaint.
     if (owner.kind !== "parent-session" || this.activeOwnerRelation(owner) !== "match") return;
     this.invalidateDurableProjection(owner);
-    const change = { sessionId: owner.sessionId, workspace: owner.workspace };
+    const change = { sessionId: owner.sessionId, workspace: owner.workspace, branchId: owner.branchId ?? null };
     for (const listener of [...this.durableChangeListeners]) {
       try { listener(change); } catch { /* a projection listener cannot break supervision */ }
     }
@@ -1921,7 +1922,7 @@ export class ObservedWaitHost {
       logPaths: { stdout: pathSet.stdout, stderr: pathSet.stderr, events: pathSet.events },
       waits,
       ...(context?.sandbox ? { sandbox: context.sandbox } : {}),
-      owner: { sessionId: operation.owner.sessionId, workspace: operation.owner.workspace },
+      owner: { sessionId: operation.owner.sessionId, workspace: operation.owner.workspace, branchId: operation.owner.branchId ?? null },
     };
   }
 

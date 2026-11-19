@@ -7,7 +7,30 @@ import { join } from "node:path";
 import type { Worker } from "node:worker_threads";
 import { WorkQueryExecutor } from "../../src/runtime/query-executor.ts";
 import { WorkClient } from "../../src/runtime/work-client.mjs";
-import { queryBootstrap } from "./query-bootstrap.ts";
+import { queryBootstrap, querySourceReady } from "./query-bootstrap.ts";
+
+const STALL_RECEIPT_MS = 5000;
+
+function waitForStallHandler(worker: Worker, failure: (detail: string, cause?: unknown) => Error) {
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      worker.off("message", message); worker.off("exit", exited); worker.off("error", failed);
+    };
+    const message = (value: { type?: string }) => {
+      if (value.type !== "diagnostic-stall-handler-ready") return;
+      cleanup(); resolve();
+    };
+    const rejectReadiness = (detail: string, cause?: unknown) => {
+      cleanup(); reject(failure(`diagnostic stall handler readiness: ${detail}`, cause));
+    };
+    const exited = (code: number) => rejectReadiness(`worker exited (code ${code})`);
+    const failed = (error: Error) => rejectReadiness("worker failed", error);
+    const timer = setTimeout(() => rejectReadiness(`no handler receipt within ${STALL_RECEIPT_MS} ms`), STALL_RECEIPT_MS);
+    timer.unref();
+    worker.on("message", message); worker.once("exit", exited); worker.once("error", failed);
+  });
+}
 
 export async function fixture(options: { intervalMs?: number; capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
@@ -17,15 +40,21 @@ export async function fixture(options: { intervalMs?: number; capacity?: number;
     workerUrl: options.workerUrl ?? new URL("./slow-query-worker.mjs", import.meta.url),
     modelOptions: { baseDir: root, durableDir: join(root, "durable"), intervalMs: options.intervalMs ?? 60000 } });
   const worker = (executor as unknown as { worker: Worker }).worker;
-  const bootstrapped = queryBootstrap(worker, () => {
+  const diagnostic = () => {
     const metrics = executor.metrics().executor;
     const observation = executor.observation();
     return { observation: { status: observation.status, reason: observation.reason?.slice(0, 1024) }, executor: {
       worker: metrics.worker, restarts: metrics.restarts, timeouts: metrics.timeouts, status: metrics.status,
     } };
-  });
+  };
+  const bootstrapped = queryBootstrap(worker, diagnostic);
   // Most fixtures do not need a bootstrap receipt, but awaited receipts must fail on exit.
   void bootstrapped.catch(() => {});
+  const stallFailure = (detail: string, cause?: unknown) => new Error(
+    `${detail}${cause === undefined ? "" : `: ${String(cause).slice(0, 512)}`}; ${JSON.stringify(diagnostic())}`, { cause });
+  // Production can publish verified inventory before the fixture has installed its handler.
+  const stallHandlerReady = waitForStallHandler(worker, stallFailure);
+  void stallHandlerReady.catch(() => {}); // Other worker fixtures do not implement the stall protocol.
   const sockets = new Set<Socket>();
   let closingFixture = false;
   const peerErrors: Array<{ role: string; phase: string; code?: string; expected: boolean }> = [];
@@ -74,20 +103,43 @@ export async function fixture(options: { intervalMs?: number; capacity?: number;
   const clients: WorkClient[] = [];
   const client = async () => { const value = new WorkClient(path, root); clients.push(value); await value.ready; return value; };
   const stall = async (iterations = 3000000) => {
-    const started = new Promise<void>(resolve => {
-      const listener = (message: any) => { if (message.type === "diagnostic-started") { worker.off("message", listener); resolve(); } };
-      worker.on("message", listener);
+    await stallHandlerReady;
+    let resolveStart!: () => void;
+    let rejectStart!: (error: Error) => void;
+    const started = new Promise<void>((resolve, reject) => {
+      resolveStart = resolve; rejectStart = reject;
     });
     const finished = new Promise<number>((resolve, reject) => {
-      const cleanup = () => { worker.off("message", listener); worker.off("exit", exited); worker.off("error", failed); };
-      const listener = (message: any) => { if (message.type === "diagnostic-finished") { cleanup(); resolve(message.durationMs); } };
-      const exited = (code: number) => { cleanup(); reject(new Error(`diagnostic worker exited before completing SQLite work (code ${code})`)); };
-      const failed = (error: Error) => { cleanup(); reject(error); };
+      let didStart = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        worker.off("message", listener); worker.off("exit", exited); worker.off("error", failed);
+      };
+      const listener = (message: { type?: string; durationMs: number }) => {
+        if (message.type === "diagnostic-started") {
+          didStart = true;
+          clearTimeout(timer);
+          resolveStart();
+        } else if (didStart && message.type === "diagnostic-finished") {
+          cleanup(); resolve(message.durationMs);
+        }
+      };
+      const fail = (detail: string, cause?: unknown) => {
+        cleanup();
+        const error = stallFailure(`${detail} (iterations ${iterations})`, cause);
+        rejectStart(error); reject(error);
+      };
+      const pendingWork = () => didStart ? "completing SQLite work" : "acknowledging diagnostic stall start";
+      const exited = (code: number) => fail(`diagnostic worker exited before ${pendingWork()} (code ${code})`);
+      const failed = (error: Error) => fail(`diagnostic worker failed before ${pendingWork()}`, error);
+      const timer = setTimeout(() => fail(`diagnostic stall: no start receipt within ${STALL_RECEIPT_MS} ms`), STALL_RECEIPT_MS);
       worker.on("message", listener); worker.once("exit", exited); worker.once("error", failed);
+      try { worker.postMessage({ type: "diagnostic-stall", iterations }); }
+      catch (error) { fail("could not send diagnostic stall", error); }
     });
     // Some watchdog tests intentionally discard the completion promise.
     void finished.catch(() => {});
-    worker.postMessage({ type: "diagnostic-stall", iterations }); await started;
+    await started;
     return { finished };
   };
   let closing: Promise<void> | undefined;
@@ -103,5 +155,6 @@ export async function fixture(options: { intervalMs?: number; capacity?: number;
   // A test timeout does not unwind a suspended body into its finally block.
   after(close);
   server.listen(path); await once(server, "listening");
-  return { executor, client, stall, worker, bootstrapped, close, root, path, sockets, peerErrors, peerActivity };
+  const waitForSourceReady = () => querySourceReady(worker, () => executor.observation());
+  return { executor, client, stall, worker, bootstrapped, waitForSourceReady, close, root, path, sockets, peerErrors, peerActivity };
 }

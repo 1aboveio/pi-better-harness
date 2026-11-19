@@ -1,0 +1,49 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "plan668-original-case-failure-context-committed-not-acceptance-progress",
+  "sha": "d2602098734f9c958800498fb41f230652da2286",
+  "head": "d2602098734f9c958800498fb41f230652da2286",
+  "headKind": "Coherent diagnostic commit; later report-only commit leaves tests and production unchanged.",
+  "parent": "d7ee91c7afd10366516d3ef024c394c1533d25fb",
+  "planRevision": 668,
+  "decision": "805-canonical-failure-only-context",
+  "standingOrders": [],
+  "actualModel": { "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "session": "sa_mwkb0p9t_17", "readback": ".private-805/logs/canonical-context-final-guards-model.log", "method": "Actual session model_change/thinking_level_change records and currentPI_MODEL/PI_REASONING_LEVEL/PI_SESSION_ID agree; no pin/runtime/settings changes." },
+  "production": "All production files unchanged, including query-executor.ts, query-worker.mjs, background-history.ts and Goal coverage. No production tracing, source scan, retry, timer, admission, timeout, cache, transaction or sandbox policy changed. No causal correction selected.",
+  "case88": {
+    "originalCase": "slow caller cancellation preserves other clients and ignores late replies",
+    "file": "packages/pi-better-server/test/query-executor.test.ts",
+    "scope": "Only this original callback installs its local recorder, after the same fixture bootstrap/client creation. Reuses the private discriminator's exact existing client.request settlement boundary. No global WorkClient instrumentation.",
+    "requestContext": "At most16existing request entries: client role, command, original test phase, exact scope, pending/fulfilled/rejected state, elapsed time, returned snapshotstatus or original error text capped512characters. The deliberately caughtslowtimeout remains visibly distinct from initialready, queued other-client read and freshread.",
+    "bodyPhases": ["bootstrap", "client-hello", "initial-ready-subscription", "slow-query-blocked", "queued-read-and-control", "expected-slow-timeout", "queued-read-result", "fresh-read-after-release"],
+    "emission": "Only the original catch prints slowCallerFailure before finally cleanup; includes bounded existing executor metrics and caps serialized output8192characters. Capture failure is ignored and the exact original error object is rethrown. Successful execution prints no new diagnostic record. No extra query or file/probe call.",
+    "preserved": "Original700ms request/2000ms watchdog/10000ms test bounds, original150ms delay, blocked-source/cancellation/control/readiness/late-reply/restart/slot assertions and same request order. Await/queue semantics unchanged; only existing promises receive settlement observers. No retry or deadline reset."
+  },
+  "case188": {
+    "originalCase": "Background indexed pages merge legacy rows and fence cursors and off-page incidents",
+    "file": "packages/pi-better-server/test/runtime-background-boundaries.test.ts",
+    "worker": "packages/pi-better-server/test/support/history-metadata-evidence-worker.mjs",
+    "scope": "Only this original test selects the dedicated test-only worker wrapper. It loads the same production query-worker/model implementation and supplies the same modelOptions, source paths and50ms repair interval. No production file edited or alternate production implementation substituted.",
+    "existingBoundary": "Intercept the existing node:fs.readFileSync call in this isolated test worker. Only meta.json reads whose actual caller stack includes BackgroundHistory.refresh count. All nonmatching reads return unchanged and are not recorded. No source reread, stat, directory traversal, reconciliation or additional snapshot request.",
+    "identity": "Retain first16actual read attempts with sequence, run ID capped128characters with truncation flag, byte count andSHA256of already returned bytes; failed attempts retain the original errorcode instead of contents. Maintain total/dropped counts. This distinguishes repeated identical bytes from changed metadata and records removed-file attempts that the existing metadataReads counter also counts. Payloads and absolute paths are not retained.",
+    "transport": "Attach the bounded ring to the model's existing metrics getter only within the test worker, so the original already-issued finalruntime_get_metrics reply carries historyMetadataEvidence. No new production IPC message or RPC.",
+    "emission": "Print mixedHistoryReadFailure only if the original final metadataReads differs from7, immediately before the unchanged strict7assertion. Output capped8192characters. Original assertion still fails normally, capture cannot replace it; successful run prints no new identity diagnostic.",
+    "preserved": "Original15000ms test and10000ms publication/read wait bounds, existing1100ms delay, all six initial records, changed record, scope/cursor/ownership/off-page checks and expectedmetadataReads7remain. No extra metadata source reads or count waiver; no relationship to oldcache205queryCount8vs6assumed."
+  },
+  "focusedChecks": [
+    { "cwd": "packages/pi-better-server", "command": "TMPDIR=\"$PWD/../../.private-805/tmp\" node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-name-pattern '^slow caller cancellation preserves' test/query-executor.test.ts", "exit": 0, "passed": 1, "failed": 0, "skipped": 0, "evidence": ".private-805/logs/canonical-context-case88.log", "meaning": "Original callback succeeds locally with no failure-only output; same700ms expectedslowexpiry/control/readiness/late-reply assertions. Not original native failure recurrence or causal fix." },
+    { "cwd": "packages/pi-better-server", "command": "TMPDIR=\"$PWD/../../.private-805/tmp\" node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-name-pattern '^Background indexed pages merge' test/runtime-background-boundaries.test.ts", "exit": 0, "passed": 1, "failed": 0, "skipped": 0, "evidence": ".private-805/logs/canonical-context-case188-final.log", "meaning": "Original scenario and expected7metadata reads pass with dedicated evidence worker, no failure-only output. Not explanation/erasure of native8vs7." },
+    { "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/canonical-failure-context.test.ts", "exit": 0, "passed": 1, "failed": 0, "skipped": 0, "evidence": ".private-805/logs/canonical-context-recorder-final.log", "meaning": "Execute actual worker-wrapper recorder setup with only worker/module boundaries replaced. Actual file reads prove16-entry cap/total/dropped, hashes/byte identity, no contents leakage or extra source reads, preserved metrics, unrecorded non-history reads and originalENOENT propagation. This validates diagnostics, not product cause." },
+    { "command": "npm run typecheck --workspace packages/pi-better-server", "exit": 0, "evidence": ".private-805/logs/canonical-context-types-accepted.log" },
+    { "command": "AST compare original assertion/setTimeout calls and byte-compare production/history before diagnostic changes", "exit": 0, "result": "All294query-executor and84Background-boundary assertion/timer calls unchanged. Existingd7ee805-6f165-ci-fix.json and productionGoal/query/history source unchanged.", "evidence": ".private-805/logs/canonical-context-final-guards-model.log" },
+    { "command": "git diff --check", "exit": 0 }
+  ],
+  "retainedIteration": "Initial typecheck found the request params declaration was object rather than a scope-bearing record. Recorder-only explicitRecordcast resolves this with no runtime behavior change; successful final Server typecheck above. Earlier logs remain in .private-805/logs/canonical-context-*. Original native failure andd7eehistory retained.",
+  "acceptanceProgress": "None. This is exactly the one approved failure-context replan, not a causal product fix, native PASS, failure-count reset or reason to relax any criterion. No production or original assertion/deadline fix inferred from local passes.",
+  "remainingCanonicalQualification": [
+    "Coordinator runs original required CI on the coherent candidate. If88recurs, slowCallerFailure identifies rejected client/command/scope/phase and active/queued/timeout state; diagnose that exact receipt before changing behavior.",
+    "If188recurs, mixedHistoryReadFailure identifies which actual history metadata ID/hash/error repeats or changes; retain expected7 and compare actual source identity before selecting correction.",
+    "Retain distinct oldcache2058vs6identity transition and coldfixture63bproof separately. No blind rerun, generic production trace, timing/admission alteration, broader scenario removal, requiredCI/sandbox change, push or external wait performed."
+  ]
+}

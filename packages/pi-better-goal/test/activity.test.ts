@@ -177,3 +177,16 @@ test("goal reconstruction follows set, usage, and clear entries", () => {
 
   assert.equal(reconstructGoalSnapshot([...entries, { type: "custom", customType: "pi-better-goal", data: { kind: "clear" } }]), null);
 });
+
+test("partial unverified coverage retains only the current goal's verified drain tracker", async () => {
+  const snapshot = await collectActivitySnapshot({} as never, [
+    { id: "unknown", getActivity: () => { throw new Error("scope rebuilding"); } },
+    { id: "known", getActivity: () => ({ providerId: "known", items: [{ id: "new", status: "running", active: true }] }) },
+  ], false);
+  const tracker = { goalId: "g1", activeSignature: "previous:running" };
+  assert.equal(snapshot.coverage, "unverified");
+  assert.equal(snapshot.activeBackgroundCount, 1, "verified rows remain observable without inventing active work");
+  assert.deepEqual(planBackgroundDrainWake(tracker, goal("g1"), snapshot), { nextTracker: tracker, wakeSignature: null });
+  assert.deepEqual(planBackgroundDrainWake(tracker, goal("g2"), snapshot), { nextTracker: null, wakeSignature: null });
+  assert.deepEqual(planBackgroundDrainWake(tracker, goal("g1", "paused"), snapshot), { nextTracker: null, wakeSignature: null });
+});

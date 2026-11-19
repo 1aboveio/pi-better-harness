@@ -290,7 +290,7 @@ export class BackgroundHistory {
           meta = active ?? this.project([op])[0];
           // Retain the source signature even when dismissal hides the row:
           // absence would make every exact repair demand another history build.
-          meta = { ...meta, callbackOrigin: { cwd: op.owner_workspace, sessionId: op.owner_session_id }, logPath: meta.logPaths?.stdout ?? "" };
+          meta = { ...meta, callbackOrigin: { cwd: op.owner_workspace, sessionId: op.owner_session_id, branchId: op.owner_branch_id ?? null }, logPath: meta.logPaths?.stdout ?? "" };
         }
         if (meta) save(key, meta, signature, "", false, context);
         else if (previous.get(key)?.signature === signature) seen.add(key);

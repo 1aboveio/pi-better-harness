@@ -4,7 +4,8 @@ import { fork, execFileSync } from "node:child_process";
 import { createServer, connect, type Socket } from "node:net";
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { once } from "node:events";
+import { once, EventEmitter } from "node:events";
+import goalExtension from "../../pi-better-goal/src/index.ts";
 import { register, createRequire, syncBuiltinESMExports } from "node:module";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
@@ -147,6 +148,8 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     const extensionPath = new URL("../../pi-better-subagents/index.ts", import.meta.url).href;
     const { default: extension } = await import(extensionPath);
     const handlers = new Map<string, Function>();
+    const goalHandlers = new Map<string, Function>();
+    const events = new EventEmitter();
     const tools = new Map<string, any>();
     const ctx = { cwd: root, mode: "tui", hasUI: true, isIdle: () => true,
       sessionManager: { getSessionId: () => "parent", getBranch: () => [] },
@@ -156,9 +159,24 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
     const OriginalDatabase = sqlite.DatabaseSync;
     let localConnections = 0;
     try {
-      extension({ on: (key: string, fn: Function) => handlers.set(key, fn), registerTool: (tool: any) => tools.set(tool.name, tool), sendMessage() {} } as never);
+      extension({ events, on: (key: string, fn: Function) => handlers.set(key, fn), registerTool: (tool: any) => tools.set(tool.name, tool), sendMessage() {} } as never);
       phase = "extension-session-start";
       await handlers.get("session_start")!({}, ctx);
+      goalExtension({ events, on: (key: string, fn: Function) => goalHandlers.set(key, fn),
+        registerTool() {}, registerCommand() {}, appendEntry() {}, sendMessage() {} } as never);
+      await goalHandlers.get("session_start")!({}, ctx);
+      const request = WorkClient.prototype.request;
+      let goalQueries = 0;
+      WorkClient.prototype.request = function(type: string, params?: any) {
+        if (type === "runtime_get_snapshot") goalQueries++;
+        return request.call(this, type, params);
+      };
+      try {
+        for (let frame = 0; frame < 60; frame++) {
+          await goalHandlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx);
+        }
+        assert.equal(goalQueries, 0, "warmed Goal with the real Subagent provider sends no full-state socket queries");
+      } finally { WorkClient.prototype.request = request; }
       sqlite.DatabaseSync = class extends OriginalDatabase { constructor(...args: any[]) { super(...args); localConnections++; } };
       const hooks = (globalThis as any)[Symbol.for("pi-better-subagents.acceptance-hooks")];
       for (let frame = 0; frame < 60; frame++) assert.equal(hooks.listRows().length, 50);
@@ -241,6 +259,7 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       assert.ok(refreshed.details.snapshot.rows.every((row: any) => row.health.thresholds.longToolMs === 600000), "tool and Navigator share the updated judgment");
     } finally {
       sqlite.DatabaseSync = OriginalDatabase;
+      await goalHandlers.get("session_shutdown")?.({}, ctx);
       await handlers.get("session_shutdown")?.({}, ctx);
       for (const [key, value] of saved) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     }
@@ -404,6 +423,8 @@ test("registered Navigator preserves older active rows and the same consumers re
     await until("initial:201-history-list", async () => (await observation.observedList({ cwd: root })).totalMatching === 201);
     phase("initial:201-history-list-confirmation");
     assert.equal((await observation.observedList({ cwd: root })).totalMatching, 201);
+    // History can still report indexed rows while Navigator shows a degraded warning.
+    await until("initial:navigator-ready", () => observation.workObservation()?.status === "ready");
     const hooks = (globalThis as any)[Symbol.for("pi-better-subagents.acceptance-hooks")];
     const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("subagents");
     assert.equal(hooks.listRows().find((row: any) => row.id === "sa_review_0")?.status, "running");

@@ -11,9 +11,11 @@ import { catalogHostAuthority } from "./catalog-host-admission.ts";
 import { openSharedCatalog } from "./shared-catalog.ts";
 import { SANDBOX_POLICY_CHANNEL } from "./permission-policy.ts";
 import { canonicalJson } from "./operation-bridge-types.ts";
+import { captureLaunchContext } from "./launch-context.ts";
 
 /** The fixed Pi host issues execution grants. Catalog registration grants no execution. */
 export async function submitManagedLaunch(pi: ExtensionAPI, ctx: ExtensionContext, key: string, tool: string, params: unknown) {
+    ctx = captureLaunchContext(ctx);
     mkdirSync(getAgentDir(), { recursive: true });
     const root = realpathSync(getAgentDir());
     const catalog = await openSharedCatalog(ctx.cwd, root);

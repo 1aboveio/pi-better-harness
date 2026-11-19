@@ -3,22 +3,22 @@ import { listMetas, onMetaChanged } from "./registry.domain.mjs";
 import { getObservedWaitHost } from "./observed-waits.domain.mjs";
 import { isTerminalStatus } from "./types.domain.mjs";
 import { backgroundTaskProgressAt, observeBackgroundTaskStall } from "./stall.domain.mjs";
-import { backgroundObservation, onBackgroundObservation } from "./work-observation.domain.mjs";
+import { backgroundGoalObservation, onBackgroundObservation } from "./work-observation.domain.mjs";
 const GOAL_READY_EVENT = "pi-better-goal:ready";
 const GOAL_REGISTER_PROVIDER_EVENT = "pi-better-goal:register-provider";
 const readySubscriptions = new WeakSet();
 export function collectBackgroundTaskGoalActivity(metas = listMetas(), ctx, now = Date.now(), durable = []) {
+    const items = [
+        ...metas.filter((meta) => isVisibleGoalActivity(meta, ctx, now)).map(backgroundTaskToGoalItem),
+        ...durable.filter((task) => isVisibleDurableGoalActivity(task, ctx, now)).map(durableTaskToGoalItem),
+    ];
+    const deadlines = items.filter(item => item.terminal && typeof item.endedAt === "number")
+        .map(item => item.endedAt + TERMINAL_GOAL_ACTIVITY_RETENTION_MS).filter(deadline => deadline > now);
     return {
         providerId: "background-tasks",
         label: "Background Tasks",
-        items: [
-            ...metas
-                .filter((meta) => isVisibleGoalActivity(meta, ctx, now))
-                .map(backgroundTaskToGoalItem),
-            ...durable
-                .filter((task) => isVisibleDurableGoalActivity(task, ctx, now))
-                .map(durableTaskToGoalItem),
-        ],
+        items,
+        nextDeadline: deadlines.length ? Math.min(...deadlines) : null,
     };
 }
 export function registerBackgroundTasksGoalProvider(pi) {
@@ -27,20 +27,33 @@ export function registerBackgroundTasksGoalProvider(pi) {
             id: "background-tasks",
             label: "Background Tasks",
             scope: "session",
+            activityVersion: 1,
             getActivity: async (ctx) => {
-                const snapshot = await backgroundObservation(pi, ctx);
+                const snapshot = await backgroundGoalObservation(pi, ctx);
                 if (snapshot.status !== "ready")
                     throw new Error(snapshot.reason ?? "Background activity is unverified");
                 const durable = snapshot.rows.filter((row) => row.meta.durable).map((row) => row.meta);
                 const legacy = snapshot.rows.filter((row) => !row.meta.durable).map((row) => row.meta);
-                return collectBackgroundTaskGoalActivity(legacy, ctx, Date.now(), durable);
+                const activity = collectBackgroundTaskGoalActivity(legacy, ctx, Date.now(), durable);
+                const deadlines = [activity.nextDeadline, snapshot.nextDeadline].filter((value) => typeof value === "number" && value > Date.now());
+                return { ...activity, nextDeadline: deadlines.length ? Math.min(...deadlines) : null };
             },
             // A durable operation change must refresh Goal activity even though it
             // never writes a mutable legacy registry meta.
-            onActivityChanged: (notify) => {
+            onActivityChanged: (notify, ctx) => {
                 const offRuntime = onBackgroundObservation(pi, notify);
-                const offMeta = onMetaChanged(notify);
-                const offDurable = getObservedWaitHost(pi)?.onDurableTaskChange(notify);
+                const offMeta = onMetaChanged(meta => {
+                    if (ctx && meta && !belongsToGoalActivitySession(meta, ctx))
+                        return;
+                    notify();
+                });
+                const offDurable = getObservedWaitHost(pi)?.onDurableTaskChange(change => {
+                    if (ctx && (change.workspace !== ctx.cwd || change.sessionId !== ctx.sessionManager.getSessionId()))
+                        return;
+                    if (ctx && change.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === change.branchId))
+                        return;
+                    notify();
+                });
                 return () => {
                     offRuntime();
                     offMeta();
@@ -75,6 +88,8 @@ function belongsToGoalActivitySession(meta, ctx) {
     if (origin) {
         if (origin.cwd !== active.cwd)
             return false;
+        if (origin.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === origin.branchId))
+            return false;
         if (origin.sessionId || active.sessionId)
             return origin.sessionId === active.sessionId;
         return true;
@@ -99,6 +114,8 @@ function isVisibleDurableGoalActivity(task, ctx, now) {
     if (ctx) {
         const active = getGoalActivityOrigin(ctx);
         if (task.owner.workspace !== active.cwd)
+            return false;
+        if (task.owner.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === task.owner.branchId))
             return false;
         if (active.sessionId || task.owner.sessionId) {
             if (task.owner.sessionId !== active.sessionId)

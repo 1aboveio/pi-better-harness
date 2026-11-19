@@ -33,7 +33,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
         });
         observeFixtureChild(child);
         actors.add(child); child.stderr.on("data", bytes => { errors += bytes; });
-        const tools = new Map(), sent = [], delivered = [], notes = [];
+        const tools = new Map(), sent = [], delivered = [], notes = [], invocationEntries = [];
         const update = state => {
             if (!state) return;
             entries = state.entries;
@@ -45,6 +45,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
         };
         const ready = new Promise((resolve, reject) => {
             child.on("message", message => {
+                if (message.invocation) { invocationEntries.push(message.entry); return; }
                 update(message.state ?? (message.ready ? message : undefined));
                 if (message.ready) {
                     tools.clear();
@@ -85,7 +86,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
             tools.set(tool, { execute: (key, params) => execute(tool, key, params) });
         }
         // Read-only SDK snapshots support the existing assertions, never tool execution.
-        return { tools, sent, delivered, notes, ready, ctx: { cwd, sessionManager: { getSessionId: () => actualSessionId, getBranch: () => entries } },
+        return { tools, sent, delivered, notes, ready, invocationEntries, ctx: { cwd, sessionManager: { getSessionId: () => actualSessionId, getBranch: () => entries } },
             pid: child.pid, runTeardownOwner: "continuation-fixture",
             get sessionFile() { return actualSessionFile; },
             async inspect() { await ready; const id = ++sequence; return new Promise((resolve, reject) => { requests.set(id, { resolve, reject }); child.send({ id, inspect: true }, error => { if (error) { requests.delete(id); reject(new Error(`${error.message}: ${errors}`)); } }); }); },

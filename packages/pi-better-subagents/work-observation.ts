@@ -18,6 +18,11 @@ let generation = 0;
 const details = new Map<string, any>();
 const pendingDetails = new Set<string>();
 let refresh = () => {};
+const observationListeners = new Set<() => void>();
+export function onWorkObservation(notify: () => void) {
+    observationListeners.add(notify);
+    return () => { observationListeners.delete(notify); };
+}
 
 export function workObservation() { return snapshot; }
 export function workObservationFailure() { return snapshot?.reason ?? failure; }
@@ -143,7 +148,10 @@ async function connectObservation(current: number) {
 export async function startWorkObservation(agentDir: string, origin: { cwd: string; sessionId?: string }, changed: () => void) {
     stopWorkObservation();
     const current = generation;
-    context = { agentDir, origin }; refresh = changed;
+    context = { agentDir, origin }; refresh = () => {
+        changed();
+        for (const notify of observationListeners) notify();
+    };
     try { await ensureObservation(); }
     catch (error) { if (current === generation) { degraded(error); reconnectLater(current); } }
 }

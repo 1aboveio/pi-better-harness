@@ -191,7 +191,7 @@ export class WorkReadModel {
         if (previous?.path === parent && previous.identity === identity) return;
         const entry = relative(parent, root).split(sep)[0];
         const watcher = this.watch(parent, (_event, filename) => {
-          if (this.rootParents.get(root)?.watcher !== watcher) return;
+          if (this.closed || this.rootParents.get(root)?.watcher !== watcher) return;
           if (!filename || String(filename) === entry || String(filename) === relative(dirname(parent), parent)) void this.reconcile();
         });
         watcher.on("error", () => {
@@ -225,7 +225,7 @@ export class WorkReadModel {
     if (this.watchers.has(path)) return;
     try {
       const watcher = this.watch(path, (_event, filename) => {
-        if (this.watchers.get(path) !== watcher) return;
+        if (this.closed || this.watchers.get(path) !== watcher) return;
         if (path === this.runs) {
           // A raw directory may itself have been removed/replaced. Reattach
           // from the shared inventory, never retain its preceding inode.
@@ -313,7 +313,8 @@ export class WorkReadModel {
         handle = await opendir(directory);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        this.unwatchDirectory(directory); this.rootWatchIdentities.delete(directory);
+        this.unwatchDirectory(directory);
+        this.rootWatchIdentities.delete(directory);
         if (directory === this.runs) for (const path of this.watchers.keys()) if (path.startsWith(this.runs + sep)) this.unwatchDirectory(path);
         continue;
       }
