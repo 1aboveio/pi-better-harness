@@ -17,11 +17,10 @@ import { checkStartupAdmission, startupIntentFromEnv } from '../src/startup/admi
 import { readOwnBuild } from '../src/startup/artifact.ts';
 import { summarizeCohorts } from './measure-full-runtime/aggregate-samples.mjs';
 import { runMutationSequence } from './measure-full-runtime/mutation-sequence.mjs';
-import { createBatchCapture, platformCapture } from './measure-full-runtime/batch-capture.mjs';
+import { openPeakSampler, peakCapturePeriodMs } from './measure-full-runtime/peak-sampler.mjs';
 import { distribution } from './measure-full-runtime/owned-fixture.mjs';
 import { measureEventPublication } from './event-publication/measure.mjs';
 import { readLifecycleConfig } from '../src/lifecycle-config.ts';
-import { createRequire } from 'node:module';
 import { buildDarwinCapture } from './measure-full-runtime/build-darwin-capture.mjs';
 import { parseSubjectBinding, subjectModuleUrl } from './measure-full-runtime/subject-binding.mjs';
 const subject = process.env.PI_FULL_RUNTIME_SUBJECT ? parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT) : undefined;
@@ -41,7 +40,7 @@ writeFileSync(sessionFile,JSON.stringify({type:'session',version:3,id:randomUUID
 const probe = new URL('./measure-full-runtime/probe.mjs', import.meta.url).href;
 const preload = subject ? new URL('./measure-full-runtime/subject-probe.mjs', import.meta.url).href : probe;
 const execPath = process.env.PI_TEST_PRIVATE_RUNTIME_NODE ?? process.execPath;
-process.env.PI_RESOURCE_REPORT_DIR=samples;let fixtureControl, nativeCapture;
+process.env.PI_RESOURCE_REPORT_DIR=samples;let fixtureControl, nativeBinding, peakSampler;
 const env = { ...process.env, PI_CODING_AGENT_DIR: agent, PI_SERVER_DIR: transport, TMPDIR: root, TMP: root, TEMP: root, PI_RESOURCE_REPORT_DIR: samples,
   BACKGROUND_SESSION_FILE:sessionFile,NODE_OPTIONS: `--import ${preload}`, LAUNCH_WORKSPACE: cwd, LAUNCH_ENTERED: join(cwd, 'entered'), LAUNCH_RELEASE: join(cwd, 'release'), PI_OFFLINE: '1' };
 const workload = incremental ? seedWorkload({ root, agent, cwd, settings: incremental }) : undefined;
@@ -76,6 +75,7 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
     './measure-full-runtime/probe.mjs', './measure-full-runtime/recovery-trace.mjs', './measure-full-runtime/recovery-trace-loader.mjs',
     './measure-full-runtime/incremental-workload.mjs', './event-publication/writer.mjs', './event-publication/commit.mjs',
     './measure-full-runtime/aggregate-samples.mjs',
+    './measure-full-runtime/peak-sampler.mjs',
     './measure-full-runtime/mutation-sequence.mjs',
     './measure-full-runtime/batch-capture.mjs', './measure-full-runtime/owned-fixture.mjs', './measure-full-runtime/owned-query-worker.mjs',
     './measure-full-runtime/worker-gc-preload.cjs', './measure-full-runtime/worker-gc.cjs',
@@ -85,7 +85,7 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
     './measure-full-runtime/baseline-observation.mjs',
     '../test/support/subagent-offline-model.ts',
   ].map(path => ({ path, sha256: createHash('sha256').update(readFileSync(new URL(path, import.meta.url))).digest('hex') })))).digest('hex'),
-  diagnosticBudget: { samplerIntervalMs: 250, controlIntervalMs: 100 },
+  diagnosticBudget: { samplerIntervalMs: 250, controlIntervalMs: 100, batchCapturePeriodMs: peakCapturePeriodMs },
   activeWorkload: { subagents: 1, durableCommands: 2, legacyCommands: 2, hostedSessions: 2, offline: true },
   coverage: { workerGc: false, aggregatePeak: false, queueAge: false, eventLatency: false, recovery: false, exit: false } };
 if (incremental) Object.assign(report, { incremental, workload: structuredClone(workload), qualification: 'notRun', missing: ['fault matrix', 'scope/UI matrix', 'native dual-platform runs', 'paired fixed-host comparison'] });
@@ -140,10 +140,9 @@ try {
   assert.ok(!env.PI_SERVER_GUARDED_CHILD && !env.PI_SERVER_GUARDIAN_REBIND, 'Primary workload requires its own legitimate guardian bootstrap; inherited guardian authority cannot be reused');
   if (process.platform === 'darwin') {
     reportPhase('build-native-capture');
-    const built = buildDarwinCapture(samples);
-    const binding = createRequire(import.meta.url)(built.path);
-    report.measurement.nativeCapture = { sourceSha256: built.sourceSha256, binarySha256: built.binarySha256, napiVersion: built.napiVersion };
-    nativeCapture = pids => platformCapture(pids, { nativeCapture: binding.capture, nativeBindingId: built.binarySha256 });
+    nativeBinding = buildDarwinCapture(samples);
+    const { sourceSha256, binarySha256, napiVersion } = nativeBinding;
+    report.measurement.nativeCapture = { sourceSha256, binarySha256, napiVersion };
   }
   reportPhase('import-resource-probe');
   ({ fixtureControl } = await import(probe));
@@ -279,26 +278,27 @@ try {
     for(const pid of required) assert.ok(before.some(v=>v.identity.pid===pid),`Missing instrumented actual process ${pid}`);
     const workloadBefore = workload ? await reconcileWorkload(work, cwd, workload, { baseline: Boolean(report.subject?.observations?.baseline) }) : undefined;
     const countersBefore = await work.request('runtime_get_metrics');
-    before = await sampleAll();
-    const batchCapture = createBatchCapture({ pids: required, generation: String(count), ...(nativeCapture ? { capture: nativeCapture } : {}) });
-    const aggregateCohorts = [batchCapture()];
-    const requiredProcesses = aggregateCohorts[0].map(row => ({ identity: row.identity, role: role(row.identity.pid) }));
+    peakSampler = openPeakSampler({ pids: required, generation: String(count), nativeBinding, gcDirectory: samples });
+    before = await sampleAll(await peakSampler.ready);
+    reportPhase(`clients-${count}-measurement`);
+    const firstCohort = await peakSampler.start();
+    const requiredProcesses = firstCohort.map(row => ({ identity: row.identity, role: role(row.identity.pid) }));
     const batchIdentity = value => ({ ...value, observedIdentity: value.identity, observedAt: value.at,
       identity: requiredProcesses.find(row => row.identity.pid === value.identity.pid).identity });
     before = before.map(batchIdentity);
-    const captureCohort = () => {
-      aggregateCohorts.push(batchCapture());
-    };
-    reportPhase(`clients-${count}-measurement`);
     const startedAt = Date.now();
     const measurementStart=performance.now(), latencies=[], queueAges=[]; const duration=incremental?.durationMs ?? (process.env.PI_FULL_RUNTIME_MATRIX_ONLY?100:count===10?60000:3000);
     while(performance.now()-measurementStart<duration) { const began=performance.now(); await work.request('runtime_get_status'); latencies.push(performance.now()-began);
       const actual = await work.request('runtime_get_metrics');
       if (Number.isFinite(actual.executor?.oldestQueuedAgeMs)) queueAges.push(actual.executor.oldestQueuedAgeMs);
-      captureCohort(); await delay(100); }
+      await delay(100); }
     const elapsedMs = performance.now() - measurementStart, endedAt = Date.now();
-    captureCohort();
-    const after=(await sampleAll(endedAt)).map(batchIdentity), metrics=await work.request('runtime_get_metrics'), status=await work.request('runtime_get_status');
+    await peakSampler.stop(endedAt);
+    const after=(await sampleAll(endedAt)).map(batchIdentity);
+    const aggregateCohorts = await peakSampler.read();
+    await peakSampler.close();
+    peakSampler = undefined;
+    const metrics=await work.request('runtime_get_metrics'), status=await work.request('runtime_get_status');
     const aggregatePeak = summarizeCohorts(aggregateCohorts, { required: requiredProcesses, generation: String(count) }, { startedAt, endedAt });
     const workloadAfter = workload ? await reconcileWorkload(work, cwd, workload, { baseline: Boolean(metrics.baselineObservation) }) : undefined;
     if (workload) {
@@ -454,6 +454,7 @@ finally {
       console.error(`Full runtime cleanup ${step}: ${error}`);
     }
   }
+  await cleanupStep('close peak sampler', () => peakSampler?.close());
   await cleanupStep('observe phase', () => reportPhase('cleanup-observe-owned'));
   const owned = await cleanupStep('observe identities', () => observed().map(value => value.identity).filter(identity=>identity.pid!==process.pid)) ?? [];
   for (const gate of ['release', 'finish']) await cleanupStep(`write ${gate} gate`, () => writeFileSync(join(cwd, gate), 'done'));

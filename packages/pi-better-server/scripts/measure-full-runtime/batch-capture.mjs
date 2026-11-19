@@ -4,11 +4,15 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 let linuxUnits;
 
+export function linuxCaptureUnits(run = execFileSync) {
+  return linuxUnits ??= { ticks: Number(run('getconf', ['CLK_TCK'], { encoding: 'utf8' }).trim()),
+    pageBytes: Number(run('getconf', ['PAGESIZE'], { encoding: 'utf8' }).trim()) };
+}
+
 /** One platform owner acquires this NEW batch, never independent probe files. */
 export function platformCapture(pids, { run = execFileSync, read = readFileSync, now = Date.now, platform = process.platform, units, nativeCapture, nativeBindingId } = {}) {
   assert.ok(['darwin', 'linux'].includes(platform), 'Unsupported batch capture platform');
-  const scale = platform === 'linux' ? units ?? (linuxUnits ??= { ticks: Number(run('getconf', ['CLK_TCK'], { encoding: 'utf8' }).trim()),
-    pageBytes: Number(run('getconf', ['PAGESIZE'], { encoding: 'utf8' }).trim()) }) : undefined;
+  const scale = platform === 'linux' ? units ?? linuxCaptureUnits(run) : undefined;
   const captureStartedAt = now();
   const cpuStarted = process.cpuUsage();
   const cost = () => {
