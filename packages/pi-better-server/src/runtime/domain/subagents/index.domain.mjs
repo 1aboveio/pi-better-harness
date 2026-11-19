@@ -3464,20 +3464,22 @@ export default function (pi, managed) {
                     workerOperations.release(id, "attempt-exited");
                 // Reconcile this attempt's earlier published writer before its
                 // next park can admit another continuation of the conversation.
-                await settleResumedAttemptExit({
-                    attemptId: id,
-                    service: workerOperations.service,
-                    status: readMeta(id)?.status ?? "exited",
-                    // The exit handler releases the conversation writer lease just
-                    // above, before this call.
-                    writerLeaseReleased: true,
-                    notify: (message) => {
-                        try {
-                            uiCtx?.ui?.notify?.(message, "warning");
-                        }
-                        catch { /* ignore UI failures */ }
-                    },
-                });
+                if (internal?.resumeWait && resume)
+                    await settleResumedAttemptExit({
+                        attemptId: id,
+                        priorPark: { runId: resume.prior.id, ...internal.resumeWait },
+                        service: workerOperations.service,
+                        status: readMeta(id)?.status ?? "exited",
+                        // The exit handler releases the conversation writer lease just
+                        // above, before this call.
+                        writerLeaseReleased: true,
+                        notify: (message) => {
+                            try {
+                                uiCtx?.ui?.notify?.(message, "warning");
+                            }
+                            catch { /* ignore UI failures */ }
+                        },
+                    });
                 await settleParkedExit(id);
             });
             managed?.observeExit?.(id, exitCompletion);
