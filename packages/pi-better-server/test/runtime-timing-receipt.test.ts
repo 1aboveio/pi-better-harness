@@ -78,8 +78,8 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
     assert.equal(result.isError, undefined);
     assert.ok(readOutcome(meta)?.inspectedAt);
     const sessionFile = manager.getSessionFile()!;
-    await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
-    if (host) await host.dispose({ abort: false }); else session.dispose();
+    if (host) await host.dispose({ abort: false });
+    else { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     removeTimingReceipt(id, 'deadline'); // Crash after native handoff, before durable receipt.
     // A terminal run retains a new notice while its recipient is disconnected.
     const disconnected = readMeta(id)!;
@@ -112,6 +112,7 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
     assert.deepEqual(readOutcome(meta), consumed);
     assert.equal(consumed?.disposition?.kind, 'consumed');
   } finally {
-    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); if (host) await host.dispose({ abort: false }); else session.dispose(); }
+    if (host) await host.dispose({ abort: false });
+    else if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
   }
 });

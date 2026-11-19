@@ -302,13 +302,20 @@ export class HostedSession {
     this.activity?.dispose();
     // Abort synchronously before releasing dialogs, so cancellation cannot resume a model/tool continuation.
     const aborted = options.abort ? this.session.abort().catch(() => undefined) : Promise.resolve();
-    this.ui.cancelAll();
+    this.ui.close();
     await aborted;
     this.unsubscribe();
     this.listeners.clear();
     this.runtimeReleased = true;
-    this.log.flush();
-    this.session.dispose();
+    try {
+      // SDK dispose invalidates the extension context but does not run its cleanup hooks.
+      if (this.session.extensionRunner.hasHandlers("session_shutdown")) {
+        await this.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+      }
+    } finally {
+      this.log.flush();
+      this.session.dispose();
+    }
   }
 
   private async queueForStartingTurn(id: string | undefined, command: string, message: string, options: { images?: RpcCommandImages; streamingBehavior?: "steer" | "followUp" }): Promise<RpcResponse> {

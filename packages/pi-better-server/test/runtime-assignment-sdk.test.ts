@@ -77,8 +77,8 @@ for (const paused of [false, true]) for (const hosted of [false, true]) test(`re
     assert.equal(result.isError, undefined);
     assert.ok(readOutcome(meta)?.inspectedAt);
     const sessionFile = manager.getSessionFile()!;
-    await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
-    if (host) await host.dispose({ abort: false }); else session.dispose();
+    if (host) await host.dispose({ abort: false });
+    else { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     manager = SessionManager.open(sessionFile);
     await resourceLoader.reload();
     ({ session } = await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader, sessionManager: manager, noTools: 'all' }));
@@ -99,6 +99,7 @@ for (const paused of [false, true]) for (const hosted of [false, true]) test(`re
     assert.deepEqual(readOutcome(meta), consumed);
     assert.equal(consumed?.disposition?.kind, 'consumed');
   } finally {
-    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); if (host) await host.dispose({ abort: false }); else session.dispose(); }
+    if (host) await host.dispose({ abort: false });
+    else if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
   }
 });

@@ -116,6 +116,60 @@ test("guardian signal shutdown closes captured pipes and releases both owners na
   assert.equal(JSON.parse(readFileSync(join(env.serverDir, "clean-stop.json"), "utf8")).token, server.token);
 });
 
+test("closing a hosted Pi with real extensions releases its work clients and lets both owners idle out", { timeout: 20_000 }, async t => {
+  const env = makeEnv();
+  const extension = fileURLToPath(new URL('../scripts/measure-full-runtime/hosted-extension.ts', import.meta.url));
+  writeFileSync(join(env.agentDir, 'extensions', 'resource-hosted.ts'), `export { default } from ${JSON.stringify(extension)};`);
+  const shutdownMarker = join(env.gateDir, 'shutdown-dialog');
+  writeFileSync(join(env.agentDir, 'extensions', 'shutdown-dialog.ts'), `
+    import { writeFileSync } from 'node:fs';
+    export default (pi) => pi.on('session_shutdown', async (_event, ctx) => {
+      const answer = await ctx.ui.confirm('Shutdown fixture', 'No controller can answer this');
+      writeFileSync(${JSON.stringify(shutdownMarker)}, String(answer));
+    });
+  `);
+  const fixture = runtime({ ...env, vars: { ...env.vars, PI_SERVER_DAEMON_IDLE_MS: '100' } });
+  t.after(async () => {
+    if (fixture.child.exitCode === null && fixture.child.signalCode === null) fixture.child.kill('SIGTERM');
+    await fixture.exited;
+  });
+
+  const server = await liveServer(env);
+  writeFileSync(join(env.agentDir, 'server-registration-v1.json'), JSON.stringify({ version: 1, agentDir: env.agentDir, serverDir: env.serverDir }));
+  const control = await Client.connect(join(env.serverDir, 'pi-server.sock'));
+  try {
+    assert.equal((await control.request({ type: 'hello', protocolVersion: 1, runtimeRoot: env.agentDir })).success, true);
+    const opened = await control.request({ type: 'create_session', cwd: env.cwd });
+    assert.equal(opened.success, true, JSON.stringify(opened));
+    const closed = await Promise.race([
+      control.request({ type: 'close_session', sessionId: opened.sessionId }),
+      new Promise<never>((_, reject) => {
+        const signal = AbortSignal.timeout(6000);
+        signal.addEventListener('abort', () => reject(new Error('close_session did not finish')), { once: true });
+      }),
+    ]);
+    assert.equal(closed.success, true, JSON.stringify(closed));
+    let status: any;
+    try {
+      await waitFor('natural exit of Server and guardian', async () => {
+        if (fixture.child.exitCode !== null) return true;
+        const response = await Promise.race([fixture.exited, control.request({ type: 'runtime_get_status' })]);
+        if (Array.isArray(response)) return true;
+        status = response.data;
+        return false;
+      }, 4000);
+    } catch (error) {
+      throw new Error(`${error}; hosted=${status?.hostedSessions}; liveness=${JSON.stringify(status?.livenessReasons)}`, { cause: error });
+    }
+    assert.deepEqual(await fixture.exited, [0, null], fixture.log());
+    assert.equal(processMatchesStart(server.pid, server.start), false);
+    const checkpoint = JSON.parse(readFileSync(join(env.serverDir, 'clean-stop.json'), 'utf8'));
+    assert.equal(checkpoint.token, server.token);
+    assert.deepEqual(checkpoint.idleEvidence?.obligations, []);
+    assert.equal(readFileSync(shutdownMarker, 'utf8'), 'false');
+  } finally { control.close(); }
+});
+
 test("idle shutdown fault gets one bounded recovery within the shutdown budget", { timeout: 25_000 }, async t => {
   const env = makeEnv(); mkdirSync(env.serverDir);
   // A real persistence fault, not a replaced obligation provider.

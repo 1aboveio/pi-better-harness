@@ -34,6 +34,7 @@ interface Waiter {
 export class UiBridge {
   private readonly waiters = new Map<string, Waiter>();
   private readonly emit: (event: unknown) => void;
+  private closed = false;
 
   constructor(emit: (event: unknown) => void) {
     this.emit = emit;
@@ -51,13 +52,14 @@ export class UiBridge {
     return true;
   }
 
-  /** Release every waiting extension with a cancelled answer (the session is going away). */
-  cancelAll(): void {
+  /** Cancel current and future dialogs; shutdown hooks no longer have a controller. */
+  close(): void {
+    this.closed = true;
     for (const waiter of [...this.waiters.values()]) waiter.settle({ cancelled: true }, "closed");
   }
 
   private dialog<T>(spec: Omit<PendingDialog, "type" | "id">, opts: ExtensionUIDialogOptions | undefined, fallback: T, parse: (answer: DialogAnswer) => T): Promise<T> {
-    if (opts?.signal?.aborted) return Promise.resolve(fallback);
+    if (this.closed || opts?.signal?.aborted) return Promise.resolve(fallback);
     const dialog: PendingDialog = { type: "extension_ui_request", id: randomUUID(), ...spec };
     return new Promise<T>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
