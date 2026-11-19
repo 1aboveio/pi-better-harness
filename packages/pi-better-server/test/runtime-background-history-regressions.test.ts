@@ -207,6 +207,12 @@ for (const legacyCount of [0, 160]) test(`public list settles after durable dism
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([(async () => {
+      // Background rows can be ready before the worker publishes its initial coordinator revision.
+      // Finish and verify startup before warming either cache scope used by the list.
+      await executor.livenessReasons();
+      const baseline = await executor.snapshot({});
+      assert.equal(baseline.status, "ready", baseline.reason);
+      assert.notEqual(baseline.observedRevisionVector.coordinator, "unknown", "coordinator revision is verified before warming the list cache");
       const cachedList = (await run("bg_task_list")).content[0].text;
       assert.match(cachedList, new RegExp(budgetId));
       // Original output.test.ts afterEach removes files without registry removal.
