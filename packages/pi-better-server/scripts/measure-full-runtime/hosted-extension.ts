@@ -4,8 +4,10 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import background from '../../../pi-better-background-tasks/src/index.ts';
 import subagents from '../../../pi-better-subagents/index.ts';
 import { join } from 'node:path';
-import { traceHostedHook } from './hosted-hook-trace.mjs';
+import { traceHostedHook, traceHostedRequests } from './hosted-hook-trace.mjs';
+import { WorkClient as SubagentWorkClient } from '../../../pi-better-subagents/shared-work-client.mjs';
 export default function hostedResourceFixture(pi: ExtensionAPI) {
+  traceHostedRequests(SubagentWorkClient);
   const tools = new Map<string, any>();
   const capture = (owner: string) => {
     const ordinals = new Map<string, number>();

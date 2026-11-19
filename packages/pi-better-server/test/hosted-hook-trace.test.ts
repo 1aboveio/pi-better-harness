@@ -4,8 +4,40 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentSession, ExtensionRunner } from '@earendil-works/pi-coding-agent';
-import { traceHostedHook } from '../scripts/measure-full-runtime/hosted-hook-trace.mjs';
+import { traceHostedHook, traceHostedRequests } from '../scripts/measure-full-runtime/hosted-hook-trace.mjs';
 import ts from 'typescript';
+
+test('startup request discriminator is bounded without dropping requests or replacing their original failures', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'hook-requests-'));
+  const previous = process.env.PI_FULL_RUNTIME_CREATION_REPORT;
+  const output = join(root, 'requests.json');
+  process.env.PI_FULL_RUNTIME_CREATION_REPORT = output;
+  const failure = new Error('original RPC failure');
+  let calls = 0;
+  class Client {
+    async request(type: string) { calls++; if (type === 'failure') throw failure; return { status: 'ready' }; }
+  }
+  traceHostedRequests(Client); traceHostedRequests(Client);
+  const client = new Client();
+  try {
+    await traceHostedHook('subagents', 'session_start', 2, async () => {
+      await assert.rejects(client.request('failure'), error => error === failure);
+      const failed = JSON.parse(readFileSync(output, 'utf8'));
+      assert.equal(failed.dependency.state, 'failed');
+      for (let i = 0; i < 40; i++) assert.deepEqual(await client.request('runtime_get_snapshot'), { status: 'ready' });
+      const bounded = JSON.parse(readFileSync(output, 'utf8'));
+      assert.equal(bounded.dependency.state, 'request-bound-exceeded');
+      assert.equal(bounded.dependency.limit, 32);
+      assert.equal(calls, 41, 'diagnostic bound must not change execution');
+      assert.ok(Buffer.byteLength(readFileSync(output)) < 256);
+    })();
+    assert.equal(JSON.parse(readFileSync(output, 'utf8')).status, 'returned');
+  } finally {
+    if (previous === undefined) delete process.env.PI_FULL_RUNTIME_CREATION_REPORT;
+    else process.env.PI_FULL_RUNTIME_CREATION_REPORT = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('actual hosted fixture registration forwards all hooks and tools with distinct owner ordinals', async () => {
   const source = readFileSync(new URL('../scripts/measure-full-runtime/hosted-extension.ts', import.meta.url), 'utf8');
