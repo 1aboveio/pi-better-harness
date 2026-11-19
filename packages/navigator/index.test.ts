@@ -57,7 +57,7 @@ function renderWidget(value: unknown, width: number, theme: unknown = { fg: (_co
 }
 
 describe("shared background work navigator", () => {
-  it("packs leaf agents together while separating groups with child tasks", () => {
+  it("renders agent groups and their tasks without blank rows in the work tree", () => {
     const previousView = getNavigatorView();
     setNavigatorView("tree");
     const agents = provider("subagents", "Subagents", 10, 100, () => {});
@@ -67,7 +67,7 @@ describe("shared background work navigator", () => {
         ...agents.listRows(now)[0]!, id, name: id, sortStartedAt: 100 - i,
       })) });
     const unregisterTasks = registerBackgroundWorkProvider({ ...tasks, listRows: (now) =>
-      ["main", "with-task"].map((parentAgentId) => ({ ...tasks.listRows(now)[0]!,
+      ["main", "with-task", "missing-owner"].map((parentAgentId) => ({ ...tasks.listRows(now)[0]!,
         id: `${parentAgentId}-task`, name: `${parentAgentId}-task`, parentAgentId,
       })) });
     let widget: unknown;
@@ -88,9 +88,10 @@ describe("shared background work navigator", () => {
       assert.match(lines[mainTask]!, /└─ >_ main-task/);
       assert.match(lines[mainTask + 1]!, /●\s+leaf-a/);
       assert.match(lines[mainTask + 2]!, /leaf-b/);
-      assert.equal(lines[mainTask + 3]?.trim(), "");
-      assert.match(lines[mainTask + 4]!, /with-task/);
-      assert.match(lines[mainTask + 5]!, /└.*with-task-task/);
+      assert.match(lines[mainTask + 3]!, /with-task/);
+      assert.match(lines[mainTask + 4]!, /└.*with-task-task/);
+      assert.match(lines[mainTask + 5]!, /missing-owner.*not running/);
+      assert.match(lines[mainTask + 6]!, /└.*missing-owner-task/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregisterAgents();
