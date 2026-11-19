@@ -27,7 +27,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
-import { requestWorkDetail } from "../work-observation.ts";
+import { requestWorkDetail, workObservation } from "../work-observation.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(__dirname);
@@ -296,7 +296,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
         get overlayComponent() { return overlayComponent; },
         async start() {
             await handlers.session_start({}, ctx);
-            await eventually(() => seededIds.every(id => requestWorkDetail(id)?.detail));
+            await eventually(() => workObservation()?.status === "ready" && seededIds.every(id => requestWorkDetail(id)?.detail));
             assert.ok(ui.factory, "session_start must install the navigator editor factory");
             editor = ui.factory("tui", "theme", "kb");
             assert.equal(typeof editor.handleInput, "function");
@@ -366,6 +366,14 @@ describe("registered extension path: session_start reload cleanup", () => {
     let metaBase;
     let timerSpies;
 
+    function writeRunWithLog(meta) {
+        const directory = registry.runDir(meta.id);
+        const logPath = join(directory, "output.log");
+        mkdirSync(directory, { recursive: true });
+        writeFileSync(logPath, "");
+        registry.writeMeta({ ...meta, logPath });
+    }
+
     before(async () => {
         stopRuntime = await startWorkRuntimeFixture();
         setupStubs();
@@ -380,7 +388,6 @@ describe("registered extension path: session_start reload cleanup", () => {
             callbackOrigin: { cwd: RUNTIME, sessionId: "reload-recipient" },
             promptPreview: "reload-ext",
             startedAt: 1,
-            logPath: join(RUNTIME, "reload.log"),
             sessionId: "reload-ext",
         };
         assertCheckoutNodeModulesUntouched();
@@ -403,7 +410,7 @@ describe("registered extension path: session_start reload cleanup", () => {
     // @covers navigator.hardening
     // @level integration
     it("terminal-only session_start clears the left-arrow affordance", async () => {
-        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
+        const nav = bootRegisteredNavigator(mod, { writeMeta: writeRunWithLog, metaBase });
         nav.seedRun({
             id: trackDisk(`sa_t48_terminal_${Date.now()}`),
             name: "done-job",
@@ -426,7 +433,7 @@ describe("registered extension path: session_start reload cleanup", () => {
     // @level integration
     it("second session_start disposes live detail/arm timers, clears confirm, does not stack editor, keeps the persistent footer clear", async () => {
         timerSpies = installTimerSpies();
-        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
+        const nav = bootRegisteredNavigator(mod, { writeMeta: writeRunWithLog, metaBase });
         const runningId = nav.seedRun({
             id: trackDisk(`sa_t48_reload_${Date.now()}`),
             name: "reload-job",

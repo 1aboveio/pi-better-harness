@@ -1251,6 +1251,10 @@ describe("completion callback batching", () => {
             completionCallbackPendingAt: now - 1_000,
         };
         try {
+            for (const id of ids) {
+                mkdirSync(runDir(id), { recursive: true });
+                writeFileSync(join(runDir(id), "output.log"), JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
+            }
             writeMeta({ ...base, id: ids[0], name: "active-a", logPath: join(runDir(ids[0]), "output.log"), callbackOrigin: { cwd: h.ctx.cwd, sessionId: "session-b" } });
             writeMeta({ ...base, id: ids[1], name: "active-b", logPath: join(runDir(ids[1]), "output.log"), callbackOrigin: { cwd: h.ctx.cwd, sessionId: "session-b" } });
             writeMeta({ ...base, id: ids[2], name: "foreign", logPath: join(runDir(ids[2]), "output.log"), callbackOrigin: { cwd: h.ctx.cwd, sessionId: "session-a" } });

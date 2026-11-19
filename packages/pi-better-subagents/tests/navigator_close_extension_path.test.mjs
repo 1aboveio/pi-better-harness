@@ -589,7 +589,13 @@ describe("registered extension path: main-window navigator actions", () => {
     // @covers navigator.close
     // @level integration
     it("registered main-list widget hides the section when only terminal subagents remain", async () => {
-        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
+        const nav = bootRegisteredNavigator(mod, { metaBase, writeMeta(meta) {
+            const directory = registry.runDir(meta.id);
+            const logPath = join(directory, "output.log");
+            mkdirSync(directory, { recursive: true });
+            writeFileSync(logPath, "");
+            registry.writeMeta({ ...meta, logPath });
+        } });
         const now = Date.now();
         const recentFailedId = nav.seedRun({
             id: trackDisk(`sa_t47_recent_failed_${now}`),

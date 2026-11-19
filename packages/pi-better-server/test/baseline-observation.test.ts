@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { workloadCounterDelta, reconcileWorkload } from '../scripts/measure-full-runtime/incremental-workload.mjs';
 import { threadId } from 'node:worker_threads';
 import { createRequire } from 'node:module';
+import { setImmediate as finishLoaderTurn } from 'node:timers/promises';
 import ts from 'typescript';
 
 test('approved baseline real parser modules reread and refold after eviction of their exact loaded caches', async () => {
@@ -38,6 +39,9 @@ test('approved baseline real parser modules reread and refold after eviction of 
     await load('shared-log-utils'); await load('log-cursor');
     const parse = await load('parse'), health = await load('health-observation');
     const { WorkReadModel } = await load('read-model');
+    // A cold tsx import schedules its cache-directory sweep with setImmediate.
+    // Let that setup start before measuring filesystem work from the model.
+    await finishLoaderTurn();
     // Loading/transpiling component modules is setup, not subject filesystem work.
     // Install before constructing the real model; builtin ESM bindings stay live.
     restoreFs = adapter.installBaselineFsObservation();

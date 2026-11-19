@@ -60,7 +60,11 @@ for (const count of [1, 50]) test(`registered provider observes ${count} attempt
     }
     try {
         await handlers.get("session_start")({}, ctx);
-        metas.forEach(writeMeta);
+        for (const meta of metas) {
+            fs.mkdirSync(runDir(meta.id), { recursive: true });
+            fs.writeFileSync(join(runDir(meta.id), "output.log"), "");
+            writeMeta(meta);
+        }
         await eventually(() => list().length === count && list().every(row => row.status === "running"));
         sqlite.DatabaseSync = class extends OriginalDatabase {
             constructor(...args) { super(...args); connections++; }
@@ -92,6 +96,7 @@ for (const count of [1, 50]) test(`registered provider observes ${count} attempt
             startedAt: now, status: "failed", operations: { ...metas[0].operations, resumeLaunchToken: "resume" } };
         fs.mkdirSync(runDir(continuation.id), { recursive: true });
         try {
+            fs.writeFileSync(join(runDir(continuation.id), "output.log"), "");
             externalWrite(continuation);
             await eventually(() => list().find(r => r.id === metas[0].id)?.status === "failed");
             assert.equal(list().find(r => r.id === metas[0].id).status, "failed");
