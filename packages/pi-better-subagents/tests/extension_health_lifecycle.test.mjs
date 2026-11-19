@@ -328,8 +328,9 @@ describe("structured failure attention", () => {
                 mock.timers.tick(HEALTH_TICK_MS);
                 await new Promise((resolve) => setImmediate(resolve));
                 await waitFor(() => h.sent.filter((x) => x.message.customType === "subagent-failure").length === 1);
+                assert.ok(await waitFor(() => pendingFailureAttention(readRunFailures(id), Date.now()) === undefined),
+                    "successful urgent handoff must be acknowledged in the failure journal before reload");
                 assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 1);
-                assert.equal(pendingFailureAttention(readRunFailures(id), Date.now()), undefined);
                 await h.handlers.get("session_start")({}, h.ctx);
                 mock.timers.tick(HEALTH_TICK_MS);
                 await waitFor(() => h.sent.filter((x) => x.message.customType === "subagent-failure").length === 1);
