@@ -5,11 +5,13 @@ import { performance, PerformanceObserver } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { threadId } from 'node:worker_threads';
 import { register } from 'node:module';
 import { baselineModuleUrls, baselineObservation, evictBaselineParsers } from './baseline-observation.mjs';
 
 let executor, gc, gcObserver;
+const observedGcThreads = new Set();
 function publish(name, value, directory = process.env.PI_RESOURCE_REPORT_DIR) {
   const path = join(directory, `${process.pid}-${name}`);
   writeFileSync(path + '.tmp', JSON.stringify(value)); renameSync(path + '.tmp', path);
@@ -19,6 +21,8 @@ export function registerOwnedLoader() {
   register(new URL('./recovery-trace-loader.mjs', import.meta.url), { data: { resourceParentThreadId: threadId, resourceReportDir: process.env.PI_RESOURCE_REPORT_DIR } });
 }
 export function observeGcThread(key = `worker-${threadId}`, directory = process.env.PI_RESOURCE_REPORT_DIR) {
+  if (observedGcThreads.has(key)) return;
+  observedGcThreads.add(key);
   threadGc();
   const sample = () => publish(`${key}.gc`, { thread: key, physicalThreadId: threadId, ...threadGc() }, directory);
   sample(); setInterval(sample, 250).unref();
@@ -29,8 +33,13 @@ export function gcThreads() {
   const lifecycle = names.filter(name => name.endsWith('.expected')).map(read).sort((a,b) => a.thread.localeCompare(b.thread));
   const expected = lifecycle.filter(value => !value.exitedAt);
   const records = names.filter(name => name.endsWith('.gc')).map(read).filter(value => expected.some(item => item.thread === value.thread));
+  const now = Date.now();
   return { expected: expected.map(value => value.thread), lifecycle, records,
-    complete: expected.every(value => records.some(record => record.thread === value.thread && record.observedAt >= Date.now() - 250)) };
+    complete: records.length === expected.length && new Set(records.map(record => record.physicalThreadId)).size === records.length
+      && expected.every(value => records.some(record => record.thread === value.thread && record.observed === true
+        && Number.isSafeInteger(record.physicalThreadId) && record.physicalThreadId > 0
+        && (value.physicalThreadId === undefined || value.physicalThreadId === record.physicalThreadId)
+        && record.observedAt >= now - 250)) };
 }
 export function threadGc() {
   if (!gc) {
@@ -103,10 +112,17 @@ export async function controlOwnedExecutor(executor, action) {
 export function installOwnedRouter() {
   const cp = createRequire(import.meta.url)('node:child_process'), fork = cp.fork, spawn = cp.spawn, children = new Set();
   const threads = createRequire(import.meta.url)('node:worker_threads'), OriginalWorker = threads.Worker;
+  const workerGcPreload = fileURLToPath(new URL('./worker-gc-preload.mjs', import.meta.url));
   threads.Worker = class extends OriginalWorker {
-    constructor(...args) { super(...args); const key = `worker-${this.threadId}`;
-      publish(`${key}.expected`, { thread: key });
-      this.once('exit', () => publish(`${key}.expected`, { thread: key, exitedAt: Date.now() })); }
+    constructor(entry, options) {
+      const execArgv = options?.execArgv ?? process.execArgv;
+      super(entry, { ...options, execArgv: [...execArgv, '--require', workerGcPreload] });
+      const physicalThreadId = this.threadId, key = `worker-${physicalThreadId}`;
+      const source = options?.eval ? '<eval>' : entry instanceof URL ? (entry.protocol === 'file:' ? entry.href : '<url>') : entry;
+      const identity = { thread: key, physicalThreadId, entry: source };
+      publish(`${key}.expected`, identity);
+      this.once('exit', () => publish(`${key}.expected`, { ...identity, exitedAt: Date.now() }));
+    }
   };
   cp.fork = (...args) => { const child = fork(...args); children.add(child); child.once('exit', () => children.delete(child)); return child; };
   cp.spawn = (command, args, options) => {

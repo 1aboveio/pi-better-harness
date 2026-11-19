@@ -78,6 +78,7 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
     './measure-full-runtime/aggregate-samples.mjs',
     './measure-full-runtime/mutation-sequence.mjs',
     './measure-full-runtime/batch-capture.mjs', './measure-full-runtime/owned-fixture.mjs', './measure-full-runtime/owned-query-worker.mjs',
+    './measure-full-runtime/worker-gc-preload.mjs',
     './measure-full-runtime/darwin-capture.cc', './measure-full-runtime/build-darwin-capture.mjs',
     './measure-full-runtime/subject-binding.mjs', './measure-full-runtime/measure-subject.mjs',
     './measure-full-runtime/subject-probe.mjs',
@@ -257,7 +258,7 @@ try {
       let gcCount = value.window.gc.count - prior.window.gc.count, durationMs = value.window.gc.durationMs - prior.window.gc.durationMs;
       for (const record of endThreads.records) {
         const start = startThreads.records.find(item => item.thread === record.thread);
-        if (!start || start.startedAt !== record.startedAt || record.count < start.count || record.durationMs < start.durationMs) return null;
+        if (!start || start.physicalThreadId !== record.physicalThreadId || start.startedAt !== record.startedAt || record.count < start.count || record.durationMs < start.durationMs) return null;
         gcCount += record.count - start.count; durationMs += record.durationMs - start.durationMs;
       }
       if (![gcCount,durationMs].every(value => Number.isFinite(value) && value >= 0)) return null;
