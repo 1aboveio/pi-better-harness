@@ -399,7 +399,9 @@ test("stalled diagnostic completion rejects when its worker exits", { timeout: 1
 });
 
 test("slow caller cancellation preserves other clients and ignores late replies", { timeout: 10000 }, async t => {
-  const f = await fixture({ timeoutMs: 700, watchdogMs: 2000,
+  // Cold inventory still runs after the RPC receipt. Use the normal watchdog
+  // for setup; the 700 ms caller deadline is the bound this test exercises.
+  const f = await fixture({ timeoutMs: 700,
     workerUrl: new URL("./support/cancellable-query-worker.mjs", import.meta.url) });
   let phase = "bootstrap";
   const requests: Array<Record<string, unknown>> = [];
