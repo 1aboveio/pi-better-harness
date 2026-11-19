@@ -442,6 +442,7 @@ function scopeOf(registration) {
     return {
         runId: registration.runId,
         conversationId: registration.conversationId,
+        ...(registration.assignment && registration.attemptId ? { assignmentAttemptId: registration.attemptId } : {}),
         workspace: registration.workspace,
         authorityReference: registration.authorityReference,
         branchId: registration.branchId ?? null,
@@ -537,6 +538,7 @@ export function createWorkerOperationsHost(options) {
             tools: [...registration.tools],
             capabilities: registration.capabilities,
             assignmentOutcomesVersion: 1,
+            assignmentTaskOwnership: registration.assignment !== undefined,
             owner,
             ...(registration.writerLeaseId ? { writerLeaseId: registration.writerLeaseId } : {}),
         }) : { assignmentOutcomesVersion: 1 };

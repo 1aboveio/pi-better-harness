@@ -865,6 +865,8 @@ export interface WorkerOperationsHost {
 
 function scopeOf(registration: {
     runId: string;
+    attemptId?: string;
+    assignment?: AssignmentBinding;
     conversationId: string;
     workspace: string;
     authorityReference: string;
@@ -874,6 +876,7 @@ function scopeOf(registration: {
     return {
         runId: registration.runId,
         conversationId: registration.conversationId,
+        ...(registration.assignment && registration.attemptId ? { assignmentAttemptId: registration.attemptId } : {}),
         workspace: registration.workspace,
         authorityReference: registration.authorityReference,
         branchId: registration.branchId ?? null,
@@ -972,6 +975,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             tools: [...registration.tools],
             capabilities: registration.capabilities as unknown as JsonRecord,
             assignmentOutcomesVersion: 1,
+            assignmentTaskOwnership: registration.assignment !== undefined,
             owner,
             ...(registration.writerLeaseId ? { writerLeaseId: registration.writerLeaseId } : {}),
         }) : { assignmentOutcomesVersion: 1 };

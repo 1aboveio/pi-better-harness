@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { cleanupHarnesses, createHarness, registerOperation, workerOwner } from "./support.ts";
+import { cleanupHarnesses, createHarness, registerOperation, removeAssignmentOperationBinding, workerOwner } from "./support.ts";
 import { openStore } from "../index.ts";
 import { DatabaseSync } from "node:sqlite";
 
@@ -54,6 +54,7 @@ test("the first open of a v3 database installs the result admission fence", () =
     registerOperation(harness.store);
     harness.closeStore();
     const old = new DatabaseSync(harness.path);
+    removeAssignmentOperationBinding(old);
     old.exec("DROP TRIGGER result_scope_admission_v1; DROP TABLE assignment_repairs; UPDATE schema_meta SET value = '3' WHERE key = 'schema_version'");
     old.close();
     const migrated = openStore({ path: harness.path });

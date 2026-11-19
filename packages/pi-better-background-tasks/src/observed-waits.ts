@@ -71,6 +71,8 @@ import {
   type SupervisorStartOptions,
   type SupervisorTaskStatus,
 } from "./supervisor/index.js";
+import { processGroupAlive } from "./supervisor/identity.js";
+import { readStopRequest } from "./supervisor/store.js";
 import type { BackgroundTaskCallbackOrigin, CommandSpec, Condition, TaskSandboxProvenance } from "./types.js";
 import type { SpawnTaskParams, WatchTaskParams } from "./runtime.js";
 
@@ -266,6 +268,7 @@ export type ParentNotifier = (notification: ParentNotification, delivery: Parent
 
 export interface WorkerRunScope {
   readonly runId: string;
+  readonly assignmentAttemptId?: string;
   readonly conversationId: string;
   readonly workspace: string;
   readonly authorityReference: string;
@@ -275,6 +278,7 @@ export interface WorkerRunScope {
 
 interface RpcRunBinding {
   readonly runId: string;
+  readonly assignmentTaskOwnership: boolean;
   readonly conversationId: string;
   readonly attemptId: string;
   readonly workspace: string;
@@ -956,6 +960,7 @@ export class ObservedWaitHost {
   private continuationError?: string;
   private readonly launches = new Map<string, LaunchContext>();
   private readonly localCancels = new Set<string>();
+  private assignmentCleanupCursor?: string;
   private readonly resultHandoffs = new Set<string>();
   private readonly rpcRuns = new Map<string, RpcRunBinding>();
   private readonly waitOwners = new Map<string, OwnerIdentity>();
@@ -1302,6 +1307,7 @@ export class ObservedWaitHost {
       if (role === "holder") {
         this.discoverObservedTasks();
         this.reconcileGlobalRunning();
+        await this.reconcileAssignmentCleanup();
       } else {
         this.reconcileFollowerRunning();
         this.reconcileOwnerChanges();
@@ -1310,6 +1316,33 @@ export class ObservedWaitHost {
       await this.dispatchOutbox();
     } finally {
       this.authorityPassCache = undefined;
+    }
+  }
+
+  private async reconcileAssignmentCleanup(): Promise<void> {
+    const store = this.requireStore();
+    const [candidate] = store.listAssignmentCleanupOperations(1, this.assignmentCleanupCursor);
+    this.assignmentCleanupCursor = candidate?.operationId;
+    if (!candidate || candidate.resultManaged || this.supervisionAuthority(candidate) !== "self") return;
+    const { taskId, launchToken } = candidate;
+    try {
+      const inspection = this.supervisor.snapshot(taskId);
+      const stop = readStopRequest(this.directory, taskId);
+      if (inspection?.token !== launchToken || (stop && stop.token !== launchToken)) return;
+      if (inspection.terminal) {
+        const pgid = inspection.command?.pgid ?? inspection.command?.pid;
+        if (inspection.cleanup?.groupEmpty === true || (pgid && !processGroupAlive(pgid))) {
+          store.verifyAssignmentCleanup(candidate.operationId, launchToken, candidate.terminalRevision);
+        }
+        return;
+      }
+      if (!stop && !this.localCancels.has(taskId)) {
+        this.localCancels.add(taskId);
+        try { await this.supervisor.stop(taskId, { token: launchToken, reason: "owning assignment ended" }); }
+        finally { this.localCancels.delete(taskId); }
+      }
+    } catch (error) {
+      this.options.logger?.(`Assignment cleanup for ${taskId}: ${String(error)}`);
     }
   }
 
@@ -2279,6 +2312,7 @@ export class ObservedWaitHost {
       supervision: this.supervision(),
       authorityRef: authorityReference(`worker:${run.authorityReference}`),
       intentRef: typeof input.params.operation_id === "string" ? input.params.operation_id : null,
+      ...(run.assignmentAttemptId ? { assignmentAttemptId: run.assignmentAttemptId } : {}),
     });
     const launchContext: LaunchContext = {
       workerAttemptId: run.runId,
@@ -2652,6 +2686,7 @@ export class ObservedWaitHost {
       : {};
     this.rpcRuns.set(runId, Object.freeze({
       runId,
+      assignmentTaskOwnership: params.assignmentTaskOwnership === true,
       conversationId,
       attemptId,
       workspace,
@@ -3008,6 +3043,7 @@ export class ObservedWaitHost {
   private rpcScope(binding: RpcRunBinding): WorkerRunScope {
     return {
       runId: binding.runId,
+      ...(binding.assignmentTaskOwnership ? { assignmentAttemptId: binding.attemptId } : {}),
       conversationId: binding.conversationId,
       workspace: binding.workspace,
       authorityReference: binding.authorityReference,
