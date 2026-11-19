@@ -151,6 +151,13 @@ export class WorkClient {
 const recoveryKey = Symbol.for("pi-better-runtime.connection-recovery.v2");
 const recoveries = globalThis[recoveryKey] ??= new Map();
 const connectionDemands = globalThis[Symbol.for("pi-better-runtime.connection-demand.v2")] ??= new Map();
+const recoveryTasks = globalThis[Symbol.for("pi-better-runtime.recovery-tasks.v1")] ??= new Map();
+
+/** After stopping consumers, a root owner can wait for cancelled installers to finish writing. */
+export async function waitForWorkClientRecovery(socketPath, agentDir) {
+    const tasks = recoveryTasks.get(JSON.stringify([agentDir, socketPath]));
+    if (tasks) await Promise.allSettled(tasks);
+}
 
 /** Establish a transport only. Never replay an application request after dispatch. */
 export async function connectWorkClient(socketPath, agentDir, capabilities = [], options = {}) {
@@ -194,7 +201,16 @@ export async function connectWorkClient(socketPath, agentDir, capabilities = [],
                 const timer = setTimeout(() => {
                     controller.abort(new Error("runtime-unavailable: reconnect deadline exceeded during recovery"));
                 }, budget);
-                const promise = waitForRecovery(Promise.resolve().then(() => options.recover({ timeoutMs: budget, signal: controller.signal })), controller.signal)
+                const task = Promise.resolve().then(() => options.recover({ timeoutMs: budget, signal: controller.signal }));
+                const tasks = recoveryTasks.get(key) ?? new Set();
+                tasks.add(task);
+                recoveryTasks.set(key, tasks);
+                const retire = () => {
+                    tasks.delete(task);
+                    if (tasks.size === 0) recoveryTasks.delete(key);
+                };
+                void task.then(retire, retire);
+                const promise = waitForRecovery(task, controller.signal)
                     .finally(() => clearTimeout(timer));
                 recovery = { promise, controller, key };
                 recoveries.set(key, recovery);

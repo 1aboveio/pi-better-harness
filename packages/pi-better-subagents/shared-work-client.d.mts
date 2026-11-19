@@ -18,3 +18,4 @@ export interface ConnectionOptions {
 }
 /** Establishes a connection; never replays application requests. */
 export function connectWorkClient(socketPath: string, agentDir: string, capabilities?: string[], options?: ConnectionOptions): Promise<WorkClient>;
+export function waitForWorkClientRecovery(socketPath: string, agentDir: string): Promise<void>;

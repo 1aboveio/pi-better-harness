@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import { once } from "node:events";
-import { mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../shared-work-client.mjs";
@@ -120,4 +120,67 @@ test('closing observation cancels a pending list without restarting a stopped ge
         await pending; await start; await delay(30);
         assert.equal(workObservation(), undefined);
     } finally { stopWorkObservation(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('owned runtime root can drain installer writes after reconnect cancellation', { timeout: 4000 }, async () => {
+    const { connectWorkClient } = await import('../shared-work-client.mjs');
+    const { waitForWorkClientRecovery } = await import('../../pi-better-server/src/runtime/work-client.mjs');
+    const root = realpathSync(mkdtempSync('/tmp/pi-obs-stage-'));
+    const stage = join(root, '.stage-owned');
+    const socketPath = join(root, 'pi-server.sock');
+    const controller = new AbortController();
+    const started = Promise.withResolvers();
+    const cancelled = Promise.withResolvers();
+    const finish = Promise.withResolvers();
+    const replacement = createServer(socket => {
+        let buffer = '';
+        const onData = chunk => {
+            buffer += chunk;
+            const end = buffer.indexOf('\n');
+            if (end < 0) return;
+            socket.off('data', onData);
+            const hello = JSON.parse(buffer.slice(0, end));
+            socket.write(JSON.stringify({ id: hello.id, success: true, data: { capabilities: [] } }) + '\n');
+        };
+        socket.setEncoding('utf8');
+        socket.on('data', onData);
+    });
+    let installation;
+    const dial = connectWorkClient(socketPath, root, [], {
+        signal: controller.signal,
+        recover({ signal }) {
+            installation = (async () => {
+                mkdirSync(stage);
+                started.resolve();
+                await once(signal, 'abort');
+                cancelled.resolve();
+                await finish.promise;
+                writeFileSync(join(stage, 'late-installer-write'), 'finished');
+                rmSync(stage, { recursive: true });
+            })();
+            return installation;
+        },
+    });
+    void dial.catch(() => {});
+    try {
+        await started.promise;
+        replacement.listen(socketPath);
+        await once(replacement, 'listening');
+        await dial;
+        await cancelled.promise;
+        let drained = false;
+        const draining = waitForWorkClientRecovery(socketPath, root).then(() => { drained = true; });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(drained, false, 'the root is still owned while the cancelled installer can write');
+        finish.resolve();
+        await draining;
+        assert.equal(existsSync(stage), false, 'drain includes filesystem cleanup');
+    } finally {
+        controller.abort();
+        finish.resolve();
+        (await dial.catch(() => undefined))?.close();
+        await installation;
+        if (replacement.listening) await new Promise(resolve => replacement.close(resolve));
+        rmSync(root, { recursive: true, force: true });
+    }
 });

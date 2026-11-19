@@ -2,12 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork, execFileSync } from "node:child_process";
 import { createServer, connect, type Socket } from "node:net";
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, realpathSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { once, EventEmitter } from "node:events";
 import goalExtension from "../../pi-better-goal/src/index.ts";
 import { register, createRequire, syncBuiltinESMExports } from "node:module";
-import { WorkClient } from "../src/runtime/work-client.mjs";
+import { WorkClient, waitForWorkClientRecovery } from "../src/runtime/work-client.mjs";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
 import { WorkQueries } from "../src/runtime/queries.ts";
 import { privateRuntimeNode } from "./private-runtime-node.ts";
@@ -508,6 +508,8 @@ test("registered Navigator preserves older active rows and the same consumers re
   } finally {
     phase("cleanup:session-shutdown");
     await handlers.get("session_shutdown")?.({}, ctx); await stop();
+    phase("cleanup:installer-settlement");
+    await waitForWorkClientRecovery(join(realpathSync(transport), "pi-server.sock"), realpathSync(agent));
     for (const [key, value] of saved) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     rmSync(root, { recursive: true, force: true }); rmSync(transport, { recursive: true, force: true });
   }
