@@ -4,10 +4,21 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import background from '../../../pi-better-background-tasks/src/index.ts';
 import subagents from '../../../pi-better-subagents/index.ts';
 import { join } from 'node:path';
+import { traceHostedHook } from './hosted-hook-trace.mjs';
 export default function hostedResourceFixture(pi: ExtensionAPI) {
   const tools = new Map<string, any>();
-  const capture = { ...pi, registerTool(tool: any) { tools.set(tool.name, tool); pi.registerTool(tool); } };
-  background(capture); subagents(capture);
+  const capture = (owner: string) => {
+    const ordinals = new Map<string, number>();
+    return { ...pi,
+      registerTool(tool: any) { tools.set(tool.name, tool); pi.registerTool(tool); },
+      on(event: any, handler: any) {
+        const ordinal = (ordinals.get(event) ?? 0) + 1;
+        ordinals.set(event, ordinal);
+        pi.on(event, traceHostedHook(owner, event, ordinal, handler));
+      },
+    };
+  };
+  background(capture('background')); subagents(capture('subagents'));
   pi.registerProvider('openai', {
     baseUrl: 'https://example.invalid', apiKey: 'offline', api: 'openai-completions',
     models: [{ id: 'gpt-4.1', name: 'Offline recipient', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 2048, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],

@@ -26,6 +26,8 @@ import { createRequire } from 'node:module';
 import { buildDarwinCapture } from './measure-full-runtime/build-darwin-capture.mjs';
 import { parseSubjectBinding, subjectModuleUrl } from './measure-full-runtime/subject-binding.mjs';
 const subject = process.env.PI_FULL_RUNTIME_SUBJECT ? parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT) : undefined;
+const bindOnly = process.argv.includes('--bind-only');
+assert.ok(!bindOnly || process.argv.includes('--smoke'), '--bind-only requires explicit nonqualifying --smoke');
 if (process.argv.includes('--campaign') || (!process.argv.includes('--smoke') && process.env.PI_INCREMENTAL_WORKLOAD !== '1' && !process.env.PI_FULL_RUNTIME_MATRIX_ONLY)) {
   const { runCampaign } = await import('./measure-full-runtime/campaign.mjs');
   const configPath = process.argv.includes('--campaign') ? process.argv[process.argv.indexOf('--campaign') + 1] : process.env.PI_FULL_RUNTIME_CAMPAIGN_APPROVAL;
@@ -34,6 +36,7 @@ if (process.argv.includes('--campaign') || (!process.argv.includes('--smoke') &&
   process.exit(0);
 }
 const incremental = workloadSettings();
+assert.ok(!bindOnly || !incremental, '--bind-only cannot run an incremental workload');
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'p751-full-'))), agent = join(root, 'agent'), cwd = join(root, 'workspace'), samples = join(root, 'samples');
 const { directory: transport, socketPath } = workloadTransport(root);
 for (const path of [agent, transport, cwd, samples, join(agent, 'agents/roles')]) mkdirSync(path, { recursive: true });
@@ -55,6 +58,7 @@ writeFileSync(join(agent, 'agents/roles/fixture.md'), '---\nschema: pi-agent/v1\
 let errors = '', seq = 0; const children = [], clients = [];
 const report = { root, transport, socketPath, socketBytes: Buffer.byteLength(socketPath), mode: process.env.PI_FULL_RUNTIME_MATRIX_ONLY ? "mixed-adapter-smoke-not-performance" : incremental ? "resource-matrix" : "resource-smoke-not-qualified", platform: process.platform, node: process.version, machine:{release:release(),arch:arch(),cpus:cpus().length,cpuModel:cpus()[0]?.model,totalMemory:totalmem()}, source:sourceProvenance(fileURLToPath(new URL('../../..', import.meta.url))), scope: 'Actual guardian, server, SDK Pi clients, managed worker, Background runner/command, two real RemoteClientSession adapters over loopback Unix transport with HostedSessions (not cross-machine SSH); sampler overhead included', scenarios: [] };
 const output = process.env.PI_FULL_RUNTIME_REPORT ?? join(root, 'report.json');
+if (bindOnly) report.mode = 'hosted-bind-only-not-qualified';
 env.PI_FULL_RUNTIME_CREATION_REPORT = `${output}.hosted-create.json`;
 function reportPhase(phase) {
   report.phase = phase;
@@ -74,6 +78,7 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
   fixtureSha256: createHash('sha256').update(JSON.stringify([
     './measure-full-runtime.mjs', './measure-full-runtime/frontend.ts', './measure-full-runtime/hosted-extension.ts',
     './measure-full-runtime/probe.mjs', './measure-full-runtime/recovery-trace.mjs', './measure-full-runtime/recovery-trace-loader.mjs',
+    './measure-full-runtime/hosted-hook-trace.mjs',
     './measure-full-runtime/incremental-workload.mjs', './event-publication/writer.mjs', './event-publication/commit.mjs',
     './measure-full-runtime/aggregate-samples.mjs',
     './measure-full-runtime/mutation-sequence.mjs',
@@ -88,6 +93,7 @@ report.measurement = { schemaVersion: 1, fixedHostId: process.env.PI_FULL_RUNTIM
   activeWorkload: { subagents: 1, durableCommands: 2, legacyCommands: 2, hostedSessions: 2, offline: true },
   coverage: { workerGc: false, aggregatePeak: false, queueAge: false, eventLatency: false, recovery: false, exit: false } };
 if (incremental) Object.assign(report, { incremental, workload: structuredClone(workload), qualification: 'notRun', missing: ['fault matrix', 'scope/UI matrix', 'native dual-platform runs', 'paired fixed-host comparison'] });
+if (bindOnly) report.measurement.activeWorkload = { subagents: 0, durableCommands: 0, legacyCommands: 0, hostedSessions: 1, offline: true };
 function start(url, args = []) { const target = subject ? new URL(subjectModuleUrl(url.href, subject)) : url; const child = fork(target, args, { execPath, execArgv: ['--import', 'tsx'], env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }); children.push(child); child.stdout.resume(); child.stderr.on('data', d => { errors += d; }); return child; }
 async function until(label, fn, timeout = 30000) { const deadline = Date.now()+timeout; while (Date.now()<deadline) { const value = await fn(); if (value) return value; await delay(25); } throw new Error(`${label} timed out: ${errors.slice(-4000)}`); }
 function message(child, predicate) { return new Promise((resolve, reject) => { const timer = setTimeout(() => { cleanup(); reject(new Error(`IPC timeout: ${errors.slice(-2000)}`)); }, 30000); const on = value => { if (predicate(value)) { cleanup(); resolve(value); } }; const exit = () => { cleanup(); reject(new Error(`Child exited: ${errors}`)); }; function cleanup() { clearTimeout(timer); child.off('message', on); child.off('exit', exit); } child.on('message', on); child.once('exit', exit); }); }
@@ -122,7 +128,7 @@ try {
     assert.ok(actual.logReads && (actual.checkpoints || actual.baselineObservation?.complete && actual.baselineObservation.durableCheckpoints === false), 'Approved subject lacks complete actual parser observations; external fixture compatibility remains unqualified');
   }
   writeFileSync(join(agent,'server-registration-v1.json'), JSON.stringify({ version:1, agentDir:agent, serverDir:transport }));
-  for (let i=0;i<2;i++) {
+  for (let i=0;i<(bindOnly ? 1 : 2);i++) {
     reportPhase(`hosted-${i}-connect`);
     const client=await DaemonClient.connect(join(transport,'pi-server.sock'));hostedClients.push(client);
     reportPhase(`hosted-${i}-create-session`);
@@ -131,6 +137,10 @@ try {
     const remote=await RemoteClientSession.connect(client,result.sessionId);remotes.push(remote);
     assert.equal(remote.extensionRunner.hasHandlers(),false);assert.deepEqual(remote.resourceLoader.getExtensions().extensions,[]);
   }
+  if (bindOnly) {
+    report.bindOnly = { completed: true, hostedSessions: remotes.length, correctnessExtensions: ['background', 'subagents'] };
+    reportPhase('hosted-bind-only-complete');
+  } else {
   reportPhase('remote-background-prompt');
   await remotes[0].prompt('/resource_background');
   reportPhase('await-remote-tool-proof');
@@ -357,6 +367,7 @@ try {
     await until('natural exit of every owned related process including Server and guardian', () => exitIdentities.every(value => !processMatchesStart(value.pid,value.start)), lifecycle.daemonIdleMs + 30000);
     report.scenarios.at(-1).exit = distribution([performance.now() - exitStarted]);
     report.measurement.coverage.exit = report.scenarios.every(value => value.exit?.samples > 0);
+  }
   }
 } catch(error) { report.failure=String(error); throw error; }
 finally {
