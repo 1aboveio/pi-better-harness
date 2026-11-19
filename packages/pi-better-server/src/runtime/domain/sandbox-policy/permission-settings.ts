@@ -10,6 +10,13 @@ export function permissionSettingsPath(seams: SandboxPreferenceSeams = {}): stri
 }
 
 export function readPermissionSettings(seams: SandboxPreferenceSeams = {}): SandboxPermissionSettings {
+    return loadPermissionSettings(seams).settings;
+}
+
+export function loadPermissionSettings(seams: SandboxPreferenceSeams = {}): {
+    settings: SandboxPermissionSettings;
+    source: "saved defaults" | "built-in defaults";
+} {
     const stored = readHarnessSetting<unknown>("sandboxPermissions", seams, {
         path: join((seams.agentDir ?? getAgentDir)(), "extensions", "pi-better-sandbox-permissions.json"),
         parse: parsePermissionSettings,
@@ -18,9 +25,9 @@ export function readPermissionSettings(seams: SandboxPreferenceSeams = {}): Sand
         const settings = defaultSandboxPermissions();
         settings.main.enabled = readSandboxDefault(seams) === "on";
         settings.background = { ...settings.main };
-        return settings;
+        return { settings, source: "built-in defaults" };
     }
-    return parsePermissionSettings(stored).permissions;
+    return { settings: parsePermissionSettings(stored).permissions, source: "saved defaults" };
 }
 
 function parsePermissionSettings(parsed: unknown): { version: number; permissions: SandboxPermissionSettings } {

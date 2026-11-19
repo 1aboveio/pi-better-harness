@@ -20,6 +20,7 @@ export const SANDBOX_COMMAND_DESCRIPTION = "Configure Main, Subagents, and Backg
 const USAGE = [
     "Usage:",
     "  /sandbox",
+    "  /sandbox status",
     "  /sandbox on",
     "  /sandbox off",
     "  /sandbox default on",
@@ -53,7 +54,7 @@ const DEFAULT_OFF_MESSAGE = [
 ].join("\n");
 const RESET_TITLE = "Restore the packaged write-deny defaults?";
 /** Build the `/sandbox` handler. Exported so its behaviour is directly testable. */
-export function createSandboxCommandHandler({ controller, denyRules, onStateChange, setDefault, setSessionEnabled, openPermissions, }) {
+export function createSandboxCommandHandler({ controller, denyRules, onStateChange, setDefault, setSessionEnabled, describeProcessAccess, openPermissions, }) {
     return async function handleSandboxCommand(args, ctx) {
         // Only the verbs are case-folded. Everything after them is a path, and
         // paths are case-sensitive on the filesystems this package supports.
@@ -65,12 +66,13 @@ export function createSandboxCommandHandler({ controller, denyRules, onStateChan
             await handleDiagnosticsCommand(rest, ctx);
             return;
         }
-        if (subcommand === "") {
-            if (openPermissions && ctx.mode === "tui") {
-                await openPermissions(ctx);
-                return;
-            }
-            ctx.ui.notify(formatSandboxReport(controller.status()), "info");
+        if (subcommand === "" && openPermissions && ctx.mode === "tui") {
+            await openPermissions(ctx);
+            return;
+        }
+        if (subcommand === "" || subcommand === "status") {
+            const status = controller.status();
+            ctx.ui.notify([formatSandboxReport(status), describeProcessAccess?.(status)].filter(Boolean).join("\n\n"), "info");
             return;
         }
         if (subcommand === "on") {
@@ -198,9 +200,10 @@ function announce(ctx, change) {
         throw error;
     }
 }
-const SUBCOMMANDS = ["on", "off", "default", "deny", "rules", "diagnostics"];
+const SUBCOMMANDS = ["on", "off", "default", "deny", "rules", "diagnostics", "status"];
 const DENY_ACTIONS = ["list", "add", "remove", "reset"];
 const COMPLETION_DESCRIPTIONS = {
+    status: "Show effective Main sandbox and process-tool access",
     on: "Enable confinement for this session",
     off: "Disable confinement for this session",
     default: "Change the persistent activation default",
