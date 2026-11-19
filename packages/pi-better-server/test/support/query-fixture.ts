@@ -9,7 +9,7 @@ import { WorkQueryExecutor } from "../../src/runtime/query-executor.ts";
 import { WorkClient } from "../../src/runtime/work-client.mjs";
 import { queryBootstrap, querySourceReady } from "./query-bootstrap.ts";
 
-export async function fixture(options: { intervalMs?: number; capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
+export async function fixture(options: { intervalMs?: number; capacity?: number; timeoutMs?: number; watchdogMs?: number; workerUrl?: URL; queryPhaseDiagnostics?: SharedArrayBuffer; onTerminalLogsChanged?: (ids: string[]) => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "query-root-"));
   mkdirSync(join(root, "runs"));
   const transport = mkdtempSync("/tmp/query-socket-");

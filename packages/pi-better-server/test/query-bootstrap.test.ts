@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { queryBootstrap, querySourceReady } from "./support/query-bootstrap.ts";
 import { fixture } from "./support/query-fixture.ts";
+import "./support/query-phase-diagnostics.ts";
 
 test("bootstrap exit retains a prior watchdog cause without claiming source readiness", async () => {
   const worker = new EventEmitter();

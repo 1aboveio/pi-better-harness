@@ -2,6 +2,9 @@ import { parentPort, workerData } from "node:worker_threads";
 import { createRequire } from "node:module";
 import { EventEmitter } from "node:events";
 import { performance } from "node:perf_hooks";
+import { queryPhase, recordQueryPhase, recordQuerySample } from "./query-phase-diagnostics.mjs";
+const trace = (phase, id = 0) => recordQueryPhase(workerData.queryPhaseDiagnostics, phase, id, workerData.queryPhaseGeneration);
+trace(queryPhase.moduleEntered);
 
 // The fixed Node 24 artifact strips types natively and does not depend on tsx.
 // Development on Node 22 uses the workspace loader without inheriting test preloads.
@@ -24,16 +27,20 @@ sqlite.DatabaseSync = class extends OriginalDatabase {
     if (this.counted) { this.counted = false; connections.active--; }
   }
 };
+trace(queryPhase.modelImportBegin);
 const { WorkReadModel } = await import("./read-model.ts");
+trace(queryPhase.modelImportEnd);
 const { createWorkBudget } = await import("./work-budget.ts");
 const budget = createWorkBudget(workerData.modelOptions?.budgetBuffer);
 const { workerSourceWatch } = await import("./source-watch.ts");
 const { WorkQueries, workScope, queryEncodingMetrics, snapshotJSON } = await import("./queries.ts");
 let model;
 try {
+  trace(queryPhase.modelConstructBegin);
   model = new WorkReadModel(workerData.agentDir, workerData.instanceId, {
     ...workerData.modelOptions, watch: workerSourceWatch(parentPort),
   });
+  trace(queryPhase.modelConstructEnd);
 } catch (error) {
   // Worker error forwarding retains only String(error). Keep the original
   // statement's stack for this specific bootstrap failure, without source data.
@@ -61,6 +68,7 @@ let heartbeatPending = false;
 setInterval(() => {
   if (heartbeatPending) return;
   heartbeatPending = true;
+  recordQuerySample(workerData.queryPhaseDiagnostics, "sent");
   parentPort.postMessage({ type: "heartbeat" });
 }, 250).unref();
 const cache = new Map();
@@ -140,13 +148,17 @@ function session(id) {
 }
 
 parentPort.on("message", async message => {
-  if (message.type === "heartbeat-consumed") { heartbeatPending = false; return; }
+  if (message.type === "query") trace(queryPhase.queryReceived, message.id);
+  if (message.type === "cancel") trace(queryPhase.cancelReceived, message.id);
+  if (message.type === "heartbeat-consumed") { recordQuerySample(workerData.queryPhaseDiagnostics, "consumed"); heartbeatPending = false; return; }
   if (message.type === "cancel") {
     const request = requests.get(message.id);
     if (request) {
       request.cancelled = true;
       requests.delete(message.id);
+      trace(queryPhase.replyBegin, message.id);
       parentPort.postMessage({ type: "reply", id: message.id, error: "runtime-timeout: read cancelled" });
+      trace(queryPhase.replyPosted, message.id);
     }
     return;
   }
@@ -171,6 +183,7 @@ parentPort.on("message", async message => {
   const release = budget.enter("query");
   try {
     if (!release) throw new Error("runtime-overloaded: shared source query budget exhausted");
+    trace(queryPhase.handlerEntered, message.id);
     const command = message.command;
     if (["runtime_get_liveness", "runtime_get_upgrade_obligations"].includes(command.type)) {
       await model.reconcile();
@@ -184,12 +197,19 @@ parentPort.on("message", async message => {
     if (request.cancelled) return;
     const state = session(message.connection);
     state.generation = message.generation; state.pending = undefined;
+    trace(queryPhase.snapshotBegin, message.id);
     let value = state.queries.handle(command);
+    trace(queryPhase.snapshotEnd, message.id);
     if (!indexed && !value.rows.length) value = { ...value, status: "rebuilding", reason: "The requested run is being indexed; retry after reconciliation." };
+    trace(queryPhase.replyBegin, message.id);
     parentPort.postMessage({ type: "reply", id: message.id, json: encoded.get(value) ?? JSON.stringify(value), metrics: metrics() });
+    trace(queryPhase.replyPosted, message.id);
   } catch (error) {
     if (request.cancelled) return;
+    trace(queryPhase.replyBegin, message.id);
     parentPort.postMessage({ type: "reply", id: message.id, error: String(error).slice(0, 512), metrics: metrics() });
+    trace(queryPhase.replyPosted, message.id);
   } finally { release?.(); requests.delete(message.id); }
 });
+trace(queryPhase.handlerInstalled);
 void model.reconcile();

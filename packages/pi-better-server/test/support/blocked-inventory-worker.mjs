@@ -1,8 +1,11 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { bootstrapHeartbeat } from "./bootstrap-heartbeat.mjs";
+import { queryPhase, recordQueryPhase } from "../../src/runtime/query-phase-diagnostics.mjs";
+import { traceInitialInventory } from "./query-init-diagnostics.mjs";
+const trace = value => recordQueryPhase(workerData.queryPhaseDiagnostics, value, 0, workerData.queryPhaseGeneration);
 // The fixture imports the model before the production worker can own control
 // messages. Keep that async bootstrap responsive without claiming source readiness.
-const stopBootstrapHeartbeat = bootstrapHeartbeat(parentPort);
+const stopBootstrapHeartbeat = bootstrapHeartbeat(parentPort, workerData.queryPhaseDiagnostics);
 const { readFileSync, statSync } = await import("node:fs");
 const { join } = await import("node:path");
 if (Number(process.versions.node.split(".")[0]) < 24) {
@@ -10,6 +13,7 @@ if (Number(process.versions.node.split(".")[0]) < 24) {
   register();
 }
 const { WorkReadModel } = await import("../../src/runtime/read-model.ts");
+traceInitialInventory(WorkReadModel, workerData);
 
 const reconcile = WorkReadModel.prototype.reconcile;
 let model;
@@ -27,6 +31,7 @@ function blockInventory() {
   return () => { inventoryHeld = false; release(); };
 }
 let release = blockInventory();
+trace(queryPhase.fixtureHeld);
 let rpcInstalled = false;
 let releaseScanTail;
 const earlyMessages = [];
@@ -70,6 +75,7 @@ parentPort.on("message", async message => {
     releaseScanTail?.();
   }
   if (message.type === "release-inventory") {
+    trace(queryPhase.fixtureReleased);
     WorkReadModel.prototype.reconcile = reconcile;
     release();
   }
@@ -77,5 +83,6 @@ parentPort.on("message", async message => {
 await import("../../src/runtime/query-worker.mjs");
 rpcInstalled = true;
 stopBootstrapHeartbeat();
+trace(queryPhase.bootstrapHandoff);
 parentPort.postMessage({ type: "fixture-ready" });
 parentPort.postMessage({ type: "inventory-blocked", earlyMessages });

@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { queryPhase, recordQueryPhase, recordQuerySample } from "./query-phase-diagnostics.mjs";
 import { performance, monitorEventLoopDelay } from "node:perf_hooks";
 import { resolve } from "node:path";
 import type { Duplex } from "node:stream";
@@ -17,6 +18,8 @@ export type ReadStream = Pick<Duplex, "destroyed" | "writableLength" | "write" |
 interface Stream { socket: ReadStream; paused: boolean; generation: number; drain: () => void; close: () => void }
 interface WorkerMetrics { sourceWatchers?: number; inventories?: number; coordinatorConnections?: number; indexConnections?: number; sqlite?: { opens: number; active: number; maximum: number }; [key: string]: unknown }
 export interface QueryExecutorOptions {
+  /** Temporary #805 evidence; only the three held-startup regression fixtures supply it. */
+  queryPhaseDiagnostics?: SharedArrayBuffer;
   queryCacheDiagnostics?: boolean;
   capacity?: number; timeoutMs?: number; maxConnections?: number; watchdogMs?: number;
   workerUrl?: URL;
@@ -80,6 +83,8 @@ export class WorkQueryExecutor {
     this.worker = this.startWorker();
     this.watchdog = setInterval(() => {
       if (!this.closed && !this.failure && performance.now() - this.lastResponse > (this.options.watchdogMs ?? 4000)) {
+        recordQuerySample(this.options.queryPhaseDiagnostics, "watchdog");
+        recordQueryPhase(this.options.queryPhaseDiagnostics, queryPhase.watchdogFired, 0, this.workerGeneration);
         this.fail(new Error("runtime-unhealthy: read worker unresponsive; watchdog deadline exceeded"));
       }
     }, Math.min(250, (this.options.watchdogMs ?? 4000) / 4));
@@ -95,10 +100,12 @@ export class WorkQueryExecutor {
       notifyWorkBudget(this.options.budgetBuffer);
     }
     const generation = this.workerGeneration;
+    recordQueryPhase(this.options.queryPhaseDiagnostics, queryPhase.workerStart, 0, generation);
     const instanceId = this.workerGeneration ? `${this.instanceId}:reads:${this.workerGeneration}` : this.instanceId;
     const worker = new Worker(this.options.workerUrl ?? new URL("./query-worker.mjs", import.meta.url), {
       execArgv: [], workerData: { agentDir: this.agentDir, instanceId, modelOptions: { ...this.options.modelOptions, budgetBuffer: this.options.budgetBuffer },
-        queryCacheDiagnostics: this.options.queryCacheDiagnostics === true },
+        queryCacheDiagnostics: this.options.queryCacheDiagnostics === true,
+        ...(this.options.queryPhaseDiagnostics ? { queryPhaseDiagnostics: this.options.queryPhaseDiagnostics, queryPhaseGeneration: generation } : {}) },
     });
     worker.on("message", message => {
       if (this.sourceWatches.handle(generation, message, value => {
@@ -266,13 +273,18 @@ export class WorkQueryExecutor {
     if (this.waits.length > 128) this.waits.shift();
     const stream = this.streams.get(query.connection);
     if (stream) { stream.generation++; this.workerConnections.add(query.connection); }
+    recordQueryPhase(this.options.queryPhaseDiagnostics, queryPhase.dispatch, query.id, this.workerGeneration);
     this.worker.postMessage({ type: "query", id: query.id, connection: query.connection,
       generation: stream?.generation ?? 0, command: query.command });
   }
 
   private receive(message: any) {
+    if (message.type === "reply" || message.type === "fixture-ready") recordQueryPhase(this.options.queryPhaseDiagnostics,
+      message.type === "reply" ? queryPhase.replyReceived : queryPhase.fixtureReady, message.id ?? 0, this.workerGeneration);
     if (this.failure) return;
     this.lastResponse = performance.now();
+    recordQuerySample(this.options.queryPhaseDiagnostics, "response");
+    if (message.type === "heartbeat") recordQuerySample(this.options.queryPhaseDiagnostics, "accepted");
     if (message.type === "heartbeat") { this.worker.postMessage({ type: "heartbeat-consumed" }); return; }
     // Replies to cancelled reads carry no fresh observation or metrics authority.
     if (message.type === "reply" && (!this.active || message.id !== this.active.id || !this.active.waiters.size)) {
@@ -281,6 +293,7 @@ export class WorkQueryExecutor {
     }
     if (message.metrics) this.workerMetrics = message.metrics;
     if (message.observation) this.lastObservation = message.observation;
+    if (message.observation?.status === "ready") recordQueryPhase(this.options.queryPhaseDiagnostics, queryPhase.sourceReady, 0, this.workerGeneration);
     if (message.type === "terminal-logs") {
       const sourceWorker = this.worker;
       const ids = Array.isArray(message.ids) ? message.ids.filter((id: unknown): id is string => typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id)).slice(0, 128) : [];
@@ -313,6 +326,7 @@ export class WorkQueryExecutor {
 
   private expire(query: Query, waiter: Waiter) {
     if (!query.waiters.delete(waiter)) return;
+    recordQueryPhase(this.options.queryPhaseDiagnostics, queryPhase.callerDeadline, query.id, this.workerGeneration);
     this.timeouts++;
     if (query === this.active) this.callerTimeouts++;
     else this.queueTimeouts++;

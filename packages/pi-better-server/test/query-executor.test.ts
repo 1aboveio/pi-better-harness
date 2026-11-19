@@ -10,6 +10,7 @@ import { MessageChannel, receiveMessageOnPort, type Worker } from "node:worker_t
 import { fixture } from "./support/query-fixture.ts";
 import { HostSourceWatches, nativeWatch } from "../src/runtime/source-watch.ts";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+import { createQueryPhaseBuffer, readQueryPhases, recordQueryPhase, queryPhase } from "../src/runtime/query-phase-diagnostics.mjs";
 const { commitMetadata } = await import(String("../scripts/event-publication/commit.mjs"));
 
 
@@ -418,14 +419,18 @@ test("slow caller cancellation preserves other clients and ignores late replies"
 });
 
 test("an 800 ms setup subscription cannot verify a source while fixture bootstrap is held", { timeout: 10000 }, async t => {
+  const queryPhaseDiagnostics = createQueryPhaseBuffer();
+  let phase = "connect";
   const implementation = new URL("./support/cancellable-query-worker.mjs", import.meta.url).href;
   const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(`
-    import { parentPort } from "node:worker_threads";
+    import { parentPort, workerData } from "node:worker_threads";
+    const { queryPhase, recordQueryPhase } = await import(${JSON.stringify(new URL("../src/runtime/query-phase-diagnostics.mjs", import.meta.url).href)});
     const deferred = [];
     const buffer = message => {
       if (["query", "cancel"].includes(message.type)) deferred.push(message);
     };
     parentPort.on("message", buffer);
+    recordQueryPhase(workerData.queryPhaseDiagnostics, queryPhase.fixtureHeld, 0, workerData.queryPhaseGeneration);
     await new Promise(resolve => {
       const release = message => {
         if (message.type !== "release-bootstrap") return;
@@ -433,27 +438,36 @@ test("an 800 ms setup subscription cannot verify a source while fixture bootstra
       };
       parentPort.on("message", release);
     });
+    recordQueryPhase(workerData.queryPhaseDiagnostics, queryPhase.fixtureReleased, 0, workerData.queryPhaseGeneration);
     await import(${JSON.stringify(implementation)});
     parentPort.off("message", buffer);
     for (const message of deferred) parentPort.emit("message", message);
   `)}`);
-  const f = await fixture({ timeoutMs: 800, watchdogMs: 2500, capacity: 2, workerUrl });
+  const f = await fixture({ timeoutMs: 800, watchdogMs: 2500, capacity: 2, workerUrl, queryPhaseDiagnostics });
   try {
     const client = await f.client();
+    phase = "deliberate-held-subscription";
     await assert.rejects(ready(client), /runtime-timeout: caller read deadline exceeded; source was not verified/);
     const cold = f.executor.metrics().executor;
     assert.equal(cold.callerTimeouts, 1, "the eager setup subscription owns this deadline");
     assert.equal(cold.queueTimeouts, 0);
     assert.equal(cold.singleflightHits, 0, "shared-caller work has not begun");
     assert.equal(f.executor.observation().status, "rebuilding", "an expired setup read cannot verify the source");
+    phase = "bootstrap";
+    recordQueryPhase(queryPhaseDiagnostics, queryPhase.releaseSent);
     f.worker.postMessage({ type: "release-bootstrap" });
     await f.bootstrapped;
+    phase = "post-bootstrap-subscription";
     await ready(client);
     assert.equal(client.snapshot?.status, "ready");
     assert.equal(f.executor.metrics().executor.callerTimeouts, 1);
     assert.equal(f.executor.metrics().executor.restarts, 0, "a setup deadline does not require a worker restart");
     t.diagnostic(JSON.stringify({ coldCallerTimeouts: cold.callerTimeouts, coldQueueTimeouts: cold.queueTimeouts,
       coldSharedHits: cold.singleflightHits, verifiedAfterBootstrap: client.snapshot?.status }));
+  } catch (error) {
+    try { t.diagnostic(JSON.stringify({ heldFixtureFailure: { case: 109, phase, observation: f.executor.observation(),
+      executor: f.executor.metrics().executor, trace: readQueryPhases(queryPhaseDiagnostics) } }).slice(0, 8192)); } catch {}
+    throw error;
   } finally { f.worker.postMessage({ type: "release-bootstrap" }); await f.close(); }
 });
 
@@ -480,14 +494,16 @@ test("shared callers have separate deadlines and queue timeouts retain bounded a
   } finally { await f.close(); }
 });
 
-test("responsive fixture imports outlive the wedge watchdog without source readiness", { timeout: 10000 }, async () => {
+test("responsive fixture imports outlive the wedge watchdog without source readiness", { timeout: 10000 }, async t => {
+  const queryPhaseDiagnostics = createQueryPhaseBuffer();
+  let phase = "held-heartbeats";
   const implementation = new URL("./support/cancellable-query-worker.mjs", import.meta.url).href;
   const workerUrl = new URL(`data:text/javascript,${encodeURIComponent(`
     import { workerData } from "node:worker_threads";
     workerData.fixtureHoldBootstrap = true;
     await import(${JSON.stringify(implementation)});
   `)}`);
-  const f = await fixture({ timeoutMs: 400, watchdogMs: 1200, workerUrl });
+  const f = await fixture({ timeoutMs: 400, watchdogMs: 1200, workerUrl, queryPhaseDiagnostics });
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     await new Promise<void>((resolve, reject) => {
@@ -500,12 +516,20 @@ test("responsive fixture imports outlive the wedge watchdog without source readi
     });
     assert.equal(f.executor.metrics().executor.restarts, 0);
     assert.equal(f.executor.observation().status, "rebuilding");
+    phase = "bootstrap";
+    recordQueryPhase(queryPhaseDiagnostics, queryPhase.releaseSent);
     f.worker.postMessage({ type: "release-bootstrap" });
     await f.bootstrapped;
+    phase = "inventory-ready";
     await f.waitForSourceReady();
+    phase = "post-ready-subscription";
     const client = await f.client(); await ready(client);
     assert.equal(client.snapshot?.status, "ready");
     assert.equal(f.executor.metrics().executor.restarts, 0);
+  } catch (error) {
+    try { t.diagnostic(JSON.stringify({ heldFixtureFailure: { case: 111, phase, observation: f.executor.observation(),
+      executor: f.executor.metrics().executor, trace: readQueryPhases(queryPhaseDiagnostics) } }).slice(0, 8192)); } catch {}
+    throw error;
   } finally { clearTimeout(timeout); await f.close(); }
 });
 
@@ -559,6 +583,8 @@ test("cold bootstrap caller deadline does not imply a wedged read worker", { tim
 });
 
 test("responsive rebuilding outlives the watchdog without claiming source readiness", { timeout: 10000 }, async t => {
+  const queryPhaseDiagnostics = createQueryPhaseBuffer();
+  let phase = "bootstrap";
   const { bootstrapHeartbeat } = await import(String("./support/bootstrap-heartbeat.mjs"));
   const { port1, port2 } = new MessageChannel();
   const stop = bootstrapHeartbeat(port1);
@@ -567,11 +593,12 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
       "bootstrap must report control liveness before waiting for the first interval or importing the model");
     assert.equal(receiveMessageOnPort(port2), undefined, "one in-flight bootstrap heartbeat");
   } finally { stop(); port1.close(); port2.close(); }
-  const f = await fixture({ watchdogMs: 800,
+  const f = await fixture({ watchdogMs: 800, queryPhaseDiagnostics,
     workerUrl: new URL("./support/blocked-inventory-worker.mjs", import.meta.url) });
   try {
     await f.bootstrapped;
     const a = await f.client(), b = await f.client();
+    phase = "held-rebuilding";
     const began = performance.now();
     for (let i = 0; i < 6; i++) {
       assert.equal((await a.get({ limit: 1 })).status, "rebuilding");
@@ -582,9 +609,16 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
     assert.equal(f.executor.metrics().executor.timeouts, 0);
     assert.equal(f.executor.observation().status, "rebuilding");
     t.diagnostic(JSON.stringify({ rebuildingMs: performance.now() - began, metrics: f.executor.metrics() }));
+    phase = "inventory-ready";
+    recordQueryPhase(queryPhaseDiagnostics, queryPhase.releaseSent);
     f.worker.postMessage({ type: "release-inventory" });
     await f.waitForSourceReady();
+    phase = "post-ready-subscription";
     await ready(b);
+  } catch (error) {
+    try { t.diagnostic(JSON.stringify({ heldFixtureFailure: { case: 114, phase, observation: f.executor.observation(),
+      executor: f.executor.metrics().executor, trace: readQueryPhases(queryPhaseDiagnostics) } }).slice(0, 8192)); } catch {}
+    throw error;
   } finally { await f.close(); }
 });
 
