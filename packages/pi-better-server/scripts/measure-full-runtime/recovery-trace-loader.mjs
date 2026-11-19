@@ -136,7 +136,11 @@ export async function load(url, context, nextLoad) {
   if (url.startsWith('file:') && new URL(url).pathname.endsWith('/src/runtime/query-worker.mjs')) {
     let source = readFileSync(new URL(url), 'utf8');
     if (process.env.PI_FULL_RUNTIME_CREATION_REPORT) source = instrumentHostedRead(source, 'worker');
-    const anchor = 'const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);';
+    const legacy = 'const model = new WorkReadModel(workerData.agentDir, workerData.instanceId, workerData.modelOptions);';
+    const current = `model = new WorkReadModel(workerData.agentDir, workerData.instanceId, {
+    ...workerData.modelOptions, watch: workerSourceWatch(parentPort),
+  });`;
+    const anchor = source.includes(legacy) ? legacy : current;
     if (source.split(anchor).length !== 2) throw Error('Fixture model creation anchor changed');
     source = source.replace(anchor, anchor + '\nbindOwnedModel(model,parentPort,import.meta.url);');
     const metricsAnchor = '...model.metrics, background:';
