@@ -21,7 +21,11 @@ function publish(name, value, directory = process.env.PI_RESOURCE_REPORT_DIR) {
 }
 export function registerOwnedLoader() {
   publish(`loader-${threadId}.expected`, { thread: `loader-${threadId}` });
-  register(new URL('./recovery-trace-loader.mjs', import.meta.url), { data: { resourceParentThreadId: threadId, resourceReportDir: process.env.PI_RESOURCE_REPORT_DIR } });
+  // A prestarted subject loader cannot see later environment updates from this thread.
+  register(new URL('./recovery-trace-loader.mjs', import.meta.url), { data: {
+    resourceParentThreadId: threadId, resourceReportDir: process.env.PI_RESOURCE_REPORT_DIR,
+    resourceClockBinding: process.env.PI_RESOURCE_CLOCK_BINDING ?? null,
+  } });
 }
 export function gcThreads() {
   const names = readdirSync(process.env.PI_RESOURCE_REPORT_DIR).filter(name => name.startsWith(`${process.pid}-`));

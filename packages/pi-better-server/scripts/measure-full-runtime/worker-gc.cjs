@@ -5,12 +5,11 @@ const { threadId } = require('node:worker_threads');
 
 let gc, gcObserver;
 const observedGcThreads = new Set();
-function observedContinuousNs() {
-  const binding = process.env.PI_RESOURCE_CLOCK_BINDING;
+function observedContinuousNs(binding = process.env.PI_RESOURCE_CLOCK_BINDING) {
   return binding ? require(binding).continuousNs() : undefined;
 }
 
-function threadGc() {
+function threadGc(clockBinding) {
   if (!gc) {
     gc = { observed: true, count: 0, durationMs: 0, startedAt: Date.now() };
     gcObserver = new PerformanceObserver(list => {
@@ -21,16 +20,16 @@ function threadGc() {
     });
     gcObserver.observe({ entryTypes: ['gc'] });
   }
-  return { ...gc, observedAt: Date.now(), observedContinuousNs: observedContinuousNs() };
+  return { ...gc, observedAt: Date.now(), observedContinuousNs: observedContinuousNs(clockBinding) };
 }
 
-function observeGcThread(key = `worker-${threadId}`, directory = process.env.PI_RESOURCE_REPORT_DIR) {
+function observeGcThread(key = `worker-${threadId}`, directory = process.env.PI_RESOURCE_REPORT_DIR, clockBinding) {
   if (observedGcThreads.has(key)) return;
   observedGcThreads.add(key);
-  threadGc();
+  threadGc(clockBinding);
   const path = join(directory, `${process.pid}-${key}.gc`);
   const sample = () => {
-    writeFileSync(path + '.tmp', JSON.stringify({ thread: key, physicalThreadId: threadId, ...threadGc() }));
+    writeFileSync(path + '.tmp', JSON.stringify({ thread: key, physicalThreadId: threadId, ...threadGc(clockBinding) }));
     renameSync(path + '.tmp', path);
   };
   sample();

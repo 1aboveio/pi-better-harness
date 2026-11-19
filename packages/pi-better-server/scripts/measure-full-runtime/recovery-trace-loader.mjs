@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { observeGcThread } from './owned-fixture.mjs';
 import { parseSubjectBinding, subjectModuleUrl } from './subject-binding.mjs';
 import { baselineModuleUrls, instrumentBaselineModule, instrumentBaselineQueue } from './baseline-observation.mjs';
-export function initialize(data) { observeGcThread(`loader-${data.resourceParentThreadId}`, data.resourceReportDir); }
+export function initialize(data) {
+  observeGcThread(`loader-${data.resourceParentThreadId}`, data.resourceReportDir, data.resourceClockBinding);
+}
 
 const originalTarget = new URL('../../src/runtime/background-tools.ts', import.meta.url).href;
 const subject = process.env.PI_FULL_RUNTIME_SUBJECT ? parseSubjectBinding(process.env.PI_FULL_RUNTIME_SUBJECT) : undefined;
