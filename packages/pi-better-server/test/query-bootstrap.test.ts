@@ -104,7 +104,13 @@ test("source startup timeout and worker failure remain distinct from caller read
   t.mock.timers.tick(5000);
   await startup;
   assert.deepEqual(worker.eventNames(), []);
-  const exited = assert.rejects(querySourceReady(worker, observation), /exited before source inventory readiness \(code 9\)/);
+  const unavailable = () => ({ status: "degraded", observedAt: null,
+    reason: "runtime-unhealthy: read worker unresponsive; watchdog deadline exceeded" });
+  const exited = assert.rejects(querySourceReady(worker, unavailable), error => {
+    assert.match(String(error), /exited before source inventory readiness \(code 9\)/);
+    assert.match(String(error), /watchdog deadline exceeded/);
+    return true;
+  });
   worker.emit("exit", 9);
   await exited;
   const original = new Error("source worker failed");

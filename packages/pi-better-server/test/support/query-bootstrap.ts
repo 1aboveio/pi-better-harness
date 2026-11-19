@@ -18,7 +18,7 @@ export function querySourceReady(worker: Pick<EventEmitter, "on" | "once" | "off
       if (value.status !== "ready" || value.observedAt === null) return;
       cleanup(); resolve();
     };
-    const exited = (code: number) => { cleanup(); reject(new Error(`query fixture worker exited before source inventory readiness (code ${code})`)); };
+    const exited = (code: number) => { cleanup(); reject(new Error(`query fixture worker exited before source inventory readiness (code ${code}); ${JSON.stringify(observation())}`)); };
     const failed = (error: Error) => { cleanup(); reject(error); };
     worker.on("message", changed); worker.once("exit", exited); worker.once("error", failed);
     changed();

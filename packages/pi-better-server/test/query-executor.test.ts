@@ -502,6 +502,7 @@ test("responsive fixture imports outlive the wedge watchdog without source readi
     assert.equal(f.executor.observation().status, "rebuilding");
     f.worker.postMessage({ type: "release-bootstrap" });
     await f.bootstrapped;
+    await f.waitForSourceReady();
     const client = await f.client(); await ready(client);
     assert.equal(client.snapshot?.status, "ready");
     assert.equal(f.executor.metrics().executor.restarts, 0);
@@ -519,6 +520,7 @@ test("watchdog recovers a genuinely wedged worker while socket control stays res
         startupTimeout = setTimeout(() => reject(new Error("query fixture did not bootstrap within budget")), 5000);
       })]);
     } finally { clearTimeout(startupTimeout); }
+    await f.waitForSourceReady();
     const a = await f.client(), b = await f.client(); await ready(a); await ready(b);
     const epoch = b.snapshot!.instanceId;
     const wedged = new Promise<void>(resolve => f.worker.on("message", message => { if (message.type === "wedged") resolve(); }));
@@ -581,6 +583,7 @@ test("responsive rebuilding outlives the watchdog without claiming source readin
     assert.equal(f.executor.observation().status, "rebuilding");
     t.diagnostic(JSON.stringify({ rebuildingMs: performance.now() - began, metrics: f.executor.metrics() }));
     f.worker.postMessage({ type: "release-inventory" });
+    await f.waitForSourceReady();
     await ready(b);
   } finally { await f.close(); }
 });
