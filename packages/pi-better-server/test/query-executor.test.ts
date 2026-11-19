@@ -122,8 +122,9 @@ test("a dropped same-consumer snapshot reports a gap while unrelated global comm
   });
   let consumer: WorkClient | undefined;
   const write = (id: string, cwd: string, name: string) => {
-    mkdirSync(join(f.root, "runs", id), { recursive: true });
-    const path = join(f.root, "runs", id, "meta.json");
+    const directory = join(f.root, "runs", id);
+    if (mkdirSync(directory, { recursive: true })) writeFileSync(join(directory, "output.log"), "");
+    const path = join(directory, "meta.json");
     writeFileSync(path + ".tmp", JSON.stringify({ id, cwd, name, status: "completed", startedAt: 1 }));
     renameSync(path + ".tmp", path);
   };
@@ -284,7 +285,9 @@ test("10 socket clients share each truthful partial-write and recovery epoch", {
   let held: number | undefined;
   try {
     const first = await f.client(); await ready(first);
-    mkdirSync(directory); writeFileSync(path, JSON.stringify(meta));
+    mkdirSync(directory);
+    writeFileSync(join(directory, "output.log"), "");
+    writeFileSync(path, JSON.stringify(meta));
     await f.executor.livenessReasons();
     const clients = [first, ...await Promise.all(Array.from({ length: 9 }, () => f.client()))];
     for (const client of clients) await client.subscribe(scope);
@@ -722,6 +725,7 @@ test("metadata present before the held initial inventory is included in the firs
   try {
     const id = "sa_initial_source", path = join(f.root, "runs", id, "meta.json");
     mkdirSync(join(f.root, "runs", id));
+    writeFileSync(join(f.root, "runs", id, "output.log"), "");
     writeFileSync(path, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1, name: "present-before-inventory" }));
     const client = await f.client();
     const initial = await client.subscribe({});
@@ -1366,6 +1370,7 @@ for (const rootRecreated of [false, true]) test(`a raw directory observed before
     await client.subscribe(scope);
     if (rootRecreated) {
       mkdirSync(directory);
+      writeFileSync(join(directory, "output.log"), "");
       writeFileSync(metaPath, JSON.stringify({ id, cwd: f.root, status: "completed", startedAt: 1,
         callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "before-root" }));
       const wait = async (condition: () => boolean, phase: string) => {
@@ -1400,6 +1405,7 @@ for (const rootRecreated of [false, true]) test(`a raw directory observed before
       if ((f.executor.metrics().inventories ?? 0) > before && client.snapshot?.rows.length === 0) break;
       await new Promise(resolve => setTimeout(resolve, 10));
     } while (true);
+    writeFileSync(join(directory, "output.log"), "");
     writeFileSync(metaPath, JSON.stringify({ id, sessionId: "worker", cwd: f.root, status: "completed", startedAt: 1,
       endedAt: Date.now(), callbackOrigin: { cwd: f.root, sessionId: "parent" }, name: "original" }));
     const report = await measureEventPublication({ socketPath: f.path, agentDir: f.root, scope, metaPath, taskId: id,
