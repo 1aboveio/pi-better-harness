@@ -448,6 +448,7 @@ test("an 800 ms setup subscription cannot verify a source while fixture bootstra
     assert.equal(f.executor.observation().status, "rebuilding", "an expired setup read cannot verify the source");
     f.worker.postMessage({ type: "release-bootstrap" });
     await f.bootstrapped;
+    await f.waitForSourceReady();
     await ready(client);
     assert.equal(client.snapshot?.status, "ready");
     assert.equal(f.executor.metrics().executor.callerTimeouts, 1);
