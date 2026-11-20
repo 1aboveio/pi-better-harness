@@ -1,3 +1,6 @@
+import { reconstructGoalSnapshot } from "pi-better-goal/src/goal-state.ts";
+import type { GoalSnapshot } from "pi-better-goal/src/types.ts";
+
 export const OUTCOME_ENTRY = "pi-better-harness:outcome";
 
 export interface OutcomeInput {
@@ -33,9 +36,13 @@ export function prepareOutcome(current: Outcome | null, input: OutcomeInput, new
   };
 }
 
-export function restoreOutcome(entries: Iterable<{ type: string; customType?: string; data?: unknown }>): Outcome | null {
+export function restoreOutcome(
+  entries: readonly { type: string; customType?: string; data?: unknown }[],
+  goal?: GoalSnapshot | null,
+): Outcome | null {
+  let lastOutcomeIndex = -1;
   let outcome: Outcome | null = null;
-  for (const entry of entries) {
+  for (const [index, entry] of entries.entries()) {
     if (entry.type !== "custom" || entry.customType !== OUTCOME_ENTRY) continue;
     const data = entry.data as { version?: number; outcome?: Outcome } | null;
     if (data?.version !== 1 || !data.outcome) continue;
@@ -43,8 +50,17 @@ export function restoreOutcome(entries: Iterable<{ type: string; customType?: st
       const parsed = prepareOutcome(null, data.outcome);
       if (typeof data.outcome.goalId === "string") parsed.goalId = data.outcome.goalId;
       outcome = parsed;
+      lastOutcomeIndex = index;
     } catch {
       // A malformed entry is not permission to replace previously valid task state.
+    }
+  }
+  // Older sessions could save new active work against a Goal that was already complete.
+  if (outcome?.status === "active" && goal?.status === "complete" && outcome.goalId === goal.goalId) {
+    const previous = reconstructGoalSnapshot(entries.slice(0, lastOutcomeIndex));
+    if (previous?.goalId === goal.goalId && previous.status === "complete") {
+      delete outcome.goalId;
+      if (outcome.source === "goal") delete outcome.source;
     }
   }
   return outcome;

@@ -10,7 +10,7 @@ import { OUTCOME_ENTRY, prepareOutcome, restoreOutcome, formatOutcome, type Outc
 import { changeOutcomeTodoPreference, parseOutcomeTodoPreferences } from "./preferences.js";
 import { canRenderTaskRuntime, renderCompactTaskHeader, type CompactTaskHeader } from "./compact-task-header.js";
 import type { GoalSnapshot } from "pi-better-goal/src/types.ts";
-import { canStartGoalFromOutcome, OUTCOME_ACCEPTED_EVENT } from "pi-better-goal/src/task-context.ts";
+import { OUTCOME_ACCEPTED_EVENT, type TaskContextRequest } from "pi-better-goal/src/task-context.ts";
 
 import {
   completedPlanClearDelay,
@@ -168,7 +168,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   let enabled = false;
   let display = true;
   let ledgerEnabled = false;
-  let widgetContext: ExtensionContext | undefined;
+  let sessionContext: ExtensionContext | undefined;
   let outcome: Outcome | null = null;
   const taskTools = ["update_todo", "get_todo"] as const;
   const syncTools = (): void => {
@@ -434,10 +434,11 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
 
   const restore = (ctx: ExtensionContext): void => {
     const entries = ctx.sessionManager.getBranch();
-    outcome = restoreOutcome(entries);
+    sessionContext = ctx;
+    const trigger = reconstructGoalSnapshot(entries);
+    outcome = restoreOutcome(entries, trigger);
     restoreLedgerState(ctx);
     if (enabled) {
-      const trigger = reconstructGoalSnapshot(entries);
       if (!outcome && trigger && trigger.status !== "complete") {
         outcome = { objective: trigger.objective, source: "goal", goalId: trigger.goalId, status: trigger.status === "active" ? "active" : "paused" };
       } else if (outcome?.goalId && outcome.status !== "complete" && outcome.status !== "cancelled") {
@@ -484,7 +485,6 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
 
   const installWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) return;
-    widgetContext = ctx;
     setNavigatorPanel(ctx,
       EXTENSION_NAME,
       (tui, theme) => {
@@ -535,7 +535,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     promptSnippet: "Remember the accepted outcome and update Todo, workflow, or durable ledger progress",
     promptGuidelines: [
       "Capture the accepted outcome before substantive implementation, delegation, or investigation. An outcome-only update is valid; do not invent a checklist or acceptance criteria.",
-      "Use newTask:true with its outcome when the user switches to unrelated work. Omit newTask for a correction or refinement of the same task. Mark the outcome complete explicitly; checklist completion alone is not delivery.",
+      "Use newTask:true with its outcome when the user switches to unrelated work. Omit newTask for a correction or refinement of the same task. For an active Goal, call update_goal after verifying delivery. Otherwise mark the outcome complete explicitly.",
       "Use a Todo checklist when several meaningful milestones help track delivery; update it when work completes, is blocked, or changes scope.",
       "Write each Todo label as a short action in plain language, usually 3-7 English words or a similarly short phrase in the task's language. For example: 'Add Todo toggle' or 'Test keyboard controls'. Put methods, file paths, rationale, and acceptance criteria in the outcome, explanation, or workflow records, not the label. Apply this to workflow titles too; do not copy long issue headings.",
       "For generic plans only, mark distinct milestones in_progress when work is actually underway. Do not mark a delegated step completed until its result or failure has been inspected and integrated.",
@@ -577,6 +577,20 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       if (input.todo !== undefined && owner) throw new Error(`${owner} owns the task plan. Send workflow instead of todo.`);
       const nextOutcome = input.outcome ? prepareOutcome(outcome, input.outcome, input.newTask) : null;
       if (!input.newTask) assertOutcomeCompletionAllowed(ctx, nextOutcome);
+      let reopenedGoalId: string | undefined;
+      if (nextOutcome?.goalId) {
+        const goal = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
+        if (goal?.goalId === nextOutcome.goalId) {
+          if (nextOutcome.status === "complete" && goal.status === "active") {
+            throw new Error("This Outcome belongs to an active Goal. Verify its acceptance criteria and use update_goal to complete both.");
+          }
+          if (nextOutcome.status === "active" && goal.status === "complete") {
+            if (input.outcome?.status === "active") reopenedGoalId = nextOutcome.goalId;
+            delete nextOutcome.goalId;
+            if (nextOutcome.source === "goal") delete nextOutcome.source;
+          }
+        }
+      }
       const replacement = input.todo?.length ? replacePlan(input.newTask ? null : currentPlan, input.todo, input.explanation) : null;
       const detachOnCommit = input.newTask && ledgerId !== null;
       // Commit task memory only after the requested checklist or workflow operation succeeds.
@@ -590,7 +604,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         saveOutcome(nextOutcome);
         const sessionId = ctx.sessionManager.getSessionId?.();
         if (typeof sessionId === "string") {
-          pi.events.emit(OUTCOME_ACCEPTED_EVENT, { sessionId, outcome: { ...nextOutcome } });
+          pi.events.emit(OUTCOME_ACCEPTED_EVENT, { sessionId, reopenedGoalId, outcome: { ...nextOutcome } });
         }
       };
       if (!input.workflow && input.todo === undefined) {
@@ -867,21 +881,42 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   registerSettings();
   const unsubscribeTask = pi.events.on("pi-better-harness:task-context", (event: unknown) => {
     if (!event || typeof event !== "object") return;
-    const request = event as { action: string; goalId?: string; width?: number; objective?: string; enabled?: boolean; display?: boolean };
+    const request = event as TaskContextRequest;
     request.enabled = enabled;
+    if (request.action === "audit") {
+      if (enabled && outcome?.goalId && outcome.goalId === request.goalId) {
+        request.objective = outcome.objective;
+        request.doneWhen = outcome.doneWhen?.filter(criterion => criterion.trim());
+        if (sessionContext) {
+          try {
+            assertOutcomeCompletionAllowed(sessionContext, { ...outcome, status: "complete" });
+          } catch (error) {
+            request.ledgerBlocker = error instanceof Error ? error.message : String(error);
+          }
+        }
+        if (sessionContext && !workflowPlanOwner(sessionContext) && !rushBinding) {
+          request.openSteps = currentPlan?.steps.filter(step => step.status !== "completed").map(step => step.step);
+        }
+      }
+      return;
+    }
     if (request.action === "inspect") {
-      const goal = widgetContext ? reconstructGoalSnapshot(widgetContext.sessionManager.getBranch()) : null;
-      request.display = !!(typeof request.goalId === "string" && widgetContext && display && displayMode !== "hidden" &&
+      const goal = sessionContext ? reconstructGoalSnapshot(sessionContext.sessionManager.getBranch()) : null;
+      request.display = !!(typeof request.goalId === "string" && sessionContext?.hasUI && display && displayMode !== "hidden" &&
         outcome && request.goalId === outcome.goalId && goal?.goalId === request.goalId && typeof request.width === "number" &&
-        canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) && displayedWorkflowOwner === workflowPlanOwner(widgetContext));
+        canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) && displayedWorkflowOwner === workflowPlanOwner(sessionContext));
     }
     if (!enabled || request.action === "inspect") return;
     if (request.action === "bind") {
-      if (request.goalId && request.objective?.trim() === outcome?.objective && canStartGoalFromOutcome(outcome)) {
+      if (request.goalId && request.objective?.trim() === outcome?.objective && outcome?.status === "active" && !outcome.goalId) {
         saveOutcome({ ...outcome, goalId: request.goalId });
       }
     } else if (request.action === "start" && request.goalId && request.objective?.trim()) {
       if (outcome?.goalId === request.goalId) return;
+      if (outcome?.status === "active" && !outcome.goalId && outcome.objective === request.objective.trim()) {
+        saveOutcome({ ...outcome, goalId: request.goalId });
+        return;
+      }
       clearWorkflowPlan();
       if (currentPlan) clearPlan();
       saveOutcome({ objective: request.objective.trim(), status: "active", goalId: request.goalId, source: "goal" });
@@ -953,7 +988,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     if (typeof unsubscribeSettings === "function") unsubscribeSettings();
     if (typeof unsubscribeTask === "function") unsubscribeTask();
     refreshWidget = undefined;
-    widgetContext = undefined;
+    sessionContext = undefined;
     try {
       setNavigatorPanel(ctx, EXTENSION_NAME, undefined);
     } catch { /* best-effort cleanup */ }

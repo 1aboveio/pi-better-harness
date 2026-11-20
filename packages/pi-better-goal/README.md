@@ -50,6 +50,10 @@ With **Auto-start Goal** enabled, a successful explicit `update_todo` outcome sa
 
 Existing active, paused or budget-limited Goals are never replaced or resumed. Refinements of a bound outcome do not create another Goal. A new unbound task can start after the previous Goal completes. Session restore, branch navigation and enabling the preference do not replay saved outcomes; the next explicit qualifying save is the trigger. Completing a checklist or outcome does not complete the Goal.
 
+For an active Goal with a bound Outcome, the agent completes both through `update_goal`. It supplies an `evidence` array with one `{criterion, result}` per `doneWhen` entry, using the Outcome objective if no criteria were recorded. Each result should identify the observed result and its source. Open Todo steps and open items on an associated work ledger block completion. These checks also apply after a workflow scheduler reports `finish`. The user can still complete a Goal manually with `/goal complete`.
+
+Explicitly setting the same bound Outcome back to `active` after Goal completion starts a fresh Goal for its remaining work, including when Auto-start Goal is off. The new Goal preserves the Todo. Restoring an older session that saved active work against an already completed Goal leaves that work active and unbound. Running `/goal <exact Outcome objective>` binds it again with its Todo intact.
+
 When a workflow already owns the session, the new Goal binds its registered coordinator without invoking it again. Its scheduler and completion checks continue to apply. An unavailable or invalid workflow coordinator prevents automatic creation.
 
 ## Settings Storage
