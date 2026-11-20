@@ -696,7 +696,6 @@ export default function (pi: ExtensionAPI): void {
         let value: BackgroundProviderSnapshot;
         try {
           value = await provider.getActivity(ctx, { cachedOnly });
-          if (cachedOnly && value.coverage === "unverified") return value;
           if (provider.activityVersion === 1 && value.nextDeadline !== null &&
               (typeof value.nextDeadline !== "number" || !Number.isFinite(value.nextDeadline))) {
             throw new Error(`${provider.id}: activity v1 requires an explicit nextDeadline`);
@@ -714,7 +713,8 @@ export default function (pi: ExtensionAPI): void {
         if (execution === executionGeneration && providers.get(provider.id) === provider &&
             sequence >= (providerCacheSequences.get(provider.id) ?? 0)) {
           providerCacheSequences.set(provider.id, sequence);
-          providerCache.set(provider.id, value);
+          if (cachedOnly && value.coverage === "unverified") providerCache.delete(provider.id);
+          else providerCache.set(provider.id, value);
           if (!provider.onActivityChanged) compatibilityReadAt.set(provider.id, Date.now() + POLL_INTERVAL_MS);
         }
         return value;
