@@ -8,8 +8,9 @@ const context = (branch: any[] = []) => ({ cwd: '/workspace', sessionManager: { 
 beforeEach(() => { fixture.request.mockReset(); fixture.enqueue.mockReset();fixture.urgent.mockReset(); fixture.observe = undefined; });
 describe('managed native UI boundary', () => {
     it('opens observation once on demand and discards a pending poll after a session switch', async () => {
-      const poll = Promise.withResolvers<any>();
-      fixture.request.mockReturnValue(poll.promise);
+      let release!: (snapshot: unknown) => void;
+      const poll = new Promise(resolve => { release = resolve; });
+      fixture.request.mockReturnValue(poll);
       const frontend = createManagedBackgroundFrontend({ registerTool() {} } as any);
       frontend.host.start(context(), false);
       expect(frontend.ui.rows()).toEqual([]);
@@ -19,8 +20,8 @@ describe('managed native UI boundary', () => {
       expect(fixture.request).toHaveBeenCalledTimes(1);
       frontend.host.close();
       frontend.host.start(context(), false);
-      poll.resolve({ tasks: [], legacyRows: [{ id: 'old' }], deliveries: [] });
-      await poll.promise;
+      release({ tasks: [], legacyRows: [{ id: 'old' }], deliveries: [] });
+      await poll;
       expect(frontend.ui.rows()).toEqual([]);
       expect(fixture.enqueue).not.toHaveBeenCalled();
       frontend.host.close();
