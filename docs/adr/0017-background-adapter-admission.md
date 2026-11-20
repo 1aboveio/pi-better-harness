@@ -1,5 +1,7 @@
 # Verified Background tool admission
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#execution-boundaries).
+
 ## Status
 
 Implementation amendment for [#572](https://github.com/1aboveio/pi-better-harness/issues/572), following the Architect's admission recommendation. Extends [ADR 0007](0007-trusted-runtime-task-boundary.md) and the Background amendment in [ADR 0005](0005-sandbox-permission-table.md). No new permission defaults or shared task-sandbox API are introduced.

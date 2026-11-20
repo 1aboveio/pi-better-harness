@@ -1,5 +1,7 @@
 # Explicit sandbox Off disables profile enforcement
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#permission-to-use-a-tool).
+
 ## Status
 
 Accepted decision for #847. This records the intended contract, not a claim that

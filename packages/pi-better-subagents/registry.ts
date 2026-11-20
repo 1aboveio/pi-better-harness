@@ -135,6 +135,8 @@ export interface LaunchRecipe {
     role?: string | readonly string[];
     alias?: string;
     catalog?: CatalogLaunchSnapshot;
+    /** Absent on recipes that predate explicit ordinary worker providers. */
+    toolLoadingVersion?: 1;
     /** Resolved extension arguments; a changed implementation requires explicit replacement. */
     extensionArgs?: string[];
     /** Provider/tool runtime arguments, excluding permission-dependent trusted tools. */

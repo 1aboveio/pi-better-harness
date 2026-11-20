@@ -344,6 +344,7 @@ export class ManagedSubagentHost {
             const host = this;
             const port = {
                 observeHealth: reconcile => host.observeHealth(reconcile),
+                activeProviders: () => host.current.activeProviders ?? {},
                 backgroundTools: () => host.current.background?.available === true ? host.current.background.tools : [],
                 get owner() { return { pid: host.current.pid, start: host.current.start }; },
                 get identity() { return { root: host.root, instance: host.instance, epoch: host.epoch }; },
@@ -380,7 +381,7 @@ export class ManagedSubagentHost {
                     const policyDigest = input.policyPath ? launchDigest(JSON.parse(readFileSync(input.policyPath, "utf8"))) : undefined;
                     const attempt = host.journal.prepare(host.current.ownerKey, host.current.key, host.epoch, { ...input, preflightDigest, policyDigest,
                         capacityOwner: { pid: host.current.pid, start: host.current.start },
-                        launchAuthority: host.current.launchAuthority ?? { owner: host.current.owner, pid: host.current.pid, start: host.current.start, settings: host.current.settings, model: host.current.model, projectTrusted: host.current.projectTrusted, background: host.current.background, permissions: host.current.permissions } });
+                        launchAuthority: host.current.launchAuthority ?? { owner: host.current.owner, pid: host.current.pid, start: host.current.start, settings: host.current.settings, model: host.current.model, projectTrusted: host.current.projectTrusted, background: host.current.background, activeProviders: host.current.activeProviders, permissions: host.current.permissions } });
                     return { PI_MANAGED_SUBAGENT: JSON.stringify({ path: host.path, owner: host.current.ownerKey,
                             key: host.current.key, epoch: host.epoch, id: input.id, token: attempt.token }) };
                 },

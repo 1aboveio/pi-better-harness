@@ -5,6 +5,7 @@ import type { RunMeta } from "./registry.ts";
 /** Fixed server adapter port; never deserialized from a socket request. */
 export interface ManagedLaunchPort {
     observeHealth?(reconcile: (ids: readonly string[]) => void): () => void;
+    activeProviders?(): Record<string, string>;
     backgroundTools(): readonly string[];
     readonly owner: { pid: number; start?: string };
     readonly identity: { root: string; instance: string; epoch: number };

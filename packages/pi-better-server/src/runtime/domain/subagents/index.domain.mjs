@@ -38,7 +38,8 @@ import { finalizeRun as finalizeRunCore, reconcileInterruptedRun } from "./final
 import { completeOwnedExit } from "./owned-exit.domain.mjs";
 import { selectSessionByName } from "./session-selection.domain.mjs";
 import { isWithinWorkspace } from "./workspace-scope.domain.mjs";
-import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.domain.mjs";
+import { BUILTIN_TOOLS } from "./extensions.domain.mjs";
+import { ORDINARY_TOOL_PROVIDERS, activeChildProviders, ordinaryChildConfig, addEditablePatch, loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.domain.mjs";
 import { createSubagentSettingsPage } from "./settings-page.domain.mjs";
 import { deliverSubagentPrompt, effectiveSubagentSettings, subagentSettingsTool } from "./effective-settings.domain.mjs";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.domain.mjs";
@@ -51,7 +52,7 @@ import { resolveExtensions, extensionArgs } from "./extensions.domain.mjs";
 import { prepareTaskRuntime, applyDirectApplicationLoadout, DEFAULT_TASK_PERMISSIONS, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.domain.mjs";
 import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.domain.mjs";
 import { TASK_BUILTINS } from "./shared-task-sandbox.domain.mjs";
-import { APPLY_PATCH, describeTaskTools, planTaskTools, selectEffectiveTaskTools } from "./subagent-tools.domain.mjs";
+import { describeTaskTools, planTaskTools, selectEffectiveTaskTools } from "./subagent-tools.domain.mjs";
 import { announceExecutionAdapter, describeSubagentProcessPolicy, effectiveWorkerProcessAccess, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions, } from "./permission-policy.domain.mjs";
 import { resolveSubagentWorkspace } from "./git-workspace.domain.mjs";
 import { dirname, isAbsolute, join } from "node:path";
@@ -3001,8 +3002,7 @@ export default function (pi, managed) {
                 allow = [...allow.split(","), ...SUBAGENT_TOOLS.filter((t) => !have.has(t))]
                     .filter(Boolean).join(",");
             }
-            // A confined child gets extension tools only through /sandbox Subagents · Tools (ADR 0009):
-            // the guarded apply_patch adapter, and trusted tools admitted by name and package.
+            // Exclusions apply to the worker selection before provider admission (ADR 0027).
             const requestedExcludes = new Set(requestedExcludeTools.split(",").map((t) => t.trim()).filter(Boolean));
             // Supervised worker operations. This only decides which names the
             // child's loadout carries: clean children, explicit tool lists,
@@ -3049,13 +3049,11 @@ export default function (pi, managed) {
             if (bridgeEnabled) {
                 allow = [...new Set([...allow.split(",").filter(Boolean), ...bridgePlan.tools])].join(",");
             }
-            if (sandboxEnabled && !clean) {
+            if (!clean) {
                 const names = allow.split(",").filter(Boolean);
-                // Models reach for apply_patch whenever they may edit; ticked trusted tools join the default set.
-                if (permissionPlan.tools.applyPatch && names.some((name) => name === "edit" || name === "write"))
-                    names.push(APPLY_PATCH);
-                if (requestedTools === undefined)
-                    names.push(...permissionPlan.tools.trusted.map((entry) => entry.name));
+                // Derive the editable loadout before applying the resource policy.
+                if (!resume)
+                    addEditablePatch(names, requestedExcludes);
                 allow = [...new Set(names)].join(",");
             }
             if (sandboxEnabled && requestedTools === undefined && processAccess === "read") {
@@ -3085,12 +3083,13 @@ export default function (pi, managed) {
                 const path = resolveExtensionPath(spec);
                 return path ? workerPath(path) : path;
             };
+            const normalProviders = ordinaryChildConfig(cfg, managed?.activeProviders?.() ?? activeChildProviders(pi));
             const taskTools = sandboxEnabled ? planTaskTools({
                 requested: plannedTools,
                 settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
                 processAccess,
                 builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
-                toolExtensions: cfg.toolExtensions, resolvePath: workerResolvePath,
+                toolExtensions: normalProviders.toolExtensions, resolvePath: workerResolvePath,
             }) : undefined;
             // One effective selection feeds the task policy, child preflight, worker
             // bridge and frozen recipe, so a refused tool cannot leak into any of them
@@ -3112,7 +3111,7 @@ export default function (pi, managed) {
                     ? new ContinuationError(`Cannot continue ${resume.prior.id}: its frozen launch requires tool(s) this parent can no longer provide: ${detail}. ` +
                         `Launch a new run instead of continuing this conversation. ${processPolicy}`)
                     : new Error(`Requested tool(s) are not available in the task sandbox: ${detail}. ` +
-                        `Remove them from the tools list, or make them available in /sandbox (Subagents · Tools); nothing was launched.`);
+                        `Check the child tool provider and the Subagents resource permissions; nothing was launched.`);
             }
             if (toolSelection) {
                 if (plannedTools.length > 0 && toolSelection.tools.length === 0) {
@@ -3120,26 +3119,39 @@ export default function (pi, managed) {
                 }
                 allow = toolSelection.tools.join(",");
             }
+            // Older recipes were frozen before isolated workers gained Harness providers
+            // and inherited workers began loading mappings explicitly.
+            const legacyToolLoading = resume !== undefined && !resume.recipe.toolLoadingVersion;
+            let extensionConfig = cfg;
+            if (!sandboxEnabled && !legacyToolLoading)
+                extensionConfig = normalProviders;
+            if (legacyToolLoading && cfg.inheritExtensions)
+                extensionConfig = { ...cfg, toolExtensions: {} };
             const dependencyOptions = {
                 model, virtual: (() => {
                     const slash = model?.indexOf("/") ?? -1;
                     return slash > 0 && ctx.modelRegistry?.find?.(model.slice(0, slash), model.slice(slash + 1))?.api === "pi-virtual";
-                })(), config: cfg, resolvePath: workerResolvePath,
+                })(), config: extensionConfig, resolvePath: workerResolvePath,
                 configPaths: [configPath(), workerPath(join(selfDir(), "config.json"))],
             };
             // Bridge tools are supplied by the worker bridge extension, not by a
             // configured toolExtensions mapping: keep them out of extension
             // resolution so `unmapped` stays an accurate operator warning and the
             // frozen launch recipe never depends on bridge availability.
-            const extensionAllowlist = () => (bridgeEnabled
-                ? allow.split(",").filter((name) => !bridgePlan.tools.includes(name)).join(",")
-                : allow);
+            const extensionAllowlist = () => allow.split(",")
+                .filter(name => !requestedExcludes.has(name) && !bridgeToolNames.has(name)).join(",");
             const { resolution, fullResolution } = await resolveChildLaunch({ ...dependencyOptions, resolution: resolveExtensions({
                     // Only SDK builtins reach `--tools` and extension resolution: process_list and run_application
                     // are task builtins that the mandatory guard installs and activates itself.
                     tools: sandboxEnabled ? allow.split(",").filter((name) => SDK_BUILTIN_TOOLS.includes(name)).join(",") : extensionAllowlist(),
-                    model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
+                    model, clean, allowNested: sandboxEnabled ? false : allowNested, config: extensionConfig,
                 }) }, taskTools?.trusted.map(tool => tool.loadPath) ?? []);
+            if (!sandboxEnabled && resolution.mode === "isolated" &&
+                fullResolution.specs.every((spec) => Object.values(ORDINARY_TOOL_PROVIDERS).includes(spec))) {
+                const missingTools = resolution.unmapped.filter((name) => requiredToolNames.has(name));
+                if (missingTools.length)
+                    throw new Error(`No provider for required child tools: ${missingTools.join(", ")}. Configure toolExtensions or change the requested tools.`);
+            }
             const { args: resolvedExtArgs, missing } = extensionArgs(resolution, (spec) => resolution.paths[spec] ?? workerResolvePath(spec));
             const trustedExtArgs = fullResolution.specs.map(spec => fullResolution.paths[spec])
                 .filter(path => !resolvedExtArgs.includes(path)).flatMap(path => ["--extension", path]);
@@ -3159,7 +3171,7 @@ export default function (pi, managed) {
                 const reference = model === resume.recipe.model ? resolution : await resolveChildClosure({
                     ...dependencyOptions, model: resume.recipe.model, virtual: false, resolution: resolveExtensions({
                         tools: sandboxEnabled ? allow.split(",").filter((name) => SDK_BUILTIN_TOOLS.includes(name)).join(",") : extensionAllowlist(),
-                        model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
+                        model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: extensionConfig,
                     })
                 });
                 const referenceArgs = [...extensionArgs(reference, (spec) => reference.paths[spec] ?? workerResolvePath(spec)).args, ...codemodeArgs,
@@ -3367,6 +3379,7 @@ export default function (pi, managed) {
             }
             // Freeze the ordinary recipe before the durable external-launch intent.
             const recipe = buildLaunchRecipe({
+                ...(!legacyToolLoading ? { toolLoadingVersion: 1 } : {}),
                 attemptId: id, sessionId, sessionDir: childSessionDir, cwd, model, effort: thinking,
                 tools: callerLaunchTools(allow), excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
                 ...(optionalTrustedTools.length ? { optionalTrustedTools } : {}),
@@ -4323,6 +4336,30 @@ export default function (pi, managed) {
         pi.events?.emit("harness-settings:register", contribution);
         pi.events?.emit("harness-settings:register", agentsContribution);
     };
+    const unsubscribeToolLoading = pi.events?.on?.("pi-better-subagents:default-tool-loading", (request) => {
+        const query = request;
+        if (typeof query?.reply !== "function")
+            return;
+        const config = ordinaryChildConfig(loadConfig(), activeChildProviders(pi));
+        const names = normalizeTools(config.defaultTools ?? SAFE_DEFAULT_TOOLS).split(",").filter(Boolean);
+        addEditablePatch(names, new Set());
+        const rows = [...new Set(names)].map(name => {
+            if (name === "codemode") {
+                const supported = "createCodemodeExtension" in PiCodingAgent && typeof PiCodingAgent.createCodemodeExtension === "function";
+                return { name, provider: supported ? "Harness" : "SDK unavailable" };
+            }
+            if (BUILTIN_TOOLS.includes(name))
+                return { name, provider: "Pi" };
+            const spec = config.toolExtensions?.[name];
+            const sources = typeof spec === "string" ? [spec] : spec ?? [];
+            const providers = sources.map(source => {
+                const label = source === ORDINARY_TOOL_PROVIDERS[name] ? "Harness" : source;
+                return resolveExtensionPath(source) ? label : `${label} (missing)`;
+            });
+            return { name, provider: providers.join(", ") || (config.inheritExtensions ? "Session extensions" : "No provider mapped") };
+        });
+        query.reply(rows);
+    });
     const unsubscribeSettingsRequest = pi.events?.on?.("harness-settings:request", registerSettings);
     const unsubscribeOutcomeWorkflow = pi.events?.on?.("pi-better-workflow:changed", () => recoverAssignmentOutcomes(pi));
     registerSettings();
@@ -4595,6 +4632,8 @@ export default function (pi, managed) {
         closeOutcomeHost(outcomeHost);
         if (typeof unsubscribeOutcomeWorkflow === "function")
             unsubscribeOutcomeWorkflow();
+        if (typeof unsubscribeToolLoading === "function")
+            unsubscribeToolLoading();
         if (typeof unsubscribeSettingsRequest === "function")
             unsubscribeSettingsRequest();
         // #625: subagent children are detached process groups that outlive this

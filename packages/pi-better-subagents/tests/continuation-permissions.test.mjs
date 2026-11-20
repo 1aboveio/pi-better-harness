@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { planTaskTools } from '../subagent-tools.ts';
 import { assertContinuationExtensions, ContinuationError } from '../continuation.ts';
 
-test('trusted tool revocation narrows continuation while implementation replacement still refuses', () => {
+test('removing a provider or its network access narrows continuation while implementation replacement still refuses', () => {
   const root = mkdtempSync(join(tmpdir(), 'continuation-permissions-'));
   try {
     const a = join(root, 'trusted-a.ts'), b = join(root, 'trusted-b.ts');
@@ -14,8 +14,8 @@ test('trusted tool revocation narrows continuation while implementation replacem
     const baseArgs = ['--no-extensions', '--extension', '/runtime/provider.ts'];
     const plan = ({ network = true, enabled = true, implementation = a } = {}) => planTaskTools({
       requested: ['read', 'web_fetch'], builtins: ['read'], network,
-      settings: { applyPatch: false, trusted: enabled ? [{name: 'web_fetch', package: implementation}] : [] },
-      registered: [], toolExtensions: { web_fetch: implementation }, resolvePath: spec => spec,
+      settings: { applyPatch: false, trusted: [] },
+      registered: [], toolExtensions: enabled ? { web_fetch: implementation } : {}, resolvePath: spec => spec,
     });
     const initial = plan();
     assert.equal(initial.trusted.length, 1);
