@@ -17,6 +17,7 @@ import { AssignmentInbox } from "./domain/assignment-inbox.mjs";
 type BackgroundScope = { origin: { cwd: string; sessionId?: string }; rows: any[]; references: number;
   pending: any[]; pendingRevision?: number; recent: any[]; recentRevision?: number };
 const DISCOVERY_PAGE_SIZE = 256;
+const malformedHistoryContext = Symbol("malformed terminal history context");
 
 /** Root-owned query connection; never opens a supervisor or mutates source facts. */
 export class BackgroundObservation {
@@ -382,7 +383,11 @@ export class BackgroundObservation {
         }
         const readContext = () => {
           try { return JSON.parse(readFileSync(observedPath, "utf8")); }
-          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; return {}; }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+            if (!useCache && op.terminal_revision > 0 && error instanceof SyntaxError) return malformedHistoryContext;
+            throw error;
+          }
         };
         const workerContext = op.owner_kind === "worker-conversation" ? readContext() : undefined;
         const parent = workerContext && this.workerParent(op, workerContext);
@@ -395,6 +400,7 @@ export class BackgroundObservation {
         work.snapshots++;
         const inspection = snapshot(directory, op.task_id);
         const context = workerContext ?? readContext();
+        if (context === malformedHistoryContext) return { id: op.task_id, unreadable: true };
         const terminal = inspection?.terminal === true || op.terminal_revision > 0;
         const status = inspection?.terminal ? inspection.status : op.terminal_revision > 0 ? op.terminal_outcome : inspection?.status ?? "running";
         const row = { ...parent, durable: true, id: op.task_id, operationId: op.operation_id, kind: context.kind ?? inspection?.kind ?? "process",

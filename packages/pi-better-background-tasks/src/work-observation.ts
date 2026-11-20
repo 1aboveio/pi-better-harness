@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { cursorKind } from "./shared-log-utils.js";
+
 const hostedClients = new WeakSet<object>();
 const connectionAborts = new WeakMap<object, AbortController>();
 const clients = new WeakMap<object, Promise<any>>();
@@ -28,8 +30,13 @@ export function onBackgroundObservation(pi: ExtensionAPI, notify: () => void): (
   set.add(notify); return () => { set.delete(notify); };
 }
 
+export function backgroundListNeedsHistory(params: Record<string, unknown>): boolean {
+  return params.all === true || params.limit !== undefined || params.status !== undefined
+    || typeof params.cursor === "string" && cursorKind(params.cursor) !== "s";
+}
+
 /** A query connection grants no supervisor, transcript writer or retention authority. */
-export function backgroundObservation(pi: ExtensionAPI, ctx: ExtensionContext, history = false, all = false, page?: { limit?: number; statuses?: string[]; cursor?: string }): Promise<any> {
+export function backgroundObservation(pi: ExtensionAPI, ctx: ExtensionContext, history = false, all = false, page?: { limit?: number; statuses?: string[]; cursor?: string }, wait?: { timeoutMs: number; signal?: AbortSignal }): Promise<any> {
   const scope = { background: true, cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId(), processId: process.pid };
   const generation = generations.get(pi) ?? 0;
   const read = async (retry: boolean): Promise<any> => {
@@ -38,12 +45,13 @@ export function backgroundObservation(pi: ExtensionAPI, ctx: ExtensionContext, h
     const client = await connection;
     if ((generations.get(pi) ?? 0) !== generation) throw new Error("runtime-unavailable: client closed");
     try {
-      const deadline = Date.now() + 20000;
+      const deadline = Date.now() + (wait?.timeoutMs ?? 20000);
       for (;;) {
+        wait?.signal?.throwIfAborted();
         checkGeneration();
         const snapshot = await client.get({ ...scope, backgroundHistory: history, backgroundAll: all, ...page });
         if (!history || snapshot.status !== "rebuilding" || Date.now() >= deadline) return snapshot;
-        await delay(20);
+        await delay(wait ? 100 : 20, undefined, { signal: wait?.signal });
       }
     }
     catch (error) {

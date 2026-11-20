@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
+import { cursorKind } from "./shared-log-utils.domain.mjs";
 const hostedClients = new WeakSet();
 const connectionAborts = new WeakMap();
 const clients = new WeakMap();
@@ -29,8 +30,12 @@ export function onBackgroundObservation(pi, notify) {
     set.add(notify);
     return () => { set.delete(notify); };
 }
+export function backgroundListNeedsHistory(params) {
+    return params.all === true || params.limit !== undefined || params.status !== undefined
+        || typeof params.cursor === "string" && cursorKind(params.cursor) !== "s";
+}
 /** A query connection grants no supervisor, transcript writer or retention authority. */
-export function backgroundObservation(pi, ctx, history = false, all = false, page) {
+export function backgroundObservation(pi, ctx, history = false, all = false, page, wait) {
     const scope = { background: true, cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId(), processId: process.pid };
     const generation = generations.get(pi) ?? 0;
     const read = async (retry) => {
@@ -41,13 +46,14 @@ export function backgroundObservation(pi, ctx, history = false, all = false, pag
         if ((generations.get(pi) ?? 0) !== generation)
             throw new Error("runtime-unavailable: client closed");
         try {
-            const deadline = Date.now() + 20000;
+            const deadline = Date.now() + (wait?.timeoutMs ?? 20000);
             for (;;) {
+                wait?.signal?.throwIfAborted();
                 checkGeneration();
                 const snapshot = await client.get({ ...scope, backgroundHistory: history, backgroundAll: all, ...page });
                 if (!history || snapshot.status !== "rebuilding" || Date.now() >= deadline)
                     return snapshot;
-                await delay(20);
+                await delay(wait ? 100 : 20, undefined, { signal: wait?.signal });
             }
         }
         catch (error) {

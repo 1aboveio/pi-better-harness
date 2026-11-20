@@ -8,7 +8,7 @@ import { cursorKind, readOutputControls } from "./shared-log-utils.domain.mjs";
 import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.domain.mjs";
 import { registerDeliveryObserver } from "./delivery-observer.domain.mjs";
 import { formatWaitView, getObservedWaitHost, observedWaitServiceUnavailableReason, } from "./observed-waits.domain.mjs";
-import { backgroundObservation } from "./work-observation.domain.mjs";
+import { backgroundListNeedsHistory, backgroundObservation } from "./work-observation.domain.mjs";
 import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.domain.mjs";
 import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.domain.mjs";
 import { runTaskMaintenance } from "./maintenance.domain.mjs";
@@ -672,8 +672,7 @@ async function runAction(pi, params, ctx, callbackOrigin, getActiveSession, sign
 /** Ordinary lists reuse retained activity; explicit filtered/paged lists open history. */
 async function durableAwareList(pi, params, origin, ctx) {
     const options = listOptions(params, origin);
-    const history = params.all === true || params.limit !== undefined || params.status !== undefined
-        || typeof params.cursor === "string" && cursorKind(params.cursor) !== "s";
+    const history = backgroundListNeedsHistory(params);
     const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, history, params.all === true, { limit: options.limit, statuses: options.statuses, cursor: options.cursor }) : undefined;
     if (snapshot && snapshot.status !== "ready")
         throw new Error(snapshot.reason ?? "Background activity is unverified");
