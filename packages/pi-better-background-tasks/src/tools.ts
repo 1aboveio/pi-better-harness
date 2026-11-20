@@ -26,7 +26,7 @@ import {
   type DurableLaunch,
   type WaitView,
 } from "./observed-waits.js";
-import { backgroundObservation } from "./work-observation.js";
+import { backgroundListNeedsHistory, backgroundObservation } from "./work-observation.js";
 import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
 import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask, type WatchTaskParams, type BackgroundTaskRuntime } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
@@ -754,8 +754,7 @@ async function durableAwareList(
   ctx: ExtensionContext,
 ): Promise<string> {
   const options = listOptions(params, origin);
-  const history = params.all === true || params.limit !== undefined || params.status !== undefined
-    || typeof params.cursor === "string" && cursorKind(params.cursor) !== "s";
+  const history = backgroundListNeedsHistory(params);
   const snapshot = origin && !unavailableSessionOrigins.has(origin) ? await backgroundObservation(pi, ctx, history, params.all === true,
     { limit: options.limit, statuses: options.statuses, cursor: options.cursor }) : undefined;
   if (snapshot && snapshot.status !== "ready") throw new Error(snapshot.reason ?? "Background activity is unverified");
