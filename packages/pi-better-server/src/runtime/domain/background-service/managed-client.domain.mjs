@@ -4,7 +4,7 @@ import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, w
 import { join } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { backgroundDigest } from "./managed-authority.domain.mjs";
-import { readProcessStartTokenFresh } from "./process-identity.domain.mjs";
+import { readAdmissionStartToken, readProcessStartTokenFresh } from "./process-identity.domain.mjs";
 import { currentForegroundSandboxPolicy, FOREGROUND_SANDBOX_POLICY_CHANNEL } from "./sandbox.domain.mjs";
 import { backgroundObservation } from "./work-observation.domain.mjs";
 /** Native host proof carries scope and captured policy, never a transcript or module path. */
@@ -34,9 +34,11 @@ export async function requestBackgroundTool(pi, ctx, key, tool, params, paramete
         const sessionId = ctx.sessionManager.getSessionId();
         if (!sessionId)
             throw new Error('Background tools require a native session identity');
-        const record = { version: 1, id, secretHash: createHash('sha256').update(secret).digest('hex'), instanceId: hello.instanceId,
+        const version = hello.capabilities?.includes("runtime-background-admission-v2") ? 2 : 1;
+        const start = version === 2 ? readAdmissionStartToken(process.pid) : readProcessStartTokenFresh(process.pid);
+        const record = { version, id, secretHash: createHash('sha256').update(secret).digest('hex'), instanceId: hello.instanceId,
             owner: { kind: 'parent-session', sessionId, workspace: realpathSync(ctx.cwd) }, branchIds, projectTrusted: ctx.isProjectTrusted(),
-            pid: process.pid, start: readProcessStartTokenFresh(process.pid), key, tool, params, parametersDigest: parameters === undefined ? undefined : backgroundDigest(parameters), policy };
+            pid: process.pid, start, key, tool, params, parametersDigest: parameters === undefined ? undefined : backgroundDigest(parameters), policy };
         const staged = `${path}.tmp`;
         writeFileSync(staged, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
         renameSync(staged, path);
