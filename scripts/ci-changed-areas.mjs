@@ -51,6 +51,7 @@ const AREA_PATTERNS = {
     "docs/adr/0027-sandbox-tools-and-permissions.md",
     "scripts/sandbox-permissions.tui.e2e.test.mjs",
     "packages/pi-better-server/test/support/subagent-offline-model.ts",
+    "packages/pi-better-server/test/support/subagent-launch-sdk.mjs",
     "packages/pi-better-server/test/support/native-message-framing.mjs",
     "packages/pi-better-server/src/runtime/domain/subagents/**",
     "packages/pi-better-server/src/runtime/domain/sandbox-policy/**",

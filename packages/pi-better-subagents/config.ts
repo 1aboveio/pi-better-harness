@@ -9,12 +9,14 @@
  * `defaultSkills` absent → the child discovers the user-level skills catalog.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { toolPackage, supportsChildProvider } from "./shared-task-tools.ts";
 import { SELF_SPEC } from "./extensions.ts";
-import { installedPackage } from "./child-dependencies.mjs";
+import { installedPackage, packageRoot } from "./child-dependencies.mjs";
 import { isDelegationMode, type DelegationMode } from "./delegation.ts";
 import { normalizeSkillExposure } from "./skills.ts";
 import { validatedTimingMinutes, type TimingSettings } from "./timing.ts";
@@ -256,9 +258,36 @@ export const ORDINARY_TOOL_PROVIDERS: Readonly<Record<string, string>> = {
     process_list: join(selfDir(), "child-process-list.ts"),
 };
 
-export function ordinaryChildConfig(config: SubagentConfig): SubagentConfig {
+/** Check the owning package even when a mapping points directly to one of its files. */
+export function supportedChildEntrypoint(name: string, pkg: string, path: string): boolean {
+    return supportsChildProvider(name, pkg, packageRoot(path) ?? path);
+}
+
+/** Capture exact user-installed entrypoints already active in the foreground. */
+export function activeChildProviders(pi: Pick<ExtensionAPI, "getActiveTools" | "getAllTools">): Record<string, string> {
+    const active = new Set(pi.getActiveTools?.() ?? []);
+    const paths = new Map<string, string>();
+    const seen = new Set<string>();
+    for (const tool of pi.getAllTools?.() ?? []) {
+        if (!active.has(tool.name)) continue;
+        // The SDK reports active names. Conflicting registrations have no unique owner.
+        if (seen.has(tool.name)) { paths.delete(tool.name); continue; }
+        seen.add(tool.name);
+        if (tool.sourceInfo?.scope !== "user") continue;
+        const owner = toolPackage(tool);
+        if (!owner || !supportsChildProvider(tool.name, owner.package, owner.root)) continue;
+        try {
+            const path = realpathSync(tool.sourceInfo.path);
+            if (!statSync(path).isFile() || !supportedChildEntrypoint(tool.name, owner.package, path)) continue;
+            paths.set(tool.name, path);
+        } catch { /* An unavailable entrypoint cannot supply a new worker. */ }
+    }
+    return Object.fromEntries(paths);
+}
+
+export function ordinaryChildConfig(config: SubagentConfig, activeProviders: Record<string, string> = {}): SubagentConfig {
     const packaged = config.toolExtensions === null ? undefined : bundledConfig().toolExtensions;
-    return { ...config, toolExtensions: { ...ORDINARY_TOOL_PROVIDERS, ...packaged, ...config.toolExtensions } };
+    return { ...config, toolExtensions: { ...activeProviders, ...ORDINARY_TOOL_PROVIDERS, ...packaged, ...config.toolExtensions } };
 }
 
 export function addEditablePatch(names: string[], excluded: ReadonlySet<string>): void {

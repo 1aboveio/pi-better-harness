@@ -11,6 +11,7 @@ import { catalogHostAuthority } from "./catalog-host-admission.ts";
 import { openSharedCatalog } from "./shared-catalog.ts";
 import { SANDBOX_POLICY_CHANNEL } from "./permission-policy.ts";
 import { canonicalJson } from "./operation-bridge-types.ts";
+import { activeChildProviders } from "./config.ts";
 import { captureLaunchContext } from "./launch-context.ts";
 
 /** The fixed Pi host issues execution grants. Catalog registration grants no execution. */
@@ -39,7 +40,7 @@ export async function submitManagedLaunch(pi: ExtensionAPI, ctx: ExtensionContex
         const payload = { version: 1, id, secretHash: createHash("sha256").update(secret).digest("hex"), instanceId: hello.instanceId,
             owner, pid: process.pid, start: processStartToken(process.pid), projectTrusted: ctx.isProjectTrusted(),
             background: { available: getWorkerOperationService(pi)?.assignmentContinuation === 1 || nativeBackgroundCapability(pi), tools: [...resolveProductionSchemas(pi, DEFAULT_WORKER_BRIDGE_TOOLS).schemas.keys()] },
-            permissions: currentSandboxPermissions(pi) ?? {}, settings, model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+            activeProviders: activeChildProviders(pi), permissions: currentSandboxPermissions(pi) ?? {}, settings, model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
             catalogAuthority, key, tool, params };
         const staging = `${path}.tmp`;
         writeFileSync(staging, JSON.stringify(payload), { flag: "wx", mode: 0o600 });

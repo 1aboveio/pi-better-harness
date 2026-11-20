@@ -36,7 +36,7 @@ import {
     publishForegroundSandboxPolicy,
 } from "./events.ts";
 import { installTaskTools, runtimeCodeRoot } from "./shared-task-sandbox.ts";
-import { discoverTrustedTools, toolPackage } from "./shared-task-tools.ts";
+import { toolPackage } from "./shared-task-tools.ts";
 import { writeSandboxDefault } from "./preferences.ts";
 import { loadPermissionSettings, readPermissionSettings, writePermissionSettings } from "./permission-settings.ts";
 import { defaultSandboxPermissions, describeLoosening, type SandboxPermissionSettings } from "./permissions.ts";
@@ -231,8 +231,6 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
                 });
                 return subagents === undefined ? { main } : { main, subagents };
             },
-            // Trusted-tool candidates: what this Pi has actually registered, by owning package.
-            discoverTools: () => discoverTrustedTools(pi.getAllTools?.() ?? []),
             change: (settings) => {
                 appendSessionPermissions(pi, settings);
                 permissionSource = "this session branch";

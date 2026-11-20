@@ -778,7 +778,7 @@ nodeTest("old session snapshots inherit Main once and do not re-link Background 
     await recorded.handlers.get("session_shutdown")!({}, started.ctx);
 });
 
-test("UI edits persist both profiles and tools to session only and immediately enforce restrictions", async () => {
+test("UI edits persist resource profiles to the session and immediately enforce restrictions", async () => {
     forgetDenyOverride();
     forgetSandboxPreference();
     writePermissionSettings(defaultSandboxPermissions());
@@ -802,19 +802,13 @@ test("UI edits persist both profiles and tools to session only and immediately e
         await press(" "); // Subagents on.
         for (let i = 0; i < 7; i++) await press("\x1b[B");
         await press(" "); // Subagents network off.
-        await press("\x1b[B"); // Skip the independent Process access row.
-        await press("\x1b[B");
-        await press(" "); // Guarded apply_patch off.
-        await press("\x1b[B");
-        await press(" "); // Default trusted group off.
-        assert.doesNotMatch(page.render(120).join("\n"), /Save as defaults/);
-        page.handleInput?.("\r"); // Fold, not save.
+        assert.doesNotMatch(page.render(120).join("\n"), /\[[ x]\] apply_patch|Subagents · Tools/);
+        page.handleInput?.("\r");
     });
     const expected = defaultSandboxPermissions();
     Object.assign(expected.main, { enabled: true, projectFiles: "off", commands: false, network: false });
     Object.assign(expected.subagents, { enabled: true, network: false });
-    expected.subagentTools = { applyPatch: false, trusted: [] };
-    assert.equal(recorded.branch.length, 8, "each policy edit creates one custom entry");
+    assert.equal(recorded.branch.length, 6, "each policy edit creates one custom entry");
     const last = recorded.branch.at(-1)!;
     assert.equal(last.type, "custom");
     assert.deepEqual((last as { data: unknown }).data, { version: 1, permissions: expected });

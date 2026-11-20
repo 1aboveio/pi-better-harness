@@ -21,7 +21,7 @@ import { createBackgroundAdmission, isBackgroundLaunch } from "./background-admi
 import { DenyRuleManager } from "./deny-rules.domain.mjs";
 import { FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, publishForegroundSandboxPolicy, } from "./events.domain.mjs";
 import { installTaskTools, runtimeCodeRoot } from "./shared-task-sandbox.domain.mjs";
-import { discoverTrustedTools, toolPackage } from "./shared-task-tools.domain.mjs";
+import { toolPackage } from "./shared-task-tools.domain.mjs";
 import { writeSandboxDefault } from "./preferences.domain.mjs";
 import { loadPermissionSettings, readPermissionSettings, writePermissionSettings } from "./permission-settings.domain.mjs";
 import { defaultSandboxPermissions, describeLoosening } from "./permissions.domain.mjs";
@@ -204,8 +204,6 @@ export default function piBetterSandbox(pi) {
                 });
                 return subagents === undefined ? { main } : { main, subagents };
             },
-            // Trusted-tool candidates: what this Pi has actually registered, by owning package.
-            discoverTools: () => discoverTrustedTools(pi.getAllTools?.() ?? []),
             change: (settings) => {
                 appendSessionPermissions(pi, settings);
                 permissionSource = "this session branch";

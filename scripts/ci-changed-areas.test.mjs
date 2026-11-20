@@ -67,6 +67,7 @@ test("sandbox contract and acceptance inputs select the sandbox checks", () => {
     "docs/adr/0027-sandbox-tools-and-permissions.md",
     "scripts/sandbox-permissions.tui.e2e.test.mjs",
     "packages/pi-better-server/test/support/subagent-offline-model.ts",
+    "packages/pi-better-server/test/support/subagent-launch-sdk.mjs",
     "packages/pi-better-subagents/tests/continuation.test.mjs",
   ]) assert.ok(selected([path]).includes("sandbox"), path);
 });

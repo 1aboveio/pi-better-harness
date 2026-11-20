@@ -475,8 +475,7 @@ an enabled human profile. Saved enabled profiles and session choices stay enable
   cache directories when Outside is Read or Read/write. Credential and control
   denials retain precedence. See the permission details below.
 - **Tool allowlist.** Confined children admit only verified read/write/edit/bash
-  implementations, guarded `run_application`, the guarded `apply_patch`, and the trusted tools ticked in
-  `/sandbox`. The fixed `process_list` adapter is available with Process access
+  implementations, guarded `run_application`, the guarded `apply_patch`, and the selected extension tools with verified providers. The fixed `process_list` adapter is available with Process access
   set to Read. Other requested tools are reported as unavailable, with the reason.
 - **No runaway recursion.** Confined children cannot spawn nested agents.
   `allow_nested:true` loads nested-agent support only for unconfined children.
@@ -552,7 +551,7 @@ limit to 10 min in `/sandbox`, then press Ctrl+S. New launches capture the polic
 running children keep theirs. An incompatible older consumer is rejected rather
 than silently dropping these restrictions.
 
-For a confined worker, grant access to extension tools in `/sandbox` → Use permissions → Subagents · Tools.
+Select tools in the role, worker defaults or spawn request. Loading a tool grants access to call it. Use `/sandbox` to edit the resource rules.
 [Sandbox tool loading and permission to use tools](../../../docs/adr/0027-sandbox-tools-and-permissions.md) defines the contract.
 
 - **Guarded:** `apply_patch`, a harness adapter with the Codex tool's name,
@@ -563,17 +562,10 @@ For a confined worker, grant access to extension tools in `/sandbox` → Use per
   checked first; no file is left half-patched, and a failure part-way reports
   what was and wasn't applied. It is added for a child that may `edit` or
   `write`, or asks for it.
-- **Trusted:** third-party tools you tick (default `web_fetch` and `web_search`).
-  Their package is loaded into the child and they run in the child Pi process,
-  **outside the file rules**. The child admits one only when both its name and
-  its package match the ticked entry, so another package registering the same
-  name is refused. A single extension file with no package manifest is loaded
-  and admitted by itself, never its directory. Known network tool names
-  (`web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name) are refused while Network access is Off; this is a name list, not a
-  network sandbox. A ticked tool whose package can't be found is left out of a
-  default loadout and reported with its reason in the launch output; an explicit
-  `tools` request for a tool the task boundary cannot provide refuses the launch.
-  Ticked tools join the default tool list; an explicit `tools` list still decides.
+- **Extension tools:** the child loads the selected provider and checks its
+  canonical source at dispatch. A single user-installed extension entrypoint is
+  loaded by itself. Known network tools require Network access On. The extension
+  runs in the trusted Pi process, outside guarded file operations.
   If a trusted tool is inherited from the defaults, registers in the child, and
   is then inactive (for example, because the extension requires a different
   model), the child logs the omission once and continues without it. Missing
@@ -746,12 +738,10 @@ The effective config also sets:
 
 ## The allowlist also decides what LOADS
 
-For confined children, the requested list is first restricted to tools with
-verified task adapters and the trusted tools ticked in `/sandbox`; only the
-ticked tools' packages load. `toolExtensions` still chooses which package to
-load for a tool (an override), but the child admits it only if that is the
-ticked package. Provider extensions can still load as trusted runtime
-dependencies. Nested spawning and
+For confined children, the requested list selects verified task adapters and
+extension providers. A worker mapping takes precedence over an active
+user-installed entrypoint. Previously saved trusted-package records can
+identify a provider for a selected tool. Nested spawning and
 inherited extension discovery are currently unavailable under confinement.
 
 The mapping behavior below applies to unconfined children and to admitted
@@ -767,8 +757,7 @@ pi -p --mode json --no-extensions -e <package backing a requested tool> ...
 The default editable worker gets the Harness `apply_patch` adapter. An explicit
 `process_list` request loads the bounded current-user inventory adapter. Each
 can use an ordinary provider override. The default web tools load their
-configured package. With Subagents Off, saved guarded and trusted checkboxes
-have no effect on these selections.
+configured package. Both execution modes use the selected tools without an additional permission checkbox.
 
 Two maps in `config.json` drive it, with a built-in default for provider auth:
 

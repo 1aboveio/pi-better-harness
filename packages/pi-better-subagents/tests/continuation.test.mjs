@@ -371,6 +371,45 @@ describe("sandbox tool loading and use permissions (ADR 0027)", () => {
         }
     });
 
+    it("uses an active user provider without a mapping and enforces its network permission", async () => {
+        const dir = join(RUNTIME, "agent", "extensions");
+        mkdirSync(dir, { recursive: true });
+        const provider = join(dir, "network-probe.ts");
+        const receipt = join(WORKSPACE, "network-probe.txt");
+        const name = "mcp__fixture__ping";
+        writeFileSync(provider, `import { writeFileSync } from "node:fs";
+            export default pi => pi.registerTool({
+                name: ${JSON.stringify(name)}, label: "Ping", description: "Record a call",
+                parameters: { type: "object", properties: {} },
+                execute: async () => {
+                    writeFileSync(${JSON.stringify(receipt)}, "called");
+                    return { content: [{ type: "text", text: "ok" }] };
+                }
+            });`);
+        const policy = { state: "enabled", permissions: policyMain, subagentPermissions: { ...policyMain, enabled: true },
+            subagentTools: { applyPatch: false, trusted: [] } };
+        const h = makeHarness({ policy, loadUserExtensions: true });
+        const prompt = "Call the active network probe";
+        const key = createHash("sha256").update(prompt).digest("hex");
+        writeFileSync(join(ARTIFACTS, `tool-call-${key}.json`), JSON.stringify({ name, arguments: {} }));
+        const params = { prompt, tools: name, clean: false, sandbox: undefined, callback: false, model: "test/model" };
+        let id;
+        try {
+            h.publishPolicy({ ...policy, subagentPermissions: { ...policy.subagentPermissions, network: false } });
+            await assert.rejects(spawnRun(h, params), /needs Network access/);
+            assert.equal(existsSync(receipt), false);
+            h.publishPolicy(policy);
+            id = await spawnRun(h, params);
+            const meta = await waitTerminal(id);
+            assert.equal(meta.status, "completed", readFileSync(logPathFor(id), "utf8"));
+            assert.equal(readFileSync(receipt, "utf8"), "called");
+        } finally {
+            await reap(id ? [id] : []);
+            await h.shutdown();
+            rmSync(provider, { force: true });
+        }
+    });
+
     for (const tool of ["apply_patch", "fixture_report"]) {
         it(`the SDK worker executes the selected ${tool} provider with retained permissions unchecked`, async () => {
             const settingsPath = join(RUNTIME, "agent", "settings.json");
@@ -399,7 +438,7 @@ describe("sandbox tool loading and use permissions (ADR 0027)", () => {
                 subagentPermissions: { ...policyMain, enabled: false, projectFiles: "read" },
                 subagentTools: { applyPatch: false, trusted: [] } };
             const h = makeHarness({ policy });
-            let id;
+            let id, confinedId;
             try {
                 id = await spawnRun(h, { prompt, clean: false, sandbox: undefined, model: "test/model",
                     tools: `read,${tool}`, callback: false });
@@ -411,16 +450,22 @@ describe("sandbox tool loading and use permissions (ADR 0027)", () => {
                 const plan = JSON.parse(readFileSync(join(runDir(id), "child-preflight.json"), "utf8"));
                 assert.ok(plan.tools.includes(tool));
                 assert.deepEqual(plan.unmapped, []);
+                h.publishPolicy({ ...policy, subagentPermissions: { ...policyMain, enabled: true } });
+                rmSync(receipt);
+                confinedId = await spawnRun(h, { prompt, clean: false, sandbox: undefined, model: "test/model",
+                    tools: `read,${tool}`, callback: false });
+                const confined = await waitTerminal(confinedId);
+                assert.equal(confined.status, "completed", readFileSync(logPathFor(confinedId), "utf8"));
+                assert.equal(confined.recipe.sandbox, true);
                 if (tool === "apply_patch") {
-                    h.publishPolicy({ ...policy, subagentPermissions: { ...policy.subagentPermissions, enabled: true } });
-                    const before = listMetas().map(run => run.id).sort();
-                    await assert.rejects(spawnRun(h, { clean: false, sandbox: undefined, model: "test/model",
-                        tools: `read,${tool}`, callback: false }), /apply_patch is off in \/sandbox/);
-                    assert.deepEqual(listMetas().map(run => run.id).sort(), before);
-                    assert.deepEqual(readMeta(id).recipe, meta.recipe);
+                    assert.equal(existsSync(receipt), false, "the guarded worker must use the Harness adapter");
+                    assert.equal(readFileSync(join(WORKSPACE, "proof.txt"), "utf8"), "verified\n");
+                } else {
+                    assert.equal(readFileSync(receipt, "utf8"), input);
                 }
+                assert.deepEqual(readMeta(id).recipe, meta.recipe);
             } finally {
-                await reap(id ? [id] : []);
+                await reap([id, confinedId].filter(Boolean));
                 await h.shutdown();
                 writeFileSync(settingsPath, saved);
             }

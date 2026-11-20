@@ -51,7 +51,7 @@ import { completeOwnedExit } from "./owned-exit.ts";
 import { selectSessionByName } from "./session-selection.ts";
 import { isWithinWorkspace } from "./workspace-scope.ts";
 import { BUILTIN_TOOLS } from "./extensions.ts";
-import { ORDINARY_TOOL_PROVIDERS, ordinaryChildConfig, addEditablePatch, loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
+import { ORDINARY_TOOL_PROVIDERS, activeChildProviders, ordinaryChildConfig, addEditablePatch, loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
 import { createSubagentSettingsPage } from "./settings-page.ts";
 import { deliverSubagentPrompt, effectiveSubagentSettings, formatSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
@@ -3073,8 +3073,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                     .filter(Boolean).join(",");
             }
 
-            // A confined child gets extension tools only through /sandbox Subagents · Tools (ADR 0027):
-            // the guarded apply_patch adapter, and trusted tools admitted by name and package.
+            // Exclusions apply to the worker selection before provider admission (ADR 0027).
             const requestedExcludes = new Set(requestedExcludeTools.split(",").map((t) => t.trim()).filter(Boolean));
 
             // Supervised worker operations. This only decides which names the
@@ -3125,9 +3124,8 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
 
             if (!clean) {
                 const names = allow.split(",").filter(Boolean);
-                // Models reach for apply_patch whenever they may edit; ticked trusted tools join the default set.
-                if (!resume && (!sandboxEnabled || permissionPlan.tools.applyPatch)) addEditablePatch(names, requestedExcludes);
-                if (sandboxEnabled && requestedTools === undefined) names.push(...permissionPlan.tools.trusted.map((entry) => entry.name));
+                // Derive the editable loadout before applying the resource policy.
+                if (!resume) addEditablePatch(names, requestedExcludes);
                 allow = [...new Set(names)].join(",");
             }
             if (sandboxEnabled && requestedTools === undefined && processAccess === "read") {
@@ -3157,12 +3155,13 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 const path = resolveExtensionPath(spec);
                 return path ? workerPath(path) : path;
             };
+            const normalProviders = ordinaryChildConfig(cfg, managed?.activeProviders?.() ?? activeChildProviders(pi));
             const taskTools = sandboxEnabled ? planTaskTools({
                 requested: plannedTools,
                 settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
                 processAccess,
                 builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
-                toolExtensions: cfg.toolExtensions, resolvePath: workerResolvePath,
+                toolExtensions: normalProviders.toolExtensions, resolvePath: workerResolvePath,
             }) : undefined;
             // One effective selection feeds the task policy, child preflight, worker
             // bridge and frozen recipe, so a refused tool cannot leak into any of them
@@ -3187,7 +3186,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                     )
                     : new Error(
                         `Requested tool(s) are not available in the task sandbox: ${detail}. ` +
-                        `Remove them from the tools list, or make them available in /sandbox (Subagents · Tools); nothing was launched.`,
+                        `Check the child tool provider and the Subagents resource permissions; nothing was launched.`,
                     );
             }
             if (toolSelection) {
@@ -3200,7 +3199,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             // and inherited workers began loading mappings explicitly.
             const legacyToolLoading = resume !== undefined && !resume.recipe.toolLoadingVersion;
             let extensionConfig = cfg;
-            if (!sandboxEnabled && !legacyToolLoading) extensionConfig = ordinaryChildConfig(cfg);
+            if (!sandboxEnabled && !legacyToolLoading) extensionConfig = normalProviders;
             if (legacyToolLoading && cfg.inheritExtensions) extensionConfig = { ...cfg, toolExtensions: {} };
             const dependencyOptions = {
                 model, virtual: (() => {
@@ -4426,7 +4425,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
     const unsubscribeToolLoading = pi.events?.on?.("pi-better-subagents:default-tool-loading", (request: unknown) => {
         const query = request as { reply?: (rows: { name: string; provider: string }[]) => void } | undefined;
         if (typeof query?.reply !== "function") return;
-        const config = ordinaryChildConfig(loadConfig());
+        const config = ordinaryChildConfig(loadConfig(), activeChildProviders(pi));
         const names = normalizeTools(config.defaultTools ?? SAFE_DEFAULT_TOOLS).split(",").filter(Boolean);
         addEditablePatch(names, new Set());
         const rows = [...new Set(names)].map(name => {

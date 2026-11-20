@@ -28,7 +28,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
         const cwd = options.cwd ?? workspace, sessionId = options.sessionId ?? "owner-session";
         const child = fork(new URL("../../pi-better-server/test/support/subagent-launch-sdk.mjs", import.meta.url), [], {
             execPath: process.execPath, execArgv: ["--import", "tsx"],
-            env: { ...env, LAUNCH_WORKSPACE: cwd, CONTINUATION_CONTEXT: JSON.stringify({ sessionId, sessionDir: join(root, "parents"), sessionFile: options.sessionFile, ui: options.ui, failHealthNotify: options.failHealthNotify, policy }) },
+            env: { ...env, LAUNCH_WORKSPACE: cwd, CONTINUATION_CONTEXT: JSON.stringify({ sessionId, sessionDir: join(root, "parents"), sessionFile: options.sessionFile, ui: options.ui, loadUserExtensions: options.loadUserExtensions, failHealthNotify: options.failHealthNotify, policy }) },
             stdio: ["ignore", "ignore", "pipe", "ipc"],
         });
         observeFixtureChild(child);

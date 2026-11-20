@@ -321,8 +321,8 @@ describe("refused task tools never reach the child loadout (#669)", () => {
 
         // The drop is reported, with the reason, where the operator can act.
         assert.match(text, /Task sandbox: /);
-        assert.match(text, /tool_search disabled \(not a guarded tool and not ticked as trusted in \/sandbox \(Subagents · Tools\)\)/);
-        assert.match(text, /web_fetch disabled \(its package @juicesharp\/rpiv-web-tools can't be found/);
+        assert.match(text, /tool_search disabled \(no provider selected for this worker\)/);
+        assert.match(text, /web_fetch disabled \(provider @juicesharp\/rpiv-web-tools is unavailable/);
         assert.doesNotMatch(text, /trusted web_fetch/);
     });
 
@@ -340,7 +340,7 @@ describe("refused task tools never reach the child loadout (#669)", () => {
             }, undefined, undefined, ctx),
             (error) => {
                 assert.match(error.message, /tool_search/);
-                assert.match(error.message, /not a guarded tool and not ticked as trusted/);
+                assert.match(error.message, /no provider selected for this worker/);
                 // The refusal is the parent's, not the child launcher's fallback.
                 assert.doesNotMatch(error.message, /Task sandbox requires a supported active Pi SDK/);
                 return true;
@@ -426,7 +426,7 @@ describe("refused task tools never reach the child loadout (#669)", () => {
             (error) => {
                 assert.match(error.message, new RegExp(`Cannot continue ${sessionId}`));
                 assert.match(error.message, /frozen launch requires/);
-                assert.match(error.message, /web_fetch \(its package @juicesharp\/rpiv-web-tools can't be found/);
+                assert.match(error.message, /web_fetch \(provider @juicesharp\/rpiv-web-tools is unavailable/);
                 assert.match(error.message, /Launch a new run/);
                 assert.doesNotMatch(error.message, /Task sandbox requires a supported active Pi SDK/);
                 return true;
