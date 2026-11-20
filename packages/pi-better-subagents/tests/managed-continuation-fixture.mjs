@@ -82,7 +82,7 @@ export async function continuationFixture({ root, artifacts, workspace }) {
                 child.send({ id, tool, key: `${key}-${actorId}-${id}`, params, policy }, error => { if (error) { requests.delete(id); reject(new Error(`${error.message}: ${errors}`)); } });
             });
         };
-        for (const tool of ["subagent_spawn", "subagent_spawn_batch", "subagent_result", "subagent_stop", "subagent_settings"]) {
+        for (const tool of ["subagent_spawn", "subagent_spawn_batch", "subagent_list", "subagent_result", "subagent_stop", "subagent_settings"]) {
             tools.set(tool, { execute: (key, params) => execute(tool, key, params) });
         }
         // Read-only SDK snapshots support the existing assertions, never tool execution.
