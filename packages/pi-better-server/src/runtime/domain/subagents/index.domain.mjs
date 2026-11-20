@@ -4529,6 +4529,13 @@ export default function (pi, managed) {
     // alive, resume the ticking widget. Deferred out of the factory per pi's
     // "no background resources at load" rule.
     let restoreObservation;
+    let offFirstAssignment;
+    const cancelDeferredObservation = () => {
+        if (restoreObservation)
+            clearImmediate(restoreObservation);
+        offFirstAssignment?.();
+        offFirstAssignment = undefined;
+    };
     pi.on("session_start", async (event, ctx) => {
         // A session begins in this process again (reload, restart, or a session
         // switch), so the previous session's teardown no longer applies: the
@@ -4554,8 +4561,7 @@ export default function (pi, managed) {
         activeCallbackOrigin = callbackOriginFromContext(ctx);
         pendingRecipientRecovery.clear();
         observedRecipientRows.clear();
-        if (restoreObservation)
-            clearImmediate(restoreObservation);
+        cancelDeferredObservation();
         if (!managed && activeCallbackOrigin) {
             configureWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => {
                 refreshBackgroundWorkNavigator(ctx);
@@ -4563,6 +4569,17 @@ export default function (pi, managed) {
             });
             if (shouldRestoreWorkObservation(event, ctx.sessionManager)) {
                 restoreObservation = setImmediate(() => { void activateWorkObservation(); });
+            }
+            else {
+                // Another extension can assign work to this recipient before it calls a tool.
+                const origin = activeCallbackOrigin;
+                offFirstAssignment = onMetaChanged(meta => {
+                    if (!meta || !belongsToOrigin(meta, origin))
+                        return;
+                    offFirstAssignment?.();
+                    offFirstAssignment = undefined;
+                    void activateWorkObservation();
+                });
             }
         }
         if (!managed) {
@@ -4619,6 +4636,7 @@ export default function (pi, managed) {
             await startWorkerOperations();
     });
     pi.on("session_before_switch", () => {
+        cancelDeferredObservation();
         closeCatalogHost();
         agentSessionSettings.clear();
         catalogModelRegistry = undefined;
@@ -4633,8 +4651,7 @@ export default function (pi, managed) {
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (event, ctx) => {
         closeCatalogHost();
-        if (restoreObservation)
-            clearImmediate(restoreObservation);
+        cancelDeferredObservation();
         stopWorkObservation();
         pendingNavigatorDismissals.clear();
         if (outcomeTicker)
