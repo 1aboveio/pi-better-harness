@@ -4567,7 +4567,11 @@ export default function (pi, managed) {
                 refreshBackgroundWorkNavigator(ctx);
                 observeRecipientNotifications(pi);
             });
-            if (shouldRestoreWorkObservation(event, ctx.sessionManager)) {
+            if (!event?.reason) {
+                // Older hosts use completion of their untyped start callback as the readiness signal.
+                await activateWorkObservation();
+            }
+            else if (shouldRestoreWorkObservation(event, ctx.sessionManager)) {
                 restoreObservation = setImmediate(() => { void activateWorkObservation(); });
             }
             else {

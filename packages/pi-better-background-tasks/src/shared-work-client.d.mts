@@ -1,1 +1,1 @@
-export function shouldRestoreWorkObservation(event: { reason: string; piBetterServerHosted?: boolean } | undefined, session: { getSessionFile?(): string | undefined; getLeafId?(): string | null }): boolean;
+export function shouldRestoreWorkObservation(event: { reason: string; piBetterObserveWork?: boolean } | undefined, session: { getSessionFile?(): string | undefined; getLeafId?(): string | null }): boolean;

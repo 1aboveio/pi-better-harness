@@ -47,10 +47,18 @@ const resourceLoader = new DefaultResourceLoader({ cwd: config.cwd, agentDir: pr
     })] });
 await resourceLoader.reload();
 const manager = SessionManager.create(config.cwd, config.directory, { id: config.sessionId });
-const { session } = await createAgentSession({ cwd: config.cwd, agentDir: process.env.PI_CODING_AGENT_DIR, settingsManager, resourceLoader, sessionManager: manager, noTools: 'all' });
+const { session } = await createAgentSession({ cwd: config.cwd, agentDir: process.env.PI_CODING_AGENT_DIR, settingsManager, resourceLoader, sessionManager: manager,
+    // This host receives work from a separate manager process before it issues any tool calls.
+    sessionStartEvent: { type: "session_start", reason: "startup", piBetterObserveWork: true }, noTools: 'all' });
 await session.setModel(session.extensionRunner.createContext().modelRegistry.find('recipient-fixture', 'model'));
 initTheme(settingsManager.getTheme(), false);
 await session.bindExtensions({ mode: 'tui', uiContext: { ...session.extensionRunner.getUIContext(), notify(msg, level) { process.send?.({ notice: { msg, level } }); } } });
+// The manager may publish immediately after ready. Wait for this recipient's subscription.
+const deadline = performance.now() + 10000;
+while (workObservation()?.status !== "ready") {
+    if (performance.now() >= deadline) throw new Error(workObservationFailure());
+    await new Promise(resolve => setTimeout(resolve, 10));
+}
 process.send?.({ ready: true });
 process.on('message', async command => {
     try {
