@@ -474,7 +474,8 @@ test("a cold Background history resumes its next page after the shared reader re
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(projected, 128);
     await delay(30);
-    assert.equal(history.queryStatus, "rebuilding");
+    assert.equal(history.read(scope).page.total, 128);
+    assert.equal(String(history.queryStatus), "rebuilding");
     assert.equal(index.prepare("SELECT count(*) AS n FROM background_history").get().n, 128);
     source.observationActive = false;
     const end = Date.now() + 3000;
