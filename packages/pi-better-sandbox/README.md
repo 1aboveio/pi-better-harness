@@ -1,6 +1,6 @@
 # pi-better-sandbox
 
-Sandbox permissions for Pi's foreground tools, detached subagents, and local background tasks.
+Sandbox permissions for Pi's foreground tools, detached subagents, and local background tasks. See the [sandbox tool-loading and permission contract](../../docs/adr/0027-sandbox-tools-and-permissions.md).
 
 ![Pi Better Sandbox package preview](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-sandbox.png)
 
