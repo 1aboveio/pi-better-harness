@@ -14,6 +14,9 @@ test('copied source reports unknown Git identity and a reproducible content mani
     assert.equal(first.head, null); assert.equal(first.dirty, null);
     assert.equal(first.kind, 'source-copy-without-git');
     assert.equal(first.manifest.files, 1);
+    const scratch = join(root, 'packages', 'server', '.work', 'crash');
+    mkdirSync(scratch, { recursive: true });
+    writeFileSync(join(scratch, 'operation-coordinator.sqlite-shm'), 'temporary runtime state');
     assert.deepEqual(sourceProvenance(root), first);
     writeFileSync(join(root, 'packages', 'sample.ts'), 'export const value = 2;');
     assert.notEqual(sourceProvenance(root).manifest.sha256, first.manifest.sha256);
