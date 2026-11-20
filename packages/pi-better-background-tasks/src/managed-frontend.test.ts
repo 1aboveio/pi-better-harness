@@ -7,6 +7,25 @@ import { createManagedBackgroundFrontend } from './managed-frontend.js';
 const context = (branch: any[] = []) => ({ cwd: '/workspace', sessionManager: { getSessionId: () => 'native', getBranch: () => branch } } as any);
 beforeEach(() => { fixture.request.mockReset(); fixture.enqueue.mockReset();fixture.urgent.mockReset(); fixture.observe = undefined; });
 describe('managed native UI boundary', () => {
+    it('opens observation once on demand and discards a pending poll after a session switch', async () => {
+      let release!: (snapshot: unknown) => void;
+      const poll = new Promise(resolve => { release = resolve; });
+      fixture.request.mockReturnValue(poll);
+      const frontend = createManagedBackgroundFrontend({ registerTool() {} } as any);
+      frontend.host.start(context(), false);
+      expect(frontend.ui.rows()).toEqual([]);
+      expect(fixture.request).not.toHaveBeenCalled();
+      frontend.ui.onOpen?.();
+      frontend.ui.onOpen?.();
+      expect(fixture.request).toHaveBeenCalledTimes(1);
+      frontend.host.close();
+      frontend.host.start(context(), false);
+      release({ tasks: [], legacyRows: [{ id: 'old' }], deliveries: [] });
+      await poll;
+      expect(frontend.ui.rows()).toEqual([]);
+      expect(fixture.enqueue).not.toHaveBeenCalled();
+      frontend.host.close();
+    });
     it('passes late terminal observations to the navigator and keeps rows through rebuilding and request failure', async () => {
       const origin = {cwd:'/workspace',sessionId:'native'};
       const terminal = {id:'finished',terminal:true,endedAt:Date.now()-60000};

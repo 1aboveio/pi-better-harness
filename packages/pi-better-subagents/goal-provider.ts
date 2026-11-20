@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { workObservation, onWorkObservation } from "./work-observation.ts";
+import { activateWorkObservation, hasWorkObservationContext, workObservation, onWorkObservation } from "./work-observation.ts";
 import {
     belongsToOrigin,
     effectiveStatus,
@@ -48,6 +48,10 @@ export function registerSubagentsGoalProvider(pi: ExtensionAPI): void {
             activityVersion: 1,
             getActivity: (ctx?: ExtensionContext) => {
                 const observed = workObservation();
+                if (!observed && hasWorkObservationContext()) {
+                    void activateWorkObservation();
+                    throw new Error("Subagent activity is unverified while connecting");
+                }
                 if (observed) {
                     if (observed.status !== "ready") throw new Error(observed.reason ?? "Subagent activity is unverified");
                     return {

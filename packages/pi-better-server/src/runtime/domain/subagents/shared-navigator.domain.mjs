@@ -933,6 +933,10 @@ function wrapEditor(inner, deps) {
 }
 function handleMainListInput(data, deps) {
     const s = state();
+    if (!s.mainListFocused && deps.isOpenTrigger(data)) {
+        for (const provider of s.providers.values())
+            provider.onOpen?.();
+    }
     const rows = listRows();
     if (rows.length === 0) {
         // Every row is gone, but an overlay that lost focus may still be mounted: Esc still closes it.
@@ -1054,6 +1058,8 @@ function openNavigator() {
     const deps = s.deps;
     if (!ctx || !deps || !isNavigatorUiAvailable(ctx))
         return;
+    for (const provider of s.providers.values())
+        provider.onOpen?.();
     const rows = listRows();
     if (rows.length === 0)
         return;

@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { listMetas, onMetaChanged } from "./registry.js";
-import { getObservedWaitHost, type DurableTaskProjection } from "./observed-waits.js";
+import { getObservedWaitHost } from "./observed-wait-client.js";
+import type { DurableTaskProjection } from "./observed-waits.js";
 import type { BackgroundTaskMeta } from "./types.js";
 import { isTerminalStatus } from "./types.js";
 import { backgroundTaskProgressAt, observeBackgroundTaskStall } from "./stall.js";

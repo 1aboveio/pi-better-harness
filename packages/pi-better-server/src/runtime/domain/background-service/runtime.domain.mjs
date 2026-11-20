@@ -14,12 +14,12 @@ import { markFailureAttentionDelivered } from "./shared-failure-observations.dom
 import { getCallbackBatcher } from "./shared-callback-batcher.domain.mjs";
 import { formatCallbackFacts } from "./output.domain.mjs";
 import { observeTaskStallAttention } from "./stall-attention.domain.mjs";
-import { isTerminalStatus } from "./types.domain.mjs";
+import { FIRST_WATCH_CHECK_WAIT_MS, isTerminalStatus } from "./types.domain.mjs";
 export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
 /** Consecutive blind checks (exit 0, stderr, no condition matched) before a watch is flagged (#359). */
 export const DEFAULT_BLIND_CHECKS = 3;
 /** How long bg_task_watch waits for the first check before returning (#359). */
-export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;
+export { FIRST_WATCH_CHECK_WAIT_MS } from "./types.domain.mjs";
 /** How to fix a false alarm: some tools write progress or warnings to stderr on success. */
 export const BLIND_CHECK_HINT = "If the stderr is expected (progress or warnings), redirect it (2>/dev/null) or set blind_checks:0.";
 /** Each cached extension factory owns its scheduling and suspension state. */

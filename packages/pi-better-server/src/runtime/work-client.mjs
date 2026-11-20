@@ -1,6 +1,17 @@
+import { existsSync } from "node:fs";
 import { connect } from "node:net";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
+
+/** A persisted session can own work even when its selected branch is empty. */
+export function shouldRestoreWorkObservation(event, session) {
+    if (event?.piBetterObserveWork) return true;
+    const reason = event?.reason;
+    if (reason === "new") return false;
+    if (reason !== "startup" || typeof session?.getSessionFile !== "function") return true;
+    const file = session.getSessionFile();
+    return file ? existsSync(file) : Boolean(session.getLeafId?.());
+}
 
 /** SDK-free observation stream. Cached snapshots are the only synchronous read API. */
 export class WorkClient {

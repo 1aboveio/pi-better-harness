@@ -32,7 +32,7 @@ await session.bindExtensions(fixture?.ui ? { mode: "tui", uiContext: { ...sessio
 if (fixture?.ui && !fixture.sessionFile) await session.prompt("Prepare the health notification recipient");
 const state = () => ({ entries: sessionManager.getBranch(), sessionId: sessionManager.getSessionId(), sessionFile: sessionManager.getSessionFile(), deliveries, notes });
 if (fixture) session.subscribe(() => queueMicrotask(() => { if (process.connected) process.send({ state: state() }); }));
-process.send({ ready: true, ...state(), tools: ["subagent_spawn", "subagent_spawn_batch", "subagent_result", "subagent_stop", "subagent_settings", "subagent_resume", "subagent_release"].filter(name => session.extensionRunner.getToolDefinition(name)) });
+process.send({ ready: true, ...state(), tools: ["subagent_spawn", "subagent_spawn_batch", "subagent_list", "subagent_result", "subagent_stop", "subagent_settings", "subagent_resume", "subagent_release"].filter(name => session.extensionRunner.getToolDefinition(name)) });
 process.on("message", async request => {
     let stopTrace;
     try {

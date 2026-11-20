@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { requestBackgroundTool } from "./managed-client.domain.mjs";
 import { onBackgroundObservation } from "./work-observation.domain.mjs";
 import { getCallbackBatcher } from "./shared-callback-batcher.domain.mjs";
-import { registerObservedWaitClient } from "./observed-waits.domain.mjs";
+import { registerObservedWaitClient } from "./observed-wait-client.domain.mjs";
 import { observeNavigatorLaunch } from "./shared-navigator.domain.mjs";
 /** Native transcript delivery and cached UI projections; no coordinator or supervisor. */
 export function createManagedBackgroundFrontend(pi) {
@@ -12,6 +12,7 @@ export function createManagedBackgroundFrontend(pi) {
     const retainedTasks = new Map();
     const cachedTask = (id) => rows.find(row => row.id === id) ?? retainedTasks.get(id);
     let adoptedScope;
+    let observing = false;
     const scopeOf = (context) => JSON.stringify([context.cwd, context.sessionManager.getSessionId()]);
     const ownership = new Map();
     const adoptContext = (context) => {
@@ -130,12 +131,26 @@ export function createManagedBackgroundFrontend(pi) {
             void reconcile().catch(() => undefined); });
         return refresh;
     };
+    const activate = () => {
+        if (observing || !ctx)
+            return;
+        observing = true;
+        const version = generation;
+        void reconcile().catch(() => { if (generation === version)
+            observing = false; });
+    };
     const host = {
         async reconcileNow() { await reconcile(); while (refresh)
             await refresh; },
-        start(context) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
+        start(context, restore = true) {
+            adoptContext(context);
+            generation++;
+            observing = false;
+            if (restore)
+                activate();
+        },
         noteParentContext(context) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
-        close() { ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
+        close() { observing = false; ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
         isParentOriginActive: active,
         onDurableTaskChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
         listDurableTasks(origin, _options = {}) { return active(origin) ? rows : []; },
@@ -187,6 +202,7 @@ export function createManagedBackgroundFrontend(pi) {
         } });
     registerObservedWaitClient(proxy, host);
     const ui = {
+        onOpen: activate,
         rows: () => legacyRows,
         prepareDetail(id, options) {
             const lines = options?.logTailLines ?? 40, key = `${id}:${lines}`;

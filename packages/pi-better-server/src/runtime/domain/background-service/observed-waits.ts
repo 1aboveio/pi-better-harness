@@ -1,3 +1,5 @@
+import { getObservedWaitHost, registerObservedWaitClient } from "./observed-wait-client.js";
+export { getObservedWaitHost, registerObservedWaitClient } from "./observed-wait-client.js";
 /**
  * Parent-side observed waits: the integration between background tasks, the
  * detached local supervisor and the durable operation coordinator.
@@ -656,20 +658,12 @@ export function observedWaitServiceUnavailableReason(pi: unknown): string | unde
   return events ? serviceErrors.get(events) : undefined;
 }
 
-const hosts = new WeakMap<object, ObservedWaitHost>();
-
 export function createObservedWaitHost(pi: ExtensionAPI, options: ObservedWaitHostOptions = {}): ObservedWaitHost {
-  const existing = hosts.get(pi as unknown as object);
+  const existing = getObservedWaitHost(pi);
   if (existing && existing !== undefined) existing.close();
   const host = new ObservedWaitHost(pi, options);
-  hosts.set(pi as unknown as object, host);
+  registerObservedWaitClient(pi, host);
   return host;
-}
-
-export function registerObservedWaitClient(pi: ExtensionAPI, host: ObservedWaitHost): void { hosts.set(pi as object, host); }
-
-export function getObservedWaitHost(pi: unknown): ObservedWaitHost | undefined {
-  return pi && typeof pi === "object" ? hosts.get(pi as object) : undefined;
 }
 
 interface LaunchContext {

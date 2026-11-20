@@ -1,6 +1,17 @@
+import { existsSync } from "node:fs";
 import { connect } from "node:net";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
+
+/** A persisted session can own work even when its selected branch is empty. */
+export function shouldRestoreWorkObservation(event, session) {
+    if (event?.piBetterObserveWork) return true;
+    const reason = event?.reason;
+    if (reason === "new") return false;
+    if (reason !== "startup" || typeof session?.getSessionFile !== "function") return true;
+    const file = session.getSessionFile();
+    return file ? existsSync(file) : Boolean(session.getLeafId?.());
+}
 
 /** SDK-free observation stream. Cached snapshots are the only synchronous read API. */
 export class WorkClient {
@@ -191,8 +202,10 @@ export async function connectWorkClient(socketPath, agentDir, capabilities = [],
             if (!recovery) {
                 const controller = new AbortController();
                 const budget = Math.ceil(remaining());
-                const timer = setTimeout(() => controller.abort(), budget);
-                const promise = waitForRecovery(Promise.resolve().then(() => options.recover({ timeoutMs: budget, signal: controller.signal })), budget, controller.signal)
+                const timer = setTimeout(() => {
+                    controller.abort(new Error("runtime-unavailable: reconnect deadline exceeded during recovery"));
+                }, budget);
+                const promise = waitForRecovery(Promise.resolve().then(() => options.recover({ timeoutMs: budget, signal: controller.signal })), controller.signal)
                     .finally(() => clearTimeout(timer));
                 recovery = { promise, controller, key };
                 recoveries.set(key, recovery);
@@ -221,13 +234,12 @@ export async function connectWorkClient(socketPath, agentDir, capabilities = [],
     }
 }
 
-function waitForRecovery(recovery, timeoutMs, signal) {
+function waitForRecovery(recovery, signal) {
     return new Promise((resolve, reject) => {
-        const finish = (callback, value) => { clearTimeout(timer); signal?.removeEventListener("abort", abort); callback(value); };
+        const finish = (callback, value) => { signal.removeEventListener("abort", abort); callback(value); };
         const abort = () => finish(reject, signal.reason);
-        const timer = setTimeout(() => finish(reject, new Error("runtime-unavailable: reconnect deadline exceeded during recovery")), timeoutMs);
-        signal?.addEventListener("abort", abort, { once: true });
+        signal.addEventListener("abort", abort, { once: true });
         recovery.then(value => finish(resolve, value), error => finish(reject, error));
-        if (signal?.aborted) abort();
+        if (signal.aborted) abort();
     });
 }

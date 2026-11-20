@@ -20,7 +20,7 @@ function fixtureRoot(name: string) {
   return mkdtempSync(join(parent, `${name}-`));
 }
 
-test("one real daemon shares unchanged scope observations across 1, 5 and 10 socket clients", { timeout: 30000 }, async () => {
+test("one real daemon shares unchanged scope observations across 1, 5 and 10 socket clients", { timeout: 30000 }, async t => {
   const root = fixtureRoot("runtime");
   const transport = mkdtempSync("/tmp/p753-");
   const agent = join(root, "agent");
@@ -162,6 +162,9 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
       extension({ events, on: (key: string, fn: Function) => handlers.set(key, fn), registerTool: (tool: any) => tools.set(tool.name, tool), sendMessage() {} } as never);
       phase = "extension-session-start";
       await handlers.get("session_start")!({}, ctx);
+      // The restored foreground subscribes asynchronously. Measure redraws after its first publication.
+      const hooks = (globalThis as any)[Symbol.for("pi-better-subagents.acceptance-hooks")];
+      await t.waitFor(() => assert.equal(hooks.listRows().length, 50), { timeout: 5000 });
       goalExtension({ events, on: (key: string, fn: Function) => goalHandlers.set(key, fn),
         registerTool() {}, registerCommand() {}, appendEntry() {}, sendMessage() {} } as never);
       await goalHandlers.get("session_start")!({}, ctx);
@@ -178,7 +181,6 @@ test("one real daemon shares unchanged scope observations across 1, 5 and 10 soc
         assert.equal(goalQueries, 0, "warmed Goal with the real Subagent provider sends no full-state socket queries");
       } finally { WorkClient.prototype.request = request; }
       sqlite.DatabaseSync = class extends OriginalDatabase { constructor(...args: any[]) { super(...args); localConnections++; } };
-      const hooks = (globalThis as any)[Symbol.for("pi-better-subagents.acceptance-hooks")];
       for (let frame = 0; frame < 60; frame++) assert.equal(hooks.listRows().length, 50);
       const displayed = hooks.listRows().find((row: any) => row.id === "sa_shared_0");
       assert.equal(displayed.tool, "bash");
