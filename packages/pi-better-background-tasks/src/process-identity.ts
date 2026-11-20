@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
 /**
@@ -29,15 +30,30 @@ interface TokenMemoEntry {
 
 const tokenMemo = new Map<number, TokenMemoEntry>();
 
-function readTokenUncached(pid: number): string | undefined {
+function readTokenUncached(pid: number, admission = false): string | undefined {
     if (!Number.isInteger(pid) || pid <= 0 || process.platform === "win32") return undefined;
     try {
-        const output = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+        const output = execFileSync(admission ? "/bin/ps" : "ps", ["-o", "lstart=", "-p", String(pid)], {
+            env: admission ? { LC_ALL: "C", TZ: "UTC0", PATH: "/usr/bin:/bin" } : process.env,
             encoding: "utf8",
             stdio: ["ignore", "pipe", "ignore"],
             timeout: 2_000,
         }).trim();
         return output || undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+// Admission crosses process environments; stored task tokens retain their original format.
+export function readAdmissionStartToken(pid: number): string | undefined {
+    if (process.platform !== "linux") return readTokenUncached(pid, true);
+    if (!Number.isInteger(pid) || pid <= 0) return undefined;
+    try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        // Fields after the parenthesized command start at field 3. Start time is field 22.
+        const start = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+        return start && /^\d+$/.test(start) ? start : undefined;
     } catch {
         return undefined;
     }

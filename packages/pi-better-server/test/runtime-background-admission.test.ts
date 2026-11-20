@@ -13,7 +13,7 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
     const directory = join(root, 'background-tool-admission');
     mkdirSync(directory, { mode: 0o700 });
     const load = (name: string) => import(`../src/runtime/domain/background-service/${name}.domain.mjs`);
-    const [{ registerTools }, { backgroundDigest }, { readProcessStartTokenFresh }] = await Promise.all([load('tools'), load('managed-authority'), load('process-identity')]);
+    const [{ registerTools }, { backgroundDigest }, { readAdmissionStartToken }] = await Promise.all([load('tools'), load('managed-authority'), load('process-identity')]);
     const supervision = new RuntimeResultSupervision(root, 'instance');
     const ports: Map<string, any> = (globalThis as any)[Symbol.for('pi-better-server:result-supervision-ports-v1')] ??= new Map();
     ports.set(root, { status() { supervision.reconcile(); return { hostId: supervision.hostId, epoch: supervision.epoch, reason: supervision.reason }; } });
@@ -22,7 +22,7 @@ test('fixed Background adapter fences new admissions, accepts exact replay and r
     let draining = false, service: Awaited<ReturnType<typeof createBackgroundTools>> | undefined;
     const invoke = async (tool: string, params: any, key: string = randomUUID(), mutate?: (record: any) => void) => {
         const id = randomUUID(), secret = randomBytes(32).toString('hex'), path = join(directory, `${id}.json`);
-        const record = { version: 1, id, secretHash: createHash('sha256').update(secret).digest('hex'), instanceId: 'instance', key, tool, params, parametersDigest: backgroundDigest(definitions.get(tool)?.parameters ?? {}), owner: { kind: 'parent-session', sessionId: 'native', workspace: root }, branchIds: [], projectTrusted: true, pid: process.pid, start: readProcessStartTokenFresh(process.pid) };
+        const record = { version: 2, id, secretHash: createHash('sha256').update(secret).digest('hex'), instanceId: 'instance', key, tool, params, parametersDigest: backgroundDigest(definitions.get(tool)?.parameters ?? {}), owner: { kind: 'parent-session', sessionId: 'native', workspace: root }, branchIds: [], projectTrusted: true, pid: process.pid, start: readAdmissionStartToken(process.pid) };
         mutate?.(record);
         writeFileSync(path, JSON.stringify(record), { mode: 0o600 });
         try {

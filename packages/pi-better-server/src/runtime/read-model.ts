@@ -239,7 +239,7 @@ export class WorkReadModel {
           else for (const watched of this.watchers.keys()) if (watched.startsWith(this.runs + sep)) this.unwatchDirectory(watched);
         }
         this.fileHint(path, filename ? String(filename) : undefined);
-      });
+      }, dirname(path) === this.runs);
       watcher.on("error", () => {
         if (this.watchers.get(path) !== watcher) return;
         this.unwatchDirectory(path);
