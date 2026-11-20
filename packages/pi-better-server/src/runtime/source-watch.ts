@@ -1,14 +1,56 @@
 import { EventEmitter } from "node:events";
-import { realpathSync, watch } from "node:fs";
+import { realpathSync, statSync, watch } from "node:fs";
 import { createRequire } from "node:module";
-import { basename, relative, sep } from "node:path";
+import { basename, dirname, relative, sep } from "node:path";
 import { isMainThread, type MessagePort } from "node:worker_threads";
 
 export interface SourceWatcher extends EventEmitter { ready: Promise<void>; close(): void }
-export type SourceWatch = (path: string, listener: (event: string, name?: string) => void) => SourceWatcher;
-export type WatchBackend = (path: string, changed: (name?: string) => void, failed: (error: Error) => void) => () => Promise<void>;
+export type SourceWatch = (path: string, listener: (event: string, name?: string) => void, shareParent?: boolean) => SourceWatcher;
+export type WatchBackend = (path: string, changed: (name?: string) => void, failed: (error: Error) => void, shareParent?: boolean) => () => Promise<void>;
 
-export const nativeWatch: WatchBackend = (path, changed, failed) => {
+type ChangeListener = (name?: string) => void;
+interface DarwinRunStream {
+  listeners: Map<string, Set<ChangeListener>>;
+  stop: () => Promise<void>;
+}
+const runStreams = new Map<string, DarwinRunStream>();
+
+// FSEvents is recursive. Share a stream across sibling run directories while
+// keeping individual subscriptions, event routing and generation cleanup.
+function watchDarwinRun(parent: string, root: string, changed: ChangeListener): () => Promise<void> {
+  const stat = statSync(parent, { bigint: true });
+  const key = JSON.stringify([parent, String(stat.dev), String(stat.ino)]);
+  let stream = runStreams.get(key);
+  if (!stream) {
+    const listeners = new Map<string, Set<ChangeListener>>();
+    const native = createRequire(import.meta.url)("fsevents");
+    const stop = native.watch(parent, (entry: string, flags: number) => {
+      if ((flags & 7) || entry === parent) {
+        for (const group of listeners.values()) for (const notify of group) notify();
+        return;
+      }
+      for (const notify of listeners.get(dirname(entry)) ?? []) notify(basename(entry));
+      // A directory itself was renamed or removed.
+      for (const notify of listeners.get(entry) ?? []) notify();
+    });
+    stream = { listeners, stop };
+    runStreams.set(key, stream);
+  }
+  const group = stream.listeners.get(root) ?? new Set<ChangeListener>();
+  const notify: ChangeListener = name => changed(name);
+  group.add(notify);
+  stream.listeners.set(root, group);
+  return async () => {
+    if (!group.delete(notify)) return;
+    if (!group.size) stream.listeners.delete(root);
+    if (!stream.listeners.size) {
+      runStreams.delete(key);
+      await stream.stop();
+    }
+  };
+}
+
+export const nativeWatch: WatchBackend = (path, changed, failed, shareParent) => {
   const root = realpathSync(path);
   if (process.platform !== "darwin") {
     const watcher = watch(root, (_event, name) => changed(name ?? undefined));
@@ -17,6 +59,7 @@ export const nativeWatch: WatchBackend = (path, changed, failed) => {
   }
   // Loaded only by the owner, never by an executor worker.
   if (!isMainThread) throw new Error("Darwin native source watches require the host transport");
+  if (shareParent && dirname(root) === realpathSync(dirname(path))) return watchDarwinRun(dirname(root), root, changed);
   const native = createRequire(import.meta.url)("fsevents");
   return native.watch(root, (entry: string, flags: number) => {
     const name = relative(root, entry);
@@ -25,11 +68,11 @@ export const nativeWatch: WatchBackend = (path, changed, failed) => {
   });
 };
 
-export const watchSource: SourceWatch = (path, listener) => {
+export const watchSource: SourceWatch = (path, listener, shareParent) => {
   const watcher = new EventEmitter() as SourceWatcher;
   let closed = false;
   watcher.on("change", listener);
-  const stop = nativeWatch(path, name => { if (!closed) watcher.emit("change", "rename", name); }, error => { if (!closed) watcher.emit("error", error); });
+  const stop = nativeWatch(path, name => { if (!closed) watcher.emit("change", "rename", name); }, error => { if (!closed) watcher.emit("error", error); }, shareParent);
   watcher.ready = Promise.resolve();
   watcher.close = () => { if (!closed) { closed = true; void stop().then(() => watcher.emit("close"), error => watcher.emit("error", error)); } };
   return watcher;
@@ -69,7 +112,7 @@ export class HostSourceWatches {
           if (!value.live) return;
           send({ type: "source-watch-error", id, error: String(error).slice(0, 512) });
           void this.retire(key, value).catch(() => {});
-        }); }
+        }, message.shareParent === true); }
         catch (error) { this.entries.delete(key); throw error; }
         send({ type: "source-watch-subscribed", id });
       } catch (error) { send({ type: "source-watch-subscribed", id, error: String(error).slice(0, 512) }); }
@@ -116,7 +159,7 @@ export function workerSourceWatch(port: MessagePort): SourceWatch {
       if (message.error) entry.watcher.emit("error", new Error(message.error)); else entry.watcher.emit("close");
     }
   });
-  return (path, listener) => {
+  return (path, listener, shareParent) => {
     // Preserve synchronous missing-path semantics; the model owns ancestor selection.
     realpathSync(path);
     const id = ++counter, watcher = new EventEmitter() as SourceWatcher;
@@ -126,7 +169,7 @@ export function workerSourceWatch(port: MessagePort): SourceWatch {
     const entry = { watcher, resolve, reject, closed: false };
     entries.set(id, entry); watcher.on("change", listener);
     watcher.close = () => { if (!entry.closed) { entry.closed = true; port.postMessage({ type: "source-watch-unsubscribe", id }); } };
-    port.postMessage({ type: "source-watch-subscribe", id, path });
+    port.postMessage({ type: "source-watch-subscribe", id, path, shareParent });
     return watcher;
   };
 }

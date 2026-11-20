@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { HostSourceWatches } from "../src/runtime/source-watch.ts";
 import { WorkReadModel } from "../src/runtime/read-model.ts";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -76,4 +76,31 @@ test("backend registration failure returns an error without consuming capacity",
   host.handle(0, { type: "source-watch-subscribe", id: 1, path: "/source" }, value => messages.push(value));
   assert.match(messages[0].error, /registration refused/);
   assert.equal(host.metrics().allocated, 0);
+});
+
+test("Darwin raw run watches leave file descriptors available for Background admission", { skip: process.platform !== "darwin" }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "source-fd-budget-"));
+  const baseline = readdirSync("/dev/fd").length;
+  const runs = join(root, "runs");
+  for (let i = 0; i < 48; i++) {
+    const id = "sa_fd_" + i;
+    mkdirSync(join(runs, id), { recursive: true });
+    writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, status: "completed", startedAt: i + 1 }));
+  }
+  const model = new WorkReadModel(root, "fd-budget", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000 });
+  try {
+    await model.reconcile();
+    assert.ok(model.metrics.sourceWatchers >= 48, "all run directories subscribed");
+    const growth = readdirSync("/dev/fd").length - baseline;
+    assert.ok(growth < 120, `48 run subscriptions consumed ${growth} file descriptors`);
+    const id = "sa_fd_47";
+    const update = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { off(); reject(new Error("missed nested metadata change")); }, 5000);
+      const off = model.onChange(() => {
+        if (model.snapshot({ id }).rows[0]?.meta.name === "updated") { clearTimeout(timer); off(); resolve(); }
+      });
+    });
+    writeFileSync(join(runs, id, "meta.json"), JSON.stringify({ id, cwd: root, status: "completed", startedAt: 48, name: "updated" }));
+    await update;
+  } finally { await model.close(); rmSync(root, { recursive: true, force: true }); }
 });
