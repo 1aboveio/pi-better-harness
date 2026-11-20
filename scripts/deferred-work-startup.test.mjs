@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import background from "../packages/pi-better-background-tasks/src/index.ts";
 import subagents from "../packages/pi-better-subagents/index.ts";
 
@@ -59,21 +60,35 @@ for (const resumed of [false, true]) {
       manager = SessionManager.open(file, sessions);
     }
     const settingsManager = SettingsManager.inMemory();
-    const inputs = [];
+    const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), refreshOnCreate: false,
+      modelsPath: join(root, "models.json"), modelsStorePath: join(root, "models-store.json") });
+    const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    const provider = {
+      baseUrl: "https://example.invalid", apiKey: "test", api: "openai-completions",
+      models: [{ id: "offline", name: "Offline", input: ["text"], reasoning: false, contextWindow: 16000, maxTokens: 100, cost }],
+      streamSimple(model) {
+        const stream = createAssistantMessageEventStream();
+        const message = { role: "assistant", content: [{ type: "text", text: "fixture reply" }], api: model.api,
+          provider: model.provider, model: model.id, stopReason: "stop", timestamp: Date.now(),
+          usage: { ...cost, totalTokens: 0, cost: { ...cost, total: 0 } } };
+        stream.push({ type: "done", reason: "stop", message });
+        stream.end(message);
+        return stream;
+      },
+    };
+    modelRuntime.registerProvider("startup-test", provider);
     const resourceLoader = new DefaultResourceLoader({
       cwd: root, agentDir: root, settingsManager, noExtensions: true, noSkills: true,
       noContextFiles: true, noPromptTemplates: true, noThemes: true,
-      extensionFactories: [subagents, background, pi => pi.on("input", event => {
-        inputs.push(event.text);
-        return { action: "handled" };
-      })],
+      extensionFactories: [subagents, background, pi => pi.registerProvider("startup-test", provider)],
     });
     await resourceLoader.reload();
     assert.deepEqual(resourceLoader.getExtensions().errors, []);
-    ({ session } = await createAgentSession({ cwd: root, agentDir: root, sessionManager: manager, settingsManager, resourceLoader }));
+    ({ session } = await createAgentSession({ cwd: root, agentDir: root, sessionManager: manager, settingsManager, resourceLoader,
+      modelRuntime, model: modelRuntime.getModel("startup-test", "offline") }));
     await session.bindExtensions({ mode: "rpc" });
     await session.prompt("ordinary input");
-    assert.deepEqual(inputs, ["ordinary input"]);
+    assert.equal(session.messages.at(-1)?.content[0]?.text, "fixture reply");
     for (const name of ["subagent_list", "bg_task_list"]) {
       assert.ok(session.getActiveToolNames().includes(name));
       assert.ok(session.getToolDefinition(name).parameters.properties.limit);
