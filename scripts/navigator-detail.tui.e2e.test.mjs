@@ -891,8 +891,12 @@ function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagen
     intervalMs: 15_000,
     deadlineAt: now + 600_000,
   });
-  // The shared runtime observes external writers asynchronously. Focus only after both rows exist.
-  waitForScreen(screen => screen.includes("subagent golden path") && screen.includes("background golden path"));
+  // External fixture writes bypass the tools. Open the navigator to subscribe, then
+  // give focus back to the editor so each scenario starts in its normal input state.
+  sendKey("Left");
+  const overview = waitForScreen(screen => screen.includes("subagent golden path") && screen.includes("background golden path"));
+  if (overview.includes("Esc unfocus")) sendKey("Escape");
+  waitForScreen(screen => screen.includes("← work navigator"));
 }
 
 function hasSettledInputFrame(screen) {
