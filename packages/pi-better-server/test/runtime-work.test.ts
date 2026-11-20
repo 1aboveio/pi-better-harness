@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork, execFileSync } from "node:child_process";
 import { createServer, connect, type Socket } from "node:net";
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { once, EventEmitter } from "node:events";
 import goalExtension from "../../pi-better-goal/src/index.ts";
@@ -383,7 +384,10 @@ test("registered Navigator preserves older active rows and the same consumers re
   const transport = mkdtempSync("/tmp/p753-");
   const agent = join(root, "agent"), runs = join(root, "pi-better-subagents/runs");
   mkdirSync(agent); mkdirSync(runs, { recursive: true });
-  const saved = new Map(["PI_CODING_AGENT_DIR", "TMPDIR", "PI_CATALOG_ACCEPTANCE_PROBE"].map(key => [key, process.env[key]]));
+  const saved = new Map(["PI_CODING_AGENT_DIR", "TMPDIR", "PI_CATALOG_ACCEPTANCE_PROBE", "PI_SERVER_COMMAND"].map(key => [key, process.env[key]]));
+  // The fixture owns both daemon launches. During the gap, consumers must
+  // reconnect to the replacement without staging a competing managed runtime.
+  process.env.PI_SERVER_COMMAND = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
   process.env.PI_CODING_AGENT_DIR = agent; process.env.TMPDIR = root; process.env.PI_CATALOG_ACCEPTANCE_PROBE = "1";
   const launch = async () => {
     phase(`daemon:${replacement}:ready-message`);
@@ -496,6 +500,7 @@ test("registered Navigator preserves older active rows and the same consumers re
     assert.ok(!hooks.listRows().some((row: any) => row.id === "sa_review_0"), "confirmed dismissal must hide a stale cached row before the next server observation");
     await until("final:dismissal-observed", () => Boolean(observation.workObservation()?.rows.find((row: any) => row.meta.id === "sa_review_0")?.meta.dismissedAt));
     assert.ok(!hooks.listRows().some((row: any) => row.id === "sa_review_0"), "the acknowledged dismissal must not reappear");
+    assert.equal(existsSync(join(agent, "managed-runtime")), false, "the fixture owns runtime replacement");
   } finally {
     phase("cleanup:session-shutdown");
     await handlers.get("session_shutdown")?.({}, ctx); await stop();
