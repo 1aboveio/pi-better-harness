@@ -4631,7 +4631,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 refreshBackgroundWorkNavigator(ctx);
                 observeRecipientNotifications(pi);
             });
-            if (shouldRestoreWorkObservation(event?.reason, ctx.sessionManager)) {
+            if (shouldRestoreWorkObservation(event, ctx.sessionManager)) {
                 restoreObservation = setImmediate(() => { void activateWorkObservation(); });
             }
         }

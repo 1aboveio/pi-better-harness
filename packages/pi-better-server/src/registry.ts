@@ -427,7 +427,12 @@ export class SessionRegistry {
         this.log(`session ${entry.sessionId}: automatic expiry disabled with a caller-owned resource loader because background activity is unobservable`);
         activity.markUnobservable();
       }
-      ({ session } = await createAgentSession({ ...supplied, customTools: supplied?.customTools?.map((tool) => activity.wrapTool(tool)), settingsManager, resourceLoader, cwd: entry.cwd, sessionManager }));
+      // A hosted recipient can receive assignments from another client before its first tool call.
+      const sessionStartEvent = {
+        ...(supplied?.sessionStartEvent ?? { type: "session_start" as const, reason: "startup" as const }),
+        piBetterServerHosted: true,
+      };
+      ({ session } = await createAgentSession({ ...supplied, sessionStartEvent, customTools: supplied?.customTools?.map((tool) => activity.wrapTool(tool)), settingsManager, resourceLoader, cwd: entry.cwd, sessionManager }));
       if (useDefaultModel) await this.initializeDefaultModel(session);
       if (!manager) await this.restoreSavedModel(session, sessionManager, entry.model);
       const events = new EventLog(join(this.options.serverDir, "events", `${entry.sessionId}.jsonl`), this.options.eventLog);

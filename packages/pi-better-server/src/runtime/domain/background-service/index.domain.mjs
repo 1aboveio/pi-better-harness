@@ -43,7 +43,7 @@ export default function backgroundTasksExtension(pi) {
     // Registered after registerTools so the callback batcher has its session
     // context before a reconciled delivery can enqueue a parent notification.
     pi.on("session_start", (event, ctx) => {
-        observedWaits.start(ctx, shouldRestoreWorkObservation(event?.reason, ctx.sessionManager));
+        observedWaits.start(ctx, shouldRestoreWorkObservation(event, ctx.sessionManager));
     });
     // A fork or branch navigation does not restart the session, but it changes
     // which continuation may receive a queued callback. Update the host snapshot

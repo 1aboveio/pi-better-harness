@@ -4,7 +4,9 @@ import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 
 /** A persisted session can own work even when its selected branch is empty. */
-export function shouldRestoreWorkObservation(reason, session) {
+export function shouldRestoreWorkObservation(event, session) {
+    if (event?.piBetterServerHosted) return true;
+    const reason = event?.reason;
     if (reason === "new") return false;
     if (reason !== "startup" || typeof session?.getSessionFile !== "function") return true;
     const file = session.getSessionFile();
