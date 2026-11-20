@@ -5,12 +5,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { startWorkRuntimeFixture } from "../packages/pi-better-subagents/tests/work-runtime-fixture.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 
-test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the real TUI", { skip: !hasTmux }, () => {
+test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the real TUI", { skip: !hasTmux }, async () => {
     const fixture = mkdtempSync(join(tmpdir(), "pi-permission-tui-"));
+    // The Subagents extension opens its runtime on startup and reload. Give the TUI
+    // a registered daemon so acceptance never installs a private runtime in this fixture.
+    const stopRuntime = await startWorkRuntimeFixture({ ...process.env, PI_CODING_AGENT_DIR: join(fixture, "agent") });
     const server = `pi-permission-${process.pid}`;
     const args = ["-L", server];
     const q = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
@@ -121,6 +125,7 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         wait(/Outside project\s+-\s+Write & delete/);
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
+        await stopRuntime();
         rmSync(fixture, { recursive: true, force: true });
     }
 });

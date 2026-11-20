@@ -57,6 +57,8 @@ import { splitNativeFraming } from "../../pi-better-server/test/support/native-m
 const evidenceRoot = fileURLToPath(new URL("../../../.work/761/", import.meta.url));
 mkdirSync(evidenceRoot, { recursive: true });
 const RUNTIME = mkdtempSync(join(evidenceRoot, "subagent-continuation-"));
+// Give fixture providers their own package boundary inside a Harness checkout.
+writeFileSync(join(RUNTIME, "package.json"), JSON.stringify({ name: "continuation-fixture", type: "module" }));
 process.env.TMPDIR = RUNTIME;
 process.env.PI_CODING_AGENT_DIR = join(RUNTIME, "agent");
 process.env.PI_SUBAGENT_DURABLE_DIR = join(RUNTIME, "agent/subagents");

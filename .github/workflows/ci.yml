@@ -862,7 +862,7 @@ jobs:
         if: env.AFFECTED == 'true'
         run: |
           tmux -V
-          node --test scripts/sandbox-permissions.tui.e2e.test.mjs
+          node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/sandbox-permissions.tui.e2e.test.mjs
 
       - name: Enable and verify bubblewrap user namespaces
         if: env.AFFECTED == 'true'
