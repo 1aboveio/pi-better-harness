@@ -203,7 +203,7 @@ describe("clean, nesting and the operator opt-out", () => {
         const r = resolveExtensions({ tools: DEFAULT_TOOLS, config: { ...CFG, inheritExtensions: true } });
         assert.equal(r.mode, "inherit");
         const { args } = extensionArgs(r, (s) => `/p/${s}`);
-        assert.deepEqual(args, []);
+        assert.deepEqual(args, ["--extension", `/p/${WEB}`]);
     });
 
     // @covers extensions.inherit-optout

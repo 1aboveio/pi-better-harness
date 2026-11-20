@@ -169,6 +169,19 @@ function writeConfigSettings(settings, path) {
 export function normalizeTools(list) {
     return list.split(",").map((t) => t.trim()).filter(Boolean).join(",");
 }
+export const ORDINARY_TOOL_PROVIDERS = {
+    apply_patch: join(selfDir(), "child-apply-patch.ts"),
+    process_list: join(selfDir(), "child-process-list.ts"),
+};
+export function ordinaryChildConfig(config) {
+    const packaged = config.toolExtensions === null ? undefined : bundledConfig().toolExtensions;
+    return { ...config, toolExtensions: { ...ORDINARY_TOOL_PROVIDERS, ...packaged, ...config.toolExtensions } };
+}
+export function addEditablePatch(names, excluded) {
+    const editable = names.some(name => (name === "edit" || name === "write") && !excluded.has(name));
+    if (editable && !excluded.has("apply_patch") && !names.includes("apply_patch"))
+        names.push("apply_patch");
+}
 /** This package's own root — the extension dir, which is also `self`. */
 export function selfDir() {
     return dirname(fileURLToPath(import.meta.url));

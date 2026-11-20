@@ -30,7 +30,7 @@ function table(page: Component, width = 80): string[] {
     const footer = lines.findIndex((line) => plain(line).includes("ctrl+s Save default"));
     assert.ok(footer >= 0, "the footer must expose the save-default shortcut");
     assert.ok(!lines.some((line) => plain(line).includes("Save as defaults")), "saving is not a selectable row");
-    return lines.slice(0, footer);
+    return lines.slice(1, footer);
 }
 
 function harness(overrides: Partial<PermissionPageHandlers> = {}) {
@@ -49,7 +49,7 @@ function harness(overrides: Partial<PermissionPageHandlers> = {}) {
     const page = createPermissionsPage(theme, handlers, () => { renders++; }, () => { closes++; });
     const input: Record<string, string> = {
         [Key.up]: "\x1b[A", [Key.down]: "\x1b[B", [Key.left]: "\x1b[D", [Key.right]: "\x1b[C",
-        [Key.space]: " ", [Key.enter]: "\r", [Key.escape]: "\x1b",
+        [Key.tab]: "\t", [Key.space]: " ", [Key.enter]: "\r", [Key.escape]: "\x1b",
     };
     const press = (...keys: string[]) => keys.forEach((key) => page.handleInput?.(input[key] ?? key));
     return { page, press, changes, saved, initial, get current() { return current; }, get renders() { return renders; }, get closes() { return closes; } };
@@ -61,6 +61,29 @@ const toBottom: string[] = Array(30).fill(Key.down);
 async function settle() {
     await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+test("Tab shows tool providers independently of saved permissions", async () => {
+    const h = harness({ toolLoading: () => ({
+        main: [{ name: "main_tool", provider: "main-package" }],
+        subagents: [{ name: "apply_patch", provider: "Harness" }, { name: "optional", provider: "No provider mapped" }],
+    }) });
+    assert.match(plain(h.page.render(16)[0]!), /Use permissions/);
+    h.press(Key.right, Key.tab);
+    assert.match(plain(h.page.render(16)[0]!), /Tool loading/);
+    const text = h.page.render(100).map(plain).join("\n");
+    assert.match(text, /Tool loading.*Use permissions/);
+    assert.match(text, /Ordinary subagent defaults[\s\S]*apply_patch.*Harness/);
+    assert.match(text, /optional.*No provider mapped/);
+    assert.match(text, /Active Main tools[\s\S]*main_tool.*main-package/);
+    h.press(Key.space, "\x13");
+    await settle();
+    assert.deepEqual(h.changes, []);
+    assert.deepEqual(h.saved, []);
+    h.press("\x1b[Z", Key.space);
+    await settle();
+    assert.equal(h.current.subagents.enabled, true);
+    assert.equal(h.current.main.enabled, false);
+});
 
 test("default table starts all profiles Off and hides retained details", () => {
     const h = harness();

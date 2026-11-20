@@ -36,7 +36,7 @@ import {
     publishForegroundSandboxPolicy,
 } from "./events.ts";
 import { installTaskTools, runtimeCodeRoot } from "./shared-task-sandbox.ts";
-import { discoverTrustedTools } from "./shared-task-tools.ts";
+import { discoverTrustedTools, toolPackage } from "./shared-task-tools.ts";
 import { writeSandboxDefault } from "./preferences.ts";
 import { loadPermissionSettings, readPermissionSettings, writePermissionSettings } from "./permission-settings.ts";
 import { defaultSandboxPermissions, describeLoosening, type SandboxPermissionSettings } from "./permissions.ts";
@@ -220,6 +220,17 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
         await openPermissionsPage(ctx, {
             getConfig: () => controller.permissionSettings() ?? defaultSandboxPermissions(),
+            toolLoading: () => {
+                const active = new Set(pi.getActiveTools());
+                const main = pi.getAllTools().filter(tool => active.has(tool.name))
+                    .map(tool => ({ name: tool.name, provider: toolPackage(tool)?.package ?? tool.sourceInfo?.source ?? "Pi" }))
+                    .sort((a, b) => a.name.localeCompare(b.name));
+                let subagents: { name: string; provider: string }[] | undefined;
+                pi.events.emit("pi-better-subagents:default-tool-loading", {
+                    reply: (rows: { name: string; provider: string }[]) => { subagents = rows; },
+                });
+                return subagents === undefined ? { main } : { main, subagents };
+            },
             // Trusted-tool candidates: what this Pi has actually registered, by owning package.
             discoverTools: () => discoverTrustedTools(pi.getAllTools?.() ?? []),
             change: (settings) => {

@@ -21,7 +21,7 @@ import { createBackgroundAdmission, isBackgroundLaunch } from "./background-admi
 import { DenyRuleManager } from "./deny-rules.domain.mjs";
 import { FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, publishForegroundSandboxPolicy, } from "./events.domain.mjs";
 import { installTaskTools, runtimeCodeRoot } from "./shared-task-sandbox.domain.mjs";
-import { discoverTrustedTools } from "./shared-task-tools.domain.mjs";
+import { discoverTrustedTools, toolPackage } from "./shared-task-tools.domain.mjs";
 import { writeSandboxDefault } from "./preferences.domain.mjs";
 import { loadPermissionSettings, readPermissionSettings, writePermissionSettings } from "./permission-settings.domain.mjs";
 import { defaultSandboxPermissions, describeLoosening } from "./permissions.domain.mjs";
@@ -193,6 +193,17 @@ export default function piBetterSandbox(pi) {
     const openSettings = async (ctx) => {
         await openPermissionsPage(ctx, {
             getConfig: () => controller.permissionSettings() ?? defaultSandboxPermissions(),
+            toolLoading: () => {
+                const active = new Set(pi.getActiveTools());
+                const main = pi.getAllTools().filter(tool => active.has(tool.name))
+                    .map(tool => ({ name: tool.name, provider: toolPackage(tool)?.package ?? tool.sourceInfo?.source ?? "Pi" }))
+                    .sort((a, b) => a.name.localeCompare(b.name));
+                let subagents;
+                pi.events.emit("pi-better-subagents:default-tool-loading", {
+                    reply: (rows) => { subagents = rows; },
+                });
+                return subagents === undefined ? { main } : { main, subagents };
+            },
             // Trusted-tool candidates: what this Pi has actually registered, by owning package.
             discoverTools: () => discoverTrustedTools(pi.getAllTools?.() ?? []),
             change: (settings) => {

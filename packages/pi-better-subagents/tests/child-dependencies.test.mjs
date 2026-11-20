@@ -21,6 +21,15 @@ const requirements = { providers: ['deepseek', 'ollama-cloud'], modelGroups: [
 ] };
 const selection = () => resolveExtensions({ tools: 'read,bash', model: 'router/auto' });
 
+test('an absent mapped provider identifies its explicitly selected tool', async t => {
+  const f = fixture(t);
+  for (const inheritExtensions of [false, true]) {
+    const config = { inheritExtensions, toolExtensions: { fixture_report: 'npm:missing' } };
+    const resolution = resolveExtensions({ tools: 'fixture_report', config });
+    await assert.rejects(resolveChildLaunch({ resolution, resolvePath: f.resolvePath }), /npm:missing.*not installed.*fixture_report/);
+  }
+});
+
 test('loads TypeScript declarations with the host loader and no extension initialization', async t => {
   const f = fixture(t);
   const router = f.pkg('pi-better-model-router', { childRequirements: './requirements.ts', extensions: ['./index.ts'] });

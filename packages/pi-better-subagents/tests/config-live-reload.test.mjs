@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, setConfigForTests, setConfigPathForTests, writeDelegationMode } from "../config.ts";
+import { ordinaryChildConfig, loadConfig, setConfigForTests, setConfigPathForTests, writeDelegationMode } from "../config.ts";
 
 function fixture(t) {
     const root = mkdtempSync(join(tmpdir(), "saved-config-live-"));
@@ -18,6 +18,16 @@ function fixture(t) {
     const save = (subagents) => writeFileSync(path, JSON.stringify({ theme: "light", piBetterHarness: { subagents, goal: { enabled: true } } }));
     return { root, path, bundled, save };
 }
+
+test("overriding one ordinary provider preserves the other packaged mappings", (t) => {
+    const { bundled, save } = fixture(t);
+    writeFileSync(bundled, JSON.stringify({ toolExtensions: { web_search: "web", web_fetch: "web" } }));
+    save({ toolExtensions: { web_search: [], apply_patch: "custom-patch" } });
+    const providers = ordinaryChildConfig(loadConfig()).toolExtensions;
+    assert.deepEqual(providers.web_search, []);
+    assert.equal(providers.web_fetch, "web");
+    assert.equal(providers.apply_patch, "custom-patch");
+});
 
 test("saved config reloads same-size edits and atomic replacements with preserved mtime", (t) => {
     const { path, save } = fixture(t);

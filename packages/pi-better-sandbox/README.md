@@ -18,7 +18,15 @@ enabled switches, keep their values. Open `/sandbox` to change any column, or us
 saved to the current session branch. **Ctrl+S** saves all three profiles as
 defaults for new sessions.
 
+Press **Tab** to switch between **Tool loading** and **Use permissions**. Tool
+loading lists the active Main tools and the providers for ordinary subagent
+defaults. A role, explicit tool list, or exclusion changes the selection for a
+particular launch. Local Background tasks launch commands through the Background
+adapter. Use permissions shows the three profiles and the tool grants used by
+confined subagents.
+
 ```text
+Tool loading      Use permissions      Tab switch
 Sandbox permissions               Main             Subagents         Background tasks
 
 Sandbox                           Off              Off               Off
@@ -32,7 +40,7 @@ Command time limit                -                -                 -
 Network access                    -                -                 -
 Process access                    -                -                 -
 
-  Subagents · Tools
+  Subagents · Tools (when Sandbox is On)
     Guarded (follows the file rules)
     [x] apply_patch  harness adapter
     Trusted (runs outside the file rules)
@@ -41,6 +49,10 @@ Process access                    -                -                 -
 
 ↑↓ Select · ←→ Column/fold · Space Toggle · ctrl+s Save default · Enter Fold · Esc Back
 ```
+
+With Subagents Off, an editable worker gets the Harness `apply_patch` provider
+by default. Selected extensions use their ordinary provider mappings. The saved
+guarded and trusted choices take effect when Subagents is On.
 
 **Subagents · Tools** picks the extension tools a confined subagent may use:
 
@@ -87,7 +99,7 @@ Trusted SSH tools run outside local file, credential-file, and command rules;
 remote effects are not confined either. Only enable them when you trust the
 extension and the subagent's access to your SSH configuration and credentials.
 Other harness packages remain excluded from trusted candidates.
-See [ADR 0009](../../docs/adr/0009-guarded-and-trusted-subagent-tools.md).
+See [Sandbox tool loading and permission to use tools](../../docs/adr/0027-sandbox-tools-and-permissions.md).
 
 Project files and Outside project cycle through four levels:
 

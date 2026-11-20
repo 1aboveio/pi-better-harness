@@ -129,7 +129,7 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
     const server = `pi-permission-${process.pid}`;
     const args = ["-L", server];
     const q = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
-    const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(join(fixture, "agent"))} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(join(root, "node_modules/.bin/pi"))} -e ${q(join(root, "packages/pi-better-sandbox/index.ts"))} --no-skills --no-context-files --approve --model openai/gpt-4o-mini`;
+    const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(join(fixture, "agent"))} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(join(root, "node_modules/.bin/pi"))} -e ${q(join(root, "packages/pi-better-sandbox/index.ts"))} -e ${q(join(root, "packages/pi-better-subagents/index.ts"))} --no-skills --no-context-files --approve --model openai/gpt-4o-mini`;
     const tmux = (...more) => execFileSync("tmux", [...args, ...more], { encoding: "utf8" });
     const screen = () => tmux("capture-pane", "-t", "permissions", "-p");
     const key = (value) => tmux("send-keys", "-t", "permissions", value);
@@ -149,6 +149,14 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         wait(/sandbox/);
         literal("/sandbox"); key("Enter");
         let text = wait(/Sandbox permissions\s+Main\s+Subagents\s+Background tasks/);
+        assert.match(text, /Tool loading.*Use permissions/);
+        key("Tab");
+        text = wait(/Active Main tools/);
+        assert.match(text, /Ordinary subagent defaults/);
+        assert.match(text, /apply_patch\s+·\s+Harness/);
+        assert.match(text, /read\s+·\s+Pi/);
+        key("Tab");
+        text = wait(/Sandbox permissions\s+Main\s+Subagents\s+Background tasks/);
         assert.doesNotMatch(text, /Save as defaults/);
         assert.match(text, /ctrl\+s Save default/);
         assert.match(text, /Sandbox\s+Off\s+Off\s+Off/);

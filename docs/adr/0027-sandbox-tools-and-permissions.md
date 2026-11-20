@@ -12,6 +12,8 @@
 | Tool use | Apply the tool's ordinary contract, OS permissions and any other active boundary. | Also enforce the applicable file, credential, application, shell, timeout, network, process and trusted-tool rules. |
 | Failure | Identify a missing or incompatible provider as a loading failure. | Identify a missing required adapter as a loading failure. Identify a refusal by an active rule as a permission denial. |
 
+The `/sandbox` page has two sections. **Tool loading** shows active Main tools and the ordinary subagent defaults with their providers. Roles, explicit tool lists and exclusions determine the selection for each launch. Local Background tasks use the Background command adapter. **Use permissions** edits the three profiles and the guarded and trusted grants for confined subagents. Switching sections preserves the current selections.
+
 ### Tool loading
 
 1. Resolve what the caller selected for this task: its role and defaults, explicit tool list, explicit exclusions, supported runtime and launch mode. Exclusions take precedence. A read-only task stays read-only. A frozen continuation retains its recorded tool and provider choices, subject to current admission.
@@ -45,10 +47,11 @@ An active enclosing boundary still applies. For example, Main can deny the comma
 
 ### Acceptance criteria
 
-1. Start a real editable SDK worker with Subagents Off, no custom mapping and the ordinary default tools. Invoke `apply_patch` and verify the file contents. Repeat with the retained guarded checkbox checked and unchecked, and with an explicit request for the tool. An earlier test expecting a missing-mapping error in this scenario is superseded.
-2. Exercise a second selected tool with a compatible extension provider. With Subagents Off, its retained trust checkbox cannot deny its ordinary use. In a separate case, remove the required provider and verify a loading error that identifies the missing tool.
-3. Enable Subagents and use the guarded patch adapter. Verify an allowed project change, a denied change outside the permitted scope, and an unchanged target after denial. A conflicting extension must not take over the guarded name. Exercise a trusted tool with its canonical provider and a same-name replacement.
-4. Exercise each scope with restrictive detail values saved. Switch it Off, then On. Verify actual operations and retained settings at both steps, independent admission in the other scopes, and stable confinement for work already running. Include explicit tool exclusions, a read-only task, and the fixed output limits of `process_list`.
+1. Open both sections in a real Pi terminal. Check provider information in Tool loading and change a profile in Use permissions.
+2. Start a real editable SDK worker with Subagents Off, no custom mapping and the ordinary default tools. Invoke `apply_patch` and verify the file contents. Repeat with the retained guarded checkbox checked and unchecked, and with an explicit request for the tool. An earlier test expecting a missing-mapping error in this scenario is superseded.
+3. Exercise a second selected tool with a compatible extension provider. With Subagents Off, its retained trust checkbox cannot deny its ordinary use. In a separate case, remove the required provider and verify a loading error that identifies the missing tool.
+4. Enable Subagents and use the guarded patch adapter. Verify an allowed project change, a denied change outside the permitted scope, and an unchanged target after denial. A conflicting extension must not take over the guarded name. Exercise a trusted tool with its canonical provider and a same-name replacement.
+5. Exercise each scope with restrictive detail values saved. Switch it Off, then On. Verify actual operations and retained settings at both steps, independent admission in the other scopes, and stable confinement for work already running. Include explicit tool exclusions, a read-only task, and the fixed output limits of `process_list`.
 
 These are acceptance criteria. Historical test counts do not establish that the current installation implements the full contract.
 

@@ -552,9 +552,8 @@ limit to 10 min in `/sandbox`, then press Ctrl+S. New launches capture the polic
 running children keep theirs. An incompatible older consumer is rejected rather
 than silently dropping these restrictions.
 
-Extension tools are
-chosen in `/sandbox` → Subagents · Tools
-([ADR 0009](../../../docs/adr/0009-guarded-and-trusted-subagent-tools.md)):
+For a confined worker, grant access to extension tools in `/sandbox` → Use permissions → Subagents · Tools.
+[Sandbox tool loading and permission to use tools](../../../docs/adr/0027-sandbox-tools-and-permissions.md) defines the contract.
 
 - **Guarded:** `apply_patch`, a harness adapter with the Codex tool's name,
   schema and patch format. Every add, update, move and delete goes through the
@@ -765,9 +764,11 @@ which extension *code* is loaded into it. A child launches as
 pi -p --mode json --no-extensions -e <package backing a requested tool> ...
 ```
 
-so a package that backs no requested tool never loads. With the default
-allowlist (`read, bash, edit, write, web_search, web_fetch`) exactly one package
-loads — the web-tools one — and `web_fetch` works normally.
+The default editable worker gets the Harness `apply_patch` adapter. An explicit
+`process_list` request loads the bounded current-user inventory adapter. Each
+can use an ordinary provider override. The default web tools load their
+configured package. With Subagents Off, saved guarded and trusted checkboxes
+have no effect on these selections.
 
 Two maps in `config.json` drive it, with a built-in default for provider auth:
 
@@ -782,8 +783,9 @@ same provider replaces the built-in one, and an empty list disables it. A mapped
 package that is not installed still fails the launch with the explicit
 missing-extension error rather than starting without provider auth.
 
-Ask for a tool with no mapping and the spawn still succeeds, but says so at
-launch — the tool simply will not exist in the child.
+A required tool with no possible provider fails admission. If an extension
+could supply the name, the worker checks the active registration during
+startup. Both failures identify the missing tool.
 
 `clean:true` is the narrowest case of the same mechanism: no extensions at all.
 For unconfined children, `allow_nested:true` loads this package into the child;

@@ -2,7 +2,7 @@
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isNetworkTool, packageLabel } from "./shared-task-tools.domain.mjs";
 import { defaultSandboxPermissions } from "./permissions.domain.mjs";
-const GUARDED_HINT = "apply_patch goes through the guarded file operations: Project files and Outside project apply to it.";
+const GUARDED_HINT = "Sandbox On: patch access follows the file rules. Off: editable workers use their ordinary patch provider.";
 const TRUSTED_HINT = "Trusted tools run in the subagent's Pi process, outside the file rules. Tick only tools you trust.";
 export const DEFAULT_PERMISSION_SETTINGS = defaultSandboxPermissions();
 const rows = [
@@ -66,6 +66,27 @@ function cell(text, width) {
 /** Keyboard-driven profiles and a foldable package/provider tool tree. */
 export function createPermissionsPage(theme, handlers, requestRender, close) {
     let settings;
+    let section = "permissions";
+    let loadingRows = [];
+    let loadingOffset = 0;
+    const loadingWindow = 14;
+    function readLoading() {
+        try {
+            const inventory = handlers.toolLoading?.();
+            const entries = (tools) => tools.map(tool => `  ${tool.name}  ·  ${tool.provider}`);
+            return [
+                "Ordinary subagent defaults",
+                ...(inventory?.subagents === undefined ? ["  Subagents extension unavailable"]
+                    : inventory.subagents.length ? entries(inventory.subagents) : ["  No default tools selected"]),
+                "", "Local Background tasks run commands through the Background adapter.",
+                "", "Active Main tools",
+                ...(inventory ? entries(inventory.main) : ["  Tool inventory unavailable"]),
+            ];
+        }
+        catch (error) {
+            return [`Tool inventory unavailable: ${errorText(error)}`];
+        }
+    }
     let message = "";
     let isError = false;
     try {
@@ -251,6 +272,23 @@ export function createPermissionsPage(theme, handlers, requestRender, close) {
             if (matchesKey(data, Key.escape)) {
                 close();
             }
+            else if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
+                section = section === "permissions" ? "loading" : "permissions";
+                if (section === "loading") {
+                    loadingRows = readLoading();
+                    loadingOffset = 0;
+                }
+                requestRender();
+            }
+            else if (section === "loading") {
+                if (matchesKey(data, Key.up))
+                    loadingOffset = Math.max(0, loadingOffset - 1);
+                else if (matchesKey(data, Key.down))
+                    loadingOffset = Math.min(Math.max(0, loadingRows.length - loadingWindow), loadingOffset + 1);
+                else
+                    return;
+                requestRender();
+            }
             else if (matchesKey(data, Key.up)) {
                 row = Math.max(0, row - 1);
                 requestRender();
@@ -285,6 +323,15 @@ export function createPermissionsPage(theme, handlers, requestRender, close) {
         },
         render(width) {
             const w = Math.max(0, Math.floor(width));
+            const activeTitle = section === "loading" ? "Tool loading" : "Use permissions";
+            const tabs = ["Tool loading", "Use permissions"]
+                .map(title => title === activeTitle ? theme.inverse(` ${title} `) : ` ${title} `).join("  ");
+            const heading = truncateToWidth((visibleWidth(tabs) <= w ? tabs : theme.inverse(activeTitle)) + "   Tab switch", w, "");
+            if (section === "loading") {
+                return [heading, "", ...loadingRows.slice(loadingOffset, loadingOffset + loadingWindow),
+                    "", "Role, tool list and exclusions determine each worker's tools.",
+                    "↑↓ Scroll · Tab Use permissions · Esc Back"].map(text => truncateToWidth(text, w, ""));
+            }
             const prefix = w >= 20 ? 2 : 0;
             const gap = w >= 8 ? 1 : 0;
             const minimumCell = Math.max(1, Math.min(16, Math.floor((w - prefix - gap) / 4)));
@@ -304,7 +351,7 @@ export function createPermissionsPage(theme, handlers, requestRender, close) {
                 return highlight(theme.fg(selected ? "accent" : "text", marker + labelPart) + " ".repeat(gap) +
                     cells.join(""), selected);
             };
-            const output = [line("Sandbox permissions", ["Main", "Subagents", "Background tasks"], false), ""];
+            const output = [heading, "", line("Sandbox permissions", ["Main", "Subagents", "Background tasks"], false), ""];
             for (let i = 0; i < rows.length; i++) {
                 const entry = rows[i];
                 const value = (profile) => {
@@ -333,7 +380,7 @@ export function createPermissionsPage(theme, handlers, requestRender, close) {
                     output.push("");
             }
             // Subagents · Tools: which extension tools a confined subagent may use.
-            output.push("", theme.fg("text", truncateToWidth(`${prefix ? "  " : ""}Subagents · Tools`, w, "")));
+            output.push("", theme.fg("text", truncateToWidth(`${prefix ? "  " : ""}Subagents · Tools (when Sandbox is On)`, w, "")));
             const toolNames = items.flatMap((item) => item.kind === "group" ? [] : [visibleWidth(item.name)]);
             const nameWidth = Math.min(24, Math.max(...toolNames), Math.max(0, w - prefix - 10));
             items.forEach((item, index) => {
