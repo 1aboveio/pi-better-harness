@@ -677,7 +677,11 @@ export default function (pi: ExtensionAPI): void {
     return goal;
   };
 
-  const publishSnapshot = async (ctx: ExtensionContext, explicit = true): Promise<ActivitySnapshot | null> => {
+  const publishSnapshot = async (
+    ctx: ExtensionContext, explicit = true,
+    readMode: "cached" | "connect" = getGoal(ctx) || getWorkflow(ctx) ? "connect" : "cached",
+  ): Promise<ActivitySnapshot | null> => {
+    const cachedOnly = readMode === "cached";
     bindProviderSubscriptions();
     const execution = executionGeneration;
     const sequence = ++snapshotSequence;
@@ -691,7 +695,7 @@ export default function (pi: ExtensionAPI): void {
         dirtyProviders.delete(provider.id);
         let value: BackgroundProviderSnapshot;
         try {
-          value = await provider.getActivity(ctx);
+          value = await provider.getActivity(ctx, { cachedOnly });
           if (provider.activityVersion === 1 && value.nextDeadline !== null &&
               (typeof value.nextDeadline !== "number" || !Number.isFinite(value.nextDeadline))) {
             throw new Error(`${provider.id}: activity v1 requires an explicit nextDeadline`);
@@ -709,7 +713,8 @@ export default function (pi: ExtensionAPI): void {
         if (execution === executionGeneration && providers.get(provider.id) === provider &&
             sequence >= (providerCacheSequences.get(provider.id) ?? 0)) {
           providerCacheSequences.set(provider.id, sequence);
-          providerCache.set(provider.id, value);
+          if (cachedOnly && value.coverage === "unverified") providerCache.delete(provider.id);
+          else providerCache.set(provider.id, value);
           if (!provider.onActivityChanged) compatibilityReadAt.set(provider.id, Date.now() + POLL_INTERVAL_MS);
         }
         return value;
@@ -1268,7 +1273,7 @@ export default function (pi: ExtensionAPI): void {
     description: "Show foreground/background activity known to pi-better-goal",
     handler: async (_args, ctx) => {
       currentCtx = ctx;
-      const snapshot = await publishSnapshot(ctx);
+      const snapshot = await publishSnapshot(ctx, true, "connect");
       if (!snapshot) return;
       ctx.ui.notify(formatSnapshot(snapshot), "info");
     },
@@ -1326,7 +1331,7 @@ export default function (pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       currentCtx = ctx;
-      const snapshot = await publishSnapshot(ctx);
+      const snapshot = await publishSnapshot(ctx, true, "connect");
       if (!snapshot) {
         return { content: [{ type: "text", text: "Activity changed during collection; inspect again." }], details: { stale: true } };
       }
@@ -1387,11 +1392,20 @@ export default function (pi: ExtensionAPI): void {
         return undefined;
       });
     }
-    const snapshot = await publishSnapshot(ctx);
+    const snapshot = await publishSnapshot(ctx, true, "cached");
     if (!snapshot) return;
     syncPollingState();
-    if (restoredGoal?.status === "active" && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning && !snapshot.backgroundRunning && !hasUnverifiedActivity(snapshot)) {
-      scheduleIdleContinuation(restoredGoal, ctx, "continuation");
+    if (restoredGoal?.status === "active") {
+      const resumeIfIdle = (activity: ActivitySnapshot | null) => {
+        if (activity && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning &&
+            !activity.backgroundRunning && !hasUnverifiedActivity(activity)) {
+          scheduleIdleContinuation(restoredGoal, ctx, "continuation");
+        }
+      };
+      if (hasUnverifiedActivity(snapshot)) {
+        // A restored Goal still needs verified work evidence. Let Pi finish binding while it arrives.
+        void publishSnapshot(ctx, true, "connect").then(resumeIfIdle);
+      } else resumeIfIdle(snapshot);
     }
   });
 

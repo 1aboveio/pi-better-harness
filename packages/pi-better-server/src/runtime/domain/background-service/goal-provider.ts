@@ -58,8 +58,9 @@ export function registerBackgroundTasksGoalProvider(pi: ExtensionAPI): void {
       label: "Background Tasks",
       scope: "session",
       activityVersion: 1,
-      getActivity: async (ctx: ExtensionContext) => {
-        const snapshot = await backgroundGoalObservation(pi, ctx);
+      getActivity: async (ctx: ExtensionContext, options?: { cachedOnly?: boolean }) => {
+        const snapshot = await backgroundGoalObservation(pi, ctx, options?.cachedOnly);
+        if (!snapshot && options?.cachedOnly) return { providerId: "background-tasks", coverage: "unverified", items: [], nextDeadline: null };
         if (snapshot.status !== "ready") throw new Error(snapshot.reason ?? "Background activity is unverified");
         const durable = snapshot.rows.filter((row: any) => row.meta.durable).map((row: any) => row.meta);
         const legacy = snapshot.rows.filter((row: any) => !row.meta.durable).map((row: any) => row.meta);

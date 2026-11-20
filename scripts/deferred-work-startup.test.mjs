@@ -9,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import background from "../packages/pi-better-background-tasks/src/index.ts";
+import goal from "../packages/pi-better-goal/src/index.ts";
 import subagents from "../packages/pi-better-subagents/index.ts";
 
 for (const resumed of [false, true]) {
@@ -80,7 +81,7 @@ for (const resumed of [false, true]) {
     const resourceLoader = new DefaultResourceLoader({
       cwd: root, agentDir: root, settingsManager, noExtensions: true, noSkills: true,
       noContextFiles: true, noPromptTemplates: true, noThemes: true,
-      extensionFactories: [subagents, background, pi => pi.registerProvider("startup-test", provider)],
+      extensionFactories: [subagents, background, goal, pi => pi.registerProvider("startup-test", provider)],
     });
     await resourceLoader.reload();
     assert.deepEqual(resourceLoader.getExtensions().errors, []);
@@ -110,6 +111,10 @@ for (const resumed of [false, true]) {
       assert.deepEqual(requests.filter(type => type === "hello"), ["hello"]);
       assert.equal(subscriptions.length, 1);
       assert.equal(subscriptions[0].sessionId, manager.getSessionId());
+      const inspect = session.getToolDefinition("get_background_activity");
+      const activity = await inspect.execute("inspect-work", {}, undefined, undefined, ctx);
+      assert.equal(activity.details.coverage, "verified");
+      assert.ok(subscriptions.some(scope => scope.background));
     }
   });
 }
