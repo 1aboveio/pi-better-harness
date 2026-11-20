@@ -56,7 +56,8 @@ export interface BackgroundActivityProvider {
   /** v1 requires notifications and an explicit nextDeadline (including null). */
   activityVersion?: 1;
   label?: string;
-  getActivity(ctx: ExtensionContext): BackgroundProviderSnapshot | Promise<BackgroundProviderSnapshot>;
+  /** Passive foreground updates can use existing subscriptions without opening a connection. */
+  getActivity(ctx: ExtensionContext, options?: { cachedOnly?: boolean }): BackgroundProviderSnapshot | Promise<BackgroundProviderSnapshot>;
   onActivityChanged?(notify: () => void, ctx?: ExtensionContext): () => void;
 }
 

@@ -9,12 +9,17 @@ const connectionAborts = new WeakMap();
 const clients = new WeakMap();
 const generations = new WeakMap();
 const listeners = new WeakMap();
+const subscribedClients = new WeakMap();
 const activityScopes = new WeakMap();
 /** Goal reads the subscribed observation, never a periodic full-state RPC. */
-export async function backgroundGoalObservation(pi, ctx) {
+export async function backgroundGoalObservation(pi, ctx, cachedOnly = false) {
     const scope = { background: true, cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId(), processId: process.pid };
-    const client = await observationClient(pi, scope);
     const key = JSON.stringify(scope);
+    if (cachedOnly) {
+        const client = subscribedClients.get(pi);
+        return client && !client.closed && activityScopes.get(client) === key ? client.snapshot : undefined;
+    }
+    const client = await observationClient(pi, scope);
     if (activityScopes.get(client) !== key) {
         await client.subscribe(scope);
         activityScopes.set(client, key);
@@ -94,6 +99,7 @@ function observationClient(pi, scope) {
                     await hosted.subscribe(scope);
                     activityScopes.set(hosted, JSON.stringify({ ...scope, processId: process.pid }));
                     checkOpen();
+                    subscribedClients.set(pi, hosted);
                     return hosted;
                 }
                 catch (error) {
@@ -146,6 +152,7 @@ function observationClient(pi, scope) {
                     client.close();
                     throw error;
                 }
+                subscribedClients.set(pi, client);
                 subscribed = true;
                 activityScopes.set(client, JSON.stringify({ ...scope, processId: process.pid }));
                 return client;
@@ -159,6 +166,7 @@ function observationClient(pi, scope) {
     return pending;
 }
 export function closeBackgroundObservation(pi) {
+    subscribedClients.delete(pi);
     generations.set(pi, (generations.get(pi) ?? 0) + 1);
     connectionAborts.get(pi)?.abort();
     connectionAborts.delete(pi);

@@ -28,8 +28,10 @@ export function registerBackgroundTasksGoalProvider(pi) {
             label: "Background Tasks",
             scope: "session",
             activityVersion: 1,
-            getActivity: async (ctx) => {
-                const snapshot = await backgroundGoalObservation(pi, ctx);
+            getActivity: async (ctx, options) => {
+                const snapshot = await backgroundGoalObservation(pi, ctx, options?.cachedOnly);
+                if (!snapshot && options?.cachedOnly)
+                    return { providerId: "background-tasks", coverage: "unverified", items: [], nextDeadline: null };
                 if (snapshot.status !== "ready")
                     throw new Error(snapshot.reason ?? "Background activity is unverified");
                 const durable = snapshot.rows.filter((row) => row.meta.durable).map((row) => row.meta);
