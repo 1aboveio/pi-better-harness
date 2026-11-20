@@ -18,3 +18,5 @@ export interface ConnectionOptions {
 }
 /** Establishes a connection; never replays application requests. */
 export function connectWorkClient(socketPath: string, agentDir: string, capabilities?: string[], options?: ConnectionOptions): Promise<WorkClient>;
+
+export function shouldRestoreWorkObservation(reason: string | undefined, session: { getSessionFile?(): string | undefined; getLeafId?(): string | null }): boolean;

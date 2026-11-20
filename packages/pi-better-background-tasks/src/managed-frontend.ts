@@ -4,7 +4,8 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { requestBackgroundTool } from './managed-client.js';
 import { onBackgroundObservation } from './work-observation.js';
 import { getCallbackBatcher } from './shared-callback-batcher.js';
-import { registerObservedWaitClient, type ObservedWaitHost } from './observed-waits.js';
+import { registerObservedWaitClient } from "./observed-wait-client.js";
+import type { ObservedWaitHost } from "./observed-waits.js";
 import { observeNavigatorLaunch } from './shared-navigator.ts';
 /** Native transcript delivery and cached UI projections; no coordinator or supervisor. */
 export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
@@ -13,6 +14,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
     const retainedTasks = new Map<string, any>();
     const cachedTask = (id: string) => rows.find(row => row.id === id) ?? retainedTasks.get(id);
     let adoptedScope: string | undefined;
+    let observing = false;
     const scopeOf = (context: ExtensionContext) => JSON.stringify([context.cwd, context.sessionManager.getSessionId()]);
     const ownership = new Map<string, { operationId: string; owner: { kind: string; sessionId: string; workspace: string } }>();
     const adoptContext = (context: ExtensionContext) => {
@@ -103,11 +105,20 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
         .finally(() => { refresh = undefined;if(dirty&&ctx)void reconcile().catch(()=>undefined); });
         return refresh;
     };
+    const activate = () => {
+        if (observing || !ctx) return;
+        observing = true;
+        const version = generation;
+        void reconcile().catch(() => { if (generation === version) observing = false; });
+    };
     const host = {
         async reconcileNow() { await reconcile(); while (refresh) await refresh; },
-        start(context: ExtensionContext) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
+        start(context: ExtensionContext, restore = true) {
+            adoptContext(context); generation++; observing = false;
+            if (restore) activate();
+        },
         noteParentContext(context: ExtensionContext) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
-        close() { ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
+        close() { observing = false; ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
         isParentOriginActive: active,
         onDurableTaskChange(listener: (change: any) => void) { listeners.add(listener); return () => listeners.delete(listener); },
         listDurableTasks(origin: any, _options: any = {}) { return active(origin) ? rows : []; },
@@ -147,6 +158,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
         } });
     registerObservedWaitClient(proxy, host as unknown as ObservedWaitHost);
     const ui: ManagedBackgroundNavigator = {
+        onOpen: activate,
         rows: () => legacyRows,
         prepareDetail(id, options) {
             const lines = options?.logTailLines ?? 40, key = `${id}:${lines}`;

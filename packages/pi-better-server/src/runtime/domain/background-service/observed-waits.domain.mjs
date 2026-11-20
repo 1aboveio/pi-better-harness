@@ -1,4 +1,6 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/observed-waits.ts. Do not edit directly.
+import { getObservedWaitHost, registerObservedWaitClient } from "./observed-wait-client.domain.mjs";
+export { getObservedWaitHost, registerObservedWaitClient } from "./observed-wait-client.domain.mjs";
 /**
  * Parent-side observed waits: the integration between background tasks, the
  * detached local supervisor and the durable operation coordinator.
@@ -167,18 +169,13 @@ export function observedWaitServiceUnavailableReason(pi) {
     const events = eventBusOf(pi);
     return events ? serviceErrors.get(events) : undefined;
 }
-const hosts = new WeakMap();
 export function createObservedWaitHost(pi, options = {}) {
-    const existing = hosts.get(pi);
+    const existing = getObservedWaitHost(pi);
     if (existing && existing !== undefined)
         existing.close();
     const host = new ObservedWaitHost(pi, options);
-    hosts.set(pi, host);
+    registerObservedWaitClient(pi, host);
     return host;
-}
-export function registerObservedWaitClient(pi, host) { hosts.set(pi, host); }
-export function getObservedWaitHost(pi) {
-    return pi && typeof pi === "object" ? hosts.get(pi) : undefined;
 }
 function branchIdsOf(ctx) {
     try {

@@ -92,6 +92,8 @@ export type BackgroundWorkProvider = {
   close(id: string): BackgroundWorkCloseOutcome;
   /** Return true when this detail handled the key. The navigator refreshes the sheet. */
   handleDetailInput?(id: string, data: string): boolean;
+  /** An explicit navigator interaction may attach a deferred work subscription. */
+  onOpen?(): void;
   onVisibleChanged?(notify: () => void): () => void;
 };
 
@@ -984,6 +986,9 @@ function wrapEditor(inner: any, deps: HostDeps): unknown {
 
 function handleMainListInput(data: string, deps: HostDeps): boolean {
   const s = state();
+  if (!s.mainListFocused && deps.isOpenTrigger(data)) {
+    for (const provider of s.providers.values()) provider.onOpen?.();
+  }
   const rows = listRows();
   if (rows.length === 0) {
     // Every row is gone, but an overlay that lost focus may still be mounted: Esc still closes it.
@@ -1094,6 +1099,7 @@ function openNavigator(): void {
   const ctx = s.uiCtx;
   const deps = s.deps;
   if (!ctx || !deps || !isNavigatorUiAvailable(ctx)) return;
+  for (const provider of s.providers.values()) provider.onOpen?.();
   const rows = listRows();
   if (rows.length === 0) return;
   const selectedId = selectedMainListRow()?.navigatorId ?? rows[0]!.navigatorId;

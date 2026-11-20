@@ -27,7 +27,7 @@ import type {
   TerminalResult,
 } from "./types.js";
 import { observeTaskStallAttention } from "./stall-attention.js";
-import { isTerminalStatus } from "./types.js";
+import { FIRST_WATCH_CHECK_WAIT_MS, isTerminalStatus } from "./types.js";
 
 export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefined;
 
@@ -98,7 +98,7 @@ export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
 /** Consecutive blind checks (exit 0, stderr, no condition matched) before a watch is flagged (#359). */
 export const DEFAULT_BLIND_CHECKS = 3;
 /** How long bg_task_watch waits for the first check before returning (#359). */
-export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;
+export { FIRST_WATCH_CHECK_WAIT_MS } from "./types.js";
 /** How to fix a false alarm: some tools write progress or warnings to stderr on success. */
 export const BLIND_CHECK_HINT = "If the stderr is expected (progress or warnings), redirect it (2>/dev/null) or set blind_checks:0.";
 /**

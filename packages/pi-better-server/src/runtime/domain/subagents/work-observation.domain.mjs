@@ -25,6 +25,8 @@ export function onWorkObservation(notify) {
     return () => { observationListeners.delete(notify); };
 }
 export function workObservation() { return snapshot; }
+export function hasWorkObservationContext() { return context !== undefined; }
+export function workObservationStarted() { return Boolean(connecting || client || retry || snapshot); }
 export function workObservationFailure() { return snapshot?.reason ?? failure; }
 function degraded(error) {
     failure = String(error);
@@ -209,15 +211,19 @@ async function connectObservation(current) {
         retry = undefined;
     }
 }
-export async function startWorkObservation(agentDir, origin, changed) {
+export function configureWorkObservation(agentDir, origin, changed) {
     stopWorkObservation();
-    const current = generation;
     context = { agentDir, origin };
     refresh = () => {
         changed();
         for (const notify of observationListeners)
             notify();
     };
+}
+export async function activateWorkObservation() {
+    if (!context)
+        return;
+    const current = generation;
     try {
         await ensureObservation();
     }
@@ -227,6 +233,10 @@ export async function startWorkObservation(agentDir, origin, changed) {
             reconnectLater(current);
         }
     }
+}
+export async function startWorkObservation(agentDir, origin, changed) {
+    configureWorkObservation(agentDir, origin, changed);
+    await activateWorkObservation();
 }
 async function ensureObservation() {
     if (connecting)

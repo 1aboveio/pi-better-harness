@@ -1,6 +1,6 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/goal-provider.ts. Do not edit directly.
 import { listMetas, onMetaChanged } from "./registry.domain.mjs";
-import { getObservedWaitHost } from "./observed-waits.domain.mjs";
+import { getObservedWaitHost } from "./observed-wait-client.domain.mjs";
 import { isTerminalStatus } from "./types.domain.mjs";
 import { backgroundTaskProgressAt, observeBackgroundTaskStall } from "./stall.domain.mjs";
 import { backgroundGoalObservation, onBackgroundObservation } from "./work-observation.domain.mjs";

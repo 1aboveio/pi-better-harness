@@ -6,13 +6,12 @@ import { actionableFailures, failureLabel, readFailureState } from "./shared-fai
 import { failurePath, failureView } from "./failures.domain.mjs";
 import { readLog } from "./logs.domain.mjs";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.domain.mjs";
-import { getObservedWaitHost } from "./observed-waits.domain.mjs";
-import { stopTask } from "./runtime.domain.mjs";
+import { getObservedWaitHost } from "./observed-wait-client.domain.mjs";
 import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.domain.mjs";
 const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 const DURABLE_ROW_CACHE_MS = 1_000;
 let durableRowCache;
-export function createBackgroundTasksNavigator(runtime = { stopTask }, managed) {
+export function createBackgroundTasksNavigator(runtime, managed) {
     const owner = Symbol("background-tasks navigator factory");
     let unregister;
     let navigatorContext;
@@ -74,6 +73,7 @@ export function createBackgroundTasksNavigator(runtime = { stopTask }, managed) 
         id: "background-tasks",
         label: "Background Tasks",
         priority: 20,
+        onOpen: managed?.onOpen,
         visibleCount: () => {
             const now = Date.now();
             return (managed ? managed.rows().filter(row => row.status === "running").length : visibleMetas(now).filter((meta) => meta.status === "running").length)
@@ -117,7 +117,11 @@ export function createBackgroundTasksNavigator(runtime = { stopTask }, managed) 
             if (!meta)
                 return { action: "missing", providerId: "background-tasks", id };
             if (meta.status === "running") {
-                void runtime.stopTask(piRef, id);
+                const pi = piRef;
+                if (runtime)
+                    void runtime.stopTask(pi, id);
+                else
+                    void import("./runtime.domain.mjs").then(({ stopTask }) => stopTask(pi, id));
                 return { action: "stopped", providerId: "background-tasks", id, status: "stopping" };
             }
             meta.dismissedAt = Date.now();

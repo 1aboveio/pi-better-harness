@@ -1,3 +1,4 @@
+import { shouldRestoreWorkObservation } from "./shared-work-client.mjs";
 import { appendTimingWake, removeTimingReceipt, receiptTimingWake, timingWakeReceipt } from "./timing-notifications.ts";
 import { captureLaunchContext } from "./launch-context.ts";
 /**
@@ -26,7 +27,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { initializeNavigatorPanels } from "./shared-navigator-panels.ts";
-import { workObservation, workObservationFailure, startWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail, TERMINAL_NAVIGATOR_RETENTION_MS } from "./work-observation.ts";
+import { workObservation, workObservationStarted, workObservationFailure, configureWorkObservation, activateWorkObservation, stopWorkObservation, observedAssignment, observedList, requestWorkDetail, TERMINAL_NAVIGATOR_RETENTION_MS } from "./work-observation.ts";
 import { withAssignmentObservations } from "./assignment-projection.mjs";
 import { formatNavigatorHealthFacts } from "./health-surface.mjs";
 import { matchesKey, Key, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
@@ -44,7 +45,6 @@ import {
     type BackgroundWorkRow,
 } from "./shared-navigator.ts";
 import { spawnDetached, killProcessTree, type SpawnResult } from "./spawn.ts";
-import { abortUncommittedLaunch } from "./launch-abort.ts";
 import { parseRun, parseRunForLifecycle, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore, reconcileInterruptedRun } from "./finalization.ts";
 import { completeOwnedExit } from "./owned-exit.ts";
@@ -80,8 +80,6 @@ import {
 } from "./timing.ts";
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
-import { resolveChildClosure, resolveChildLaunch, configSnapshot } from "./child-dependencies.mjs";
-import { PREFLIGHT_ENV } from "./child-preflight.mjs";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime, applyDirectApplicationLoadout, DEFAULT_TASK_PERMISSIONS, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.ts";
 import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.ts";
@@ -90,7 +88,6 @@ import { describeTaskTools, planTaskTools, selectEffectiveTaskTools } from "./su
 import {
     announceExecutionAdapter, describeSubagentProcessPolicy, effectiveWorkerProcessAccess, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions,
 } from "./permission-policy.ts";
-import { resolveSubagentWorkspace } from "./git-workspace.ts";
 import { dirname, isAbsolute, join } from "node:path";
 import {
     baseDir,
@@ -1626,7 +1623,7 @@ const pendingNavigatorDismissals = new Set<string>();
 function navigatorRunningCount(): number {
     const snapshot = workObservation();
     return (snapshot?.rows.filter((row: any) => !pendingNavigatorDismissals.has(row.meta.id) && !row.meta.dismissedAt && ["running", "waiting"].includes(row.assignment.state)).length ?? 0) +
-        (!snapshot || snapshot.status !== "ready" ? 1 : 0);
+        (workObservationStarted() && snapshot?.status !== "ready" ? 1 : 0);
 }
 
 /**
@@ -1745,7 +1742,7 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
             primary: [shortModel(meta.model), meta.effort, row.display?.tool, row.display?.spend].filter(Boolean).join(" ") || "subagent run", facts: formatNavigatorHealthFacts(health), sortStartedAt: meta.startedAt,
             expiresAt: terminal && typeof meta.endedAt === "number" ? meta.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS : undefined };
     });
-    if (!snapshot || snapshot.status !== "ready") rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Status sync",
+    if (workObservationStarted() && snapshot?.status !== "ready") rows.unshift({ providerId: "subagents", id: "runtime-observation", name: "Status sync",
         status: snapshot?.status ?? "degraded", statusTone: "warning", kind: "observation", readOnly: true, elapsed: "", primary: "Task status unconfirmed · enter for details", sortStartedAt: now });
     return rows;
 }
@@ -1935,6 +1932,7 @@ function ensureSubagentProvider(): void {
         id: "subagents",
         label: "Subagents",
         priority: 10,
+        onOpen: () => { void activateWorkObservation(); },
         visibleCount: () => navigatorRunningCount(),
         // The last worker becoming terminal must not hide its retained result.
         showSection: (rows) => rows.length > 0,
@@ -2747,6 +2745,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             ctx = captureLaunchContext(ctx);
             catalogHostFrom(ctx);
             const { submitManagedLaunch } = await import("./managed-launch-client.ts");
+            void activateWorkObservation();
             return await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, params)) as never;
         } });
     };
@@ -2901,6 +2900,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         /** Set only when a catalog run's model or effort differs from its role or agent default. */
         modelNote?: string;
     }> {
+        const { resolveChildClosure, resolveChildLaunch, configSnapshot } = await import("./child-dependencies.mjs");
+        const { resolveSubagentWorkspace } = await import("./git-workspace.ts");
+        const { PREFLIGHT_ENV } = await import("./child-preflight.mjs");
         assertThinkingLevel(p.thinking);
         // Skill exposure is a caller choice, not a launch: validate its shape
         // before any attempt directory or capacity effect exists. A continuation
@@ -3600,6 +3602,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             // must not keep running unsupervised; its log goes with the
             // attempt, because a record without metadata can never be read.
             if (!committed) {
+                const { abortUncommittedLaunch } = await import("./launch-abort.ts");
                 await abortUncommittedLaunch(id, {
                     child: spawned, lease,
                     artifacts: { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch },
@@ -4603,7 +4606,8 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
     // Capture a UI-bearing context and, if runs from a prior session are still
     // alive, resume the ticking widget. Deferred out of the factory per pi's
     // "no background resources at load" rule.
-    pi.on("session_start", async (_event, ctx) => {
+    let restoreObservation: NodeJS.Immediate | undefined;
+    pi.on("session_start", async (event, ctx) => {
         // A session begins in this process again (reload, restart, or a session
         // switch), so the previous session's teardown no longer applies: the
         // replacing session owns this instance's supervision loops (#625).
@@ -4621,10 +4625,16 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         activeCallbackOrigin = callbackOriginFromContext(ctx);
         pendingRecipientRecovery.clear();
         observedRecipientRows.clear();
-        if (!managed && activeCallbackOrigin) await startWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => {
-            refreshBackgroundWorkNavigator(ctx);
-            observeRecipientNotifications(pi);
-        });
+        if (restoreObservation) clearImmediate(restoreObservation);
+        if (!managed && activeCallbackOrigin) {
+            configureWorkObservation(PiCodingAgent.getAgentDir(), activeCallbackOrigin, () => {
+                refreshBackgroundWorkNavigator(ctx);
+                observeRecipientNotifications(pi);
+            });
+            if (shouldRestoreWorkObservation(event?.reason, ctx.sessionManager)) {
+                restoreObservation = setImmediate(() => { void activateWorkObservation(); });
+            }
+        }
         if (!managed) {
             recoverCompletionCallbacks(pi);
             observeRecipientNotifications(pi);
@@ -4689,6 +4699,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (event, ctx) => {
         closeCatalogHost();
+        if (restoreObservation) clearImmediate(restoreObservation);
         stopWorkObservation();
         pendingNavigatorDismissals.clear();
         if (outcomeTicker) clearInterval(outcomeTicker);

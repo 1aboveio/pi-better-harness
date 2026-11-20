@@ -1,5 +1,5 @@
 // Generated fixed launch domain from packages/pi-better-subagents/goal-provider.ts. Do not edit directly.
-import { workObservation, onWorkObservation } from "./work-observation.domain.mjs";
+import { activateWorkObservation, hasWorkObservationContext, workObservation, onWorkObservation } from "./work-observation.domain.mjs";
 import { belongsToOrigin, effectiveStatus, isPendingPark, listMetasForParent, onMetaChanged, readParkRecord, } from "./registry.domain.mjs";
 const GOAL_READY_EVENT = "pi-better-goal:ready";
 const GOAL_REGISTER_PROVIDER_EVENT = "pi-better-goal:register-provider";
@@ -40,6 +40,10 @@ export function registerSubagentsGoalProvider(pi) {
             activityVersion: 1,
             getActivity: (ctx) => {
                 const observed = workObservation();
+                if (!observed && hasWorkObservationContext()) {
+                    void activateWorkObservation();
+                    throw new Error("Subagent activity is unverified while connecting");
+                }
                 if (observed) {
                     if (observed.status !== "ready")
                         throw new Error(observed.reason ?? "Subagent activity is unverified");
