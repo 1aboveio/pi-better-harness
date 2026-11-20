@@ -183,10 +183,15 @@ export class BackgroundHistory {
       this.startRefresh(version);
     }
     const resource = `list:${sessionScopeKey({ all: scope.backgroundAll, origin: { cwd: scope.cwd, sessionId: scope.sessionId }, processId: scope.processId })}:${[...(scope.statuses ?? [])].sort().join(",")}`;
-    const clauses = ["unreadable = 0", "dismissed = 0"], args: any[] = [];
-    if (!scope.backgroundAll) clauses.push("known = 1");
-    if (!scope.backgroundAll) { clauses.push("workspace = ? AND session = ?"); args.push(scope.cwd, scope.sessionId ?? ""); }
-    if (!scope.backgroundAll && !scope.sessionId) { clauses.push("spawn_pid = ?"); args.push(scope.processId ?? -1); }
+    const ownerClauses: string[] = [], ownerArgs: any[] = [];
+    if (!scope.backgroundAll) {
+      ownerClauses.push("workspace = ? AND session = ?");
+      ownerArgs.push(scope.cwd, scope.sessionId ?? "");
+      if (!scope.sessionId) { ownerClauses.push("spawn_pid = ?"); ownerArgs.push(scope.processId ?? -1); }
+    }
+    const ownerWhere = ownerClauses.join(" AND ");
+    const clauses = ["unreadable = 0", "dismissed = 0"], args = [...ownerArgs];
+    if (ownerWhere) clauses.push("known = 1", ownerWhere);
     if (scope.statuses?.length) { clauses.push(`(state IN (${scope.statuses.map(() => "?").join(",")})${scope.statuses.includes("running") ? " OR active = 1" : ""})`); args.push(...scope.statuses); }
     if (scope.active !== undefined) { clauses.push("active = ?"); args.push(scope.active ? 1 : 0); }
     const where = clauses.join(" AND ");
@@ -214,7 +219,9 @@ export class BackgroundHistory {
     const revisions = this.db.prepare(`SELECT sum(content) AS content, sum(failure) AS failure FROM background_history_revisions
       WHERE workspace = ? AND session = ? AND state IN (${revisionStates.map(() => "?").join(",")})`)
       .get(scope.backgroundAll ? "" : scope.cwd, scope.backgroundAll ? "" : scope.sessionId || `process:${scope.processId ?? -1}`, ...revisionStates);
-    const diagnostics = this.db.prepare("SELECT sum(unreadable) AS unreadable, sum(known = 0 AND unreadable = 0) AS unknown FROM background_history WHERE dismissed = 0").get();
+    const diagnosticScope = ownerWhere ? ` AND (known = 0 OR (${ownerWhere}))` : "";
+    const diagnostics = this.db.prepare(`SELECT sum(unreadable) AS unreadable, sum(known = 0 AND unreadable = 0) AS unknown
+      FROM background_history WHERE dismissed = 0${diagnosticScope}`).get(...ownerArgs);
     return { records: records.slice(0, scope.limit ?? 10).map((meta: any) => ({ id: meta.id, found: true, readable: true, meta })),
       page: { total: Number(aggregate.n), before, nextCursor: page.nextCursor, resource,
         contentRevision: digest([aggregate.n, revisions.content, diagnostics.unreadable, diagnostics.unknown]), failureRevision: digest(revisions.failure),
@@ -292,7 +299,7 @@ export class BackgroundHistory {
           // absence would make every exact repair demand another history build.
           meta = { ...meta, callbackOrigin: { cwd: op.owner_workspace, sessionId: op.owner_session_id, branchId: op.owner_branch_id ?? null }, logPath: meta.logPaths?.stdout ?? "" };
         }
-        if (meta) save(key, meta, signature, "", false, context);
+        if (meta) save(key, meta, signature, "", meta.unreadable === true, context);
         else if (previous.get(key)?.signature === signature) seen.add(key);
       }
       last = operations.at(-1).operation_id;

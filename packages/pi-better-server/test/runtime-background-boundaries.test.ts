@@ -413,3 +413,38 @@ test("recent terminal cache follows atomic sidecar changes without timed rereads
     assert.equal(observation.read(scope)[0]?.name, "changed", "atomic sidecar replacement invalidates the cached projection");
   } finally { await observation.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("a malformed observed sidecar does not block scoped Background history or its repair", async () => {
+  const root = mkdtempSync("/tmp/bg-history-gap-"), directory = join(root, "supervisor");
+  const writer = openStore({ path: join(root, "operation-coordinator.sqlite"), now: () => Date.now() - 60000 });
+  const sessions = ["requested", "other"];
+  const ids = sessions.map((_, i) => "bgs_" + String(i + 1).padStart(20, "0"));
+  mkdirSync(join(directory, "observed"), { recursive: true });
+  const damaged = join(directory, "observed", ids[1] + ".json");
+  writeFileSync(damaged, '{"name":"old"}trailing bytes');
+  for (const [i, sessionId] of sessions.entries()) {
+    const owner = { kind: "parent-session", workspace: root, sessionId };
+    writer.registerOperation({ operationId: ids[i], taskId: ids[i], launchToken: ids[i], owner, observer: { kind: "local-supervisor", version: "1" } });
+    writer.recordTerminalOutcome({ operationId: ids[i], eventId: ids[i], owner, outcome: "succeeded", evidence: [{ kind: "terminal-record", ref: ids[i] }] });
+  }
+  const model = new WorkReadModel(root, "history-gap", { supervisorDirectory: directory, baseDir: join(root, "runs"), durableDir: join(root, "archives") });
+  const read = async (sessionId: string, expected: number, backgroundAll = false) => {
+    const scope = { cwd: root, sessionId, background: true, backgroundHistory: true, backgroundAll, limit: 3 };
+    const end = Date.now() + 3000;
+    for (;;) {
+      const page = model.snapshot(scope);
+      if (page.status === "ready" && page.rows.length === expected) return page;
+      assert.ok(Date.now() < end, String(page.reason ?? page.status)); await delay(20);
+    }
+  };
+  try {
+    await model.reconcile();
+    assert.equal((await read("requested", 1)).backgroundIndex.page.unreadable, 0);
+    assert.equal((await read("other", 0)).backgroundIndex.page.unreadable, 1);
+    assert.equal((await read("requested", 1, true)).backgroundIndex.page.unreadable, 1);
+    writeFileSync(damaged, '{"name":"repaired"}');
+    const recovered = await read("other", 1);
+    assert.equal(recovered.backgroundIndex.page.unreadable, 0);
+    assert.equal(recovered.rows[0]?.meta?.name, "repaired");
+  } finally { await model.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
+});
