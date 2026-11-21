@@ -13,7 +13,9 @@
 import { StoreError } from "./errors.ts";
 import { mapOperation, ownerFromRow, readOperation, requireOperation } from "./rows.ts";
 import {
+    columnJson,
     columnText,
+    getRow,
     getRows,
     isUniqueViolation,
     run,
@@ -24,6 +26,7 @@ import type {
     ObserverHealth,
     OperationFilter,
     OperationRecord,
+    OwnerIdentity,
     ReleaseSupervisionInput,
     RecordSupervisionInput,
     RecordTerminalOutcomeInput,
@@ -39,6 +42,7 @@ import {
     normalizeOwner,
     optionalText,
     requireBoolean,
+    requireCounter,
     requireEnum,
     requireEvidenceKind,
     requireId,
@@ -53,6 +57,7 @@ import { bumpChangeRevision } from "./discovery.ts";
 
 const HEALTH_VALUES: readonly ObserverHealth[] = ["active", "unmonitored", "lost"];
 const OUTCOME_VALUES: readonly TerminalOutcome[] = ["succeeded", "failed", "cancelled", "lost"];
+const ASSIGNMENT_CLEANUP_PAGE_MAX = 256;
 
 function normalizeSupervision(value: unknown): SupervisionIdentity | null {
     if (value === undefined || value === null) return null;
@@ -62,6 +67,8 @@ function normalizeSupervision(value: unknown): SupervisionIdentity | null {
     const supervision = value as Partial<SupervisionIdentity>;
     return {
         hostId: requireId("supervision.hostId", supervision.hostId),
+        ...(supervision.resultScope === undefined ? {} : { resultScope: requireId("supervision.resultScope", supervision.resultScope) }),
+        ...(supervision.resultAdapter === 1 ? { resultAdapter: 1 as const } : {}),
         runnerId: supervision.runnerId === undefined || supervision.runnerId === null
             ? null
             : requireId("supervision.runnerId", supervision.runnerId),
@@ -105,6 +112,9 @@ export function registerOperation(
     const taskId = requireId("taskId", input.taskId);
     const launchToken = requireId("launchToken", input.launchToken);
     const owner = normalizeOwner("owner", input.owner);
+    const assignmentAttemptId = input.assignmentAttemptId === undefined
+        ? undefined
+        : requireId("assignmentAttemptId", input.assignmentAttemptId);
     const observer = requireObserver("observer", input.observer);
     const supervision = normalizeSupervision(input.supervision);
     const authorityRef = optionalText("authorityRef", input.authorityRef, 512);
@@ -130,6 +140,7 @@ export function registerOperation(
         const differences: string[] = [];
         if (existing.taskId !== taskId) differences.push("taskId");
         if (existing.launchToken !== launchToken) differences.push("launchToken");
+        if (existing.assignmentAttemptId !== assignmentAttemptId) differences.push("assignmentAttemptId");
         if (!sameOwner(existing.owner, owner)) {
             differences.push(`owner (${describeOwnerDiff(existing.owner, owner)})`);
         }
@@ -151,6 +162,20 @@ export function registerOperation(
             return { operation: existing, created: false };
         }
         assertTaskAvailable();
+        if (assignmentAttemptId !== undefined) {
+            const binding = getRow(ctx, `SELECT b.owner_json, o.assignment_id AS terminal_assignment_id
+                FROM assignment_attempts a
+                JOIN assignment_bindings b ON b.assignment_id = a.assignment_id
+                LEFT JOIN assignment_outcomes o ON o.assignment_id = a.assignment_id
+                WHERE a.attempt_id = ?`, assignmentAttemptId);
+            const capturedOwner = binding && columnJson<OwnerIdentity>(binding, "owner_json");
+            if (!binding || !capturedOwner || !sameOwner(capturedOwner, owner)) {
+                throw new StoreError("foreign-owner", "Operation owner must match the captured owner of a registered assignment attempt.");
+            }
+            if (binding.terminal_assignment_id !== null) {
+                throw new StoreError("validation", "A terminal assignment cannot register a new operation.");
+            }
+        }
 
         const at = ctx.now();
         try {
@@ -158,10 +183,10 @@ export function registerOperation(
                 ctx,
                 `INSERT INTO operations (
                     operation_id, task_id, launch_token,
-                    owner_kind, owner_session_id, owner_workspace, owner_branch_id, owner_goal_id,
+                    owner_kind, owner_session_id, owner_workspace, owner_branch_id, owner_goal_id, assignment_attempt_id,
                     observer_kind, observer_version, supervision_json, supervision_host_id, authority_ref, intent_ref,
                     phase, health, health_reason, terminal_revision, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'active', NULL, 0, ?, ?)`,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'active', NULL, 0, ?, ?)`,
                 operationId,
                 taskId,
                 launchToken,
@@ -170,6 +195,7 @@ export function registerOperation(
                 owner.workspace,
                 owner.branchId ?? null,
                 owner.goalId ?? null,
+                assignmentAttemptId ?? null,
                 observer.kind,
                 observer.version,
                 supervision ? JSON.stringify(supervision) : null,
@@ -432,8 +458,32 @@ export function listOperations(
         params.push(requireId("taskId", filter.taskId));
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
-    return getRows(ctx, `SELECT * FROM operations ${where} ORDER BY created_at, operation_id`, ...params)
-        .map(mapOperation);
+    return getRows(ctx, `SELECT *, EXISTS(SELECT 1 FROM coordinator_state s WHERE s.key = 'result-supervision-v1:' || operations.operation_id) AS result_managed FROM operations ${where} ORDER BY created_at, operation_id`, ...params)
+        .map(row => ({ ...mapOperation(row), resultManaged: Number(row.result_managed) === 1 }));
+}
+
+export function listAssignmentCleanupOperations(
+    ctx: StoreContext,
+    limit: number,
+    afterOperationId?: string,
+): OperationRecord[] {
+    const requested = requireCounter("limit", limit);
+    if (requested === 0) throw new StoreError("validation", "Invalid limit: must be at least 1");
+    const cursor = afterOperationId === undefined ? "" : requireId("afterOperationId", afterOperationId);
+    // Seek the partial index in cursor order rather than sorting all running operations.
+    return getRows(ctx, `SELECT op.*, EXISTS(SELECT 1 FROM coordinator_state s
+            WHERE s.key = 'result-supervision-v1:' || op.operation_id) AS result_managed
+        FROM operations op INDEXED BY operations_assignment_cleanup
+        JOIN assignment_attempts a ON a.attempt_id = op.assignment_attempt_id
+        JOIN assignment_outcomes o ON o.assignment_id = a.assignment_id
+        WHERE op.assignment_attempt_id IS NOT NULL AND op.operation_id > ?
+            AND (op.terminal_revision = 0 OR op.terminal_outcome = 'lost'
+                OR EXISTS (SELECT 1 FROM operation_evidence e WHERE e.operation_id = op.operation_id
+                    AND e.terminal_revision = op.terminal_revision AND e.kind = 'terminal-record'
+                    AND e.summary LIKE '%groupCleanup=unproven%'))
+            AND NOT EXISTS (SELECT 1 FROM coordinator_state s WHERE s.key = 'assignment-cleanup-verified:' || op.operation_id)
+        ORDER BY op.operation_id LIMIT ?`, cursor, Math.min(requested, ASSIGNMENT_CLEANUP_PAGE_MAX))
+        .map(row => ({ ...mapOperation(row), resultManaged: Number(row.result_managed) === 1 }));
 }
 
 /** Running operations assigned to one supervising host, using the phase/host index. */
@@ -443,9 +493,9 @@ export function listRunningSupervisedBy(
 ): OperationRecord[] {
     return getRows(
         ctx,
-        "SELECT * FROM operations WHERE phase = 'running' AND supervision_host_id = ? ORDER BY created_at, operation_id",
+        "SELECT *, EXISTS(SELECT 1 FROM coordinator_state s WHERE s.key = 'result-supervision-v1:' || operations.operation_id) AS result_managed FROM operations WHERE phase = 'running' AND supervision_host_id = ? ORDER BY created_at, operation_id",
         requireId("hostId", hostId),
-    ).map(mapOperation);
+    ).map(row => ({ ...mapOperation(row), resultManaged: Number(row.result_managed) === 1 }));
 }
 
 function listOutboxForRevision(

@@ -174,7 +174,9 @@ async function existingDaemon(t: TestContext, serverDir: string, announced = hel
   });
 }
 
-describe("managed remote connect", { concurrency: false, timeout: 60_000 }, () => {
+// Twenty serial installation fixtures can exceed a minute on compatibility runners.
+// This is the suite deadline, not an individual remote operation timeout.
+describe("managed remote connect", { concurrency: false, timeout: 120_000 }, () => {
   for (const mode of ["disabled", "older CLI default"] as const) {
     it(`preserves registered startup when managed installation is ${mode}`, { skip: mode === "older CLI default" && PI_VERSION === "1.2.0" }, async t => {
       const f = await fixture(t, true);

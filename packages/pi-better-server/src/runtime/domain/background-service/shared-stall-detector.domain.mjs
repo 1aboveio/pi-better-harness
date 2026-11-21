@@ -1,0 +1,37 @@
+// Generated fixed launch domain from packages/pi-better-background-tasks/src/shared-stall-detector.ts. Do not edit directly.
+export const DEFAULT_STALL_THRESHOLDS = Object.freeze({
+    quietMs: 60_000,
+    stallMs: 5 * 60_000,
+});
+function positiveMs(value, fallback) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+/** Normalize caller config and ensure quiet never exceeds the stall threshold. */
+export function resolveStallThresholds(partial) {
+    const quietMs = positiveMs(partial?.quietMs, DEFAULT_STALL_THRESHOLDS.quietMs);
+    const stallMs = positiveMs(partial?.stallMs, DEFAULT_STALL_THRESHOLDS.stallMs);
+    return { quietMs: Math.min(quietMs, stallMs), stallMs: Math.max(quietMs, stallMs) };
+}
+/**
+ * Classify the age of observable progress. This is deliberately observational:
+ * it does not claim a live process is broken and never performs recovery.
+ */
+export function observeStall(input) {
+    const thresholds = resolveStallThresholds(input.thresholds);
+    const observedAt = input.lastProgressAt ?? input.startedAt;
+    if (typeof observedAt !== "number" || !Number.isFinite(observedAt)) {
+        return { state: "unknown", thresholds };
+    }
+    const ageMs = Math.max(0, input.now - observedAt);
+    if (input.exempt) {
+        return { state: ageMs >= thresholds.quietMs ? "quiet" : "healthy", observedAt, ageMs, thresholds };
+    }
+    if (ageMs >= thresholds.stallMs) {
+        return { state: "stalled", observedAt, ageMs, thresholds };
+    }
+    if (ageMs >= thresholds.quietMs) {
+        return { state: "quiet", observedAt, ageMs, thresholds };
+    }
+    return { state: "healthy", observedAt, ageMs, thresholds };
+}

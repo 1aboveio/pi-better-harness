@@ -1,0 +1,78 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "reviewed-inbox-deferral-integrated-local-checks-pass",
+  "head": "3deab6be4b2d7ee13a55e98056fb128feef2be7e",
+  "headKind": "Tested integration merge; later report-only commit does not change implementation or tests.",
+  "parents": ["994352f2adf66dc08f330fe372db09705776dbd9", "44604696998c0be78ac1b0b0ab227e4bd253fa15"],
+  "standingOrders": [],
+  "modelReadback": { "session": "sa_mwkb0p9t_17", "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "source": "Actual session JSONL initial model/thinking records reread this turn; PI_MODEL and PI_SESSION_ID agree." },
+  "integration": {
+    "method": "Local fetch of exact reviewed802 object, ordinary no-ff merge with manual per-intent conflict resolution; no reset/rebase/force or whole-side conflict resolution.",
+    "fetchCommand": "git fetch /Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/802 44604696998c0be78ac1b0b0ab227e4bd253fa15",
+    "fetchExit": 0,
+    "mergeCommand": "git merge --no-ff --no-commit 44604696998c0be78ac1b0b0ab227e4bd253fa15",
+    "mergeInitialExit": 1,
+    "conflicts": "Canonical AssignmentInbox constructor and generated copies; adjacent WorkReadModel getter/observation initialization condition.",
+    "resolution": [
+      "Canonical inbox preserves805 entityPrefix filtering, separate background_inbox/assignment_inbox aliases and existing initialized-schema read-only fast path. Wrap acquisition/schema construction in802 owned-cleanup guard; ATTACH/DETACH use that exact existing alias, never another participant or borrowed owner. Regenerate all copies through existing scripts.",
+      "Keep expanded805 Background registry/change metrics; adopt802 observationInitialized gate requiring checkpoint and assignment reader, including null/unknown metrics while unavailable and existing repair-tick-only permission.",
+      "Incoming exclusive/corrupt assignment-inbox tests require exact composed aliases main/background_inbox/log_checkpoints, preserving the independently owned Background participant while still excluding failed assignment_inbox. No extra connection or weaker alias membership check.",
+      "History regression asserts initial rebuilding and awaits normal reconcile before every unchanged original ready/degraded/repaired-ready/history-inventory assertion. No recovery assertion removed or loosened."
+    ],
+    "generatedSync": "Both existing coordinator and runtime-domain synchronization scripts succeeded; a repeated synchronization left all11 integration files byte-identical. LogCheckpoints exactly matches reviewed802.",
+    "ancestry": "Both reviewed44604696998c0be78ac1b0b0ab227e4bd253fa15 and accepted57b56add23ba31d4103ae04bc771195a2455ece5 are merge ancestors."
+  },
+  "initialFailures": [
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/checkpoint-deferral.test.ts packages/pi-better-server/test/runtime-background-inputs.test.ts packages/pi-better-server/test/query-bootstrap.test.ts packages/operation-coordinator/tests/assignment-observation.test.ts",
+      "exit": 1,
+      "result": "21/23 pass. Two incoming tests expected only main/log_checkpoints; composed805 correctly also retains background_inbox. Exact fixture alias expectations corrected; no production failure masked.",
+      "evidence": ".private-805/logs/inbox-parent-components.log"
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test --test-name-pattern '^repaired legacy watch releases its degraded poll' packages/pi-better-server/test/runtime-background-history-regressions.test.ts",
+      "exit": 1,
+      "result": "Both variants fail their initial eager-ready premise at line32 before reaching recovery. New deferred-inbox gate correctly reports rebuilding; ordinary initialization added before original recovery assertions.",
+      "evidence": ".private-805/logs/inbox-parent-history.log"
+    }
+  ],
+  "checks": [
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/checkpoint-deferral.test.ts packages/pi-better-server/test/runtime-background-inputs.test.ts packages/pi-better-server/test/query-bootstrap.test.ts packages/operation-coordinator/tests/assignment-observation.test.ts",
+      "exit": 0, "passed": 23, "failed": 0, "skipped": 0,
+      "coverage": "All9 actual SQLite checkpoint/inbox cases,5 assignment observation cases,5 bootstrap cases and4 Background input/ownership/idle/deadline cases, including accepted57b56 constructor fixture. Actual exclusive assignment-inbox lock: only repair ticks replenish attempt permission, unavailable cursor remains unknown, source coverage not ready/verified empty, caller deadline under400ms, same-owner recovery publishes updated recipient outcome. Schema contention cleans only newly acquired alias; corruption stays degraded without retry.",
+      "evidence": ".private-805/logs/inbox-parent-components-green.log"
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test --test-name-pattern '^repaired legacy watch releases its degraded poll' packages/pi-better-server/test/runtime-background-history-regressions.test.ts",
+      "exit": 0, "passed": 2, "failed": 0, "skipped": 0,
+      "coverage": "Original history inactive and active degraded-poll latch recovery variants, with every original source/readiness/no-extra-inventory assertion.",
+      "evidence": ".private-805/logs/inbox-parent-history-green.log"
+    },
+    {
+      "command": "npm run test --workspace packages/pi-better-background-tasks -- src/runtime.test.ts -t 'defaults command watchers|keeps explicit watcher timeouts|shared observation resumes|holds the state clock|real state change|JSON key order|redraw-only|every poll fails|fingerprint and state clock|still finishes'",
+      "exit": 0, "passed": 10, "unselected": 43,
+      "coverage": "Existing timeout/default, watch scheduling and semantic progress clocks, including owned one-second watch not accelerated by shared-observation resumes.",
+      "evidence": ".private-805/logs/inbox-parent-poll.log"
+    },
+    {
+      "command": "npm run typecheck --workspace packages/pi-better-server --workspace packages/pi-better-subagents --workspace packages/pi-better-background-tasks --workspace packages/pi-better-goal",
+      "exit": 0, "coverage": "All four affected package typechecks pass.",
+      "evidence": ".private-805/logs/inbox-parent-types.log"
+    },
+    { "command": "node .private-805/navigator-widget-premise-check.mjs", "exit": 0, "coverage": "Actual accepted navigator fixture helper remains pending until required scoped widget publication; controlled dependency proof, not native UI acceptance.", "evidence": ".private-805/logs/inbox-parent-widget.log" },
+    { "command": "node .private-805/status-log-premise-check.mjs", "exit": 0, "coverage": "Accepted readiness predicate rejects premature/foreign/failed evidence and accepts exact successful status/log checkpoint; no native CLI replay.", "evidence": ".private-805/logs/inbox-parent-readiness.log" },
+    { "command": "node .private-805/scripts2-phase-check.mjs", "exit": 0, "coverage": "All77 protected original SSH assertion/wait ASTs unchanged; controlled lifecycle first-error/teardown diagnostics retained.", "evidence": ".private-805/logs/inbox-parent-phases.log" },
+    { "command": "Read-only byte comparisons against994352f2 for accepted fixtures and source/diagnostic fences", "exit": 0, "coverage": "Background inputs, navigator publication fixture, observed-waits readiness, SSH durability diagnostics, poll runtime, server BackgroundObservation, launch context and startup-owner diagnostic byte-identical.", "evidence": ".private-805/logs/inbox-parent-preserved.log" },
+    { "command": "Repeat node scripts/sync-operation-coordinator.mjs and node scripts/sync-runtime-domain.mjs with byte comparison; compare LogCheckpoints to reviewed446", "exit": 0, "evidence": ".private-805/logs/inbox-parent-sync-check.log" },
+    { "command": "git diff --check HEAD; git diff --cached --check; node --check packages/operation-coordinator/assignment-inbox.mjs; node --check packages/pi-better-subagents/tests/navigator_close_extension_path.test.mjs", "exit": 0 },
+    { "command": "git merge-base --is-ancestor 44604696998c0be78ac1b0b0ab227e4bd253fa15 HEAD; git merge-base --is-ancestor 57b56add23ba31d4103ae04bc771195a2455ece5 HEAD", "exit": 0 }
+  ],
+  "remaining": [
+    "BackgroundObservation eager attachment remains unchanged, owned by802's new continuation; no duplicate deferral implementation here and no claim this fixes the08f Mac background_inbox failure.",
+    "Coordinator owns push and exact-head native/full-CI qualification and waits. Local Node24.21.0 is not canonical24.14.1; these focused component checks do not claim native/CI qualification.",
+    "Earlier failed/cancelled original-case evidence and counters remain retained; no new native SSH/readiness workflow pass inferred from controlled fixture checks."
+  ],
+  "boundaries": "No global poll, new timer/retry/busy-timeout/connection policy, deadline extension, physical2/2/2 or control16/query8/repair8-total32 relaxation, ownership/source/token/recipient/outcome fence weakening, restricted native/socket/process/probe/admission replay, shared runtime/settings/permission changes, push/PR/CI dispatch/wait. Existing resources used."
+}

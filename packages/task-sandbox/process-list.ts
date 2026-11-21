@@ -8,6 +8,7 @@ import { maybeBuildSandboxCommand, type SandboxWritePolicy } from "../sandbox-co
 import type { TaskFileController } from "./files.ts";
 
 export const PROCESS_LIST_TOOL = "process_list";
+export const PROCESS_ACCESS_OFF = "Sandbox: Process access is Off. Enable Read in /sandbox.";
 
 const EXECUTABLE = "/usr/bin/pgrep";
 const MAX_STDOUT = 1024 * 1024;
@@ -138,10 +139,15 @@ function run(file: string, argv: string[], cwd: string, home: string, signal?: A
     });
 }
 
-export function createProcessListToolDefinition(cwd: string, controller: TaskFileController, access: () => "off" | "read") {
+export function createProcessListToolDefinition(
+    cwd: string,
+    controller: TaskFileController,
+    access: () => "off" | "read",
+    accessDenied: () => string = () => PROCESS_ACCESS_OFF,
+) {
     let identity: string | undefined;
     const checkAccess = () => {
-        if (access() !== "read") throw new Error("Sandbox: Process access is Off. Enable Read in /sandbox.");
+        if (access() !== "read") throw new Error(accessDenied());
     };
     const checkExecutable = () => {
         const current = executableIdentity();

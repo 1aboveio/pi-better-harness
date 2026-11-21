@@ -1,0 +1,92 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "local-causal-parent-integration-complete-native-qualification-pending",
+  "head": "6abc15e65144ac5e7ebe39227944c27a890c97ed",
+  "priorHead": "46a0712f5e5e6c9f871860ece67d35797d02b777",
+  "standingOrders": [],
+  "approvedParents": {
+    "803": "8b6a7bd76f71bfd83249d6ec0ea6f0bb22ee5006",
+    "802": "3e85651821bf98e3d96fa9535da5e45d46ccc267"
+  },
+  "modelReadback": { "session": "sa_mwkb0p9t_17", "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "source": "Actual session JSONL model_change/thinking_level_change records reread this turn." },
+  "merges": [
+    {
+      "head": "0f9a6ac95f085e9b6d8e8b469f5681744ea14817",
+      "incoming": "8b6a7bd76f71bfd83249d6ec0ea6f0bb22ee5006",
+      "method": "Ordinary --no-ff merge with explicit semantic resolution; exact committed objects imported from existing803 clone.",
+      "conflicts": [
+        { "file": "packages/pi-better-server/src/runtime/read-model.ts", "resolution": "Preserved805's reviewed refreshAssignments then schema-preflight-before-repair-reset ordering; retained both source memoization and assignment restoration state." },
+        { "file": "scripts/reload-ssh-durability.e2e.test.mjs", "resolution": "Added803 bounded server-handoff tail capture while preserving existing legacy callback capture, first-error/body/teardown phases and all original77 assert/wait calls." }
+      ],
+      "causalSource": "BackgroundObservation now publishes verified rows/signature/status before invoking history.repairOperation; the history source fence sees repaired current metadata instead of latching the previous degraded reason. Existing authority and partial-source degradation remain.",
+      "logs": [".private-805/logs/causal-803-fetch.log", ".private-805/logs/causal-803-merge.log", ".private-805/logs/causal-803-commit.log"]
+    },
+    {
+      "head": "6abc15e65144ac5e7ebe39227944c27a890c97ed",
+      "incoming": "3e85651821bf98e3d96fa9535da5e45d46ccc267",
+      "method": "Ordinary --no-ff merge, exact object from existing802 clone; prior merge history retained.",
+      "conflicts": [
+        { "file": "packages/pi-better-server/src/runtime/read-model.ts", "resolution": "Retained802 explicit unsupportedAssignmentRevision OR preflight fence after805 refreshAssignments, before repair reset. Last verified rows/pending work and ready-restoration rules remain." }
+      ],
+      "timingCleanup": "Retains exact owned exit receipt, PID/start/group validation, finalizer plus callback-settlement acknowledgement and original two-second teardown budget; removal only follows quiescence. Bootstrap import-phase capture retained, not mistaken for readiness.",
+      "logs": [".private-805/logs/causal-802-fetch.log", ".private-805/logs/causal-802-merge.log", ".private-805/logs/causal-802-commit.log"]
+    }
+  ],
+  "proof": [
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test --test-name-pattern '^repaired legacy watch releases its degraded poll' packages/pi-better-server/test/runtime-background-history-regressions.test.ts",
+      "exit": 0, "passed": 2, "failed": 0, "skipped": 0,
+      "result": "Original803 causal regression passes for history inactive and active: partial JSON remains genuinely degraded, source fence rejects unverified source, completed repaired watch becomes ready, no new history inventory.",
+      "evidence": ".private-805/logs/causal-history-latch.log"
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/runtime-unsupported-schema.test.ts",
+      "exit": 0, "passed": 1, "failed": 0, "skipped": 0,
+      "result": "Original merged schema regression passes: zero repair scans for unchanged rejected schema, retained rows/hints, no idle writes/revisions, real revision restoration and exact deferred entity application.",
+      "evidence": ".private-805/logs/causal-schema.log"
+    },
+    {
+      "command": "node --import tsx --test packages/pi-better-subagents/tests/owned-exit.test.mjs packages/pi-better-server/test/query-bootstrap.test.ts",
+      "exit": 0, "passed": 10, "failed": 0, "skipped": 0,
+      "result": "Includes original802 timing finalization/callback-write settlement before group proof, exact owner registration, urgent/ordinary callback settlement and bootstrap cause/import-phase preservation.",
+      "evidence": ".private-805/logs/causal-owned-bootstrap.log"
+    },
+    {
+      "command": "node --import tsx --test packages/pi-better-server/test/work-client-recovery.test.ts packages/pi-better-subagents/tests/launch-context.test.mjs packages/pi-better-subagents/tests/capacity_gate.test.mjs packages/pi-better-goal/test/activity-notifications.test.ts",
+      "exit": 0, "passed": 39, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/causal-composition.log"
+    },
+    {
+      "command": "npm exec --workspace packages/pi-better-background-tasks -- vitest run src/managed-frontend.test.ts",
+      "exit": 0, "passed": 11, "failed": 0,
+      "evidence": ".private-805/logs/causal-frontend.log"
+    },
+    {
+      "command": "npm run typecheck --workspace packages/pi-better-server --workspace packages/pi-better-subagents --workspace packages/pi-better-background-tasks --workspace packages/pi-better-goal",
+      "exit": 0, "packages": 4,
+      "evidence": ".private-805/logs/causal-types.log"
+    },
+    { "command": "node .private-805/status-log-premise-check.mjs", "exit": 0, "result": "Existing exact structured-evidence readiness fix remains; premature/foreign/failed evidence rejected", "evidence": ".private-805/logs/causal-readiness.log" },
+    { "command": "node .private-805/scripts2-phase-check.mjs", "exit": 0, "result": "All77 original SSH assertion/wait ASTs unchanged; four phase-discrimination checks pass", "evidence": ".private-805/logs/causal-phase-check.log" },
+    { "command": "node scripts/sync-runtime-domain.mjs", "exit": 0, "evidence": ".private-805/logs/causal-sync.log" },
+    { "command": "node --check scripts/reload-ssh-durability.e2e.test.mjs", "exit": 0 },
+    { "command": "node --check scripts/observed-waits.integration.test.mjs", "exit": 0 },
+    { "command": "node --check packages/pi-better-subagents/tests/timing_lifecycle.test.mjs", "exit": 0 },
+    { "command": "cmp packages/pi-better-subagents/index.ts packages/pi-better-server/src/runtime/domain/subagents/index.ts", "exit": 0 },
+    { "command": "cmp packages/pi-better-background-tasks/src/managed-frontend.ts packages/pi-better-server/src/runtime/domain/background-service/managed-frontend.ts", "exit": 0 },
+    { "command": "git diff 46a0712f --exit-code -- scripts/observed-waits.integration.test.mjs", "exit": 0, "result": "Exact own readiness correction unchanged." },
+    { "command": "git merge-base --is-ancestor 8b6a7bd76f71bfd83249d6ec0ea6f0bb22ee5006 HEAD", "exit": 0 },
+    { "command": "git merge-base --is-ancestor 3e85651821bf98e3d96fa9535da5e45d46ccc267 HEAD", "exit": 0 },
+    { "command": "git merge-base --is-ancestor 46a0712f HEAD", "exit": 0 },
+    { "command": "git diff --cached --check; git ls-files -u", "exit": 0, "result": "No whitespace errors or unresolved entries before merge commit." }
+  ],
+  "summary": { "focusedTestsPassed": 63, "packageTypechecksPassed": 4, "localMergeComplete": true, "remoteMergeabilityVerified": false, "newNativeAcceptanceClaimed": false },
+  "failuresThisTurn": "Both ordinary merge commands initially exited1 for the named conflicts; all resolved semantically before checks/commit. No validation failures or cleanup errors. No RED rerun required for integrating exact reviewed causal source; original latch regression reused unmodified.",
+  "remaining": [
+    "Coordinator must publish exact integrated head and qualify original real SSH callback/reload and timing-lifecycle cases. These component passes do not claim new native/full-CI success.",
+    "Original3252 SQLite ATTACH lock and pre-test npm-ci cancellation remain distinct retained failures; timing-cleanup integration is not attributed as a SQLite fix without evidence.",
+    "Earlier scripts3 native checkpoint failure still needs exact integrated qualification, despite preserved local readiness RED/GREEN; all historical counters and failed evidence remain."
+  ],
+  "boundaries": "No force/rebase/reset, deadline/assertion/gate/resource16/8/8-total32 or physical2/2/2 change, shared-runtime/settings action, restricted CLI/socket/process/runner replay, push/PR/CI dispatch or external wait. Only requested committed parents and semantic merge resolution added; existing registered resources reused."
+}

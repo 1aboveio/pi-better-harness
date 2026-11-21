@@ -45,6 +45,8 @@
  * to be durable.
  */
 export { SCHEMA_VERSION, TERMINAL_WAIT_PHASES } from "./src/types.ts";
+export type { TaskCancellationIntent, TaskCancellationRequest } from "./src/task-cancellation.ts";
+export { cancellationCredential } from "./src/task-cancellation.ts";
 export type { AssignmentOutcomeInput, AssignmentOutcomeRecord } from "./src/assignment-outcomes.ts";
 export type {
     AcknowledgeDisposition,
@@ -116,3 +118,5 @@ export { StoreError, isStoreError } from "./src/errors.ts";
 export type { StoreErrorCode } from "./src/errors.ts";
 export { openStore, ownerDiff } from "./src/store.ts";
 export type { Store } from "./src/store.ts";
+
+export type { ParentCallbackScope, ParentCallbackPage, RecentBackgroundTerminalPage } from './src/background-parent-callbacks.ts';

@@ -9,7 +9,7 @@ import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:p
 import { canonicalizePath, compileWritePolicy, isRemovableUnderWrite, type SandboxPermissions } from "../sandbox-core/index.ts";
 import { createTaskFileOperations, type TaskFileController } from "./files.ts";
 import { APPLY_PATCH_TOOL, createApplyPatchToolDefinition } from "./apply-patch.ts";
-import { createProcessListToolDefinition, PROCESS_LIST_TOOL } from "./process-list.ts";
+import { createProcessListToolDefinition, PROCESS_ACCESS_OFF, PROCESS_LIST_TOOL } from "./process-list.ts";
 import { createRunApplicationToolDefinition, RUN_APPLICATION_TOOL } from "./application.ts";
 import { createTaskExecutor, directShellInterpreter, SHELL_SCRIPTS_OFF, shellInterpreterOff } from "./exec.ts";
 import type { SandboxDiagnostics, DiagnosticResource } from "../sandbox-diagnostics/index.ts";
@@ -123,6 +123,7 @@ export function installTaskTools(pi: ExtensionAPI, options: {
     applyPatch?: boolean;
     /** Human-controlled access to the fixed read-only inventory adapter. */
     processAccess?: () => "off" | "read";
+    processAccessDenied?: () => string;
     /** Build the admitted bash definition from the confined operations (default: the SDK bash tool). */
     bashDefinition?: (cwd: string, operations: BashOperations) => ReturnType<typeof createBashToolDefinition>;
     diagnostics?: Pick<SandboxDiagnostics, "observe">;
@@ -149,7 +150,7 @@ export function installTaskTools(pi: ExtensionAPI, options: {
         pi.registerTool(own(createEditToolDefinition(cwd, { operations: files.edit })));
         pi.registerTool(own(options.bashDefinition ? options.bashDefinition(cwd, bash) : createBashToolDefinition(cwd, { operations: bash })));
         pi.registerTool(own(createRunApplicationToolDefinition(cwd, commandExec)) as any);
-        pi.registerTool(own(createProcessListToolDefinition(cwd, controller, options.processAccess ?? (() => "off"))) as any);
+        pi.registerTool(own(createProcessListToolDefinition(cwd, controller, options.processAccess ?? (() => "off"), processAccessDenied)) as any);
         if (options.applyPatch) {
             const patchFiles = createTaskFileOperations(controller, options.diagnostics, "apply_patch");
             pi.registerTool(own(createApplyPatchToolDefinition(cwd, {
@@ -158,6 +159,7 @@ export function installTaskTools(pi: ExtensionAPI, options: {
             }, PiCodingAgent.withFileMutationQueue)) as any);
         }
     };
+    const processAccessDenied = options.processAccessDenied ?? (() => PROCESS_ACCESS_OFF);
     register(options.cwd);
     pi.on("user_bash", () => ({ operations: bash }));
     pi.on("tool_call", (event, ctx) => {
@@ -194,7 +196,7 @@ export function installTaskTools(pi: ExtensionAPI, options: {
                     }
                 }
                 if (event.toolName === PROCESS_LIST_TOOL && options.processAccess?.() !== "read") {
-                    return blocked("Sandbox: Process access is Off. Enable Read in /sandbox.", "process-inspection");
+                    return blocked(processAccessDenied(), "process-inspection");
                 }
                 return;
             }

@@ -45,6 +45,7 @@ import {
     isValidTaskId,
     normalizeToolDescriptors,
     normalizeWaitForOperationsResult,
+    requiresParkCheckpoint,
     operationBridgeErrorBody,
     redactSecret,
     validateCheckpointParams,
@@ -107,6 +108,7 @@ export type OperationCheckpointEvidenceCheck = (
 ) => boolean | Promise<boolean>;
 
 export interface OperationRunHandlers {
+    report_assignment_result?: OperationToolHandler;
     bg_task_spawn?: OperationToolHandler;
     bg_task_watch?: OperationToolHandler;
     bg_task_status?: OperationToolHandler;
@@ -137,6 +139,8 @@ export interface OperationRunRegistration {
      * against the parent's own records before the checkpoint handler runs.
      */
     checkpointEvidenceValidator?: OperationCheckpointEvidenceCheck;
+    /** Synchronous parent diagnostic hook after authentication, before handler dispatch. */
+    onToolRejected?: (error: OperationBridgeErrorBody, context: OperationRequestContext) => void;
     handlers: OperationRunHandlers;
     /** Test-only or pre-provisioned token. Production should omit this and use the generated value. */
     token?: string;
@@ -207,6 +211,7 @@ interface FrozenRegistration {
     tools: readonly OperationToolDescriptor[];
     ownership: OperationOwnershipCheck;
     checkpointEvidenceValidator?: OperationCheckpointEvidenceCheck;
+    onToolRejected?: OperationRunRegistration["onToolRejected"];
     handlers: OperationRunHandlers;
     descriptor: OperationBridgeDescriptor;
 }
@@ -399,6 +404,7 @@ export async function createOperationBridgeHost(
                 ? { checkpointEvidenceValidator: registration.checkpointEvidenceValidator }
                 : {}),
             handlers: Object.freeze({ ...registration.handlers }),
+            onToolRejected: registration.onToolRejected,
             descriptor,
         });
         runs.set(registration.runId, {
@@ -696,13 +702,17 @@ export async function createOperationBridgeHost(
             return;
         }
         const params = (envelope.params ?? {}) as JsonRecord;
+        const reject = (error: OperationBridgeErrorBody): void => {
+            run.registration.onToolRejected?.(error, makeContext(run, envelope, new AbortController().signal));
+            sendError(socket, envelope.id, error);
+        };
         if (findSecretField(params)) {
-            sendError(socket, envelope.id, { code: "authority-field", message: "request contains a credential-shaped field" });
+            reject({ code: "authority-field", message: "request contains a credential-shaped field" });
             return;
         }
         const bridgeEnvironmentField = findBridgeEnvironmentKey(params);
         if (bridgeEnvironmentField) {
-            sendError(socket, envelope.id, {
+            reject({
                 code: "bridge-env-leak",
                 message: `${bridgeEnvironmentField} is a parent bridge credential and cannot be passed to a launched task`,
             });
@@ -711,7 +721,7 @@ export async function createOperationBridgeHost(
         }
         const authorityField = findAuthorityField(params);
         if (authorityField) {
-            sendError(socket, envelope.id, {
+            reject({
                 code: "authority-field",
                 message: `caller field ${authorityField} would override parent authority`,
             });
@@ -720,7 +730,7 @@ export async function createOperationBridgeHost(
         }
         const schema = validateJsonSchema(descriptor.parameters, params);
         if (!schema.ok) {
-            sendError(socket, envelope.id, {
+            reject({
                 code: "schema-invalid",
                 message: `${schema.path}: ${schema.message}`,
             });
@@ -890,7 +900,7 @@ export async function createOperationBridgeHost(
             if (tool === "wait_for_operations") {
                 const wait = normalizeWaitForOperationsResult(cloned);
                 if (!wait.ok) throw new OperationBridgeError("response-invalid", wait.message);
-                if (wait.result.park && !wait.result.settled) {
+                if (requiresParkCheckpoint(wait.result)) {
                     run.issuedWaits.set(wait.result.waitId, {
                         generation: wait.result.generation,
                         requestId: envelope.id,
@@ -1131,6 +1141,7 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
 
 function normalizeCapabilities(value: OperationBridgeCapabilities): OperationBridgeCapabilities {
     if (!value || typeof value !== "object") throw new Error("capabilities are required");
+    if (value.reportAssignment !== undefined && typeof value.reportAssignment !== "boolean") throw new Error("capabilities.reportAssignment must be boolean");
     const background = value.background;
     if (!background || typeof background !== "object") throw new Error("capabilities.background is required");
     const booleans = ["spawn", "watch", "status", "log"] as const;
@@ -1141,6 +1152,7 @@ function normalizeCapabilities(value: OperationBridgeCapabilities): OperationBri
         if (typeof value[key] !== "boolean") throw new Error(`capabilities.${key} must be boolean`);
     }
     return Object.freeze({
+        ...(value.reportAssignment !== undefined ? { reportAssignment: value.reportAssignment } : {}),
         background: Object.freeze({
             spawn: background.spawn,
             watch: background.watch,

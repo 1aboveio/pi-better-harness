@@ -10,6 +10,7 @@ import { OPERATION_RESUME_ADMISSION, operationOwnerMatches, type OperationResume
 
 import {
   collectActivitySnapshot,
+  hasUnverifiedActivity,
   planBackgroundDrainWake,
   summarizeActiveBackground,
   terminalAttentionSignature,
@@ -45,7 +46,7 @@ import { collectSubagentActivity } from "./subagents.js";
 import { currentWorkflowOwner, ISSUE_WORKFLOW_SKILLS, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
 import { completionGate, pauseGate, schedulerWaitUntil, operationResumeSchedulerGate } from "./workflow-gates.js";
 import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
-import { requestTaskContext } from "./task-context.js";
+import { canStartGoalFromOutcome, OUTCOME_ACCEPTED_EVENT, requestTaskContext, type OutcomeAcceptedEvent } from "./task-context.js";
 import {
   EVENT_ACTIVITY,
   EVENT_READY,
@@ -56,6 +57,7 @@ import {
   type ActivitySnapshot,
   type BackgroundActivityProvider,
   type BackgroundWorkItem,
+  type BackgroundProviderSnapshot,
   type GoalSnapshot,
 } from "./types.js";
 
@@ -125,10 +127,10 @@ const GOAL_ACTIONS: readonly AutocompleteItem[] = [
   { value: "resume", label: "resume", description: "Resume the paused goal" },
   { value: "clear", label: "clear", description: "Remove the current goal" },
   { value: "complete", label: "complete", description: "Mark the current goal complete" },
-  { value: "settings", label: "settings", description: "Inspect or persist goal continuation, conversational resume, and Escape pause controls" },
+  { value: "settings", label: "settings", description: "Inspect or persist goal continuation, resume, Escape pause, and Outcome auto-start controls" },
 ];
 
-const GOAL_SETTINGS = ["auto-continue", "conversational-resume", "pause-on-escape"] as const;
+const GOAL_SETTINGS = ["auto-continue", "conversational-resume", "pause-on-escape", "auto-start-from-outcome"] as const;
 
 export function goalArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
   const prefix = argumentPrefix.trimStart().toLowerCase();
@@ -203,6 +205,7 @@ export function finishedSinceQuestion(
   activeAtStart: ReadonlyMap<string, BackgroundWorkItem>,
   snapshot: ActivitySnapshot,
 ): BackgroundWorkItem[] {
+  if (hasUnverifiedActivity(snapshot)) return [];
   const stillActive = activeItemsByKey(snapshot);
   const current = new Map<string, BackgroundWorkItem>();
   for (const provider of snapshot.providers) {
@@ -244,7 +247,7 @@ function formatGoal(
   goal: GoalSnapshot | null,
   continuation: ReturnType<typeof currentContinuationState> = null,
   stall = observeGoalStall(goal, continuation),
-  preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true },
+  preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false },
   permissions?: PermissionHold | null,
 ): string {
   const settings = formatPreferences(preferences);
@@ -285,6 +288,7 @@ function formatPreferences(preferences: GoalPreferences): string {
     `Automatic continuation setting: ${preferences.autoContinue ? "on" : "off"}${WAKE_DISABLED ? " (disabled by environment)" : ""}`,
     `Conversational resume setting: ${preferences.conversationalResume ? "on" : "off"}`,
     `Pause on Esc setting: ${preferences.pauseOnEscape ? "on" : "off"}`,
+    `Auto-start Goal setting: ${preferences.autoStartFromOutcome ? "on" : "off"}`,
   ].join("\n");
 }
 
@@ -308,6 +312,12 @@ export default function (pi: ExtensionAPI): void {
   initializeNavigatorPanels(pi);
   const providers = new Map<string, BackgroundActivityProvider>();
   const providerUnsubscribers = new Map<string, () => void>();
+  const providerCache = new Map<string, BackgroundProviderSnapshot>();
+  const providerCacheSequences = new Map<string, number>();
+  const dirtyProviders = new Set<string>();
+  const providerBindings = new Map<string, number>();
+  const compatibilityReadAt = new Map<string, number>();
+  let providerDeadline: ReturnType<typeof setTimeout> | undefined;
   providers.set("subagents", {
     id: "subagents",
     label: "Subagents",
@@ -317,6 +327,7 @@ export default function (pi: ExtensionAPI): void {
   let currentCtx: ExtensionContext | undefined;
   let executionGeneration = 0;
   let operationAdmissionRevision = 0;
+  const operationAdmissionScope = {};
   let agentGeneration = -1;
   let turnGeneration = 0;
   let escapeAbortSuppression: { session: number; turn: number; execution: number } | undefined;
@@ -341,7 +352,7 @@ export default function (pi: ExtensionAPI): void {
   let terminalInputIsEditor: (() => boolean) | undefined;
   let uiPromptDepth = 0;
   let lastAgentEvidence: ContinuationEvidence | null = null;
-  let preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true };
+  let preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false };
   /** Background items active when each pending blocking question started, keyed by tool call id. */
   const pendingQuestions = new Map<string, Map<string, BackgroundWorkItem>>();
 
@@ -396,7 +407,7 @@ export default function (pi: ExtensionAPI): void {
     ctx.ui.notify(message, type);
   };
 
-  const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource): void => {
+  const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource, bindOutcome = false): void => {
     executionGeneration += 1;
     lastAgentEvidence = null;
     const previous = getGoal(ctx);
@@ -405,7 +416,7 @@ export default function (pi: ExtensionAPI): void {
     // Bridge lifecycle after the raw Goal entry is durable. Harness may own the
     // structured outcome, but Goal still owns its trigger, clocks, pauses, and wakes.
     if (!previous || previous.goalId !== goal.goalId) {
-      requestTaskContext(pi, "start", goal);
+      requestTaskContext(pi, bindOutcome ? "bind" : "start", goal);
     } else if (goal.status === "complete") {
       requestTaskContext(pi, "complete", goal);
     } else if (goal.status === "paused" || goal.status === "budgetLimited") {
@@ -620,7 +631,7 @@ export default function (pi: ExtensionAPI): void {
     if (!auditIsCurrent() || !isPokeable(goal)) return;
     if (!boundCommandReady(goal, ctx)) return;
     const snapshot = await publishSnapshot(ctx);
-    if (!snapshot || !auditIsCurrent() || snapshot.foregroundRunning || snapshot.backgroundRunning) return;
+    if (!snapshot || !auditIsCurrent() || snapshot.foregroundRunning || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) return;
 
     continuationQueuedFor = goal.goalId;
     const content = kind === "background-drained"
@@ -666,14 +677,54 @@ export default function (pi: ExtensionAPI): void {
     return goal;
   };
 
-  const publishSnapshot = async (ctx: ExtensionContext): Promise<ActivitySnapshot | null> => {
+  const publishSnapshot = async (
+    ctx: ExtensionContext, explicit = true,
+    readMode: "cached" | "connect" = getGoal(ctx) || getWorkflow(ctx) ? "connect" : "cached",
+  ): Promise<ActivitySnapshot | null> => {
+    const cachedOnly = readMode === "cached";
+    bindProviderSubscriptions();
     const execution = executionGeneration;
     const sequence = ++snapshotSequence;
-    const snapshot = await collectActivitySnapshot(ctx, providers.values(), foregroundRunning);
+    const snapshot = await collectActivitySnapshot(ctx, [...providers.values()].map(provider => ({
+      ...provider,
+      getActivity: async () => {
+        const cached = providerCache.get(provider.id);
+        if (cached && !provider.onActivityChanged && !explicit && Date.now() < (compatibilityReadAt.get(provider.id) ?? 0)) return cached;
+        if (cached && provider.onActivityChanged && !dirtyProviders.has(provider.id) &&
+            !(typeof cached.nextDeadline === "number" && cached.nextDeadline <= Date.now())) return cached;
+        dirtyProviders.delete(provider.id);
+        let value: BackgroundProviderSnapshot;
+        try {
+          value = await provider.getActivity(ctx, { cachedOnly });
+          if (provider.activityVersion === 1 && value.nextDeadline !== null &&
+              (typeof value.nextDeadline !== "number" || !Number.isFinite(value.nextDeadline))) {
+            throw new Error(`${provider.id}: activity v1 requires an explicit nextDeadline`);
+          }
+        } catch (error) {
+          // A failed fresh read must not resurrect an older verified cache.
+          if (execution === executionGeneration && providers.get(provider.id) === provider &&
+              sequence >= (providerCacheSequences.get(provider.id) ?? 0)) {
+            providerCacheSequences.set(provider.id, sequence);
+            providerCache.delete(provider.id);
+          }
+          throw error;
+        }
+        // Explicit inspections may finish before an older notification read.
+        if (execution === executionGeneration && providers.get(provider.id) === provider &&
+            sequence >= (providerCacheSequences.get(provider.id) ?? 0)) {
+          providerCacheSequences.set(provider.id, sequence);
+          if (cachedOnly && value.coverage === "unverified") providerCache.delete(provider.id);
+          else providerCache.set(provider.id, value);
+          if (!provider.onActivityChanged) compatibilityReadAt.set(provider.id, Date.now() + POLL_INTERVAL_MS);
+        }
+        return value;
+      },
+    })), foregroundRunning);
     if (execution !== executionGeneration) return null;
     if (sequence < lastAppliedSnapshotSequence) return latestSnapshot;
     lastAppliedSnapshotSequence = sequence;
     latestSnapshot = snapshot;
+    armProviderDeadline();
 
     const goal = currentGoalSnapshot(ctx);
     const wakePlan = planBackgroundDrainWake(backgroundDrainTracker, goal, snapshot);
@@ -686,7 +737,7 @@ export default function (pi: ExtensionAPI): void {
       scheduleIdleContinuation(goal, ctx, "background-drained", snapshot);
     }
 
-    if (snapshot.foregroundRunning || snapshot.backgroundRunning) {
+    if (snapshot.foregroundRunning || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) {
       clearIdleContinuation();
     }
 
@@ -730,7 +781,7 @@ export default function (pi: ExtensionAPI): void {
     }
     collecting = true;
     const session = sessionGeneration;
-    void publishSnapshot(ctx).finally(() => {
+    void publishSnapshot(ctx, false).finally(() => {
       if (session !== sessionGeneration) return;
       collecting = false;
       if (collectionPending) {
@@ -759,14 +810,48 @@ export default function (pi: ExtensionAPI): void {
   };
 
   const syncPollingState = (): void => {
+    bindProviderSubscriptions();
+    armProviderDeadline();
     const ctx = currentCtx;
     const goal = ctx ? currentGoalSnapshot(ctx) : null;
-    if (ctx && (isPokeable(goal) || latestSnapshot?.backgroundRunning === true)) {
+    if (ctx && [...providers.values()].some(provider => !provider.onActivityChanged) &&
+        (isPokeable(goal) || latestSnapshot?.backgroundRunning === true)) {
       startPolling();
     } else {
       stopPolling();
     }
   };
+
+  function armProviderDeadline(): void {
+    if (providerDeadline) clearTimeout(providerDeadline);
+    providerDeadline = undefined;
+    if (!currentCtx) return;
+    const goal = getGoal(currentCtx);
+    if (isForegroundBusy(currentCtx) || (goal && (!isPokeable(goal) || currentContinuationState(currentCtx, goal.goalId)?.blocked))) return;
+    const deadlines = [...providerCache.values()].map(value => value.nextDeadline)
+      .filter((value): value is number => typeof value === "number" && value > Date.now());
+    if (!deadlines.length) return;
+    const execution = executionGeneration;
+    providerDeadline = setTimeout(() => {
+      providerDeadline = undefined;
+      if (execution === executionGeneration) collectIfPossible();
+    }, Math.min(MAX_TIMER_DELAY_MS, Math.max(1, Math.min(...deadlines) - Date.now())));
+    providerDeadline.unref?.();
+  }
+
+  function bindProviderSubscriptions(): void {
+    for (const provider of providers.values()) {
+      if (!provider.onActivityChanged || providerBindings.get(provider.id) === executionGeneration) continue;
+      providerUnsubscribers.get(provider.id)?.();
+      const execution = executionGeneration;
+      providerBindings.set(provider.id, execution);
+      providerUnsubscribers.set(provider.id, provider.onActivityChanged(() => {
+        if (!currentCtx || execution !== executionGeneration || providers.get(provider.id) !== provider) return;
+        dirtyProviders.add(provider.id);
+        collectIfPossible();
+      }, currentCtx));
+    }
+  }
 
   const installGoalWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) {
@@ -855,7 +940,12 @@ export default function (pi: ExtensionAPI): void {
     if (goal && currentContinuationState(ctx, goal.goalId)?.blocked) { held("Goal continuation requires human resume"); return; }
     if (goal && !boundCommandReady(goal, ctx)) { held("Bound workflow is not ready"); return; }
     const workflow = getWorkflow(ctx);
-    void (workflow ? operationResumeSchedulerGate(ctx.sessionManager.getBranch(), workflow) : Promise.resolve({ ok: true as const, waitUntil: undefined })).then((gate) => {
+    if (workflow) request.pending?.();
+    void (workflow ? operationResumeSchedulerGate(ctx.sessionManager.getBranch(), workflow, {
+      scope: operationAdmissionScope,
+      revision: JSON.stringify([request.owner.sessionId, request.owner.workspace, request.owner.branchId, goal?.goalId, revision, preferencesRevision]),
+      getEntries: () => ctx.sessionManager.getBranch(),
+    }) : Promise.resolve({ ok: true as const, waitUntil: undefined, isCurrent: () => true })).then((gate) => {
       if (ctx !== currentCtx || revision !== executionGeneration || preferencesRevision !== operationAdmissionRevision || !operationOwnerMatches(currentCtx, request.owner!)) {
         held("Parent execution changed during resume admission"); return;
       }
@@ -866,6 +956,9 @@ export default function (pi: ExtensionAPI): void {
         held("Goal became held during resume admission"); return;
       }
       if (!gate.ok) { held(gate.reason); return; }
+      if (JSON.stringify(getWorkflow(ctx)) !== JSON.stringify(workflow) || !gate.isCurrent()) {
+        held("Bound workflow changed during resume admission"); return;
+      }
       if (gate.waitUntil && gate.waitUntil > Date.now()) { held("Workflow scheduler is waiting"); return; }
       // An in-process capability lets the dispatcher validate this admission
       // after its last await and immediately before releasing execution.
@@ -875,6 +968,7 @@ export default function (pi: ExtensionAPI): void {
         const active = getGoal(ctx);
         if ((request.owner!.goalId ?? null) !== (active?.goalId ?? null)) return false;
         if (JSON.stringify(getWorkflow(ctx)) !== JSON.stringify(workflow)) return false;
+        if (!gate.isCurrent()) return false;
         return !active || (preferences.autoContinue && isPokeable(active)
           && !currentContinuationState(ctx, active.goalId)?.blocked && boundCommandReady(active, ctx));
       };
@@ -888,13 +982,35 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     const accepted = candidate as BackgroundActivityProvider;
+    if (accepted.activityVersion !== undefined && accepted.activityVersion !== 1) return;
+    if (accepted.activityVersion === 1 && typeof accepted.onActivityChanged !== "function") return;
     providerUnsubscribers.get(accepted.id)?.();
     providerUnsubscribers.delete(accepted.id);
     providers.set(accepted.id, accepted);
-    if (typeof accepted.onActivityChanged === "function") {
-      providerUnsubscribers.set(accepted.id, accepted.onActivityChanged(collectIfPossible));
-    }
+    providerCache.delete(accepted.id);
+    providerCacheSequences.set(accepted.id, ++snapshotSequence);
+    dirtyProviders.add(accepted.id);
+    providerBindings.delete(accepted.id);
+    bindProviderSubscriptions();
     if (latestSnapshot) collectIfPossible();
+  });
+
+  const unsubscribeOutcomeAccepted = pi.events.on(OUTCOME_ACCEPTED_EVENT, (value: unknown) => {
+    const ctx = currentCtx;
+    const event = value as Partial<OutcomeAcceptedEvent> | null;
+    if (!preferences.autoStartFromOutcome || !ctx || !event ||
+        typeof event.sessionId !== "string" || event.sessionId !== ctx.sessionManager.getSessionId() ||
+        !canStartGoalFromOutcome(event.outcome)) return;
+    const current = getGoal(ctx);
+    if (current && current.status !== "complete") return;
+    const objective = event.outcome.objective.trim();
+    if (validateObjective(objective)) return;
+    const owner = getWorkflow(ctx);
+    if (owner && !workflowAvailable(owner)) return;
+    const command = owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null;
+    const goal = createGoalSnapshot(objective, null, undefined, command ?? undefined);
+    setGoal(goal, ctx, "runtime", true);
+    resetContinuationState(goal);
   });
 
   const changePreference = async (ctx: ExtensionCommandContext, key: keyof GoalPreferences, enabled: boolean): Promise<void> => {
@@ -906,7 +1022,7 @@ export default function (pi: ExtensionAPI): void {
     if (!previous.autoContinue && preferences.autoContinue) {
       const snapshot = await publishSnapshot(ctx);
       const goal = getGoal(ctx);
-      if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning) {
+      if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning && !hasUnverifiedActivity(snapshot)) {
         scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
       }
     }
@@ -923,7 +1039,20 @@ export default function (pi: ExtensionAPI): void {
     }
   };
   const contribution = { id: "goal", label: "Goal", command: "/goal settings", open: openSettings };
-  const registerSettings = () => pi.events.emit("harness-settings:register", contribution);
+  const autoStartControl = {
+    id: "goal-auto-start",
+    label: "Auto-start Goal",
+    values: ["Off", "On"],
+    get: () => preferences.autoStartFromOutcome ? "On" : "Off",
+    async change(value: string, ctx: ExtensionCommandContext) {
+      if (value !== "On" && value !== "Off") throw new Error("Invalid Auto-start Goal mode.");
+      await changePreference(ctx, "autoStartFromOutcome", value === "On");
+    },
+  };
+  const registerSettings = () => {
+    pi.events.emit("harness-settings:register", contribution);
+    pi.events.emit("harness-settings:register", autoStartControl);
+  };
   const unsubscribeSettingsRequest = pi.events.on("harness-settings:request", registerSettings);
   registerSettings();
 
@@ -943,13 +1072,14 @@ export default function (pi: ExtensionAPI): void {
         const [, setting, mode, ...extra] = trimmed.split(/\s+/);
         if (setting !== undefined && (!GOAL_SETTINGS.includes(setting as typeof GOAL_SETTINGS[number]) ||
             (mode !== "on" && mode !== "off") || extra.length > 0)) {
-          notifyGoal(ctx, "Usage: /goal settings [auto-continue|conversational-resume|pause-on-escape on|off]", "warning");
+          notifyGoal(ctx, "Usage: /goal settings [auto-continue|conversational-resume|pause-on-escape|auto-start-from-outcome on|off]", "warning");
           return;
         }
         if (setting !== undefined) {
           try {
             const key = setting === "auto-continue" ? "autoContinue"
-              : setting === "conversational-resume" ? "conversationalResume" : "pauseOnEscape";
+              : setting === "conversational-resume" ? "conversationalResume"
+                : setting === "pause-on-escape" ? "pauseOnEscape" : "autoStartFromOutcome";
             await changePreference(ctx, key, mode === "on");
           } catch (error) {
             notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
@@ -1143,7 +1273,7 @@ export default function (pi: ExtensionAPI): void {
     description: "Show foreground/background activity known to pi-better-goal",
     handler: async (_args, ctx) => {
       currentCtx = ctx;
-      const snapshot = await publishSnapshot(ctx);
+      const snapshot = await publishSnapshot(ctx, true, "connect");
       if (!snapshot) return;
       ctx.ui.notify(formatSnapshot(snapshot), "info");
     },
@@ -1201,7 +1331,7 @@ export default function (pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       currentCtx = ctx;
-      const snapshot = await publishSnapshot(ctx);
+      const snapshot = await publishSnapshot(ctx, true, "connect");
       if (!snapshot) {
         return { content: [{ type: "text", text: "Activity changed during collection; inspect again." }], details: { stale: true } };
       }
@@ -1226,12 +1356,15 @@ export default function (pi: ExtensionAPI): void {
     lastAgentEvidence = null;
     collecting = false;
     collectionPending = false;
+    providerCache.clear();
+    dirtyProviders.clear();
     currentCtx = ctx;
     foregroundRunning = !ctx.isIdle();
     agentLoopActive = false;
     try {
       preferences = readGoalPreferences();
     } catch (error) {
+      preferences = { ...preferences, autoStartFromOutcome: false };
       notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
     }
     const restoredGoal = getGoal(ctx);
@@ -1259,15 +1392,34 @@ export default function (pi: ExtensionAPI): void {
         return undefined;
       });
     }
-    const snapshot = await publishSnapshot(ctx);
+    const snapshot = await publishSnapshot(ctx, true, "cached");
     if (!snapshot) return;
     syncPollingState();
-    if (restoredGoal?.status === "active" && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning && !snapshot.backgroundRunning) {
-      scheduleIdleContinuation(restoredGoal, ctx, "continuation");
+    if (restoredGoal?.status === "active") {
+      const resumeIfIdle = (activity: ActivitySnapshot | null) => {
+        if (activity && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning &&
+            !activity.backgroundRunning && !hasUnverifiedActivity(activity)) {
+          scheduleIdleContinuation(restoredGoal, ctx, "continuation");
+        }
+      };
+      if (hasUnverifiedActivity(snapshot)) {
+        // A restored Goal still needs verified work evidence. Let Pi finish binding while it arrives.
+        void publishSnapshot(ctx, true, "connect").then(resumeIfIdle);
+      } else resumeIfIdle(snapshot);
     }
   });
 
   pi.on("ui_prompt_start", () => { uiPromptDepth += 1; });
+  pi.on("session_tree", async (_event, ctx) => {
+    executionGeneration += 1;
+    clearIdleContinuation();
+    backgroundDrainTracker = null;
+    continuationQueuedFor = null;
+    providerCache.clear();
+    currentCtx = ctx;
+    await publishSnapshot(ctx);
+    syncPollingState();
+  });
   pi.on("ui_prompt_end", () => { uiPromptDepth = Math.max(0, uiPromptDepth - 1); });
 
   pi.on("input", async (event, ctx) => {
@@ -1361,7 +1513,9 @@ export default function (pi: ExtensionAPI): void {
     }
 
     if (!isPokeable(goal)) return;
-    const backgroundInstruction = snapshot.backgroundRunning
+    const backgroundInstruction = hasUnverifiedActivity(snapshot)
+      ? " Background activity is unverified. Do not infer completion or drained work from missing activity; inspect a verified observation before completing the goal."
+      : snapshot.backgroundRunning
       ? ` The goal still has delegated background work running (${summarizeActiveBackground(snapshot)}). Foreground idleness alone is not goal completion; keep any structured plan current and do not mark verification, the plan, or the goal complete until every relevant delegated task reaches a terminal state and its result or failure has been inspected and integrated.`
       : "";
     if (harnessPresent) {
@@ -1480,7 +1634,7 @@ export default function (pi: ExtensionAPI): void {
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
     const goal = getGoal(ctx);
-    if (!isPokeable(goal) || snapshot.backgroundRunning) {
+    if (!isPokeable(goal) || snapshot.backgroundRunning || hasUnverifiedActivity(snapshot)) {
       return;
     }
     // A run the scheduler says is only waiting (a retry is due at a known time) is not stuck: wake at
@@ -1521,6 +1675,7 @@ export default function (pi: ExtensionAPI): void {
       updatedAt: Math.floor(now / 1000),
     });
     if (blocked) {
+      syncPollingState();
       refreshGoalWidget?.();
       if (ctx.hasUI) {
         ctx.ui.notify(
@@ -1559,6 +1714,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
     if (typeof unsubscribeOperationAdmission === "function") unsubscribeOperationAdmission();
+    if (typeof unsubscribeOutcomeAccepted === "function") unsubscribeOutcomeAccepted();
 
     executionGeneration += 1;
     sessionGeneration += 1;
@@ -1568,6 +1724,11 @@ export default function (pi: ExtensionAPI): void {
     terminalInputIsEditor = undefined;
     uiPromptDepth = 0;
     stopPolling();
+    if (providerDeadline) clearTimeout(providerDeadline);
+    providerDeadline = undefined;
+    for (const off of providerUnsubscribers.values()) off();
+    providerUnsubscribers.clear();
+    providerCache.clear();
     foregroundRunning = false;
     pendingQuestions.clear();
     clearIdleContinuation();

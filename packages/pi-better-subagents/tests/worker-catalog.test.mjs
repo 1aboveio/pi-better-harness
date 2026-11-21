@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { planWorkers } from '../worker-catalog.ts';
@@ -149,8 +150,9 @@ test('standalone CLI resolves shared roles without any Pi runtime installed', (t
     writeFileSync(join(portable, 'package.json'), '{"type":"module"}');
     mkdirSync(join(portable, 'node_modules'));
     const repoRoot = resolve(packageRoot, '../..');
+    const require = createRequire(import.meta.url);
     for (const name of ['tsx', 'yaml', 'proper-lockfile']) {
-        symlinkSync(join(repoRoot, 'node_modules', name), join(portable, 'node_modules', name), 'dir');
+        symlinkSync(dirname(require.resolve(`${name}/package.json`)), join(portable, 'node_modules', name), 'dir');
     }
     const result = spawnSync(process.execPath, [join(portable, 'agent-catalog.mjs')], { input: JSON.stringify(request), encoding: 'utf8', cwd: root });
     assert.equal(result.status, 0, result.stderr + result.stdout);

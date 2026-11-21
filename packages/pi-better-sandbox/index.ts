@@ -36,19 +36,35 @@ import {
     publishForegroundSandboxPolicy,
 } from "./events.ts";
 import { installTaskTools, runtimeCodeRoot } from "./shared-task-sandbox.ts";
-import { discoverTrustedTools } from "./shared-task-tools.ts";
+import { toolPackage } from "./shared-task-tools.ts";
 import { writeSandboxDefault } from "./preferences.ts";
-import { readPermissionSettings, writePermissionSettings } from "./permission-settings.ts";
+import { loadPermissionSettings, readPermissionSettings, writePermissionSettings } from "./permission-settings.ts";
 import { defaultSandboxPermissions, describeLoosening, type SandboxPermissionSettings } from "./permissions.ts";
 import { openPermissionsPage } from "./permissions-page.ts";
 import { appendSessionPermissions, readSessionPermissions } from "./session-permissions.ts";
-import { createSubagentExecutionAdmission, requestsSubagentSandbox } from "./subagent-admission.ts";
+import { createSubagentExecutionAdmission } from "./subagent-admission.ts";
 
 import { ForegroundSandboxController, type ForegroundSandboxStatus } from "./state.ts";
 import { SandboxDiagnostics, diagnosticPackageVersion } from "./shared-sandbox-diagnostics.ts";
 
 export default function piBetterSandbox(pi: ExtensionAPI): void {
     const controller = new ForegroundSandboxController();
+    let permissionSource: ReturnType<typeof loadPermissionSettings>["source"] | "this session branch" | "settings load failed" | "session not started" = "session not started";
+    const mainProcessAccess = () => {
+        const main = controller.permissionSettings()?.main;
+        return main && !main.enabled ? "read" : main?.processAccess ?? "off";
+    };
+    const mainProcessSummary = () => {
+        const main = controller.permissionSettings()?.main;
+        const setting = main?.processAccess === "read" ? "Read" : "Off";
+        if (main && !main.enabled) {
+            return `Main process_list: allowed by policy (Main confinement Off; retained Process access: ${setting}, from ${permissionSource}).`;
+        }
+        return `Main process_list: Process access is ${setting} (${permissionSource}).`;
+    };
+    const mainProcessOffHelp = () => permissionSource === "session not started"
+        ? "Wait for Pi to finish starting the session."
+        : "Set Main > Process access to Read in /sandbox; edits here apply without a restart. Subagents settings do not control this tool.";
     let diagnosticsWarning: ((error: unknown) => void) | undefined;
     const diagnostics = new SandboxDiagnostics({ context: "foreground",
         version: diagnosticPackageVersion(new URL("./package.json", import.meta.url)),
@@ -67,7 +83,8 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     const subagentExecutionAdmission = createSubagentExecutionAdmission(pi);
     const boundary = installTaskTools(pi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
         admitExtensionTool: (name, input, sourcePath) => backgroundAdmission(name, input, sourcePath) !== undefined,
-        processAccess: () => controller.permissionSettings()?.main.processAccess ?? "off",
+        processAccess: mainProcessAccess,
+        processAccessDenied: () => `Sandbox: ${mainProcessSummary()} ${mainProcessOffHelp()}`,
         diagnostics,
         trustedSources: [ownEntry,
             join(dirname(ownEntry), "../../extensions/sandbox/index.ts"),
@@ -84,8 +101,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
         const backgroundLaunch = isBackgroundLaunch(name, event.input);
         const admission = backgroundAdmission(name, event.input);
         const child = status.subagentPermissions;
-        if ((name === "subagent_spawn" || name === "subagent_spawn_batch") && child?.commands &&
-            (child.enabled || requestsSubagentSandbox(name, event.input)) &&
+        if ((name === "subagent_spawn" || name === "subagent_spawn_batch") && child?.enabled && child.commands &&
             (child.shell === false || child.commandTimeoutSeconds != null) && !subagentExecutionAdmission(name)) {
             return block("Sandbox: subagent launch has no compatible application execution adapter. Update pi-better-subagents before using Shell scripts or Command time limit restrictions.", "tool-admission");
         }
@@ -134,8 +150,16 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
         try {
             const sessionPermissions = readSessionPermissions(ctx);
             hasSessionPolicy = sessionPermissions !== undefined;
-            settings = sessionPermissions ?? readPermissionSettings();
+            if (sessionPermissions) {
+                settings = sessionPermissions;
+                permissionSource = "this session branch";
+            } else {
+                const loaded = loadPermissionSettings();
+                settings = loaded.settings;
+                permissionSource = loaded.source;
+            }
         } catch (error) {
+            permissionSource = "settings load failed";
             controller.beginSession(ctx.cwd, true);
             const message = `Sandbox permissions could not be loaded: ${error instanceof Error ? error.message : String(error)}`;
             settings.main.enabled = true;
@@ -196,10 +220,20 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
         await openPermissionsPage(ctx, {
             getConfig: () => controller.permissionSettings() ?? defaultSandboxPermissions(),
-            // Trusted-tool candidates: what this Pi has actually registered, by owning package.
-            discoverTools: () => discoverTrustedTools(pi.getAllTools?.() ?? []),
+            toolLoading: () => {
+                const active = new Set(pi.getActiveTools());
+                const main = pi.getAllTools().filter(tool => active.has(tool.name))
+                    .map(tool => ({ name: tool.name, provider: toolPackage(tool)?.package ?? tool.sourceInfo?.source ?? "Pi" }))
+                    .sort((a, b) => a.name.localeCompare(b.name));
+                let subagents: { name: string; provider: string }[] | undefined;
+                pi.events.emit("pi-better-subagents:default-tool-loading", {
+                    reply: (rows: { name: string; provider: string }[]) => { subagents = rows; },
+                });
+                return subagents === undefined ? { main } : { main, subagents };
+            },
             change: (settings) => {
                 appendSessionPermissions(pi, settings);
+                permissionSource = "this session branch";
                 announce(controller.setPermissionSettings(settings));
             },
             save: (settings) => writePermissionSettings(settings),
@@ -233,6 +267,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
                 const settings = controller.permissionSettings() ?? defaultSandboxPermissions();
                 settings.main.enabled = enabled;
                 appendSessionPermissions(pi, settings);
+                permissionSource = "this session branch";
                 return enabled ? controller.enable() : controller.disable();
             },
             setDefault: (enabled) => {
@@ -241,8 +276,16 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
                 writePermissionSettings(settings);
                 writeSandboxDefault(enabled ? "on" : "off");
                 appendSessionPermissions(pi, settings);
+                permissionSource = "this session branch";
                 return controller.setPermissionSettings(settings);
             },
+            describeProcessAccess: (status) => [
+                mainProcessSummary(),
+                status.state === "unavailable" || status.state === "failed" ? "Main sandbox cannot launch the inventory helper." : undefined,
+                mainProcessAccess() === "off" ? mainProcessOffHelp() : undefined,
+                status.state === "enabled" && status.backend === "macos-seatbelt" ? "macOS Seatbelt can deny absolute /bin/ps even with Process Read." : undefined,
+                "Edits in this session apply immediately. Saved defaults from another session apply to new sessions; a saved branch policy survives reload.",
+            ].filter(Boolean).join("\n"),
             openPermissions: openSettings,
         }),
     });

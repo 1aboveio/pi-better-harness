@@ -1,0 +1,92 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "supported-fixture-premise-correction-committed-sqlite-cause-unresolved",
+  "sourceCommit": "8830df86a34ab702c6d6f0391c0729ff18450d7c",
+  "priorHead": "1aa77f83",
+  "testedCIHead": "3252bbea65f7956dce677e284b9f4bc91bed8c5e",
+  "run": 44216074249,
+  "standingOrders": [],
+  "modelReadback": { "session": "sa_mwkb0p9t_17", "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "source": "Actual session JSONL model_change and thinking_level_change entries read this turn." },
+  "scripts3": {
+    "job": 134506237743,
+    "step": "Root script tests",
+    "firstFailure": {
+      "case": "cancelling a parked assignment after the production continuation CLI is published stops the held real child and never acknowledges",
+      "caseNumber": 43,
+      "error": "Expected /\"step\":\"status-log\"/; actual trace contains only park/spawn and park/wait",
+      "location": "scripts/observed-waits.integration.test.mjs:1359:16",
+      "evidenceDir": ".private-805/logs",
+      "evidence": ".private-805/logs/ci3252-scripts3-retrieved.log:571-592"
+    },
+    "sourceFacts": [
+      "Original heldLog wait accepts any text containing bg_task_status and bg_task_log, then immediately reads child-trace.jsonl and asserts status-log.",
+      "Tool catalog, prompts and tool-call start events can mention both names before either read finishes or the provider emits its checkpoint.",
+      "The real offline provider writes mode=resume/step=status-log with exact taskId/waitId/generation before issuing the two tools; its ack gate holds the next model turn after the results. The existing no-ack assertion and cancellation/writer fences remain authoritative."
+    ],
+    "red": {
+      "command": "node .private-805/status-log-premise-check.mjs",
+      "exit": 1,
+      "error": "tool names in startup/prompt text are not completed reads or a provider checkpoint: actual startup message string returned, expected undefined",
+      "evidence": ".private-805/logs/independent-status-log-red.log",
+      "method": "TypeScript AST extracts and executes the exact original heldLog predicate in an isolated VM. Synthetic actual-format log mentions both names while the trace has only park/wait; the old predicate incorrectly releases. No native CLI/process/socket path executed."
+    },
+    "correction": "Keep the existing30-second wait and every assertion, but release only after successful structured tool_execution_end events for both tools AND a resume/status-log checkpoint matching the actual operation task and wait ID/generation. Parse JSON records, ignoring incomplete/non-JSON log lines, instead of accepting arbitrary tool-name substrings.",
+    "green": {
+      "command": "node .private-805/status-log-premise-check.mjs",
+      "exit": 0,
+      "evidence": [".private-805/logs/independent-status-log-green.log", ".private-805/logs/independent-status-log-final.log"],
+      "cases": ["startup/prompt names rejected", "completed reads without checkpoint rejected", "foreign task checkpoint rejected", "exact checkpoint plus successful completed reads accepted", "failed log read rejected"],
+      "scope": "Proves a concrete premature fixture predicate and its correction. Does not by itself prove every detail of the original native3252 scheduling race or qualify the real cancellation/continuation workflow."
+    },
+    "preservation": "AST comparison proves205 existing assert calls and all16 waitUntil labels/deadlines unchanged in the integration file. The original no-ack, exact result inspection, writer, cancellation, evidence-pin and no-duplicate continuation assertions remain."
+  },
+  "sqlite": {
+    "job": 134506237722,
+    "lane": "pi-1x-compat (1/3)",
+    "firstFailure": {
+      "case": "real SQLite runner obligations exclude terminal history, unread waits and corrupt records",
+      "caseNumber": 216,
+      "error": "runtime-unhealthy: read worker failed: Error: database is locked",
+      "producerStack": "new LogCheckpoints log-checkpoints.ts:26:65 -> new WorkReadModel read-model.ts:140:24 -> query-worker.mjs:32:11",
+      "statement": "ATTACH DATABASE ? AS log_checkpoints, not the later auto_vacuum setter",
+      "evidence": ".private-805/logs/ci3252-compat1.log:2003-2025"
+    },
+    "sourceFacts": "The original fixture opens a direct WorkReadModel and a WorkQueryExecutor on the same root before starting the real runner and reconciling. Both derived owners attach root/runtime-log-checkpoints.sqlite. The log identifies the failing worker statement but not the other holder's transaction/lock kind or its precise lifetime.",
+    "focusedCheck": {
+      "command": "node --import tsx --test --test-name-pattern '^checkpoint readers open under another derived' packages/pi-better-server/test/runtime-log-checkpoints.test.ts",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "evidence": ".private-805/logs/independent-checkpoint-reservation.log",
+      "coverage": "Existing real in-process SQLite guard: readers open under another derived owner's RESERVED writer; attempted writes still fail under that reservation; missing-schema bootstrap remains a visible lock failure; duplicate/failed attachments preserve borrowed-owner query tables and recover after contention. No worker/socket/runner test replay."
+    },
+    "notFixed": "This existing guard passes. An induced exclusive-lock refusal would be expected SQLite behavior, not proof of the original holder or a justified busy-timeout/retry policy. No speculative fixture reorder, extra timeout, catch-empty, false-ready, swallowed write error or checkpoint code change selected.",
+    "overlap": "Existing802 owns LogCheckpoints cleanup/auto_vacuum corrections87b22c5b/1755de90 and retains prior original lifecycle lock history. Read sibling802 source/history only; no changes to its files, no duplicate repair or assertion waiver. The newly proven exact ATTACH location is returned for coordination."
+  },
+  "verification": [
+    { "command": "node --check scripts/observed-waits.integration.test.mjs", "exit": 0 },
+    { "command": "TypeScript AST comparison of HEAD and edited scripts/observed-waits.integration.test.mjs", "exit": 0, "result": "205 assert calls identical;16 wait labels/deadlines identical", "evidence": ".private-805/logs/independent-guards-preserved.log" },
+    { "command": "node .private-805/scripts2-phase-check.mjs", "exit": 0, "result": "All77 original SSH fixture assert/wait ASTs unchanged and existing four phase-discrimination checks pass", "evidence": ".private-805/logs/independent-77-preservation.log" },
+    { "command": "git diff --check", "exit": 0 }
+  ],
+  "sourceCoordination": {
+    "onlyChangedSource": "scripts/observed-waits.integration.test.mjs heldLog readiness predicate",
+    "notTouched": ["803822d Background server/frontend handoff instrumentation", "scripts/reload-ssh-durability.e2e.test.mjs", "LogCheckpoints production source", "shared runtime/settings/guards", "CI workflow and gates"],
+    "coordinatorAction": "Carry only this narrow fixture correction; do not infer a callback-handoff or SQLite repair from it. Existing803822d qualification remains independently owned."
+  },
+  "progress": {
+    "newLocalVerifiedCheckpoint": "Exact original cancellation-fixture predicate has discriminating RED/GREEN for premature tool-name matches; guards unchanged. SQLite failing ATTACH statement isolated and existing real reserved-writer guard verified passing.",
+    "nativeAcceptanceAdvanced": false,
+    "sqliteCauseOrFixEstablished": false,
+    "scripts3WholeNativeCauseProven": false,
+    "history": "All original3252/04375/004/10f failures and counters remain; no unrelated pass, diagnostics, commit or local test resets nonconvergence."
+  },
+  "remaining": [
+    "Coordinator qualifies original scripts3 cancellation fixture on the corrected exact readiness predicate; local predicate proof is not native acceptance.",
+    "SQLite ATTACH contention remains unresolved until actual holder/transaction timing is established through approved evidence. No native worker replay or lock-policy change performed.",
+    "npm-ci cancellation occurred before tests and remains infrastructure-pending; no blind product fix.803 callback-handoff evidence remains with existing queued44218275359, not duplicated."
+  ],
+  "boundaries": "No push/PR/CI dispatch/external wait, shared runtime/settings change, denied native replay via another Node/path/channel/identity, source-authority/writer/token/recipient fence weakening, resource16/8/8-total32 or physical2/2/2 change. Same registered private resources and Node24.21 versus required24.14.1 distinction retained."
+}

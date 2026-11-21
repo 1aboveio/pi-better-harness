@@ -1,0 +1,144 @@
+/** Installed as the final inline extension by the trusted native launcher. */
+import { SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { canonicalizePath, describeSandboxSupport } from "./shared-sandbox-core.ts";
+import { GUARDED_TASK_TOOLS, installTaskTools, TASK_BUILTINS } from "./shared-task-sandbox.ts";
+import { parseTaskPolicy, RUN_APPLICATION, selectTaskTools, type TaskPolicy } from "./task-policy.ts";
+import { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } from "./permission-policy.ts";
+import { failureDispositionTool, intentBashDefinition } from "./child-incidents.ts";
+import { DISPOSITION_TOOL } from "./incident-model.ts";
+import { SandboxDiagnostics, diagnosticPackageVersion } from "./shared-sandbox-diagnostics.ts";
+import { fileURLToPath } from "node:url";
+import { claimTaskToolOwner } from "./task-tool-owner.ts";
+import { installChildCodemode } from "./child-codemode.ts";
+import { OPERATION_BRIDGE_TOOL_NAMES } from "./operation-bridge-types.ts";
+
+/** Bridge calls run only through the fixed parent-authenticated adapter, never an arbitrary trusted package. */
+export function operationBridgeToolAllowed(policy: Pick<TaskPolicy, "operationBridge" | "tools">, name: string, sourcePath: string | undefined): boolean {
+    if (!policy.operationBridge || !policy.tools.includes(name) || !(OPERATION_BRIDGE_TOOL_NAMES as readonly string[]).includes(name) || !sourcePath) return false;
+    try { return canonicalizePath(sourcePath) === canonicalizePath(fileURLToPath(new URL("./child-operations.ts", import.meta.url))); }
+    catch { return false; }
+}
+
+const TRUSTED_INLINE_SOURCE = "<inline:task-sandbox>";
+
+function inside(root: string, path: string): boolean {
+    return path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
+}
+
+/**
+ * A trusted extension tool is admitted only when its name AND its canonical
+ * source lie inside the package root the parent recorded, and a network tool
+ * only while Network access is On. Another package registering the same name
+ * is refused.
+ */
+export function trustedToolRefusal(policy: TaskPolicy, name: string, sourcePath: string | undefined): string | undefined {
+    const entry = policy.extensionTools.find((tool) => tool.name === name);
+    if (!entry) return `${name} is not a trusted tool for this run`;
+    if (entry.network && !policy.permissions.network) return `${name} needs Network access, which is Off`;
+    if (!sourcePath || sourcePath.startsWith("<")) return `${name} has no package source`;
+    let canonical: string;
+    try { canonical = canonicalizePath(sourcePath); } catch { return `${name} source cannot be resolved`; }
+    if (!inside(entry.root, canonical)) return `${name} comes from ${sourcePath}, not the trusted package ${entry.package}`;
+    return undefined;
+}
+
+export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (error: unknown) => never, ownedTools = false): void {
+    const policy = parseTaskPolicy(input);
+    const support = describeSandboxSupport();
+    if (!support.supported) throw new Error(`Task sandbox unavailable: ${support.reason}`);
+    const plan = Object.freeze({
+        confined: true as const, profilePath: policy.profilePath,
+        policy: Object.freeze({ writableRoot: policy.root, home: policy.home, permissions: policy.permissions, denyWrite: policy.denyWrite,
+            runtimeCompatibility: true, runtimeWrite: Object.freeze([policy.scratch]) }),
+    });
+    const controller = Object.freeze({ requireLaunchPlan: () => plan });
+    let shellPath: string | undefined;
+    let currentCwd = process.cwd();
+    let diagnosticsWarned = false;
+    const diagnostics = new SandboxDiagnostics({ context: "worker", agentDir: () => policy.agentDir,
+        relay: (report) => { process.stdout.write(`${JSON.stringify(report)}\n`); },
+        version: diagnosticPackageVersion(new URL("./package.json", import.meta.url)),
+        policy: () => ({ permissions: policy.permissions, denyWrite: policy.denyWrite, root: policy.root }),
+        backend: () => support.backend,
+        onError: () => {
+            if (!diagnosticsWarned) process.stderr.write("Sandbox diagnostics collection gap; enforcement unchanged.\n");
+            diagnosticsWarned = true;
+        },
+    });
+    const codemode = policy.tools.includes("codemode") && installChildCodemode(pi, true);
+    const toolApi = ownedTools ? { ...pi, registerTool: claimTaskToolOwner(pi) } : pi;
+    const installBoundary = () => installTaskTools(toolApi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
+        diagnostics,
+        trustedSources: [ownedTools ? fileURLToPath(new URL("./task-tool-owner.ts", import.meta.url)) : TRUSTED_INLINE_SOURCE],
+        // Structured command intent (#315): validated before the confined command runs.
+        bashDefinition: (cwd, operations) => intentBashDefinition(cwd, operations) as any,
+        applyPatch: policy.applyPatch,
+        processAccess: () => policy.permissions.processAccess ?? "off",
+        // The disposition tool performs no file or command I/O; only this inline registration is admitted.
+        // Trusted tools are admitted by name and package (ADR 0009).
+        admitExtensionTool: (name, _input, sourcePath) => ((name === DISPOSITION_TOOL || (name === "codemode" && codemode)) && sourcePath === TRUSTED_INLINE_SOURCE) ||
+            operationBridgeToolAllowed(policy, name, sourcePath) || trustedToolRefusal(policy, name, sourcePath) === undefined,
+    });
+    // Defer owned registrations until after SDK duplicate-name diagnostics.
+    // The final session_start handler still installs and verifies them before activation.
+    let boundary = ownedTools ? undefined : installBoundary();
+    pi.registerTool(failureDispositionTool(() => currentCwd) as any);
+    const profile = Object.freeze({ enabled: true, ...policy.permissions });
+    const status = Object.freeze({
+        state: "enabled", projectRoot: policy.root, writableRoot: policy.root,
+        denyWrite: policy.denyWrite, platform: process.platform, backend: support.backend, executable: support.executable,
+        permissions: profile, subagentPermissions: profile,
+        readPolicy: "restricted", networkPolicy: policy.permissions.network ? "unrestricted" : "blocked",
+        reason: "Immutable child task policy; Pi runtime operations remain trusted.",
+    });
+    pi.events.on(SANDBOX_POLICY_REQUEST_CHANNEL, () => pi.events.emit(SANDBOX_POLICY_CHANNEL, status));
+    pi.on("session_start", (_event, ctx) => {
+        try {
+            shellPath = SettingsManager.create(ctx.cwd, policy.agentDir, { projectTrusted: false }).getShellPath();
+            currentCwd = ctx.cwd;
+            boundary ??= installBoundary();
+            boundary.register(ctx.cwd);
+            const builtins: readonly string[] = policy.applyPatch ? [...TASK_BUILTINS, ...GUARDED_TASK_TOOLS] : TASK_BUILTINS;
+            const known = new Set<string>(builtins);
+            // A newer shared task sandbox may install the guarded application adapter
+            // before its name reaches this vendored builtin list. Admission still runs:
+            // assertInstalled verifies the installed schema identity and source.
+            if (!known.has(RUN_APPLICATION) && pi.getAllTools().some((tool) => tool.name === RUN_APPLICATION)) {
+                known.add(RUN_APPLICATION);
+            }
+            const selected = selectTaskTools(policy, [...known]);
+            boundary.assertInstalled(selected);
+            const inventory = pi.getAllTools();
+            const bridged: string[] = [];
+            if (policy.operationBridge) {
+                for (const name of policy.tools) {
+                    if (!(OPERATION_BRIDGE_TOOL_NAMES as readonly string[]).includes(name)) continue;
+                    const registered = inventory.find(tool => tool.name === name);
+                    if (!registered || !operationBridgeToolAllowed(policy, name, registered.sourceInfo?.path)) {
+                        throw new Error(`Guarded worker operation adapter ${name} is unavailable or has unverified provenance`);
+                    }
+                    bridged.push(name);
+                }
+            }
+            const trusted: string[] = [];
+            const refused: { name: string; reason: string }[] = [];
+            for (const name of policy.tools) {
+                if (builtins.includes(name) || !policy.extensionTools.some((tool) => tool.name === name)) continue;
+                const registered = inventory.find((tool) => tool.name === name);
+                const reason = registered ? trustedToolRefusal(policy, name, registered.sourceInfo?.path) : `${name} was not registered by its package`;
+                if (reason) refused.push({ name, reason }); else trusted.push(name);
+            }
+            const activated = selected.length || trusted.length || bridged.length || codemode
+                ? [...selected, ...trusted, ...bridged, ...(codemode ? ["codemode"] : []), DISPOSITION_TOOL] : selected;
+            pi.setActiveTools(activated);
+            const active = new Set(pi.getActiveTools());
+            if (active.size !== activated.length || activated.some((name) => !active.has(name))) {
+                throw new Error("SDK did not activate the guarded tool set; refusing to start the task.");
+            }
+            pi.events.emit(SANDBOX_POLICY_CHANNEL, status);
+            // A typed lifecycle marker, never inferred from assistant prose.
+            process.stdout.write(`${JSON.stringify({ type: "task_sandbox_ready", root: policy.root, tools: selected,
+                ...(trusted.length ? { trusted } : {}), ...(refused.length ? { refused } : {}) })}\n`);
+        } catch (error) { fatal(error); }
+    });
+}

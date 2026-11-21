@@ -7,6 +7,7 @@ import extension from "./extension-fixture.js";
 import { goalPreferencesPath, readGoalPreferences } from "../src/preferences.js";
 
 type Contribution = { id: string; label: string; command: string; open(ctx: ExtensionCommandContext): Promise<void> };
+type Control = { id: string; label: string; values: string[]; get(): string; change(value: string, ctx: ExtensionCommandContext): Promise<void> };
 const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text,
   bold: (text: string) => text, inverse: (text: string) => text } as Theme;
 
@@ -88,9 +89,24 @@ test("goal settings discovery uses the standalone opener and shared preferences,
   assert.deepEqual(JSON.parse(readFileSync(goalPreferencesPath(), "utf8")), {
     ...unrelated,
     piBetterHarness: { ...unrelated.piBetterHarness, goal: {
-      version: 1, autoContinue: true, conversationalResume: true, pauseOnEscape: true,
+      version: 1, autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false,
     } },
   });
+  assert.deepEqual(entries, []);
+  assert.deepEqual(messages, []);
+
+  const control = registrations.find(item => item.id === "goal-auto-start") as unknown as Control;
+  assert.equal(control.label, "Auto-start Goal");
+  assert.deepEqual(control.values, ["Off", "On"]);
+  assert.equal(control.get(), "Off");
+  await control.change("On", ctx);
+  assert.equal(readGoalPreferences().autoStartFromOutcome, true);
+  await contribution.open(ctx);
+  assert.match(pages.at(-1)!, /Auto-start Goal\s+On/);
+  await commands.get("goal")!.handler("settings auto-start-from-outcome off", ctx);
+  assert.equal(control.get(), "Off", "the Harness control and Goal command share the live preference");
+  await assert.rejects(control.change("invalid", ctx), /Invalid Auto-start Goal mode/);
+  assert.equal(control.get(), "Off");
   assert.deepEqual(entries, []);
   assert.deepEqual(messages, []);
 

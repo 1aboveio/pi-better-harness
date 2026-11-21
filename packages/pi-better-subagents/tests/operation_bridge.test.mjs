@@ -529,7 +529,7 @@ describe("worker operation bridge transport", () => {
     });
 
 
-async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } = {}) {
+async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false, settled = false } = {}) {
     const root = mkdtempSync(join(tmpdir(), "operation-sdk-parking-"));
     const agentDir = join(root, "agent");
     const sessionDir = join(root, "sessions");
@@ -546,22 +546,24 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
         workspace: root,
         authorityReference: "test:real-sdk",
         capabilities: {
-            background: { spawn: false, watch: false, status: false, log: false },
+            background: { spawn: false, watch: false, status: true, log: false },
             wait: true,
-            acknowledge: false,
+            acknowledge: true,
             parking: true,
         },
-        tools: [createToolDescriptor("wait_for_operations")],
+        tools: [createToolDescriptor("wait_for_operations"), createToolDescriptor("bg_task_status"), createToolDescriptor("acknowledge_operation_result")],
         ownership: (taskId) => taskId === "bg_1",
         handlers: {
+            bg_task_status: async () => ({ taskId: "bg_1", text: "retained terminal evidence" }),
+            acknowledge_operation_result: async () => ({ phase: "consumed" }),
             wait_for_operations: async () => ({
                 waitId: "wait-real",
                 generation: 1,
                 phase: "parking",
-                settled: false,
+                settled,
                 park: true,
                 taskIds: ["bg_1"],
-                dependencies: [],
+                dependencies: settled ? [{ taskId: "bg_1", terminalRevision: 1, terminalOutcome: "succeeded" }] : [],
             }),
             checkpoint: async () => { counters.checkpoint += 1; return { recorded: true }; },
             park_failed: async () => { counters.parkFailed += 1; return { recorded: true }; },
@@ -1261,6 +1263,17 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
         const sessionFile = fixture.sessionManager.getSessionFile();
         assert.ok(sessionFile);
         assert.match(readFileSync(sessionFile, "utf8"), /wait_for_operations/);
+    });
+
+    it("parks a settled wait until the active writer has checkpointed and exited", { timeout: 20_000 }, async (t) => {
+        const fixture = await realSdkParkingSession(t, { settled: true });
+        await fixture.session.prompt("Wait for the already settled operation");
+        await fixture.session.waitForIdle();
+        assert.equal(fixture.counters.modelRequests, 1, "the writer must not continue while its wait is parking");
+        assert.equal(fixture.counters.checkpoint, 1);
+        assert.equal(fixture.counters.parkFailed, 0);
+        assert.equal(fixture.counters.shutdowns, 1);
+        assert.deepEqual(fixture.errors, []);
     });
 
     it("refuses parking when a wait shares a real SDK tool batch with another call", { timeout: 20_000 }, async (t) => {

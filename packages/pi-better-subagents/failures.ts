@@ -160,7 +160,8 @@ function exactRuleLeftovers(path: string, prior: FailureState): Set<string> {
         .filter((x) => x.category === "tool" && x.status === "unresolved" && leftover(x.id)).map((x) => x.id));
 }
 /** Scan complete source records, independent of the finite progress/transcript tail. */
-export function collectRunFailures(id: string, cwd: string, terminal = false): FailureState {
+export function collectRunFailures(id: string, cwd: string, terminal = false, assertCurrent: () => void = () => {}): FailureState {
+    assertCurrent();
     const path = failurePath(id);
     let fd: number;
     try { fd = openSync(logPathFor(id), "r"); }
@@ -229,6 +230,7 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
         let oversized = false;
         const buffer = Buffer.alloc(CHUNK);
         while (position < size) {
+            assertCurrent();
             const count = readSync(fd, buffer, 0, Math.min(CHUNK, size - position), position);
             if (!count) break;
             let from = 0;
@@ -251,9 +253,11 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
                                     (row.type === "tool_execution_end" && typeof row.isError !== "boolean" && typeof row.result?.isError !== "boolean" && typeof row.result?.exitCode !== "number") ||
                                     (row.type === "message_end" && (!row.message || typeof row.message.role !== "string")) ||
                                     (row.type === "auto_retry_end" && typeof row.success !== "boolean")) throw new Error("invalid structured event");
+                                assertCurrent();
                                 fold(id, scan, row, start, cwd);
                             }
                         } catch {
+                            assertCurrent();
                             observeFailures(path, [{ id: `malformed:${start}`, operation: "child-log", kind: "incomplete", summary: "Child log contains malformed structured events; observations may be incomplete" }]);
                         }
                     }
@@ -270,6 +274,7 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
             if (!oversized && rest.length) fragments.push(Buffer.from(rest));
             position += count;
         }
+        assertCurrent();
         scan.offset = start;
         if (scan.gap) settleMetadataGap(id, scan);
         scans.delete(id);
@@ -280,6 +285,7 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
             operation: "child-log-access", kind: "recovered", incidents: [access.id] }]);
         if (terminal && position > start) observeFailures(path, [{ id: `partial:${start}`, operation: "child-log", kind: "incomplete", summary: "Child log ends with a partial event; observations may be incomplete" }]);
     } catch {
+        assertCurrent();
         observeFailures(path, [{ id: "log-read-error", operation: "child-log", kind: "incomplete", summary: "Child log could not be fully scanned; observations may be incomplete" }]);
     } finally { closeSync(fd); }
     return readRunFailures(id);

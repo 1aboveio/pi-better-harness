@@ -1,0 +1,1331 @@
+// Generated from packages/pi-better-subagents/catalog-schema.ts. Do not edit directly.
+/**
+ * Portable pi-agent/v1 definitions.
+ *
+ * Markdown body plus YAML frontmatter. This module is pure: no filesystem, no
+ * Pi APIs, and no child launch. Operations and resolution import these types
+ * directly; the extension entrypoint is intentionally not wired here.
+ *
+ * Portable preferences (model, effort, tier) are catalog data. They are not
+ * host execution controls and do not grant tools, sandbox modes, or presets.
+ */
+import { isAlias, isCollection, isMap, isPair, isScalar, parseDocument, stringify } from "yaml";
+import { THINKING_LEVELS } from "./thinking.mjs";
+export const CATALOG_SCHEMA_VERSION = "pi-agent/v1";
+export const PREFERENCE_KEYS = ["model", "effort", "tier"];
+/**
+ * Every key `defaults` (roles) and `overrides` (agents) may carry. `skills` is
+ * added here but is not a `PreferenceKey`: model resolution consumes preferences,
+ * while skill exposure is reproduced by the launcher from the definition.
+ */
+export const DEFINITION_PREFERENCE_KEYS = [...PREFERENCE_KEYS, "skills"];
+/** Closed set of thinking levels shared with the existing subagent parser. */
+export const EFFORT_LEVELS = THINKING_LEVELS;
+/**
+ * Top-level keys that describe host execution. The catalog preserves them and
+ * blocks launch; it never treats them as enforced permissions or tool presets.
+ */
+export const HOST_EXECUTION_CONTROL_KEYS = [
+    "sandbox",
+    "sandbox_mode",
+    "sandboxMode",
+    "tools",
+    "tool",
+    "toolPreset",
+    "toolsPreset",
+    "permissions",
+    "permission",
+    "mcp",
+    "mcpServers",
+    "extensions",
+    "network",
+    "filesystem",
+    "cwd",
+    "workspace",
+    "allow_nested",
+    "nested",
+    "env",
+    "environment",
+];
+export const PARSER_LIMITS = {
+    maxFileBytes: 512 * 1024,
+    maxFrontmatterBytes: 128 * 1024,
+    maxBodyBytes: 384 * 1024,
+    maxAliasCount: 50,
+    maxNodes: 2_000,
+    maxDepth: 32,
+    maxIdLength: 128,
+    maxNameLength: 120,
+    maxDescriptionLength: 2_000,
+    maxStringLength: 64 * 1024,
+};
+/**
+ * Approved bundled-role defaults from DEV-23. Short model names in the product
+ * table are OpenAI model ids; stored values use the provider/model form the
+ * runtime already uses. Tiers are catalog policy, not benchmark rankings.
+ */
+export const APPROVED_ROLE_DEFAULTS = [
+    { id: "role.researcher", name: "Researcher", model: "openai/gpt-6.1-terra", effort: "medium", tier: "balanced" },
+    { id: "role.explorer", name: "Explorer", model: "openai/gpt-6-luna", effort: "medium", tier: "efficient" },
+    { id: "role.product-manager", name: "Product Manager", model: "openai/gpt-6.1-sol", effort: "medium", tier: "balanced" },
+    { id: "role.developer", name: "Developer", model: "openai/gpt-6.1-sol", effort: "high", tier: "balanced" },
+    { id: "role.reviewer", name: "Reviewer", model: "openai/gpt-6-astra", effort: "medium", tier: "frontier" },
+    { id: "role.architect", name: "Architect", model: "openai/gpt-6-astra", effort: "high", tier: "frontier" },
+    { id: "role.writer", name: "Writer", model: "openai/gpt-6.1-terra", effort: "medium", tier: undefined },
+];
+export const DiagnosticCodes = {
+    malformedFrontmatter: "malformed-frontmatter",
+    parserLimit: "parser-limit",
+    duplicateKey: "duplicate-key",
+    invalidSchema: "invalid-schema",
+    invalidKind: "invalid-kind",
+    invalidId: "invalid-id",
+    duplicateId: "duplicate-id",
+    invalidField: "invalid-field",
+    invalidInstructionMode: "invalid-instruction-mode",
+    emptyReplacement: "empty-replacement",
+    multipleBaseRoles: "multiple-base-roles",
+    missingRole: "missing-role",
+    unusableRole: "unusable-role",
+    unknownAgent: "unknown-agent",
+    unknownRole: "unknown-role",
+    ambiguousSelector: "ambiguous-selector",
+    missingSelector: "missing-selector",
+    invalidShadow: "invalid-shadow",
+    unsupportedExecutionRestriction: "unsupported-execution-restriction",
+    projectCatalogSuppressed: "project-catalog-suppressed",
+    symlinkIgnored: "symlink-ignored",
+    credentialMaterial: "credential-material",
+    cosmeticMetadata: "cosmetic-metadata",
+    untrustedWrite: "untrusted-write",
+    immutableScope: "immutable-scope",
+    definitionExists: "definition-exists",
+    pathEscape: "path-escape",
+    notLaunchable: "not-launchable",
+    kindDirectoryMismatch: "kind-directory-mismatch",
+    bundledMissing: "bundled-missing",
+    ioError: "io-error",
+    unsafeConfigDir: "unsafe-config-dir",
+};
+const ID_PATTERN = /^(role|agent)\.[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
+const MODEL_PATTERN = /^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._+-]*$/;
+const TIER_PATTERN = /^[a-z][a-z0-9-]{0,32}$/;
+/** POSIX absolute, or a Windows drive/UNC path. */
+const ABSOLUTE_PATH = /^(?:\/|[A-Za-z]:[\\/]|\\\\)/;
+const SECRET_KEY = /^(api[_-]?key|apikey|secret|password|passwd|token|access[_-]?token|refresh[_-]?token|credential|credentials|authorization|auth|databaseurl|connectionstring|dsn)$/i;
+const MULTI_ROLE_KEYS = new Set(["roleIds", "baseRoles", "baseRole", "inherits", "roles"]);
+const KNOWN_TOP_LEVEL = new Set([
+    "schema",
+    "kind",
+    "id",
+    "name",
+    "description",
+    "defaults",
+    "roleId",
+    "instructions",
+    "overrides",
+    "provenance",
+    "executionRestrictions",
+    "metadata",
+    "extensions",
+    "preservedExecutionControls",
+    ...HOST_EXECUTION_CONTROL_KEYS,
+    ...MULTI_ROLE_KEYS,
+]);
+const EXECUTION_KEY_SET = new Set(HOST_EXECUTION_CONTROL_KEYS);
+export function formatDiagnostic(diagnostic) {
+    const where = [diagnostic.scope, diagnostic.path, diagnostic.id ? `id ${diagnostic.id}` : undefined]
+        .filter(Boolean)
+        .join(" ");
+    return where ? `${diagnostic.code}: ${diagnostic.message} (${where})` : `${diagnostic.code}: ${diagnostic.message}`;
+}
+export function hasBlockingDiagnostic(diagnostics) {
+    return diagnostics.some((diagnostic) => diagnostic.blocking);
+}
+export function kindForId(id) {
+    if (id.startsWith("role."))
+        return "role";
+    if (id.startsWith("agent."))
+        return "agent";
+    return undefined;
+}
+/** Prefix every role id carries. Stored ids and files keep it; people type and read the short name. */
+export const ROLE_ID_PREFIX = "role.";
+/** Short, user-facing role name: `role.developer` becomes `developer`. Any other id is returned unchanged. */
+export function shortRoleName(id) {
+    return id.startsWith(ROLE_ID_PREFIX) ? id.slice(ROLE_ID_PREFIX.length) : id;
+}
+/**
+ * Canonical role id for a value typed into a `role` field. Trimmed and
+ * lowercased; a bare name gains the `role.` prefix, so `Developer` becomes
+ * `role.developer`. The result always starts with `role.`, so a role field
+ * can never select an `agent.*` named agent.
+ */
+export function canonicalRoleId(value) {
+    const trimmed = value.trim().toLowerCase();
+    if (trimmed === "")
+        return trimmed;
+    return trimmed.startsWith(ROLE_ID_PREFIX) ? trimmed : `${ROLE_ID_PREFIX}${trimmed}`;
+}
+/** Canonical named-agent id: trimmed and lowercased, since ids are lowercase-only. */
+export function canonicalAgentId(value) {
+    return value.trim().toLowerCase();
+}
+/**
+ * Canonical id for a field that takes either kind, such as `agents_catalog`
+ * inspect. An `agent.` id (any case) is lowercased; anything else is read as a role.
+ */
+export function canonicalCatalogId(value) {
+    const lowered = value.trim().toLowerCase();
+    return lowered.startsWith("agent.") ? lowered : canonicalRoleId(lowered);
+}
+export function isPreferenceKey(value) {
+    return PREFERENCE_KEYS.includes(value);
+}
+export function setAgentOverride(agent, key, value) {
+    if (key === "model")
+        return { ...agent, overrides: { ...agent.overrides, model: value } };
+    if (key === "effort")
+        return { ...agent, overrides: { ...agent.overrides, effort: value } };
+    return { ...agent, overrides: { ...agent.overrides, tier: value } };
+}
+/** Delete one override key so the next resolution inherits that field again. */
+export function removeAgentOverride(agent, key) {
+    const overrides = { ...agent.overrides };
+    delete overrides[key];
+    return { ...agent, overrides };
+}
+export function updateAgentOverrides(agent, patch) {
+    const remove = patch.remove ?? [];
+    const set = patch.set ?? {};
+    for (const key of remove) {
+        if (set[key] !== undefined || (key in set && set[key] === null)) {
+            throw new Error(`Override ${key} cannot be both set and removed.`);
+        }
+    }
+    const overrides = { ...agent.overrides };
+    for (const key of remove)
+        delete overrides[key];
+    if (Object.prototype.hasOwnProperty.call(set, "model") && set.model !== undefined)
+        overrides.model = set.model;
+    if (Object.prototype.hasOwnProperty.call(set, "effort") && set.effort !== undefined)
+        overrides.effort = set.effort;
+    if (Object.prototype.hasOwnProperty.call(set, "tier") && set.tier !== undefined)
+        overrides.tier = set.tier;
+    // Skill exposure is a definition value, not a resolution preference, so it
+    // rides the same patch path without joining the model/effort resolution.
+    if (Object.prototype.hasOwnProperty.call(set, "skills") && set.skills !== undefined)
+        overrides.skills = set.skills;
+    return { ...agent, overrides };
+}
+/** The definition's own skill value: undefined inherits, null suppresses, `[]` is none. */
+export function definitionSkillPreference(definition) {
+    const preferences = definition.kind === "role" ? definition.defaults : definition.overrides;
+    if (!Object.prototype.hasOwnProperty.call(preferences, "skills"))
+        return undefined;
+    return preferences.skills === null || preferences.skills === undefined ? null : [...preferences.skills];
+}
+/** Absolute definition paths, with the empty selection rejected rather than stored as "none". */
+export function definitionSkillPaths(paths) {
+    if (paths.length === 0) {
+        throw new Error("Selected skills needs at least one absolute path. Choose No skill catalog for none.");
+    }
+    return paths.map((entry, index) => {
+        if (typeof entry !== "string" || entry.trim() === "") {
+            throw new Error(`Selected skills[${index}] must be a non-empty absolute path.`);
+        }
+        const path = entry.trim();
+        if (!ABSOLUTE_PATH.test(path)) {
+            throw new Error(`Selected skills[${index}] must be absolute: ${path}. A definition has no workspace of its own.`);
+        }
+        return path;
+    });
+}
+/** Apply one edit without flattening inherited values or touching other fields. */
+export function applySkillExposure(definition, edit) {
+    const paths = edit.mode === "explicit" ? definitionSkillPaths(edit.paths) : undefined;
+    const apply = (preferences) => {
+        const next = { ...preferences };
+        if (edit.mode === "inherit")
+            delete next.skills;
+        else if (edit.mode === "none")
+            next.skills = [];
+        else
+            next.skills = [...paths];
+        return next;
+    };
+    return definition.kind === "role"
+        ? { ...definition, defaults: apply(definition.defaults) }
+        : { ...definition, overrides: apply(definition.overrides) };
+}
+export function parseDefinition(markdown, sourcePath) {
+    const diagnostics = [];
+    try {
+        return parseDefinitionWithinLimits(markdown, sourcePath, diagnostics);
+    }
+    catch (error) {
+        const occupant = safeEarlyOccupant(markdown);
+        diagnostics.push(problem(DiagnosticCodes.parserLimit, `Catalog parser stopped on this file: ${clip(error instanceof Error ? error.message : String(error))}. Other definitions are unaffected. Remove cyclic aliases or shorten the frontmatter.`, {
+            path: sourcePath,
+            ...(occupant.occupantId ? { id: occupant.occupantId } : {}),
+            blocking: true,
+            structural: true,
+        }));
+        return { ok: false, diagnostics, ...occupant };
+    }
+}
+function parseDefinitionWithinLimits(markdown, sourcePath, diagnostics) {
+    if (Buffer.byteLength(markdown, "utf8") > PARSER_LIMITS.maxFileBytes) {
+        return rejectEarly(diagnostics, DiagnosticCodes.parserLimit, `Definition exceeds ${PARSER_LIMITS.maxFileBytes} bytes. Split or shorten it.`, sourcePath, markdown);
+    }
+    if (markdown.includes("\0")) {
+        return rejectEarly(diagnostics, DiagnosticCodes.malformedFrontmatter, "Definition contains NUL and was not parsed.", sourcePath, markdown);
+    }
+    const split = splitFrontmatter(markdown);
+    if ("error" in split) {
+        return rejectEarly(diagnostics, DiagnosticCodes.malformedFrontmatter, split.error, sourcePath, markdown);
+    }
+    if (Buffer.byteLength(split.yaml, "utf8") > PARSER_LIMITS.maxFrontmatterBytes) {
+        return rejectEarly(diagnostics, DiagnosticCodes.parserLimit, `Frontmatter exceeds ${PARSER_LIMITS.maxFrontmatterBytes} bytes.`, sourcePath, markdown);
+    }
+    if (Buffer.byteLength(split.body, "utf8") > PARSER_LIMITS.maxBodyBytes) {
+        return rejectEarly(diagnostics, DiagnosticCodes.parserLimit, `Instruction body exceeds ${PARSER_LIMITS.maxBodyBytes} bytes.`, sourcePath, markdown);
+    }
+    const document = parseCatalogYaml(split.yaml);
+    const identity = occupantFromDocument(document);
+    if (document.errors.length > 0) {
+        for (const error of document.errors) {
+            const duplicate = /unique|duplicated mapping key/i.test(error.message);
+            diagnostics.push(problem(duplicate ? DiagnosticCodes.duplicateKey : DiagnosticCodes.malformedFrontmatter, clip(error.message), {
+                path: sourcePath,
+                id: identity.occupantId,
+                blocking: true,
+                structural: true,
+            }));
+        }
+        return { ok: false, diagnostics, ...identity };
+    }
+    const measured = measureNode(document.contents);
+    if (measured.nodes > PARSER_LIMITS.maxNodes || measured.depth > PARSER_LIMITS.maxDepth) {
+        diagnostics.push(problem(DiagnosticCodes.parserLimit, `Frontmatter has ${measured.nodes} nodes at depth ${measured.depth}. Limits are ${PARSER_LIMITS.maxNodes} nodes and depth ${PARSER_LIMITS.maxDepth}. Anchors are allowed within these limits.`, { path: sourcePath, id: identity.occupantId, blocking: true, structural: true }));
+        return { ok: false, diagnostics, ...identity };
+    }
+    let data;
+    try {
+        data = document.toJS({ maxAliasCount: PARSER_LIMITS.maxAliasCount });
+    }
+    catch (error) {
+        diagnostics.push(problem(DiagnosticCodes.parserLimit, clip(error instanceof Error ? error.message : String(error)), {
+            path: sourcePath,
+            id: identity.occupantId,
+            blocking: true,
+            structural: true,
+        }));
+        return { ok: false, diagnostics, ...identity };
+    }
+    const graph = yamlGraphIssue(data);
+    if (graph) {
+        diagnostics.push(problem(DiagnosticCodes.parserLimit, graph === "cycle"
+            ? "YAML alias cycle in frontmatter. Later aliases may repeat an earlier anchor, but a cycle is rejected before recursive traversal so this file cannot exhaust the catalog read. Remove the cyclic alias. Alias expansions stay limited to 50, nodes to 2000, and depth to 32."
+            : `YAML alias graph exceeded the catalog bounds (${PARSER_LIMITS.maxNodes} nodes, depth ${PARSER_LIMITS.maxDepth}) while checking for cycles. Shorten the frontmatter.`, { path: sourcePath, id: identity.occupantId, blocking: true, structural: true }));
+        return { ok: false, diagnostics, ...identity };
+    }
+    if (!isPlainObject(data)) {
+        diagnostics.push(problem(DiagnosticCodes.malformedFrontmatter, "Frontmatter must be a YAML mapping.", {
+            path: sourcePath,
+            id: identity.occupantId,
+            blocking: true,
+            structural: true,
+        }));
+        return { ok: false, diagnostics, ...identity };
+    }
+    try {
+        return interpretMapping(data, split.body, diagnostics, sourcePath);
+    }
+    catch (error) {
+        diagnostics.push(problem(DiagnosticCodes.parserLimit, `Catalog parser stopped on this file: ${clip(error instanceof Error ? error.message : String(error))}. Other definitions are unaffected. Remove cyclic aliases or shorten the frontmatter.`, { path: sourcePath, id: identity.occupantId, blocking: true, structural: true }));
+        return { ok: false, diagnostics, ...identity };
+    }
+}
+export function validateDefinition(definition) {
+    return parseDefinition(serializeUnchecked(definition), undefined);
+}
+export function serializeDefinition(definition) {
+    const parsed = validateDefinition(definition);
+    if (!parsed.ok || !parsed.definition) {
+        return { ok: false, diagnostics: parsed.diagnostics };
+    }
+    return {
+        ok: true,
+        markdown: serializeUnchecked(parsed.definition),
+        diagnostics: parsed.diagnostics,
+    };
+}
+function serializeUnchecked(definition) {
+    const mapping = {
+        schema: definition.schema,
+        kind: definition.kind,
+        id: definition.id,
+        name: definition.name,
+    };
+    if (definition.description !== undefined)
+        mapping.description = definition.description;
+    if (definition.kind === "agent") {
+        mapping.roleId = definition.roleId;
+        mapping.instructions = { mode: definition.instructionMode };
+        if (hasPreference(definition.overrides))
+            mapping.overrides = preferenceMapping(definition.overrides);
+    }
+    else if (hasPreference(definition.defaults)) {
+        mapping.defaults = preferenceMapping(definition.defaults);
+    }
+    if (definition.provenance)
+        mapping.provenance = { ...definition.provenance };
+    if (definition.executionRestrictions.length > 0)
+        mapping.executionRestrictions = definition.executionRestrictions.map((item) => ({ ...item }));
+    if (definition.metadata && Object.keys(definition.metadata).length > 0)
+        mapping.metadata = definition.metadata;
+    if (definition.extensions && Object.keys(definition.extensions).length > 0)
+        mapping.extensions = definition.extensions;
+    if (definition.preservedExecutionControls && Object.keys(definition.preservedExecutionControls).length > 0) {
+        mapping.preservedExecutionControls = definition.preservedExecutionControls;
+    }
+    const yaml = stringify(mapping, { lineWidth: 0 }).trimEnd();
+    const body = definition.body.length === 0 ? "\n" : definition.body.startsWith("\n") ? definition.body : `\n${definition.body}`;
+    const normalizedBody = body.endsWith("\n") ? body : `${body}\n`;
+    return `---\n${yaml}\n---${normalizedBody}`;
+}
+function interpretMapping(data, body, diagnostics, sourcePath) {
+    const redacted = redactSecrets(data, "frontmatter", diagnostics, sourcePath);
+    const idText = typeof redacted.id === "string" ? redacted.id : undefined;
+    const occupantId = idText && ID_PATTERN.test(idText) ? idText : undefined;
+    if (redacted.schema !== CATALOG_SCHEMA_VERSION) {
+        diagnostics.push(problem(DiagnosticCodes.invalidSchema, `schema must be ${CATALOG_SCHEMA_VERSION}.`, {
+            path: sourcePath,
+            field: "schema",
+            id: occupantId,
+            blocking: true,
+            structural: true,
+        }));
+    }
+    if (redacted.kind !== "role" && redacted.kind !== "agent") {
+        diagnostics.push(problem(DiagnosticCodes.invalidKind, "kind must be role or agent.", {
+            path: sourcePath,
+            field: "kind",
+            id: occupantId,
+            blocking: true,
+            structural: true,
+        }));
+    }
+    if (!occupantId) {
+        diagnostics.push(problem(DiagnosticCodes.invalidId, "id must be a stable role.<slug> or agent.<slug> identifier, independent of the file name. Use lowercase letters, numbers, dots, and hyphens.", { path: sourcePath, field: "id", blocking: true, structural: true }));
+    }
+    else if (redacted.kind === "role" || redacted.kind === "agent") {
+        if (kindForId(occupantId) !== redacted.kind) {
+            diagnostics.push(problem(DiagnosticCodes.invalidId, `id ${occupantId} does not match kind ${redacted.kind}.`, {
+                path: sourcePath,
+                field: "id",
+                id: occupantId,
+                blocking: true,
+                structural: true,
+            }));
+        }
+    }
+    const name = readName(redacted.name, diagnostics, sourcePath, occupantId);
+    const description = readDescription(redacted.description, diagnostics, sourcePath, occupantId);
+    const extensions = {};
+    const preservedExecutionControls = isPlainObject(redacted.preservedExecutionControls)
+        ? { ...redacted.preservedExecutionControls }
+        : {};
+    if (redacted.preservedExecutionControls !== undefined && !isPlainObject(redacted.preservedExecutionControls)) {
+        diagnostics.push(problem(DiagnosticCodes.invalidField, "preservedExecutionControls must be a mapping.", {
+            path: sourcePath,
+            field: "preservedExecutionControls",
+            id: occupantId,
+            blocking: true,
+            structural: true,
+        }));
+    }
+    for (const key of Object.keys(redacted)) {
+        if (KNOWN_TOP_LEVEL.has(key))
+            continue;
+        extensions[key] = redacted[key];
+        diagnostics.push(problem(DiagnosticCodes.cosmeticMetadata, `Unknown field ${key} was preserved and is not enforced.`, { path: sourcePath, field: key, id: occupantId, blocking: false, structural: false, severity: "warning" }));
+    }
+    if (isPlainObject(redacted.extensions)) {
+        for (const [key, value] of Object.entries(redacted.extensions))
+            extensions[key] = value;
+    }
+    for (const key of HOST_EXECUTION_CONTROL_KEYS) {
+        if (!Object.prototype.hasOwnProperty.call(redacted, key))
+            continue;
+        preservedExecutionControls[key] = redacted[key];
+        rememberRestriction(key, redacted[key], diagnostics, sourcePath, occupantId);
+    }
+    const multi = [...MULTI_ROLE_KEYS].filter((key) => Object.prototype.hasOwnProperty.call(redacted, key));
+    if (multi.length > 0 || Array.isArray(redacted.roleId)) {
+        for (const key of multi)
+            extensions[key] = redacted[key];
+        diagnostics.push(problem(DiagnosticCodes.multipleBaseRoles, "An agent has exactly one base role (roleId). Multiple inheritance and executable-role memberships are not catalog parents. Remove the extra role fields.", { path: sourcePath, field: multi[0] ?? "roleId", id: occupantId, blocking: true, structural: true }));
+    }
+    const provenance = readProvenance(redacted.provenance, extensions, diagnostics, sourcePath, occupantId);
+    const restrictions = readRestrictions(redacted.executionRestrictions, diagnostics, sourcePath, occupantId);
+    for (const key of Object.keys(preservedExecutionControls)) {
+        if (restrictions.some((item) => item.name === key))
+            continue;
+        restrictions.push({
+            name: key,
+            value: preservedExecutionControls[key],
+            required: true,
+            honored: false,
+            reason: "Preserved host execution control. The catalog does not enforce it, so launch stays blocked until the restriction is removed.",
+        });
+    }
+    for (const restriction of restrictions) {
+        if (!restriction.required) {
+            diagnostics.push(problem(DiagnosticCodes.cosmeticMetadata, `Optional execution restriction ${restriction.name} is preserved and is not enforced.`, { path: sourcePath, field: restriction.name, id: occupantId, blocking: false, structural: false, severity: "warning" }));
+            continue;
+        }
+        diagnostics.push(problem(DiagnosticCodes.unsupportedExecutionRestriction, restriction.honored
+            ? `Required execution restriction ${restriction.name} claims to be honored, but this catalog does not enforce host controls. Remove the restriction after it is actually resolved; a flag does not make it active.`
+            : `Required execution restriction ${restriction.name} is preserved and blocks launch because the catalog cannot enforce it. ${restriction.reason ?? "Remove it once a real host control covers it, or delete the requirement."}`, { path: sourcePath, field: restriction.name, id: occupantId, blocking: true, structural: false }));
+    }
+    const metadata = isPlainObject(redacted.metadata) ? redacted.metadata : undefined;
+    if (redacted.metadata !== undefined && !isPlainObject(redacted.metadata)) {
+        diagnostics.push(problem(DiagnosticCodes.invalidField, "metadata must be a mapping.", {
+            path: sourcePath,
+            field: "metadata",
+            id: occupantId,
+            blocking: true,
+            structural: true,
+        }));
+    }
+    else if (metadata && Object.keys(metadata).length > 0) {
+        diagnostics.push(problem(DiagnosticCodes.cosmeticMetadata, "metadata is preserved and does not change launch or capabilities.", {
+            path: sourcePath,
+            field: "metadata",
+            id: occupantId,
+            blocking: false,
+            structural: false,
+            severity: "info",
+        }));
+    }
+    const structural = diagnostics.some((diagnostic) => diagnostic.structural);
+    if (structural || !occupantId || (redacted.kind !== "role" && redacted.kind !== "agent") || !name) {
+        return { ok: false, occupantId, diagnostics };
+    }
+    if (redacted.kind === "role") {
+        if (redacted.roleId !== undefined || redacted.instructions !== undefined || redacted.overrides !== undefined) {
+            diagnostics.push(problem(DiagnosticCodes.invalidField, "Roles do not take roleId, instructions, or overrides. Put model, effort, and tier in defaults.", {
+                path: sourcePath,
+                id: occupantId,
+                blocking: true,
+                structural: true,
+            }));
+            return { ok: false, occupantId, diagnostics };
+        }
+        const defaults = readPreferences(redacted.defaults, "defaults", extensions, restrictions, diagnostics, sourcePath, occupantId);
+        if (diagnostics.some((diagnostic) => diagnostic.structural))
+            return { ok: false, occupantId, diagnostics };
+        const definition = compactDefinition({
+            schema: CATALOG_SCHEMA_VERSION,
+            kind: "role",
+            id: occupantId,
+            name,
+            description,
+            defaults: defaults ?? {},
+            provenance,
+            executionRestrictions: restrictions,
+            metadata,
+            extensions: Object.keys(extensions).length > 0 ? extensions : undefined,
+            preservedExecutionControls: Object.keys(preservedExecutionControls).length > 0 ? preservedExecutionControls : undefined,
+            body,
+        });
+        return { ok: true, definition, diagnostics };
+    }
+    if (redacted.defaults !== undefined) {
+        extensions.defaults = redacted.defaults;
+        diagnostics.push(problem(DiagnosticCodes.invalidField, "Agents must not store role defaults. Omit inherited fields and set only explicit overrides. The defaults mapping was preserved under extensions and was not copied into overrides.", { path: sourcePath, field: "defaults", id: occupantId, blocking: true, structural: true }));
+        return { ok: false, occupantId, diagnostics };
+    }
+    const roleId = typeof redacted.roleId === "string" && ID_PATTERN.test(redacted.roleId) && kindForId(redacted.roleId) === "role"
+        ? redacted.roleId
+        : undefined;
+    if (!roleId) {
+        diagnostics.push(problem(DiagnosticCodes.invalidField, "roleId must reference exactly one role.<slug> base role.", {
+            path: sourcePath,
+            field: "roleId",
+            id: occupantId,
+            blocking: true,
+            structural: true,
+        }));
+        return { ok: false, occupantId, diagnostics };
+    }
+    const instructionMode = readInstructionMode(redacted.instructions, diagnostics, sourcePath, occupantId);
+    if (!instructionMode || diagnostics.some((diagnostic) => diagnostic.structural)) {
+        return { ok: false, occupantId, diagnostics };
+    }
+    if (instructionMode === "replace" && body.trim().length === 0) {
+        diagnostics.push(problem(DiagnosticCodes.emptyReplacement, "Instruction mode replace requires nonempty instruction text. Model and effort still inherit unless overridden; an empty replacement was not saved as add mode.", { path: sourcePath, field: "instructions.mode", id: occupantId, blocking: true, structural: true }));
+        return { ok: false, occupantId, diagnostics };
+    }
+    const overrides = readPreferences(redacted.overrides, "overrides", extensions, restrictions, diagnostics, sourcePath, occupantId);
+    if (diagnostics.some((diagnostic) => diagnostic.structural))
+        return { ok: false, occupantId, diagnostics };
+    const definition = compactDefinition({
+        schema: CATALOG_SCHEMA_VERSION,
+        kind: "agent",
+        id: occupantId,
+        name,
+        description,
+        roleId,
+        instructionMode,
+        overrides: overrides ?? {},
+        provenance,
+        executionRestrictions: restrictions,
+        metadata,
+        extensions: Object.keys(extensions).length > 0 ? extensions : undefined,
+        preservedExecutionControls: Object.keys(preservedExecutionControls).length > 0 ? preservedExecutionControls : undefined,
+        body,
+    });
+    return { ok: true, definition, diagnostics };
+}
+function readInstructionMode(value, diagnostics, sourcePath, id) {
+    if (value === undefined)
+        return "add";
+    if (!isPlainObject(value) || Array.isArray(value)) {
+        diagnostics.push(problem(DiagnosticCodes.invalidInstructionMode, "instructions must be a mapping with mode add (default) or replace.", {
+            path: sourcePath,
+            field: "instructions",
+            id,
+            blocking: true,
+            structural: true,
+        }));
+        return undefined;
+    }
+    const mode = value.mode === undefined ? "add" : value.mode;
+    if (mode !== "add" && mode !== "replace") {
+        diagnostics.push(problem(DiagnosticCodes.invalidInstructionMode, "instructions.mode must be add or replace. replace changes instruction text only.", {
+            path: sourcePath,
+            field: "instructions.mode",
+            id,
+            blocking: true,
+            structural: true,
+        }));
+        return undefined;
+    }
+    for (const key of Object.keys(value)) {
+        if (key === "mode")
+            continue;
+        diagnostics.push(problem(DiagnosticCodes.invalidField, `Unknown instructions.${key} is not allowed. Instruction text belongs in the Markdown body.`, {
+            path: sourcePath,
+            field: `instructions.${key}`,
+            id,
+            blocking: true,
+            structural: true,
+        }));
+    }
+    return mode;
+}
+/**
+ * Skill paths in a definition are literal and absolute: a catalog file has no
+ * workspace of its own, so a relative path would resolve differently depending
+ * on who launches it. Returns undefined for anything that is not such a list.
+ */
+function readSkillPaths(value) {
+    if (!Array.isArray(value))
+        return undefined;
+    const paths = [];
+    for (const entry of value) {
+        if (typeof entry !== "string")
+            return undefined;
+        const path = entry.trim();
+        if (path === "" || !ABSOLUTE_PATH.test(path))
+            return undefined;
+        paths.push(path);
+    }
+    return paths;
+}
+function readPreferences(value, field, extensions, restrictions, diagnostics, sourcePath, id) {
+    if (value === undefined)
+        return {};
+    if (!isPlainObject(value)) {
+        diagnostics.push(problem(DiagnosticCodes.invalidField, `${field} must be a mapping of model, effort, tier, and skills.`, {
+            path: sourcePath,
+            field,
+            id,
+            blocking: true,
+            structural: true,
+        }));
+        return undefined;
+    }
+    const preferences = {};
+    for (const key of Object.keys(value)) {
+        if (!isPreferenceKey(key) && key !== "skills") {
+            const target = `${field}.${key}`;
+            extensions[target] = value[key];
+            if (EXECUTION_KEY_SET.has(key)) {
+                rememberRestriction(target, value[key], diagnostics, sourcePath, id);
+                restrictions.push({
+                    name: target,
+                    value: value[key] ?? null,
+                    required: true,
+                    honored: false,
+                    reason: "Host execution control nested in preferences. Preserved and not enforced.",
+                });
+                diagnostics.push(problem(DiagnosticCodes.unsupportedExecutionRestriction, `${target} is a host execution control, not a portable preference. It was preserved and blocks launch. Model, effort, tier, and skills are the only preference fields.`, { path: sourcePath, field: target, id, blocking: true, structural: false }));
+            }
+            else {
+                diagnostics.push(problem(DiagnosticCodes.cosmeticMetadata, `Unknown ${target} was preserved and is not a model, effort, tier, or skills preference.`, {
+                    path: sourcePath,
+                    field: target,
+                    id,
+                    blocking: false,
+                    structural: false,
+                    severity: "warning",
+                }));
+            }
+            continue;
+        }
+        const item = value[key];
+        if (item === null) {
+            preferences[key] = null;
+            continue;
+        }
+        if (key === "skills") {
+            const paths = readSkillPaths(item);
+            if (!paths) {
+                diagnostics.push(problem(DiagnosticCodes.invalidField, `${field}.skills must be a list of absolute paths to a SKILL.md file or a skill directory; [] loads no skills. Skill paths stay literal so a frozen launch recipe replays the same files.`, { path: sourcePath, field: `${field}.skills`, id, blocking: true, structural: true }));
+                continue;
+            }
+            preferences.skills = paths;
+            continue;
+        }
+        if (key === "model") {
+            if (typeof item !== "string" || !MODEL_PATTERN.test(item)) {
+                diagnostics.push(problem(DiagnosticCodes.invalidField, "model must be provider/model, without an @effort suffix. Set effort separately.", {
+                    path: sourcePath,
+                    field: `${field}.model`,
+                    id,
+                    blocking: true,
+                    structural: true,
+                }));
+                continue;
+            }
+            preferences.model = item;
+            continue;
+        }
+        if (key === "effort") {
+            if (typeof item !== "string" || !THINKING_LEVELS.includes(item)) {
+                diagnostics.push(problem(DiagnosticCodes.invalidField, `effort must be one of ${THINKING_LEVELS.join(", ")}. Availability against a live model is checked at resolution, not here.`, { path: sourcePath, field: `${field}.effort`, id, blocking: true, structural: true }));
+                continue;
+            }
+            preferences.effort = item;
+            continue;
+        }
+        if (typeof item !== "string" || !TIER_PATTERN.test(item)) {
+            diagnostics.push(problem(DiagnosticCodes.invalidField, "tier must be a short lowercase catalog-policy label such as balanced, efficient, or frontier.", {
+                path: sourcePath,
+                field: `${field}.tier`,
+                id,
+                blocking: true,
+                structural: true,
+            }));
+            continue;
+        }
+        preferences.tier = item;
+    }
+    return preferences;
+}
+function readRestrictions(value, diagnostics, sourcePath, id) {
+    if (value === undefined)
+        return [];
+    if (!Array.isArray(value)) {
+        diagnostics.push(problem(DiagnosticCodes.invalidField, "executionRestrictions must be a list.", {
+            path: sourcePath,
+            field: "executionRestrictions",
+            id,
+            blocking: true,
+            structural: true,
+        }));
+        return [];
+    }
+    const restrictions = [];
+    for (const [index, item] of value.entries()) {
+        if (!isPlainObject(item) || typeof item.name !== "string" || item.name.trim() === "") {
+            diagnostics.push(problem(DiagnosticCodes.invalidField, `executionRestrictions[${index}] needs a name.`, {
+                path: sourcePath,
+                field: "executionRestrictions",
+                id,
+                blocking: true,
+                structural: true,
+            }));
+            continue;
+        }
+        if (!isJsonData(item.value) && item.value !== undefined) {
+            diagnostics.push(problem(DiagnosticCodes.invalidField, `executionRestrictions[${index}].value must be JSON-compatible data.`, {
+                path: sourcePath,
+                field: `executionRestrictions.${item.name}`,
+                id,
+                blocking: true,
+                structural: true,
+            }));
+            continue;
+        }
+        const required = item.required === undefined ? true : item.required === true;
+        if (item.required !== undefined && typeof item.required !== "boolean") {
+            diagnostics.push(problem(DiagnosticCodes.invalidField, `executionRestrictions ${item.name} required must be a boolean.`, {
+                path: sourcePath,
+                field: item.name,
+                id,
+                blocking: true,
+                structural: true,
+            }));
+            continue;
+        }
+        const honored = item.honored === true;
+        restrictions.push({
+            name: item.name,
+            value: item.value ?? null,
+            required,
+            honored,
+            reason: typeof item.reason === "string" ? item.reason : undefined,
+        });
+    }
+    return restrictions;
+}
+function readProvenance(value, extensions, diagnostics, sourcePath, id) {
+    if (value === undefined)
+        return undefined;
+    if (!isPlainObject(value)) {
+        diagnostics.push(problem(DiagnosticCodes.invalidField, "provenance must be a mapping.", {
+            path: sourcePath,
+            field: "provenance",
+            id,
+            blocking: true,
+            structural: true,
+        }));
+        return undefined;
+    }
+    if (value.origin !== "local" && value.origin !== "imported") {
+        diagnostics.push(problem(DiagnosticCodes.invalidField, "provenance.origin must be local or imported.", {
+            path: sourcePath,
+            field: "provenance.origin",
+            id,
+            blocking: true,
+            structural: true,
+        }));
+        return undefined;
+    }
+    const provenance = { origin: value.origin };
+    if (value.format !== undefined) {
+        if (typeof value.format !== "string" || value.format.length > 80) {
+            diagnostics.push(problem(DiagnosticCodes.invalidField, "provenance.format must be a short string.", {
+                path: sourcePath,
+                field: "provenance.format",
+                id,
+                blocking: true,
+                structural: true,
+            }));
+        }
+        else {
+            provenance.format = value.format;
+        }
+    }
+    if (value.sourceRef !== undefined) {
+        if (typeof value.sourceRef !== "string" || value.sourceRef.length > 500 || /[\r\n]/.test(value.sourceRef)) {
+            diagnostics.push(problem(DiagnosticCodes.invalidField, "provenance.sourceRef must be a single-line source label, not credential material.", {
+                path: sourcePath,
+                field: "provenance.sourceRef",
+                id,
+                blocking: true,
+                structural: true,
+            }));
+        }
+        else {
+            provenance.sourceRef = value.sourceRef;
+        }
+    }
+    if (value.importedAt !== undefined) {
+        if (typeof value.importedAt !== "string" || value.importedAt.length > 40) {
+            diagnostics.push(problem(DiagnosticCodes.invalidField, "provenance.importedAt must be a short timestamp string.", {
+                path: sourcePath,
+                field: "provenance.importedAt",
+                id,
+                blocking: true,
+                structural: true,
+            }));
+        }
+        else {
+            provenance.importedAt = value.importedAt;
+        }
+    }
+    if (value.note !== undefined) {
+        if (typeof value.note !== "string" || value.note.length > 500) {
+            diagnostics.push(problem(DiagnosticCodes.invalidField, "provenance.note must be a string of at most 500 characters.", {
+                path: sourcePath,
+                field: "provenance.note",
+                id,
+                blocking: true,
+                structural: true,
+            }));
+        }
+        else {
+            provenance.note = value.note;
+        }
+    }
+    for (const key of Object.keys(value)) {
+        if (["origin", "format", "sourceRef", "importedAt", "note"].includes(key))
+            continue;
+        extensions[`provenance.${key}`] = value[key];
+        diagnostics.push(problem(DiagnosticCodes.cosmeticMetadata, `Unknown provenance.${key} was preserved.`, {
+            path: sourcePath,
+            field: `provenance.${key}`,
+            id,
+            blocking: false,
+            structural: false,
+            severity: "warning",
+        }));
+    }
+    return provenance;
+}
+function readName(value, diagnostics, sourcePath, id) {
+    if (typeof value !== "string" || value.trim() === "" || value.trim().length > PARSER_LIMITS.maxNameLength || /[\u0000-\u001F]/.test(value)) {
+        diagnostics.push(problem(DiagnosticCodes.invalidField, "name must be a nonempty display name of at most 120 characters. Renaming it does not change id.", {
+            path: sourcePath,
+            field: "name",
+            id,
+            blocking: true,
+            structural: true,
+        }));
+        return undefined;
+    }
+    return value.trim();
+}
+function readDescription(value, diagnostics, sourcePath, id) {
+    if (value === undefined)
+        return undefined;
+    if (typeof value !== "string" || value.trim() === "" || value.length > PARSER_LIMITS.maxDescriptionLength) {
+        diagnostics.push(problem(DiagnosticCodes.invalidField, "description must be a nonempty string of at most 2000 characters when present.", {
+            path: sourcePath,
+            field: "description",
+            id,
+            blocking: true,
+            structural: true,
+        }));
+        return undefined;
+    }
+    return value.trim();
+}
+function rememberRestriction(name, value, diagnostics, sourcePath, id) {
+    if (!isJsonData(value) && value !== undefined) {
+        diagnostics.push(problem(DiagnosticCodes.invalidField, `${name} must be JSON-compatible when preserved as a restriction.`, {
+            path: sourcePath,
+            field: name,
+            id,
+            blocking: true,
+            structural: true,
+        }));
+    }
+}
+function redactSecrets(value, pathLabel, diagnostics, sourcePath, stack = new Set()) {
+    if (typeof value !== "object" || value === null)
+        return value;
+    if (stack.has(value))
+        throw new Error("YAML alias cycle");
+    if (Array.isArray(value)) {
+        stack.add(value);
+        try {
+            return value.map((item, index) => redactSecrets(item, `${pathLabel}[${index}]`, diagnostics, sourcePath, stack));
+        }
+        finally {
+            stack.delete(value);
+        }
+    }
+    if (!isPlainObject(value))
+        return value;
+    stack.add(value);
+    try {
+        const output = {};
+        for (const [key, child] of Object.entries(value)) {
+            if (SECRET_KEY.test(key)) {
+                diagnostics.push(problem(DiagnosticCodes.credentialMaterial, `Field ${pathLabel}.${key} looks like credential or connection material and was not stored. Remove it from the definition. Launch stays blocked.`, { path: sourcePath, field: key, blocking: true, structural: false }));
+                output[key] = "[redacted]";
+                continue;
+            }
+            output[key] = redactSecrets(child, `${pathLabel}.${key}`, diagnostics, sourcePath, stack);
+        }
+        return output;
+    }
+    finally {
+        stack.delete(value);
+    }
+}
+function splitFrontmatter(source) {
+    const text = source.charCodeAt(0) === 0xfeff ? source.slice(1) : source;
+    const opening = /^---[ \t]*\r?\n/.exec(text);
+    if (!opening) {
+        return { error: "Definition must be Markdown with opening YAML frontmatter (---). Filename and display name are not the schema." };
+    }
+    const rest = text.slice(opening[0].length);
+    const closing = /\r?\n---[ \t]*(?:\r?\n|$)/.exec(rest);
+    if (!closing || closing.index === undefined) {
+        return { error: "Frontmatter is missing the closing --- line. Keep instruction text below it." };
+    }
+    return {
+        yaml: rest.slice(0, closing.index),
+        body: rest.slice(closing.index + closing[0].length),
+    };
+}
+function parseCatalogYaml(yaml) {
+    return parseDocument(yaml, {
+        uniqueKeys: true,
+        version: "1.2",
+        schema: "core",
+        merge: true,
+        resolveKnownTags: false,
+        strict: true,
+        prettyErrors: true,
+    });
+}
+function rejectEarly(diagnostics, code, message, sourcePath, markdown) {
+    const occupant = safeEarlyOccupant(markdown);
+    diagnostics.push(problem(code, message, {
+        path: sourcePath,
+        ...(occupant.occupantId ? { id: occupant.occupantId } : {}),
+        blocking: true,
+        structural: true,
+    }));
+    return { ok: false, diagnostics, ...occupant };
+}
+/**
+ * Identity for a rejection that must not run the full parser.
+ * Closed, in-limit frontmatter may be parsed. Anything larger, cut off, or
+ * containing NUL is only scanned for one plain top-level id inside the
+ * frontmatter byte cap. The instruction body is never an identity source.
+ */
+function safeEarlyOccupant(markdown) {
+    try {
+        const source = markdown.charCodeAt(0) === 0xfeff ? markdown.slice(1) : markdown;
+        const bounded = boundedUtf8Prefix(source, PARSER_LIMITS.maxFrontmatterBytes);
+        const slice = frontmatterSlice(bounded.text);
+        if (!slice)
+            return {};
+        const yamlWindow = boundedUtf8Prefix(slice.yaml, PARSER_LIMITS.maxFrontmatterBytes);
+        const withinCap = !slice.yaml.includes("\0")
+            && Buffer.byteLength(slice.yaml, "utf8") <= PARSER_LIMITS.maxFrontmatterBytes
+            && !yamlWindow.truncated;
+        const completeEnoughToParse = withinCap && (slice.closed || !bounded.truncated);
+        if (completeEnoughToParse)
+            return identityFromParsedYaml(slice.yaml);
+        return occupantFromLines(dropIncompleteNulLine(yamlWindow.text));
+    }
+    catch {
+        return {};
+    }
+}
+function identityFromParsedYaml(yaml) {
+    try {
+        return occupantFromDocument(parseCatalogYaml(yaml));
+    }
+    catch {
+        return occupantFromLines(yaml);
+    }
+}
+function boundedUtf8Prefix(text, maxBytes) {
+    let bytes = 0;
+    let index = 0;
+    while (index < text.length) {
+        const code = text.charCodeAt(index);
+        let width = 1;
+        let step = 1;
+        if (code >= 0x80 && code < 0x800)
+            width = 2;
+        else if (code >= 0xd800 && code <= 0xdbff && index + 1 < text.length) {
+            width = 4;
+            step = 2;
+        }
+        else if (code >= 0x800)
+            width = 3;
+        if (bytes + width > maxBytes) {
+            const slice = text.slice(0, index);
+            const newline = Math.max(slice.lastIndexOf("\n"), slice.lastIndexOf("\r"));
+            return newline < 0 ? { text: "", truncated: true } : { text: slice.slice(0, newline), truncated: true };
+        }
+        bytes += width;
+        index += step;
+    }
+    return { text, truncated: false };
+}
+function dropIncompleteNulLine(text) {
+    const index = text.indexOf("\0");
+    if (index < 0)
+        return text;
+    const lineBreak = Math.max(text.lastIndexOf("\n", index - 1), text.lastIndexOf("\r", index - 1));
+    return lineBreak >= 0 ? text.slice(0, lineBreak) : "";
+}
+function frontmatterSlice(text) {
+    const opening = /^---[ \t]*\r?\n/.exec(text);
+    if (!opening)
+        return undefined;
+    const rest = text.slice(opening[0].length);
+    const closing = /\r?\n---[ \t]*(?:\r?\n|$)/.exec(rest);
+    if (!closing || closing.index === undefined)
+        return { yaml: rest, closed: false };
+    return { yaml: rest.slice(0, closing.index), closed: true };
+}
+/** One unindented plain or quoted id. A trailing comment is kept; aliases and nested keys are not. */
+function occupantFromLines(yaml) {
+    const found = [];
+    for (const line of yaml.split(/\r?\n/)) {
+        const match = /^id:[ \t]*(.*)$/.exec(line);
+        if (!match)
+            continue;
+        const id = plainScalarId(match[1] ?? "");
+        if (!id)
+            return {};
+        found.push(id);
+    }
+    if (found.length === 0 || new Set(found).size !== 1)
+        return {};
+    return { occupantId: found[0] };
+}
+function plainScalarId(raw) {
+    const text = raw.trim();
+    if (text === "" || text.startsWith("#"))
+        return undefined;
+    if (text.startsWith("\"") || text.startsWith("'")) {
+        const quote = text[0];
+        let value = "";
+        for (let index = 1; index < text.length; index += 1) {
+            const char = text[index];
+            if (quote === "'" && char === "'" && text[index + 1] === "'") {
+                value += "'";
+                index += 1;
+                continue;
+            }
+            if (quote === '"' && char === "\\")
+                return undefined;
+            if (char === quote) {
+                const after = text.slice(index + 1).trim();
+                if (after !== "" && !after.startsWith("#"))
+                    return undefined;
+                return ID_PATTERN.test(value) ? value : undefined;
+            }
+            value += char;
+        }
+        return undefined;
+    }
+    const commentAt = text.search(/[ \t]#/);
+    const plain = (commentAt >= 0 ? text.slice(0, commentAt) : text).trim();
+    if (plain === "" || /^[&*!|>[{%@`]/.test(plain))
+        return undefined;
+    return ID_PATTERN.test(plain) ? plain : undefined;
+}
+/**
+ * Stable id from the top-level `id` key of a parsed document, including when a
+ * later field is malformed. Comments and nested values are not identities.
+ * Aliases count only when they point at an earlier scalar anchor. Distinct
+ * top-level ids are not guessed between.
+ */
+function occupantFromDocument(document) {
+    if (!isMap(document.contents))
+        return {};
+    const ordered = nodesInOrder(document.contents);
+    const resolved = [];
+    for (const item of document.contents.items) {
+        if (!isPair(item) || !isScalar(item.key) || item.key.value !== "id")
+            continue;
+        const value = resolveIdScalar(item.value, ordered);
+        if (value === undefined)
+            return {};
+        resolved.push(value);
+    }
+    if (resolved.length === 0)
+        return {};
+    if (new Set(resolved).size !== 1)
+        return {};
+    const id = resolved[0];
+    if (!ID_PATTERN.test(id))
+        return {};
+    return { occupantId: id };
+}
+function resolveIdScalar(node, ordered) {
+    if (!node)
+        return undefined;
+    if (isScalar(node))
+        return typeof node.value === "string" ? node.value : undefined;
+    if (!isAlias(node) || !ordered)
+        return undefined;
+    const seen = new Set();
+    let current = node;
+    while (current && isAlias(current)) {
+        if (seen.has(current))
+            return undefined;
+        seen.add(current);
+        const index = ordered.findIndex((item) => item.node === current);
+        if (index < 0)
+            return undefined;
+        let target;
+        for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+            if (ordered[cursor].anchor === current.source) {
+                target = ordered[cursor].node;
+                break;
+            }
+        }
+        current = target;
+    }
+    return current && isScalar(current) && typeof current.value === "string" ? current.value : undefined;
+}
+function nodesInOrder(root) {
+    const ordered = [];
+    const stack = [root];
+    let visited = 0;
+    while (stack.length > 0) {
+        if (++visited > PARSER_LIMITS.maxNodes + 1)
+            return undefined;
+        const current = stack.pop();
+        if (!current)
+            continue;
+        if (isAlias(current)) {
+            ordered.push({ node: current });
+            continue;
+        }
+        if (isScalar(current) || isCollection(current)) {
+            const anchor = typeof current.anchor === "string" && current.anchor.length > 0 ? current.anchor : undefined;
+            ordered.push({ node: current, anchor });
+        }
+        if (isPair(current)) {
+            stack.push(current.value, current.key);
+            continue;
+        }
+        if (isCollection(current)) {
+            for (let index = current.items.length - 1; index >= 0; index -= 1) {
+                stack.push(current.items[index]);
+            }
+        }
+    }
+    return ordered;
+}
+/** Iterative cycle check. Shared anchors (a diamond) are not cycles. */
+function yamlGraphIssue(value) {
+    const seen = new Set();
+    const inStack = new Set();
+    const frames = [];
+    const push = (node) => {
+        if (typeof node !== "object" || node === null)
+            return undefined;
+        if (inStack.has(node))
+            return "cycle";
+        if (seen.has(node))
+            return undefined;
+        if (seen.size >= PARSER_LIMITS.maxNodes || frames.length >= PARSER_LIMITS.maxDepth)
+            return "limit";
+        seen.add(node);
+        inStack.add(node);
+        frames.push({
+            node,
+            children: Array.isArray(node) ? node : Object.values(node),
+            index: 0,
+        });
+        return undefined;
+    };
+    const rootIssue = push(value);
+    if (rootIssue)
+        return rootIssue;
+    while (frames.length > 0) {
+        const frame = frames[frames.length - 1];
+        if (frame.index >= frame.children.length) {
+            inStack.delete(frame.node);
+            frames.pop();
+            continue;
+        }
+        const issue = push(frame.children[frame.index]);
+        frame.index += 1;
+        if (issue)
+            return issue;
+    }
+    return undefined;
+}
+function measureNode(node) {
+    const state = { nodes: 0, depth: 0 };
+    walkNode(node, 1, state);
+    return state;
+}
+function walkNode(node, depth, state) {
+    if (node == null || state.nodes > PARSER_LIMITS.maxNodes + 1)
+        return;
+    state.nodes += 1;
+    state.depth = Math.max(state.depth, depth);
+    if (isAlias(node))
+        return;
+    if (isPair(node)) {
+        walkNode(node.key, depth + 1, state);
+        walkNode(node.value, depth + 1, state);
+        return;
+    }
+    if (isCollection(node)) {
+        for (const item of node.items)
+            walkNode(item, depth + 1, state);
+    }
+}
+function preferenceMapping(preferences) {
+    const mapping = {};
+    for (const key of DEFINITION_PREFERENCE_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(preferences, key) && preferences[key] !== undefined) {
+            mapping[key] = preferences[key];
+        }
+    }
+    return mapping;
+}
+function hasPreference(preferences) {
+    return DEFINITION_PREFERENCE_KEYS.some((key) => preferences[key] !== undefined);
+}
+function compactDefinition(definition) {
+    if (!definition.description)
+        delete definition.description;
+    if (!definition.provenance)
+        delete definition.provenance;
+    if (!definition.metadata)
+        delete definition.metadata;
+    if (!definition.extensions)
+        delete definition.extensions;
+    if (!definition.preservedExecutionControls)
+        delete definition.preservedExecutionControls;
+    return definition;
+}
+function problem(code, message, fields) {
+    return {
+        severity: fields.severity ?? (fields.blocking ? "error" : "warning"),
+        code,
+        message,
+        path: fields.path,
+        field: fields.field,
+        id: fields.id,
+        blocking: fields.blocking,
+        structural: fields.structural,
+    };
+}
+function isPlainObject(value) {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+function isJsonData(value, depth = 0) {
+    if (value === null)
+        return true;
+    if (typeof value === "string")
+        return value.length <= PARSER_LIMITS.maxStringLength;
+    if (typeof value === "boolean")
+        return true;
+    if (typeof value === "number")
+        return Number.isFinite(value);
+    if (depth > PARSER_LIMITS.maxDepth)
+        return false;
+    if (Array.isArray(value))
+        return value.every((item) => isJsonData(item, depth + 1));
+    if (isPlainObject(value))
+        return Object.values(value).every((item) => isJsonData(item, depth + 1));
+    return false;
+}
+function clip(message) {
+    return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+}

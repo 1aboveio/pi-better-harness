@@ -912,10 +912,14 @@ export function holdFailedResume(
 
     return ctx.transaction(() => {
         const terminal = getRow(ctx, "SELECT assignment_id FROM assignment_outcome_waits WHERE wait_id = ? AND generation = ?", waitId, generation);
-        if (terminal) {
+        const recorded = requireWait(ctx, waitId, generation);
+        // Interpretation ends the wait, but its writer may continue until exit.
+        // Exact exit proof releases only that writer's claim, preserving the receipt.
+        if (terminal || recorded.phase === "consumed") {
             const claim = requireClaim(ctx, claimId);
             if (claim.waitId !== waitId || claim.generation !== generation || claim.claimToken !== claimToken
                 || claim.attemptId !== attemptId || claim.launchToken !== launchToken) throw new StoreError("claim-state", "Terminal writer exit proof does not match the published attempt.");
+            if (!terminal && claim.cancelEpoch !== recorded.cancelEpoch) throw new StoreError("stale-cancel-epoch", "Writer exit proof belongs to a different cancellation epoch.");
             const applied = claim.state === "published";
             if (applied) run(ctx, "UPDATE resume_claims SET state = 'invalidated', invalidated_at = ?, reason = ? WHERE claim_id = ?", ctx.now(), reason, claimId);
             return { wait: requireWait(ctx, waitId, generation), claim: requireClaim(ctx, claimId), applied };

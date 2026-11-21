@@ -17,6 +17,7 @@ import {
     describeTiming,
     emptyProgress,
     foldProgress,
+    isProgressRelevantLine,
     resolveRunTiming,
     continuationTimingParams,
     stuckAlertText,
@@ -330,6 +331,24 @@ describe("timing decisions", () => {
             "the persisted calls keep their own start times after reconstruction");
         assert.deepEqual(decideTiming({ graceMs: 0, toolWaitMs: 300, toolWaitAlerted: ["a", "b"] }, reloadSeed, 500), {},
             "a reload with the alert marker does not repeat it");
+    });
+
+    it("alerts only for calls still open after nested tool execution ends", () => {
+        const state = emptyProgress(0);
+        const events = [
+            { type: "tool_execution_start", toolCallId: "batch", toolName: "codemode" },
+            { type: "tool_execution_start", toolCallId: "batch/1", toolName: "read", parentToolCallId: "batch" },
+            { type: "tool_execution_start", toolCallId: "batch/2", toolName: "read", parentToolCallId: "batch" },
+            { type: "tool_execution_end", toolCallId: "batch/1", toolName: "read", parentToolCallId: "batch", isError: false, durationMs: 10 },
+        ];
+        for (const line of events.map((event) => JSON.stringify(event)).filter(isProgressRelevantLine)) {
+            foldProgress(state, JSON.parse(line));
+        }
+        const timing = { graceMs: 0, toolWaitMs: 300 };
+        assert.deepEqual(decideTiming(timing, state, 300).toolWaitWakes?.map(({ callId }) => callId), ["batch", "batch/2"]);
+        foldProgress(state, { type: "tool_execution_end", toolCallId: "batch/2", toolName: "read", parentToolCallId: "batch", isError: true });
+        foldProgress(state, { type: "message_end", message: { role: "toolResult", toolCallId: "batch", toolName: "codemode", timestamp: 310 } });
+        assert.equal(decideTiming(timing, state, 620).toolWaitWakes, undefined);
     });
 
     it("keeps tool-wait dedup separate from the stuck spell and re-arms on a later call", () => {

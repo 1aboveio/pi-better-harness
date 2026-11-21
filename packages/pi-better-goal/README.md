@@ -12,8 +12,26 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 
 ## Core Features
 
+### Activity Provider Contract
+
+New providers register `activityVersion: 1`, `getActivity(ctx)`, and
+`onActivityChanged(notify, ctx)`. Each snapshot supplies `nextDeadline` as an
+absolute millisecond timestamp or `null`. Notifications observe the captured
+workspace, session, and branch; they do not authorize a model turn. Goal owns
+continuation admission and transcript writes. Callbacks from replaced execution
+generations are ignored. Deadline timers are cancelled while the Goal is held,
+paused, complete, or foreground-busy, and recalculated on re-entry.
+
+Unversioned providers retain legacy compatibility: at most one scheduled
+collection every 2,000 ms per provider while observation is needed. This cost is
+reported as `compatibilityIntervalMs` in its activity snapshot. Notifying
+providers are cached between events and deadlines, even when legacy providers
+need a compatibility check. A v1 provider without notifications is refused; it
+never falls back to a global scanner. Elapsed-clock rendering reads only session
+memory and does not collect activity.
+
 - `/goal` runtime for starting, pausing, resuming, completing, and clearing the current objective.
-- `/goal settings` opens an interactive settings page in the TUI. Select a row with Up/Down and toggle with Space/Enter; changes save immediately, and Escape closes the page. All three controls default to `on`. Automatic continuation controls idle and background-drain wakes; conversational resume controls the agent's Escape-pause resume tool; **Pause on Esc** controls whether editor Escape pauses the active goal. Goal kickoff, `/goal resume`, and `alt+g` remain available with these controls off. For scripts or non-interactive sessions, use `/goal settings auto-continue on|off`, `/goal settings conversational-resume on|off`, and `/goal settings pause-on-escape on|off`; bare `/goal settings` prints the saved values outside the TUI.
+- `/goal settings` opens an interactive settings page in the TUI. Select a row with Up/Down and toggle with Space/Enter; changes save immediately, and Escape closes the page. Automatic continuation, conversational resume, and **Pause on Esc** default to `on`. **Auto-start Goal** defaults to `off` and is also available directly on the `/harness-settings` main page. Automatic continuation controls idle and background-drain wakes; conversational resume controls the agent's Escape-pause resume tool; Pause on Esc controls whether editor Escape pauses the active goal. Goal kickoff, `/goal resume`, and `alt+g` remain available with these controls off. For scripts or non-interactive sessions, use `/goal settings auto-continue on|off`, `/goal settings conversational-resume on|off`, `/goal settings pause-on-escape on|off`, or `/goal settings auto-start-from-outcome on|off`; bare `/goal settings` prints the saved values outside the TUI.
 - `escape` pauses the active goal by default, and it stays paused while you talk to the agent. With **Pause on Esc** off, observed editor Escape leaves the goal active while preserving native streaming interruption and menu/dialog cancellation. Automatic continuation remains independent. Hosts without terminal/focus inspection and unknown custom editors retain generic abort-to-pause behavior because they cannot identify Escape reliably. With conversational resume enabled, say "go" (the agent then calls `goal_resume`), or use `/goal resume` or `alt+g`. `/goal pause` resumes only through `/goal resume` or `alt+g`. Paused goals are never poked. On a macOS terminal without Option-as-Meta, `alt+g` types `©`; use `/goal resume` there.
 - Background work that finishes while an `ask_user_question` is pending is handed to the agent right after the answer.
 - A compact goal widget that does not replace Pi's footer.
@@ -28,13 +46,20 @@ When `pi-better-harness` is installed, its optional **Outcome & Todo** runtime o
 
 `/goal` does not install, enable, or configure Outcome & Todo. Install Harness and enable **Outcome & Todo** in `/harness-settings` if you want that shared outcome and checklist. Without Harness, this package keeps its standalone prompts and behavior unchanged. The stored Goal objective remains the raw original trigger (for example, a bound command invocation) so `/goal resume` can re-enter the work; it is not the authoritative business outcome when Harness owns one.
 
+With **Auto-start Goal** enabled, a successful explicit `update_todo` outcome save can create and bind a Goal. The outcome must be active, unbound, have a nonempty objective and at least one nonempty `doneWhen` acceptance criterion. All criteria must contain text. Slash-shaped command invocations do not qualify; invoke those commands explicitly. Outcome & Todo hooks must also be enabled. The existing outcome, boundaries and Todo stay intact. No kickoff message is queued for the already-running tool turn; subsequent idle/background continuation obeys its existing setting and gates.
+
+Existing active, paused or budget-limited Goals are never replaced or resumed. Refinements of a bound outcome do not create another Goal. A new unbound task can start after the previous Goal completes. Session restore, branch navigation and enabling the preference do not replay saved outcomes; the next explicit qualifying save is the trigger. Completing a checklist or outcome does not complete the Goal.
+
+When a workflow already owns the session, the new Goal binds its registered coordinator without invoking it again. Its scheduler and completion checks continue to apply. An unavailable or invalid workflow coordinator prevents automatic creation.
+
 ## Settings Storage
 
 Goal preferences are saved only in Pi's global `~/.pi/agent/settings.json` under
 `piBetterHarness.goal` (or `$PI_CODING_AGENT_DIR/settings.json` when overridden).
 The payload retains `version: 1` and the boolean `autoContinue`,
-`conversationalResume`, and `pauseOnEscape` fields; omitted controls default to
-`true`. Updates preserve other Pi settings and other `piBetterHarness` keys.
+`conversationalResume`, `pauseOnEscape`, and `autoStartFromOutcome` fields. The
+first three default to `true`; `autoStartFromOutcome` defaults to `false`.
+Updates preserve other Pi settings and other `piBetterHarness` keys.
 
 On first read, an existing `extensions/pi-better-goal-preferences.json` in the
 agent directory is validated and migrated when the global Goal key is absent.

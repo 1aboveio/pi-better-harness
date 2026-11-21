@@ -2,9 +2,24 @@
 
 `pi-better-background-tasks` is a Pi extension for durable background shell tasks, watchers, logs, and status inspection.
 
+For the decisions governing execution, progress, waits, and notifications, see the [Background task policy (ADR 0028)](https://github.com/1aboveio/pi-better-harness/blob/main/docs/adr/0028-background-task-policy.md).
+
 ## Quick Answer
 
 Use `pi-better-background-tasks` when a command should keep running while the foreground Pi session stays free. It is best for dev servers, long scripts, queue watchers, deploy checks, log tails, and other command-driven work.
+
+## Runtime Status
+
+Run `pi-background-runtime-status` to ensure the manifest-pinned local server and
+print its canonical agent root, build, Node version, instance and capabilities as JSON.
+This command does not create a hosted Pi session or require Harness.
+The first use installs a verified private Node 24 and locked server dependencies.
+Set `PI_OFFLINE=1` to require the cached runtime without downloads.
+`PI_CODING_AGENT_DIR` selects the agent root; `PI_SERVER_DIR` selects the initial
+transport directory. Later calls for the same canonical root reuse the registered
+transport, including calls from Subagents or another package installation.
+An incompatible or unhealthy live owner is an error, not a reason to replace it.
+The API is `runtime-client/src/runtime/client.mjs`, exporting `ensureRuntime`.
 
 ## Screenshots
 
@@ -97,10 +112,10 @@ timeouts, and v1 non-goals.
 
 ## Reloads and session switches
 
-Tasks belong to the Pi session that started them. After `/reload`, the same
-session picks every task back up: watches keep polling, remote tmux output keeps
-being collected, and a task that finished during the reload (or exits later) gets
-its completion callback exactly once.
+SSH and legacy tasks belong to the Pi session that started them. After `/reload`,
+that session resumes polling watches and collecting remote tmux output. The
+runtime checks delivery receipts and recovers pending callbacks. For supervised
+local tasks (`bgs_`), see [Observed operations and waits](#observed-operations-and-waits).
 
 After `/new`, `/resume`, fork, or switching to another session, the previous
 session's tasks keep running but are paused from Pi's side: watches do not poll,
@@ -114,9 +129,16 @@ new Pi process, a task whose process is gone is marked lost.
 
 ## Progress And Suspected Stalls
 
+Supervised local tasks (`bgs_`) can notify their owning session while a wait
+is pending. The alert includes available output and the state of the other wait
+dependencies. The wait delivers its completion once all dependencies finish.
+The server recovers a pending alert on the owning branch after a reconnect and
+checks the runner for fresh progress before delivery. [Background task policy](../../docs/adr/0028-background-task-policy.md)
+
 A task can remain `running` without recent progress evidence. Compact status and
-navigator use the same observation. Process tasks use recorded progress and the
-log's modification time. A watch advances only when a poll observes a changed
+navigator use the same observation. Supervised processes record the time of new output, including bytes beyond the
+log retention limit. SSH and legacy processes use recorded progress and the log's
+modification time. A watch advances only when a poll observes a changed
 outcome: running a poll, appending its result to the watch log, or polling on
 schedule is activity, not progress. Before any progress, the task's launch time
 anchors the silence duration. This does not measure CPU activity, network waits,
@@ -150,9 +172,11 @@ records an observation, not a process failure. After the existing 60-second
 attention grace, callback-enabled tasks wake the parent once per silent spell.
 New progress closes the observation and a later spell can notify again. Quiet
 work does not alert, `callback:false` suppresses notification, and no silence
-threshold stops a task or changes its lifecycle. The active session's runtime
-checks observations once per second, including an in-flight watch poll. Reload
-restores monitoring and the persisted attention receipts. Log-retention writes
+threshold stops a task or changes its lifecycle. For supervised tasks the server
+schedules the next silence threshold, including during an in-flight watch poll.
+A supervised watch launched by an older runner lacks the progress checkpoint
+needed to classify silence. Its next launch uses the new runner. Reload restores
+monitoring and persisted delivery receipts. Log-retention writes
 are excluded from task progress.
 
 ## Launch Policy And Diagnostics
@@ -172,9 +196,10 @@ missing profile files or current process-tool denials are not confinement proof.
 Remote execution also reports unknown remote confinement.
 
 Use `bg_task_status` with `diagnostics:true` (or either wrapper's `status`
-action) for a bounded, current process snapshot. Both Main and Background tasks
-must currently permit **Process access: Read**, even when sandbox switches are
-Off. The result checks the recorded PID and start identity, then reports process
+action) for a bounded, current process snapshot. An enabled Background tasks
+profile must permit **Process access: Read**. A disabled profile's retained
+setting does not deny access. The adapter is unavailable under Main confinement.
+The result checks the recorded PID and start identity, then reports process
 state, accumulated CPU time, and available wait evidence. It never reads command
 arguments or environment values and never probes a remote host or descendants.
 A snapshot cannot establish useful work or a hang. Watch poll PIDs are not
@@ -307,12 +332,21 @@ keeps observing after the worker or Pi process exits. Status and logs recover
 from durable evidence; an ambiguous launch becomes `lost` and is not relaunched.
 SSH tasks and older `bg_` identifiers use the existing runtime.
 
+The canonical local server owns result supervision for newly admitted local
+tasks. Closing every frontend leaves the independent runner running. The server
+imports matching terminal evidence, advances already-authorized waits, and keeps
+notifications for their recorded recipients. Hosted sessions use the same root
+supervisor rather than starting another discovery loop. A live or unverified
+legacy owner blocks handoff; missing permission authority or execution evidence
+is reported without starting a replacement command. This transfer does not
+authorize a continuation, consume evidence, or start a parent model turn.
+
 Stop and timeout evidence can contain `groupCleanup=unproven` when the command's
 leader exits before cleanup can be verified. Descendants may remain running;
 inspect that evidence before interpreting the result.
 
 Call `wait_for_operations` with `task_ids` and an optional `continuation_note` to
-register an all-settled wait. The parent remains responsive. A notification means
+register an all-settled wait. The parent remains responsive. A wait completion notification means
 every dependency is terminal, including failed, cancelled, timed-out or lost
 operations; it does not mean the command succeeded.
 

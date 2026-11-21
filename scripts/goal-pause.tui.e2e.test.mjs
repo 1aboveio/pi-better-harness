@@ -54,7 +54,7 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   waitForScreen((screen) => /Pause on Esc\s+Off/.test(screen));
   const preferencesFile = join(fixtures, "agent", "settings.json");
   assert.deepEqual(JSON.parse(readFileSync(preferencesFile, "utf8")).piBetterHarness.goal, {
-    version: 1, autoContinue: false, conversationalResume: false, pauseOnEscape: false,
+    version: 1, autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false,
   });
   sendKey("Space");
   waitForScreen((screen) => /Pause on Esc\s+On/.test(screen));

@@ -2,9 +2,30 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { existsSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { cleanupHarnesses, createHarness, parentOwner, registerOperation, workerOwner } from "./support.ts";
+import { cleanupHarnesses, createHarness, parentOwner, registerOperation, settleOperation, workerOwner } from "./support.ts";
 
 afterEach(cleanupHarnesses);
+
+test("ready worker waits block upgrade without a resume claim, while responsive parent waits do not", async () => {
+    const h = createHarness();
+    const { createAssignmentReader } = await import(new URL('../assignment-observation.mjs', import.meta.url).href);
+    const reader = createAssignmentReader(h.path);
+    try {
+        registerOperation(h.store);
+        settleOperation(h.store, 'op-build-1');
+        const { wait } = h.store.registerWait({ owner: workerOwner,
+            dependencies: [{ operationId: 'op-build-1' }], continuationNote: 'Interpret retained output' });
+        assert.equal(h.store.listResumeClaims({ waitId: wait.waitId }).length, 0);
+        assert.deepEqual(reader.upgradeObligations(), [{ kind: 'worker-wait', id: wait.waitId,
+            generation: wait.generation, phase: wait.phase }]);
+        h.store.cancelWait({ waitId: wait.waitId, generation: wait.generation, expectedCancelEpoch: 0,
+            owner: workerOwner, reason: 'Explicit resolution' });
+        registerOperation(h.store, { operationId: 'parent-operation', owner: parentOwner });
+        settleOperation(h.store, 'parent-operation', 'succeeded', parentOwner);
+        h.store.registerWait({ owner: parentOwner, dependencies: [{ operationId: 'parent-operation' }], continuationNote: 'Inspect output' });
+        assert.deepEqual(reader.upgradeObligations(), []);
+    } finally { reader.close(); h.closeStore(); }
+});
 const readers = await Promise.all([
     "../assignment-observation.mjs",
     "../../pi-better-background-tasks/src/shared-operation-coordinator/assignment-observation.mjs",
@@ -71,4 +92,20 @@ test("v4 missing required fields remains unverified and missing storage is never
     }
     assert.deepEqual(readFileSync(h.path), before);
     assert.equal(existsSync(`${h.path}.missing`), false);
+});
+
+test("upgrade obligations retain accepted intents until durable resolution", async () => {
+    const h = createHarness();
+    const { createAssignmentReader } = await import(new URL('../assignment-observation.mjs', import.meta.url).href);
+    const db = new DatabaseSync(h.path);
+    db.exec(`CREATE TABLE subagent_launch_intents (owner TEXT, request_key TEXT, attempts TEXT, state TEXT);
+      INSERT INTO subagent_launch_intents VALUES ('parent', 'request', '[{"id":"attempt"}]', 'accepted');`);
+    const reader = createAssignmentReader(h.path);
+    try {
+        assert.deepEqual(reader.upgradeObligations(), [{ kind: 'launch-intent', id: 'request', owner: 'parent', attempts: ['attempt'] }]);
+        db.exec("UPDATE subagent_launch_intents SET state='returned'");
+        assert.deepEqual(reader.upgradeObligations(), []);
+        db.exec("UPDATE schema_meta SET value='999' WHERE key='schema_version'");
+        assert.throws(() => reader.upgradeObligations(), /Unsupported coordinator schema/);
+    } finally { reader.close(); db.close(); h.closeStore(); }
 });

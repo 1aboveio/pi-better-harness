@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { createHarness, cleanupHarnesses, registerOperation, parentOwner, workerOwner } from "./support.ts";
-import type { AssignmentOutcomeInput } from "../index.ts";
+import { createHarness, cleanupHarnesses, registerOperation, removeAssignmentOperationBinding, parentOwner, workerOwner } from "./support.ts";
+import { SCHEMA_VERSION, type AssignmentOutcomeInput } from "../index.ts";
 import { DatabaseSync } from "node:sqlite";
 
 afterEach(cleanupHarnesses);
@@ -21,6 +21,7 @@ function fixture() {
 test("terminal failure atomically disarms dispatch, transfers pins, and preserves unresolved facts and writer fences", () => {
     const { h, wait, claim, input } = fixture();
     const outcome = h.store.recordAssignmentOutcome(input);
+    assert.deepEqual(h.store.listDispatchableOutboxRecipients(), [], "assignment outcomes are delivered through their own path");
     assert.equal(h.store.getWait(wait)?.phase, "held");
     assert.equal(h.store.getWait(wait)?.acknowledgement, null);
     assert.equal(h.store.getWait(wait)?.cancelEpoch, 0);
@@ -104,10 +105,13 @@ test("version 1 migrates without losing dependency evidence or published writer 
     const { h, input } = fixture();
     h.closeStore();
     const db = new DatabaseSync(h.path);
+    // The fixture removes additive schema too, matching an actual v1 database.
+    for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'assignment_change_%'").all()) db.exec(`DROP TRIGGER "${row.name}"`);
+    removeAssignmentOperationBinding(db);
     db.exec("DROP TABLE assignment_outcome_waits; DROP TABLE assignment_outcomes; DROP TABLE assignment_attempts; DROP TABLE assignment_bindings; ALTER TABLE outbox_events DROP COLUMN event_type; DROP INDEX waits_one_pending_per_owner; ALTER TABLE waits DROP COLUMN dispatch_disarmed; CREATE UNIQUE INDEX waits_one_pending_per_owner ON waits (owner_kind, owner_session_id, coalesce(owner_branch_id, '')) WHERE phase NOT IN ('consumed', 'cancelled'); UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'");
     db.close();
     h.reopen();
-    assert.equal(h.store.schemaVersion, 4);
+    assert.equal(h.store.schemaVersion, SCHEMA_VERSION);
     assert.equal(h.store.listResumeClaims()[0].state, "published");
     h.store.registerAssignment(input);
     assert.equal(h.store.recordAssignmentOutcome(input).outcome, "failed");
@@ -161,6 +165,7 @@ test("version 2 outcome migration preserves receipts and disarms the historical 
     h.store.receiptAssignmentOutcome({ assignmentId: input.assignmentId, recipient: parentOwner, revision: 1, entryId: "retained-transcript-entry" });
     h.closeStore();
     const db = new DatabaseSync(h.path);
+    removeAssignmentOperationBinding(db);
     db.exec("DROP TABLE assignment_attempts; DROP INDEX waits_one_pending_per_owner; ALTER TABLE waits DROP COLUMN dispatch_disarmed; CREATE UNIQUE INDEX waits_one_pending_per_owner ON waits (owner_kind, owner_session_id, coalesce(owner_branch_id, '')) WHERE phase NOT IN ('consumed', 'cancelled'); UPDATE schema_meta SET value = '2' WHERE key = 'schema_version'");
     db.close();
     h.reopen();

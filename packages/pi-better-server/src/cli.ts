@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { parseManagedStartupArgs, resolveAgent, type ServerAgent } from "./cli-args.ts";
 import { absolutePath, launcherRuntime, registeredRuntime } from "./startup/runtime.ts";
+import { validateDaemonOwnerIdentity } from "./daemon-owner.ts";
 
 const log = (message: string): void => void process.stderr.write(`[pi-better-server] ${message}\n`);
 
@@ -70,15 +71,51 @@ async function main(): Promise<void> {
   }
 
   const serverDir = process.env.PI_SERVER_DIR ? { serverDir: process.env.PI_SERVER_DIR } : {};
+  if (agent === "pi" && !process.env.PI_SERVER_GUARDED_CHILD) {
+    const { runtimeRoot } = await import("./runtime/root.ts");
+    const root = runtimeRoot(process.env.PI_CODING_AGENT_DIR!, process.env.PI_SERVER_DIR!);
+    const { runGuardian } = await import("./runtime/guardian.ts");
+    const rebind = process.env.PI_SERVER_GUARDIAN_REBIND ? JSON.parse(process.env.PI_SERVER_GUARDIAN_REBIND) : undefined;
+    if (rebind) {
+      validateDaemonOwnerIdentity(rebind);
+    } else {
+      const { checkStartupAdmission, startupIntentFromEnv } = await import("./startup/admission.ts");
+      const { readOwnBuild } = await import("./startup/artifact.ts");
+      checkStartupAdmission({ canonicalServerDir: root.serverDir, agentDir: root.agentDir,
+        build: readOwnBuild(), intent: startupIntentFromEnv(process.env) });
+    }
+    await runGuardian(root.serverDir, rebind);
+    return;
+  }
+  let shutdownBudget: ReturnType<typeof setTimeout> | undefined;
   const daemon = agent === "codex"
     ? await (await import("./codex/daemon.ts")).startCodexDaemon({ ...serverDir, log })
-    : await (await import("./server.ts")).startDaemon({ ...serverDir, log });
+    : await (await import("./server.ts")).startDaemon({ ...serverDir, log, onDraining: () => {
+      shutdownBudget ??= setTimeout(() => { log("runtime-unavailable: shutdown exceeded 5000ms; writer state remains unverified"); process.exit(1); }, 5000);
+      shutdownBudget.unref();
+    } });
+  if ("closed" in daemon) {
+    const { inspectDaemonOwner } = await import("./daemon-owner.ts");
+    const owner = inspectDaemonOwner(daemon.serverDir);
+    const token = owner.status === "live" ? owner.owner.token : undefined;
+    const { maintainGuardian } = await import("./runtime/guardian.ts");
+    const stopRecovery = owner.status === "live" ? maintainGuardian(daemon.serverDir, owner.owner) : () => undefined;
+    if (process.connected) process.send?.({ type: "runtime-ready", token }, () => undefined);
+    void daemon.closed.then(() => {
+      if (shutdownBudget) clearTimeout(shutdownBudget);
+      stopRecovery();
+      if (process.connected) process.send?.({ type: "runtime-clean-stop", token }, () => process.disconnect?.());
+    });
+  }
 
   let stopping = false;
   const shutdown = (): void => {
     if (stopping) return;
     stopping = true;
-    void daemon.stop().finally(() => process.exit(0));
+    void daemon.stop().catch(error => {
+      log(`shutdown failed: ${String(error)}`);
+      process.exitCode = 1;
+    });
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

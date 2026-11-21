@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { DaemonClient } from "../client.ts";
 import { claimDaemonOwner, inspectDaemonOwner, ownerIsAlive, validateDaemonOwnerIdentity, type DaemonOwnerIdentity } from "../daemon-owner.ts";
-import { socketPathFor } from "../paths.ts";
+import { socketPathFor } from "../runtime/socket.ts";
 import type { Readiness } from "./ensure.ts";
 import type { ActivationResult, IdleSessionsLease, ServerBuild, StagedRuntime, UpgradeRequest } from "./managed-types.ts";
 import { homedir } from "node:os";
@@ -273,6 +273,15 @@ export const defaultActivationPorts: ActivationPorts = {
     finally { clearTimeout(timer); client.close(); }
   },
   async launch(request, options = { adopt: true }) {
+    // Server owner release precedes its process exit and the guardian's release.
+    // Preserve the old recovery owner until it observes that exact clean exit.
+    const deadline = Date.now() + 5000;
+    while (inspectDaemonOwner(request.serverDir, "guardian-owner").status === "live") {
+      const owner = inspectDaemonOwner(request.serverDir);
+      if (owner.status === "live" || owner.status === "ambiguous") throw new Error("runtime-unhealthy: existing server owner still prevents activation");
+      if (Date.now() >= deadline) throw new Error("runtime-unhealthy: previous guardian has not released ownership; no replacement launched");
+      await delay(25);
+    }
     const env: NodeJS.ProcessEnv = { ...process.env, PI_SERVER_AGENT: "pi", PI_SERVER_DIR: request.serverDir, PI_CODING_AGENT_DIR: request.agentDir,
       PI_SERVER_RUNTIME_MANIFEST: request.runtime.manifestPath };
     delete env.PI_SERVER_ACTIVATION_ID;
@@ -297,9 +306,13 @@ export const defaultActivationPorts: ActivationPorts = {
 /** Executed in a detached host process; the exclusive lock is never aged out. */
 export async function runActivationWorker(request: UpgradeRequest, ports: ActivationPorts = defaultActivationPorts): Promise<ActivationResult> {
   const serverDir = canonicalStateDir(request.serverDir);
+  // Contending claims are transient coordinator metadata, not existing daemon
+  // state. Keep them out of the root inventory used for empty-namespace proof.
+  const stagingDir = join(serverDir, RESERVATIONS);
+  mkdirSync(stagingDir, { recursive: true, mode: 0o700 });
   let release: () => void;
   for (let attempt = 0; ; attempt++) {
-    try { release = claimDaemonOwner(serverDir, LOCK); break; }
+    try { release = claimDaemonOwner(serverDir, LOCK, stagingDir); break; }
     catch (error) {
       const journal = readActivationJournal(serverDir);
       // A staged journal can still name the abandoned build while the coordinator
@@ -396,6 +409,16 @@ export async function runActivationWorker(request: UpgradeRequest, ports: Activa
         save(journal);
         return result(journal);
       }
+      // Once scheduled, this exact daemon owns the durable stop transition.
+      // Repeated hellos can time out during activity observation and abandon its coordinator.
+      if (scheduled && journal.phase === "prepared") {
+        const owner = inspectDaemonOwner(serverDir);
+        if (owner.status === "live" && sameOwner(owner.owner, journal.previousOwner)) {
+          await ports.pause();
+          journal = readActivationJournal(serverDir)!;
+          continue;
+        }
+      }
       const probe = await ports.probe(serverDir);
       journal = readActivationJournal(serverDir)!;
       if (committed(journal.phase)) break;
@@ -411,9 +434,13 @@ export async function runActivationWorker(request: UpgradeRequest, ports: Activa
         if (!old || !compatibleUpgrade(old, journal.desiredBuild)) return defer(journal, "Unsafe SDK downgrade or incompatible protocol; activation deferred");
         journal.previousBuild = old;
         journal.previousOwner = owner.owner;
-        journal.phase = "prepared";
-        journal.reason = "Waiting for idle sessions and reconnect-capable controllers";
-        save(journal);
+        if (journal.phase !== "prepared") {
+          journal.phase = "prepared";
+          journal.reason = "Waiting for idle sessions and reconnect-capable controllers";
+          save(journal);
+        }
+        // Once prepared, the daemon owns the stop transition. Re-publishing our
+        // snapshot could overwrite its stopping commitment while this probe ran.
         if (!scheduled) { await ports.schedule(journal); scheduled = true; }
         await ports.pause();
         journal = readActivationJournal(serverDir)!;

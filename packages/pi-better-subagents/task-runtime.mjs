@@ -1,5 +1,6 @@
 /** Trusted native entry point. Any failure before/inside guard installation is fatal. */
 import preflight from "./child-preflight.mjs";
+import "./managed-launch-bootstrap.mjs";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join } from "node:path";

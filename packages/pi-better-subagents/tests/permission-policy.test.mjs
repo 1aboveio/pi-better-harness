@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-    currentSandboxPermissions, observeSandboxPermissions, resolveSubagentPermissions,
+    currentSandboxPermissions, describeSubagentProcessPolicy, effectiveWorkerProcessAccess, observeSandboxPermissions, resolveSubagentPermissions,
     SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL,
 } from "../permission-policy.ts";
 import { maybeBuildSandboxCommand } from "../sandbox.ts";
@@ -30,6 +30,7 @@ describe("subagent permission policy", () => {
             for (const requested of [undefined, false, true]) {
                 assert.deepEqual(resolveSubagentPermissions(pi, requested), {
                     sandboxEnabled: requested === true, enforced: false, tools: defaultSubagentTools(),
+                    activationSource: requested === undefined ? "default (no Subagents profile)" : "launch request",
                 });
             }
         }
@@ -51,9 +52,9 @@ describe("subagent permission policy", () => {
         const plan = resolveSubagentPermissions(pi, true);
         assert.equal(plan.sandboxEnabled, true);
         assert.equal(plan.enforced, true);
-        assert.deepEqual(plan.permissions, {
-            projectFiles: "read-write", outsideProject: "read", storedCredentials: "read", commands: true, network: true,
-        });
+        assert.equal(plan.permissions, undefined);
+        assert.equal(plan.inactiveProfile, true);
+        assert.equal(effectiveWorkerProcessAccess(plan), "read");
     });
 
     it("carries published subagent tools and rejects a malformed tool list", () => {
@@ -100,6 +101,46 @@ describe("subagent permission policy", () => {
         assert.equal(readPlan.permissions.processAccess, "read", "a launched policy cannot change retroactively");
         publish({ state: "enabled", permissions: main, subagentPermissions: { ...child, processAccess: "write" } });
         assert.throws(() => resolveSubagentPermissions(pi, undefined), /Invalid sandbox permission profile/);
+    });
+
+    it("distinguishes process policy for saved and fresh launches as the profiles change", () => {
+        const { pi, publish } = fixture();
+        const savedOn = { runId: "confined", sandbox: true };
+        const savedOff = { runId: "unconfined", sandbox: false };
+        const continued = (saved = savedOn) => resolveSubagentPermissions(pi, undefined, saved);
+        const fresh = () => resolveSubagentPermissions(pi, undefined);
+        const update = (mainEnabled, childEnabled, processAccess) => publish({
+            state: mainEnabled ? "enabled" : "disabled",
+            permissions: { ...main, enabled: mainEnabled, processAccess: "off" },
+            subagentPermissions: { ...child, enabled: childEnabled, processAccess },
+        });
+
+        update(true, true, "off");
+        assert.equal(continued().permissions.processAccess, "off");
+        assert.equal(fresh().permissions.processAccess, "off");
+        assert.throws(() => continued(savedOff), /saved launch recipe has confinement Off.*Subagents profile requires it On.*new recipe/);
+
+        update(true, true, "read");
+        const readPlan = continued();
+        assert.equal(readPlan.permissions.processAccess, "read");
+        assert.match(describeSubagentProcessPolicy(readPlan, "darwin"), /On \(saved launch recipe\).*Read \(current Subagents profile\).*new recipe.*Seatbelt can deny absolute \/bin\/ps/);
+        assert.doesNotMatch(describeSubagentProcessPolicy(readPlan, "linux"), /\/bin\/ps/);
+        assert.match(describeSubagentProcessPolicy(fresh(), "darwin"), /On \(current Subagents profile\).*Read \(current Subagents profile\)/);
+
+        update(false, false, "read");
+        assert.equal(continued().sandboxEnabled, true);
+        assert.equal(continued().permissions, undefined, "the disabled profile does not override the task sandbox defaults");
+        assert.equal(effectiveWorkerProcessAccess(continued()), "read");
+        assert.equal(continued(savedOff).sandboxEnabled, false);
+        assert.match(describeSubagentProcessPolicy(fresh(), "darwin"), /Off \(current Subagents profile\).*No worker task-sandbox process policy/);
+
+        update(false, false, "off");
+        assert.equal(fresh().permissions, undefined);
+        assert.equal(effectiveWorkerProcessAccess(continued()), "read", "the disabled scope cannot deny the fixed tool");
+        assert.match(describeSubagentProcessPolicy(continued(), "darwin"), /On \(saved launch recipe\).*Read \(task sandbox defaults; Subagents profile Off\)/);
+        update(false, true, "off");
+        assert.equal(effectiveWorkerProcessAccess(continued()), "off", "re-enabling restores retained Process Off");
+        assert.equal(readPlan.permissions.processAccess, "read", "the earlier attempt's plan stays frozen");
     });
 
     it("does not allow a tool opt-out to bypass the human-enabled profile", () => {
@@ -150,4 +191,14 @@ describe("subagent permission policy", () => {
         assert.throws(() => resolveSubagentPermissions(pi, undefined), /Invalid sandbox permission profile/);
         assert.equal(resolveSubagentPermissions(fixture().pi, undefined).sandboxEnabled, true);
     });
+});
+
+it('captures immutable Background policy alongside worker permissions for restored admission',()=>{
+ const events=new EventEmitter();const pi={events};
+ const background={state:'enabled',writableRoot:'/background',denyWrite:['/private'],permissions:{enabled:true,projectFiles:'read',outsideProject:'off',storedCredentials:'off',commands:false,network:false}};
+ events.on('pi-better-sandbox:policy-request',()=>events.emit('pi-better-sandbox:policy',{state:'enabled',background}));
+ const captured=currentSandboxPermissions(pi);
+ assert.equal(captured.backgroundPolicy.permissions.commands,false);
+ background.permissions.commands=true;assert.equal(captured.backgroundPolicy.permissions.commands,false);
+ assert.equal(currentSandboxPermissions(pi).backgroundPolicy.permissions.commands,true);
 });

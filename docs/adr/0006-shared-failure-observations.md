@@ -24,6 +24,8 @@ Notification receipts are separate from observation and recovery. A successful h
 
 Failed writes retain every pending event and receipt in process memory and retry on subsequent reads. Pending receipts prevent repeated handoffs within that process; a visible observation-incomplete state remains until persistence succeeds. While storage is unavailable, this memory-only backlog cannot survive process loss. The existence marker can still report that evidence is missing when it was written successfully. Journals and markers follow existing run/task retention and explicit cleanup.
 
+Background Tasks applies this shared delivery contract to suspected stalls during a pending wait. Its progress rules, recipient behavior, and acceptance criteria are maintained in the [Background task policy](0028-background-task-policy.md#progress-and-suspected-stalls).
+
 ## Amendment: incident lifecycle (#315)
 
 ### Problem
@@ -53,7 +55,7 @@ Replaying the session from issue #315 (29 children, 181 tool failures) yields 17
 - **One view of attempt reuse.** The parent scans the child's whole process log; the child checks `attemptId` reuse and validates dispositions against its whole session record, not one branch. Session entries are a superset of the log's tool starts, so a reuse the parent predicts is always one the child refused.
 - **Rejected intent is read, not re-derived.** The parent files `rejected-intent` only when the child's `tool_execution_end` carries the child's own pre-run refusal (`Invalid command intent: … The command was not run.`, or Pi's schema refusal of intent fields the shared validator also rejects). A prediction from the logged arguments never decides it: the log keeps the model's raw arguments, while Pi may normalize them before `execute` (0.87 drops optional nulls; it coerces `42` to `"42"`). A command that ran is always an ordinary failure. An explicit `null` intent field means "not declared" in the shared validator, and the intent schemas admit it, so both sides read the same input.
 - **Orphaned and lost runs.** Subagents defer running observation gaps only while the run is `running`. After an orphaned or lost run's health callback, later gaps are delivered promptly (once, by receipt), because no further callback may follow.
-- **Background-task intent.** `bg_task_spawn`, `bg_task_watch`, and `bg_task` accept `operation_id` and `expected_exit_codes`. The parent agent launches these commands itself, so the declaration is trusted. They are validated before launch with the shared validator. A declared exit code is recorded as expected. A later task that succeeds with the same `operation_id` (same kind, cwd, and SSH target, and the same owner: an equal non-empty session id, or for sessionless tasks the same spawning process, #312's rule), and that started after the failure, recovers the earlier task's unresolved failures; observation gaps and expected failures are left alone.
+- **Background-task intent.** The Background adapter validates the launching parent's declared intent with the shared validator. The task-specific matching and recovery rules are maintained in [ADR 0028](0028-background-task-policy.md#failure-evidence).
 - **Budget-safe terminal notes.** The terminal summary never exceeds its budget and is made of whole lines. It drops, in order: incident rows, lower-priority notes (history, expected, earlier reported), the cursor's retrieval hint, the unclassified count, the cursor, and the count line. The correctness note is kept whenever it fits.
 
 ## Amendment: quiet history

@@ -69,6 +69,7 @@ test('worker scheduler admission distinguishes unreadable evidence from an eligi
   writeFileSync(join(skill,'scripts','next-actions.mjs'),'process.stdout.write("invalid scheduler output");');
   assert.equal((await operationResumeSchedulerGate(entries,owner)).ok,false,'invalid output must hold');
   writeFileSync(join(skill,'scripts','next-actions.mjs'),'process.stdout.write(JSON.stringify({due:[]}));');
-  assert.deepEqual(await operationResumeSchedulerGate(entries,owner),{ok:true,waitUntil:undefined});
+  const eligible=await operationResumeSchedulerGate(entries,owner);
+  assert.ok(eligible.ok && eligible.waitUntil===undefined && eligible.isCurrent());
  }finally{rmSync(root,{recursive:true,force:true});}
 });

@@ -6,6 +6,19 @@
 
 Use `pi-better-subagents` when you want Pi to launch independent agent work without blocking the current conversation. Each subagent runs in its own `pi -p` child process, reports back when finished, and keeps durable logs for later inspection.
 
+## Runtime Status
+
+Run `pi-subagents-runtime-status` to ensure the manifest-pinned local server and
+print its canonical agent root, build, Node version, instance and capabilities as JSON.
+This command does not create a hosted Pi session or require Harness.
+The first use installs a verified private Node 24 and locked server dependencies.
+Set `PI_OFFLINE=1` to require the cached runtime without downloads.
+`PI_CODING_AGENT_DIR` selects the agent root; `PI_SERVER_DIR` selects the initial
+transport directory. Later calls for the same canonical root reuse the registered
+transport, including calls from Background Tasks or another package installation.
+An incompatible or unhealthy live owner is an error, not a reason to replace it.
+The API is `runtime-client/src/runtime/client.mjs`, exporting `ensureRuntime`.
+
 ## Screenshots
 
 <p><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-subagents.png" alt="pi-better-subagents rendered in Pi" width="49%" /><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/overview/pi-better-subagents.png" alt="pi-better-subagents package overview" width="49%" /></p>
@@ -74,7 +87,7 @@ pi -e npm:pi-better-subagents
 
 Sandboxing starts Off for fresh settings, including standalone subagents without published settings. Explicit saved profiles and session choices remain unchanged. Set `sandbox:true` for a confined launch; `sandbox:false` cannot bypass a human-enabled Subagents profile.
 
-Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or newer. `/sandbox` controls the independent Subagents profile, which each launch freezes. Pi handles its own startup, authentication, and provider connection; task tools obey the selected file, command, and network permissions. Outside project defaults to Write: tasks write across home and temp but can remove files outside the workspace only in temp, hidden home directories, and worktree folders (Linux keeps ordinary home folders read-only instead). Confined children admit `read`, `write`, `edit`, and policy-permitted `bash` or guarded `run_application`, the guarded `apply_patch` (Codex patches that follow the file rules), and the trusted tools ticked in `/sandbox` → Subagents · Tools (default `web_fetch` and `web_search`), which run outside the file rules. Other requested tools are reported as unavailable, with the reason. For direct applications without shell scripts, set Subagents → Sandbox On, Run applications On, Shell scripts Off, and Command time limit to 10 min in `/sandbox`, then press Ctrl+S. This is an explicit choice, not the default. New launches capture the policy; running children keep theirs. See [usage notes](https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md#write-sandbox) for the runtime boundary and supported configurations.
+Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or newer. `/sandbox` controls the independent Subagents profile, which each launch freezes. Pi handles its own startup, authentication, and provider connection; task tools obey the selected file, command, and network permissions. Outside project defaults to Write: tasks write across home and temp but can remove files outside the workspace only in temp, hidden home directories, and worktree folders (Linux keeps ordinary home folders read-only instead). Confined children admit `read`, `write`, `edit`, and policy-permitted `bash` or guarded `run_application`, the guarded `apply_patch` (Codex patches that follow the file rules), and the selected extension tools with verified providers (defaults include `web_fetch` and `web_search`), which run outside the file rules. Other requested tools are reported as unavailable, with the reason. For direct applications without shell scripts, set Subagents → Sandbox On, Run applications On, Shell scripts Off, and Command time limit to 10 min in `/sandbox`, then press Ctrl+S. This is an explicit choice, not the default. New launches capture the policy; running children keep theirs. See [usage notes](https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md#write-sandbox) for the runtime boundary and supported configurations.
 
 ## Delegation Modes
 

@@ -1,0 +1,9 @@
+import { startDaemon } from "../../src/server.ts";
+
+const daemon = await startDaemon({ serverDir: process.env.PI_SERVER_DIR, sessionIdleMs: 0, daemonIdleMs: 0,
+  cancellationFault(stage) {
+    if (stage === process.env.PI_TEST_CANCEL_FAULT) process.kill(process.pid, "SIGKILL");
+  },
+});
+process.send?.({ ready: daemon.socketPath });
+process.on("message", () => { void daemon.stop().then(() => process.exit(0)); });

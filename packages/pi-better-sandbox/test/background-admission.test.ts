@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,7 +42,10 @@ process.env.TMPDIR = scratch;
 process.env.TEMP = scratch;
 process.env.TMP = scratch;
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT = "off";
-after(() => {
+const { startWorkRuntime, retainWorkRuntimeFailure } = await import(new URL("../../pi-better-background-tasks/src/test-support/work-runtime.ts", import.meta.url).href);
+const stopWorkRuntime = await startWorkRuntime();
+after(async () => {
+    await stopWorkRuntime();
     for (const [name, value] of Object.entries({ PI_CODING_AGENT_DIR: oldEnv.agent, TMPDIR: oldEnv.tmp, TEMP: oldEnv.temp, TMP: oldEnv.tmpAlias,
         PI_SANDBOX_RECOVERY_SNAPSHOT: oldEnv.recovery })) {
         if (value === undefined) delete process.env[name]; else process.env[name] = value;
@@ -82,14 +86,17 @@ async function harness(config: SandboxPermissionSettings, backgroundFirst = fals
     runner.onError((error) => errors.push(error));
     await runner.emit({ type: "session_start", reason: "startup" });
     assert.deepEqual(errors, []);
-    const gate = (name: string, input: Record<string, unknown> = {}) => runner.emitToolCall({ type: "tool_call", toolName: name, toolCallId: "admission-test", input });
+    const gate = (name: string, input: Record<string, unknown> = {}, toolCallId = randomUUID()) => runner.emitToolCall({ type: "tool_call", toolName: name, toolCallId, input });
     const execute = async (name: string, input: Record<string, unknown>) => {
-        const refusal = await gate(name, input);
+        const toolCallId = randomUUID();
+        const refusal = await gate(name, input, toolCallId);
         if (refusal?.block) return { blocked: true, text: refusal.reason ?? "Tool call blocked" };
         const tool = runner.getToolDefinition(name);
         assert.ok(tool);
-        const result = await tool.execute("admission-test", input, undefined, undefined, runner.createContext());
-        return { blocked: false, text: result.content.map((part) => part.type === "text" ? part.text : "").join("\n") };
+        try {
+            const result = await tool.execute(toolCallId, input, undefined, undefined, runner.createContext());
+            return { blocked: false, text: result.content.map((part) => part.type === "text" ? part.text : "").join("\n") };
+        } catch (error) { await retainWorkRuntimeFailure(); throw error; }
     };
     return { root, runner, loaded, events, gate, execute, async policy(next: SandboxPermissionSettings) {
         setPolicy(next);
@@ -361,11 +368,39 @@ test("a foreign durable id is refused while the owning session may stop with com
         await owner.policy(settings(true, true, false, false));
         const stopped = await owner.execute("bg_task_stop", { id });
         assert.equal(stopped.blocked, false, stopped.text);
+        assert.match(stopped.text, /cancelled/, stopped.text);
         assert.match(await terminal(owner, id), /cancelled/);
     } finally {
         if (id) await owner.execute("bg_task_stop", { id }).catch(() => {});
         await other.close();
         await owner.close();
+    }
+});
+
+test("commands-off cancellation of existing unconfined work preserves owner authority without enabling launch", async () => {
+    const owner = await harness(settings(false, false));
+    const other = await harness(settings(false, false));
+    let id: string | undefined;
+    try {
+        const launched = await owner.execute("bg_task_spawn", { command: "sleep 60", callback: false });
+        id = extractTaskId(launched.text);
+        assert.ok(id, launched.text);
+        await owner.policy(settings(true, true, false, false));
+        await other.policy(settings(true, true, false, false));
+        const deniedLaunch = await owner.execute("bg_task_spawn", { command: "true" });
+        assert.match(deniedLaunch.text, /disables commands/);
+        assert.equal(extractTaskId(deniedLaunch.text), undefined);
+        const foreign = await other.execute("bg_task_stop", { id });
+        assert.equal(foreign.blocked, true, foreign.text);
+        assert.match(foreign.text, /no verified task execution adapter/);
+        assert.match(await taskStatusText(owner, id), /running/);
+        const stopped = await owner.execute("bg_task_stop", { id });
+        assert.equal(stopped.blocked, false, stopped.text);
+        assert.match(stopped.text, /cancelled/, stopped.text);
+        assert.match(await terminal(owner, id), /cancelled/);
+    } finally {
+        if (id) await owner.execute("bg_task_stop", { id }).catch(() => {});
+        await other.close(); await owner.close();
     }
 });
 

@@ -1,0 +1,75 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "local-reviewed-deferral-integration-complete-native-qualification-pending",
+  "head": "1126c2ba186289f153737d78e978f6a73832b0a6",
+  "parents": ["e35d36f645193c31b5b3c78392ce7462869cd483", "af6a72ac11f7be37c784552fecbf6484da4f1d57"],
+  "standingOrders": [],
+  "modelReadback": { "session": "sa_mwkb0p9t_17", "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "source": "Actual session JSONL model_change/thinking_level_change records reread this turn." },
+  "integration": {
+    "method": "Fetch exact reviewed/pushed802 object from existing802 clone, ordinary --no-ff merge into existinge35 history. No reset/rebase/force or unrelated source correction.",
+    "conflict": "One adjacent conflict in read-model.ts: preserved805 expanded Background registry/change metrics and incoming checkpoint-ready-aware observation(). All remaining exact parent changes merged without conflict.",
+    "sourceDelta": "Only approved three files: log-checkpoints.ts, read-model.ts and original checkpoint-deferral.test.ts. Canonical participant and original deferral regression are byte-identical toaf6a72ac.",
+    "behavior": "Unavailable checkpoint participant remains on the borrowed model owner. One nonblocking acquisition is permitted initially; after contention only the existing repair interval renews permission. Incomplete coverage stays rebuilding, liveness refuses verified-empty coverage, hints/callers cannot spin or multiply acquisition. Same-owner release/recovery and owned attachment cleanup retained.",
+    "preserved": "Poll-resume scheduling, history-latch repair, scripts3 readiness, SSH body/teardown/first-error capture and startup owner assertion diagnostics are unchanged frome35. No busy timeout, new timer, acquisition retry loop, new connection, waiter budget or policy added beyond exact approved parent's existing-repair-tick deferral."
+  },
+  "proof": [
+    { "command": "git fetch /Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796/units/802 af6a72ac11f7be37c784552fecbf6484da4f1d57", "exit": 0, "evidence": ".private-805/logs/deferral-fetch.log" },
+    { "command": "git merge --no-ff --no-commit af6a72ac11f7be37c784552fecbf6484da4f1d57", "exit": 1, "expected": true, "error": "Single read-model metrics/observation conflict, resolved as stated before all checks/commit", "evidence": ".private-805/logs/deferral-merge.log" },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/checkpoint-deferral.test.ts",
+      "exit": 0, "passed": 6, "failed": 0, "skipped": 0,
+      "result": "Original actual SQLite exclusive-lock deferral, same-owner recovery, query subscription incomplete/ready publication, no caller/hint amplification, no initial source scans, partial attachment/schema contention cleanup, duplicate/pinned owner refusal, corrupt source no-retry degradation, shutdown while writer held and explicit detach failure ownership tests pass.",
+      "timing": "Original independent control/query bound400ms retained; measured ticks2.685833/1.210250/1.325000ms. Owner busy_timeout remains0 and attempts only advance on existing interval, as asserted by original test.",
+      "scope": "In-process actual SQLite owner and WorkQueries consumer; no worker, socket, runner or subprocess entrypoint replay.",
+      "evidence": ".private-805/logs/deferral-checkpoints.log"
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test --test-name-pattern '^repaired legacy watch releases its degraded poll' packages/pi-better-server/test/runtime-background-history-regressions.test.ts",
+      "exit": 0, "passed": 2, "failed": 0, "skipped": 0,
+      "result": "Both original history inactive/active repair variants pass with truthful degraded source, recovered ready watch and zero additional inventory.",
+      "evidence": ".private-805/logs/deferral-history.log"
+    },
+    {
+      "command": "npm exec --workspace packages/pi-better-background-tasks -- vitest run src/runtime.test.ts -t 'command watch progress evidence'",
+      "exit": 0, "passed": 10, "failed": 0, "unselected": 43,
+      "result": "Original exact3-poll shared-resume witness, genuine owner suspension/resume, interval/progress/fingerprint/incident and terminal cases pass.43 other file cases not run or claimed passing.",
+      "evidence": ".private-805/logs/deferral-poll.log"
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test --test-name-pattern '^checkpoint readers open under another derived' packages/pi-better-server/test/runtime-log-checkpoints.test.ts",
+      "exit": 0, "passed": 1, "failed": 0, "skipped": 0,
+      "result": "Original eager participant reservation/write-failure/borrowed-owner cleanup guard remains passing.",
+      "evidence": ".private-805/logs/deferral-reservation.log"
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/runtime-unsupported-schema.test.ts packages/pi-better-server/test/query-bootstrap.test.ts",
+      "exit": 0, "passed": 6, "failed": 0, "skipped": 0,
+      "result": "Original schema memo/restore and bootstrap cause/readiness fences pass on combined initialization lifecycle.",
+      "evidence": ".private-805/logs/deferral-schema-bootstrap.log"
+    },
+    {
+      "command": "npm run typecheck --workspace packages/pi-better-server --workspace packages/pi-better-background-tasks --workspace packages/pi-better-subagents --workspace packages/pi-better-goal",
+      "exit": 0, "packages": 4,
+      "evidence": ".private-805/logs/deferral-types.log"
+    },
+    { "command": "node .private-805/status-log-premise-check.mjs", "exit": 0, "evidence": ".private-805/logs/deferral-readiness.log" },
+    { "command": "node .private-805/scripts2-phase-check.mjs", "exit": 0, "result": "77 original SSH assert/wait ASTs unchanged; four phase-discrimination checks pass", "evidence": ".private-805/logs/deferral-phases.log" },
+    { "command": "node scripts/sync-runtime-domain.mjs", "exit": 0, "evidence": ".private-805/logs/deferral-sync.log" },
+    { "command": "git diff e35d36f6 --exit-code -- scripts/observed-waits.integration.test.mjs scripts/reload-ssh-durability.e2e.test.mjs packages/pi-better-server/test/startup-ensure.test.ts packages/pi-better-background-tasks/src/runtime.ts packages/pi-better-server/src/runtime/background.ts", "exit": 0, "result": "Own readiness/diagnostics and reviewed poll/history behavior unchanged." },
+    { "command": "git diff af6a72ac --exit-code -- packages/pi-better-server/src/runtime/log-checkpoints.ts packages/pi-better-server/test/checkpoint-deferral.test.ts", "exit": 0, "result": "Exact reviewed parent participant and regression retained." },
+    { "command": "git diff --cached --check", "exit": 0 },
+    { "command": "git ls-files -u", "exit": 0, "result": "No unresolved entries before merge commit." },
+    { "command": "git merge-base --is-ancestor af6a72ac11f7be37c784552fecbf6484da4f1d57 HEAD", "exit": 0 },
+    { "command": "git merge-base --is-ancestor e35d36f6 HEAD", "exit": 0 },
+    { "command": "git merge-base --is-ancestor 64853756b94059bfa62a6fbccb0a1ede3414d0e1 HEAD", "exit": 0 }
+  ],
+  "summary": { "focusedTestsPassed": 25, "packageTypechecksPassed": 4, "localMergeComplete": true, "nativeQualificationClaimed": false },
+  "retainedFailures": [
+    "Original native SQLite ATTACH case requires canonical qualification of exact integrated head; local reviewed deferral proof is not a native/full-CI pass.",
+    "647b scripts2 was cancelled with lastphase launch-watch, not originalSSH PASS. Poll/history/deferral integration needs original full-trigger qualification; do not erase previous timeout evidence.",
+    "647b startup owner-absence assertion remains unresolved with its bounded readiness-stderr capture retained; no ownership/deadline-policy change inferred from deferral.",
+    "802 report802-checkpoint-deferral.json retains broader local bounded-baseline ready-vs-rebuilding failure on candidate AND parent3e856. It was not rerun/altered here or represented as passing; original canonical follow-up remains separate."
+  ],
+  "boundaries": "Existing registered resources only; no new busy timeout/timer/retry policy/connection, forced history replacement, source/owner/receipt authority weakening, required gate/count/deadline change, control16/query8/repair8-total32 or physical2/2/2 relaxation, shared-runtime/settings action, restricted native replay, push/PR/CI dispatch or external wait. Coordinator owns publication, exact-head CI and delivery."
+}

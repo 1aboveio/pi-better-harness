@@ -1,6 +1,5 @@
 import { connect, type Socket } from "node:net";
-import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
-import { SERVER_EXTENSION_VERSIONS } from "./handshake.ts";
+import { SERVER_EXTENSION_VERSIONS } from "./version.ts";
 import { encodeLine, LineDecoder, PROTOCOL_VERSION, type HelloData } from "./protocol.ts";
 
 /** The daemon refused the `hello`; the message is the daemon's own explanation. */
@@ -72,12 +71,18 @@ export class DaemonClient {
       if (signal?.aborted) throw abortError();
       const client = new DaemonClient(socket, undefined);
       if (options.hello === false) return client;
+      const hello = { ...options.hello };
+      // Explicit cross-SDK discovery does not need ordinary-client SDK defaults.
+      if (!Object.hasOwn(hello, "piVersion")) {
+        const sdk = await Promise.race([import("@earendil-works/pi-coding-agent"), aborted]);
+        hello.piVersion = sdk.VERSION;
+      }
+      if (signal?.aborted) throw abortError();
       const response = await Promise.race([client.request({
         type: "hello",
         protocolVersion: PROTOCOL_VERSION,
-        piVersion: PI_VERSION,
         extensionVersions: { ...SERVER_EXTENSION_VERSIONS },
-        ...options.hello,
+        ...hello,
       }), aborted]);
       if (signal?.aborted) throw abortError();
       if (!response.success) throw new HandshakeError(response.error ?? "daemon rejected the handshake");

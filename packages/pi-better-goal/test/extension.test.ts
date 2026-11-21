@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 
 import type {
   ExtensionAPI,
@@ -41,7 +42,7 @@ test("goal action completions expose selectable actions with context", () => {
     { value: "resume", label: "resume", description: "Resume the paused goal" },
     { value: "clear", label: "clear", description: "Remove the current goal" },
     { value: "complete", label: "complete", description: "Mark the current goal complete" },
-    { value: "settings", label: "settings", description: "Inspect or persist goal continuation, conversational resume, and Escape pause controls" },
+    { value: "settings", label: "settings", description: "Inspect or persist goal continuation, resume, Escape pause, and Outcome auto-start controls" },
   ]);
   assert.deepEqual(
     goalArgumentCompletions("  c")?.map((entry) => entry.value),
@@ -49,7 +50,7 @@ test("goal action completions expose selectable actions with context", () => {
   );
   assert.equal(goalArgumentCompletions("ship the release"), null);
   assert.deepEqual(goalArgumentCompletions("settings ")?.map((item) => item.value), [
-    "settings auto-continue", "settings conversational-resume", "settings pause-on-escape",
+    "settings auto-continue", "settings conversational-resume", "settings pause-on-escape", "settings auto-start-from-outcome",
   ]);
   assert.deepEqual(goalArgumentCompletions("settings auto-continue o")?.map((item) => item.value), [
     "settings auto-continue on", "settings auto-continue off",
@@ -105,7 +106,7 @@ test("active background work adds completion-audit guidance to the agent prompt"
   await handlers.get("session_shutdown")?.({}, ctx);
 });
 
-test("idle sessions sleep until provider activity needs polling", async (t) => {
+test("notifying providers sleep between real activity changes even while running", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
@@ -161,7 +162,7 @@ test("idle sessions sleep until provider activity needs polling", async (t) => {
   assert.ok(afterWake > afterStartup, "provider changes wake one immediate collection");
   t.mock.timers.tick(2_000);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.ok(collections > afterWake, "owned running work keeps polling active");
+  assert.equal(collections, afterWake, "owned notifying work does not need polling");
 
   active = false;
   activityChanged?.();
@@ -218,6 +219,13 @@ test("only the slash command creates a goal and installs an observability-safe w
   extension(pi);
 
   assert.equal(tools.has("create_goal"), false);
+  let providerReads = 0;
+  pi.events.emit("pi-better-goal:register-provider", { id: "subagents", activityVersion: 1,
+    onActivityChanged: () => () => {}, getActivity: () => {
+      providerReads++;
+      return { providerId: "subagents", items: [], nextDeadline: null };
+    },
+  });
   assert.equal(tools.has("get_goal"), true);
   assert.equal(tools.has("update_goal"), true);
 
@@ -265,7 +273,26 @@ test("only the slash command creates a goal and installs an observability-safe w
   assert.match(line ?? "", /goal active \d+:\d{2} Ship slash-only goals/);
 
 
-  t.mock.timers.tick(9_999);
+  const require = createRequire(import.meta.url);
+  const fs = require("node:fs"), sqlite = require("node:sqlite"), net = require("node:net");
+  const original = new Map(["readFileSync", "statSync", "openSync", "readdirSync"].map(name => [name, fs[name]]));
+  const Database = sqlite.DatabaseSync, socketWrite = net.Socket.prototype.write;
+  let io = 0;
+  for (const [name, method] of original) fs[name] = (...args: any[]) => { io++; return method(...args); };
+  sqlite.DatabaseSync = class extends Database { constructor(...args: any[]) { super(...args); io++; } };
+  net.Socket.prototype.write = function(...args: any[]) { io++; return socketWrite.apply(this, args); };
+  syncBuiltinESMExports();
+  const readsBeforeTick = providerReads;
+  try {
+    component.render(80);
+    t.mock.timers.tick(9_999);
+  } finally {
+    for (const [name, method] of original) fs[name] = method;
+    sqlite.DatabaseSync = Database; net.Socket.prototype.write = socketWrite;
+    syncBuiltinESMExports();
+  }
+  assert.equal(io, 0, "elapsed-only timer and render read no filesystem, SQLite or socket");
+  assert.equal(providerReads, readsBeforeTick, "elapsed-only timer and render do not collect activity");
   assert.equal(renderRequests, 1, "active clock does not repaint every second");
   t.mock.timers.tick(1);
   assert.equal(renderRequests, 2, "active clock requests one coarse refresh");
@@ -2259,7 +2286,7 @@ test("TUI goal settings opens the interactive page and its toggles persist", asy
   const next = createContinuationHarness();
   await next.handlers.get("session_start")?.({}, next.ctx);
   const inspected = await next.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(next.ctx));
-  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false, pauseOnEscape: false });
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false });
   assert.equal(h.entries.length, 0);
   await h.handlers.get("session_shutdown")?.({}, h.ctx);
   await next.handlers.get("session_shutdown")?.({}, next.ctx);
@@ -2279,7 +2306,7 @@ test("all settings persist across extension recreation without disabling kickoff
   const h = createContinuationHarness();
   await h.handlers.get("session_start")?.({}, h.ctx);
   const inspected = await h.tools.get("get_goal")!.execute("settings", {}, undefined, undefined, toolContext(h.ctx));
-  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false, pauseOnEscape: false });
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false, pauseOnEscape: false, autoStartFromOutcome: false });
   await h.commands.get("goal")?.handler("settings", h.ctx);
   assert.match(h.notifications.at(-1)?.message ?? "", /Automatic continuation setting: off/);
   assert.match(h.notifications.at(-1)?.message ?? "", /Conversational resume setting: off/);
@@ -2423,7 +2450,7 @@ test("invalid settings commands cannot replace the goal or modify preferences", 
   }
   assert.equal(h.entries.length, before);
   const inspected = await h.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(h.ctx));
-  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: true, conversationalResume: true, pauseOnEscape: true });
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: true, conversationalResume: true, pauseOnEscape: true, autoStartFromOutcome: false });
   await h.handlers.get("session_shutdown")?.({}, h.ctx);
 });
 

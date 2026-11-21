@@ -1,0 +1,86 @@
+{
+  "name": "pi-better-subagents",
+  "version": "0.36.0",
+  "description": "Pi extension for detached, sandboxed subagent runs that keep the foreground session free.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "pi-subagents-runtime-status": "./runtime-client/src/runtime/status-cli.mjs",
+    "pi-agent-catalog": "./agent-catalog.mjs"
+  },
+  "exports": {
+    "./catalog": "./worker-catalog.ts",
+    "./catalog-store": "./catalog-store.ts",
+    "./catalog-resolver": "./catalog-resolver.ts",
+    "./model-resolution-core": "./model-resolution-core.ts",
+    "./*": "./*"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "subagents",
+    "sandboxed-agents"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "image": "https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-subagents.png"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1aboveio/pi-better-harness.git",
+    "directory": "packages/pi-better-subagents"
+  },
+  "bugs": {
+    "url": "https://github.com/1aboveio/pi-better-harness/issues"
+  },
+  "homepage": "https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-subagents#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "pretest": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
+    "prepack": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs && node ../../scripts/sync-runtime-client.mjs",
+    "typecheck": "tsc -p tsconfig.task-runtime.json",
+    "test": "node --import tsx --import ./tests/isolate-registry.mjs --test tests/*.test.mjs",
+    "test:cross-session": "node --import tsx --import ./tests/isolate-registry.mjs --test --test-name-pattern \"callback session isolation\" tests/extension_health_lifecycle.test.mjs",
+    "pretest:macos-sandbox": "node ../../scripts/sync-shared-sandbox-core.mjs",
+    "test:macos-sandbox": "bash tests/test_sandbox_applied.sh && bash tests/test_sandbox_deny_outside.sh && bash tests/test_sandbox_wrapper_argv.sh && PI_SANDBOX_RECOVERY_SNAPSHOT=off node --import tsx --test tests/sandbox_profile.test.mjs tests/child_incidents.test.mjs",
+    "pretest:linux-sandbox": "node ../../scripts/sync-shared-sandbox-core.mjs",
+    "test:linux-sandbox": "node --import tsx --test tests/linux_bubblewrap.integration.mjs tests/child_incidents.test.mjs",
+    "verify": "npm run typecheck && npm test"
+  },
+  "files": [
+    "runtime-client/**",
+    "*.ts",
+    "*.mjs",
+    "*.d.mts",
+    "shared-operation-coordinator/**/*.ts",
+    "shared-operation-coordinator/assignment-observation.mjs",
+    "config.json",
+    "README.md",
+    "roles/**/*.md",
+    "docs/usage.md",
+    "docs/agent-catalog.md",
+    "docs/agent-catalog-operations.md",
+    "docs/agent-model-resolution.md",
+    "docs/worker-catalog.md",
+    "docs/agent-catalog-lifecycle.md",
+    "docs/agent-catalog-acceptance.md",
+    "docs/failure-observations.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": ">=0.82.1",
+    "@earendil-works/pi-tui": "*"
+  },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2",
+    "shell-quote": "1.12.0",
+    "smol-toml": "1.9.0",
+    "tsx": "^4.22.3",
+    "yaml": "^2.9.1"
+  }
+}

@@ -98,6 +98,8 @@ export type LoadedRun =
     | { kind: "unreadable"; detail: string };
 
 export type SubagentToolSession = {
+    observeAssignment?: (id: string) => Promise<{ assignment: ReturnType<typeof assignmentFor>; snapshot: unknown }>;
+    observeList?: (scope: object) => Promise<any>;
     inspectOutcome?: (meta: RunMeta, params: Record<string, unknown>, ctx?: unknown) => unknown;
     /** Current session origin; `ctx` is the tool call's host context when available. */
     getActiveOrigin?: (ctx?: unknown) => RunCallbackOrigin | undefined;
@@ -862,12 +864,13 @@ export function listIncidentLabel(id: string, cwd: string, terminal: boolean): s
 export function listRevisions(
     items: Array<{ id: string; status: string; meta?: RunMeta }>,
     failureSignatures: string[],
+    assignmentOf = (meta: RunMeta) => assignmentFor(meta, effectiveStatus(meta)),
 ): { contentRevision: string; failureRevision: string } {
     return {
         contentRevision: revisionOf(items.map((item) => [
             item.id,
             item.status,
-            item.meta ? assignmentFor(item.meta, effectiveStatus(item.meta)).revision : null,
+            item.meta ? assignmentOf(item.meta).revision : null,
             item.meta?.status ?? null,
             item.meta?.exitCode ?? null,
             item.meta?.endedAt ?? null,
