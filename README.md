@@ -131,6 +131,7 @@ pi -e .
 
 ## Docs
 
+- [Architecture decisions by subject](docs/adr/README.md)
 - [Development and release notes](docs/development-and-release.md)
 - [Write sandbox details](packages/pi-better-sandbox/README.md)
 - [Subagents details](packages/pi-better-subagents/docs/usage.md)

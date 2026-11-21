@@ -4,6 +4,11 @@ Status: accepted
 
 Refs #63 and #60.
 
+This decision defines what the supervisor can infer about a process. The
+[subagent lifecycle](0007-subagent-lifecycle.md) defines what the parent can
+recover. The coordinator judges the assignment using its
+[completion evidence](../../../../docs/adr/0022-assignment-progress-projection.md).
+
 ## Context
 
 Subagent health reconciliation needs to distinguish three user-visible facts:

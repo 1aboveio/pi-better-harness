@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted. This ADR is the source of policy for Background task execution, progress, waits, and notifications.
+Accepted. This ADR owns Background task execution, progress, waits and the conditions that produce notifications. The shared delivery contract governs routing, retries and receipts. [Notification delivery](0029-notification-delivery.md)
+
+## Core invariants
+
+- **Keep the original execution and owner.** A task has a stable identity, an execution owner and retrievable status, logs and terminal evidence. For supervised local work, reconnect to the recorded runner. An uncertain launch or a frontend restart cannot authorize rerunning the command.
+- **Use observed progress.** New output or a changed watch result can demonstrate progress. Silence, a failed check and a terminal task outcome have distinct meanings. A stall alert or a periodic wait review leaves the task running and the wait pending. A configured task timeout is a separate execution limit.
+- **Every wait has an owner.** Keep the dependency identities, wait generation and terminal revisions. Once all dependencies settle, the owner can inspect and acknowledge their outcomes, including failure, cancellation, timeout or loss. Cancelling a wait withdraws the wait only.
+- **Keep evidence through handoff and cleanup.** A callback receipt records a notification handoff. The owner's acknowledgement records its interpretation of the wait. Parked assignments retain their tasks. At a terminal assignment outcome, stop only verified owned tasks and keep unfinished cleanup recoverable. [Observed waits](0020-observed-waits-retain-an-owner.md) · [Assignment cleanup](0025-assignment-terminal-task-cleanup.md)
 
 ## Execution and ownership
 
@@ -39,12 +46,13 @@ review. The review leaves the wait and its terminal deadline in place.
 | Event | What the owning session receives | Effect on a registered wait |
 | --- | --- | --- |
 | A running task qualifies for a stall alert | A health notification under the task's callback setting | The task stays running and the wait stays pending. |
+| A pending wait reaches its review interval without progress | A review of the current evidence for that wait generation | The owner can inspect or act. The wait and its deadline stay in place. |
 | Some dependencies finish | Their outcomes become available for inspection. The wait owns their completion delivery. | The wait stays pending while any dependency is running. |
 | All dependencies reach a terminal state | The wait's completion notification, including failed, cancelled, timed-out, or lost outcomes | The owner inspects the exact terminal revisions and acknowledges the result. |
 
 A callback-enabled task outside a registered wait sends its own completion notification. Cancelling a wait withdraws the wait. Stopping a task is a separate operation. A stall alert grants no authority to stop, retry, or acknowledge a task.
 
-Route alerts to the recorded session and eligible branch. Keep pending alerts and delivery receipts across reloads and server restarts. On reattachment, check that the stall still applies before sending. If the task has progressed or finished, retire the stale alert. A successful handoff records a receipt for that incident. Delivery follows the shared at-least-once contract, including the crash window between handoff and receipt persistence. `callback: false` suppresses unsolicited task alerts while status and evidence remain available. [Shared failure observations](0006-shared-failure-observations.md)
+On reattachment, check that a pending stall alert still applies. Retire it if the task has progressed or finished. `callback: false` suppresses unsolicited task alerts while status and evidence remain available. The shared server and notification contract governs recipient selection, handoff, receipts and replay. [Notification invariants](0029-notification-delivery.md#notification-invariants)
 
 ## Failure evidence
 
@@ -54,8 +62,9 @@ The launching parent may declare `operation_id` and `expected_exit_codes` on `bg
 
 ## Acceptance criteria
 
-- **Single dependency (fmm-express#2727).** A Gradle build emits one line and stays running. Advance time through the stall threshold and grace period. Verify the owning session receives the alert with that line while its wait is still pending. Reload after receipt and verify that continued silence produces no new alert.
+- **Single dependency (fmm-express#2727).** A Gradle build emits one line and stays running. Advance time through the stall threshold and grace period. Verify the owning session receives the alert with that line while its wait is still pending. Reload after receipt and verify the same stall alert is delivered only once.
+- **Periodic review.** Keep that supervised local task silent in a callback-enabled parent wait. Advance through two review intervals. Verify the parent receives a review at each interval and the wait retains its generation and deadline. Restart after several missed intervals and verify the supervisor delivers one overdue review. End the wait before the next handoff and verify the pending review is retired.
 - **Multiple dependencies (fmm-express#2732).** An Android test fails, a CI watch observes a failed run reach completion, and a PostgreSQL check stays silent. Verify the parent receives the PostgreSQL stall alert while the wait is pending and the navigator still shows the running task. Cancel the PostgreSQL task and verify the parent then receives all three terminal results and can acknowledge their exact revisions.
 - **Recovery.** Disconnect the parent before alert delivery. Reattach on the owning branch and verify a continuing stall is delivered. Repeat with progress or termination before reattachment and verify the obsolete alert is retired. With callbacks disabled, verify the stall remains inspectable.
 
-The [native acceptance test](../../packages/pi-better-server/test/runtime-background-stall.test.ts) runs in the server CI shards.
+The native acceptance test runs in the server CI shards. [Background stall acceptance test](../../packages/pi-better-server/test/runtime-background-stall.test.ts)

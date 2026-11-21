@@ -41,6 +41,8 @@ alerts retain supervision until their handoff is handled, so lost work is not si
 
 ## Worker Ownership
 
+Every subagent follows the same contract for preserving work and delivering results to its parent. It applies to read-only investigations as well as tasks that create or change files. [Subagent lifecycle, preservation and delivery](https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/adr/0007-subagent-lifecycle.md)
+
 Every child launch, including clean, batch and unsandboxed launches, loads a Pi
 hook that keeps external CI/PR monitoring with its coordinator. Workers finish
 their assigned implementation or diagnosis, run focused checks, push only when
@@ -194,7 +196,7 @@ The projection exposes an opaque semantic `revision`, readable `reason`, attempt
 identity, process status, termination evidence and retained evidence references.
 Compare revisions for equality; unchanged observations keep the same revision.
 Unavailable or unsupported coordinator reads report Waiting with an unverified
-reason. See the [projection contract](../../docs/adr/0022-assignment-progress-projection.md).
+reason. See the [projection contract](https://github.com/1aboveio/pi-better-harness/blob/main/docs/adr/0022-assignment-progress-projection.md).
 
 - Repository: https://github.com/1aboveio/pi-better-harness
 - Detailed notes: https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md

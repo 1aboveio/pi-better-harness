@@ -1,6 +1,6 @@
 # pi-better-sandbox
 
-Sandbox permissions for Pi's foreground tools, detached subagents, and local background tasks. See the [sandbox tool-loading and permission contract](../../docs/adr/0027-sandbox-tools-and-permissions.md).
+Sandbox permissions for Pi's foreground tools, detached subagents, and local background tasks. See the [sandbox tool-loading and permission contract](https://github.com/1aboveio/pi-better-harness/blob/main/docs/adr/0027-sandbox-tools-and-permissions.md).
 
 ![Pi Better Sandbox package preview](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-sandbox.png)
 
@@ -164,7 +164,7 @@ Linux could separate removal from writing with Landlock (5.19+), but nothing
 here can apply it: Node has no binding and `bwrap` does not expose it. Windows
 could use NTFS `DELETE` rights with a restricted token or AppContainer, which
 would need a native launcher. Both are tracked as follow-ups; see
-[ADR 0008](../../docs/adr/0008-write-without-delete.md).
+[ADR 0008](https://github.com/1aboveio/pi-better-harness/blob/main/docs/adr/0008-write-without-delete.md).
 
 ### Recovery snapshot (macOS)
 
@@ -309,7 +309,7 @@ schema identity before admitting local spawn/watch and explicit registry
 operations. Background's column controls the executable, independently of
 Main's commands switch. Missing or incompatible adapters fail closed when
 Background confinement is enabled, even with Main Off. Remote stop receives no
-local-adapter exemption under Main confinement. See [ADR 0017](../../docs/adr/0017-background-adapter-admission.md).
+local-adapter exemption under Main confinement. See [ADR 0017](https://github.com/1aboveio/pi-better-harness/blob/main/docs/adr/0017-background-adapter-admission.md).
 
 Overriding `write` and `edit` changes nothing you can see: the parameter
 schemas, prompt guidance, call rendering, write previews, edit diffs, result

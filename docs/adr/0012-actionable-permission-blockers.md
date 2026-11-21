@@ -23,9 +23,9 @@ Continuing the loop grants no permissions. Goal's existing no-progress detection
 still stops repeated unchanged work; completion and explicit pause behavior stay
 in place. Goal does not become a task scheduler or add a retry policy of its own.
 
-The original decision below records the previous behavior. Its structured
-report validation and failure-evidence rules remain applicable; its Goal hold,
-single-release, and workflow-precedence rules no longer apply.
+The [reporting rules](#reporting-permission-failures) remain in force. The
+[former Goal hold](#former-goal-hold) records the retired automatic pause and
+single-retry behavior.
 
 ## Context
 
@@ -41,6 +41,8 @@ These are not evidence that permissions changed or the failed operation passed.
 
 ## Decision
 
+### Reporting permission failures
+
 Use the existing failure journal and explicit `failure_disposition open` path.
 An optional permission resource category reports the need for human action and
 must name a real unresolved failed tool incident. The child and trusted parent
@@ -55,26 +57,18 @@ actionability, append-only history, recovery evidence, and pending-only delivery
 rules remain intact. Parent result/output tools carry actionable reports in
 structured details and display contextual diagnostics before ordinary progress.
 
-An inspected actionable report pauses the current goal with a permission-blocker
-reason. Compact blocker and release records are persisted separately from the
-progress ledger. Ordinary conversation, background drains, settings changes,
-reworded blocker prose, reload, and incident recovery do not release this hold.
-Model-callable `goal_resume` remains restricted to interrupt pauses. Workflow
-instructions cannot override permission-hold instructions.
-
-The human selected `/goal resume` itself as confirmation for one bounded retry
-of the held operation and scope; the human resume shortcut has the same meaning.
-Resume preserves goal identity, usage, and history. It grants no new permissions,
-changes no authentication, copies no credentials, and does not authorize a
-foreground fallback or broader resource activity. Changed worker settings need
-a fresh worker with a new immutable launch snapshot. Metadata inspection is not
-permission to run product tests or mutate resources. A released continuation
-returns to the hold after its turn; a new denial reestablishes the hold immediately.
-Reload does not replay a persisted release as an execution ticket.
-
 Assistant rewording is excluded from the generic evidence signature when a turn
 contains tool actions/results. Assistant-only evidence retains its text identity.
 This changes progress accounting, not failure outcome or permission classification.
+
+### Former Goal hold
+
+The original policy paused Goal when the foreground inspected an actionable
+permission report. It stored the hold and allowed one bounded retry after a human
+resume. The amendment above retired both transitions. An existing legacy hold
+can be resumed normally. Runtime permission checks still apply on every attempt.
+See [Goal and Todo lifecycle](0030-goal-and-todo-lifecycle.md) for current pause,
+continuation and completion rules.
 
 ## Limits
 
@@ -85,19 +79,11 @@ metadata and foreground blocker adoption are deferred until authentic error
 transport is available. Workers must explicitly report a blocker through the
 existing open disposition and the foreground must inspect their result/output.
 
-The bound applies to autonomous continuation turns. Same-operation/scope is
-conveyed through instructions; command count within a turn and already-running
-children are not controlled by this feature. Existing task guards enforce actual
-permissions. The mechanism is not a new security boundary against trusted
-runtime extensions. Finite scope/history limits refuse further releases when
-observation is incomplete; retained evidence is not erased.
-
 ## Verification
 
 Synthetic fixtures exercise dummy credential-cache and process-inspection
 failures, trusted parent/child replay, forged and malformed reports, output
-budgets, history retention, and preservation of failed outcomes. Goal handler
-tests cover varied prose, ordinary questions, unrelated background completion,
-settings changes, reload, workflow precedence, stale timers/audits, explicit
-single release, repeat denial, and missing or exhausted evidence. No real
-credentials, cloud requests, product tests, or Android resources are needed.
+budgets, history retention, and preservation of failed outcomes. For the
+amended Goal behavior, inspect a permission report, reload the session and
+verify that an active Goal can continue other authorized work. Repeat with a
+human-paused Goal and verify that the pause survives.
