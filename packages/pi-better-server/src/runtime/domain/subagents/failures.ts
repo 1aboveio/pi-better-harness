@@ -21,7 +21,7 @@ export { formatFailureSummary, pendingFailureAttention, markFailureAttentionDeli
 export const failurePath = (id: string) => join(runDir(id), "failures.jsonl");
 export function readRunFailures(id: string): FailureState {
     const retained = !existsSync(runDir(id)) && resultDir(id);
-    return readFailureState(retained ? join(retained,"failures.jsonl") : failurePath(id));
+    return readFailureState(retained ? join(retained, "failures.jsonl") : failurePath(id));
 }
 interface Scan {
     offset: number; head: string; identity: string; model: IncidentModel; retry?: number;
@@ -168,7 +168,7 @@ export function collectRunFailures(id: string, cwd: string, terminal = false, as
     assertCurrent();
     if (!existsSync(runDir(id))) {
         const retained = resultDir(id);
-        if (retained && existsSync(join(retained,"result.json"))) return readRunFailures(id);
+        if (retained && existsSync(join(retained, "result.json"))) return readRunFailures(id);
     }
     const path = failurePath(id);
     let fd: number;

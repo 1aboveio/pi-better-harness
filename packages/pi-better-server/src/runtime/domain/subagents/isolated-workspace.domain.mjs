@@ -1,18 +1,18 @@
 // Generated fixed launch domain from packages/pi-better-subagents/isolated-workspace.ts. Do not edit directly.
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync, } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync, } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { inspectGitWorkspace, syncGitRemotes } from "./git-workspace.domain.mjs";
 import { restoreTree, snapshotTree, verifyTree } from "./workspace-files.domain.mjs";
 import { durableSubagentRoot } from "./session-store.domain.mjs";
 import { taskWorkspaceDir } from "./registry.domain.mjs";
 // Every mutating git command uses an argv array. Restoring a checkout cannot run a post-checkout hook.
-function git(cwd, args) {
+function git(cwd, args, input) {
     return execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...args], {
         cwd,
         maxBuffer: 64 * 1024 * 1024,
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: [input ?? "pipe", "pipe", "pipe"],
         env: {
             ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
             GIT_TERMINAL_PROMPT: "0",
@@ -249,7 +249,7 @@ function materializeClone(target, cp, store) {
     if (info.repoRoot !== realpathSync(target) || info.gitDir !== realpathSync(gitDir))
         throw new Error("Recovered checkout refers to external Git metadata");
 }
-function checkIndependentHistory(proof, head) {
+function checkIndependentHistory(proof, head, packPath) {
     // Only inspect Git's object graph. Repository config, hooks and global config
     // are not inputs to verification and must not run helpers on the worker's behalf.
     const config = join(proof, ".git", "config"), original = join(dirname(proof), "verification-config");
@@ -277,6 +277,17 @@ function checkIndependentHistory(proof, head) {
             .trim() !== head)
             throw new Error("Saved HEAD failed verification");
         execFileSync("git", [...args, "fsck", "--cache", "--connectivity-only", "--no-dangling", "--no-reflogs", head], options);
+        if (packPath) {
+            const output = openSync(packPath, "wx", 0o600);
+            try {
+                execFileSync("git", [...args, "pack-objects", "--stdout", "--revs", "--indexed-objects"], {
+                    ...options, input: head + "\n", stdio: ["pipe", output, "pipe"],
+                });
+            }
+            finally {
+                closeSync(output);
+            }
+        }
     }
     finally {
         renameSync(original, config);
@@ -428,7 +439,7 @@ export function restoreWorkspace(original, inClone = false, prior = original.own
             renameSync(target, root);
         }
         else {
-            // Let Git enforce branch occupancy. Keep the checkpoint when the source has moved or lost an object.
+            // Let Git enforce branch occupancy. The saved private HEAD and index replace the temporary checkout.
             if (cp.branch && value(w.source, ["rev-parse", "--verify", "refs/heads/" + cp.branch]) !== cp.head)
                 throw new Error("Worktree branch moved. The saved checkout is available in Clone.");
             git(w.source, [
@@ -437,7 +448,7 @@ export function restoreWorkspace(original, inClone = false, prior = original.own
                 "--no-checkout",
                 ...(cp.branch ? [] : ["--detach"]),
                 target,
-                cp.branch || cp.head,
+                cp.branch || "HEAD",
             ]);
             const admin = inspectGitWorkspace(target).gitDir;
             for (const name of readdirSync(admin))
@@ -447,7 +458,26 @@ export function restoreWorkspace(original, inClone = false, prior = original.own
             restoreTree(target, store, cp.files);
             verifyTree(target, cp.files, withoutGit);
             verifyTree(admin, cp.privateGit, worktreePointers);
-            git(target, ["fsck", "--connectivity-only", "--no-dangling", "--no-reflogs"]);
+            const verify = ["fsck", "--cache", "--connectivity-only", "--no-dangling", "--no-reflogs", cp.head];
+            try {
+                git(target, verify);
+            }
+            catch {
+                // A detached commit or staged blob can be pruned while its checkout is reclaimed.
+                // Reintroduce its verified objects without updating any source branch or Git configuration.
+                const proof = join(staging, "proof");
+                const packPath = join(staging, "saved.pack");
+                materializeClone(proof, cp, store);
+                checkIndependentHistory(proof, cp.head, packPath);
+                const input = openSync(packPath, "r");
+                try {
+                    git(w.source, ["unpack-objects", "-q"], input);
+                }
+                finally {
+                    closeSync(input);
+                }
+                git(target, verify);
+            }
             git(w.source, ["worktree", "move", target, root]);
         }
         return after;

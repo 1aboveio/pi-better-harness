@@ -2730,7 +2730,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             }
             if (entry.type === "custom" && entry.customType === "pi-better-subagents-workspace") {
                 const data = entry.data as { version?: number; mode?: unknown } | null;
-                if (data?.version === 1 && (data.mode === "worktree" || data.mode === "clone" || data.mode === null)) workspaceOverride = data.mode ?? undefined;
+                if (data?.version === 1 && (data.mode === "worktree" || data.mode === "clone" || data.mode === null)) {
+                    workspaceOverride = data.mode ?? undefined;
+                }
             }
             if (entry.type === "custom" && entry.customType === "pi-better-subagents-timing") {
                 const data = entry.data as {
@@ -3036,16 +3038,25 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             const previous = handoffAuthority?.sandbox;
             const permissions = taskPermissions ?? DEFAULT_TASK_PERMISSIONS;
             assertAssignmentPermissionScope(handoffAuthority, {
-                mandatoryPermissions:permissionPlan.enforced,
-                sandbox:sandboxEnabled ? { root:resume.recipe.sandboxDir, denyWrite:previous?.denyWrite ?? [],
-                    permissions:{...DEFAULT_TASK_PERMISSIONS, ...permissions, ...resolveCommandSettings(permissions),
-                        processAccess:permissions.processAccess ?? "off"} } : null,
+                mandatoryPermissions: permissionPlan.enforced,
+                sandbox: sandboxEnabled ? {
+                    root: resume.recipe.sandboxDir,
+                    denyWrite: previous?.denyWrite ?? [],
+                    permissions: {
+                        ...DEFAULT_TASK_PERMISSIONS, ...permissions, ...resolveCommandSettings(permissions),
+                        processAccess: permissions.processAccess ?? "off",
+                    },
+                } : null,
             });
         }
         const selected = normalizeTools(p.tools ?? cfg.defaultTools ?? (p.clean ? SAFE_CLEAN_TOOLS : SAFE_DEFAULT_TOOLS));
-        const automatic = !resume && !p.sandbox_dir && p.isolation !== false;
-        let isolated = resume?.recipe.workspace ?? (automatic
-            ? workspaceChoice(p.cwd ?? ctx.cwd, id, p.git_clone_workspace ? "clone" : activeWorkspace(), p.git_clone_workspace ? "write" : selected, p.git_clone_workspace ? "" : p.exclude_tools ?? "") : undefined);
+        let isolated = resume?.recipe.workspace;
+        if (!resume && !p.sandbox_dir && p.isolation !== false) {
+            isolated = workspaceChoice(
+                p.cwd ?? ctx.cwd, id, p.git_clone_workspace ? "clone" : activeWorkspace(),
+                p.git_clone_workspace ? "write" : selected, p.git_clone_workspace ? "" : p.exclude_tools ?? "",
+            );
+        }
         const ownedCloneWorkspace = !resume && !p.sandbox_dir && (isolated || p.git_clone_workspace) ? taskWorkspaceDir(id) : undefined;
         // A launch attempt only becomes a run when `writeMeta` commits. Until
         // then everything it creates (prompt, control/, provenance, its own
@@ -3393,13 +3404,13 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             if (taskRuntime?.policy.worktreeGitDir) {
                 const policy = taskRuntime.policy;
                 const notice = worktreePolicyNotice(policy.worktreeGitDir!, compileWritePolicy({
-                    writableRoot:policy.root, home:policy.home, permissions:policy.permissions,
-                    denyWrite:policy.denyWrite, runtimeCompatibility:true, runtimeWrite:[policy.scratch],
+                    writableRoot: policy.root, home: policy.home, permissions: policy.permissions,
+                    denyWrite: policy.denyWrite, runtimeCompatibility: true, runtimeWrite: [policy.scratch],
                 }));
                 if (notice) {
                     workspaceNote += " " + notice;
-                    args[args.length-1] = workspaceNote + "\n\n" + p.prompt;
-                    writeFileSync(promptPathFor(id),args[args.length-1]!);
+                    args[args.length - 1] = workspaceNote + "\n\n" + p.prompt;
+                    writeFileSync(promptPathFor(id), args[args.length - 1]!);
                 }
             }
             launchScratch = taskRuntime?.policy.scratch;
@@ -3504,23 +3515,21 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             // cannot hide inside a final asynchronous window.
             if (internal?.resumeWait && !resume?.prior.assignment) throw new PreSpawnResumeError("This legacy park has no verified assignment outcome recipient; refusing continuation on an unsupported binding.");
             if (!assignment && bridgeEnabled) throw new Error("Durable assignment outcomes require a recorded parent session and transcript capability.");
-            if (internal?.resumeWait) {
-                const captured = resume?.prior.operations?.policy;
-                const currentSandbox = taskRuntime ? {
+            const workspaceAuthority = {
+                mandatoryPermissions: permissionPlan.enforced,
+                sandbox: taskRuntime ? {
                     root: taskRuntime.policy.root,
-                    ...(taskRuntime.policy.permissions ? { permissions: taskRuntime.policy.permissions } : {}),
-                    ...(taskRuntime.policy.denyWrite ? { denyWrite: [...taskRuntime.policy.denyWrite] } : {}),
-                } : null;
-                assertAssignmentPermissionScope(captured, { sandbox: currentSandbox, mandatoryPermissions: permissionPlan.enforced }, Boolean(managed));
+                    permissions: taskRuntime.policy.permissions,
+                    denyWrite: [...taskRuntime.policy.denyWrite],
+                } : null,
+            };
+            if (internal?.resumeWait) {
+                assertAssignmentPermissionScope(resume?.prior.operations?.policy, workspaceAuthority, Boolean(managed));
             }
             // Freeze the ordinary recipe before the durable external-launch intent.
             const recipe = buildLaunchRecipe({
                 ...(!legacyToolLoading ? { toolLoadingVersion: 1 as const } : {}),
-                ...(isolated ? { workspace: isolated, workspaceAuthority: {
-                    mandatoryPermissions:permissionPlan.enforced, sandbox:taskRuntime ? {
-                        root:taskRuntime.policy.root, permissions:taskRuntime.policy.permissions, denyWrite:[...taskRuntime.policy.denyWrite],
-                    } : null,
-                } } : {}),
+                ...(isolated ? { workspace: isolated, workspaceAuthority } : {}),
                 attemptId: id, sessionId, sessionDir: childSessionDir, cwd, model, effort: thinking,
                 tools: callerLaunchTools(allow), excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
                 ...(optionalTrustedTools.length ? { optionalTrustedTools } : {}),

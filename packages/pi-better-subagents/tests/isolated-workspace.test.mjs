@@ -77,6 +77,11 @@ for (const mode of ["clone", "worktree"])
         assert.equal(existsSync(cwd), false);
         assert.ok(existsSync(other));
         assert.ok(!git(source, "worktree", "list", "--porcelain").includes(cwd));
+        if (mode === "worktree") {
+            git(source, "reflog", "expire", "--expire=now", "--all");
+            git(source, "gc", "--prune=now");
+            assert.throws(() => git(source, "cat-file", "-e", head), "the detached commit was pruned");
+        }
         restoreWorkspace(a);
         assert.equal(git(cwd, "rev-parse", "HEAD"), head);
         assert.equal(git(cwd, "show", ":f"), "staged");

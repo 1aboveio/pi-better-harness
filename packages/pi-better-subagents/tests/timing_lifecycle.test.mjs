@@ -766,10 +766,17 @@ describe("harness timing: stuck wake", () => {
                 assert.equal(wakes(h, "stuck").length, 1);
                 await tick();
                 assert.equal(wakes(h, "stuck").length, 1, "once per stuck spell");
-                const previousStuckAnchor = readMeta(run.id).timing.stuckAnchorAt;
+                // The recipient can see the wake before the supervisor folds its durable receipt.
+                const previousStuckAnchor = await waitFor(async () => {
+                    await tick();
+                    return readMeta(run.id).timing.stuckAnchorAt;
+                });
+                assert.ok(previousStuckAnchor, "the supervisor acknowledged the first stuck wake");
                 appendEvents(run.id, editEvents("fix"));
-                await tick();
-                assert.equal(readMeta(run.id).timing.lastProgressAt > previousStuckAnchor, true,
+                assert.ok(await waitFor(async () => {
+                    await tick();
+                    return readMeta(run.id).timing.lastProgressAt > previousStuckAnchor;
+                }),
                     "the edit advances progress beyond the previous stuck spell");
                 const result = (await h.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text;
                 assert.doesNotMatch(result, /Timing: stuck/, "progress clears the stuck reason");

@@ -880,12 +880,12 @@ export function collectSizeCapEntries(): SizeCapEntry[] {
         });
         const workspace = meta?.recipe?.workspace;
         if (workspace && meta && meta.startedAt >= (workspaces.get(workspace.owner)?.started ?? 0)) {
-            workspaces.set(workspace.owner, { root:workspace.root, started:meta.startedAt, entry:entries[entries.length-1]! });
+            workspaces.set(workspace.owner, { root: workspace.root, started: meta.startedAt, entry: entries[entries.length - 1]! });
         }
     }
     // A restored conversation may have outlived its first attempt. Charge its
     // one shared checkout to the most recent writer still in the registry.
-    for (const {root,entry} of workspaces.values()) entry.bytes += dirBytes(root);
+    for (const { root, entry } of workspaces.values()) entry.bytes += dirBytes(root);
     return entries;
 }
 
