@@ -397,16 +397,16 @@ function readText(path: string): RecordRead<string> {
     return { value: readFileSync(path, "utf8"), missing: false };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { missing: true };
-    return { missing: true, error: error instanceof Error ? error.message : String(error) };
+    return { missing: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
 function readJsonRecord<T>(path: string, problem: (value: unknown) => string | undefined): RecordRead<T> {
   const read = readText(path);
-  if (read.missing) return { missing: true, error: read.error };
+  if (read.value === undefined) return { missing: read.missing, error: read.error };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(read.value!);
+    parsed = JSON.parse(read.value);
   } catch (error) {
     return { missing: false, error: `invalid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
