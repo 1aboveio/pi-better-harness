@@ -11,6 +11,7 @@ import { observeNavigatorLaunch } from './shared-navigator.ts';
 export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
     let ctx: ExtensionContext | undefined, generation = 0, refresh: Promise<void> | undefined, dirty=false;
     let rows: any[] = [], legacyRows: any[] = [], details = new Map<string, any>(), logs = new Map<string, any>();
+    let pendingAttention = new Set<string>();
     const retainedTasks = new Map<string, any>();
     const cachedTask = (id: string) => rows.find(row => row.id === id) ?? retainedTasks.get(id);
     let adoptedScope: string | undefined;
@@ -20,6 +21,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
     const adoptContext = (context: ExtensionContext) => {
         if (adoptedScope !== undefined && adoptedScope !== scopeOf(context)) {
             ownership.clear(); rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); generation++;
+            pendingAttention.clear();
         }
         ctx = context; adoptedScope = scopeOf(context);
     };
@@ -51,6 +53,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
     const notify = () => { for (const listener of listeners)
         listener({ workspace: ctx?.cwd, sessionId: ctx?.sessionManager.getSessionId() }); };
     let handoffRetry: ReturnType<typeof setTimeout> | undefined;
+    let attentionRetry: ReturnType<typeof setTimeout> | undefined;
     let retryAt = Infinity;
     const scheduleHandoffPoll = (delayMs: number) => {
         if (!ctx || retryAt <= Date.now() + delayMs) return;
@@ -63,6 +66,16 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
         }, delayMs);
         handoffRetry.unref();
     };
+    const waitForAttentionIdle = () => {
+        if (attentionRetry) return;
+        attentionRetry = setTimeout(() => {
+            attentionRetry = undefined;
+            if (!ctx || !pendingAttention.size) return;
+            if (!ctx.isIdle()) { waitForAttentionIdle(); return; }
+            void reconcile().catch(() => undefined);
+        }, 1000);
+        attentionRetry.unref();
+    };
     const reconcile = () => {
         if (!ctx)
             return Promise.resolve();
@@ -70,6 +83,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
         dirty=false;
         const captured = ctx, version = generation;
         refresh = (async () => {
+            const rechecking = pendingAttention.size && captured.isIdle() ? pendingAttention : undefined;
             trace('poll-start');
             const snapshot = await request('__background_poll', { knownActiveIds: rows.filter(row => row.active).map(row => row.id).slice(0, 200) });
             trace('poll-received', { stale: version !== generation, total: snapshot.deliveries?.length ?? 0, deliveries: (snapshot.deliveries ?? []).slice(0, 8).map((item: any) => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
@@ -89,9 +103,19 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
                 legacyRows = snapshot.legacyRows ?? [];
             }
             notify();
+            const deferredAttention = new Set<string>();
             for (const item of snapshot.deliveries ?? []) {
                 if (queued.has(item.token))
                     continue;
+                const n = item.notification;
+                const type = n.event?.customType;
+                if ((type === 'background-task-stall' || type === 'background-wait-review')
+                    && (!rechecking?.has(item.receiptId) || !captured.isIdle())) {
+                    // Keep the candidate here while busy. Pi's followUp queue cannot
+                    // revalidate it when the current turn eventually ends.
+                    deferredAttention.add(item.receiptId);
+                    continue;
+                }
                 queued.add(item.token);
                 const facts = { taskId: item.notification.taskId, receiptId: item.receiptId };
                 const receipt = (delivered: boolean, reason?: string) => {
@@ -108,7 +132,6 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
                     receipt(true);
                     continue;
                 }
-                const n = item.notification;
                 trace('queue', { ...facts, urgent: n.urgent === true, recipientActive: active(n.origin, n.branchId) });
                 if (n.urgent) {
                     const handoff = getCallbackBatcher(pi).deliverUrgent({ ...n.event, receiptId: item.receiptId,
@@ -123,7 +146,16 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
                     getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active',
                     onDelivered: () => receipt(true), onSuppressed: (reason) => receipt(false, reason) });
             }
-        })().catch(error => { trace('poll-error', { error: String(error).slice(0, 256) }); throw error; })
+            pendingAttention = deferredAttention;
+            if (pendingAttention.size) {
+                if (captured.isIdle()) dirty = true;
+                else waitForAttentionIdle();
+            }
+        })().catch(error => {
+            trace('poll-error', { error: String(error).slice(0, 256) });
+            if (version === generation && pendingAttention.size) waitForAttentionIdle();
+            throw error;
+        })
         .finally(() => { refresh = undefined;if(dirty&&ctx)void reconcile().catch(()=>undefined); });
         return refresh;
     };
@@ -140,7 +172,24 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
             if (restore) activate();
         },
         noteParentContext(context: ExtensionContext) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
-        close() { clearTimeout(handoffRetry); handoffRetry = undefined; retryAt = Infinity; observing = false; ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
+        close() {
+            clearTimeout(handoffRetry);
+            clearTimeout(attentionRetry);
+            handoffRetry = attentionRetry = undefined;
+            retryAt = Infinity;
+            observing = false;
+            ctx = undefined;
+            adoptedScope = undefined;
+            generation++;
+            rows = [];
+            legacyRows = [];
+            details.clear();
+            logs.clear();
+            retainedTasks.clear();
+            queued.clear();
+            ownership.clear();
+            pendingAttention.clear();
+        },
         isParentOriginActive: active,
         onDurableTaskChange(listener: (change: any) => void) { listeners.add(listener); return () => listeners.delete(listener); },
         listDurableTasks(origin: any, _options: any = {}) { return active(origin) ? rows : []; },

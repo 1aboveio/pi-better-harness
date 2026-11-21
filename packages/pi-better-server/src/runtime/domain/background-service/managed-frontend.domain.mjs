@@ -9,6 +9,7 @@ import { observeNavigatorLaunch } from "./shared-navigator.domain.mjs";
 export function createManagedBackgroundFrontend(pi) {
     let ctx, generation = 0, refresh, dirty = false;
     let rows = [], legacyRows = [], details = new Map(), logs = new Map();
+    let pendingAttention = new Set();
     const retainedTasks = new Map();
     const cachedTask = (id) => rows.find(row => row.id === id) ?? retainedTasks.get(id);
     let adoptedScope;
@@ -24,6 +25,7 @@ export function createManagedBackgroundFrontend(pi) {
             logs.clear();
             retainedTasks.clear();
             generation++;
+            pendingAttention.clear();
         }
         ctx = context;
         adoptedScope = scopeOf(context);
@@ -66,6 +68,7 @@ export function createManagedBackgroundFrontend(pi) {
             listener({ workspace: ctx?.cwd, sessionId: ctx?.sessionManager.getSessionId() });
     };
     let handoffRetry;
+    let attentionRetry;
     let retryAt = Infinity;
     const scheduleHandoffPoll = (delayMs) => {
         if (!ctx || retryAt <= Date.now() + delayMs)
@@ -81,6 +84,21 @@ export function createManagedBackgroundFrontend(pi) {
         }, delayMs);
         handoffRetry.unref();
     };
+    const waitForAttentionIdle = () => {
+        if (attentionRetry)
+            return;
+        attentionRetry = setTimeout(() => {
+            attentionRetry = undefined;
+            if (!ctx || !pendingAttention.size)
+                return;
+            if (!ctx.isIdle()) {
+                waitForAttentionIdle();
+                return;
+            }
+            void reconcile().catch(() => undefined);
+        }, 1000);
+        attentionRetry.unref();
+    };
     const reconcile = () => {
         if (!ctx)
             return Promise.resolve();
@@ -91,6 +109,7 @@ export function createManagedBackgroundFrontend(pi) {
         dirty = false;
         const captured = ctx, version = generation;
         refresh = (async () => {
+            const rechecking = pendingAttention.size && captured.isIdle() ? pendingAttention : undefined;
             trace('poll-start');
             const snapshot = await request('__background_poll', { knownActiveIds: rows.filter(row => row.active).map(row => row.id).slice(0, 200) });
             trace('poll-received', { stale: version !== generation, total: snapshot.deliveries?.length ?? 0, deliveries: (snapshot.deliveries ?? []).slice(0, 8).map((item) => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
@@ -114,9 +133,19 @@ export function createManagedBackgroundFrontend(pi) {
                 legacyRows = snapshot.legacyRows ?? [];
             }
             notify();
+            const deferredAttention = new Set();
             for (const item of snapshot.deliveries ?? []) {
                 if (queued.has(item.token))
                     continue;
+                const n = item.notification;
+                const type = n.event?.customType;
+                if ((type === 'background-task-stall' || type === 'background-wait-review')
+                    && (!rechecking?.has(item.receiptId) || !captured.isIdle())) {
+                    // Keep the candidate here while busy. Pi's followUp queue cannot
+                    // revalidate it when the current turn eventually ends.
+                    deferredAttention.add(item.receiptId);
+                    continue;
+                }
                 queued.add(item.token);
                 const facts = { taskId: item.notification.taskId, receiptId: item.receiptId };
                 const receipt = (delivered, reason) => {
@@ -134,7 +163,6 @@ export function createManagedBackgroundFrontend(pi) {
                     receipt(true);
                     continue;
                 }
-                const n = item.notification;
                 trace('queue', { ...facts, urgent: n.urgent === true, recipientActive: active(n.origin, n.branchId) });
                 if (n.urgent) {
                     const handoff = getCallbackBatcher(pi).deliverUrgent({ ...n.event, receiptId: item.receiptId,
@@ -151,7 +179,19 @@ export function createManagedBackgroundFrontend(pi) {
                     getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active',
                     onDelivered: () => receipt(true), onSuppressed: (reason) => receipt(false, reason) });
             }
-        })().catch(error => { trace('poll-error', { error: String(error).slice(0, 256) }); throw error; })
+            pendingAttention = deferredAttention;
+            if (pendingAttention.size) {
+                if (captured.isIdle())
+                    dirty = true;
+                else
+                    waitForAttentionIdle();
+            }
+        })().catch(error => {
+            trace('poll-error', { error: String(error).slice(0, 256) });
+            if (version === generation && pendingAttention.size)
+                waitForAttentionIdle();
+            throw error;
+        })
             .finally(() => { refresh = undefined; if (dirty && ctx)
             void reconcile().catch(() => undefined); });
         return refresh;
@@ -175,7 +215,24 @@ export function createManagedBackgroundFrontend(pi) {
                 activate();
         },
         noteParentContext(context) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
-        close() { clearTimeout(handoffRetry); handoffRetry = undefined; retryAt = Infinity; observing = false; ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
+        close() {
+            clearTimeout(handoffRetry);
+            clearTimeout(attentionRetry);
+            handoffRetry = attentionRetry = undefined;
+            retryAt = Infinity;
+            observing = false;
+            ctx = undefined;
+            adoptedScope = undefined;
+            generation++;
+            rows = [];
+            legacyRows = [];
+            details.clear();
+            logs.clear();
+            retainedTasks.clear();
+            queued.clear();
+            ownership.clear();
+            pendingAttention.clear();
+        },
         isParentOriginActive: active,
         onDurableTaskChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
         listDurableTasks(origin, _options = {}) { return active(origin) ? rows : []; },
