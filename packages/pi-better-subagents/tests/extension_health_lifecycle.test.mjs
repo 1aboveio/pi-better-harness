@@ -329,7 +329,9 @@ describe("structured failure attention", () => {
                 await new Promise((resolve) => setImmediate(resolve));
                 await waitFor(() => h.sent.filter((x) => x.message.customType === "subagent-failure").length === 1);
                 assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 1);
-                assert.equal(pendingFailureAttention(readRunFailures(id), Date.now()), undefined);
+                // The recipient observes the message before the sender records its durable acknowledgement.
+                assert.ok(await waitFor(() => pendingFailureAttention(readRunFailures(id), Date.now()) === undefined),
+                    "the successful handoff must record its receipt before reload");
                 await h.handlers.get("session_start")({}, h.ctx);
                 mock.timers.tick(HEALTH_TICK_MS);
                 await waitFor(() => h.sent.filter((x) => x.message.customType === "subagent-failure").length === 1);
