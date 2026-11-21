@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { runDir, writeMeta } from "./registry.domain.mjs";
 import { credentialFilePaths } from "./shared-sandbox-core.domain.mjs";
 import { OperationBridgeError, redactSecret } from "./operation-bridge-types.domain.mjs";
+import { requireText } from "./shared-operation-coordinator/src/validate.domain.mjs";
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const inside = (root, path) => { const rel = relative(root, path); return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel)); };
 function retainedBytes(path, limit) {
@@ -22,6 +23,23 @@ function retainedBytes(path, limit) {
     finally {
         closeSync(fd);
     }
+}
+export function assignmentReportOutcomeReason(report) {
+    if (report.status === "complete")
+        return report.reason;
+    return (`Assignment incomplete: ${report.reason}`
+        + (report.blocker ? ` Blocked (${report.blocker.kind}): ${report.blocker.reason}.` : "")
+        + (report.remainingWork ? ` Remaining work: ${report.remainingWork.join("; ")}.` : "")).slice(0, 8192);
+}
+function validateReportText(report) {
+    requireText("report.reason", report.reason, 2048);
+    for (const item of report.remainingWork ?? [])
+        requireText("report.remaining_work", item, 1024);
+    if (report.blocker)
+        requireText("report.blocker.reason", report.blocker.reason, 1024);
+    for (const evidence of report.evidence)
+        requireText("report.evidence.explanation", evidence.explanation, 1024);
+    requireText("report.outcome_reason", assignmentReportOutcomeReason(report), 8192);
 }
 /** Runs synchronously under the authenticated handler: no yield between authority and persistence. */
 export function recordAssignmentReport(id, input, assertAuthority, current) {
@@ -86,6 +104,7 @@ function retainAssignmentReport(id, input, meta, assertAuthority, current) {
         status: report.status, reason: report.reason,
         ...(report.remaining_work ? { remainingWork: report.remaining_work } : {}), ...(report.blocker ? { blocker: report.blocker } : {}),
         evidence: snapshots.map(({ digest, source, explanation, range }) => ({ path: join(directory, digest), digest, source, explanation, ...(range ? { range } : {}) })) };
+    validateReportText(retained);
     const text = JSON.stringify(retained);
     if (Buffer.byteLength(text) > 65536)
         throw new Error("Assignment report exceeds its retained metadata bound.");
@@ -170,5 +189,8 @@ export function readAssignmentReport(meta) {
             || e.range.offset + e.range.bytes > e.range.sourceBytes)))
             throw new Error("Retained assignment evidence changed.");
     }
+    // Older accepted reports may contain prose the terminal store cannot retain.
+    // Treat those as unverified evidence rather than throwing during finalization.
+    validateReportText(report);
     return report;
 }

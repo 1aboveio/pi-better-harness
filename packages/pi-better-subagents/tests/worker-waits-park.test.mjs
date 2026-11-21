@@ -22,7 +22,7 @@ process.env.TMPDIR = volatileTmp;
 process.env.PI_SUBAGENT_DURABLE_DIR = durableRoot;
 
 const registry = await import("../registry.ts");
-const { finalizeRun } = await import("../finalization.ts");
+const { finalizeRun, reconcileInterruptedRun } = await import("../finalization.ts");
 const { captureParkCheckpoint } = await import("../park-checkpoint.ts");
 const { evaluateParkDisposition, parkedWaits } = await import("../worker-waits.ts");
 const { runDailyCleanupOnce } = await import("../cleanup.ts");
@@ -196,6 +196,33 @@ test("a non-zero exit holds the park disposition and stays an ordinary failure",
 function dispositionFor(id) {
     return evaluateParkDisposition({ runId: id, cleanExit: true });
 }
+});
+
+test("an unknown exit without recovered writer proof still holds the park", () => {
+    const fixture = parkedRunFixture("sa_park_unknown");
+    const result = finalizeRun(fixture.id, null);
+    assert.equal(result.park.parked, false);
+    assert.equal(registry.readMeta(fixture.id).park.phase, "held");
+});
+
+test("health reconciliation preserves a verified park after the interrupted writer exits", () => {
+    const fixture = parkedRunFixture("sa_park_health_recovery");
+    const now = Date.now();
+    const meta = { ...registry.readMeta(fixture.id), pidStartTime: "fixture-writer", supervisionInterruptedAt: now - 1 };
+    registry.writeMeta(meta);
+    const probe = { pidExists: () => false, startToken: () => undefined, groupId: () => undefined, groupAlive: () => false };
+
+    const { finalization } = reconcileInterruptedRun(meta, probe, now);
+    assert.equal(finalization?.park?.parked, true);
+    assert.equal(registry.readParkRecord(fixture.id).phase, "waiting");
+    assert.equal(registry.readMeta(fixture.id).exitCode, null);
+});
+
+test("recovered writer proof cannot turn a nonzero exit into a park", () => {
+    const fixture = parkedRunFixture("sa_park_recovered_failure");
+    const result = finalizeRun(fixture.id, 1, { recoveredWriterExit: true });
+    assert.equal(result.park.parked, false);
+    assert.equal(registry.readMeta(fixture.id).park.phase, "held");
 });
 
 test("a rewritten saved conversation cannot certify a park", () => {
