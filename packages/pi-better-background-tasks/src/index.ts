@@ -8,6 +8,7 @@ import { observeForegroundSandboxPolicy } from "./sandbox.js";
 import { registerTools } from "./tools.js";
 import { deliverBackgroundTasksPrompt } from "./prompt.js";
 import { closeBackgroundObservation } from "./work-observation.js";
+import { readBackgroundReviewInterval, saveBackgroundReviewInterval } from "./review-settings.js";
 
 export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   // The frontend owns native UI/delivery only. Mechanical tools run in the
@@ -15,6 +16,20 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   const {host: observedWaits, proxy, ui} = createManagedBackgroundFrontend(pi);
   const navigator = createBackgroundTasksNavigator(undefined, ui);
   initializeNavigatorPanels(pi);
+  const intervalLabel = (minutes: number) => `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  const reviewSetting = {
+    id: "background-review-interval",
+    label: "Background wait review interval",
+    values: [1, 5, 10, 15, 30, 60].map(intervalLabel),
+    get: () => intervalLabel(readBackgroundReviewInterval()),
+    change(value: string) {
+      saveBackgroundReviewInterval(Number.parseInt(value, 10));
+      void observedWaits.reconcileNow().catch(() => undefined);
+    },
+  };
+  const registerReviewSetting = () => pi.events.emit("harness-settings:register", reviewSetting);
+  let stopReviewSettings: (() => void) | undefined = pi.events.on("harness-settings:request", registerReviewSetting);
+  registerReviewSetting();
   // Sections on a host that renders them; text only where it renders none.
   // Returning a prompt on modern pi would set forceSystemPrompt, and the request
   // would then carry a snapshot, so sections published after it never arrive.
@@ -26,6 +41,8 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
   observeForegroundSandboxPolicy(pi);
   // Registered before registerTools(pi), so this runs before running tasks are resumed.
   pi.on("session_start", async (_event, ctx) => {
+    stopReviewSettings ??= pi.events.on("harness-settings:request", registerReviewSetting);
+    registerReviewSetting();
     registerBackgroundTasksGoalProvider(pi);
     navigator.ensureBackgroundTasksNavigator(ctx);
   });
@@ -35,6 +52,8 @@ export default function backgroundTasksExtension(pi: ExtensionAPI): void {
     navigator.clearBackgroundTasksNavigatorSession();
   });
   pi.on("session_shutdown", async (_event, ctx) => {
+    stopReviewSettings?.();
+    stopReviewSettings = undefined;
     closeBackgroundObservation(pi);
     // /reload, session replacement, and quit load a fresh instance; stop this one's timers (#324).
     observedWaits.close();

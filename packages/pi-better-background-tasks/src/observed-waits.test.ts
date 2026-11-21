@@ -30,6 +30,7 @@ import {
 import type { LocalSupervisor, SupervisorStartOptions } from "./supervisor/index.js";
 import { createLocalSupervisor, supervisorTaskIdForToken } from "./supervisor/index.js";
 import { advertiseBackgroundAdapter, BACKGROUND_ADAPTER_REQUEST } from "./adapter-contract.js";
+import { readBackgroundReviewInterval, saveBackgroundReviewInterval } from "./review-settings.js";
 import { readProcessStartToken } from "./process-identity.js";
 import { openStore } from "./shared-operation-coordinator/index.js";
 import { registerTools } from "./tools.js";
@@ -262,6 +263,59 @@ describe("parent durable launches", () => {
       expect(second!.delivery.receiptId).not.toBe(first!.delivery.receiptId);
       expect(second!.notification.event.content).toContain("new output");
     } finally { await host.stopDurableTask(origin, launch.id); }
+  });
+
+  it("reviews an unchanged watch using the configured interval and the full elapsed time", async () => {
+    const root = workspace("wait-review"), ctx = createCtx(root);
+    const settings = { agentDir: () => root };
+    expect(readBackgroundReviewInterval(settings)).toBe(10);
+    saveBackgroundReviewInterval(2, settings);
+    expect(() => saveBackgroundReviewInterval(0, settings)).toThrow();
+    const interval = readBackgroundReviewInterval(settings) * 60_000;
+    expect(interval).toBe(120_000);
+    let now = Date.now();
+    let { host } = startHost({ root, ctx, now: () => now });
+    const launch = await host.launchParent({ ctx, kind: "watch", params: {
+      shell: false, callback: true, interval_seconds: 1,
+      argv: nodeCommand("console.log(require('node:fs').existsSync('changed') ? 'changed' : 'same result')"),
+      success_when: { type: "stdout_contains", value: "finished" },
+    } });
+    const origin = { cwd: root, sessionId: ctx.sessionManager.getSessionId() };
+    const checkpoint = join(root, "supervisor", "tasks", launch.id, "progress.json");
+    const progressTime = () => JSON.parse(readFileSync(checkpoint, "utf8")).observedAt as number;
+    const wait = host.waitForParent(ctx, [launch.id], "Check delivery evidence");
+    const review = () => host.backgroundWaitReview(origin, launch.id, [wait], interval);
+    try {
+      await until(host, () => existsSync(checkpoint));
+      const dueAt = review()!.dueAt;
+      const initialProgress = progressTime();
+      now = dueAt - 1;
+      expect(review()?.alert).toBeUndefined();
+      now = dueAt;
+      const first = review()!.alert!;
+      expect(first.notification.event.content).toMatch(/Task has run for 2m\d{2}s\. No observed progress for 2m\d{2}s/);
+      expect(first.notification.event.content).toContain("Check delivery evidence");
+      expect(first.notification.event.content).toContain("Latest check:");
+      expect(first.notification.event.content).toContain("same result");
+      expect(review()?.alert?.delivery.receiptId).toBe(first.delivery.receiptId);
+      first.delivery.delivered();
+      host.close();
+      ({ host } = startHost({ root, ctx, now: () => now }));
+      expect(review()).toEqual({ dueAt: now + interval });
+
+      now += interval;
+      const second = review()!.alert!;
+      expect(second.delivery.receiptId).not.toBe(first.delivery.receiptId);
+      expect(second.notification.event.content).toMatch(/Task has run for 4m\d{2}s/);
+      writeFileSync(join(root, "changed"), "new observation");
+      await until(host, () => progressTime() > initialProgress);
+      now = progressTime();
+      expect(review()).toEqual({ dueAt: now + interval });
+      await host.stopDurableTask(origin, launch.id);
+      expect(review()).toBeUndefined();
+    } finally {
+      await host.stopDurableTask(origin, launch.id);
+    }
   });
 
   it("retries reconciliation after coordinator write contention", async () => {

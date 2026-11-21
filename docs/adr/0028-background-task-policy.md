@@ -20,6 +20,20 @@ Measure silence from the last observed progress, or from task start until the fi
 
 By default, a running task becomes quiet after 60 seconds without progress and reaches suspected stall at 5 minutes. If the stall persists for a further 60 seconds and callbacks are enabled, notify the owning session once for that continuous period of silence. Include the task identity, elapsed silence, last available output or evidence reference, and the state of other dependencies in the same wait. New progress closes the incident. Another period of silence can then raise a new incident.
 
+For a callback-enabled supervised local task in a parent wait, send a review
+when the wait has seen no progress for the configured interval. Repeat at that
+interval from the most recent review handoff while the same wait is pending.
+`/harness-settings` exposes **Background wait review interval**. The default
+is 10 minutes. `piBetterHarness.backgroundReviewIntervalMinutes` in the agent's
+`settings.json` accepts whole minutes from 1 to 1440.
+
+A review includes the task's total run time, time since observed progress, last
+watch check and retained evidence. The parent decides how to respond. The
+supervisor's review receipt is bound to the exact wait generation and progress
+checkpoint. A restart can recover an overdue review without replaying all
+elapsed intervals. Progress, cancellation, or termination retires the pending
+review. The review leaves the wait and its terminal deadline in place.
+
 ## Waits and callbacks
 
 | Event | What the owning session receives | Effect on a registered wait |
