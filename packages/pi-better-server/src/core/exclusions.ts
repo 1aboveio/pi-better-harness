@@ -32,11 +32,19 @@ const SECRET_DIRS: ReadonlySet<string> = new Set([".ssh", ".aws", ".gnupg", ".ku
 
 const SECRET_FILE_PATTERNS: readonly RegExp[] = [
   /^\.env/i, // any name starting with .env: .env, .env.local, .envrc, .env-prod, .env_local
+  /\.env$/i, // secrets.env, prod.env
+  /^\.pgpass$/i,
+  /^credentials?$/i, // no extension, as in ~/.aws/credentials copied into a repo
+  /\.tfvars(\.json)?$/i, // terraform.tfvars, prod.auto.tfvars
+  /^service[-_]?accounts?([-_.].+)?\.json$/i, // service-account.json, service-account-prod.json
   /^\.(npmrc|netrc|pypirc|git-credentials|dockercfg)$/i,
   /^(auth|credentials?|secrets?)(\..+)?\.(json|ya?ml|toml|ini)$/i,
-  /^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i,
+  /^id_(rsa|dsa|ecdsa|ed25519)(_sk)?(\.pub)?$/i,
   /\.(pem|key|p12|pfx|keystore|jks)$/i,
 ];
+
+/** Template copies of the files above (.env.example): they hold placeholders, so they travel with the move. */
+const TEMPLATE_SUFFIX = /\.(example|sample|template)$/i;
 
 /** Why a repo-relative path is left out of a bundle, or undefined when it may travel. */
 export function exclusionReason(relativePath: string): "credential" | "generated" | undefined {
@@ -45,7 +53,7 @@ export function exclusionReason(relativePath: string): "credential" | "generated
   for (const segment of segments.slice(0, -1)) {
     if (SECRET_DIRS.has(segment)) return "credential";
   }
-  if (SECRET_FILE_PATTERNS.some((pattern) => pattern.test(name))) return "credential";
+  if (!TEMPLATE_SUFFIX.test(name) && SECRET_FILE_PATTERNS.some((pattern) => pattern.test(name))) return "credential";
   for (const segment of segments.slice(0, -1)) {
     if (GENERATED_DIRS.has(segment)) return "generated";
   }
