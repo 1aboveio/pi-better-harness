@@ -210,7 +210,9 @@ pi -e ./packages/pi-better-harness/extensions/minimal-output/index.ts
 ## Harness Settings
 
 The bundled harness provides `/harness-settings`, using Pi's native settings
-list. It opens the settings screens of loaded Sandbox, Subagents, and Goal
+list. Work planning comes first, followed by delegation and sandbox access,
+background waits and completion delivery, then display settings. It opens
+the settings screens of loaded Sandbox, Subagents, and Goal
 packages without duplicating their configuration, plus the **Agent catalog** shortcut
 to the `/agents` catalog. `/sandbox`, `/subagents settings`, `/agents`, and
 `/goal settings` remain available in standalone installations.

@@ -114,8 +114,8 @@ The bundled-host case reports a skip when the selected SDK has no bundled CLI.
 
 ### Outcome & Todo release contract
 
-In `/harness-settings`, **Outcome & Todo display** (`outcome-todo-display`)
-defaults On; **Outcome & Todo hooks** (legacy id `outcome-todo`) defaults Off.
+In `/harness-settings`, **Outcome and Todo panel** (`outcome-todo-display`)
+defaults to On. **Outcome and Todo tools** (legacy id `outcome-todo`) defaults to Off.
 Saved v1 `enabled` remains the hooks authority, and the new optional display
 preference defaults to true. Saved state renders with hooks off; missing state
 creates no placeholder, state, or settings. Display off leaves hooks active.

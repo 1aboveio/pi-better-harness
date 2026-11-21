@@ -28,9 +28,7 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
     const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(join(fixture, "agent"))} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(piCli)} -e ${q(wrapper)} --no-skills --no-context-files --approve --model openai/gpt-4o-mini`;
     const tmux = (...more) => execFileSync("tmux", [...args, ...more], { encoding: "utf8" });
     const key = (value) => tmux("send-keys", "-t", "settings", value);
-    const literal = (value) => tmux("send-keys", "-t", "settings", "-l", value);
-    const down = (count = 1) => { for (let index = 0; index < count; index++) key("Down"); };
-    const up = (count = 1) => { for (let index = 0; index < count; index++) key("Up"); };
+    const literal = (value) => tmux("send-keys", "-t", "settings", "-l", "--", value);
     const wait = (pattern) => {
         const deadline = Date.now() + 10_000;
         let screen = "";
@@ -40,6 +38,18 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40);
         }
         assert.fail(`Missing ${pattern}:\n${screen}`);
+    };
+    const select = label => {
+        // Up clamps to the first setting, including when the menu has just reopened.
+        tmux("send-keys", "-t", "settings", "-N", "10", "Up");
+        wait(/^> Delegation mode/m);
+        for (let step = 0; step < 10; step++) {
+            const active = wait(/^> /m).split("\n").find(line => line.startsWith("> "));
+            if (active.trimEnd() === "> " + label || active.startsWith("> " + label + " ")) return;
+            key("Down");
+            wait(new RegExp("^> (?!" + active.trimEnd().slice(2).split(/\s{2,}/)[0] + ")", "m"));
+        }
+        assert.fail(`Could not select ${label}`);
     };
     try {
         runtimeOwner = await prepareOwnedRuntime(agentDir);
@@ -52,8 +62,6 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         const selected = tmux("capture-pane", "-t", "settings", "-e", "-p").split("\n")
             .find((line) => line.replace(/\x1b\[[0-9;]*m/g, "").startsWith("> Delegation mode"));
         assert.ok(selected, "selected row is visible");
-        assert.match(selected, /\x1b\[[0-9;]*48;[0-9;]*m/, "selected row uses the sandbox-style background");
-        assert.match(selected, /\x1b\[(?:\d+;)*1(?:;\d+)*m/, "selected row is bold");
         assert.match(selected, /\x1b\[(?:\d+;)*7(?:;\d+)*m/, "session cell has inverse styling");
         key("Enter"); wait(/Delegation mode\s+coordinator/);
         key("Down"); key("Enter");
@@ -61,20 +69,20 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         wait(/positive whole number/);
         key("C-u"); literal("7"); key("Enter");
         wait(/Concurrent subagents\s+7/);
-        down(); key("Enter"); key("C-u"); literal("6.5"); key("Enter");
+        select("Tool-wait alert"); key("Enter"); key("C-u"); literal("6.5"); key("Enter");
         wait(/Tool-wait alert\s+6\.5 min/);
         wait(/No-progress alert\s+10 min/);
-        down(); key("Enter"); key("C-u"); literal("12.5"); key("Enter");
+        select("No-progress alert"); key("Enter"); key("C-u"); literal("12.5"); key("Enter");
         wait(/No-progress alert\s+12\.5 min/);
         wait(/Tool-wait alert\s+6\.5 min/);
-        down(); key("Space");
+        select("Run timeout"); key("Space");
         wait(/Run timeout\s+No limit/);
         key("Enter"); key("C-u"); literal("90"); key("Enter");
         wait(/Run timeout\s+90 min/);
         assert.deepEqual(JSON.parse(readFileSync(config, "utf8")).piBetterHarness.subagents, {
             delegationMode: "adaptive", maxConcurrent: 4, defaultTools: "read",
         }, "editing session mode, cap, and timing must not save defaults");
-        down(4); wait(/> Git workspace\s+Clone/); key("Space");
+        select("Git workspace"); wait(/> Git workspace\s+Clone/); key("Space");
         wait(/Git workspace\s+Worktree/);
         key("C-s"); wait(/Subagent defaults saved/);
         const saved = JSON.parse(readFileSync(config, "utf8")).piBetterHarness.subagents;
@@ -85,19 +93,19 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         assert.equal(saved.maxMinutes, 90);
         assert.equal(saved.defaultTools, "read");
         assert.equal(saved.gitWorkspace, "worktree");
-        up(7);
+        select("Concurrent subagents");
         key("Enter"); key("C-u"); literal("2"); key("Enter");
         wait(/Concurrent subagents\s+2/);
-        down(7); key("Space"); wait(/Git workspace\s+Clone/);
-        down(); wait(/> Reset to defaults/); key("Enter");
+        select("Git workspace"); key("Space"); wait(/Git workspace\s+Clone/);
+        select("Reset to defaults"); wait(/> Reset to defaults/); key("Enter");
         wait(/Git workspace\s+Worktree/);
         wait(/Concurrent subagents\s+7/);
         wait(/Tool-wait alert\s+6\.5 min/);
         wait(/No-progress alert\s+12\.5 min/);
         wait(/Run timeout\s+90 min/);
-        up(5); key("Enter"); key("C-u"); literal("no limit"); key("Enter");
+        select("Run timeout"); key("Enter"); key("C-u"); literal("no limit"); key("Enter");
         wait(/Run timeout\s+No limit/);
-        up(3); key("Enter"); key("C-u"); literal("6"); key("Enter");
+        select("Concurrent subagents"); key("Enter"); key("C-u"); literal("6"); key("Enter");
         wait(/Concurrent subagents\s+6/);
         key("Escape"); wait(/^(?![\s\S]*Subagent settings)/);
         literal("/reload"); key("Enter"); wait(/Reloaded/);
@@ -113,7 +121,7 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         wait(/Tool-wait alert\s+6\.5 min/);
         wait(/No-progress alert\s+12\.5 min/);
         wait(/Run timeout\s+No limit/);
-        down(7); key("Enter");
+        select("Agents"); key("Enter");
         const catalog = wait(/Agents\s+.*definitions/);
         assert.doesNotMatch(catalog, /Subagent settings/, "the settings pane closes before opening Agents");
         key("Escape");

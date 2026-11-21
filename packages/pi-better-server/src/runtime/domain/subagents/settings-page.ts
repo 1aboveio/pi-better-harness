@@ -50,17 +50,21 @@ export interface SubagentSettingsHandlers {
 
 type EditTarget = { kind: "cap" } | { kind: "toolWait" } | { kind: "stuck" } | { kind: "timeout" };
 
-type Row =
-    | { kind: "mode" }
-    | { kind: "cap" }
-    | { kind: "toolWait" }
-    | { kind: "stuck" }
-    | { kind: "timeout" }
-    | { kind: "skills" }
-    | { kind: "choose" }
-    | { kind: "workspace" }
-    | { kind: "agents" }
-    | { kind: "reset" };
+const rows = [
+    { kind: "mode", label: "Delegation mode" },
+    { kind: "cap", label: "Concurrent subagents" },
+    { kind: "workspace", label: "Git workspace" },
+    { kind: "timeout", label: "Run timeout" },
+    { kind: "toolWait", label: "Tool-wait alert" },
+    { kind: "stuck", label: "No-progress alert" },
+    { kind: "skills", label: "Skill exposure" },
+    { kind: "choose", label: "Selected skills" },
+    { kind: "agents", label: "Agents" },
+    { kind: "reset", label: "Reset to defaults" },
+] as const;
+
+type Row = typeof rows[number];
+const labelWidth = Math.max(...rows.map(({ label }) => Tui.visibleWidth(label)));
 
 const SKILL_MODES: readonly { mode: SkillExposureMode; label: string }[] = [
     { mode: "inherit", label: "Discover automatically" },
@@ -68,7 +72,6 @@ const SKILL_MODES: readonly { mode: SkillExposureMode; label: string }[] = [
     { mode: "explicit", label: "Selected skills" },
 ];
 
-const LABEL_WIDTH = 26;
 const NO_LIMIT = "No limit";
 
 function parseRunTimeout(input: string): number {
@@ -90,15 +93,65 @@ function cycleSkillMode(mode: SkillExposureMode): SkillExposureMode {
 }
 
 function skillSource(settings: SubagentSettingsSnapshot): string {
-    if (settings.skillsError) return `Config error: ${settings.skillsError}`;
     if (settings.skillsSource === "session") return "Source: this session (unsaved)";
     if (settings.skillsSource === "config") return "Source: config defaultSkills";
     return "Source: discovery default";
 }
 
-function cell(text: string, width: number): string {
-    const clipped = Tui.truncateToWidth(text, width, "");
-    return clipped + " ".repeat(Math.max(0, width - Tui.visibleWidth(clipped)));
+function settingValue(kind: Row["kind"], s: SubagentSettingsSnapshot): string {
+    switch (kind) {
+        case "mode": return s.mode;
+        case "cap": return String(s.maxConcurrent);
+        case "workspace": return s.gitWorkspace === "worktree" ? "Worktree" : "Clone";
+        case "timeout": return s.maxMinutes === 0 ? NO_LIMIT : `${s.maxMinutes} min`;
+        case "toolWait": return s.toolWaitMinutes === 0 ? "Off" : `${s.toolWaitMinutes} min`;
+        case "stuck": return s.stuckMinutes === 0 ? "Off" : `${s.stuckMinutes} min`;
+        case "skills": return skillLabel(s.skillsMode);
+        case "choose": return s.skillsMode === "explicit" ? `${s.skillsPaths.length} checked` : "Choose…";
+        case "agents": return "Open";
+        case "reset": return "Restore";
+    }
+}
+
+function description(kind: Row["kind"], s: SubagentSettingsSnapshot): string {
+    switch (kind) {
+        case "mode": return {
+            manual: "Delegate when you ask or when the active workflow requires it.",
+            adaptive: "Delegate independent work when a suitable agent is available.",
+            coordinator: "Delegate work covered by an agent role. Keep coordination and verification in the foreground.",
+        }[s.mode];
+        case "cap": return "Set how many subagents can run at the same time.";
+        case "workspace": return s.gitWorkspace === "worktree"
+            ? "Create a linked worktree that shares the repository’s Git metadata."
+            : "Create a separate local clone for each isolated Git workspace.";
+        case "timeout": return "Stop a subagent when its run reaches this limit. Choose No limit to disable the timeout.";
+        case "toolWait": return "Notify the parent when a tool call stays open this long. Enter 0 to turn this alert off.";
+        case "stuck": return "Notify the parent after this long without progress. Time spent waiting for a tool is excluded. Enter 0 to turn this alert off.";
+        case "skills": return "Choose how new subagents discover skills.\n" + skillSource(s);
+        case "choose": return "Choose the skills to load for new subagents.";
+        case "agents": return "Browse agent roles and edit their profiles in /agents.";
+        case "reset": return "Restore saved defaults for this session, including its workspace, limits, and skills.";
+    }
+}
+
+function primaryKey(action: Tui.Keybinding, excludeSpace = false): string | undefined {
+    const key = Tui.getKeybindings().getKeys(action).find(key => !excludeSpace || key !== "space");
+    if (!key) return undefined;
+    if (key === "escape") return "Esc";
+    return key.split("+").map(part => part.length === 1 ? part : part[0]!.toUpperCase() + part.slice(1)).join("+");
+}
+
+function shortcuts(kind: Row["kind"], editing: boolean): string {
+    const cancel = primaryKey("tui.select.cancel");
+    const confirm = primaryKey(editing ? "tui.input.submit" : "tui.select.confirm", !editing);
+    const change = confirm ? `${confirm}/Space` : "Space";
+    const verb = kind === "agents" || kind === "choose" ? "open" : kind === "reset" ? "restore" : "change";
+    const actions = editing ? [confirm && `${confirm} to apply`]
+        : kind === "timeout" ? ["Space for No limit", confirm && `${confirm} to edit minutes`]
+        : [`${change} to ${verb}`];
+    if (!editing) actions.push("Ctrl+S to save defaults");
+    if (cancel) actions.push(`${cancel} to ${editing ? "cancel" : "go back"}`);
+    return actions.filter(Boolean).join(" · ");
 }
 
 export function createSubagentSettingsPage(
@@ -124,21 +177,12 @@ export function createSubagentSettingsPage(
         requestRender();
     }
 
-    function rowsOf(settings: SubagentSettingsSnapshot): Row[] {
-        const rows: Row[] = [
-            { kind: "mode" }, { kind: "cap" }, { kind: "toolWait" }, { kind: "stuck" }, { kind: "timeout" },
-            { kind: "skills" }, { kind: "choose" },
-        ];
-        rows.push({ kind: "agents" }, { kind: "workspace" }, { kind: "reset" });
-        return rows;
-    }
-
     function startEditing(target: EditTarget, value: string): void {
         editing = target;
         input.setValue(value);
         input.handleInput("\x05");
         input.focused = focused;
-        report(target.kind === "timeout" ? "Enter minutes or No limit." : "");
+        report("");
     }
 
     function finishEditing(text: string): void {
@@ -186,6 +230,7 @@ export function createSubagentSettingsPage(
         try {
             if (selected.kind === "workspace") {
                 handlers.changeWorkspace(settings.gitWorkspace === "worktree" ? "clone" : "worktree");
+                report("Session workspace updated.");
             } else if (selected.kind === "mode") {
                 const next = DELEGATION_MODES[(DELEGATION_MODES.indexOf(settings.mode) + 1) % DELEGATION_MODES.length]!;
                 handlers.changeMode(next);
@@ -282,13 +327,13 @@ export function createSubagentSettingsPage(
                 requestRender();
                 return;
             }
-            const rows = rowsOf(settings);
-            row = Math.min(row, rows.length - 1);
             const selected = rows[row]!;
-            if (Tui.matchesKey(data, Tui.Key.escape)) close();
-            else if (Tui.matchesKey(data, Tui.Key.up)) row = Math.max(0, row - 1);
-            else if (Tui.matchesKey(data, Tui.Key.down)) row = Math.min(rows.length - 1, row + 1);
-            else if (Tui.matchesKey(data, Tui.Key.enter) || data === " ") action(settings, selected, data);
+            const keys = Tui.getKeybindings();
+            if (keys.matches(data, "tui.select.cancel")) close();
+            else if (keys.matches(data, "tui.select.up") || keys.matches(data, "tui.select.down")) {
+                row = Math.max(0, Math.min(rows.length - 1, row + (keys.matches(data, "tui.select.up") ? -1 : 1)));
+                message = "";
+            } else if (keys.matches(data, "tui.select.confirm") || data === " ") action(settings, selected, data);
             else if (Tui.matchesKey(data, "ctrl+s")) {
                 const result = handlers.save();
                 if (result.ok) {
@@ -301,89 +346,57 @@ export function createSubagentSettingsPage(
         render(width: number) {
             if (picker) return picker.render(width);
             const settings = handlers.get();
-            const rows = rowsOf(settings);
-            row = Math.min(row, rows.length - 1);
             const w = Math.max(1, Math.floor(width));
-            const compact = w < 40;
-            const valueWidth = Math.max(1, w - LABEL_WIDTH - 1);
-            const highlight = (text: string, selected: boolean): string => selected
-                ? theme.bg("selectedBg", theme.bold(cell(text, w))) : text;
-            const marker = (selected: boolean) => selected ? "> " : "  ";
-            const source = skillSource(settings);
-            const lines: string[] = [theme.fg("accent", theme.bold("  Subagent settings")), ""];
-
-            const pushSetting = (label: string, value: string, selected: boolean, active: string): void => {
-                const title = theme.fg(selected ? "accent" : "text", marker(selected) + label);
-                if (compact) {
-                    lines.push(highlight(title, selected));
-                    lines.push("  " + (selected ? theme.inverse(active) : theme.fg("text", active)));
-                } else {
-                    lines.push(highlight(cell(title, LABEL_WIDTH) + " " +
-                        (selected ? theme.inverse(active) : theme.fg("text", active)), selected));
-                }
-            };
-
-            let selectedStart = 2;
-            let selectedEnd = 3;
-            rows.forEach((entry, index) => {
-                const selected = index === row;
-                if (selected) selectedStart = lines.length;
-                if (entry.kind === "mode" || entry.kind === "cap" || entry.kind === "toolWait"
-                    || entry.kind === "stuck" || entry.kind === "timeout") {
-                    const label = entry.kind === "mode" ? "Delegation mode"
-                        : entry.kind === "cap" ? "Concurrent subagents"
-                        : entry.kind === "toolWait" ? "Tool-wait alert"
-                        : entry.kind === "stuck" ? "No-progress alert" : "Run timeout";
-                    const value = entry.kind === "mode" ? settings.mode
-                        : entry.kind === "cap" ? String(settings.maxConcurrent)
-                        : entry.kind === "timeout" ? (settings.maxMinutes === 0 ? NO_LIMIT : `${settings.maxMinutes} min`)
-                        : `${entry.kind === "toolWait" ? settings.toolWaitMinutes : settings.stuckMinutes} min`;
-                    const active = editing?.kind === entry.kind
-                        ? input.render(compact ? Math.max(1, w - 2) : valueWidth)[0]!
-                        : value;
-                    pushSetting(label, value, selected, active);
-                    if (entry.kind === "stuck" && settings.timingError) {
-                        const sourceLine = compact ? "    " + settings.timingError : " ".repeat(LABEL_WIDTH) + " " + settings.timingError;
-                        lines.push(theme.fg("error", Tui.truncateToWidth(sourceLine, w, "")));
-                    }
-                } else if (entry.kind === "skills") {
-                    pushSetting("Skill exposure", skillLabel(settings.skillsMode), selected, skillLabel(settings.skillsMode));
-                    const sourceLine = compact ? "    " + source : " ".repeat(LABEL_WIDTH) + " " + source;
-                    lines.push(theme.fg(settings.skillsError ? "error" : "muted",
-                        Tui.truncateToWidth(sourceLine, w, "")));
-                } else if (entry.kind === "choose") {
-                    const value = settings.skillsMode === "explicit" ? `${settings.skillsPaths.length} checked` : "Choose…";
-                    pushSetting("Selected skills", value, selected, value);
-                } else if (entry.kind === "workspace") {
-                    const value = settings.gitWorkspace === "worktree" ? "Worktree" : "Clone";
-                    pushSetting("Git workspace", value, selected, value);
-                } else if (entry.kind === "agents") {
-                    lines.push(highlight(theme.fg(selected ? "accent" : "text", marker(selected) + "Agents"), selected));
-                } else {
-                    lines.push("");
-                    lines.push(highlight(theme.fg(selected ? "accent" : "text", marker(selected) + "Reset to defaults"), selected));
-                }
-                if (selected) selectedEnd = lines.length;
-            });
-
-            const body = lines.slice(2);
-            const footer: string[] = [];
-            if (message) footer.push("", theme.fg(error ? "error" : "muted", message));
-            const hint = editing
-                ? "Enter Apply · Esc Cancel"
-                : rows[row]?.kind === "timeout"
-                    ? "Space No limit · Enter Edit minutes · ctrl+s Save default · Esc Back"
-                    : "Up/Down Select · Space/Enter Change · ctrl+s Save default · Esc Back";
-            footer.push("", theme.fg("dim", hint));
             const height = Math.max(1, Math.floor(getHeight()));
-            const room = Math.max(1, height - 2 - footer.length);
-            if (selectedEnd - 2 > viewportStart + room) viewportStart = selectedEnd - 2 - room;
-            if (selectedStart - 2 < viewportStart) viewportStart = selectedStart - 2;
+            const valueColumn = 2 + labelWidth + 2;
+            const body: string[] = [];
+            let selectedStart = 0;
+            let selectedEnd = 0;
+            for (const [index, entry] of rows.entries()) {
+                const active = index === row;
+                const value = settingValue(entry.kind, settings);
+                const stacked = valueColumn + Math.max(Tui.visibleWidth(value), editing?.kind === entry.kind ? 8 : 0) > w;
+                const column = stacked ? Math.min(4, Math.max(0, w - 1)) : valueColumn;
+                const valueText = editing?.kind === entry.kind
+                    ? input.render(Math.max(1, w - column))[0] ?? ""
+                    : active ? theme.inverse(value) : theme.fg("muted", value);
+                const label = (active ? "> " : "  ") + theme.fg(active ? "accent" : "text", entry.label);
+                if (active) selectedStart = body.length;
+                if (stacked) {
+                    const valueLines = Tui.wrapTextWithAnsi(valueText, Math.max(1, w - column));
+                    body.push(label, ...valueLines.map(line => " ".repeat(column) + line));
+                } else {
+                    body.push(label + " ".repeat(valueColumn - Tui.visibleWidth(label)) + valueText);
+                }
+                if (active) selectedEnd = body.length;
+            }
+
+            const selected = rows[row]!.kind;
+            const hint = shortcuts(selected, editing !== undefined);
+            const wrap = (text: string, color: Parameters<Theme["fg"]>[0]) =>
+                Tui.wrapTextWithAnsi(text, Math.max(1, w - 2)).map(line => "  " + theme.fg(color, line));
+            const help = wrap(description(selected, settings), "text");
+            const feedback = [
+                ...(settings.timingError ? wrap(settings.timingError, "error") : []),
+                ...(settings.skillsError ? wrap(`Config error: ${settings.skillsError}`, "error") : []),
+                ...(message ? wrap(message, error ? "error" : "muted") : []),
+            ];
+            const title = theme.bold(theme.fg("text", "Subagent settings"));
+            const header = height >= 6 ? [title, ""] : [];
+            // Reserve space for the focused control and validation before its help or shortcuts.
+            const footerRoom = Math.max(0, height - header.length - (selectedEnd - selectedStart));
+            const status = feedback.slice(0, footerRoom);
+            const hints = wrap(hint, "dim");
+            const footer = [...help, "", ...hints];
+            const budget = footerRoom - status.length;
+            const visibleHelp = footer.length + 1 <= budget ? ["", ...footer]
+                : editing ? hints.slice(0, budget) : help.slice(0, Math.min(budget, 2));
+            const room = Math.max(1, height - header.length - visibleHelp.length - status.length);
             viewportStart = Math.max(0, Math.min(viewportStart, body.length - room));
-            const visible = [...lines.slice(0, 2), ...body.slice(viewportStart, viewportStart + room), ...footer];
-            // A very short terminal prioritizes the active control over chrome.
-            const result = height < 2 + footer.length + 1 ? body.slice(selectedStart - 2, selectedStart - 2 + height) : visible;
-            return result.map((line) => Tui.truncateToWidth(line, w, ""));
+            if (selectedEnd > viewportStart + room) viewportStart = selectedEnd - room;
+            if (selectedStart < viewportStart) viewportStart = selectedStart;
+            return [...header, ...body.slice(viewportStart, viewportStart + room), ...visibleHelp, ...status]
+                .map(line => Tui.truncateToWidth(line, w, ""));
         },
     };
 }
