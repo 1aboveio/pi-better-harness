@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import { isStoreError, openStore, type OwnerIdentity, type Store, type StoreOptions } from "../index.ts";
 
 const directories: string[] = [];
@@ -50,6 +51,11 @@ export function cleanupHarnesses(): void {
     }
 }
 
+/** Strip v5 operation provenance from a fresh store to build a legacy fixture. */
+export function removeAssignmentOperationBinding(db: DatabaseSync): void {
+    db.exec("DROP INDEX operations_assignment_cleanup; ALTER TABLE operations DROP COLUMN assignment_attempt_id");
+}
+
 /** The parent session from ADR 0020's replay scenario. */
 export const parentOwner: OwnerIdentity = {
     kind: "parent-session",
@@ -84,6 +90,7 @@ export interface RegisterOperationOverrides {
     taskId?: string;
     launchToken?: string;
     owner?: OwnerIdentity;
+    assignmentAttemptId?: string;
 }
 
 export function registerOperation(store: Store, overrides: RegisterOperationOverrides = {}) {
@@ -93,6 +100,7 @@ export function registerOperation(store: Store, overrides: RegisterOperationOver
         taskId: overrides.taskId ?? `bg_${operationId}`,
         launchToken: overrides.launchToken ?? `launch_${operationId}`,
         owner: overrides.owner ?? workerOwner,
+        assignmentAttemptId: overrides.assignmentAttemptId,
         observer,
         supervision: { hostId: "host-1", runnerId: "runner-1" },
         authorityRef: "permission-revision:7",

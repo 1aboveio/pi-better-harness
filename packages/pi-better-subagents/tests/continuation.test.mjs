@@ -34,6 +34,7 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
     existsSync,
     mkdirSync,
@@ -56,6 +57,8 @@ import { splitNativeFraming } from "../../pi-better-server/test/support/native-m
 const evidenceRoot = fileURLToPath(new URL("../../../.work/761/", import.meta.url));
 mkdirSync(evidenceRoot, { recursive: true });
 const RUNTIME = mkdtempSync(join(evidenceRoot, "subagent-continuation-"));
+// Give fixture providers their own package boundary inside a Harness checkout.
+writeFileSync(join(RUNTIME, "package.json"), JSON.stringify({ name: "continuation-fixture", type: "module" }));
 process.env.TMPDIR = RUNTIME;
 process.env.PI_CODING_AGENT_DIR = join(RUNTIME, "agent");
 process.env.PI_SUBAGENT_DURABLE_DIR = join(RUNTIME, "agent/subagents");
@@ -91,6 +94,9 @@ const { killProcessTree, processExists } = await import("../spawn.ts");
 const { readOutcome, outcomeTranscriptReceipt } = await import("../assignment-outcomes.ts");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// This provider deliberately returns prose without reporting, so each completed
+// attempt also saves the answer to its one completion correction.
+const correctionAnswer = { role: "assistant", text: "FOLLOWUP:The assignment has no accepted report. This is the one completion correction for this execution attempt, within its original authority and deadline. Finish available remaining work, inspect and acknowledge any outstanding operation evidence, then call report_assignment_result with workspace evidence. If progress is blocked or work remains, report incomplete with remaining_work and the concrete blocker. Do not claim completion from process exit or final prose." };
 const WORKSPACE = join(RUNTIME, "workspace");
 mkdirSync(WORKSPACE, { recursive: true });
 
@@ -228,6 +234,247 @@ after(async () => {
     rmSync(RUNTIME, { recursive: true, force: true });
 });
 
+describe("sandbox tool loading and use permissions (ADR 0027)", () => {
+    it("the managed server rejects an isolated launch with no optional tool provider before publishing a run", async () => {
+        const h = makeHarness({ policy: { state: "enabled", permissions: policyMain,
+            subagentPermissions: policyMain, subagentTools: { applyPatch: true, trusted: [] } } });
+        try {
+            const before = listMetas().map(meta => meta.id).sort();
+            await assert.rejects(spawnRun(h, { clean: false, sandbox: undefined, model: "test/model",
+                tools: "read,edit,missing_optional_tool", callback: false }), /missing_optional_tool.*toolExtensions/s);
+            assert.deepEqual(listMetas().map(meta => meta.id).sort(), before);
+        } finally {
+            await h.shutdown();
+        }
+    });
+
+    for (const [checked, explicit, inherit] of [[false, false, false], [true, false, false], [false, true, false], [false, false, true]]) {
+        it(`an editable SDK worker applies a real patch (checkbox ${checked}, explicit ${explicit}, inherit ${inherit})`, async () => {
+            const settingsPath = join(RUNTIME, "agent", "settings.json");
+            const saved = readFileSync(settingsPath, "utf8");
+            const settings = JSON.parse(saved);
+            settings.piBetterHarness.subagents.defaultTools = "read,edit,write";
+            settings.piBetterHarness.subagents.inheritExtensions = inherit;
+            writeFileSync(settingsPath, JSON.stringify(settings));
+            const filename = `default-patch-${checked}-${explicit}-${inherit}.txt`;
+            const prompt = `Create ${filename}`;
+            const key = createHash("sha256").update(prompt).digest("hex");
+            writeFileSync(join(ARTIFACTS, `tool-call-${key}.json`), JSON.stringify({
+                name: "apply_patch", arguments: { input: `*** Begin Patch\n*** Add File: ${filename}\n+verified\n*** End Patch` },
+            }));
+            const h = makeHarness({ policy: { state: "enabled", permissions: policyMain,
+                subagentPermissions: { ...policyMain, projectFiles: "read" },
+                subagentTools: { applyPatch: checked, trusted: [] } } });
+            let id;
+            try {
+                id = await spawnRun(h, { prompt, clean: false, sandbox: undefined, model: "test/model",
+                    ...(explicit ? { tools: "read,apply_patch" } : {}), callback: false });
+                const meta = await waitTerminal(id);
+                assert.equal(meta.status, "completed", readFileSync(logPathFor(id), "utf8"));
+                assert.equal(meta.recipe.sandbox, false);
+                assert.ok(meta.recipe.tools.split(",").includes("apply_patch"));
+                assert.equal(readFileSync(join(WORKSPACE, filename), "utf8"), "verified\n");
+            } finally {
+                await reap(id ? [id] : []);
+                await h.shutdown();
+                writeFileSync(settingsPath, saved);
+            }
+        });
+    }
+
+    for (const [tools, exclude_tools] of [["read", ""], ["read,edit", "apply_patch"], ["read,write", "write"]]) {
+        it(`respects the worker selection tools=${tools} exclude_tools=${exclude_tools}`, async () => {
+            const h = makeHarness();
+            let id;
+            try {
+                id = await spawnRun(h, { clean: false, tools, exclude_tools, model: "test/model", callback: false });
+                const meta = await waitTerminal(id);
+                assert.equal(meta.status, "completed", readFileSync(logPathFor(id), "utf8"));
+                const plan = JSON.parse(readFileSync(join(runDir(id), "child-preflight.json"), "utf8"));
+                assert.ok(!plan.tools.includes("apply_patch"));
+                assert.ok(!childRecord(meta.pid).argv.some(arg => arg.endsWith("child-apply-patch.ts")));
+            } finally {
+                await reap(id ? [id] : []);
+                await h.shutdown();
+            }
+        });
+    }
+
+    it("loads two adapters from the same package and keeps ordinary process inventory bounded", async () => {
+        const h = makeHarness({ policy: { state: "enabled", permissions: policyMain,
+            subagentPermissions: { ...policyMain, processAccess: "off" },
+            subagentTools: { applyPatch: false, trusted: [] } } });
+        const prompt = "List one current-user process";
+        const key = createHash("sha256").update(prompt).digest("hex");
+        writeFileSync(join(ARTIFACTS, `tool-call-${key}.json`), JSON.stringify({
+            name: "process_list", arguments: { limit: 1 },
+        }));
+        let id;
+        try {
+            id = await spawnRun(h, { prompt, clean: false, sandbox: undefined, tools: "edit,process_list", model: "test/model", callback: false });
+            const meta = await waitTerminal(id);
+            assert.equal(meta.status, "completed", readFileSync(logPathFor(id), "utf8"));
+            const child = childRecord(meta.pid);
+            for (const adapter of ["child-apply-patch.ts", "child-process-list.ts"]) {
+                assert.ok(child.argv.some(arg => arg.endsWith(adapter)), adapter);
+            }
+            const response = sessionMessages(child.sessionFile).find(message => message.role === "toolResult");
+            const inventory = JSON.parse(response.text);
+            assert.equal(inventory.scope, "current-user");
+            assert.equal(inventory.processes.length, 1);
+            assert.deepEqual(Object.keys(inventory.processes[0]).sort(), ["name", "pid"]);
+        } finally {
+            await reap(id ? [id] : []);
+            await h.shutdown();
+        }
+    });
+
+    it("continues a legacy worker with its inherited provider after an ordinary mapping is added", async () => {
+        const settingsPath = join(RUNTIME, "agent", "settings.json");
+        const saved = readFileSync(settingsPath, "utf8");
+        const settings = JSON.parse(saved);
+        settings.piBetterHarness.subagents.inheritExtensions = true;
+        writeFileSync(settingsPath, JSON.stringify(settings));
+        const extensions = join(RUNTIME, "agent", "extensions");
+        mkdirSync(extensions, { recursive: true });
+        const provider = join(extensions, "legacy-tool.ts");
+        writeFileSync(provider, `export default pi => pi.registerTool({
+            name: "legacy_tool", label: "Legacy tool", description: "Inherited tool",
+            parameters: { type: "object", properties: {} },
+            execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+        });`);
+        const h = makeHarness();
+        const ids = [];
+        try {
+            const root = await spawnRun(h, { clean: false, tools: "read,legacy_tool", model: "test/model", callback: true });
+            ids.push(root);
+            const meta = await waitTerminal(root);
+            assert.equal(meta.status, "completed", readFileSync(logPathFor(root), "utf8"));
+            // Archive the old recipe after completion delivery has finished publishing metadata.
+            await deliveredOutcome(h, root, 5000);
+            writeMeta(meta, { patch: current => {
+                const recipe = { ...current.recipe };
+                delete recipe.toolLoadingVersion;
+                return { recipe };
+            } });
+            settings.piBetterHarness.subagents.toolExtensions = { legacy_tool: provider };
+            writeFileSync(settingsPath, JSON.stringify(settings));
+            const next = idOf(await resumeRun(h, { id: root, prompt: "Continue with the inherited tool" }));
+            ids.push(next);
+            const continued = await waitTerminal(next);
+            assert.equal(continued.status, "completed", readFileSync(logPathFor(next), "utf8"));
+            assert.deepEqual(continued.recipe.baseExtensionArgs, meta.recipe.baseExtensionArgs);
+            assert.equal(continued.recipe.toolLoadingVersion, undefined);
+        } finally {
+            await reap(ids);
+            await h.shutdown();
+            writeFileSync(settingsPath, saved);
+            rmSync(provider, { force: true });
+        }
+    });
+
+    it("uses an active user provider without a mapping and enforces its network permission", async () => {
+        const dir = join(RUNTIME, "agent", "extensions");
+        mkdirSync(dir, { recursive: true });
+        const provider = join(dir, "network-probe.ts");
+        const receipt = join(WORKSPACE, "network-probe.txt");
+        const name = "mcp__fixture__ping";
+        writeFileSync(provider, `import { writeFileSync } from "node:fs";
+            export default pi => pi.registerTool({
+                name: ${JSON.stringify(name)}, label: "Ping", description: "Record a call",
+                parameters: { type: "object", properties: {} },
+                execute: async () => {
+                    writeFileSync(${JSON.stringify(receipt)}, "called");
+                    return { content: [{ type: "text", text: "ok" }] };
+                }
+            });`);
+        const policy = { state: "enabled", permissions: policyMain, subagentPermissions: { ...policyMain, enabled: true },
+            subagentTools: { applyPatch: false, trusted: [] } };
+        const h = makeHarness({ policy, loadUserExtensions: true });
+        const prompt = "Call the active network probe";
+        const key = createHash("sha256").update(prompt).digest("hex");
+        writeFileSync(join(ARTIFACTS, `tool-call-${key}.json`), JSON.stringify({ name, arguments: {} }));
+        const params = { prompt, tools: name, clean: false, sandbox: undefined, callback: false, model: "test/model" };
+        let id;
+        try {
+            h.publishPolicy({ ...policy, subagentPermissions: { ...policy.subagentPermissions, network: false } });
+            await assert.rejects(spawnRun(h, params), /needs Network access/);
+            assert.equal(existsSync(receipt), false);
+            h.publishPolicy(policy);
+            id = await spawnRun(h, params);
+            const meta = await waitTerminal(id);
+            assert.equal(meta.status, "completed", readFileSync(logPathFor(id), "utf8"));
+            assert.equal(readFileSync(receipt, "utf8"), "called");
+        } finally {
+            await reap(id ? [id] : []);
+            await h.shutdown();
+            rmSync(provider, { force: true });
+        }
+    });
+
+    for (const tool of ["apply_patch", "fixture_report"]) {
+        it(`the SDK worker executes the selected ${tool} provider with retained permissions unchecked`, async () => {
+            const settingsPath = join(RUNTIME, "agent", "settings.json");
+            const saved = readFileSync(settingsPath, "utf8");
+            const settings = JSON.parse(saved);
+            const provider = join(RUNTIME, `mapped-${tool}.mjs`);
+            const prompt = `Invoke the selected ${tool} provider`;
+            const key = createHash("sha256").update(prompt).digest("hex");
+            const input = "*** Begin Patch\n*** Add File: proof.txt\n+verified\n*** End Patch";
+            const receipt = join(WORKSPACE, `invoked-${tool}.txt`);
+            writeFileSync(join(ARTIFACTS, `tool-call-${key}.json`), JSON.stringify({
+                name: tool, arguments: { input },
+            }));
+            writeFileSync(provider, `import { writeFileSync } from "node:fs";
+            export default pi => pi.registerTool({
+                name: ${JSON.stringify(tool)}, label: "Fixture patch", description: "Fixture patch implementation",
+                parameters: { type: "object", properties: { input: { type: "string" } }, required: ["input"] },
+                async execute(_id, params) {
+                    writeFileSync(${JSON.stringify(receipt)}, params.input);
+                    return { content: [{ type: "text", text: "fixture patch received" }] };
+                }
+            });`);
+            settings.piBetterHarness.subagents.toolExtensions = { [tool]: provider };
+            writeFileSync(settingsPath, JSON.stringify(settings));
+            const policy = { state: "enabled", permissions: policyMain,
+                subagentPermissions: { ...policyMain, enabled: false, projectFiles: "read" },
+                subagentTools: { applyPatch: false, trusted: [] } };
+            const h = makeHarness({ policy });
+            let id, confinedId;
+            try {
+                id = await spawnRun(h, { prompt, clean: false, sandbox: undefined, model: "test/model",
+                    tools: `read,${tool}`, callback: false });
+                const meta = await waitTerminal(id);
+                assert.equal(meta.status, "completed", readFileSync(logPathFor(id), "utf8"));
+                assert.equal(meta.recipe.sandbox, false);
+                assert.ok(childRecord(meta.pid).argv.includes(provider));
+                assert.equal(readFileSync(receipt, "utf8"), input);
+                const plan = JSON.parse(readFileSync(join(runDir(id), "child-preflight.json"), "utf8"));
+                assert.ok(plan.tools.includes(tool));
+                assert.deepEqual(plan.unmapped, []);
+                h.publishPolicy({ ...policy, subagentPermissions: { ...policyMain, enabled: true } });
+                rmSync(receipt);
+                confinedId = await spawnRun(h, { prompt, clean: false, sandbox: undefined, model: "test/model",
+                    tools: `read,${tool}`, callback: false });
+                const confined = await waitTerminal(confinedId);
+                assert.equal(confined.status, "completed", readFileSync(logPathFor(confinedId), "utf8"));
+                assert.equal(confined.recipe.sandbox, true);
+                if (tool === "apply_patch") {
+                    assert.equal(existsSync(receipt), false, "the guarded worker must use the Harness adapter");
+                    assert.equal(readFileSync(join(WORKSPACE, "proof.txt"), "utf8"), "verified\n");
+                } else {
+                    assert.equal(readFileSync(receipt, "utf8"), input);
+                }
+                assert.deepEqual(readMeta(id).recipe, meta.recipe);
+            } finally {
+                await reap([id, confinedId].filter(Boolean));
+                await h.shutdown();
+                writeFileSync(settingsPath, saved);
+            }
+        });
+    }
+});
+
 describe("completed-subagent continuation", () => {
     it("continues the SAME saved conversation under a new attempt id and preserves the old attempt", async () => {
         const h = makeHarness();
@@ -247,7 +494,11 @@ describe("completed-subagent continuation", () => {
             });
             assert.equal(initialConversation.kind, "ok", JSON.stringify(initialConversation));
             const sessionPath = initialConversation.conversation.path;
-            assert.deepEqual(sessionMessages(sessionPath).map((m) => m.role), ["user", "assistant"]);
+            assert.deepEqual(sessionMessages(sessionPath), [
+                { role: "user", text: "INITIAL TASK" },
+                { role: "assistant", text: "INITIAL ANSWER" },
+                correctionAnswer,
+            ]);
             // The fresh child allocated a new session and never used --session.
             const freshChild = childRecord(root.pid);
             assert.ok(freshChild.argv.includes("--session-id"));
@@ -281,7 +532,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(resumed.recipe.sandbox, false);
 
             // Real context continuation: the SAME file, same header id, and the
-            // real SessionManager saw the prior two messages before appending.
+            // real SessionManager saw the prior three messages before appending.
             const continued = findSavedConversation({
                 sessionDir: root.recipe.sessionDir, sessionId: root.sessionId, expectedCwd: root.cwd,
             });
@@ -291,15 +542,17 @@ describe("completed-subagent continuation", () => {
             assert.deepEqual(sessionMessages(sessionPath), [
                 { role: "user", text: "INITIAL TASK" },
                 { role: "assistant", text: "INITIAL ANSWER" },
+                correctionAnswer,
                 { role: "user", text: "FIX IT" },
                 { role: "assistant", text: "FOLLOWUP:FIX IT" },
+                correctionAnswer,
             ]);
             const resumedChild = childRecord(resumed.pid);
             assert.ok(resumedChild.argv.includes("--session"), "continuation opens an explicit saved session");
             assert.equal(resumedChild.argv[resumedChild.argv.indexOf("--session") + 1], sessionPath);
             assert.ok(!resumedChild.argv.includes("--session-id"), "Pi rejects --session with --session-id");
-            assert.equal(resumedChild.before, 2, "the child loaded the prior conversation before appending");
-            assert.equal(resumedChild.after, 4);
+            assert.equal(resumedChild.before, 3, "the child loaded the prior conversation before appending");
+            assert.equal(resumedChild.after, 6);
 
             // Old attempt evidence is untouched.
             assert.equal(readFileSync(logPathFor(rootId), "utf-8"), rootLog);
@@ -379,6 +632,13 @@ describe("completed-subagent continuation", () => {
             // only thing this test observes changing later is continuation's work.
             await deliveredOutcome(h, killedId, 6000);
             await waitTerminal(killedId);
+            const interruptedHistory = sessionMessages(sessionPath);
+            assert.deepEqual(interruptedHistory.slice(0, 2), [
+                { role: "user", text: "INITIAL TASK" },
+                { role: "assistant", text: "INITIAL ANSWER" },
+            ]);
+            assert.deepEqual(interruptedHistory.slice(2), interruptedHistory.length === 3 ? [correctionAnswer] : [],
+                "the stop may interrupt before or after the one correction answer");
 
             // The killed attempt is now a saved conversation, while the other
             // terminal outcomes keep their existing refusal.
@@ -436,6 +696,9 @@ describe("completed-subagent continuation", () => {
             holder = undefined;
 
             const receipt = await resumeRun(h, { id: killedId, prompt: "RECOVER THE WORK" });
+            const invokingEntry = h.invocationEntries.at(-1);
+            assert.equal(invokingEntry.sessionId, "owner-session");
+            assert.ok(invokingEntry.branchId, "the invoking SDK branch is retained in the oracle");
             resumedId = idOf(receipt);
             assert.match(receipt.content[0].text, new RegExp(`from ${killedId} \\(interrupted attempt\\)`),
                 "the launch receipt names the interrupted attempt");
@@ -445,7 +708,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(resumed.sessionId, killed.sessionId, "the interrupted conversation is retained");
             assert.equal(resumed.rootRunId, killedId);
             assert.equal(resumed.resumedFrom, killedId, "the new attempt links back to the interrupted one");
-            assert.deepEqual(resumed.callbackOrigin, killed.callbackOrigin, "ownership follows the invoking foreground");
+            assert.deepEqual(resumed.callbackOrigin, invokingEntry, "ownership follows the invoking foreground");
             assert.equal(resumed.recipe.sessionDir, killed.recipe.sessionDir, "the saved recipe is reused");
             assert.equal(resumed.recipe.model, killed.recipe.model);
             assert.notEqual(resumed.logPath, killed.logPath, "each attempt keeps its own evidence");
@@ -456,13 +719,13 @@ describe("completed-subagent continuation", () => {
             assert.equal(continued.kind, "ok");
             assert.equal(continued.conversation.path, sessionPath, "the continuation reopens the same session file");
             assert.deepEqual(sessionMessages(sessionPath), [
-                { role: "user", text: "INITIAL TASK" },
-                { role: "assistant", text: "INITIAL ANSWER" },
+                ...interruptedHistory,
                 { role: "user", text: "RECOVER THE WORK" },
                 { role: "assistant", text: "FOLLOWUP:RECOVER THE WORK" },
+                correctionAnswer,
             ]);
             const child = childRecord(resumed.pid);
-            assert.equal(child.before, 2, "the new attempt loaded the interrupted history before appending");
+            assert.equal(child.before, interruptedHistory.length, "the new attempt loaded the interrupted history before appending");
 
             // The interrupted attempt is evidence, not a draft to rewrite.
             assert.equal(JSON.stringify(readMeta(killedId)), killedSnapshot, "the killed attempt is not mutated by continuation");
@@ -727,6 +990,9 @@ describe("completed-subagent continuation", () => {
             resumedId = idOf(await successor.tools.get("subagent_spawn").execute("tc", {
                 session_name: "cross-session-worker", prompt: "PICK UP THE WORK",
             }, undefined, undefined, successor.ctx));
+            const invokingEntry = successor.invocationEntries.at(-1);
+            assert.equal(invokingEntry.sessionId, "another-session");
+            assert.ok(invokingEntry.branchId, "the invoking SDK branch is retained in the oracle");
             const resumed = await waitTerminal(resumedId);
             assert.equal(resumed.status, "completed");
             assert.equal(resumed.sessionId, root.sessionId, "the successor continued the SAME saved conversation");
@@ -734,7 +1000,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(resumed.resumedFrom, rootId);
             // The new attempt is attributed to the INVOKING foreground, and the
             // prior attempt keeps its own origin.
-            assert.deepEqual(resumed.callbackOrigin, { cwd: WORKSPACE, sessionId: "another-session" });
+            assert.deepEqual(resumed.callbackOrigin, invokingEntry);
             assert.deepEqual(readMeta(rootId).callbackOrigin, rootSnapshot.callbackOrigin);
             // `ownedByOrigin` remains a pure provenance label: it describes which
             // foreground launched an attempt and never gates continuation.
@@ -748,19 +1014,21 @@ describe("completed-subagent continuation", () => {
             assert.equal(completionCallbacks(successor, resumedId).length, 1, "the invoking foreground was notified");
             assert.equal(completionCallbacks(owner, resumedId).length, 0, "the original owner was not notified again");
 
-            // Full history retained: the prior two messages are still in the same
+            // Full history retained: the prior three messages are still in the same
             // file and the follow-up was appended to it.
             assert.equal(sessionHeader(sessionPath).id, rootId);
             assert.deepEqual(sessionMessages(sessionPath), [
                 { role: "user", text: "INITIAL TASK" },
                 { role: "assistant", text: "INITIAL ANSWER" },
+                correctionAnswer,
                 { role: "user", text: "PICK UP THE WORK" },
                 { role: "assistant", text: "FOLLOWUP:PICK UP THE WORK" },
+                correctionAnswer,
             ]);
             const child = childRecord(resumed.pid);
             assert.equal(child.argv[child.argv.indexOf("--session") + 1], sessionPath,
                 "the successor's child reopened the retained session file");
-            assert.equal(child.before, 2, "the successor's child loaded the prior history before appending");
+            assert.equal(child.before, 3, "the successor's child loaded the prior history before appending");
 
             // Prior evidence is untouched by a cross-foreground continuation.
             assert.equal(readFileSync(logPathFor(rootId), "utf-8"), rootLog);
@@ -932,7 +1200,7 @@ describe("completed-subagent continuation", () => {
             } });
             await assert.rejects(
                 resumeRun(successor, { id: confinedId, prompt: "SANDWICH" }),
-                /cannot bypass it|would change its confinement/,
+                /saved launch recipe has confinement Off.*current Subagents profile requires it On.*new recipe/,
             );
             assert.equal(listMetas().filter((meta) => meta.sessionId === confinedId).length, 1, "no attempt launched under refused policy");
         } finally {
@@ -1243,7 +1511,7 @@ describe("completed-subagent continuation", () => {
             assert.equal(continued.status, "completed");
             assert.equal(continued.sessionId, rootId);
             const child = childRecord(continued.pid);
-            assert.equal(child.before, 2, "the batch continuation reopened the saved history");
+            assert.equal(child.before, 3, "the batch continuation reopened the saved history");
             assert.equal(child.sessionId, null, "a continuation reopens --session, not a new session id");
             assert.equal(readMeta(rootId).status, "completed", "the prior attempt is unchanged");
 

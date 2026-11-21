@@ -12,6 +12,7 @@ export const EVENT_TERMINAL_ATTENTION = "pi-better-goal:terminal-attention";
 export type ActivityCategory =
   | "foreground-running"
   | "background-running"
+  | "unverified"
   | "idle-waiting"
   | "complete";
 
@@ -40,19 +41,29 @@ export interface BackgroundWorkItem {
 
 export interface BackgroundProviderSnapshot {
   providerId: string;
+  /** Omitted by legacy providers; unverified observations cannot prove drain. */
+  coverage?: "verified" | "unverified";
   label?: string;
   items: BackgroundWorkItem[];
+  /** Absolute milliseconds; null means no time-dependent change is owed. */
+  nextDeadline?: number | null;
+  /** Legacy providers cost at most one collection per compatibility interval. */
+  compatibilityIntervalMs?: number;
 }
 
 export interface BackgroundActivityProvider {
   id: string;
+  /** v1 requires notifications and an explicit nextDeadline (including null). */
+  activityVersion?: 1;
   label?: string;
-  getActivity(ctx: ExtensionContext): BackgroundProviderSnapshot | Promise<BackgroundProviderSnapshot>;
-  onActivityChanged?(notify: () => void): () => void;
+  /** Passive foreground updates can use existing subscriptions without opening a connection. */
+  getActivity(ctx: ExtensionContext, options?: { cachedOnly?: boolean }): BackgroundProviderSnapshot | Promise<BackgroundProviderSnapshot>;
+  onActivityChanged?(notify: () => void, ctx?: ExtensionContext): () => void;
 }
 
 export interface ActivitySnapshot {
   version: 1;
+  coverage?: "verified" | "unverified";
   category: ActivityCategory;
   foregroundRunning: boolean;
   backgroundRunning: boolean;

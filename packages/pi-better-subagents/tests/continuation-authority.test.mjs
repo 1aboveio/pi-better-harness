@@ -16,6 +16,17 @@ test("continuation tool intersection ignores ordering and never adds uncaptured 
     assert.deepEqual(intersectContinuationPermissions(captured, { ...current, subagentTools: { applyPatch: false, trusted: [] } }).subagentTools, { applyPatch: false, trusted: [] });
 });
 
+test("an Off profile cannot narrow independently captured continuation authority", () => {
+    const off = { ...profile, enabled: false, commands: false, shell: false, processAccess: "off", commandTimeoutSeconds: 1 };
+    const active = { ...profile, processAccess: "read", shell: true, commandTimeoutSeconds: 20 };
+    const next = intersectContinuationPermissions({ ...captured, subagentPermissions: active }, { ...current, main: off, subagents: off });
+    assert.deepEqual(next.permissions, profile);
+    assert.deepEqual(next.subagentPermissions, active);
+    const enabled = intersectContinuationPermissions({ ...captured, permissions: off, subagentPermissions: off }, { ...current, main: active, subagents: active });
+    assert.deepEqual(enabled.permissions, active);
+    assert.deepEqual(enabled.subagentPermissions, active);
+});
+
 test("undispatched lease recovery never steals a live holder or a different attempt", () => {
     const sessionId = nextRunId(), lease = acquireConversationLease({ sessionId, attemptId: sessionId });
     try {

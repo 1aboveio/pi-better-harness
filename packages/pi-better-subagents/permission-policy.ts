@@ -145,30 +145,63 @@ export function currentSandboxPermissions(pi: unknown): PermissionSnapshot | und
     return mirror?.policy;
 }
 
-/** Resolve before allocating a run. Absent settings require an explicit sandbox request. */
-export function resolveSubagentPermissions(pi: unknown, requestedSandbox: boolean | undefined): {
+type SavedConfinement = { runId: string; sandbox: boolean };
+
+type SubagentPermissionPlan = {
     sandboxEnabled: boolean;
     enforced: boolean;
+    activationSource: "saved launch recipe" | "current Subagents profile" | "launch request" | "default (no Subagents profile)";
+    inactiveProfile?: true;
     permissions?: Omit<PermissionProfile, "enabled">;
     /** Which extension tools a confined child may use; defaults when no settings are published. */
     tools: SubagentToolSettings;
-} {
+};
+
+/** Resolve before allocating a run. Absent settings require an explicit sandbox request. */
+export function resolveSubagentPermissions(
+    pi: unknown, requestedSandbox: boolean | undefined, saved?: SavedConfinement,
+): SubagentPermissionPlan {
     const snapshot = currentSandboxPermissions(pi);
     const tools = snapshot?.subagentTools ?? defaultSubagentTools();
     if (snapshot?.permissions?.enabled && !snapshot.permissions.commands) {
         throw new Error("Main sandbox profile disables commands. Enable commands in the sandbox UI before launching a subagent.");
     }
     const child = snapshot?.subagentPermissions;
-    if (!child) return { sandboxEnabled: requestedSandbox === true, enforced: false, tools };
-    if (child.enabled && requestedSandbox === false) {
+    const requested = saved?.sandbox ?? requestedSandbox;
+    if (child?.enabled && requested === false) {
+        if (saved) {
+            throw new Error(`Cannot continue ${saved.runId}: the saved launch recipe has confinement Off, but the current Subagents profile requires it On. Launch a new run with a new recipe.`);
+        }
         throw new Error("Subagent sandbox is enforced by the human-enabled profile; sandbox:false cannot bypass it. Change Subagents permissions in the sandbox UI.");
     }
-    const sandboxEnabled = child.enabled || requestedSandbox === true;
-    if (!sandboxEnabled) return { sandboxEnabled: false, enforced: false, tools };
+    const sandboxEnabled = child?.enabled === true || requested === true;
+    const activationSource = saved ? "saved launch recipe"
+        : child?.enabled ? "current Subagents profile"
+        : requestedSandbox !== undefined ? "launch request"
+        : child ? "current Subagents profile" : "default (no Subagents profile)";
+    if (!child || !sandboxEnabled) return { sandboxEnabled, enforced: false, activationSource, tools };
+    if (!child.enabled) return { sandboxEnabled, enforced: true, activationSource, inactiveProfile: true, tools };
     // Starting Pi is runtime work. These capabilities constrain task tools;
     // they do not disable provider transport or the fixed file-operation worker.
     const { enabled: _enabled, ...permissions } = child;
-    return { sandboxEnabled: true, enforced: true, permissions, tools };
+    return { sandboxEnabled, enforced: true, activationSource, permissions, tools };
+}
+
+export function effectiveWorkerProcessAccess(plan: SubagentPermissionPlan): "off" | "read" {
+    return plan.inactiveProfile ? "read" : plan.permissions?.processAccess ?? "off";
+}
+
+export function describeSubagentProcessPolicy(plan: SubagentPermissionPlan, platform: string): string {
+    const activation = `Worker confinement: ${plan.sandboxEnabled ? "On" : "Off"} (${plan.activationSource}).`;
+    const refresh = plan.activationSource === "saved launch recipe"
+        ? " Changing confinement requires a new run with a new recipe."
+        : "";
+    if (!plan.sandboxEnabled) return `${activation} No worker task-sandbox process policy is applied.${refresh}`;
+    const access = effectiveWorkerProcessAccess(plan) === "read" ? "Read" : "Off";
+    const source = plan.inactiveProfile ? "task sandbox defaults; Subagents profile Off"
+        : plan.permissions ? "current Subagents profile" : "default (no Subagents profile)";
+    const macOS = platform === "darwin" ? " macOS Seatbelt can deny absolute /bin/ps even with Process Read." : "";
+    return `${activation} Worker Process access: ${access} (${source}).${refresh}${macOS}`;
 }
 
 /**

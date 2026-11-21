@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
 import { processMatchesStart } from "../src/daemon-owner.ts";
+import { readBoundedTail } from "../../pi-better-subagents/shared-log-utils.ts";
 
 for (const journalOnly of [false, true]) test(`registered SDK launch survives parent exit and ${journalOnly ? "journal-only crash recovery" : "ordinary restart"}`, { timeout: 60000 }, async () => {
   const base = resolve("../../.work/761"); mkdirSync(base, { recursive: true });
@@ -26,6 +27,7 @@ for (const journalOnly of [false, true]) test(`registered SDK launch survives pa
   let sibling: ReturnType<typeof fork> | undefined;
   const attempts: string[] = [];
   let bootstrapProof: Record<string, unknown> | undefined;
+  let preRestartTarget: unknown;
   const metaFor = (id: string) => JSON.parse(readFileSync(join(root, "pi-better-subagents/runs", id, "meta.json"), "utf8"));
   const terminal = async (id: string) => {
     // Recovered children have no exit listener; the current health pass is 15 s.
@@ -95,6 +97,7 @@ for (const journalOnly of [false, true]) test(`registered SDK launch survives pa
     assert.equal(metaFor(first.details.runId).supervisionInterruptedAt, undefined, "frontend shutdown leaves server supervision intact");
     const observer = new WorkClient(join(transport, "pi-server.sock"), agent);
     try {
+      preRestartTarget = await observer.ready;
       const snapshot = await observer.get({ cwd, sessionId: ready.sessionId });
       assert.ok(snapshot.rows.some((row: any) => row.meta.id === first.details.runId), "original session scope reconnects without a writer");
       assert.equal(snapshot.rows.some((row: any) => row.meta.id === independent.details.runId), false);
@@ -166,6 +169,35 @@ for (const journalOnly of [false, true]) test(`registered SDK launch survives pa
     assert.equal(continued.status, "completed");
   } catch (error) {
     console.error("Managed launch scenario failed:", error, errors);
+    // Preserve the pre-cleanup writer/journal evidence, not just a terminal label.
+    try {
+      const { readConversationLease } = await import(new URL("../../pi-better-subagents/continuation.ts", import.meta.url).href);
+      const db = new DatabaseSync(join(agent, "operation-coordinator.sqlite"), { readOnly: true });
+      try {
+        const intents = db.prepare("SELECT request_key, epoch, state, attempts FROM subagent_launch_intents").all() as any[];
+        const evidence = { scenario: journalOnly ? "journal-only" : "ordinary", execPath, preRestartTarget,
+          currentManagement: db.prepare("SELECT * FROM subagent_management WHERE singleton=1").get(), attempts: attempts.map(id => {
+          const meta = metaFor(id);
+          const lease = readConversationLease(meta.sessionId);
+          const journal = intents.flatMap(intent => JSON.parse(intent.attempts).filter((attempt: any) => attempt.id === id)
+            .map((attempt: any) => ({ requestKey: intent.request_key, epoch: intent.epoch, state: intent.state,
+              attemptState: attempt.state, sessionId: attempt.sessionId, pid: attempt.pid, pidStartTime: attempt.pidStartTime,
+              writerPid: attempt.writerPid, writerStartTime: attempt.writerStartTime, bootstrapped: attempt.bootstrapped,
+              lease: attempt.lease, recoveryManagement: attempt.recoveryMeta?.management })));
+          return { id, status: meta.status, lifecycleClassification: meta.lifecycleClassification, failureReason: meta.failureReason,
+            pid: meta.pid, pidStartTime: meta.pidStartTime, pgid: meta.pgid, spawnPid: meta.spawnPid,
+            management: meta.management, supervisionInterruptedAt: meta.supervisionInterruptedAt,
+            supervisionInterruptedReason: meta.supervisionInterruptedReason, probeMisses: meta.probeMisses,
+            lostAt: meta.lostAt, endedAt: meta.endedAt, exitCode: meta.exitCode, sessionId: meta.sessionId,
+            writerLease: lease && { token: lease.token, attemptId: lease.attemptId, pid: lease.pid, start: lease.start },
+            journal, log: readBoundedTail(meta.logPath, 16384) };
+        }) };
+        writeFileSync(join(root, "registered-launch-failure.json"), JSON.stringify(evidence));
+        console.error("[registered-launch-failure]", JSON.stringify(evidence));
+      } finally { db.close(); }
+    } catch (evidenceError) {
+      console.error("[registered-launch-failure-evidence-error]", evidenceError);
+    }
     throw error;
   } finally {
     writeFileSync(release, "release");

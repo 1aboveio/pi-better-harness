@@ -216,6 +216,14 @@ to the `/agents` catalog. `/sandbox`, `/subagents settings`, `/agents`, and
 `/goal settings` remain available in standalone installations.
 Packages without a settings screen are not listed. Pi's `/settings` is unchanged.
 
+**View** selects `flatten` (the default) or `tree`. Flatten keeps the Subagents
+and Background Tasks groups and includes tasks launched by subagents. Tree puts
+Main and subagents at the same level, with each agent's background tasks indented
+beneath it. Switching applies immediately and saves `piBetterHarness.navigatorView`.
+Worker-owned tasks expose status and logs; their execution remains managed by the
+owning agent. Older worker tasks appear when a retained assignment wait proves
+their parent, so unrelated sessions are never inferred from a reused conversation.
+
 **Sticky navigator** controls the shared navigator used by Goal, Outcome & Todo,
 Subagents, and Background Tasks. **On** (the default) keeps it above the input;
 **Off** places it in the conversation so it scrolls with chat. Changes apply

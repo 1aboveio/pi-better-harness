@@ -48,6 +48,23 @@ report rejection and process failure while retaining the separate process status
 and exit code. Full detail remains in the bounded report if the terminal reason
 must be shortened to the coordinator's limit.
 
+Within a live execution attempt, the child bridge permits one completion
+correction shared between a normal model stop without an accepted judgment and
+an unblocked incomplete report with concrete remaining work. The latter is
+returned as a tool refusal before report acceptance, so a later complete report
+does not rewrite accepted evidence. A further incomplete report is accepted.
+Accepted reports and exact assignment-complete acknowledgements suppress the
+missing-report correction. The correction budget is saved in the native session
+under the exact attempt ID and survives extension reload. Correction stays in
+the current SDK execution with its original authority and absolute deadline;
+it creates no new assignment, Goal, process, or retry timer. Aborted/error model
+stops, parked attempts, expired deadlines and concrete blockers do not trigger
+this correction. Exhausted correction keeps the existing terminal classification.
+
+The assigned canonical workspace is the report evidence boundary. Worker prompts
+state that boundary, and outside-workspace refusals explain how to correct the
+source. Sibling output directories and escaping symlinks remain outside it.
+
 The atomic assignment terminal decision and delivery contract is defined by
 ADR 0020's #710 extension. A committed coordinator outcome takes precedence over
 held dependency waits without implying those waits were interpreted. New launch

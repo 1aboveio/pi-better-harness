@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getObservedWaitHost } from "./observed-waits.js";
+import { getObservedWaitHost } from "./observed-wait-client.js";
 import { inspectMeta } from "./registry.js";
 
 /** Optional-peer contract, mirrored by pi-better-sandbox/background-admission.ts. */

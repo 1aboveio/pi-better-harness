@@ -81,6 +81,8 @@ after(async () => {
   for (const worker of dummyWorkers) {
     try { process.kill(-worker.pid, "SIGKILL"); } catch { /* already stopped */ }
   }
+  // Stop the registry writer before removing the state it supervises.
+  await stopOwnedRuntime(serverDir, runtimeOwner);
   // The registries live under the private TMPDIR from scripts/isolate-registry.mjs,
   // which removes it at exit. Never touch registries in any other TMPDIR (the tests
   // refuse to seed without the preload, so there is nothing of ours there).
@@ -88,7 +90,6 @@ after(async () => {
     rmSync(join(tmpdir(), "pi-better-subagents"), { recursive: true, force: true });
     rmSync(join(tmpdir(), "pi-better-background-tasks"), { recursive: true, force: true });
   }
-  await stopOwnedRuntime(serverDir, runtimeOwner);
   removeOwnedFixture(fixtures);
 });
 
@@ -337,7 +338,7 @@ test("closing work from its detail opens the next row, then returns the keyboard
   });
 
   const hiddenList = (screen) => /Work · \d|↑↓ select/.test(screen);
-  waitForScreen((screen) => screen.includes("subagent to close") && screen.includes("task to close"));
+  observeSeededRows("subagent to close", "task to close");
   sendKey("Left");
   sendKey("Down");
   waitForScreen((screen) => screen.includes("provider Subagents") && hasSettledInputFrame(screen));
@@ -890,8 +891,16 @@ function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagen
     intervalMs: 15_000,
     deadlineAt: now + 600_000,
   });
-  // The shared runtime observes external writers asynchronously. Focus only after both rows exist.
-  waitForScreen(screen => screen.includes("subagent golden path") && screen.includes("background golden path"));
+  observeSeededRows("subagent golden path", "background golden path");
+}
+
+function observeSeededRows(subagentTitle, taskTitle) {
+  // External fixture writes bypass the tools. Open the navigator to subscribe, then
+  // give focus back to the editor so each scenario starts in its normal input state.
+  sendKey("Left");
+  const overview = waitForScreen(screen => screen.includes(subagentTitle) && screen.includes(taskTitle));
+  if (overview.includes("Esc unfocus")) sendKey("Escape");
+  waitForScreen(screen => screen.includes("← work navigator"));
 }
 
 function hasSettledInputFrame(screen) {

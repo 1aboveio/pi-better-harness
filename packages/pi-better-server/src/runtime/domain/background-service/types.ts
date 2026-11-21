@@ -93,6 +93,7 @@ export interface ResolvedRemoteTaskMetadata {
 export interface BackgroundTaskCallbackOrigin {
   cwd: string;
   sessionId?: string;
+  branchId?: string | null;
 }
 
 export interface TaskSandboxProvenance {
@@ -232,3 +233,4 @@ export interface TerminalResult {
 export function isTerminalStatus(status: BackgroundTaskStatus): boolean {
   return status !== "running";
 }
+export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;

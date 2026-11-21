@@ -159,7 +159,12 @@ export default function(pi){
     key("Enter");
     wait(pane => pane.includes("Goal settings") && pane.includes("Automatic continuation"));
     key("Escape");
-    wait(pane => pane.includes("Harness settings"));
+    wait(pane => pane.includes("Harness settings") && /^> Goal\s+\/goal settings/m.test(pane));
+    key("Down");
+    wait(pane => /^> View\s+flatten/m.test(pane));
+    key("Space");
+    wait(pane => /^> View\s+tree/m.test(pane) && pane.includes("Setting saved"));
+    assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.navigatorView, "tree");
     key("Escape");
     wait(pane => !pane.includes("Harness settings"));
     send("/goal settings"); key("Escape"); key("Enter");
@@ -171,6 +176,7 @@ export default function(pi){
     wait(() => existsSync(ready));
     send("/harness-settings"); key("Enter");
     wait(pane => pane.includes("Harness settings") && pane.includes("Steer active run") && pane.includes("User default") && /Tool output\s+Minimal/.test(pane));
+    assert.match(screen(), /View\s+tree/);
     key("Enter");
     wait(pane => pane.includes("Wait until idle") && pane.includes("Session setting saved"));
     key("Down"); key("Down"); key("Down"); key("Down"); key("Space");

@@ -21,6 +21,15 @@ const requirements = { providers: ['deepseek', 'ollama-cloud'], modelGroups: [
 ] };
 const selection = () => resolveExtensions({ tools: 'read,bash', model: 'router/auto' });
 
+test('an absent mapped provider identifies its explicitly selected tool', async t => {
+  const f = fixture(t);
+  for (const inheritExtensions of [false, true]) {
+    const config = { inheritExtensions, toolExtensions: { fixture_report: 'npm:missing' } };
+    const resolution = resolveExtensions({ tools: 'fixture_report', config });
+    await assert.rejects(resolveChildLaunch({ resolution, resolvePath: f.resolvePath }), /npm:missing.*not installed.*fixture_report/);
+  }
+});
+
 test('loads TypeScript declarations with the host loader and no extension initialization', async t => {
   const f = fixture(t);
   const router = f.pkg('pi-better-model-router', { childRequirements: './requirements.ts', extensions: ['./index.ts'] });
@@ -107,6 +116,16 @@ test('child preflight accepts actual prefix candidate and rejects missing provid
   await assert.rejects(checkChildPreflight(plan(), env([models[0], { ...models[1], id: 'other' }])), /no available candidate.*ollama-cloud/);
   await assert.rejects(checkChildPreflight(plan(), env(models, ['read'])), /tool bash/);
   await assert.rejects(checkChildPreflight(plan(), { ...env(), model: models[0] }), /Selected child model/);
+});
+
+test('preflight tolerates an inherited trusted tool only if registered but inactive', async () => {
+  const selected = { ...plan(), tools: ['read', 'xai_analyze_image'] };
+  const actual = { ...env(models, ['read']), registeredTools: ['read', 'xai_analyze_image'] };
+  const optional = { ...selected, optionalTrustedTools: ['xai_analyze_image'] };
+  assert.deepEqual(await checkChildPreflight(optional, actual), ['xai_analyze_image']);
+  assert.deepEqual(await checkChildPreflight(optional, { ...actual, tools: selected.tools }), []);
+  await assert.rejects(checkChildPreflight(selected, actual), /tool xai_analyze_image is unavailable/);
+  await assert.rejects(checkChildPreflight(optional, { ...actual, registeredTools: ['read'] }), /tool xai_analyze_image is unavailable/);
 });
 
 test('preflight rejects changed config files and dynamic declaration output', async t => {

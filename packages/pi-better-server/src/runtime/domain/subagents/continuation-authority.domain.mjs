@@ -13,8 +13,12 @@ export function intersectContinuationPermissions(captured, current) {
     const intersect = (old, fresh) => {
         if (!old || !fresh)
             throw new Error("Continuation permission profile unavailable");
+        if (!fresh.enabled)
+            return old.enabled ? { ...old } : { ...fresh };
+        if (!old.enabled)
+            return { ...fresh };
         const access = ["off", "read", "write", "read-write"];
-        const value = { ...fresh, enabled: old.enabled || fresh.enabled };
+        const value = { ...fresh };
         for (const key of ["projectFiles", "outsideProject", "storedCredentials"]) {
             if (!access.includes(old[key]) || !access.includes(fresh[key]))
                 throw new Error("Invalid continuation permission profile");

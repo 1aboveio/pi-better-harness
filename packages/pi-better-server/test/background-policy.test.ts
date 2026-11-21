@@ -10,3 +10,12 @@ test('Background policy intersects captured restrictions with fresh mandatory se
  assert.equal(effectiveBackgroundPolicy(undefined,{...profile,enabled:false},'/workspace'),undefined);
  assert.equal(effectiveBackgroundPolicy(undefined,{...profile,commands:false},'/workspace').permissions.commands,false);
 });
+
+test('Background Off ignores retained restrictions without dropping captured authority', () => {
+ const captured = { state: 'enabled', writableRoot: '/captured', denyWrite: ['/secret'], permissions: { ...profile, network: false } };
+ const off = { ...profile, enabled: false, commands: false, shell: false, processAccess: 'off', commandTimeoutSeconds: 1 };
+ const next = effectiveBackgroundPolicy(captured, off, '/workspace');
+ assert.equal(next.state, 'enabled');
+ assert.deepEqual(next.permissions, captured.permissions);
+ assert.deepEqual(next.denyWrite, captured.denyWrite);
+});

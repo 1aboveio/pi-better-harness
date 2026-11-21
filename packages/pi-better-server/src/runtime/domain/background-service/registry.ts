@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
@@ -11,7 +11,7 @@ const metaCache = new Map<string, BackgroundTaskMeta>();
 // cross-process index changes before any cached IDs are reused.
 const indexIdsCache = new Map<string, { ids: Set<string>; signature: string }>();
 const initializedIndexes = new Set<string>();
-const metaChangedListeners = new Set<() => void>();
+const metaChangedListeners = new Set<(meta?: BackgroundTaskMeta) => void>();
 const registryIo = { fullDirectoryReads: 0, indexDirectoryReads: 0, metadataFileReads: 0, terminalMetadataFileReads: 0, indexRevisionChecks: 0 };
 
 export interface RegistryIoMetrics {
@@ -84,11 +84,11 @@ export function writeMeta(meta: BackgroundTaskMeta): void {
   metaCache.set(meta.id, meta);
   indexMeta(meta);
   for (const listener of metaChangedListeners) {
-    try { listener(); } catch { /* best effort */ }
+    try { listener(meta); } catch { /* best effort */ }
   }
 }
 
-export function onMetaChanged(listener: () => void): () => void {
+export function onMetaChanged(listener: (meta?: BackgroundTaskMeta) => void): () => void {
   metaChangedListeners.add(listener);
   return () => metaChangedListeners.delete(listener);
 }
@@ -190,8 +190,9 @@ export function removeMeta(meta: BackgroundTaskMeta): boolean {
     metaCache.delete(meta.id);
     removeIndexEntry(originIndexDir(originOf(meta)), meta.id);
     removeIndexEntry(originActiveIndexDir(originOf(meta)), meta.id);
+    removeIndexEntry(recentPath(originOf(meta)), meta.id);
     for (const listener of metaChangedListeners) {
-      try { listener(); } catch { /* best effort */ }
+      try { listener(meta); } catch { /* best effort */ }
     }
     return true;
   } catch {
@@ -251,6 +252,7 @@ export function listActiveMetasForOrigin(origin: BackgroundTaskCallbackOrigin): 
 export function observeMetasForOrigin(origin: BackgroundTaskCallbackOrigin, activeOnly = true): BackgroundTaskMeta[] {
   const directory = activeOnly ? originActiveIndexDir(origin) : originIndexDir(origin);
   let ids: string[];
+  registryIo.indexDirectoryReads++;
   try { ids = readdirSync(directory).filter(id => id !== ".initialized"); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   return ids.map(id => {
@@ -259,6 +261,42 @@ export function observeMetasForOrigin(origin: BackgroundTaskCallbackOrigin, acti
     return record.meta;
   }).filter((meta): meta is BackgroundTaskMeta => !!meta && !!meta.callbackOrigin && belongsToOrigin(meta, origin)
     && (!activeOnly || meta.status === "running")).sort((a, b) => b.startedAt - a.startedAt);
+}
+
+const RECENT_LIMIT = 256;
+const RECENT_MS = 30000;
+function recentPath(origin: BackgroundTaskCallbackOrigin): string {
+  return join(baseDir(), "by-origin-recent", originKey(origin));
+}
+function recentEntries(origin: BackgroundTaskCallbackOrigin): Array<{ id: string; observedAt: number }> {
+  const directory = recentPath(origin);
+  try {
+    registryIo.indexDirectoryReads++;
+    const entries = readdirSync(directory).filter(id => !id.startsWith(".")).flatMap(id => {
+      try { registryIo.indexRevisionChecks++; return [{ id, observedAt: statSync(join(directory, id)).mtimeMs }]; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    }).sort((a, b) => b.observedAt - a.observedAt || b.id.localeCompare(a.id));
+    return entries.filter(entry => Date.now() - entry.observedAt < RECENT_MS).slice(0, RECENT_LIMIT);
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+}
+
+export function recentMetaDeadline(origin: BackgroundTaskCallbackOrigin): number[] {
+  return recentEntries(origin).map(entry => entry.observedAt + RECENT_MS);
+}
+
+/** Exact cooperative source identity; no metadata or historical enumeration. */
+export function observationRevisionForOrigin(origin: BackgroundTaskCallbackOrigin): string {
+  return [originActiveIndexDir(origin), recentPath(origin)].map(indexDirectorySignature).join(";");
+}
+
+/** Bounded cooperative writes, including results written before the first reader. */
+export function observeRecentMetasForOrigin(origin: BackgroundTaskCallbackOrigin): BackgroundTaskMeta[] {
+  return recentEntries(origin).map(entry => {
+    const record = inspectMeta(entry.id);
+    if (record.found && !record.meta) throw new Error(`Unverified background task ${entry.id}: ${record.error}`);
+    return record.meta;
+  }).filter((meta): meta is BackgroundTaskMeta =>
+    !!meta && belongsToOrigin(meta, origin) && meta.dismissedAt === undefined);
 }
 
 function readMetaForSweep(id: string): BackgroundTaskMeta | undefined {
@@ -308,6 +346,16 @@ function indexMeta(meta: BackgroundTaskMeta): void {
     const activeDirectory = originActiveIndexDir(originOf(meta));
     if (meta.status === "running") writeIndexEntry(activeDirectory, meta.id);
     else removeIndexEntry(activeDirectory, meta.id);
+    const origin = originOf(meta), recentDirectory = recentPath(origin);
+    mkdirSync(recentDirectory, { recursive: true });
+    // Independent pointers preserve concurrent writers; prune only this bounded
+    // recent-write accelerator, never the authoritative metadata or history.
+    const candidates = readdirSync(recentDirectory).filter(id => !id.startsWith("."));
+    const retained = new Set(recentEntries(origin).filter(entry => entry.id !== meta.id).slice(0, RECENT_LIMIT - 1).map(entry => entry.id));
+    for (const id of candidates) if (id !== meta.id && !retained.has(id)) removeIndexEntry(recentDirectory, id);
+    const temporary = join(recentDirectory, `.${meta.id}.${process.pid}.next`);
+    writeFileSync(temporary, "");
+    renameSync(temporary, join(recentDirectory, meta.id));
   } catch {
     // Indexes are accelerators; meta.json remains authoritative.
   }

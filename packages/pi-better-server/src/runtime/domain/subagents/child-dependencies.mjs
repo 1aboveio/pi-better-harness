@@ -71,34 +71,39 @@ export function configSnapshot(directories) {
 export async function resolveChildClosure({ resolution, model, virtual = false, config = {}, resolvePath, load = loadContract, configPaths = [] }) {
     const result = { ...resolution, specs: [], reasons: { ...resolution.reasons }, paths: {}, declarations: [],
         providers: [], modelGroups: [], fingerprints: configPaths.map(path => ({ path, hash: fingerprint(path) })) };
+    function requiredPath(spec, from) {
+        const path = resolvePath(spec, from);
+        if (path)
+            return path;
+        const reason = (resolution.reasons[spec] ?? []).join(', ');
+        throw new Error(`Child dependency ${spec}${from ? ` required by ${from}` : ''} is not installed.${reason ? ` Selected for ${reason}.` : ''}`);
+    }
     if (resolution.mode !== 'isolated') {
         if (virtual)
             throw new Error(`Virtual model ${model} requires isolated mode with a declared supplier; ${resolution.mode} mode is unsupported.`);
-        return { ...result, specs: resolution.specs, paths: Object.fromEntries(resolution.specs.map(spec => {
-                const path = resolvePath(spec);
-                if (!path)
-                    throw new Error(`Child dependency ${spec} is not installed.`);
-                return [spec, path];
-            })) };
+        return { ...result, specs: resolution.specs, paths: Object.fromEntries(resolution.specs.map(spec => [spec, requiredPath(spec)])) };
     }
     const providerMap = { ...BUILTIN_PROVIDER_EXTENSIONS, ...(config.providerExtensions ?? {}) };
-    const active = [], done = new Set();
+    const active = [], done = new Set(), entrypoints = new Set();
     let ownsVirtual = false;
     const visit = async (spec, from) => {
-        const path = resolvePath(spec, from);
-        if (!path)
-            throw new Error(`Child dependency ${spec}${from ? ` required by ${from}` : ''} is not installed.`);
+        const path = requiredPath(spec, from);
         const root = packageRoot(path);
         const identity = root ?? realpathSync(path);
         if (active.includes(identity))
             throw new Error(`Child dependency cycle: ${[...active, identity].join(' -> ')}`);
-        if (done.has(identity))
+        // Different tool entrypoints can share a package and its dependency manifest.
+        const entrypoint = realpathSync(path);
+        if (entrypoints.has(entrypoint))
             return;
-        active.push(identity);
+        entrypoints.add(entrypoint);
         // Two packages may declare the same relative spec against different roots.
         const key = result.paths[spec] && result.paths[spec] !== path ? path : spec;
         result.specs.push(key);
         result.paths[key] = path;
+        if (done.has(identity))
+            return;
+        active.push(identity);
         if (root) {
             const manifestPath = join(root, 'package.json');
             const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
@@ -151,7 +156,7 @@ export async function resolveChildLaunch(options, trustedPaths = []) {
     return { resolution, fullResolution };
 }
 /** Validate actual child registration, never the parent's catalog. Groups require one physical candidate. */
-export async function checkChildPreflight(plan, { registry, tools, model }, load = loadContract) {
+export async function checkChildPreflight(plan, { registry, tools, registeredTools = [], model }, load = loadContract) {
     if (plan.configSnapshot && JSON.stringify(configSnapshot(plan.configSnapshot.map(item => item.dir))) !== JSON.stringify(plan.configSnapshot))
         throw new Error('Child configuration drift: agent or project JSON configuration changed. Launch again.');
     for (const item of plan.fingerprints)
@@ -175,7 +180,14 @@ export async function checkChildPreflight(plan, { registry, tools, model }, load
         if (!available.some(m => m.provider === group.provider && m.api !== 'pi-virtual' &&
             (group.ids.includes(m.id) || (group.prefix && m.id.startsWith(group.prefix)))))
             throw new Error(`Child has no available candidate for ${group.provider}: ${group.ids.join(', ')}${group.prefix ? ` (prefix ${group.prefix})` : ''}. Check extension, models and credentials.`);
-    for (const tool of plan.tools)
-        if (!tools.includes(tool))
+    const inactive = [];
+    for (const tool of plan.tools) {
+        if (tools.includes(tool))
+            continue;
+        if (!plan.optionalTrustedTools?.includes(tool) || !registeredTools.includes(tool)) {
             throw new Error(`Child requested tool ${tool} is unavailable.`);
+        }
+        inactive.push(tool);
+    }
+    return inactive;
 }

@@ -8,11 +8,14 @@ import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+import { withFixtureCleanup } from "./support/fixture-outcome.ts";
+import { assertGuardedServerReleased } from "./support/guardian-owner-outcome.ts";
 const { openStore } = await import(new URL("../../operation-coordinator/index.ts", import.meta.url).href);
 const { createLocalSupervisor, supervisorPaths } = await import(new URL("../../pi-better-background-tasks/src/supervisor/index.ts", import.meta.url).href);
 
-for (const crash of ["none", "concurrent-frontends", "published-permissions", "before-terminal", "after-terminal", "missing-current-authority", "missing-captured-authority", "missing-launch-evidence"]) {
+for (const crash of ["none", "idle-guardian", "idle-guardian-held", "concurrent-frontends", "published-permissions", "before-terminal", "after-terminal", "missing-current-authority", "missing-captured-authority", "missing-launch-evidence"]) {
 test(`SDK frontend exits; server imports independent evidence with ${crash} server crash and retains exact delivery`, { timeout: 30000 }, async () => {
+  const guarded = crash.startsWith("idle-guardian");
   mkdirSync(resolve(".work/760"), { recursive: true });
   const root = mkdtempSync(resolve(".work/760/flow-"));
   const runnerRoot = join(root, "frontend-volatile");
@@ -21,20 +24,27 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
   const transport = mkdtempSync("/tmp/p760-");
   const children: ReturnType<typeof fork>[] = [];
   const clients: WorkClient[] = [];
+  const stops = new Map<ReturnType<typeof fork>, unknown>();
+  let nativeSessionFile: string | undefined;
   let taskId: string | undefined;
   const taskIds: string[] = [];
   const start = async (file: string) => {
     const child = fork(new URL(file, import.meta.url), [], { execArgv: ["--import", "tsx"],
-      env: { ...process.env, PI_TEST_PERMISSION_PUBLISHER: crash === "published-permissions" ? "1" : "0", TMPDIR: file.includes("result-frontend") ? runnerRoot : root, PI_CODING_AGENT_DIR: root, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+      env: { ...process.env, ...(guarded ? { PI_SERVER_RUNTIME_IDLE_MS: "1000", PI_TEST_PERSIST_RECIPIENT: "1" } : {}),
+        LAUNCH_WORKSPACE: root, BACKGROUND_ONLY: "1", BACKGROUND_SESSION_FILE: nativeSessionFile,
+        PI_TEST_PERMISSION_PUBLISHER: crash === "published-permissions" ? "1" : "0", TMPDIR: file.includes("result-frontend") ? runnerRoot : root, PI_CODING_AGENT_DIR: root, PI_SERVER_DIR: transport }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
     children.push(child);
+    stops.set(child, file.includes("measure-full-runtime") ? { stop: true } : "stop");
+    const exited = once(child, "exit");
     let errors = ""; child.stderr!.on("data", chunk => { errors += chunk; });
-    const [ready] = await Promise.race([once(child, "message"), once(child, "exit").then(() => { throw new Error(errors); })]);
-    return { child, ready };
+    const [ready] = await Promise.race([once(child, "message"), exited.then(() => { throw new Error(errors); })]);
+    return { child, ready, exited };
   };
-  try {
-    let server = await start("./support/work-daemon.ts");
+  await withFixtureCleanup(async () => {
+    let server = await start(guarded ? "./support/guarded-work-daemon.ts" : "./support/work-daemon.ts");
     const frontends = await Promise.all(Array.from({ length: crash === "concurrent-frontends" ? 2 : 1 }, () => start("./support/result-frontend.ts")));
     const frontend = frontends[0]!;
+    nativeSessionFile = frontend.ready.sessionFile;
     taskIds.push(...frontends.map(frontend => frontend.ready.taskId));
     taskId = frontend.ready.taskId;
     // The fixed runtime owns launch evidence now. Follow its persisted exact
@@ -51,7 +61,7 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       const exited = once(frontend.child, "exit"); frontend.child.kill("SIGKILL"); await exited;
     }
     const executions = "start\n".repeat(frontends.length);
-    if (crash === "none") {
+    if (crash === "none" || guarded) {
       const client = new WorkClient(server.ready.ready, root); clients.push(client); await client.ready;
       const scope = { background: true, cwd: root, sessionId: frontend.ready.sessionId };
       const deadline = Date.now() + 5000;
@@ -71,6 +81,12 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       }
       assert.ok(status.livenessReasons.some((reason: any) => reason.kind === "runner" && reason.id === taskId),
         "Exact runner start identity must retain the server after every frontend exits, using the captured non-default supervisor directory");
+      if (guarded) {
+        assert.equal(status.instanceId, server.ready.instanceId, "startup must retain the original guarded server until runner supervision takes over");
+        const released = once(server.child, "message");
+        server.child.send({ releaseStartup: true });
+        assert.equal((await released)[0].startupReleased, true);
+      }
       client.close();
     }
     const negative = crash.startsWith("missing-");
@@ -142,15 +158,68 @@ test(`SDK frontend exits; server imports independent evidence with ${crash} serv
       assert.equal(store.getOperation(operation.operationId)?.terminalRevision, 1);
       assert.equal(store.listOutbox({ recipient: operation.owner }).length, 1);
       assert.equal(readFileSync(join(root, "executions"), "utf8"), executions);
+      if (guarded) {
+        let detachedAt = Date.now();
+        if (crash === "idle-guardian-held") {
+          store.transitionWaitPhase({ waitId: wait.waitId, generation: wait.generation,
+            from: "ready", to: "held", reason: "User decision required; no automatic continuation" });
+          assert.equal(store.getWait({ waitId: wait.waitId })?.phase, "held");
+        } else {
+        const handoff = new WorkClient(server.ready.ready, root); clients.push(handoff); await handoff.ready;
+        writeFileSync(join(root, "server-registration-v1.json"), JSON.stringify({ version: 1, agentDir: root, serverDir: transport }));
+        const recipient = await start("../scripts/measure-full-runtime/frontend.ts");
+        assert.equal(recipient.ready.sessionId, operation.owner.sessionId, "reopen the real persisted recipient, not a replacement identity");
+        handoff.close();
+        let sequence = 0;
+        const call = async (request: any) => {
+          const response = once(recipient.child, "message");
+          recipient.child.send({ ...request, id: ++sequence, key: `receipt-${sequence}` });
+          const [reply] = await response;
+          assert.equal(reply.error, undefined, reply.stack);
+          return reply.result;
+        };
+        const deadline = Date.now() + 10000;
+        let messages: any[] = [];
+        do {
+          await call({ tool: "bg_task_status", params: { id: taskId } });
+          messages = (await call({ entries: true })).filter((entry: any) => entry.type === "custom_message"
+            && entry.details?.completionEventIds?.includes(events[0].eventId));
+          if (messages.length) break;
+          assert.ok(Date.now() < deadline, "Exact native completion receipt was not delivered");
+          await delay(20);
+        } while (true);
+        assert.equal(messages.length, 1);
+        await call({ tool: "bg_task_status", params: { id: taskId } });
+        assert.equal((await call({ entries: true })).filter((entry: any) => entry.type === "custom_message"
+          && entry.details?.completionEventIds?.includes(events[0].eventId)).length, 1);
+        recipient.child.send({ stop: true }); await recipient.exited;
+        detachedAt = Date.now();
+        }
+        const [code, signal] = await server.exited;
+        assert.equal(code, 0);
+        assert.equal(signal, null);
+        assert.ok(Date.now() - detachedAt < 5000, "idle exit must remain within the existing shutdown budget");
+        const checkpoint = JSON.parse(readFileSync(join(transport, "clean-stop.json"), "utf8"));
+        assert.equal(checkpoint.token, server.ready.instanceId, "clean stop must belong to the originally announced guarded server");
+        assert.equal(checkpoint.reason, "clean-stop");
+        assert.equal(checkpoint.idleEvidence.lifecycle.runtimeIdleMs, 1000);
+        assert.deepEqual(checkpoint.idleEvidence.obligations, []);
+        assert.ok(checkpoint.idleEvidence.at >= checkpoint.idleEvidence.deadline);
+        assert.ok(checkpoint.idleEvidence.at - checkpoint.idleEvidence.deadline < 2000, "idle deadline must not wait for derived read rebuilding");
+        const { inspectDaemonOwner } = await import("../src/daemon-owner.ts");
+        assertGuardedServerReleased(inspectDaemonOwner(transport), checkpoint);
+        assert.equal(inspectDaemonOwner(transport, "guardian-owner").status, "missing");
+        if (crash === "idle-guardian-held") assert.equal(store.getWait({ waitId: wait.waitId })?.phase, "held");
+      }
     } finally { store.close(); }
-  } finally {
+  }, async () => {
     for (const client of clients) client.close();
     for (const child of children) if (child.exitCode === null && child.signalCode === null) {
-      const exited = once(child, "exit"); child.send("stop"); await exited;
+      const exited = once(child, "exit"); child.send(stops.get(child) as any); await exited;
     }
     for (const id of taskIds) await createLocalSupervisor({ directory }).stop(id);
     rmSync(transport, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
-  }
+  });
 });
 }
 
@@ -248,8 +317,11 @@ test("two actual HostedSessions share server supervision without a discovery hos
   }
 });
 
-test("scope handoff refuses live, unknown and untransferred dead legacy holders", { timeout: 30000 }, async () => {
-  const { createObservedWaitHost } = await import(new URL("../../pi-better-background-tasks/src/observed-waits.ts", import.meta.url).href);
+for (const domain of ["source", "generated"]) {
+test(`${domain}: managed waits coexist with fenced legacy discovery holders`, { timeout: 30000 }, async () => {
+  const { createObservedWaitHost } = await import(new URL(domain === "source"
+    ? "../../pi-better-background-tasks/src/observed-waits.ts"
+    : "../src/runtime/domain/background-service/observed-waits.domain.mjs", import.meta.url).href);
   mkdirSync(resolve(".work/760"), { recursive: true });
   const root = mkdtempSync(resolve(".work/760/holder-"));
   const transport = mkdtempSync("/tmp/p760-");
@@ -278,14 +350,20 @@ test("scope handoff refuses live, unknown and untransferred dead legacy holders"
       const scopeBefore = createHash("sha256").update(`${join(root, "operation-coordinator.sqlite")}\0${join(root, "supervisor")}`).digest("hex");
       const claimBefore = store.readDiscoveryClaim(scopeBefore);
       const managedLive = await host.launchParent({ kind: "process", params: { shell: false, callback: false,
-        argv: [process.execPath, "-e", "process.exit(0)"] }, ctx });
-      const managedWait = host.waitForParent(ctx, [managedLive.id], "managed result beside legacy");
+        argv: [process.execPath, "-e", "setTimeout(() => process.exit(0), 150)"] }, ctx });
+      const grantBefore = store.resultSupervision(managedLive.operationId);
+      assert.ok(grantBefore, "the timer has server supervision before registering its wait");
+      await assert.rejects(host.superviseParentWait(ctx, [managedLive.id, taskId], "mixed legacy dependency must remain fenced"), /live or unknown original/);
+      assert.equal(store.resultSupervision(op.operationId), null);
+      const managedWait = await host.superviseParentWait(ctx, [managedLive.id], "managed result beside legacy");
       const managedDeadline = Date.now() + 5000;
       while (store.getOperation(managedLive.operationId)?.terminalRevision === 0 && Date.now() < managedDeadline) await delay(25);
       assert.equal(store.getOperation(managedLive.operationId)?.terminalRevision, 1);
       assert.equal(host.waitViewForParent(ctx, managedWait.waitId, managedWait.generation)?.phase, "ready");
       host.cancelWaitForParent(ctx, managedWait.waitId, managedWait.generation, "regression complete");
+      assert.deepEqual(store.resultSupervision(managedLive.operationId), grantBefore);
       assert.deepEqual(store.readDiscoveryClaim(scopeBefore), claimBefore);
+      assert.equal(store.resultScopeManaged(scopeBefore), false, "registering an existing grant must not retire legacy discovery");
       assert.equal(store.getOperation(op.operationId)?.supervision.hostId, op.supervision.hostId);
       assert.equal(original.child.exitCode, null);
 
@@ -295,7 +373,17 @@ test("scope handoff refuses live, unknown and untransferred dead legacy holders"
       const scope = createHash("sha256").update(`${join(root, "operation-coordinator.sqlite")}\0${join(root, "supervisor")}`).digest("hex");
       const claim = store.readDiscoveryClaim(scope);
       if (claim) store.releaseDiscoveryClaim(claim);
+      const unknownClaim = store.tryClaimDiscovery({ scope, expected: null,
+        hostId: `${original.child.pid}:legacy`, token: "unknown-discovery-token" });
+      assert.ok(unknownClaim);
+      const unknownWait = await host.superviseParentWait(ctx, [managedLive.id], "managed result beside unknown discovery");
+      assert.equal(unknownWait.phase, "ready");
+      host.cancelWaitForParent(ctx, unknownWait.waitId, unknownWait.generation, "unknown discovery regression complete");
+      assert.deepEqual(store.readDiscoveryClaim(scope), unknownClaim);
+      assert.equal(store.resultScopeManaged(scope), false);
       await assert.rejects(host.superviseParentWait(ctx, [taskId], "unknown holder must remain fenced"), /live or unknown original|original supervision owner/);
+      store.releaseDiscoveryClaim(unknownClaim);
+      await assert.rejects(host.superviseParentWait(ctx, [taskId], "unknown operation owner must remain fenced"), /original supervision owner/);
       assert.equal(store.getOperation(op.operationId)?.supervision.hostId, `${original.child.pid}:legacy`);
       assert.equal(store.resultSupervision(op.operationId), null);
       assert.equal(store.getOperation(op.operationId)?.terminalRevision, 0);
@@ -329,3 +417,4 @@ test("scope handoff refuses live, unknown and untransferred dead legacy holders"
     rmSync(transport, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
   }
 });
+}

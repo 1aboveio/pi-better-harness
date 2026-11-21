@@ -15,6 +15,24 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('maintenance explains each real gate operation until settlement without an invented deadline', async () => {
+  const env = makeEnv(); mkdirSync(env.serverDir);
+  const registry = new SessionRegistry({ serverDir: env.serverDir });
+  try {
+    const release = registry.maintenance.enterSessionOperation();
+    const reason = registry.maintenance.lifecycleReasons()[0]!;
+    assert.equal(reason.source,'session-operation'); assert.equal(reason.executionDeadline,null);
+    assert.ok(reason.lastProgressAt); release(); release();
+    assert.deepEqual(registry.maintenance.lifecycleReasons(),[]);
+    await registry.maintenance.withIdleSessions('reload', async () => {
+      assert.equal(registry.maintenance.busy,true);
+      assert.equal(registry.maintenance.lifecycleReasons()[0]?.source,'reload');
+    });
+    assert.equal(registry.maintenance.busy,false);
+    assert.deepEqual(registry.maintenance.lifecycleReasons(),[]);
+  } finally { await registry.shutdown(); }
+});
+
 async function setup(t: TestContext, initialize?: (pi: ExtensionAPI, ctx: ExtensionContext) => void) {
   const previous = { ...process.env };
   const env = makeEnv();
@@ -45,6 +63,54 @@ async function setup(t: TestContext, initialize?: (pi: ExtensionAPI, ctx: Extens
 function busy(reason: MaintenanceBusyError["reason"]) {
   return (error: unknown) => error instanceof MaintenanceBusyError && error.reason === reason;
 }
+
+test('blocked bash and independent active tool report one bash identity and one activity owner', async t => {
+  const f = await setup(t);
+  const tools = (f.hosted as unknown as { activeTools: Map<string, unknown> }).activeTools;
+  let providerActive = true;
+  f.pi.events.emit('pi-better-goal:register-provider', { id: 'component-owner', scope: 'session',
+    getActivity: () => ({ items: [{ active: providerActive }] }) });
+  await f.hosted.refreshActivity();
+  // Reproduce the exact reported component state without launching a bash process.
+  Object.defineProperty(f.sdk, 'isBashRunning', { configurable: true, get: () => true });
+  tools.set('independent-tool', {});
+  const dialog = f.ctx.ui.confirm('Decision', 'Continue?');
+  try {
+    assert.equal(f.hosted.executionActive, true);
+    const reasons = f.hosted.lifecycleReasons();
+    const bash = reasons.filter(reason => reason.kind === 'hosted-bash');
+    assert.equal(bash.length, 1);
+    assert.equal('retainsExecution' in bash[0]! && bash[0].retainsExecution, false);
+    assert.equal(reasons.filter(reason => reason.kind === 'hosted-provider' && reason.id === 'component-owner').length, 1);
+  } finally {
+    tools.clear(); Reflect.deleteProperty(f.sdk, 'isBashRunning');
+    f.hosted.answerDialog(f.hosted.needsInput[0]!.id, { confirmed: false }); await dialog;
+    providerActive = false; await f.hosted.refreshActivity();
+  }
+});
+
+test('liveness records follow actual hosted commands and human dialogs without giving passive state a lease', async t => {
+  const f = await setup(t);
+  const command = f.hosted.handle({ type: 'prompt', message: 'record liveness', id: 'request' });
+  assert.ok(f.hosted.lifecycleReasons().some(reason => reason.kind === 'hosted-command'));
+  assert.equal(f.hosted.executionActive, f.hosted.lifecycleReasons().some(reason => 'retainsExecution' in reason && reason.retainsExecution));
+  await command;
+  await f.sdk.waitForIdle();
+  const passive = f.hosted.handle({ type: 'get_state', id: 'state' });
+  const passiveRecords = f.hosted.lifecycleReasons().filter(reason => reason.kind === 'hosted-operation');
+  assert.ok(passiveRecords.every(reason => 'retainsExecution' in reason && reason.retainsExecution === false));
+  await passive;
+  assert.equal(f.hosted.operationsActive,false);
+  assert.equal(f.hosted.lifecycleReasons().some(reason => reason.kind === 'hosted-operation'),false);
+  const dialog = f.ctx.ui.confirm('Decision','Continue?');
+  const pending = f.hosted.needsInput[0]!;
+  assert.ok(pending);
+  assert.ok(f.hosted.lifecycleReasons().some(reason => reason.kind === 'hosted-dialog' && 'retainsExecution' in reason && reason.retainsExecution === false));
+  f.hosted.answerDialog(pending.id, { cancelled: true });
+  await dialog;
+  assert.equal(f.hosted.lifecycleReasons().some(reason => reason.kind === 'hosted-dialog'),false);
+  assert.equal(f.hosted.executionActive, f.hosted.lifecycleReasons().some(reason => 'retainsExecution' in reason && reason.retainsExecution));
+});
 
 test("one gate excludes native reload, registry mutation and retained SDK calls without touching inactivity", async t => {
   const f = await setup(t);

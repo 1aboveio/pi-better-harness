@@ -1,5 +1,7 @@
 # Local sandbox diagnostics
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#execution-boundaries).
+
 ## Status
 
 Accepted. Extends ADR 0014's global default storage and preserves ADR 0012's

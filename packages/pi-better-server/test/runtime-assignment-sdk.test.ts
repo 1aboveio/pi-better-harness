@@ -11,13 +11,14 @@ const { startWorkRuntimeFixture } = await import(subagents + 'tests/work-runtime
 const stop = await startWorkRuntimeFixture();
 after(stop);
 
-for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'local SDK'} reads and consumes the exact retained assignment`, { timeout: 30000 }, async () => {
+for (const paused of [false, true]) for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'local SDK'} reads and consumes the exact retained assignment (paused=${paused})`, { timeout: 30000 }, async () => {
   const { default: extension } = await import(subagents + 'index.ts');
   const { registerAssignmentAttempt, commitAssignmentTerminal, readOutcome } = await import(subagents + 'assignment-outcomes.ts');
   const { writeMeta, runDir, logPathFor } = await import(subagents + 'registry.ts');
   const cwd = process.cwd(), agentDir = process.env.PI_CODING_AGENT_DIR!;
   let turns = 0;
   const settingsManager = SettingsManager.inMemory({ defaultProvider: 'delivery-fixture', defaultModel: 'model' });
+  const admission = (pi: any) => { if (paused) pi.events.on('pi-better-goal:operation-resume-admission', (request: any) => request.reply({ allowed: false, revision: 1, reason: 'Goal is not active' })); };
   const provider = (pi: any) => pi.registerProvider('delivery-fixture', {
     baseUrl: 'https://example.invalid', apiKey: 'offline', api: 'openai-completions',
     models: [{ id: 'model', name: 'Offline recipient', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 2048, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
@@ -31,7 +32,7 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
       return stream;
     },
   });
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true, extensionFactories: [extension, provider] });
+  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true, extensionFactories: [extension, provider, admission] });
   let session: any, host: any;
   try {
     await resourceLoader.reload();
@@ -46,7 +47,7 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
     await session.setModel(session.extensionRunner.createContext().modelRegistry.find('delivery-fixture', 'model'));
     manager.appendCustomEntry('fixture', {});
     manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Saved recipient fixture' }], api: 'openai-completions', provider: 'test', model: 'fixture', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: Date.now() });
-    const id = hosted ? 'sa_hosted_outcome_1' : 'sa_sdk_outcome_1';
+    const id = `${hosted ? 'sa_hosted_outcome_1' : 'sa_sdk_outcome_1'}_${paused}`;
     const recipient = { kind: 'parent-session' as const, sessionId: manager.getSessionId(), workspace: cwd, branchId: null, goalId: null };
     const binding = { version: 1 as const, assignmentId: id, owner: { ...recipient, kind: 'worker-conversation' as const, sessionId: id }, recipient };
     registerAssignmentAttempt(binding, id);
@@ -59,8 +60,8 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
     while (!readOutcome(meta)?.deliveryReceipt && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
     assert.ok(readOutcome(meta)?.deliveryReceipt, JSON.stringify(readOutcome(meta)));
     await session.waitForIdle();
-    assert.equal(turns, 1);
-    if (host) {
+    assert.equal(turns, paused ? 0 : 1);
+    if (host && !paused) {
       // The receiver has read nothing throughout delivery and model completion.
       // Its cursor now predates retained events; native snapshot repairs the gap.
       const delayed = host.subscribe(0, () => {});
@@ -88,7 +89,7 @@ for (const hosted of [false, true]) test(`real ${hosted ? 'HostedSession' : 'loc
       await host.bindUi();
     } else await session.bindExtensions({ mode: 'print' });
     assert.deepEqual(readOutcome(meta)?.deliveryReceipt, receipt);
-    assert.equal(turns, 1, 'reconnect must not repeat delivered model handoff');
+    assert.equal(turns, paused ? 0 : 1, 'reconnect must not repeat delivered model handoff');
     tool = session.extensionRunner.getToolDefinition('subagent_result');
     ctx = session.extensionRunner.createContext();
     const params = { id, outcome_revision: 1, disposition: 'consumed', note: 'Read result' };

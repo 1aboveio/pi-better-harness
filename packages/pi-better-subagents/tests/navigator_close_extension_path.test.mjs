@@ -230,11 +230,11 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId = "naviga
     assert.equal(typeof handlers.session_start, "function", "extension must register session_start");
 
     const navigator = {
-        async start() {
+        async start(widgetReady = () => true) {
             stopRuntime ??= await startWorkRuntimeFixture();
             await handlers.session_start({}, ctx);
             // These assertions inspect real asynchronous observations, not placeholders.
-            await waitFor(() => seededIds.every(id => requestWorkDetail(id)?.detail));
+            await waitFor(() => seededIds.every(id => requestWorkDetail(id)?.detail) && widgetReady());
             assert.ok(ui.factory, "session_start must install the navigator editor factory");
             editor = ui.factory("tui", "theme", "kb");
             assert.equal(typeof editor.handleInput, "function");
@@ -533,7 +533,7 @@ describe("registered extension path: main-window navigator actions", () => {
             startedAt: Date.now() + 1000,
         });
 
-        await nav.start();
+        await nav.start(() => renderWidgetValue(nav.lastWidget("background-work-list")).includes("live-job"));
         nav.focusViaLeftKey();
 
         nav.pressX();
@@ -579,7 +579,7 @@ describe("registered extension path: main-window navigator actions", () => {
             callbackOrigin: { cwd: RUNTIME, sessionId: "session-b" },
         });
 
-        await nav.start();
+        await nav.start(() => renderWidgetValue(nav.lastWidget("background-work-list")).includes("session-b-run"));
 
         const mainList = renderWidgetValue(nav.lastWidget("background-work-list"));
         assert.ok(mainList.includes("session-b-run"), mainList);
@@ -588,50 +588,64 @@ describe("registered extension path: main-window navigator actions", () => {
 
     // @covers navigator.close
     // @level integration
-    it("registered main-list widget hides the section when only terminal subagents remain", async () => {
+    it("registered main-list widget retains recent terminal subagents until they expire", async (t) => {
+        const { refreshBackgroundWorkNavigator } = await import("../shared-navigator.ts");
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
         const now = Date.now();
         const recentFailedId = nav.seedRun({
-            id: trackDisk(`sa_t47_recent_failed_${now}`),
             name: "recent-failed-run",
+            sessionId: "recent-failed",
             status: "failed",
             pid: THIS_PID,
-            startedAt: now - 40_000,
-            endedAt: now - 29_000,
+            startedAt: now - 2_000,
+            endedAt: now - 1_000,
         });
         const oldFailedId = nav.seedRun({
-            id: trackDisk(`sa_t47_old_failed_${now}`),
             name: "old-failed-run",
+            sessionId: "old-failed",
             status: "failed",
             pid: THIS_PID,
-            startedAt: now - 50_000,
-            endedAt: now - 31_000,
+            startedAt: now - 61_000,
+            endedAt: now - 60_000,
         });
         const recentCompletedId = nav.seedRun({
-            id: trackDisk(`sa_t47_recent_completed_${now}`),
             name: "recent-completed-run",
+            sessionId: "recent-completed",
             status: "completed",
             pid: THIS_PID,
-            startedAt: now - 40_000,
-            endedAt: now - 29_000,
+            startedAt: now - 2_000,
+            endedAt: now - 1_000,
         });
         const oldCompletedId = nav.seedRun({
-            id: trackDisk(`sa_t47_old_completed_${now}`),
             name: "old-completed-run",
+            sessionId: "old-completed",
             status: "completed",
             pid: THIS_PID,
-            startedAt: now - 50_000,
-            endedAt: now - 31_000,
+            startedAt: now - 61_000,
+            endedAt: now - 60_000,
         });
 
-        await nav.start();
+        const widgetKey = "background-work-list";
+        await nav.start(() => {
+            const list = renderWidgetValue(nav.lastWidget(widgetKey));
+            return list.includes("recent-failed-run") && list.includes("recent-completed-run");
+        });
 
-        const mainList = renderWidgetValue(nav.lastWidget("background-work-list"));
-        assert.ok(!mainList.includes("subagents"), mainList);
-        assert.ok(!mainList.includes("recent-failed-run"), mainList);
-        assert.ok(!mainList.includes("recent-completed-run"), mainList);
-        assert.ok(!mainList.includes("old-failed-run"), mainList);
-        assert.ok(!mainList.includes("old-completed-run"), mainList);
+        const mainList = renderWidgetValue(nav.lastWidget(widgetKey));
+        assert.match(mainList, /subagents/);
+        assert.match(mainList, /recent-failed-run\s+failed/);
+        assert.match(mainList, /recent-completed-run\s+completed/);
+        assert.doesNotMatch(mainList, /old-failed-run|old-completed-run/);
+
+        // Retention starts when the Navigator sees a terminal row, not when the run ends.
+        const afterRetention = Date.now() + 31_000;
+        const clock = t.mock.method(Date, "now", () => afterRetention);
+        try {
+            refreshBackgroundWorkNavigator(nav.ctx);
+            assert.equal(nav.lastWidget(widgetKey), undefined, "the widget clears after the last terminal row expires");
+        } finally {
+            clock.mock.restore();
+        }
         assert.equal(registry.readMeta(recentFailedId).status, "failed");
         assert.equal(registry.readMeta(oldFailedId).status, "failed");
         assert.equal(registry.readMeta(recentCompletedId).status, "completed");

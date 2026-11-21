@@ -4,11 +4,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { startWorkRuntime } from "./test-support/work-runtime.js";
+import { startWorkRuntime, retainWorkRuntimeFailure } from "./test-support/work-runtime.js";
 
 let stopRuntime: () => Promise<void>;
 const harnessCleanup = new Set<() => Promise<void>>();
-afterEach(async () => { for (const close of harnessCleanup) await close(); harnessCleanup.clear(); });
+afterEach(async context => {
+  if (context.task.result?.state === 'fail') await retainWorkRuntimeFailure();
+  for (const close of harnessCleanup) await close(); harnessCleanup.clear();
+});
 beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
 afterAll(async () => { await stopRuntime(); });
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -64,9 +67,10 @@ describe("manager-domain SDK integration and native server acceptance", () => {
     writeFileSync(logPath, "checkpoint\n");
     const permissions = { enabled: false, commands: true, network: true, processAccess: "read",
       projectFiles: "read-write", outsideProject: "read", storedCredentials: "read" };
-    let backgroundAccess = "off";
+    let backgroundEnabled = true;
     harness.events.on(FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, () => harness.events.emit(FOREGROUND_SANDBOX_POLICY_CHANNEL, {
-      state: "disabled", permissions, background: { state: "disabled", permissions: { ...permissions, processAccess: backgroundAccess } },
+      state: "disabled", permissions, background: { state: backgroundEnabled ? "enabled" : "disabled",
+        permissions: { ...permissions, enabled: backgroundEnabled, processAccess: "off" } },
     }));
     try {
       for (const tool of ["bg_task_status", "bg_task", "bg_status"]) {
@@ -74,7 +78,7 @@ describe("manager-domain SDK integration and native server acceptance", () => {
         expect(result.processDiagnostics).toMatchObject({ availability: "blocked" });
         expect(result.sandbox.confinement).toBe("unconfined");
       }
-      backgroundAccess = "read";
+      backgroundEnabled = false;
       const result = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true, diagnostics: true }));
       if (process.platform === "darwin" || process.platform === "linux") {
         expect(result.processDiagnostics).toMatchObject({ availability: "available", identity: "matches" });
@@ -609,17 +613,19 @@ describe("manager-domain SDK integration and native server acceptance", () => {
     const failed = await waitForMeta(failedId, (meta) => meta?.status === "failed" && typeof meta.endedAt === "number");
     const succeeded = await waitForMeta(succeededId, (meta) => meta?.status === "succeeded" && typeof meta.endedAt === "number");
     await harness.fireSessionStart();
-    let list = renderWidget(harness.lastWidget("background-work-list"));
+    const list = renderWidget(harness.lastWidget("background-work-list"));
     expect(list).toContain("recent-failure");
     expect(list).toContain("recent-success");
 
-    writeMeta({ ...failed!, endedAt: Date.now() - 31_000 });
-    writeMeta({ ...succeeded!, endedAt: Date.now() - 31_000 });
-    await harness.fireSessionStart();
-
-    list = renderWidget(harness.lastWidget("background-work-list"));
-    expect(list).not.toContain("recent-failure");
-    expect(list).not.toContain("recent-success");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Math.max(failed!.endedAt!, succeeded!.endedAt!, Date.now()) + 31_000);
+    try {
+      await harness.fireSessionStart();
+      const expired = renderWidget(harness.lastWidget("background-work-list"));
+      expect(expired).not.toContain("recent-failure");
+      expect(expired).not.toContain("recent-success");
+    } finally {
+      clock.mockRestore();
+    }
     expect(readMeta(failedId)?.status).toBe("failed");
     expect(readMeta(succeededId)?.status).toBe("succeeded");
   });

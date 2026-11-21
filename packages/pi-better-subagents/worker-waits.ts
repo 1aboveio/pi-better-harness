@@ -32,6 +32,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
     OPERATIONS_ATTEMPT_ID_ENV,
     OPERATIONS_CHILD_ID_ENV,
+    OPERATIONS_DEADLINE_AT_ENV,
     OPERATIONS_CONVERSATION_ID_ENV,
     OPERATIONS_ENABLED_ENV,
     OPERATIONS_ENDPOINT_ENV,
@@ -39,6 +40,7 @@ import {
     OPERATIONS_TOKEN_ENV,
     OPERATIONS_WRITER_LEASE_ID_ENV,
     WAIT_OPERATIONS_TOOL,
+    assertWaitToolDependencies,
     createToolDescriptor,
     extractResultTaskIds,
     normalizeWaitForOperationsResult,
@@ -68,6 +70,7 @@ import {
     effectiveStatus,
     isPendingPark,
     listParkRecordCandidates,
+    scanParkRecords,
     listMetas,
     listPendingParkedRuns,
     readMeta,
@@ -330,6 +333,7 @@ export interface WorkerAcknowledgeView {
 export interface WorkerWaitReadyEvent {
     readonly waitId: string;
     readonly generation: number;
+    readonly parkedAttemptId?: string;
     readonly owner: { kind: string; sessionId: string; workspace: string; branchId?: string | null; goalId?: string | null };
     readonly parentOrigin?: { cwd: string; sessionId?: string };
     readonly taskIds: readonly string[];
@@ -653,22 +657,22 @@ export function planWorkerBridgeTools(input: {
         }
         tools.push(name);
     }
+    if (tools.includes(WAIT_OPERATIONS_TOOL)
+        && (!tools.includes("acknowledge_operation_result") || !tools.some(name => name === "bg_task_status" || name === "bg_task_log"))
+        && !(input.explicitTools && allow.has(WAIT_OPERATIONS_TOOL))) {
+        tools.splice(tools.indexOf(WAIT_OPERATIONS_TOOL), 1);
+        withheld.push({ name: WAIT_OPERATIONS_TOOL, reason: "the authorized tools cannot read and acknowledge terminal evidence" });
+    }
     const has = (name: OperationBridgeToolName): boolean => tools.includes(name);
+    const capabilities = {
+        background: { spawn: has("bg_task_spawn"), watch: has("bg_task_watch"), status: has("bg_task_status"), log: has("bg_task_log") },
+        wait: has(WAIT_OPERATIONS_TOOL), acknowledge: has("acknowledge_operation_result"), parking: has(WAIT_OPERATIONS_TOOL),
+    };
+    assertWaitToolDependencies(capabilities, tools);
     return {
         tools,
         withheld,
-        capabilities: {
-            background: {
-                spawn: has("bg_task_spawn"),
-                watch: has("bg_task_watch"),
-                status: has("bg_task_status"),
-                log: has("bg_task_log"),
-            },
-            wait: has(WAIT_OPERATIONS_TOOL),
-            acknowledge: has("acknowledge_operation_result"),
-            // The bridge derives `wait_for_operations` from `wait && parking`.
-            parking: has(WAIT_OPERATIONS_TOOL),
-        },
+        capabilities,
     };
 }
 
@@ -862,6 +866,8 @@ export interface WorkerOperationsHost {
 
 function scopeOf(registration: {
     runId: string;
+    attemptId?: string;
+    assignment?: AssignmentBinding;
     conversationId: string;
     workspace: string;
     authorityReference: string;
@@ -871,6 +877,7 @@ function scopeOf(registration: {
     return {
         runId: registration.runId,
         conversationId: registration.conversationId,
+        ...(registration.assignment && registration.attemptId ? { assignmentAttemptId: registration.attemptId } : {}),
         workspace: registration.workspace,
         authorityReference: registration.authorityReference,
         branchId: registration.branchId ?? null,
@@ -939,6 +946,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
     };
 
     const register = async (registration: WorkerOperationRegistration): Promise<WorkerOperationHandle> => {
+        assertWaitToolDependencies(registration.capabilities, registration.tools);
         const supervised = registration.tools.some((name) => name !== "report_assignment_result");
         if (supervised && !capability.available) {
             const ready = await start();
@@ -968,6 +976,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             tools: [...registration.tools],
             capabilities: registration.capabilities as unknown as JsonRecord,
             assignmentOutcomesVersion: 1,
+            assignmentTaskOwnership: registration.assignment !== undefined,
             owner,
             ...(registration.writerLeaseId ? { writerLeaseId: registration.writerLeaseId } : {}),
         }) : { assignmentOutcomesVersion: 1 };
@@ -1098,7 +1107,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
                     note: typeof params.note === "string" ? params.note : "",
                     owner,
                 }) as unknown as WorkerAcknowledgeView;
-                const parked = parkedWaitByGeneration(waitId, generation);
+                const parked = await parkedWaitByGeneration(waitId, generation);
                 if (parked) updateParkRecord(parked.runId, { phase: "consumed" });
                 return view;
             };
@@ -1264,7 +1273,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
 export function childEnvironment(
     token: string,
     endpoint: string,
-    registration: { runId: string; conversationId: string; attemptId: string },
+    registration: { runId: string; conversationId: string; attemptId: string; policy?: { deadlineAt: number | null } },
 ): Record<string, string> {
     return {
         [OPERATIONS_ENABLED_ENV]: "1",
@@ -1274,6 +1283,7 @@ export function childEnvironment(
         [OPERATIONS_CONVERSATION_ID_ENV]: registration.conversationId,
         [OPERATIONS_ATTEMPT_ID_ENV]: registration.attemptId,
         [OPERATIONS_CHILD_ID_ENV]: `${registration.runId}:${randomUUID()}`,
+        ...(registration.policy ? { [OPERATIONS_DEADLINE_AT_ENV]: String(registration.policy.deadlineAt ?? 0) } : {}),
     };
 }
 
@@ -1555,6 +1565,7 @@ export function ownerBindingFromContext(ctx: ExtensionContext): WaitOwnerBinding
 export interface ResumeAdmissionRequest {
     version: 1;
     owner: { sessionId: string; workspace: string; branchId?: string | null; goalId?: string | null };
+    pending?(): void;
     reply(gate: { allowed: boolean; reason?: string; revision: number; isCurrent?: () => boolean }): void;
 }
 
@@ -1569,7 +1580,7 @@ export type ResumeAdmission =
 export async function requestResumeAdmission(
     pi: unknown,
     owner: WaitOwnerBinding,
-    options: { timeoutMs?: number } = {},
+    options: { timeoutMs?: number; pendingTimeoutMs?: number } = {},
 ): Promise<ResumeAdmission> {
     const bus = serviceBusOf(pi);
     if (!bus) {
@@ -1584,8 +1595,9 @@ export async function requestResumeAdmission(
             clearTimeout(timer);
             resolve(value);
         };
-        const timer = setTimeout(() => finish(null), timeoutMs);
+        let timer = setTimeout(() => finish(null), timeoutMs);
         timer.unref?.();
+        let pending = false;
         const request: ResumeAdmissionRequest = {
             version: 1,
             owner: {
@@ -1593,6 +1605,14 @@ export async function requestResumeAdmission(
                 workspace: owner.workspace,
                 branchId: owner.branchId,
                 goalId: owner.goalId,
+            },
+            pending: () => {
+                if (pending || settled || options.pendingTimeoutMs === undefined) return;
+                pending = true;
+                clearTimeout(timer);
+                const budget = Math.max(timeoutMs, Math.min(60_000, options.pendingTimeoutMs));
+                timer = setTimeout(() => finish({ allowed: false, reason: `Workflow admission did not answer within ${budget} ms`, revision: 0 }), budget);
+                timer.unref?.();
             },
             reply: (gate) => {
                 if (!gate || typeof gate.allowed !== "boolean") {
@@ -1660,14 +1680,15 @@ export function parkedWaits(): ParkedWait[] {
 }
 
 export function parkedWaitForRun(runId: string): ParkedWait | null {
-    return parkedWaits().find((entry) => entry.runId === runId) ?? null;
+    const meta = readMeta(runId);
+    const record = meta && readParkRecord(runId);
+    return meta && record && isPendingPark(record) ? parkedEntry(meta, record) : null;
 }
 
 /** A parked attempt's record for one wait generation, in any phase. */
-export function parkedWaitByGeneration(waitId: string, generation: number): ParkedWait | null {
-    for (const meta of listMetas()) {
-        const record = readParkRecord(meta.id);
-        if (!record || record.waitId !== waitId || record.generation !== generation) continue;
+export async function parkedWaitByGeneration(waitId: string, generation: number): Promise<ParkedWait | null> {
+    for await (const { meta, record } of scanParkRecords()) {
+        if (record.waitId !== waitId || record.generation !== generation) continue;
         return parkedEntry(meta, record);
     }
     return null;
@@ -2147,20 +2168,29 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
     };
 
     const resume = (park: ParkedWait) => options.dispatch
-        ? options.dispatch(park, () => resumeInScope(park))
+        ? options.dispatch(park, () => resumeInScope(park)).catch(error => hold(park, reasonOf(error)))
         : resumeInScope(park);
 
     const adapter: WorkerContinuationAdapter = {
         version: 1,
         id: `subagents-continuation:${randomUUID()}`,
         async onWaitReady(event) {
-            const park = parkedWaitByGeneration(event.waitId, event.generation);
+            let park: ParkedWait | null;
+            if (event.parkedAttemptId !== undefined) {
+                const meta = readMeta(event.parkedAttemptId);
+                const record = meta && readParkRecord(meta.id);
+                if (!meta || meta.sessionId !== event.owner.sessionId || !record
+                    || record.waitId !== event.waitId || record.generation !== event.generation) return "deferred";
+                park = parkedEntry(meta, record);
+            } else {
+                park = await parkedWaitByGeneration(event.waitId, event.generation);
+            }
             if (!park) return "delivered";
             const outcome = await resume(park);
             return outcome === "skipped" ? "deferred" : "delivered";
         },
         async onWaitCancelled(event) {
-            const park = parkedWaitByGeneration(event.waitId, event.generation);
+            const park = await parkedWaitByGeneration(event.waitId, event.generation);
             if (!park || park.record.phase === "cancelled") return;
             const cancellation = await stopPublishedAttempt(park, event.reason, options.stopAttempt, options.now);
             updateParkRecord(park.runId, {
@@ -2382,6 +2412,7 @@ export function isTerminalAttempt(meta: RunMeta): boolean {
 export interface ResumedAttemptExitInput {
     /** The attempt id published by the resume claim (NOT the parked attempt). */
     attemptId: string;
+    priorPark?: { runId: string; waitId: string; generation: number };
     service: WorkerOperationService | undefined;
     /** Recorded status for the reason text. */
     status?: string;
@@ -2430,7 +2461,20 @@ export function conversationWriterLeaseLive(
  * remain unchanged, even if writer exit cannot yet be proved.
  */
 export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): Promise<ResumedAttemptExitResult> {
-    return settleResumedAttemptExitForParks(input, parkedWaitsForResumedAttempt(input.attemptId));
+    if (input.priorPark) {
+        const { runId, waitId, generation } = input.priorPark;
+        const meta = readMeta(runId);
+        const record = meta && readParkRecord(runId);
+        if (!meta || !record || record.waitId !== waitId || record.generation !== generation || record.resumedBy !== input.attemptId) {
+            return { outcome: "ignored" };
+        }
+        return settleResumedAttemptExitForParks(input, [parkedEntry(meta, record)]);
+    }
+    const candidates: ParkedWait[] = [];
+    for await (const { meta, record } of scanParkRecords()) {
+        if (record.resumedBy === input.attemptId) candidates.push(parkedEntry(meta, record));
+    }
+    return settleResumedAttemptExitForParks(input, candidates);
 }
 
 async function settleResumedAttemptExitForParks(input: ResumedAttemptExitInput, candidates: readonly ParkedWait[]): Promise<ResumedAttemptExitResult> {
@@ -2675,12 +2719,10 @@ export async function reconcileParkedWaits(
     // Consumed waits cannot resume, but a missed exit observer may have left
     // their published writer claim behind. Reconcile that exact claim once.
     const candidates: ParkedWait[] = [];
-    for (const meta of listParkRecordCandidates()) {
-        const snapshot = meta.park ?? readParkRecord(meta.id);
-        if (!snapshot || (!isPendingPark(snapshot) && !(snapshot.phase === "consumed" && snapshot.resumedBy
-            && snapshot.resumeClaimId && snapshot.resumeExitReconciledClaimId !== snapshot.resumeClaimId))) continue;
-        const record = readParkRecord(meta.id);
-        if (record) candidates.push(parkedEntry(meta, record));
+    for await (const { meta, record } of scanParkRecords()) {
+        if (!isPendingPark(record) && !(record.phase === "consumed" && record.resumedBy
+            && record.resumeClaimId && record.resumeExitReconciledClaimId !== record.resumeClaimId)) continue;
+        candidates.push(parkedEntry(meta, record));
     }
     // Release earlier writers before admitting later waits in the conversation.
     candidates.sort((a, b) => a.record.parkedAt - b.record.parkedAt);

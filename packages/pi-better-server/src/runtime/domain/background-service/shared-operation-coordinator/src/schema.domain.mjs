@@ -1,7 +1,7 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/shared-operation-coordinator/src/schema.ts. Do not edit directly.
 // Generated from packages/operation-coordinator/src/schema.ts. Do not edit directly.
 /**
- * Schema v4 for the durable operation coordinator.
+ * Schema v5 for the durable operation coordinator.
  *
  * The store refuses to open a database whose recorded version it does not
  * understand, and leaves the file untouched. An unreadable or newer database
@@ -55,6 +55,14 @@ const BACKGROUND_CALLBACK_DDL = [
         SELECT 1,'',COALESCE(MAX(operation_id),''),CASE WHEN MAX(operation_id) IS NULL THEN 1 ELSE 0 END
         FROM operations WHERE owner_kind='parent-session' AND observer_kind='local-supervisor'`,
 ];
+const ASSIGNMENT_ATTEMPTS_DDL = `CREATE TABLE IF NOT EXISTS assignment_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    assignment_id TEXT NOT NULL REFERENCES assignment_bindings (assignment_id)
+)`;
+const ASSIGNMENT_ATTEMPT_COLUMN = `assignment_attempt_id TEXT REFERENCES assignment_attempts (attempt_id)`;
+const ASSIGNMENT_CLEANUP_INDEX = `CREATE INDEX IF NOT EXISTS operations_assignment_cleanup
+    ON operations (operation_id, assignment_attempt_id)
+    WHERE assignment_attempt_id IS NOT NULL`;
 const DDL = [
     `CREATE TABLE task_cancellation_authorities (
         credential_hash TEXT PRIMARY KEY,
@@ -91,6 +99,7 @@ const DDL = [
         owner_workspace TEXT NOT NULL,
         owner_branch_id TEXT,
         owner_goal_id TEXT,
+        ${ASSIGNMENT_ATTEMPT_COLUMN},
         observer_kind TEXT NOT NULL,
         observer_version TEXT NOT NULL,
         supervision_json TEXT,
@@ -113,6 +122,7 @@ const DDL = [
     `CREATE INDEX operations_owner ON operations (owner_kind, owner_session_id)`,
     `CREATE INDEX operations_phase ON operations (phase)`,
     `CREATE INDEX operations_running_supervisor ON operations (phase, supervision_host_id)`,
+    ASSIGNMENT_CLEANUP_INDEX,
     // Discovery leadership is separate from per-operation supervision. The token
     // fences stale acquisition and release; the host id is checked with process
     // identity before a replacement.
@@ -266,10 +276,7 @@ const DDL = [
         owner_json TEXT NOT NULL,
         recipient_json TEXT NOT NULL
     )`,
-    `CREATE TABLE assignment_attempts (
-        attempt_id TEXT PRIMARY KEY,
-        assignment_id TEXT NOT NULL REFERENCES assignment_bindings (assignment_id)
-    )`,
+    ASSIGNMENT_ATTEMPTS_DDL,
     `CREATE TABLE assignment_outcome_waits (
         assignment_id TEXT NOT NULL REFERENCES assignment_outcomes (assignment_id),
         wait_id TEXT NOT NULL,
@@ -313,17 +320,16 @@ export function ensureSchema(ctx) {
         throw new StoreError("schema-version", `The database was written by schema version ${recorded}; this build understands version ${SCHEMA_VERSION}. Upgrade the harness instead of downgrading the records.`);
     }
     if (recorded < SCHEMA_VERSION) {
-        if (recorded === 3) {
-            ctx.transaction(() => {
-                ensureAdditiveSchema(ctx);
-                ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE assignment_repairs")));
-                run(ctx, "UPDATE schema_meta SET value = ? WHERE key = ?", String(SCHEMA_VERSION), SCHEMA_VERSION_KEY);
-            });
-            return;
-        }
-        if (recorded === 1 || recorded === 2) {
+        ctx.transaction(() => {
+            // Another opener may have finished the upgrade before we acquired the write lock.
+            const current = readSchemaVersion(ctx);
+            if (current === SCHEMA_VERSION)
+                return;
+            if (current !== recorded) {
+                throw new StoreError("schema-version", "The coordinator schema changed during opening. Reopen the store to verify it.");
+            }
             ensureAdditiveSchema(ctx);
-            ctx.transaction(() => {
+            if (recorded <= 2) {
                 if (recorded === 1)
                     ctx.db.exec("ALTER TABLE outbox_events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'dependency-ready'");
                 for (const statement of DDL.filter((sql) => sql.startsWith("CREATE TABLE assignment_")))
@@ -332,14 +338,29 @@ export function ensureSchema(ctx) {
                 ctx.db.exec("UPDATE waits SET dispatch_disarmed = 1 WHERE EXISTS (SELECT 1 FROM assignment_outcome_waits aw WHERE aw.wait_id = waits.wait_id AND aw.generation = waits.generation)");
                 ctx.db.exec("DROP INDEX waits_one_pending_per_owner");
                 ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE UNIQUE INDEX waits_one_pending_per_owner")));
-                run(ctx, "UPDATE schema_meta SET value = ? WHERE key = ?", String(SCHEMA_VERSION), SCHEMA_VERSION_KEY);
-            });
-            return;
-        }
-        throw new StoreError("schema-version", `The database is at schema version ${recorded}; this build needs version ${SCHEMA_VERSION}. No migration is provided for this pair; records are left in place.`);
+            }
+            else if (recorded === 3) {
+                ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE assignment_repairs")));
+            }
+            ensureAssignmentCleanupSchema(ctx);
+            run(ctx, "UPDATE schema_meta SET value = ? WHERE key = ?", String(SCHEMA_VERSION), SCHEMA_VERSION_KEY);
+        });
+        return;
     }
     ensureAdditiveSchema(ctx);
-    ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE assignment_attempts")).replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+    ensureAssignmentCleanupSchema(ctx);
+}
+function ensureAssignmentCleanupSchema(ctx) {
+    const hasColumn = () => getRows(ctx, "PRAGMA table_info(operations)").some(row => row.name === "assignment_attempt_id");
+    if (hasColumn() && getRow(ctx, "SELECT 1 FROM sqlite_master WHERE name = 'operations_assignment_cleanup'"))
+        return;
+    ctx.transaction(() => {
+        ctx.db.exec(ASSIGNMENT_ATTEMPTS_DDL);
+        // Legacy writers leave the nullable provenance unset.
+        if (!hasColumn())
+            ctx.db.exec(`ALTER TABLE operations ADD COLUMN ${ASSIGNMENT_ATTEMPT_COLUMN}`);
+        ctx.db.exec(ASSIGNMENT_CLEANUP_INDEX);
+    });
 }
 /**
  * Schema version 1 is extended additively: older readers ignore the new column,

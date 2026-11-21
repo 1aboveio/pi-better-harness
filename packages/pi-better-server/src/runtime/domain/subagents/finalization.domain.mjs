@@ -15,6 +15,18 @@ import { parseRunForLifecycle } from "./parse.domain.mjs";
 import { canExitFinalize, effectiveStatus, isFinalResultStatus, readMeta, updateParkRecord, writeMeta, } from "./registry.domain.mjs";
 import { fmtElapsed, fmtSpend } from "./widget.domain.mjs";
 import { evaluateParkDisposition } from "./worker-waits.domain.mjs";
+import { reconcileRun } from "./health.domain.mjs";
+/** The current management owner calls this only for an interrupted, unobserved writer. */
+export function reconcileInterruptedRun(meta, probe, now, hooks = {}) {
+    const reconciliation = reconcileRun(meta, probe, now);
+    if ((meta.status === "running" || meta.status === "orphaned") && meta.supervisionInterruptedAt !== undefined && reconciliation.status === "lost") {
+        const run = parseRunForLifecycle(meta.id);
+        if (run.sawEnd && run.unmatchedToolCalls.length === 0) {
+            return { reconciliation, finalization: finalizeRun(meta.id, null, hooks) };
+        }
+    }
+    return { reconciliation };
+}
 /**
  * Finalize a run once its child exits. Idempotent: a run already marked
  * terminal is left alone. Persists lifecycle classification + failureReason

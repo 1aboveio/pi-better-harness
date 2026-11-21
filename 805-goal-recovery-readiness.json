@@ -1,0 +1,71 @@
+{
+  "unit": "805",
+  "status": "diagnosis-and-inprocess-reproduction-complete-caller-policy-decision-required",
+  "head": "d62b994268b6bfe1f88ecc2f50cadc33fd1c4c15",
+  "headKind": "Implementation and original assertions tested; subsequent report-only commit does not change production behavior.",
+  "standingOrders": [],
+  "decisionNeeded": {
+    "question": "Should the original standalone clean-recovery acceptance require the FIRST raw provider.getActivity promise to return ready, or allow explicit scope rebuilding followed by notification-driven Goal recovery? The current design/implementation and original fixture disagree at this boundary.",
+    "recommendation": "Keep control hello independent of source/query readiness and retain prompt truthful rebuilding. Prefer readiness-aware Goal consumption and original native fixture qualification through the existing subscribed ready publication, not blocking hello, returning false empty activity, or adding a timer.",
+    "optionA": "Keep the existing nonblocking subscription/status contract. Represent unverified provider coverage explicitly in Goal so it cannot be interpreted as background-drained; retain the last verified drain tracker until a ready publication. Align the standalone assertion with actual Goal consumption: initial unverified result is visible, then the same subscription must deliver ready within its already authorized overall acceptance budget. Approval must explicitly address the original FIRST raw-call success assertion; it is not silently removed here.",
+    "optionB": "Require first raw getActivity/subscribe to wait for authoritative scope readiness, but only within an explicitly chosen EXISTING caller/queue deadline and with typed scope-rebuilding/unavailable on expiry. This needs an API/budget owner: WorkClient's per-RPC timer currently ends when rebuilding is returned, so it is not a defined remaining budget for an additional post-response wait. Keep hello/control responsive and do not hold or extend a shared query slot across repair ticks. Deadline/unavailable outcomes still need readiness-aware drain handling; waiting alone cannot make unknown coverage safe.",
+    "notChosen": "No arbitrary readiness timer, retry loop, deadline extension, invented active placeholder, false empty result, or new participant initialization policy. No original native acceptance assertion changed."
+  },
+  "cause": {
+    "nativeRun": 44239562499,
+    "exactNativeHead": "4ef1df08c4cfb4379a932a1407700a00f0919155",
+    "nativeFailure": "Packed standalone getActivity after clean-stop receives Initial source inventory is rebuilding. Provider throws, raw eval child exits1, parent assertion at runtime-standalone.test.ts:265 requires0.",
+    "timeline": ".private-805/logs/ci4ef-recovery-timeline.jsonl:4-6 proves clean-stop -> different live owner/token -> initial provider error -> successful canonical24.14.1 hello. It does not prove ready inventory or eventual convergence.",
+    "mechanism": "ensureRuntime/handshake establishes canonical owner/control endpoint, not query scope coverage. WorkReadModel constructor starts rebuilding and defers checkpoint/assignment-reader initialization. query-worker registers its query handler then starts model.reconcile asynchronously. Ordinary snapshot/subscribe handling does not await that reconciliation. WorkQueries returns the current truthful snapshot and installs the subscription atomically. WorkClient accepts that rebuilding response; observationClient completes the initial subscription and backgroundGoalObservation returns its cached snapshot. goal-provider.ts rejects status!=ready. The raw standalone recovery caller treats this explicitly unverified observation as a fatal recovery failure rather than exercising Goal's caller handling.",
+    "notCause": "No Background inbox lock is needed: the reproduction has successful construction, no held writer and initial initialization.attempts=0 at successful hello. This is independent of807's remaining Background acquisition deferral. No stale owner replacement, missing hello, lost ready publication or need for periodic Goal polling is established.",
+    "actualGoalHandling": "collectActivitySnapshot catches the provider rejection and creates background-tasks:provider-error with terminal attention. bindProviderSubscriptions marks the provider dirty and recollects on the existing notification. The in-process same-client case receives ready after ordinary reconcile, and the error clears on collection with no additional RPC. This is not a full extension scheduling/native model-turn qualification.",
+    "additionalObservedRisk": "The generic provider-error snapshot currently has category idle-waiting and zero active work. planBackgroundDrainWake given a previously active tracker returns a drain wake signature for it. This is an actual pure-plan counterexample, not proof that the native failed fixture launched a model turn. A transient scope-rebuilding error is therefore not safely equivalent to verified drained activity; a readiness-aware consumer decision is needed, not a hidden wait that avoids this state in one test."
+  },
+  "sourceEvidence": [
+    { "path": "../../sources/805.json", "meaning": "Owner/branch-scoped real activity changes and deadlines, no periodic full-state polling, exact notifications, original session host retains continuation decisions." },
+    { "path": "docs/adr/0023-unified-server-runtime.md", "meaning": "One canonical server; observation does not transfer execution authority; linked unified runtime design remains the source of readiness constraints." },
+    { "path": "docs/plans/unified-server-runtime.md:103", "meaning": "Section6.2 expressly distinguishes successfulhello from scope-ready; section7.2 retains rebuilding/degraded statuses and forbids interpreting unverified empty state as all tasks completed." },
+    { "path": "packages/pi-better-server/src/startup/ensure.ts:83", "meaning": "Readiness object is built from health/hello. It does not verify all source scopes." },
+    { "path": "packages/pi-better-server/src/handshake.ts:41", "meaning": "Hello validates protocol/root/capabilities, not inventory or Goal scope readiness." },
+    { "path": "packages/pi-better-server/src/runtime/query-worker.mjs:165", "meaning": "Non-liveness query handling serves WorkQueries without awaiting reconcile; final module startup invokes model.reconcile independently." },
+    { "path": "packages/pi-better-server/src/runtime/read-model.ts:1096", "meaning": "Background scope status remains root state until checkpoint AND assignment reader initialization is complete." },
+    { "path": "packages/pi-better-server/src/runtime/queries.ts:78", "meaning": "Snapshot capture and subscription installation share a serial point; readiness is encoded in the returned snapshot, not inferred from control hello." },
+    { "path": "packages/pi-better-background-tasks/src/work-observation.ts:14", "meaning": "Goal reads subscribed cache; it does not run a full-state RPC on healthy unchanged reads." },
+    { "path": "packages/pi-better-background-tasks/src/goal-provider.ts:62", "meaning": "Non-ready scope throws explicitly instead of claiming empty verified activity." },
+    { "path": "packages/pi-better-goal/src/activity.ts:107", "meaning": "Generic provider exceptions become attention items; no distinct temporary scope-unverified representation currently exists. Drain planner uses active count, not readiness." },
+    { "path": "packages/pi-better-goal/src/index.ts:826", "meaning": "Provider notification binding marks dirty and recollects; source/caller generation fences remain intact." },
+    { "path": "packages/pi-better-server/test/runtime-standalone.test.ts:225", "meaning": "Raw first recovery call requires items=[] immediately; this is not collectActivitySnapshot's provider-error-to-ready event handling." }
+  ],
+  "deadlines": {
+    "workClient": "Existing5000ms request timer is cleared on the successful rebuilding response. subscribe awaits hello and one request, not source readiness. get's3500ms exact-ID retry path is unrelated to Goal's scope cache and must not be borrowed as a new readiness loop.",
+    "executor": "Existing caller/queue waiter starts at admission and expires on its original timeout (default4000ms, configured400ms in focused gates). A completed rebuilding reply finishes the waiter. Control hello has separate liveness meaning; repair tick does not renew caller deadlines.",
+    "proof": "In-process unverified read asserts the existing400ms focused caller bound, passes without adding a timer or waiting for inventory. No existing production deadline changed.",
+    "policyGap": "Neither current Goal provider API nor observationClient defines a post-response first-ready await budget. Selecting one silently would change semantics rather than fix an implementation under a clear existing contract."
+  },
+  "proof": {
+    "file": ".private-805/goal-recovery-readiness.test.ts",
+    "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test .private-805/goal-recovery-readiness.test.ts",
+    "exit": 0,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "log": ".private-805/logs/goal-recovery-readiness.log",
+    "components": "Actual WorkReadModel/SQLite, WorkQueries, WorkClient, checkHello, registered Background Goal provider, backgroundGoalObservation subscription/cache, collectActivitySnapshot and planBackgroundDrainWake. In-memory EventEmitter frame transport and owner-host connect hook only; source-watch hint adapter is inert. No fake ready snapshot or substitute projection.",
+    "sequence": [
+      "Actual checkHello succeeds for replacement-owner while model initialization.attempts is0.",
+      "Actual provider.getActivity rejects Initial source inventory is rebuilding promptly; WorkClient caches rebuilding.",
+      "Actual Goal collector creates one provider-error attention item rather than throwing; current drain planner given a prior active tracker plans a wake (diagnostic counterexample).",
+      "Explicit normal model.reconcile initializes actual derived participants and publishes ready through the SAME WorkQueries/WorkClient subscription; Goal notification listener fires.",
+      "Next actual Goal collection has no provider error and empty verified activity; five warmed reads add no RPC.",
+      "Entire command trace is exactly hello,runtime_subscribe. No get query, resubscribe, periodic full-state poll, added readiness timer or participant policy."
+    ],
+    "latestDiagnostic": { "helloInstance": "replacement-owner", "initial": "rebuilding", "caller": "provider-error", "afterPublication": "ready", "commands": ["hello", "runtime_subscribe"], "notifications": 3, "providerErrorCategory": "idle-waiting", "priorActiveDrainWake": "existing-goal:previous-task:running", "elapsedMs": 12.17708400000015 },
+    "boundary": "Supported smallest in-process owner-start/readiness scheduling case. Does not reproduce native installer/daemon restart, standalone reconnect race, full Goal extension admission, physical root budgets or a native model wake. LocalNode24.21.0 is not canonical24.14.1. Native first-body evidence remains the exactLinux artifact, not replaced by componentPASS."
+  },
+  "changes": "Private reproducible diagnostic and report only. No production or original native-test changes; no unapproved807 merge. Existing805 fixtures, all77 SSH assertion/wait calls, startup diagnostics and prior failure/counter history retained.",
+  "remaining": [
+    "Coordinator/Architect selects the precise first-call contract and owns any original acceptance alignment. Recommended nonblocking/event-driven option requires explicit readiness-aware drain handling rather than treating provider-error as verified empty.",
+    "After that decision, implement the selected caller correction and focused regression without modifying807 participant acquisition policy or extending any query/control/cleanup deadline.",
+    "Coordinator owns original exact-head native qualification, push and CI waits. Original4ef recovery failure remains FAILED."
+  ]
+}

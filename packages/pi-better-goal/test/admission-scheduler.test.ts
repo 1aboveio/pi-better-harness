@@ -23,7 +23,6 @@ function setup(t: TestContext) {
   writeFileSync(script, `
 import { appendFileSync, existsSync, readFileSync, watch } from "node:fs";
 const root = process.argv[process.argv.indexOf("--run") + 1];
-appendFileSync(root + "/launches", process.pid + "\\n");
 const watcher = watch(root, () => finish());
 let finished = false;
 function finish() {
@@ -35,6 +34,8 @@ function finish() {
   process.exitCode = response.exit ?? 0;
 }
 finish();
+// The parent may release immediately after this marker becomes visible.
+appendFileSync(root + "/launches", process.pid + "\\n");
 `);
   const entries: any[] = [{ type: "custom", customType: "pi-better-workflow-plan", data: { version: 1, kind: "set", owner: owner.name, path: planPath } }];
   const launches = () => existsSync(join(root, "launches")) ? readFileSync(join(root, "launches"), "utf8").trim().split("\n").length : 0;
@@ -100,7 +101,10 @@ test("admission isolates authority, execution revision, timeout and run while sh
   ];
   await Promise.all([h.waitForLaunches(4), other.waitForLaunches(1)]);
   h.release(); other.release();
-  assert.ok((await Promise.all(pending)).every((gate) => gate.ok));
+  const gates = await Promise.all(pending);
+  assert.ok(gates.every((gate) => gate.ok), JSON.stringify(gates.map((gate, index) => ({
+    index, ok: gate.ok, ...(!gate.ok ? { reason: gate.reason.slice(0, 400) } : {}),
+  }))));
   assert.equal(h.launches(), 4);
   assert.equal(other.launches(), 1);
 });
@@ -155,13 +159,15 @@ async function setupExtension(t: TestContext) {
   await commands.get("goal").handler("/skill:rush-issues #1", ctx);
   h.entries.push({ type: "custom", customType: "pi-better-workflow-plan", data: { version: 1, kind: "set", owner: h.owner.name, path: h.planPath } });
   const owner = { sessionId: "admission-parent", workspace: h.root, goalId: currentGoalSnapshot(ctx)!.goalId };
-  const ask = () => new Promise<OperationResumeGate>((reply) => events.emit(OPERATION_RESUME_ADMISSION, { version: 1, owner, reply }));
+  const ask = (pending?: () => void) => new Promise<OperationResumeGate>((reply) => events.emit(OPERATION_RESUME_ADMISSION, { version: 1, owner, pending, reply }));
   return { ...h, ask, handlers, commands, ctx };
 }
 
 test("the real admission handler coalesces candidates and invalidates a grant on pause", async (t) => {
   const h = await setupExtension(t);
-  const pending = Array.from({ length: 16 }, h.ask);
+  let started = 0;
+  const pending = Array.from({ length: 16 }, () => h.ask(() => { started++; }));
+  assert.equal(started, 16, "each caller learns immediately that its workflow check is pending");
   await h.waitForLaunches(1);
   h.release();
   const gates = await Promise.all(pending);
@@ -175,7 +181,7 @@ test("the real admission handler coalesces candidates and invalidates a grant on
 for (const change of ["pause", "session switch", "workflow rebind", "agent start", "shutdown"] as const) {
   test(`the real admission handler holds all pending requests after ${change}`, async (t) => {
     const h = await setupExtension(t);
-    const pending = Array.from({ length: 16 }, h.ask);
+    const pending = Array.from({ length: 16 }, () => h.ask());
     await h.waitForLaunches(1);
     if (change === "pause") await h.commands.get("goal").handler("pause", h.ctx);
     else if (change === "session switch") await h.handlers.get("session_start")({}, {

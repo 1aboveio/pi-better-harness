@@ -1,0 +1,77 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "accepted-plan612-implemented-focused-proof-pass-native-qualification-pending",
+  "head": "2cb6f69ffbf9ee66f7053ed7b40e5c8711ba1ea2",
+  "headKind": "Implementation commit; subsequent report-only commit leaves implementation/tests unchanged.",
+  "decision": "805-preserve-unverified-goal-coverage accepted in planRevision612; no new first-response wait/retry budget.",
+  "standingOrders": [],
+  "cause": "Provider errors were converted to attention items with zero observed active work, but without an availability distinction. The collector labeled this idle, and the drain planner discarded a previously active tracker and planned a wake. The first healthy restarted runtime can legitimately return rebuilding before query coverage is initialized even though hello succeeds. A failed fresh provider read could also leave an older verified provider cache available to a later explicit inspection.",
+  "implementation": [
+    "BackgroundProviderSnapshot and aggregate ActivitySnapshot expose optional coverage=verified/unverified. Successful legacy providers remain compatible; explicitly unverified provider responses are preserved. Exceptions always mark provider coverage unverified, retain existing diagnostic attention item and propagate aggregate unverified category. Counts still describe observed rows; no invented active task or verified-empty claim.",
+    "Drain planner retains exactly the current active goal's last verified tracker while coverage is unverified, without emitting a wake or replacing its signature with a partial observation. Paused/completed/replaced goal fences remain prior to this guard. A later verified-empty publication drains exactly once.",
+    "Actual Goal automatic idle/settled/restored/preference/audit paths respect unknown coverage, cancel a pending idle wake, and do not infer drained work. Question harvest cannot fabricate finished work from unverified absence. Existing authority, admission, branch/generation and recipient rules remain. Prompt/summary explicitly identify unverified background activity.",
+    "Provider cache invalidation on failed fresh reads uses existing execution/provider/sequence fences. A stale older success or failure cannot overwrite a newer observation, and a later explicit inspection cannot resurrect an older verified cache after a failure. No retry or new polling path added.",
+    "Standalone cold/recovery fixture uses a shared test-only goalActivityWhenReady helper: register production provider notifications, inspect the existing subscribed snapshot, reject actual degraded coverage, and resolve actual provider activity only after source-ready publication. It never treats hello as source-ready, sleeps, creates a timer or queries full state periodically. Same helper is exercised by the actual-component regression.",
+    "Original standalone900000ms fixture deadline remains unchanged. Cold/recovery child processes receive that existing test AbortSignal so an unfinished readiness publication cannot outlive the original fixture. All original item/owner/registration/crash/receipt assertions retained with only the accepted subscribed-readiness call substitution. Fixture context supplies an empty actual test branch; no production identity/authority manufacture."
+  ],
+  "proof": {
+    "causalRed": {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/goal-recovery-readiness.test.ts",
+      "exit": 1,
+      "expectedFailure": "unverified coverage cannot prove that previously active work drained: actual existing-goal:previous-task:running vs expected null",
+      "evidence": ".private-805/logs/unverified-goal-red.log",
+      "boundary": "Actual model/WorkClient/provider/collector counterexample, before production edit; not a fabricated snapshot-only counterexample."
+    },
+    "causalAndCallerGreen": {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/goal-recovery-readiness.test.ts packages/pi-better-goal/test/activity.test.ts packages/pi-better-goal/test/activity-notifications.test.ts",
+      "exit": 0, "passed": 24, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/unverified-goal-accepted-proof.log",
+      "actualComponents": "Real WorkReadModel/SQLite, WorkQueries, WorkClient, checkHello, registered Background provider, backgroundGoalObservation, collector and drain planner. In-memory frame transport/source hint adapter only; no native daemon/installer/socket replay or substitute ready projection.",
+      "sequence": "hello succeeds with initialization.attempts0; first provider read promptly rejects rebuilding under the existing400ms focused bound; collector returns explicit unverified/provider-error; previously active tracker remains and wake=null; shared standalone fixture helper remains pending despite hello; ordinary model.reconcile publishes ready through SAME subscription; helper and collector return verified empty; preserved tracker emits exactly one drain wake; subsequent reads/wake planning do not duplicate it.",
+      "trace": ["hello", "runtime_subscribe"],
+      "noPolling": "Five warmed provider reads and recovery publication add no get RPC or resubscribe. No readiness timer, wait budget, busy loop or retry opportunity added.",
+      "actualGoalExtension": "Both thrown-provider and explicit-unverified cases exercise actual Goal notification/cache/publish/agent_settled handling. Failed fresh read cannot resurrect a verified cache. Advancing original mock timers60000ms creates no wake/query while unknown; verified notification clears unknown and drains once; another60000ms produces no duplicate wake. Existing generation/pause/resume/hold/completion tests also pass.",
+      "mixedCoverage": "Known active rows remain observable while another provider is unverified; no partial observation overwrites prior verified tracker. Unknown coverage neither transfers tracker to another goal nor retains it for a paused goal."
+    },
+    "types": {
+      "command": "npm run typecheck --workspace packages/pi-better-goal --workspace packages/pi-better-server",
+      "exit": 0,
+      "evidence": ".private-805/logs/unverified-goal-accepted-types.log"
+    },
+    "standaloneAssertions": {
+      "command": "TypeScript AST comparison against892f6b44, normalizing only approved provider.getActivity -> subscribed readyActivity call substitution",
+      "exit": 0,
+      "result": "All60 original standalone assertions retained.",
+      "evidence": ".private-805/logs/unverified-goal-standalone-guards.log"
+    },
+    "sshAssertions": {
+      "command": "node .private-805/scripts2-phase-check.mjs",
+      "exit": 0,
+      "result": "All77 original SSH assertion/wait ASTs unchanged; lifecycle first-error/teardown evidence preserved.",
+      "evidence": ".private-805/logs/unverified-goal-ssh-guard.log"
+    },
+    "integrity": [
+      { "command": "node --check packages/pi-better-server/test/support/goal-ready.mjs", "exit": 0 },
+      { "command": "git diff --check", "exit": 0 }
+    ]
+  },
+  "retainedBroaderFailures": {
+    "command": "npm run test --workspace packages/pi-better-goal",
+    "exit": 1,
+    "passed": 262, "failed": 2, "total": 264,
+    "evidence": ".private-805/logs/unverified-goal-suite.log",
+    "cases": [
+      { "case": "admission isolates authority, execution revision, timeout and run while sharing equivalent checks", "firstError": "admission-scheduler.test.ts:103 assert.ok((await Promise.all(pending)).every(gate=>gate.ok)) false after about20076ms", "disposition": "Retained failure in unchanged scheduler test/path; no claim of baseline equivalence or green full suite, no timeout relaxation or admission replay." },
+      { "case": "trusted harness producers record diagnostics without gating continuation", "firstError": "Harness dependency staging cannot find module pi-ollama-cloud/package.json", "disposition": "Retained staging prerequisite failure; no dependency/global/runtime/permission changes and no repeated producer/native replay." }
+    ],
+    "note": "These remain qualification gaps;24focused tests do not supersede the broader suite. Later mixed-coverage unit addition is covered by final24case focused run, not retrospectively included in this264case earlier run."
+  },
+  "retainedIterationHistory": "Initial new-test static imports pulled cross-package implementation into the Server test type graph and exposed declaration/optional-value errors. Existing repo dynamic domain import pattern, explicit guarded non-null assertions and a test-helper declaration resolved them; final Goal+Server typechecks pass. Initial/final logs remain in .private-805/logs/unverified-goal-*; no earlier failure record overwritten.",
+  "remaining": [
+    "Coordinator qualifies original packed standalone clean-restart and first-query scenarios on this exact composition; no native recovery PASS claimed here.",
+    "Retain the two broader-suite failures for coordinator qualification/ownership; no assertion or deadline changes were used to clear them.",
+    "807's Background inbox acquisition continuation remains separate and untouched; this fix neither implements participant deferral nor claims it repairs that native producer."
+  ],
+  "boundaries": "Nonblocking reads unchanged; no new production timer/wait/retry/threshold or deadline extension, no hello/query readiness conflation, no server mutation/ownership/branch/recipient/token/outcome policy change, no physical/bounded-work relaxation, no shared runtime/settings changes, no restricted native replay, push or external waits. Existing resources and standingOrders=[] retained."
+}

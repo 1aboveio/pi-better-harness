@@ -33,7 +33,7 @@ export function inspectTaskProcess(meta, access, probe = sampleProcess) {
         return unavailable("Process activity adapter is unavailable under Main confinement; no unconfined process probe was run. Process access Read does not bypass kernel rules.");
     if (access !== "read")
         return { availability: "blocked", reason: access === "off"
-                ? "Process access is Off in Main or Background tasks. Enable Read in /sandbox; this does not describe task confinement."
+                ? "An active Main or Background tasks profile denies process reads. Check Process access in /sandbox; this does not describe task confinement."
                 : "Current process-access policy is unavailable; no process probe was run.", limit: LIMIT };
     if (meta.ssh)
         return unavailable("Remote activity is unavailable; no remote diagnostic command was run.");

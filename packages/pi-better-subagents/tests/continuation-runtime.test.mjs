@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { EventEmitter } from 'node:events';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -39,7 +39,7 @@ const oldPath = process.env.PATH; process.env.PATH = `${bin}:${oldPath ?? ''}`;
 const { startWorkRuntimeFixture } = await import('./work-runtime-fixture.mjs');
 const stopRuntime = await startWorkRuntimeFixture();
 
-function fixture(name) {
+function fixture(name, implementation = extension, port = managedDomainPort()) {
   const workspace = join(root, name); mkdirSync(workspace);
   const tools = new Map(), handlers = new Map();
   const host = { events: new EventEmitter(), registerTool: x => tools.set(x.name, x),
@@ -49,7 +49,7 @@ function fixture(name) {
     modelRegistry: { getAvailable: () => [{ provider: 'test', id: 'model', reasoning: true }], find: () => undefined },
     isIdle: () => true, ui: { notify() {}, setWidget() {} },
     sessionManager: { getSessionId: () => name, getBranch: () => [] } };
-  extension(host, managedDomainPort());
+  implementation(host, port);
   const execute = (tool, params) => tools.get(tool).execute('check', params, undefined, undefined, ctx);
   return { execute, workspace, shutdown: () => handlers.get('session_shutdown')?.({}, ctx) };
 }
@@ -65,6 +65,44 @@ async function terminal(id) {
 }
 
 try {
+  await test('a server upgrade continues the same native history with its original worker release', { skip: process.platform === 'win32' }, async () => {
+    const install = realpathSync(join(root));
+    symlinkSync(join(repo, 'node_modules'), join(install, 'node_modules'), 'dir');
+    async function release(id) {
+      const releaseRoot = join(install, 'releases', id.repeat(64));
+      const domain = join(releaseRoot, 'src/runtime/domain/subagents');
+      cpSync(join(repo, 'packages/pi-better-subagents'), domain, { recursive: true,
+        filter: path => !['tests', 'node_modules'].includes(path.split('/').at(-1)) });
+      mkdirSync(join(releaseRoot, 'node/bin'), { recursive: true });
+      const node = join(releaseRoot, 'node/bin/node');
+      writeFileSync(node, `#!/bin/sh\nexec '${process.execPath}' "$@"\n`); chmodSync(node, 0o700);
+      writeFileSync(join(releaseRoot, 'runtime.json'), JSON.stringify({format: 1, root: releaseRoot, installRoot: install, node,
+        build: {contentId: id.repeat(64), protocolVersion: 1, piSdkVersion: 'fixture', nodeVersion: process.versions.node, platform: process.platform}}));
+      const port = managedDomainPort();
+      port.workerCommand = args => ({file: process.execPath, fileArgs: [join(domain, 'child-runtime.mjs'), executable, ...args]});
+      return {root: releaseRoot, domain, port, implementation: (await import(pathToFileURL(join(domain, 'index.ts')).href)).default};
+    }
+    const old = await release('a'), current = await release('b');
+    const firstHost = fixture('release-before', old.implementation, old.port);
+    const nextHost = fixture('release-after', current.implementation, current.port);
+    try {
+      const first = await terminal(idOf(await firstHost.execute('subagent_spawn', {
+        prompt: 'before upgrade', cwd: firstHost.workspace, model: 'test/model', sandbox: false, callback: false, tools: 'read', skills: [],
+      })));
+      assert.equal(first.recipe.runtimeRoot, old.root);
+      const previous = JSON.stringify(first);
+      const resumed = await terminal(idOf(await nextHost.execute('subagent_spawn', {session_id: first.sessionId, prompt: 'after upgrade'})));
+      assert.equal(resumed.exitCode, 0);
+      assert.equal(resumed.sessionId, first.sessionId);
+      assert.equal(resumed.recipe.runtimeRoot, old.root);
+      const child = JSON.parse(readFileSync(join(root, `child-${resumed.pid}.json`), 'utf8'));
+      assert.equal(child.before, 2, 'native history survives the release change');
+      assert.ok(child.argv.includes(join(old.domain, 'child-steer.ts')));
+      assert.ok(!child.argv.includes(join(current.domain, 'child-steer.ts')));
+      assert.equal(JSON.stringify(readMeta(first.id)), previous);
+    } finally { firstHost.shutdown(); nextHost.shutdown(); }
+  });
+
   await test('configuration changes cannot silently replace an extension implementation on resume', async () => {
     const f = fixture('extension-owner');
     const a = join(root, 'extension-a.ts'), b = join(root, 'extension-b.ts');

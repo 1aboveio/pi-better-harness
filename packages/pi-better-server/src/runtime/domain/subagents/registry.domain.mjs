@@ -13,10 +13,12 @@
  * run directory does not delete them.
  */
 import { assignmentRetainsEvidence } from "./assignment-outcomes.domain.mjs";
-import { execFileSync } from "node:child_process";
+import { processStartToken } from "./process-identity.mjs";
+export { processStartToken } from "./process-identity.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { processExists } from "./spawn.domain.mjs";
@@ -171,6 +173,33 @@ export function listParkRecordCandidates(metas = listMetas()) {
     }
     return metas.filter((meta) => meta.park !== undefined
         || (volatileIds.has(meta.id) && existsSync(parkRecordPath(meta.id))));
+}
+/** Read recovery sidecars in batches so a large registry does not block socket replies. */
+export async function* scanParkRecords(metas = listMetas()) {
+    const runs = join(baseDir(), "runs");
+    const volatileIds = new Set(await readdir(runs).catch(() => []));
+    const batchSize = 32;
+    for (let offset = 0; offset < metas.length; offset += batchSize) {
+        const batch = await Promise.all(metas.slice(offset, offset + batchSize).map(async (meta) => {
+            if (!meta.park && !volatileIds.has(meta.id))
+                return;
+            try {
+                const record = parseParkRecord(JSON.parse(await readFile(join(runs, meta.id, "park.json"), "utf-8")));
+                if (record)
+                    return { meta, record };
+            }
+            catch (error) {
+                if (error.code === "ENOENT" && meta.park) {
+                    const record = readMeta(meta.id)?.park;
+                    if (record)
+                        return { meta, record };
+                }
+            }
+        }));
+        for (const entry of batch)
+            if (entry)
+                yield entry;
+    }
 }
 /**
  * How long a launch attempt that never produced a child is kept before a sweep
@@ -473,36 +502,6 @@ function lockTimeout(id) {
 let ownStartKnown = false;
 let ownStartCache;
 const foreignStartCache = new Map();
-/** Best-effort process start identity. Unavailable does not prove the pid is dead. */
-export function processStartToken(pid) {
-    if (process.platform === "linux") {
-        try {
-            const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-            const close = stat.lastIndexOf(") ");
-            if (close >= 0) {
-                const starttime = stat.slice(close + 2).split(" ")[19];
-                if (starttime && /^\d+$/.test(starttime))
-                    return starttime;
-            }
-        }
-        catch (error) {
-            if (errnoOf(error) !== "ENOENT" && errnoOf(error) !== "EACCES")
-                return undefined;
-        }
-    }
-    try {
-        const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-            encoding: "utf-8",
-            timeout: 1_000,
-            env: { ...process.env, LC_ALL: "C" },
-            stdio: ["ignore", "pipe", "ignore"],
-        }).trim().replace(/\s+/g, " ");
-        return out === "" ? undefined : out;
-    }
-    catch {
-        return undefined;
-    }
-}
 function ownStartToken() {
     if (ownStartKnown)
         return ownStartCache;
@@ -974,10 +973,22 @@ export function observeArchivePublication(id, error) {
     catch { /* the journal is best-effort; retaining the run is the safety net */ }
 }
 export function writeMeta(meta, options = {}) {
+    if (options.patch && !readMeta(meta.id))
+        return;
     mkdirSync(runDir(meta.id), { recursive: true });
+    let written = false;
     withRunMetaLock(meta.id, (owns) => {
         if (options.ifAbsent && existsSync(metaPathFor(meta.id)))
             return;
+        if (options.patch) {
+            const current = readMeta(meta.id);
+            if (!current)
+                return;
+            const patch = options.patch(current);
+            if (!patch)
+                return;
+            meta = { ...current, ...patch, id: meta.id };
+        }
         metaWriteBarrier?.();
         if (!owns())
             throw new MetadataLockLost();
@@ -999,10 +1010,13 @@ export function writeMeta(meta, options = {}) {
             }
         }
         owns();
+        written = true;
     });
+    if (options.patch && !written)
+        return;
     for (const listener of metaChangedListeners) {
         try {
-            listener();
+            listener(meta);
         }
         catch { /* best effort */ }
     }
@@ -1054,7 +1068,7 @@ export function removeMetaArtifacts(meta, options = {}) {
         removeIndexEntry(join(baseDir(), "by-origin", originKey(originOf(meta))), meta.id);
         for (const listener of metaChangedListeners) {
             try {
-                listener();
+                listener(meta);
             }
             catch { /* best effort */ }
         }

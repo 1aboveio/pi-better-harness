@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import extension from '../index.js';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
+import { getObservedWaitHost } from '../observed-waits.js';
 
 /** Real native SDK registration, session identity and transcript. The daemon is
  * supplied by startWorkRuntime; this helper never creates a mechanical runtime. */
@@ -42,6 +43,9 @@ export async function nativeBackground(options: { cwd?: string; sessionId?: stri
   await session.setModel(session.extensionRunner!.createContext().modelRegistry.find('background-fixture', 'model')!);
   await session.bindExtensions({ mode: 'print' });
   return { pi, session, manager, tools,
+    readDurableTask(id: string) {
+      return getObservedWaitHost(pi)?.readDurableTask({ cwd, sessionId: manager.getSessionId() }, id);
+    },
     async execute(name: string, params: Record<string, unknown>) {
       const tool = tools.get(name);
       if (!tool) throw new Error(`tool not registered: ${name}`);

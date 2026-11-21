@@ -1,4 +1,6 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/observed-waits.ts. Do not edit directly.
+import { getObservedWaitHost, registerObservedWaitClient } from "./observed-wait-client.domain.mjs";
+export { getObservedWaitHost, registerObservedWaitClient } from "./observed-wait-client.domain.mjs";
 /**
  * Parent-side observed waits: the integration between background tasks, the
  * detached local supervisor and the durable operation coordinator.
@@ -21,15 +23,18 @@
  * calling the existing `resolve*SandboxPlan` helpers.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, watch } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { describeSupervisedProgress, supervisedProgress } from "./supervised-progress.domain.mjs";
 import { validateCondition } from "./conditions.domain.mjs";
 import { STEP_GATE_COMMAND_ENV, commandExecution, parseStepGateFailure, processExists, stepGateScript, validateCommandSpec, } from "./process.domain.mjs";
 import { currentProcessStartToken, readProcessStartToken } from "./process-identity.domain.mjs";
 import { assertBackgroundExecutionAllowed, backgroundExecutionLimits, confineCommandSpec, resolveForegroundSandboxPlan, currentForegroundSandboxPolicy, resolveWorkerSandboxPlan, sandboxProvenance, } from "./sandbox.domain.mjs";
 import { openStore, cancellationCredential, } from "./shared-operation-coordinator/index.domain.mjs";
 import { createLocalSupervisor, defaultSupervisorDirectory, supervisorPaths, supervisorTaskIdForToken, } from "./supervisor/index.domain.mjs";
+import { processGroupAlive } from "./supervisor/identity.domain.mjs";
+import { readStopRequest, writeTextAtomic } from "./supervisor/store.domain.mjs";
 export const OBSERVED_WAITS_SERVICE_VERSION = 2;
 export const OBSERVED_WAITS_SERVICE_CHANNEL = "pi-better-background-tasks:observed-waits-service";
 export const OBSERVED_WAITS_SERVICE_REQUEST_CHANNEL = "pi-better-background-tasks:observed-waits-service-request";
@@ -165,18 +170,13 @@ export function observedWaitServiceUnavailableReason(pi) {
     const events = eventBusOf(pi);
     return events ? serviceErrors.get(events) : undefined;
 }
-const hosts = new WeakMap();
 export function createObservedWaitHost(pi, options = {}) {
-    const existing = hosts.get(pi);
+    const existing = getObservedWaitHost(pi);
     if (existing && existing !== undefined)
         existing.close();
     const host = new ObservedWaitHost(pi, options);
-    hosts.set(pi, host);
+    registerObservedWaitClient(pi, host);
     return host;
-}
-export function registerObservedWaitClient(pi, host) { hosts.set(pi, host); }
-export function getObservedWaitHost(pi) {
-    return pi && typeof pi === "object" ? hosts.get(pi) : undefined;
 }
 function branchIdsOf(ctx) {
     try {
@@ -361,6 +361,51 @@ export class ObservedWaitHost {
     pollMs;
     options;
     timer;
+    changeWatcher;
+    changeRepair;
+    changePosition;
+    changeScheduled = false;
+    managedDirty = false;
+    managedAfter = 0;
+    observeManagedChanges() {
+        const schedule = () => {
+            if (this.closed || this.changeScheduled)
+                return;
+            this.changeScheduled = true;
+            setImmediate(() => {
+                this.changeScheduled = false;
+                if (this.closed || !this.store)
+                    return;
+                try {
+                    const page = this.store.resultSupervisionChanges(this.changePosition);
+                    const changed = page.reset || page.seq !== this.changePosition?.seq;
+                    this.changePosition = { generation: page.generation, seq: page.seq };
+                    this.managedDirty ||= changed;
+                    if (this.managedDirty && Date.now() >= this.managedAfter) {
+                        this.managedDirty = false;
+                        this.managedAfter = Date.now() + 1000;
+                        void this.reconcileNow();
+                    }
+                    if (page.more)
+                        schedule();
+                }
+                catch { /* Existing authority remains unchanged; the bounded feed repair retries. */ }
+            });
+        };
+        this.changeWatcher = watch(dirname(this.storePath), (_event, file) => {
+            if (!file || String(file).startsWith("operation-coordinator.sqlite"))
+                schedule();
+        });
+        this.changeWatcher.on("error", () => { this.changeWatcher?.close(); this.changeWatcher = undefined; });
+        const repair = () => {
+            if (this.closed)
+                return;
+            schedule();
+            this.changeRepair = setTimeout(repair, 1000);
+            this.changeRepair.unref();
+        };
+        repair();
+    }
     closed = false;
     activationAttempted = false;
     unavailableReason;
@@ -392,6 +437,7 @@ export class ObservedWaitHost {
     continuationError;
     launches = new Map();
     localCancels = new Set();
+    assignmentCleanupCursor;
     resultHandoffs = new Set();
     rpcRuns = new Map();
     waitOwners = new Map();
@@ -493,6 +539,16 @@ export class ObservedWaitHost {
     }
     get usesServerResults() { return this.options.serverOwnedResults === true; }
     get hasActivated() { return this.activationAttempted; }
+    /** Ready worker continuations can advance; held decisions and unread results cannot. */
+    advancingWaits() {
+        if (!this.store || !this.continuation)
+            return [];
+        return this.store.listWaits({ phase: ["ready", "resuming"], pendingOnly: true })
+            .filter(wait => wait.owner.kind === "worker-conversation")
+            .map(wait => ({ kind: "advancing-wait", id: wait.waitId, generation: wait.generation, owner: wait.owner,
+            lastProgressAt: wait.updatedAt, nextDeadline: wait.updatedAt + (this.options.verificationMs ?? 30000), recovery: "captured-worker-continuation" }))
+            .filter(wait => wait.nextDeadline > Date.now());
+    }
     get reason() {
         return this.unavailableReason;
     }
@@ -536,7 +592,10 @@ export class ObservedWaitHost {
         void this.reconcileNow();
         this.recoverTerminalNotifications();
         this.terminalRecoveryNeeded = false;
-        if (this.pollMs > 0) {
+        if (this.options.serverOwnedResults && this.options.sharedStore) {
+            this.observeManagedChanges();
+        }
+        else if (this.pollMs > 0) {
             this.timer = setInterval(() => { void this.reconcileNow(); }, this.pollMs);
             this.timer.unref?.();
         }
@@ -548,6 +607,12 @@ export class ObservedWaitHost {
         HOST_INSTANCE_STATE.closed.add(this.hostId);
         if (this.timer)
             clearInterval(this.timer);
+        this.changeWatcher?.close();
+        this.changeWatcher = undefined;
+        if (this.changeRepair)
+            clearTimeout(this.changeRepair);
+        this.changeRepair = undefined;
+        this.changePosition = undefined;
         this.timer = undefined;
         this.releaseDiscoveryAuthority();
         this.releaseSupervisionAuthority();
@@ -695,8 +760,13 @@ export class ObservedWaitHost {
                 return this.reconcileNow();
             return;
         }
+        const release = this.options.enterControl?.();
+        if (this.options.enterControl && !release) {
+            this.managedDirty = true;
+            return;
+        }
         this.reconcileScope = scope;
-        const pass = this.reconcilePass();
+        const pass = this.reconcilePass().finally(() => release?.());
         this.reconcileInFlight = pass;
         try {
             await pass;
@@ -728,6 +798,8 @@ export class ObservedWaitHost {
             if (role === "holder") {
                 this.discoverObservedTasks();
                 this.reconcileGlobalRunning();
+                if (discovery.hasAssignmentTasks)
+                    await this.reconcileAssignmentCleanup();
             }
             else {
                 this.reconcileFollowerRunning();
@@ -738,6 +810,43 @@ export class ObservedWaitHost {
         }
         finally {
             this.authorityPassCache = undefined;
+        }
+    }
+    async reconcileAssignmentCleanup() {
+        const store = this.requireStore();
+        const [candidate] = store.listAssignmentCleanupOperations(1, this.assignmentCleanupCursor);
+        this.assignmentCleanupCursor = candidate?.operationId;
+        if (!candidate || candidate.resultManaged || this.supervisionAuthority(candidate) !== "self")
+            return;
+        const { taskId, launchToken } = candidate;
+        try {
+            const inspection = this.supervisor.snapshot(taskId);
+            const stop = readStopRequest(this.directory, taskId);
+            if (inspection?.token !== launchToken || (stop && stop.token !== launchToken))
+                return;
+            if (inspection.terminal) {
+                if (inspection.status !== "lost" && inspection.result?.groupCleanup !== "unproven")
+                    return;
+                const pgid = inspection.command?.pgid ?? inspection.command?.pid;
+                if (inspection.cleanup?.groupEmpty === true || (pgid && !processGroupAlive(pgid))) {
+                    store.verifyAssignmentCleanup(candidate.operationId, launchToken, candidate.terminalRevision);
+                    return;
+                }
+                if (!pgid)
+                    return;
+            }
+            if (!this.localCancels.has(taskId)) {
+                this.localCancels.add(taskId);
+                try {
+                    await this.supervisor.stop(taskId, { token: launchToken, reason: "owning assignment ended" });
+                }
+                finally {
+                    this.localCancels.delete(taskId);
+                }
+            }
+        }
+        catch (error) {
+            this.options.logger?.(`Assignment cleanup for ${taskId}: ${String(error)}`);
         }
     }
     reconcileGlobalRunning() {
@@ -1200,6 +1309,60 @@ export class ObservedWaitHost {
         this.projectionMetrics.projectionsBuilt += 1;
         return this.projectDurable(operation, now);
     }
+    /** Rebuild a live incident from the runner checkpoint. Only the native handoff writes its receipt. */
+    pendingStallAlert(origin, taskId, waits) {
+        const operation = this.operationForTask(taskId);
+        if (!operation || operation.terminalRevision || !this.belongsToParentOrigin(operation, origin))
+            return;
+        const branchId = operation.owner.branchId;
+        if (!this.isParentOriginActive(origin, branchId))
+            return;
+        const directory = this.observationDirectory(operation);
+        if (!directory)
+            return;
+        const context = this.readLaunchContext(taskId, directory);
+        if (!context?.callback)
+            return;
+        const inspection = this.passiveSnapshot(taskId, directory);
+        if (!inspection || inspection.token !== operation.launchToken || inspection.stopRequestedAt !== undefined)
+            return;
+        const now = this.options.now?.() ?? Date.now();
+        const progress = supervisedProgress(inspection, now);
+        if (!progress?.alertDue)
+            return;
+        const receiptId = `background-stall:${operation.operationId}:${progress.observedAt}`;
+        const receiptPath = join(inspection.taskDir, "stall-receipt");
+        try {
+            if (readFileSync(receiptPath, "utf8") === receiptId)
+                return;
+        }
+        catch (error) {
+            if (error.code !== "ENOENT")
+                throw error;
+        }
+        const lines = [describeSupervisedProgress(progress, now)];
+        for (const ref of waits) {
+            const wait = this.requireStore().getWait(ref);
+            if (!wait || wait.phase === "cancelled" || wait.phase === "consumed" || !sameOwner(wait.owner, operation.owner))
+                continue;
+            if (!wait.dependencies.some(dep => dep.operationId === operation.operationId))
+                continue;
+            const others = wait.dependencies.filter(dep => dep.operationId !== operation.operationId);
+            const siblings = others.slice(0, 8).map(dep => {
+                const sibling = this.requireStore().getOperation(dep.operationId);
+                return `${sibling?.taskId ?? dep.operationId} ${sibling?.terminalOutcome ?? sibling?.phase ?? "unknown"}`;
+            });
+            if (others.length > siblings.length)
+                siblings.push(`+${others.length - siblings.length} more`);
+            lines.push(`Wait ${ref.waitId} ${wait.phase}${siblings.length ? ". Other tasks: " + siblings.join(", ") : ""}`);
+        }
+        const output = [inspection.logs.stdout, inspection.logs.stderr].map(path => lastLines(tail(path).text, 1).slice(-300)).filter(Boolean);
+        lines.push(...output, `Evidence: bg_task_log id=${taskId}`);
+        const notification = { taskId, operationId: operation.operationId, origin, branchId, urgent: true,
+            event: { source: "background-task", id: receiptId, inspectId: taskId, label: context.name ?? taskId,
+                status: "suspected stall", customType: "background-task-stall", content: lines.join("\n"), detailTool: "bg_task_status" } };
+        return { notification, delivery: { receiptId, delivered: () => writeTextAtomic(receiptPath, receiptId), defer: () => { } } };
+    }
     /** Accumulated projection work, for performance regression proof. */
     getDurableProjectionMetrics() {
         return { ...this.projectionMetrics };
@@ -1285,7 +1448,7 @@ export class ObservedWaitHost {
         if (owner.kind !== "parent-session" || this.activeOwnerRelation(owner) !== "match")
             return;
         this.invalidateDurableProjection(owner);
-        const change = { sessionId: owner.sessionId, workspace: owner.workspace };
+        const change = { sessionId: owner.sessionId, workspace: owner.workspace, branchId: owner.branchId ?? null };
         for (const listener of [...this.durableChangeListeners]) {
             try {
                 listener(change);
@@ -1307,18 +1470,30 @@ export class ObservedWaitHost {
             return operation.owner.sessionId === origin.sessionId;
         return true;
     }
+    observationDirectory(operation) {
+        if (!operation.supervision?.hostId?.startsWith("server:"))
+            return this.directory;
+        const grant = this.store?.resultSupervision(operation.operationId);
+        if (!grant || grant.launchToken !== operation.launchToken || !sameOwner(grant.owner, operation.owner))
+            return;
+        return grant.directory;
+    }
+    passiveSnapshot(taskId, directory) {
+        if (!directory || !LOCAL_DURABLE_ID.test(taskId))
+            return;
+        const supervisor = directory === this.directory ? this.supervisor : createLocalSupervisor({ directory });
+        try {
+            return supervisor.snapshot(taskId);
+        }
+        catch {
+            return;
+        }
+    }
     projectDurable(operation, now) {
-        const context = this.launchContext(operation.taskId);
-        // Projection is the rendering path: a snapshot reads the durable records
-        // without taking the cross-process fence or spawning `ps`.
-        const inspection = LOCAL_DURABLE_ID.test(operation.taskId)
-            ? (() => { try {
-                return this.supervisor.snapshot(operation.taskId);
-            }
-            catch {
-                return undefined;
-            } })()
-            : undefined;
+        const directory = this.observationDirectory(operation);
+        const context = directory === this.directory ? this.launchContext(operation.taskId)
+            : directory ? this.readLaunchContext(operation.taskId, directory) : undefined;
+        const inspection = this.passiveSnapshot(operation.taskId, directory);
         const storeStatus = operation.terminalRevision > 0 ? this.statusOf(operation.operationId) : undefined;
         const status = inspection?.terminal ? inspection.status : storeStatus ?? inspection?.status ?? "running";
         const terminal = inspection?.terminal === true || operation.terminalRevision > 0;
@@ -1342,6 +1517,7 @@ export class ObservedWaitHost {
             status,
             active,
             terminal,
+            progress: active ? supervisedProgress(inspection, now) : undefined,
             attention: terminal && status !== "succeeded",
             ...(context?.name ?? inspection?.launch.name ? { name: context?.name ?? inspection?.launch.name } : {}),
             cwd: inspection?.launch.cwd ?? context?.cwd ?? operation.owner.workspace,
@@ -1365,7 +1541,7 @@ export class ObservedWaitHost {
             logPaths: { stdout: pathSet.stdout, stderr: pathSet.stderr, events: pathSet.events },
             waits,
             ...(context?.sandbox ? { sandbox: context.sandbox } : {}),
-            owner: { sessionId: operation.owner.sessionId, workspace: operation.owner.workspace },
+            owner: { sessionId: operation.owner.sessionId, workspace: operation.owner.workspace, branchId: operation.owner.branchId ?? null },
         };
     }
     status(taskId, owner) {
@@ -1373,7 +1549,8 @@ export class ObservedWaitHost {
     }
     statusForOperation(operation, owner) {
         const store = this.requireStore(), taskId = operation.taskId;
-        const inspection = this.inspect(taskId);
+        const directory = this.observationDirectory(operation);
+        const inspection = directory === this.directory ? this.inspect(taskId) : this.passiveSnapshot(taskId, directory);
         this.reconcileInspection(operation, inspection);
         const current = store.getOperation(operation.operationId) ?? operation;
         if (this.watchedRunningTasks.delete(taskId) && current.terminalRevision > 0) {
@@ -1385,14 +1562,14 @@ export class ObservedWaitHost {
             this.attemptTerminalCallback(current, this.statusOf(current.operationId), current.terminalOutcome ?? "failed", [], { pendingWithoutContext: true });
         }
         this.recordReadsForTask(owner, current);
-        const paths = supervisorPaths(this.directory, taskId);
+        const paths = inspection?.logs ?? supervisorPaths(this.directory, taskId);
         const gateText = inspection ? `${tail(paths.stderr).text}` : "";
         const waits = store.listWaits({ pendingOnly: true })
             .filter((wait) => sameOwner(wait.owner, owner))
             .filter((wait) => wait.dependencies.some((dep) => dep.operationId === current.operationId))
             .map((wait) => this.waitView(wait));
         const result = inspection?.result;
-        const launched = this.launchContext(taskId);
+        const launched = directory === this.directory ? this.launchContext(taskId) : directory ? this.readLaunchContext(taskId, directory) : undefined;
         const stepGate = result && launched?.gated ? parseStepGateFailure(gateText, taskId) : undefined;
         const kind = inspection?.kind ?? launched?.kind ?? "process";
         return {
@@ -1401,6 +1578,7 @@ export class ObservedWaitHost {
             kind: kind === "watch" ? "watch" : "process",
             status: inspection?.status ?? this.statusOf(current.operationId),
             phase: current.phase,
+            progress: current.terminalRevision === 0 ? supervisedProgress(inspection, this.options.now?.() ?? Date.now()) : undefined,
             exitCode: result?.exitCode ?? null,
             signal: result?.signal ?? null,
             ...supervisionReasonFields(inspection),
@@ -1418,10 +1596,13 @@ export class ObservedWaitHost {
     log(taskId, owner, options = {}) {
         const store = this.requireStore();
         const operation = this.ownedOperation(taskId, owner);
-        const inspection = this.inspect(taskId);
+        const directory = this.observationDirectory(operation);
+        const inspection = directory === this.directory ? this.inspect(taskId) : this.passiveSnapshot(taskId, directory);
         this.reconcileInspection(operation, inspection);
         this.recordReadsForTask(owner, store.getOperation(operation.operationId) ?? operation);
-        const paths = supervisorPaths(this.directory, taskId);
+        if (!directory)
+            throw new Error("Captured Background log directory unavailable");
+        const paths = inspection?.logs ?? supervisorPaths(directory, taskId);
         const lines = Math.max(1, Math.floor(options.lines ?? 40));
         const stdout = tail(paths.stdout);
         const stderr = tail(paths.stderr);
@@ -1461,6 +1642,9 @@ export class ObservedWaitHost {
             `${view.taskId} ${view.kind}: ${view.status} (${view.phase})`,
             `operation: ${view.operationId}; terminal revision: ${view.terminalRevision}${view.terminalOutcome ? ` (${view.terminalOutcome})` : ""}`,
         ];
+        const progress = view.progress && describeSupervisedProgress(view.progress, this.options.now?.() ?? Date.now());
+        if (progress)
+            lines.push(progress);
         if (view.sandbox) {
             lines.push(`sandbox: ${view.sandbox.confinement}${view.sandbox.backend ? `; ${oneLine(view.sandbox.backend, 40)}` : ""}; source: ${oneLine(view.sandbox.policySource, 80)}; later changes do not affect this task.`);
         }
@@ -1610,6 +1794,10 @@ export class ObservedWaitHost {
         const client = await this.resultSupervisionClient();
         try {
             const manager = await client.request("runtime_result_supervision");
+            // Already granted dependencies need no discovery scope transfer. Legacy
+            // holders may keep supervising unrelated work beside server-owned tasks.
+            if (operations.every(operation => this.requireStore().resultSupervision(operation.operationId)))
+                return;
             const discovery = this.requireStore().readDiscoveryClaim(this.discoveryScope);
             if (!newManaged && discovery && discovery.hostId !== this.hostId && this.discoveryHolderState(discovery.hostId) !== "dead") {
                 throw new Error("permission-unavailable: live or unknown original discovery holder prevents scope handoff");
@@ -1718,8 +1906,10 @@ export class ObservedWaitHost {
             supervision: this.supervision(),
             authorityRef: authorityReference(`worker:${run.authorityReference}`),
             intentRef: typeof input.params.operation_id === "string" ? input.params.operation_id : null,
+            ...(run.assignmentAttemptId ? { assignmentAttemptId: run.assignmentAttemptId } : {}),
         });
         const launchContext = {
+            workerAttemptId: run.runId,
             kind: input.kind,
             parentOrigin: this.parentOrigin,
             gated: prepared.gated,
@@ -2084,6 +2274,7 @@ export class ObservedWaitHost {
             : {};
         this.rpcRuns.set(runId, Object.freeze({
             runId,
+            assignmentTaskOwnership: params.assignmentTaskOwnership === true,
             conversationId,
             attemptId,
             workspace,
@@ -2437,6 +2628,7 @@ export class ObservedWaitHost {
     rpcScope(binding) {
         return {
             runId: binding.runId,
+            ...(binding.assignmentTaskOwnership ? { assignmentAttemptId: binding.attemptId } : {}),
             conversationId: binding.conversationId,
             workspace: binding.workspace,
             authorityReference: binding.authorityReference,
@@ -3245,6 +3437,7 @@ export class ObservedWaitHost {
                         const outcome = await adapter.onWaitReady({
                             waitId: event.waitId,
                             generation: event.generation,
+                            ...(wait?.park?.attemptId ? { parkedAttemptId: wait.park.attemptId } : {}),
                             owner,
                             ...(taskId && this.launches.get(taskId)?.parentOrigin
                                 ? { parentOrigin: this.launches.get(taskId).parentOrigin }
@@ -3735,8 +3928,8 @@ export class ObservedWaitHost {
             return undefined;
         }
     }
-    sidecarPath(taskId) {
-        return join(this.directory, "observed", `${taskId}.json`);
+    sidecarPath(taskId, directory = this.directory) {
+        return join(directory, "observed", `${taskId}.json`);
     }
     writeLaunchContext(taskId, context) {
         try {
@@ -3764,9 +3957,9 @@ export class ObservedWaitHost {
         }
         catch { /* retain an obligation if the exact sidecar cannot be persisted */ }
     }
-    readLaunchContext(taskId) {
+    readLaunchContext(taskId, directory = this.directory) {
         try {
-            const value = JSON.parse(readFileSync(this.sidecarPath(taskId), "utf8"));
+            const value = JSON.parse(readFileSync(this.sidecarPath(taskId, directory), "utf8"));
             if (value.kind !== "process" && value.kind !== "watch")
                 return undefined;
             return {

@@ -1,0 +1,84 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "landed807-integrated-original96-local-pass-canonical-and-cache-qualification-pending",
+  "sha": "cef91a3c51e14d2c78c165daa515b1725e432825",
+  "head": "cef91a3c51e14d2c78c165daa515b1725e432825",
+  "headKind": "Tested ordinary integration merge; later report-only commit does not change implementation/tests.",
+  "parents": ["b268340bba0f7506ef9db351699b4f9dddec0f2b", "acd372dd3ab5835afd361a7cc931c9ff46f6c101"],
+  "standingOrders": [],
+  "actualModel": { "provider": "openai", "model": "gpt-6.1-sol", "effort": "high", "session": "sa_mwkb0p9t_17", "readback": ".private-805/logs/mergeacd-preserved-model-final.log", "method": "Actual session model_change/thinking_level_change records parsed; PI_MODEL,PI_REASONING_LEVEL,PI_SESSION_ID agree. No pins/settings changed." },
+  "contextRead": { "sources": "../../sources/805.json", "priorDiagnosis": "../../results/805-c14-ci-fix.json", "plan": "../../task-plan.json", "planRevision": 662, "decision": "805-integrate-807-then-qualify-cold-fixture; keep case96 original bounds and cache205 identity failure distinct." },
+  "integration": {
+    "fetchCommand": "git fetch origin main",
+    "fetchExit": 0,
+    "fetchedMain": "acd372dd3ab5835afd361a7cc931c9ff46f6c101",
+    "mergeCommand": "git merge --no-ff --no-commit FETCH_HEAD",
+    "initialExit": 1,
+    "conflicts": "Ten paths: canonical assignment-inbox and six generated consumer copies, server BackgroundObservation, Background input fixture and startup ensure fixture.",
+    "resolutions": [
+      "Canonical inbox conflict is comment-only at initialized-schema fast path; retain805 explanatory text and upstream transaction/cleanup/source authority changes. Regenerate consumers with existing sync-operation-coordinator and sync-runtime-domain; no whole-side generated file replacement.",
+      "Background durable projection retains805 owner.branchId AND upstream terminalRevision/terminalOutcome. Branch-scoped Goal filtering remains possible, and immutable terminal authority remains visible. No owner/recipient escalation or duplicate participant acquisition policy.",
+      "Constructor fixture retains zero checkpoint attempts before initialization, exact main-only attachments, undefined/unready Background inbox; after reconcile retains same physical owner, exact alias set and ordered alias list, checkpoint table ownership plus acquisitionAttempts1. All original table-isolation/physical budget checks stay.",
+      "Startup timeout fixture keeps2500ms/code/stdout/log-path/owner-absence assertions. Keep local result.stderr assertion message inside upstream retainStartupOwnerFailure catch. No owner deletion/replacement or deadline policy change.",
+      "Remove only an auto-merged duplicate await model?.reconcile() from another history setup; resulting history regression file is byte-identical to b268. No cache205 capture/count assertion or measured setup modified."
+    ],
+    "generated": "Canonical generators succeeded; repeated generation is byte-idempotent across all tracked package files.",
+    "evidence": [".private-805/logs/mergeacd-fetch.log", ".private-805/logs/mergeacd-merge.log", ".private-805/logs/mergeacd-conflicts.diff", ".private-805/logs/mergeacd-sync-final.log"]
+  },
+  "preserved": {
+    "byteIdentical": "Goal activity/index/types, admission marker regression, cold-bootstrap test and63b676f0cold mailbox wrapper, Navigator fixture, history/cache205 regression and existing16-entry capture,805-c14-ci-fix.json tracked and requested results copy.",
+    "ancestry": "Exact landedacd372dd and original63b676f0 verified ancestors of merge; b268 is first parent. No reset/rebase/force or lost history.",
+    "evidence": ".private-805/logs/mergeacd-preserved-model-final.log",
+    "failedReadOnlyProbe": "Initial overly broad preservation check encountered the auto-merged duplicate history setup call. Source inspected, redundant call removed, final exact-byte probe passed. First probe retained in mergeacd-preserved-model.log, not counted as product failure."
+  },
+  "immediateCheckpoint": {
+    "case": "Original responsive fixture imports outlive the wedge watchdog without source readiness (historicalcase96)",
+    "cwd": "packages/pi-better-server",
+    "command": "TMPDIR=\"$PWD/../../.private-805/tmp\" node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-name-pattern '^responsive fixture imports outlive the wedge watchdog without source readiness$' test/query-executor.test.ts",
+    "exit": 0,
+    "passed": 1, "failed": 0, "skipped": 0,
+    "caseDurationMs": 1371.794208,
+    "evidence": ".private-805/logs/mergeacd-case96.log",
+    "bounds": "Original400ms caller,1200ms watchdog,10000ms test and3000ms heartbeat acquisition guard unchanged. Original six acknowledged heartbeat requirement, explicit rebuilding before release, same bootstrap receipt and post-release source-ready/no-restart assertions remain.",
+    "guard": ".private-805/logs/mergeacd-case96-guard.log proves actual original callback/configuration/assertions AST unchanged from b268/c14.",
+    "interpretation": "One exact original casePASS on the newly integrated local tree, using existing localNode24.21.0. No retry loop or alternate runtime/path/identity. This establishes that the original criterion passes locally on this composition; it does NOT locate the earlier canonicalc14timeout, erase bootstrap nonconvergence or qualify canonical24.14.1full CI. No new bootstrap production correction was invented from the local green."
+  },
+  "focusedChecks": [
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-goal/test/activity.test.ts packages/pi-better-goal/test/activity-notifications.test.ts packages/pi-better-goal/test/goal-clock.test.ts packages/pi-better-goal/test/admission-scheduler.test.ts packages/pi-better-server/test/goal-recovery-readiness.test.ts packages/pi-better-server/test/cold-bootstrap.test.ts",
+      "exit": 0, "passed": 50, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/mergeacd-goal.log",
+      "meaning": "Precise notifying-provider deadlines and replacement/cancellation, no warmed full-state polls, single drain wake, lifecycle/branch-generation/permission/foreground fences, bounded old-provider compatibility, original admission coalescing. Explicit unknown coverage retains tracker and blocks false empty wake; same actual model/WorkClient subscription becomes ready normally.63b actual cold entrypoint retains query/cancel before delay AND during imports, expires at original400ms and rejects late-read authority."
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-server/test/checkpoint-deferral.test.ts packages/pi-better-server/test/background-inbox-deferral.test.ts packages/pi-better-server/test/runtime-background-inputs.test.ts packages/pi-better-server/test/two-handle-composition.test.ts packages/operation-coordinator/tests/inbox-connections.test.ts packages/operation-coordinator/tests/inbox-contention-sql.test.ts",
+      "exit": 0, "passed": 26, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/mergeacd-composition.log",
+      "meaning": "Merged actual SQLite composed-owner/source-readonly/rollback/durable replay, repair-only deferred acquisition, exact participant aliases, no false verified-empty history, Background inputs and original physical budgets. No worker connection-policy duplication."
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test --test-name-pattern '^repaired legacy watch|^one wait changes|^active and incremental' packages/pi-better-server/test/runtime-background-history-regressions.test.ts",
+      "exit": 0, "passed": 4, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/mergeacd-history.log",
+      "meaning": "Existing active/inactive history latch recovery and shared projection checks pass; not a rerun or resolution of distinct cache205."
+    },
+    { "command": "npm run test --workspace packages/pi-better-background-tasks -- src/goal-provider.test.ts", "exit": 0, "passed": 4, "evidence": ".private-805/logs/mergeacd-provider.log", "meaning": "Original owner/session/branch filtering and terminal retention deadline behavior preserved." },
+    { "command": "npm run typecheck --workspace packages/pi-better-server --workspace packages/pi-better-goal --workspace packages/pi-better-subagents --workspace packages/pi-better-background-tasks", "exit": 0, "evidence": ".private-805/logs/mergeacd-types.log" },
+    { "command": "node .private-805/ci99e-navigator-premise.mjs", "exit": 0, "evidence": ".private-805/logs/mergeacd-navigator.log" },
+    { "command": "Canonical generation idempotence, original96AST guard, byte-preservation checks, git diff --check and git diff --cached --check", "exit": 0 }
+  ],
+  "separateCacheCheckpoint": {
+    "originalCase": "c14compat3job134763231537case205 public list settles after durable dismissal with0retained legacy rows",
+    "actualFailure": "queryCount8vs6, existing capture coordinatorunknown->64512:4998262:2 andseq1->2 across measurement; two distinct existing keys, deadlines unexpired.",
+    "retainedEvidence": ["805-c14-ci-fix.json", ".private-805/logs/cic14-cache-identities.json.txt", ".private-805/logs/cic14-compat3.log"],
+    "interpretation": "Not reclassified as fixed by case96 localPASS, by cold mailbox transfer or by landed807. The existing strict comparison/16-entry capture remains byte-identical. Upstream changes root transaction/source composition, so canonical exact-head case qualification is required; no speculative invalidation policy, key rewrite, new wait or relaxed8vs6assertion."
+  },
+  "pendingNativeChecks": [
+    "Canonical24.14.1 original96 and98 within unchanged caller/watchdog/test bounds on this composed head; if responsive96recurs, retain original request admission/handler/reply boundary, not a blind retry or timeout extension.",
+    "Distinct original cache2050/160variant qualification and actual identity capture on this composed transaction/source owner. Historical8vs6remains open.",
+    "Full Goal+Subagents+Background real owner activity/deadline/admission/delivery/no-duplicate-wake journeys, original Navigator stop and standalone same-subscription clean recovery on exact head.",
+    "Original activation prepared/blocker/owner-release sequence, SSH/reload native receipt/cursors, physical/control/query/repair budgets and required platform jobs; earlier native passes/upstream807CIare prior-artifact evidence, not this composition's acceptance."
+  ],
+  "boundaries": "No push, remote waits/watchers, CI dispatch/retry, deadline/threshold change, new timer/global poll, weakened assertion, shared runtime/settings/permissions change or duplicate upstream bootstrap/participant policy. Existing workspace/resources and all failure/progress history retained."
+}

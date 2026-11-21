@@ -477,6 +477,8 @@ jobs:
             node_modules/pi-better-subagents/shared-execution-policy.ts \
             node_modules/pi-better-subagents/shared-worktree-context.ts \
             node_modules/pi-better-subagents/shared-operation-coordinator/index.ts \
+            node_modules/pi-better-subagents/child-apply-patch.ts \
+            node_modules/pi-better-subagents/child-process-list.ts \
             node_modules/pi-better-subagents/child-operations.ts \
             node_modules/pi-better-subagents/worker-waits.ts \
             node_modules/pi-better-background-tasks/src/index.ts \
@@ -697,6 +699,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Accept tool loading and use permissions in a real SDK worker
+        if: matrix.shard == 1
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/continuation.test.mjs
       - name: Prove subagent launch and bootstrap ownership on Node 24
         working-directory: packages/pi-better-server
         run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-shard="${{ matrix.shard }}/2" test/runtime-subagent-*.test.ts
@@ -849,9 +854,15 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap dbus-x11 gnome-keyring libsecret-tools
+          sudo apt-get install --yes tmux bubblewrap dbus-x11 gnome-keyring libsecret-tools
           command -v bwrap
           bwrap --version
+
+      - name: Accept both /sandbox sections in the real Pi terminal
+        if: env.AFFECTED == 'true'
+        run: |
+          tmux -V
+          node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/sandbox-permissions.tui.e2e.test.mjs
 
       - name: Enable and verify bubblewrap user namespaces
         if: env.AFFECTED == 'true'

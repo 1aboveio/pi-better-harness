@@ -1,0 +1,48 @@
+{
+  "unit": 799,
+  "status": "incomplete-resumed-reassessment-no-causal-correction-established",
+  "implementationHead": "d4a5754223755757539198b895fd4417418abad7",
+  "verifiedMain": "1fb2ca5381130043c3a207151b7250d0a8be9bd4",
+  "branch": "rush/796-799",
+  "standingOrders": [],
+  "authorization": "Explicit /rush-issues #799,#801 resume decision resume-799-801-explicit; prior single replan/failure history retained, no reset.",
+  "actualModel": "openai/gpt-6.1-sol",
+  "actualEffort": "high",
+  "actualSession": "sa_mwkaikku_8",
+  "selectionEvidence": "PI_PROVIDER=openai PI_MODEL=gpt-6.1-sol PI_REASONING_LEVEL=high PI_SESSION_ID=sa_mwkaikku_8 read back in this execution",
+  "failure": {
+    "case": "orphaned cleanup that finalizes from coherent log evidence still reports its completion",
+    "step": "completion_delivery_once.test.mjs:288, exact7d38 CI44051094843/workspaces2",
+    "error": "assert.equal(await waitFor(() => completionMessages(h.sent).length),1) gotundefined after existing5000ms. Not a completionDeliveryAttempts field, not recipient.flush().",
+    "evidenceDir": "/Users/exoulster/projects/pi-better-harness/.resolve-issues/rush/issue-796",
+    "evidence": "814-7d38-workspaces2-api.log:5146-5169",
+    "retainedEvidence": "results/799-orphan-receipt-canonical-excerpt.log"
+  },
+  "guidanceRead": ["latest task-plan decisions and799 row", "sources/799.json", "exploration/findings.json units799", "root AGENTS.md and WRITING.md Agent replies", "docs/adr/0023-unified-server-runtime.md", "packages/pi-better-subagents/CONTEXT.md"],
+  "newSourceAssessment": {
+    "mainAvailable": "Verified main object exists locally, so no TLS/network workaround or fetch was needed.",
+    "landedChanges": "Main commits ee8d9660/a4318816/ac932fee under merge1fb2ca53 fix installed native bootstrap TypeScript imports, extract process-identity.mjs and launch-digest.mjs, add native installed-bootstrap tests, and order navigator fixture teardown. Existing process-start implementation and digest computation are extracted; no callback obligation/handoff correction is present.",
+    "actualOrphanPath": "Original case creates a legacy orphan record directly, uses registered stop to classify coherent assistant message_end plus agent_end log, then expects actual SDK recipient delivery. It does not launch a managed worker for that record. Main's managed-launch-bootstrap correction is not proof of that missing completion's cause.",
+    "comparison": "git diff --exit-code5c6->1fb2 is empty for index.ts,stop.ts,callback-fields.ts,work-observation.ts,callback-batcher/index.ts,completion_delivery_once.test.mjs,sdk-recipient-fixture.mjs,read-model.ts.75da->currentHEAD is also empty for original fixture, actual SDK recipient fixture/worker, legacy completion entry, stop, collector and batcher.",
+    "parallelWorkspaceChange": "During reassessment HEAD changed to d4a57542 with main1fb2 ancestor and rebase reflog entries. This worker did not rebase/reset/merge or rewrite history. Preserved current tree and used its full head for validation. Earlier75da and all prior reports remain accessible and retained; do not attribute external history change to this implementation.",
+    "existingNewerEvidence": "Existing817-32d and817-91 workspace2 logs show original orphan case passing in1981.844683ms and2471.089156ms, respectively. Those passes do not establish the cause of799's7d38 missing callback. Available817-f24-server3 log does not provide the same named orphan recipient state. No exact native run id/source observation/handoff receipt recovered."
+  },
+  "focusedVerification": [
+    {"command": "env TMPDIR=\"$PWD/.work/current-main-tmp\" npm_config_cache=\"$PWD/.work/current-main-cache\" node --import tsx --import ./scripts/isolate-registry.mjs --test --test-reporter=tap --test-concurrency=1 packages/pi-better-server/test/orphan-completion-receipt.test.ts packages/pi-better-subagents/tests/work-observation-bootstrap.test.mjs > results/799-resumed-components.log 2>&1", "status": 0, "result": "3 retained in-process controls pass. Named orphan batcher obligation still survives an older flush and receives one callback; native durable receipt remains explicitly not exercised. Readiness demand and stopped-generation controls pass. No original native correction or progress inferred."},
+    {"command": "env TMPDIR=\"$PWD/.work/current-main-tmp\" npm_config_cache=\"$PWD/.work/current-main-cache\" npm run typecheck -w packages/pi-better-server > results/799-resumed-types.log 2>&1", "status": 0, "result": "tsc --noEmit passes on actual current tree."},
+    {"command": "git merge-base --is-ancestor 1fb2ca5381130043c3a207151b7250d0a8be9bd4 HEAD", "status": 0, "result": "Verified main is already an ancestor ofd4a57542 after external integration."},
+    {"command": "git diff --binary > results/799-resumed-before-sync.diff", "status": 0},
+    {"command": "node scripts/sync-runtime-domain.mjs > results/799-resumed-sync.log 2>&1", "status": 0},
+    {"command": "git diff --binary > results/799-resumed-after-sync.diff", "status": 0},
+    {"command": "cmp results/799-resumed-before-sync.diff results/799-resumed-after-sync.diff", "status": 0, "result": "Actual generator idempotent; no tracked code change."},
+    {"command": "git diff --check", "status": 0}
+  ],
+  "scope": "Evidence-only reassessment commit. No new instrumentation/tests/production/helper mutation, speculative cache, main-feature port or native setup chain. Prior code and controls retained unchanged.",
+  "nextCheckpoint": "Same original coherent orphan's dynamically named run must reach its captured cleanup-session recipient, expose its current source row and pending completion, then produce exactly one containing completion batch and durable sent receipt within original5s. Establish that same-operation boundary from existing authorized native evidence before selecting a canonical rule or fixture predicate correction. Do not treat earlier-flush success, other-branch green or these component controls as that proof.",
+  "missingFacts": ["Actual failing dynamic run id, source-currentness/root/seq, captured recipient conversation/generation and exact terminal row at original5s assertion", "Pending/sent/suppressed fields and exact named batch in-flight/native handoff/transcript/IPC state at that same boundary"],
+  "remainingWork": ["Coordinator retains original unresolved checkpoint and obtains any available same-operation recipient/source/handoff evidence from authorized existing results; no duplicate denied native campaign or new instrumentation chain requested.", "Select and prove a minimal canonical correction only when those facts distinguish lost obligation, gated/deferred native handoff or observation delay. Current main does not itself justify a fix claim."],
+  "history": "All previous failures, explicit exhausted replan/no-progress history, original10000/60s, unavailable90s, callbackcount1/5s, source/current-root/owner/writer/recipient/token/immutableterminal/currentFrame/cursor contracts and16/8/8 total32 physical2/2/2 remain.7d38 history job passed without diagnostic causality; workspace2 failed and compat3 CANCELLED, not fullmatrixPASS. New current-main reassessment does not reset acceptance.",
+  "environment": "Local24.21 != canonical24.14.1 unchanged. Same retained private clone and registered temp/cache. No native/socket/process/probe/admission replay, alternate Node/path/runtime/identity/settings/hooks/guards, sharedruntime change, threshold waiver, push/PR/CI/external wait.",
+  "blocker": {"kind": "external-input", "reason": "Original named native recipient/source/handoff facts remain absent; allowed in-process control and landed bootstrap correction do not supply them. Native replay remains prohibited."},
+  "decisionNeeded": null
+}

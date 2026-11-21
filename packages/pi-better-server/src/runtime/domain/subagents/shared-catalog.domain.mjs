@@ -1,7 +1,7 @@
 // Generated fixed launch domain from packages/pi-better-subagents/shared-catalog.ts. Do not edit directly.
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { WorkClient } from "./shared-work-client.mjs";
+import { connectWorkClient } from "./shared-work-client.mjs";
 import { catalogSnapshotFromWire, defaultUserRoot } from "./catalog-store.domain.mjs";
 import { catalogHostAuthority } from "./catalog-host-admission.domain.mjs";
 /** Short-lived catalog connection. No transcript or permission authority travels here. */
@@ -59,29 +59,12 @@ export async function openSharedCatalog(cwd, userRoot = defaultUserRoot(), sessi
 }
 /** Retry connection establishment only; never replay a Catalog edit or authorization failure. */
 export async function connectCatalogClient(agentDir, serverDir, ensure = ensureCatalogRuntime) {
-    const connect = async () => {
-        const client = new WorkClient(join(serverDir, "pi-server.sock"), agentDir, ["runtime-catalog-v1"]);
-        try {
-            await client.ready;
-            return client;
-        }
-        catch (error) {
-            client.close();
-            throw error;
-        }
-    };
-    try {
-        return await connect();
-    }
-    catch (error) {
-        if (!["ENOENT", "ECONNREFUSED"].includes(error.code ?? ""))
-            throw error;
-        await ensure(agentDir);
-        return connect();
-    }
+    return connectWorkClient(join(serverDir, "pi-server.sock"), agentDir, ["runtime-catalog-v1"], {
+        recover: ({ timeoutMs, signal }) => ensure(agentDir, serverDir, timeoutMs, signal),
+    });
 }
-async function ensureCatalogRuntime(agentDir) {
+async function ensureCatalogRuntime(agentDir, serverDir, timeoutMs, signal) {
     const path = "./runtime-client/src/runtime/client.mjs";
     const { ensureRuntime } = await import(path);
-    await ensureRuntime({ agentDir });
+    await ensureRuntime({ agentDir, serverDir, timeoutMs, signal });
 }

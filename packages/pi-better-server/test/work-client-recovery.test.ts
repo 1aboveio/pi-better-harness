@@ -2,19 +2,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { WorkClient } from '../src/runtime/work-client.mjs';
+import { retainGuardedStartup } from './support/guarded-startup.ts';
 
 // A duplex peer keeps the exact client framing and request deadlines while
 // controlling when the replacement worker can accept subscriptions.
-function fixture() {
+function fixture(Client = WorkClient) {
   const socket: any = new PassThrough();
   const requests: any[] = [];
   socket.write = (line: string) => { requests.push(JSON.parse(line)); return true; };
-  const client = new WorkClient(socket, '/agent');
+  const client = new Client(socket, '/agent');
   const reply = (request: any, data: any, error?: string) => socket.emit('data', JSON.stringify({id:request.id,success:!error,data,error})+'\n');
   reply(requests[0], {});
   const event = () => socket.emit('data', JSON.stringify({type:'event',event:{type:'resync_required',reason:'read-worker-recovered'}})+'\n');
   const disconnect = () => socket.emit('close');
-  return {client, requests, reply, event, disconnect};
+  const publish = (value: any) => socket.emit('data', JSON.stringify({type:'event',event:{type:'runtime_snapshot',snapshot:value}})+'\n');
+  return {client, requests, reply, event, disconnect, publish};
 }
 async function until(predicate: () => boolean) {
   const deadline = Date.now()+3000;
@@ -22,8 +24,53 @@ async function until(predicate: () => boolean) {
 }
 const snapshot = (epoch: string) => ({instanceId:epoch,seq:1,status:'ready',rows:[]});
 
-test('client retries a replacement subscription after a startup deadline', async () => {
-  const f=fixture();
+test('guarded fixture readiness retains the original instance until explicit runner handoff', async () => {
+  let registered!: (hello: any) => void;
+  let closed = false, announced = false;
+  const client = { ready: new Promise(resolve => { registered = resolve; }), close: () => { closed = true; } };
+  const pending = retainGuardedStartup(client, '/fixture.sock').then(value => { announced = true; return value; });
+  await Promise.resolve();
+  assert.equal(announced, false, 'a listening socket alone cannot announce retained readiness');
+  registered({ instanceId: 'original' });
+  const startup = await pending;
+  assert.deepEqual(startup.ready, { ready: '/fixture.sock', instanceId: 'original' });
+  assert.equal(closed, false, 'SDK loading must retain the server before a runner exists');
+  startup.release();
+  assert.equal(closed, true, 'runner handoff must remove fixture retention before idle proof');
+});
+
+test('guarded startup registration failure closes the client without announcing readiness', async () => {
+  let closed = false;
+  const client = { ready: Promise.reject(new Error('runtime-unavailable: draining')), close: () => { closed = true; } };
+  const pending = retainGuardedStartup(client, '/fixture.sock');
+  await assert.rejects(pending, /draining/);
+  assert.equal(closed, true);
+});
+
+test('global sequence gaps between full scoped snapshots do not synthesize degraded frames', async () => {
+  const f = fixture(); await f.client.ready;
+  try {
+    f.publish({ ...snapshot('same'), seq: 2, scopeRevision: 'scope-before' });
+    const seen: any[] = [];
+    f.client.onChange(value => seen.push(value));
+    f.publish({ ...snapshot('same'), seq: 7, scopeRevision: 'scope-after' });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].status, 'ready');
+    assert.equal(seen[0].resyncRequired, undefined);
+    f.publish({ ...snapshot('same'), seq: 6, scopeRevision: 'stale' });
+    assert.equal(seen.length, 1, 'older observations still fail the sequence fence');
+    f.publish(snapshot('replacement'));
+    assert.equal(seen[1].status, 'degraded', 'runtime replacement still requires resync');
+    assert.equal(seen[2].resyncReason, 'instance-changed');
+  } finally { f.client.close(); }
+});
+
+for (const [name, path] of Object.entries({ canonical: '../src/runtime/work-client.mjs',
+  subagent: '../../pi-better-subagents/shared-work-client.mjs', background: '../../pi-better-background-tasks/src/shared-work-client.mjs',
+  embeddedSubagent: '../src/runtime/domain/subagents/shared-work-client.mjs', embeddedBackground: '../src/runtime/domain/background-service/shared-work-client.mjs' })) {
+test(`${name} client retries a replacement subscription after a startup deadline`, async () => {
+  const { WorkClient: Client }: { WorkClient: typeof WorkClient } = await import(path);
+  const f=fixture(Client);
   try {
     const initial=f.client.subscribe({cwd:'/project'});
     await until(()=>f.requests.length>=2);f.reply(f.requests[1],snapshot('old'));await initial;
@@ -36,6 +83,7 @@ test('client retries a replacement subscription after a startup deadline', async
     assert.equal(f.client.snapshot?.status,'ready');
   } finally {f.client.close();}
 });
+}
 
 test('closing cancels a pending recovery retry', async () => {
   const f=fixture();await f.client.ready;
@@ -113,4 +161,27 @@ test('a response delivered before disconnect is an old observation, not replacem
     assert.equal(f.client.closed,true);
     await assert.rejects(f.client.get({background:true,cwd:'/project'}),/runtime-unavailable: disconnected/);
   } finally {f.client.close();}
+});
+
+test('the standalone crash trigger owns a pending transport read, not just cached Goal activity', async () => {
+  const { backgroundGoalObservation, backgroundObservation, closeBackgroundObservation } = await import(new URL('../../pi-better-background-tasks/src/work-observation.ts', import.meta.url).href);
+  const f=fixture();await f.client.ready;
+  const pi={events:{emit(_name: string, request: any){request.accept(f.client);}}};
+  const ctx={cwd:'/project',sessionManager:{getSessionId:()=> 'parent'}};
+  try {
+    const initial=backgroundGoalObservation(pi,ctx);
+    await until(()=>f.requests.length===2);f.reply(f.requests[1],snapshot('old'));await initial;
+    const before=f.requests.length;
+    const cached=await backgroundGoalObservation(pi,ctx);
+    assert.equal(cached.instanceId,'old');
+    assert.equal(f.requests.length,before,'warmed Goal activity intentionally sends no RPC');
+    const pending=backgroundObservation(pi,ctx);
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    assert.equal(f.requests.length,before+1,'an interrupted read must issue an actual snapshot RPC');
+    const request=f.requests.at(-1);
+    assert.equal(request.type,'runtime_get_snapshot');
+    assert.equal((f.client as unknown as {pending: Map<string, unknown>}).pending.has(request.id),true);
+    const rejected=assert.rejects(pending,/runtime-unavailable: disconnected/);
+    f.disconnect();await rejected;
+  } finally {closeBackgroundObservation(pi);f.client.close();}
 });
