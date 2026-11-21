@@ -570,7 +570,7 @@ test("the ledger toggle stops and restores integration without deleting data or 
   assert.equal((await h.get()).details.ledger, undefined, "off omits the ledger view");
   await assert.rejects(
     h.mutateLedger({ action: "attach", ledgerId: ledger.id }),
-    /Long-term work ledger is off/,
+    /Project work ledger is off/,
   );
   await h.enableLedger();
   assert.equal((await h.get()).details.ledger, null, "enabling the setting never adopts an existing project ledger");
@@ -588,7 +588,7 @@ test("the ledger toggle stops and restores integration without deleting data or 
   ] }, h.ctx), { messages: [{ role: "user", content: "continue" }] }, "off removes ledger hints from the request");
   await assert.rejects(
     h.mutateLedger({ action: "update", ledgerId: ledger.id, revision: 1, changes: [{ id: "api", progress: "ignored" }] }),
-    /Long-term work ledger is off/,
+    /Project work ledger is off/,
   );
   assert.equal(h.sent.length, beforeOff, "off publishes no new reminder");
   const store = openWorkLedgerStore({ cwd: f.cwd, agentDir: f.agentDir });
@@ -620,7 +620,7 @@ test("ledger Off suppresses the manual list and show views without losing the re
     await h.command(action);
     const notice = h.notices.at(-1)!;
     assert.equal(notice.level, "warning", `/${action || "ledger"} must report that the capability is off`);
-    assert.match(notice.text, /Long-term work ledger is off/);
+    assert.match(notice.text, /Project work ledger is off/);
     assert.doesNotMatch(notice.text, new RegExp(ledger.id), `/${action || "ledger"} must not disclose ledger content while Off`);
     assert.doesNotMatch(notice.text, /Deliver checkout/, `/${action || "ledger"} must not disclose the stored outcome while Off`);
   }

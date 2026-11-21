@@ -2,7 +2,7 @@
 // @level e2e
 //
 // Real-terminal proof for the shared navigator host ("background-work-list")
-// and the "Sticky navigator" control that `/harness-settings` contributes.
+// and the "Pin work panels" control that `/harness-settings` contributes.
 //
 // The journey never invokes a model and never touches private navigator state:
 // it seeds the Todo through documented session entries, drives the real
@@ -57,7 +57,7 @@ const afterReloadRow = chatRow(3);
 const lastScrollRow = chatRow(27); // rows 4..27 scroll the navigator away
 const reloadStatusLine = "Reloaded keybindings";
 
-test("real TUI: Sticky navigator pins the shared host, moves it into chat when Off, and restores the saved choice", { skip }, async () => {
+test("real TUI: Pin work panels pins the shared host, moves it into chat when Off, and restores the saved choice", { skip }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-navigator-sticky-"));
   const socket = `navigator-sticky-${process.pid}`;
   const log = join(dir, "calls.jsonl");
@@ -111,16 +111,16 @@ test("real TUI: Sticky navigator pins the shared host, moves it into chat when O
   const selectStickyRow = () => {
     let current = selectedRow(screen());
     for (let step = 0; step < 12; step++) {
-      if (current.includes("Sticky navigator")) return;
+      if (current.includes("Pin work panels")) return;
       const previous = current;
       key("Down");
       current = selectedRow(wait((pane) => selectedRow(pane) !== previous, "the settings selection to move", 5_000));
     }
-    assert.fail(`the harness settings hub never showed Sticky navigator:\n${screen()}`);
+    assert.fail(`the harness settings hub never showed Pin work panels:\n${screen()}`);
   };
   const openHub = () => {
     command("/harness-settings");
-    wait((pane) => pane.includes("Harness settings") && pane.includes("Completions while busy"), "the harness settings hub");
+    wait((pane) => pane.includes("Harness settings") && pane.includes("Completion delivery"), "the harness settings hub");
   };
   const closeHub = () => {
     key("Escape");
@@ -176,9 +176,9 @@ test("real TUI: Sticky navigator pins the shared host, moves it into chat when O
     // 2. The hub reports the default and saves Off under piBetterHarness.navigator.
     openHub();
     selectStickyRow();
-    wait((pane) => /Sticky navigator\s+On/u.test(pane), "Sticky navigator to read On");
+    wait((pane) => /Pin work panels\s+On/u.test(pane), "Pin work panels to read On");
     key("Space");
-    wait((pane) => /Sticky navigator\s+Off/u.test(pane) && pane.includes("Setting saved."), "Sticky navigator to switch Off");
+    wait((pane) => /Pin work panels\s+Off/u.test(pane) && pane.includes("Setting saved."), "Pin work panels to switch Off");
     assert.deepEqual(storedNavigator(), { version: 1, sticky: false }, "Off must persist as version 1 with sticky: false");
     closeHub();
 
@@ -201,7 +201,7 @@ test("real TUI: Sticky navigator pins the shared host, moves it into chat when O
     assertInTranscript(restoredAfterChat, "Sticky Off after reload", afterReloadRow);
     openHub();
     selectStickyRow();
-    wait((pane) => /Sticky navigator\s+Off/u.test(pane), "the saved Off choice to survive reload");
+    wait((pane) => /Pin work panels\s+Off/u.test(pane), "the saved Off choice to survive reload");
     closeHub();
 
     // 5. With Sticky Off the navigator scrolls away instead of staying on screen.
@@ -212,9 +212,9 @@ test("real TUI: Sticky navigator pins the shared host, moves it into chat when O
     // 6. Turning Sticky back On pins the host above the input again, exactly once.
     openHub();
     selectStickyRow();
-    wait((pane) => /Sticky navigator\s+Off/u.test(pane), "Sticky navigator to still read Off");
+    wait((pane) => /Pin work panels\s+Off/u.test(pane), "Pin work panels to still read Off");
     key("Space");
-    wait((pane) => /Sticky navigator\s+On/u.test(pane) && pane.includes("Setting saved."), "Sticky navigator to switch On");
+    wait((pane) => /Pin work panels\s+On/u.test(pane) && pane.includes("Setting saved."), "Pin work panels to switch On");
     assert.deepEqual(storedNavigator(), { version: 1, sticky: true }, "On must persist as version 1 with sticky: true");
     closeHub();
     const repinned = wait((pane) => pane.includes(todoStep) && pane.includes(lastScrollRow), "the navigator to pin again");
@@ -279,7 +279,7 @@ function fixtureExtension({ log, ready, steps }) {
 
 function streamSimple() {
   appendFileSync(${JSON.stringify(log)}, JSON.stringify({ unexpectedModelRequest: true }) + '\\n');
-  throw new Error('The Sticky navigator journey must not invoke the model');
+  throw new Error('The Pin work panels journey must not invoke the model');
 }
 
 export default function (pi) {

@@ -12,6 +12,7 @@ test("supervised stall reaches the native parent during single and multi-task wa
   const root = realpathSync(mkdtempSync("/tmp/bg-stall-"));
   const agent = join(root, "agent"), cwd = join(root, "workspace"), transport = join(root, "sock");
   for (const dir of [agent, cwd, transport]) mkdirSync(dir);
+  writeFileSync(join(agent, "settings.json"), JSON.stringify({ piBetterHarness: { backgroundReviewIntervalMinutes: 1 } }));
   const sessionFile = join(root, "session.jsonl"), sessionId = randomUUID();
   const header = { type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd };
   const branch = { type: "custom", customType: "test-anchor", id: "123abcde", parentId: null, timestamp: header.timestamp };
@@ -125,6 +126,13 @@ test("supervised stall reaches the native parent during single and multi-task wa
   assert.equal(delivered.length, 1);
   const pgAlert = delivered.find(e => e.content.includes("waiting on PostgreSQL")).content;
   for (const expected of [pg.id, group.waitId, android.id + " failed", ci.details.id + " succeeded"]) assert.ok(pgAlert.includes(expected), pgAlert);
+  const waitReviews = (rows: any[]) => rows.filter(e => e.customType === "background-wait-review");
+  const reviews = waitReviews(await until(entries, items => waitReviews(items).length > 0, 5000,
+    "missing automatic wait review at the configured interval"));
+  assert.equal(reviews.length, 1);
+  assert.ok(reviews[0].content.includes(pg.id));
+  assert.match(reviews[0].content, /Task has run for 1m\d{2}s\. No observed progress for 1m\d{2}s/);
+  assert.ok(reviews[0].content.includes("waiting on PostgreSQL"));
   for (const wait of [single, group]) assert.equal(phase(wait), "waiting");
   assert.match(JSON.stringify(await call("bg_task_status", { id: muted.id })), /suspected stall/);
   const rows = await request({ navigatorRows: true });

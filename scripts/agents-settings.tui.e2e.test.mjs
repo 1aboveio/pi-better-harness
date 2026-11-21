@@ -63,8 +63,10 @@ export default function(pi) {
         tmux("new-session", "-d", "-s", "agents", "-x", "100", "-y", "40", command);
         wait(/pi-better-subagents/);
         literal("/harness-settings"); key("Tab"); key("Enter");
-        wait(/Agents\s+\/agents/);
-        key("Down"); key("Down"); key("Enter");
+        wait(/Agent catalog\s+Open/);
+        key("Down"); key("Down"); key("Down");
+        wait(/^> Agent catalog\s+Open/m);
+        key("Enter");
         const catalogScreen = wait(/Agents.*definitions/);
         assert.match(catalogScreen.split("\n")[0], /^Agents/);
         assert.match(catalogScreen, /MODEL\s+EFFORT/);

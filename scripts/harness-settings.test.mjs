@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { createSettingsRegistry } from "../packages/pi-better-harness/extensions/settings/registry.ts";
 import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/settings/page.ts";
 import harnessSettings from "../packages/pi-better-harness/extensions/settings/index.ts";
-import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import backgroundTasks from "../packages/pi-better-background-tasks/src/index.ts";
+import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const isolatedAgentDir = mkdtempSync(join(tmpdir(), "harness-settings-tests-"));
@@ -62,10 +63,60 @@ test("native settings list selects package links without opening or changing the
   let opened = false;
   const ctx = { ui: { custom(build) { return new Promise(resolve => { page = build({}, theme, {}, resolve); }); } } };
   const selected = chooseHarnessSetting(ctx, [{ id: "goal", label: "Goal", command: "/goal settings", open() { opened = true; } }], "link:goal");
-  assert.match(page.render(80).join("\n"), /Goal.*\/goal settings/);
+  assert.match(page.render(80).join("\n"), /Goal settings\s+Open/);
+  assert.match(page.render(80).join("\n"), /You can also run \/goal settings/);
   page.handleInput("\r");
   assert.equal(await selected, "link:goal");
   assert.equal(opened, false);
+});
+
+test("Background contributes the review interval and the native selector saves it", async () => {
+  const pi = { ...eventApi(), on() {}, registerTool() {} };
+  const registry = createSettingsRegistry(pi);
+  backgroundTasks(pi);
+  registry.refresh();
+  const control = registry.controls().find(item => item.id === "background-review-interval");
+  assert.ok(control);
+  let page;
+  const ctx = { ui: { custom(build) {
+    return new Promise(resolve => { page = build({}, theme, {}, resolve); });
+  } } };
+  const opened = chooseHarnessSetting(ctx, [], undefined, undefined, [control]);
+  assert.match(page.render(100).join("\n"), /Background wait reviews\s+10 minutes/);
+  page.handleInput("\r");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(page.render(100).join("\n"), /Background wait reviews\s+15 minutes/);
+  assert.equal(JSON.parse(readFileSync(join(isolatedAgentDir, "settings.json"), "utf8")).piBetterHarness.backgroundReviewIntervalMinutes, 15);
+  page.handleInput("\x1b");
+  await opened;
+  registry.dispose();
+});
+
+test("the selected setting explains its effect at narrow and wide terminal widths", async () => {
+  let page;
+  const ctx = { ui: { custom(build) { return new Promise(resolve => { page = build({}, theme, {}, resolve); }); } } };
+  const view = { id: "navigator-view", label: "View", values: ["tree", "flatten"], get: () => "flatten", change() {} };
+  const links = [{ id: "subagents", label: "Subagents", command: "/subagents settings", open() {} }];
+  const callbacks = { get: () => ({ mode: "hold", source: "default" }), change() {}, save() {} };
+  const opening = chooseHarnessSetting(ctx, links, undefined, callbacks, [], view);
+  for (const width of [48, 100]) {
+    const lines = page.render(width);
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    const text = lines.join(" ");
+    assert.match(text, /Completion delivery\s+When idle/);
+    assert.match(text, /Ctrl\+S saves\s+your default/);
+    assert.doesNotMatch(text, /Tree groups related work/);
+  }
+  page.handleInput("\x1b[B");
+  const layout = page.render(48).join(" ");
+  assert.match(layout, /Navigator layout\s+Flat list/);
+  assert.match(layout, /Tree nests tasks under their\s+agent/);
+  assert.doesNotMatch(layout, /Ctrl\+S/);
+  page.handleInput("\x1b[B");
+  assert.match(page.render(100).join("\n"), /Subagent settings\s+Open/);
+  assert.match(page.render(100).join("\n"), /You can also run \/subagents settings/);
+  page.handleInput("\x1b");
+  await opening;
 });
 
 test("selection restoration preserves ordering and rebound native navigation", async () => {
@@ -79,10 +130,10 @@ test("selection restoration preserves ordering and rebound native navigation", a
     const chosen = chooseHarnessSetting(ctx, links, "link:subagents");
     assert.equal(getKeybindings(), rebound, "restore never replaces the user's active bindings");
     const lines = page.render(80).join("\n");
-    assert.match(lines, /> subagents/);
-    assert.ok(lines.indexOf("goal") < lines.indexOf("sandbox") && lines.indexOf("sandbox") < lines.indexOf("subagents"));
+    assert.match(lines, /> Subagent settings/);
+    assert.ok(lines.indexOf("Goal settings") < lines.indexOf("Sandbox settings") && lines.indexOf("Sandbox settings") < lines.indexOf("Subagent settings"));
     page.handleInput("k");
-    assert.match(page.render(80).join("\n"), /> sandbox/);
+    assert.match(page.render(80).join("\n"), /> Sandbox settings/);
     page.handleInput("j");
     page.handleInput("\r");
     assert.equal(await chosen, "link:subagents");
@@ -101,7 +152,7 @@ test("hub opens package-owned settings, returns to selection and reports opener 
   const ctx = { mode: "tui", ui: { notify: (...args) => notifications.push(args), custom(build) {
     return new Promise(resolve => {
       const page = build({}, theme, {}, resolve);
-      if (++pages === 1) { page.handleInput("\x1b[B"); page.handleInput("\r"); }
+      if (++pages === 1) { page.handleInput("\x1b[B"); page.handleInput("\x1b[B"); page.handleInput("\r"); }
       else page.handleInput("\x1b");
     });
   } } };
@@ -129,7 +180,7 @@ test("hub offers callback settings without package contributions and rejects non
     pages++;
     return new Promise(resolve => {
       const page = build({}, theme, {}, resolve);
-      assert.match(page.render(80).join("\n"), /Completions while busy/);
+      assert.match(page.render(80).join("\n"), /Completion delivery/);
       page.handleInput("\x1b");
     });
   } };
@@ -157,9 +208,9 @@ test("hub autosaves callback changes in the session and saves the future default
         return new Promise(resolve => { page = build({}, theme, {}, resolve); });
       } } };
     const opening = command("", ctx);
-    assert.match(page.render(80).join("\n"), /Wait until idle/);
+    assert.match(page.render(80).join("\n"), /^> Completion delivery\s+When idle/m);
     page.handleInput("\r");
-    assert.match(page.render(80).join("\n"), /Steer active run/);
+    assert.match(page.render(80).join("\n"), /^> Completion delivery\s+During run/m);
     assert.equal(pi.entries.length, 1);
     assert.equal(existsSync(path), false, "session autosave must not alter future defaults");
     page.handleInput("\x13");
@@ -168,16 +219,16 @@ test("hub autosaves callback changes in the session and saves the future default
     page.handleInput("\x1b");
     await opening;
     const reopening = command("", ctx);
-    assert.match(page.render(80).join("\n"), /Steer active run/);
+    assert.match(page.render(80).join("\n"), /^> Completion delivery\s+During run/m);
     page.handleInput("\r");
-    assert.match(page.render(80).join("\n"), /Wait until idle/);
+    assert.match(page.render(80).join("\n"), /^> Completion delivery\s+When idle/m);
     const savedDefault = readFileSync(path, "utf8");
     assert.equal(pi.entries.length, 2);
     page.handleInput("\x1b");
     await reopening;
     assert.equal(readFileSync(path, "utf8"), savedDefault, "later session edits leave the saved default alone");
     const newSession = command("", { ...ctx, sessionManager: { getBranch: () => [] } });
-    assert.match(page.render(80).join("\n"), /Steer active run/);
+    assert.match(page.render(80).join("\n"), /^> Completion delivery\s+During run/m);
     page.handleInput("\x1b");
     await newSession;
     assert.deepEqual(notifications, []);
@@ -198,8 +249,8 @@ test("callback control rolls back a failed session save and reports a failed def
     save() { throw new Error("Default write unavailable"); },
   });
   page.handleInput("\r");
-  assert.match(page.render(80).join("\n"), /Wait until idle/);
-  assert.doesNotMatch(page.render(80).join("\n"), /Steer active run/);
+  assert.match(page.render(80).join("\n"), /^> Completion delivery\s+When idle/m);
+  assert.doesNotMatch(page.render(80).join("\n"), /^> Completion delivery\s+During run/m);
   assert.match(page.render(80).join("\n"), /Session write unavailable/);
   page.handleInput("\x13");
   assert.match(page.render(80).join("\n"), /Default write unavailable/);
@@ -229,8 +280,8 @@ test("an invalid callback default reports once, leaves package settings usable, 
       ui: { notify: (...args) => notifications.push(args), custom(build) {
         return new Promise(resolve => {
           const page = build({}, theme, {}, resolve);
-          assert.match(page.render(80).join("\n"), /Wait until idle/);
-          if (++pages === 1) { page.handleInput("\x1b[B"); page.handleInput("\r"); }
+          assert.match(page.render(80).join("\n"), /^[ >]+Completion delivery\s+When idle/m);
+          if (++pages === 1) { page.handleInput("\x1b[B"); page.handleInput("\x1b[B"); page.handleInput("\r"); }
           else {
             if (pages === 2) {
               page.handleInput("\x13");

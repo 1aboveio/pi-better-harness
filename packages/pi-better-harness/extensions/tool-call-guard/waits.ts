@@ -54,6 +54,6 @@ export function blockReason(match: WaitMatch): string {
     `This command waits on ${match.waitsOn}, so it belongs in a background task.`,
     "Spawn it with bg_task_spawn, then call wait_for_operations to park until it reports; a background task survives the end of the turn, while a foreground wait does not.",
     "Read bg_task_status and bg_task_log for the verdict.",
-    'To run this command in the foreground anyway, set Tool call guard to Off in Harness settings.',
+    'To run this command in the foreground anyway, set Foreground wait guard to Off in Harness settings.',
   ].join(" ");
 }

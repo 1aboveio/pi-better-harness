@@ -303,7 +303,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   };
 
   const attachLedger = (ctx: ExtensionContext, id: string): WorkLedger => {
-    if (!ledgerEnabled) throw new Error("Long-term work ledger is off. Enable it in /harness-settings first.");
+    if (!ledgerEnabled) throw new Error("Project work ledger is off. Enable it in /harness-settings first.");
     const candidate = readAssociatedWorkLedger(ctx.cwd, id);
     if (ledgerId !== id) pi.appendEntry(WORK_LEDGER_ASSOCIATION_ENTRY, workLedgerAssociationEntry(id));
     ledgerId = id;
@@ -549,7 +549,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     ],
     parameters: UpdatePlanSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!enabled) throw new Error("Outcome & Todo hooks are off. Enable them in /harness-settings.");
+      if (!enabled) throw new Error("Outcome and Todo tools are off. Enable them in /harness-settings.");
       const owner = workflowPlanOwner(ctx);
       const input = params as {
         explanation?: string; newTask?: boolean; todo?: PlanStepInput[]; outcome?: OutcomeInput;
@@ -560,7 +560,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
             input.newTask !== undefined || input.explanation !== undefined) {
           throw new Error("Send update_todo ledger alone; ledger changes are not combined with outcome, Todo, or workflow changes.");
         }
-        if (!ledgerEnabled) throw new Error("Long-term work ledger is off. Enable it in /harness-settings first.");
+        if (!ledgerEnabled) throw new Error("Project work ledger is off. Enable it in /harness-settings first.");
         const result = executeLedgerMutation(input.ledger, ctx.cwd, ledgerSessionBinding(ctx));
         if (result.details.ledger && result.details.ledger.id === ledgerId) {
           ledger = result.details.ledger;
@@ -694,10 +694,10 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     promptSnippet: "Inspect the common work plan: outcome, Todo or workflow rows, and the associated durable ledger",
     parameters: getTodoParameters,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!enabled) throw new Error("Outcome & Todo hooks are off. Enable them in /harness-settings.");
+      if (!enabled) throw new Error("Outcome and Todo tools are off. Enable them in /harness-settings.");
       const input = params as { ledger?: GetTodoLedgerInput };
       if (input.ledger !== undefined && !ledgerEnabled) {
-        throw new Error("Long-term work ledger is off. Enable it in /harness-settings first.");
+        throw new Error("Project work ledger is off. Enable it in /harness-settings first.");
       }
       refreshAssociatedLedger(ctx);
       const ledgerText = ledgerTodoText();
@@ -785,7 +785,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       const [action = "", value = ""] = args.trim().split(/\s+/, 2);
       if (!ledgerEnabled && (action === "" || action === "list" || action === "show")) {
-        ctx.ui.notify("Long-term work ledger is off. Enable it in /harness-settings to view ledgers.", "warning");
+        ctx.ui.notify("Project work ledger is off. Enable it in /harness-settings to view ledgers.", "warning");
         return;
       }
       const store = openWorkLedgerStore({ cwd: ctx.cwd });
@@ -813,7 +813,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         return;
       }
       if (!ledgerEnabled) {
-        ctx.ui.notify("Long-term work ledger is off. Enable it in /harness-settings before associating a ledger.", "warning");
+        ctx.ui.notify("Project work ledger is off. Enable it in /harness-settings before associating a ledger.", "warning");
         return;
       }
       if (!value) {

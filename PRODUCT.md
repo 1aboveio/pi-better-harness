@@ -1,35 +1,48 @@
 # Product
 
-## Register
-
-product
+<!-- impeccable:product-schema 1 -->
 
 ## Users
 
-Active Pi users working in the TUI while background work is running. They need to stay in flow, spot work that needs attention, and inspect or stop tasks without losing context.
+Pi users who delegate work or supervise long-running commands from a terminal session. They need to keep their foreground work moving, see which parallel tasks need attention, and inspect, pause, or stop work without losing their place in the conversation.
 
 ## Product Purpose
 
-pi-better-harness improves Pi's operational ergonomics for subagents, background tasks, and goal continuation. The background work navigator exists to make concurrent work visible, scannable, and controllable from the TUI without turning the interface into a dashboard or debug dump.
+Pi Better Harness keeps the foreground session responsive while related work runs in parallel. Success means operators can tell what is running and what needs attention, see what happened, and decide how to proceed with the evidence at hand.
 
-Success means the user can quickly distinguish healthy running work from failed, lost, stale, or stoppable work; inspect the evidence behind a state; and take safe action with minimal friction.
+## Positioning
 
-## Brand Personality
+Harness brings separately installable Pi extensions into one work-management flow. The shared Navigator shows background tasks, subagents, and Goals in the active Pi session. Each supervised task keeps status, logs, and results available for inspection. [Package overview](README.md)
 
-Compact, precise, composed. The feel should be close to Raycast: keyboard-first, dense, crisp, and immediate, while still feeling native to Pi's terminal interface.
+## Operating Context
 
-## Anti-references
+The interactive interface runs inside Pi’s terminal UI. Operators launch a task or delegate work, continue in the foreground, and use the Navigator to inspect status, logs, and controls. `/harness-settings` exposes shared controls and opens the settings of loaded extensions. Goal tracks an explicit objective and can continue work as background results arrive. [Harness usage](packages/pi-better-harness/README.md)
 
-Avoid debug-dump interfaces where raw metadata dominates the main path. Avoid large dashboard cards, decorative operational charts, modal-first management, chat-transcript rows, and verbose prose in list surfaces.
+People can install the full Harness or use individual Pi extensions. Commands and tool results also have headless use cases, while the Navigator and settings hub rely on the interactive host. [Installation and packages](README.md#install-the-whole-harness)
 
-## Design Principles
+## Capabilities and Constraints
 
-1. Triage first: surface the status, name, age, and next action before secondary evidence.
-2. Progressive detail: keep the list dense, then expose logs, process metadata, and health evidence in a structured drill-in view.
-3. Safety without ceremony: destructive or interrupting actions need clear confirmation, but should remain keyboard-fast.
-4. Native restraint: use Pi's theme vocabulary, terminal alignment, and predictable keybindings instead of decorative chrome.
-5. State must be legible without color alone: status text, grouping, and affordances carry meaning alongside semantic colors.
+- Core capabilities include an opt-in foreground write sandbox, delegated subagents, durable background commands and watches, synchronous SSH commands, Goal continuation, and model routing. Outcome & Todo adds optional session and checklist tracking.
+- A supervised wait has an observer and an owner. The observer reports evidence. The owner interprets it and decides whether to continue waiting or take action. [Observed wait ownership](docs/adr/0020-observed-waits-retain-an-owner.md)
+- The Navigator supports inspecting and controlling tasks from the active conversation. Task status and recent evidence are available before an operator chooses an action.
+- Pi provides the terminal theme, keyboard conventions, and extension capabilities. Keep settings and navigation consistent across extensions that share those surfaces.
+
+## Brand Commitments
+
+Compact, precise, composed. Use Raycast as a reference for dense, immediate, keyboard-first interaction and express those qualities through Pi’s terminal conventions. Use direct wording for statuses, settings, and actions. [Pi Better Harness logo](docs/images/brand/logo.png)
+
+## Evidence on Hand
+
+The package documentation records the available commands, settings, and workflows. The repository also includes a real Pi session capture and previews of package surfaces. [Harness usage](packages/pi-better-harness/README.md) · [Real Pi session capture](docs/images/package-gallery/real-session/pi-better-harness.png) · [Package previews](docs/images/package-gallery/)
+
+## Product Principles
+
+1. Keep the foreground session responsive while the operator monitors parallel work.
+2. Show status, task identity, elapsed time, and the next available action before exposing detailed logs and process metadata.
+3. Report sustained waits with elapsed time and the latest evidence so the owner can decide what to do next.
+4. Make stop and other interrupting actions explicit. Confirm consequential actions and keep the interaction keyboard-friendly.
+5. Give shared concepts consistent names and controls across the Navigator, settings, and individual extensions.
 
 ## Accessibility & Inclusion
 
-Target WCAG AA contrast for semantic colors where the host theme allows it. Use color plus text labels for status meaning. Avoid motion and flicker; state changes should be stable, predictable, and usable with reduced-motion preferences.
+Support keyboard-only use and make focus visible. Use status text and grouping alongside semantic color. Target WCAG AA contrast where the host theme allows it. Keep state changes stable and predictable, and support reduced-motion preferences.
