@@ -55,7 +55,7 @@ import { announceExecutionAdapter, describeSubagentProcessPolicy, effectiveWorke
 import { dirname, isAbsolute, join } from "node:path";
 import { baseDir, taskWorkspaceDir, sessionsDir, runDir, recordTaskRuntimeProvenance, recordLaunchAttempt, clearLaunchAttempt, logPathFor, promptPathFor, nextRunId, writeMeta, readMeta, listMetas, listActiveMetasForParent, listMetasForOrigin, listMetasForParent, onMetaChanged, effectiveStatus, ownedByThisParent as ownedByFrontend, navigatorVisibleRuns, dismissRun, } from "./registry.domain.mjs";
 import { captureProcessIdentity, extractChildEventFactsFromLog, loadHealthThresholdsFromConfig, isAbandonedByParent, needsMonitoring, observeRunHealth, realProcessProbe, reconcileRun, resetChildEventLogCursor, } from "./health.domain.mjs";
-import { assignBatchJobNames, batchLaunchOutputSchema, batchLaunchResult, mergeJobOptions, nextBatchId, planBatchLaunches, validateBatchPlan, } from "./batch.mjs";
+import { assignBatchJobNames, batchLaunchOutputSchema, batchLaunchResult, mergeJobOptions, nextBatchId, normalizeSessionSelector, planBatchLaunches, validateBatchPlan, } from "./batch.mjs";
 import { formatCapacityRejectMessage, getSharedCapacityGate, } from "./capacity.mjs";
 import { buildHealthCallbackDelivery } from "./completion.domain.mjs";
 import { cancelCallbackBatch, getCallbackBatcher, packCallbackBatch, setCallbackBatchContext } from "./shared-callback-batcher.domain.mjs";
@@ -2312,15 +2312,17 @@ function latestConversationAttempt(sessionId, metas) {
  * missing session is the only error added here. Nothing is ever recreated.
  */
 function requestedSessionId(job, cwd) {
-    if (job.session_id !== undefined && job.session_name !== undefined) {
+    const sessionId = normalizeSessionSelector(job.session_id);
+    const sessionName = normalizeSessionSelector(job.session_name);
+    if (sessionId !== undefined && sessionName !== undefined) {
         throw new Error("Pass either session_id or session_name, not both.");
     }
-    if (job.session_name !== undefined) {
-        if (typeof job.session_name !== "string")
+    if (sessionName !== undefined) {
+        if (typeof sessionName !== "string")
             throw new Error("session_name must be a non-empty name.");
-        return selectSessionByName(listMetas(), job.session_name, (workspace) => isWithinWorkspace(workspace, cwd));
+        return selectSessionByName(listMetas(), sessionName, (workspace) => isWithinWorkspace(workspace, cwd));
     }
-    return job.session_id;
+    return sessionId;
 }
 function continuationPlanFor(sessionId, origin) {
     const others = listMetas();
@@ -4062,8 +4064,10 @@ export default function (pi, managed) {
                 throw new Error(blankSelector);
             let catalogSnapshot;
             let catalogHost;
-            const needsCatalog = p.jobs.some((job) => job.session_id === undefined && job.session_name === undefined
-                && hasCatalogSelector(mergeJobOptions(p.shared, job)));
+            const needsCatalog = p.jobs.some((job) => {
+                const merged = mergeJobOptions(p.shared, job);
+                return merged.session_id === undefined && merged.session_name === undefined && hasCatalogSelector(merged);
+            });
             if (needsCatalog) {
                 catalogHost = catalogHostFrom(ctx);
                 noteCatalogHost(catalogHost);
@@ -4120,7 +4124,7 @@ export default function (pi, managed) {
                 const job = p.jobs[i];
                 let name = names[i];
                 const merged = mergeJobOptions(p.shared, job);
-                const isContinuation = job.session_id !== undefined || job.session_name !== undefined;
+                const isContinuation = merged.session_id !== undefined || merged.session_name !== undefined;
                 // A continuation keeps its own frozen model and effort. shared.model
                 // is a default for NEW conversations, so only a per-job value is an
                 // explicit escalation of the saved recipe.
@@ -4136,7 +4140,7 @@ export default function (pi, managed) {
                     }
                 }
                 try {
-                    const sessionId = requestedSessionId(job, ctx.cwd);
+                    const sessionId = requestedSessionId(merged, ctx.cwd);
                     // A saved conversation is never re-resolved against the catalog.
                     if (sessionId === undefined && catalogSnapshot && catalogHost && hasCatalogSelector(merged)) {
                         const explicitName = typeof job.name === "string" && job.name.trim() !== "" ? job.name : undefined;

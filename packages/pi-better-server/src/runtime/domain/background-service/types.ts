@@ -24,6 +24,8 @@ export interface CommandSpec {
   shell?: boolean;
   /** Run the shell as a login shell (`bash -lc`, the default). False runs `bash -c`, skipping profile sourcing. */
   loginShell?: boolean;
+  /** Internal executable selected by the host for a Windows shell or log trampoline. */
+  resolvedWindowsShell?: string;
   cwd?: string;
   env?: Record<string, string>;
 }
@@ -160,8 +162,8 @@ export interface BackgroundTaskMeta {
   env?: Record<string, string>;
   /**
    * The executable and argv this task was actually launched with, when that
-   * differs from `command`/`argv` above — today, an OS write-sandbox wrapper
-   * captured from the foreground policy at launch. Re-running a watch poll uses
+   * differs from `command`/`argv` above, such as an OS write-sandbox wrapper
+   * or a Windows watch shell selected at launch. Re-running a watch poll uses
    * it verbatim, which is how a running task keeps the policy it started under
    * even after the foreground policy changes. `command`/`argv` stay the operator's
    * own request, so status, navigator, and goal surfaces read unchanged.

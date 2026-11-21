@@ -155,11 +155,16 @@ describe("continuation jobs in a batch", () => {
         );
     });
 
-    it("rejects a blank per-job session_id", () => {
-        assert.throws(
-            () => validateBatchPlan({ jobs: [{ prompt: "x", session_id: "   " }] }),
-            /session_id must be a non-empty native session id/,
-        );
+    it("ignores blank selectors while preserving a supplied name or id", () => {
+        const jobs = [{ prompt: "by name", session_id: "   ", session_name: "saved name" },
+            { prompt: "by id", session_id: "sa_saved", session_name: "" }];
+        assert.doesNotThrow(() => validateBatchPlan({ jobs }));
+        assert.equal(mergeJobOptions({}, jobs[0]).session_id, undefined);
+        assert.equal(mergeJobOptions({}, jobs[0]).session_name, "saved name");
+        assert.equal(mergeJobOptions({}, jobs[1]).session_id, "sa_saved");
+        assert.equal(mergeJobOptions({}, jobs[1]).session_name, undefined);
+        assert.throws(() => validateBatchPlan({ jobs: [{ ...jobs[0], session_id: "sa_saved" }] }),
+            /pass either session_id or session_name/);
     });
 });
 

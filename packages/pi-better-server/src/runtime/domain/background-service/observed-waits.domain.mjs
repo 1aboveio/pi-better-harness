@@ -29,7 +29,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { describeSupervisedProgress, supervisedProgress } from "./supervised-progress.domain.mjs";
 import { formatProgressDuration } from "./stall.domain.mjs";
 import { validateCondition } from "./conditions.domain.mjs";
-import { STEP_GATE_COMMAND_ENV, commandExecution, parseStepGateFailure, processExists, stepGateScript, validateCommandSpec, } from "./process.domain.mjs";
+import { STEP_GATE_COMMAND_ENV, commandExecution, parseStepGateFailure, processExists, resolveWindowsLaunchShell, stepGateScript, validateCommandSpec, } from "./process.domain.mjs";
 import { currentProcessStartToken, readProcessStartToken } from "./process-identity.domain.mjs";
 import { assertBackgroundExecutionAllowed, backgroundExecutionLimits, confineCommandSpec, resolveForegroundSandboxPlan, currentForegroundSandboxPolicy, resolveWorkerSandboxPlan, sandboxProvenance, } from "./sandbox.domain.mjs";
 import { openStore, cancellationCredential, } from "./shared-operation-coordinator/index.domain.mjs";
@@ -2772,6 +2772,8 @@ export class ObservedWaitHost {
             ? resolveWorkerSandboxPlan(this.pi, workerPolicy, params, tool)
             : resolveForegroundSandboxPlan(this.pi, false, params, tool);
         assertBackgroundExecutionAllowed(spec, plan, { remote: false, cwd });
+        if (spec.shell !== false)
+            spec.resolvedWindowsShell = resolveWindowsLaunchShell(this.pi);
         const limits = backgroundExecutionLimits(plan);
         const gated = kind === "process" && params.require_successful_steps === true;
         if (gated) {

@@ -6,6 +6,7 @@ import { fork } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { WorkClient } from "../src/runtime/work-client.mjs";
+import { processMatchesStart } from "../src/daemon-owner.ts";
 import { setTimeout as delay } from "node:timers/promises";
 const { createObservedWaitHost } = await import(new URL("../../pi-better-background-tasks/src/observed-waits.ts", import.meta.url).href);
 const { registerTools } = await import(new URL("../../pi-better-background-tasks/src/tools.ts", import.meta.url).href);
@@ -133,7 +134,11 @@ for (const stage of ["unaccepted", "accepted", "before-stop-file", "after-stop-f
       const launched = await host.launchParent({ kind: "process", params: { shell: false, callback: false,
         argv: [process.execPath, "-e", "setInterval(()=>{},1000)"] }, ctx });
       taskId = launched.id;
-      const launchToken = JSON.parse(readFileSync(supervisorPaths(directory, taskId).launch, "utf8")).token;
+      const paths = supervisorPaths(directory, taskId);
+      const launchToken = JSON.parse(readFileSync(paths.launch, "utf8")).token;
+      const crashedAfterStop = stage === "after-stop-file" || stage === "after-process-action";
+      const claim = crashedAfterStop ? createLocalSupervisor({ directory }).snapshot(taskId)?.claim : undefined;
+      if (crashedAfterStop) assert.ok(claim?.pidStartTime, "the post-stop crash must target a runner with a recorded process identity");
       const first = await start(stage);
       const credential = host.authorizeCancellationForParent(ctx, taskId, "crash-key");
       const exited = once(first.child, "exit");
@@ -143,7 +148,7 @@ for (const stage of ["unaccepted", "accepted", "before-stop-file", "after-stop-f
         assert.match(result.content.map((part: any) => part.text).join("\n"), /outcome_unknown/);
       }
       assert.equal((await exited)[1], "SIGKILL");
-      const stopPath = supervisorPaths(directory, taskId).stop;
+      const stopPath = paths.stop;
       let before: string | undefined;
       try { before = readFileSync(stopPath, "utf8"); } catch (error) { if ((error as any).code !== "ENOENT") throw error; }
       const second = await start();
@@ -166,8 +171,25 @@ for (const stage of ["unaccepted", "accepted", "before-stop-file", "after-stop-f
       assert.ok(receipt.result, "recovery must commit a durable receipt");
       if (before) assert.equal(readFileSync(stopPath, "utf8"), before, "recovery must not rewrite the already-published stop action");
       const stored = readFileSync(stopPath, "utf8");
-      await second.client.request("runtime_cancel_task", { credential });
+      const stopMtime = statSync(stopPath).mtimeMs;
+      assert.deepEqual(await second.client.request("runtime_cancel_task", { credential }), receipt);
       assert.equal(readFileSync(stopPath, "utf8"), stored);
+      if (claim) {
+        const exitDeadline = Date.now() + 10000;
+        while (processMatchesStart(claim.pid, claim.pidStartTime) || !existsSync(paths.result)) {
+          assert.ok(Date.now() < exitDeadline, "the exact runner must exit with durable terminal evidence");
+          await delay(20);
+        }
+        const terminal = readFileSync(paths.result, "utf8");
+        const result = JSON.parse(terminal);
+        assert.equal(result.token, launchToken);
+        assert.equal(result.status, "cancelled");
+        assert.deepEqual(await second.client.request("runtime_query_cancellation", { credential }), receipt);
+        assert.deepEqual(await second.client.request("runtime_cancel_task", { credential }), receipt);
+        assert.equal(readFileSync(stopPath, "utf8"), stored);
+        assert.equal(statSync(stopPath).mtimeMs, stopMtime, "same-key replay must not rewrite the stop record");
+        assert.equal(readFileSync(paths.result, "utf8"), terminal);
+      }
       assert.equal(host.statusForParent(ctx, taskId).terminalOutcome === "succeeded", false);
     } finally {
       for (const client of clients) client.close();
