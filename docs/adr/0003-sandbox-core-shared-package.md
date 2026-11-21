@@ -1,5 +1,7 @@
 # Shared OS write-sandbox mechanism lives in private `sandbox-core`
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#execution-boundaries).
+
 The kernel-enforced write confinement proven by `pi-better-subagents` is needed by three products: detached subagent runs, the foreground `pi-better-sandbox` extension, and local `pi-better-background-tasks` spawn/watch. The mechanism — backend discovery, canonical path containment, write-deny compilation, macOS SBPL profile construction, Linux Bubblewrap mount construction, and ordered executable/argv wrapping — belongs in a private workspace package `packages/sandbox-core`, vendored into publishable extensions the same way `ssh-core` and `log-utils` are today. Product policy (when a sandbox is requested, what it may write, what a user may toggle) stays in the consumer packages; `sandbox-core` is not a Pi extension and is not published to npm.
 
 ## Status

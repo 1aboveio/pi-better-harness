@@ -9,12 +9,14 @@
  * `defaultSkills` absent → the child discovers the user-level skills catalog.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { toolPackage, supportsChildProvider } from "./shared-task-tools.ts";
 import { SELF_SPEC } from "./extensions.ts";
-import { installedPackage } from "./child-dependencies.mjs";
+import { installedPackage, packageRoot } from "./child-dependencies.mjs";
 import { isDelegationMode, type DelegationMode } from "./delegation.ts";
 import { normalizeSkillExposure } from "./skills.ts";
 import { validatedTimingMinutes, type TimingSettings } from "./timing.ts";
@@ -195,6 +197,7 @@ export function writeSubagentSettings(
     settings: {
         delegationMode: DelegationMode;
         maxConcurrent: number;
+        maxMinutes?: number;
         /** Omit to preserve the saved value; `null` explicitly records discovery. */
         defaultSkills?: string[] | null;
         /** Omit to preserve the saved value. `0` disables that alert. */
@@ -207,12 +210,15 @@ export function writeSubagentSettings(
     if (!isDelegationMode(settings.delegationMode)) throw new Error("Invalid delegation mode.");
     if (!isConcurrencyCap(settings.maxConcurrent)) throw new Error("Concurrent subagents must be a positive whole number.");
     const next: {
-        delegationMode: DelegationMode; maxConcurrent: number; defaultSkills?: string[] | null;
+        delegationMode: DelegationMode; maxConcurrent: number; maxMinutes?: number; defaultSkills?: string[] | null;
         toolWaitMinutes?: number; stuckMinutes?: number;
     } = {
         delegationMode: settings.delegationMode,
         maxConcurrent: settings.maxConcurrent,
     };
+    if (settings.maxMinutes !== undefined) {
+        next.maxMinutes = validatedTimingMinutes(settings.maxMinutes, "maxMinutes");
+    }
     if (Object.hasOwn(settings, "defaultSkills")) {
         if (settings.defaultSkills === null) {
             next.defaultSkills = null;
@@ -245,6 +251,48 @@ function writeConfigSettings(settings: Partial<SubagentConfig>, path: string): v
 /** Normalize a comma/space tool list to pi's bare comma form: "a, b" → "a,b". */
 export function normalizeTools(list: string): string {
     return list.split(",").map((t) => t.trim()).filter(Boolean).join(",");
+}
+
+export const ORDINARY_TOOL_PROVIDERS: Readonly<Record<string, string>> = {
+    apply_patch: join(selfDir(), "child-apply-patch.ts"),
+    process_list: join(selfDir(), "child-process-list.ts"),
+};
+
+/** Check the owning package even when a mapping points directly to one of its files. */
+export function supportedChildEntrypoint(name: string, pkg: string, path: string): boolean {
+    return supportsChildProvider(name, pkg, packageRoot(path) ?? path);
+}
+
+/** Capture exact user-installed entrypoints already active in the foreground. */
+export function activeChildProviders(pi: Pick<ExtensionAPI, "getActiveTools" | "getAllTools">): Record<string, string> {
+    const active = new Set(pi.getActiveTools?.() ?? []);
+    const paths = new Map<string, string>();
+    const seen = new Set<string>();
+    for (const tool of pi.getAllTools?.() ?? []) {
+        if (!active.has(tool.name)) continue;
+        // The SDK reports active names. Conflicting registrations have no unique owner.
+        if (seen.has(tool.name)) { paths.delete(tool.name); continue; }
+        seen.add(tool.name);
+        if (tool.sourceInfo?.scope !== "user") continue;
+        const owner = toolPackage(tool);
+        if (!owner || !supportsChildProvider(tool.name, owner.package, owner.root)) continue;
+        try {
+            const path = realpathSync(tool.sourceInfo.path);
+            if (!statSync(path).isFile() || !supportedChildEntrypoint(tool.name, owner.package, path)) continue;
+            paths.set(tool.name, path);
+        } catch { /* An unavailable entrypoint cannot supply a new worker. */ }
+    }
+    return Object.fromEntries(paths);
+}
+
+export function ordinaryChildConfig(config: SubagentConfig, activeProviders: Record<string, string> = {}): SubagentConfig {
+    const packaged = config.toolExtensions === null ? undefined : bundledConfig().toolExtensions;
+    return { ...config, toolExtensions: { ...activeProviders, ...ORDINARY_TOOL_PROVIDERS, ...packaged, ...config.toolExtensions } };
+}
+
+export function addEditablePatch(names: string[], excluded: ReadonlySet<string>): void {
+    const editable = names.some(name => (name === "edit" || name === "write") && !excluded.has(name));
+    if (editable && !excluded.has("apply_patch") && !names.includes("apply_patch")) names.push("apply_patch");
 }
 
 /** This package's own root — the extension dir, which is also `self`. */

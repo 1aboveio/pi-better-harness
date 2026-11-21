@@ -23,13 +23,24 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { removeOwnedFixture } from "../../../scripts/test-support/remove-owned-fixture.mjs";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { requestWorkDetail } from "../work-observation.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(__dirname);
 const RUNTIME = mkdtempSync(join(tmpdir(), "nav-close-ext-"));
 process.env.TMPDIR = RUNTIME;
+const AGENT_DIR = join(RUNTIME, "agent");
+process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
+const DURABLE_DIR = join(RUNTIME, "durable");
+process.env.PI_SUBAGENT_DURABLE_DIR = DURABLE_DIR;
+const navigators = [];
+const sleepers = [];
+let stopRuntime;
 
 const STUBS_DIR = mkdtempSync(join(RUNTIME, "stubs-"));
 const CHECKOUT_NODE_MODULES = join(REPO_ROOT, "node_modules");
@@ -146,6 +157,7 @@ function assertCheckoutNodeModulesUntouched() {
 
 function spawnSleeper() {
     const proc = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    sleepers.push(proc);
     proc.unref();
     return proc.pid;
 }
@@ -163,9 +175,12 @@ async function waitFor(pred, timeoutMs = 3000) {
  * Boot the real extension factory, fire session_start on a TUI ctx, and drive
  * the empty-editor main-window subagent navigation path.
  */
-function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
+function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId = "navigator-recipient" }) {
+    const seededIds = [];
     const handlers = {};
     const tools = new Map();
+    const commands = new Map();
+    const notices = [];
     const statusCalls = [];
     const widgetCalls = [];
     const closedOutcomes = [];
@@ -178,7 +193,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
         theme: { fg: (color, s) => `<${color}>${s}</>` },
         setStatus(k, v) { statusCalls.push([k, v]); },
         setWidget(k, v) { widgetCalls.push([k, v]); },
-        notify() {},
+        notify(message, level) { notices.push({ message, level }); },
         factory: undefined,
         getEditorComponent() { return this.factory; },
         setEditorComponent(f) { this.factory = f; },
@@ -203,7 +218,9 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
     };
 
     const pi = {
+        events: new EventEmitter(),
         registerTool(tool) { tools.set(tool.name, tool); },
+        registerCommand(name, command) { commands.set(name, command); },
         on(event, fn) { handlers[event] = fn; },
         sendMessage() {},
     };
@@ -212,9 +229,12 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
     mod.default(pi);
     assert.equal(typeof handlers.session_start, "function", "extension must register session_start");
 
-    return {
-        async start() {
+    const navigator = {
+        async start(widgetReady = () => true) {
+            stopRuntime ??= await startWorkRuntimeFixture();
             await handlers.session_start({}, ctx);
+            // These assertions inspect real asynchronous observations, not placeholders.
+            await waitFor(() => seededIds.every(id => requestWorkDetail(id)?.detail) && widgetReady());
             assert.ok(ui.factory, "session_start must install the navigator editor factory");
             editor = ui.factory("tui", "theme", "kb");
             assert.equal(typeof editor.handleInput, "function");
@@ -245,22 +265,29 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
         pressX() { overlayComponent ? overlayComponent.handleInput("x") : editor.handleInput("x"); },
         async shutdown() { await handlers.session_shutdown({}, ctx); },
         tools,
+        commands,
+        notices,
         statusCalls,
         widgetCalls,
         closedOutcomes,
         ui,
         ctx,
+        pi,
         /** Seed a visible run owned by this parent. */
         seedRun(overrides = {}) {
             const id = trackDisk(overrides.id ?? `sa_t47_ext_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
             writeMeta({
                 ...metaBase,
+                callbackOrigin: { cwd: ctx.cwd, sessionId },
                 id,
                 ...overrides,
             });
+            seededIds.push(id);
             return id;
         },
     };
+    navigators.push(navigator);
+    return navigator;
 }
 
 function renderWidgetValue(value, width = 120) {
@@ -296,11 +323,91 @@ describe("registered extension path: main-window navigator actions", () => {
         assertCheckoutNodeModulesUntouched();
     });
 
-    after(() => {
+    afterEach(async () => {
+        for (const child of sleepers) {
+            if (child.exitCode !== null || child.signalCode !== null) continue;
+            child.kill("SIGTERM");
+            assert.equal(await waitFor(() => child.exitCode !== null || child.signalCode !== null), true, "owned fixture child must exit before data removal");
+        }
+        for (const navigator of navigators) await navigator.shutdown();
+        // Cases own independent records, including deliberately unverified parks.
+        for (const id of diskIds) {
+            const directory = registry.runDir(id);
+            if (existsSync(directory)) removeOwnedFixture(directory);
+        }
+        if (existsSync(DURABLE_DIR)) removeOwnedFixture(DURABLE_DIR);
+    });
+
+    after(async () => {
+        assert.ok(sleepers.every(child => child.exitCode !== null || child.signalCode !== null), "fixture children must be gone before removal");
+        for (const navigator of navigators) await navigator.shutdown();
+        await stopRuntime?.();
         for (const id of diskIds) {
             try { rmSync(registry.runDir(id), { recursive: true, force: true }); } catch { /* best-effort */ }
         }
-        try { rmSync(RUNTIME, { recursive: true, force: true }); } catch { /* best-effort */ }
+        removeOwnedFixture(RUNTIME);
+    });
+
+    // @covers navigator.incident-presentation
+    it("foreground startup does not supervise or consume another session's held-record warning", async () => {
+        const workspace = join(RUNTIME, "startup-workspace");
+        mkdirSync(workspace, { recursive: true });
+        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase, sessionId: "startup-B" });
+        nav.ctx.cwd = workspace;
+        const id = nav.seedRun({ id: "sa_historical_startup", cwd: workspace, callbackOrigin: { cwd: workspace, sessionId: "startup-A" } });
+        registry.writeParkRecord(id, { version: 1, phase: "resuming", waitId: "wait-startup", generation: 1,
+            ownerWorkspace: workspace, ownerSessionId: "startup-A", resumedBy: "sa_missing_startup_writer", attemptId: id, parkedAt: 1, updatedAt: 1 });
+        const { createObservedWaitHost } = await import("../../pi-better-background-tasks/src/observed-waits.ts");
+        const host = createObservedWaitHost(nav.pi, { storePath: join(RUNTIME, "startup.sqlite"), supervisorDirectory: join(RUNTIME, "supervisor"), pollMs: 0 });
+        host.start(nav.ctx);
+        try {
+            await nav.start();
+            assert.equal(registry.readParkRecord(id).phase, "resuming", "foreground observation does not perform server reconciliation");
+            assert.ok(!nav.notices.some(n => n.message.includes(`Subagent ${id}:`)));
+            const { reconcileParkedWaits } = await import("../worker-waits.ts");
+            await reconcileParkedWaits(host.service, { resume: async () => "held", notifyWhen: () => false });
+            assert.equal(registry.readParkRecord(id).phase, "held", "explicit supervisor domain reconciliation repairs the missing writer");
+            assert.ok(!nav.notices.some(n => n.message.includes(`Subagent ${id}:`)), "foreign attention never becomes a recipient wake");
+            assert.equal(registry.readParkRecord(id).ownerSessionId, "startup-A");
+        } finally { await nav.shutdown(); host.close(); registry.dismissRun(id); rmSync(registry.runDir(id), { recursive: true, force: true }); }
+    });
+
+    // @covers navigator.incident-presentation
+    it("historical management inspects without adopting and retains failed cancellations across reload", async () => {
+        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase, sessionId: "unrelated-B" });
+        const id = nav.seedRun({ id: "sa_historical_attention", callbackOrigin: { cwd: RUNTIME, sessionId: "original-A" } });
+        registry.writeParkRecord(id, { version: 1, phase: "held", waitId: "wait-history", generation: 1,
+            ownerWorkspace: RUNTIME, ownerSessionId: "original-A", heldReason: "retained evidence", attemptId: id, parkedAt: 1, updatedAt: 1 });
+        const original = registry.readParkRecord(id);
+        const history = await import("../historical-attention.ts");
+        try {
+            await nav.start();
+            const { renderRegisteredWorkDetail } = await import("../shared-navigator.ts");
+            assert.ok(!renderRegisteredWorkDetail("subagents", id, 120).listedIds.includes(id));
+            const command = nav.commands.get("subagents");
+            const choices = [0, "Inspect"];
+            nav.ui.select = async (_title, labels) => { const choice = choices.shift(); return typeof choice === "number" ? labels[choice] : choice; };
+            await command.handler("history", nav.ctx);
+            assert.match(nav.notices.at(-1).message, /original-A/);
+            assert.match(nav.notices.at(-1).message, /wait-history/);
+            assert.deepEqual(registry.readParkRecord(id), original);
+            await command.handler("history dismiss", nav.ctx);
+            const waits = history.historicalWaits({ cwd: RUNTIME, sessionId: "unrelated-B" });
+            assert.equal(history.attentionDismissed(RUNTIME, history.attentionRevision(waits)), true);
+            choices.push(0, "Cancel pending wait");
+            nav.ui.confirm = async () => true;
+            await command.handler("history", nav.ctx);
+            assert.match(nav.notices.at(-1).message, /failed.*Durable cancellation unavailable/s);
+            const result = await nav.tools.get("subagent_stop").execute("stop-history", { id });
+            assert.equal(result.isError, true);
+            assert.match(result.content[0].text, /Durable cancellation unavailable/);
+            assert.deepEqual(registry.readParkRecord(id), original);
+            await nav.shutdown();
+            await nav.start();
+            assert.equal(history.attentionDismissed(RUNTIME, history.attentionRevision(history.historicalWaits({ cwd: RUNTIME, sessionId: "unrelated-B" }))), true);
+            registry.updateParkRecord(id, { heldReason: "new attention" });
+            assert.equal(history.attentionDismissed(RUNTIME, history.attentionRevision(history.historicalWaits({ cwd: RUNTIME, sessionId: "unrelated-B" }))), false);
+        } finally { await nav.shutdown(); }
     });
 
     // @covers navigator.incident-presentation
@@ -356,12 +463,14 @@ describe("registered extension path: main-window navigator actions", () => {
             assert.equal(failureView(id, RUNTIME, true).actionable, true, "navigator cannot dispose incidents");
             registry.writeMeta({ ...registry.readMeta(id), status: "lost", lostAt: now });
             refreshBackgroundWorkNavigator(nav.ctx);
+            await waitFor(() => renderRegisteredWorkDetail("subagents", id, 120).detail.status === "waiting");
             const lostRail = renderWidgetValue(nav.lastWidget("background-work-list"));
-            assert.match(lostRail, /quiet-failure\s+lost/);
+            assert.match(lostRail, /quiet-failure\s+waiting/);
             assert.doesNotMatch(lostRail, /Action required|ORIGINAL_CHILD_ERROR|model error|MODEL_FAILURE/);
             rmSync(logPath);
+            await waitFor(() => /Log unreadable/.test(renderRegisteredWorkDetail("subagents", id, 120).detail.transcriptDiagnostic ?? ""));
             const unreadable = renderRegisteredWorkDetail("subagents", id, 120).detail;
-            assert.equal(unreadable.status, "lost");
+            assert.equal(unreadable.status, "waiting");
             assert.match(unreadable.transcriptDiagnostic, /Log unreadable/);
             assert.doesNotMatch(unreadable.transcriptDiagnostic, /Action required|active failure observations/);
         } finally {
@@ -424,7 +533,7 @@ describe("registered extension path: main-window navigator actions", () => {
             startedAt: Date.now() + 1000,
         });
 
-        await nav.start();
+        await nav.start(() => renderWidgetValue(nav.lastWidget("background-work-list")).includes("live-job"));
         nav.focusViaLeftKey();
 
         nav.pressX();
@@ -470,7 +579,7 @@ describe("registered extension path: main-window navigator actions", () => {
             callbackOrigin: { cwd: RUNTIME, sessionId: "session-b" },
         });
 
-        await nav.start();
+        await nav.start(() => renderWidgetValue(nav.lastWidget("background-work-list")).includes("session-b-run"));
 
         const mainList = renderWidgetValue(nav.lastWidget("background-work-list"));
         assert.ok(mainList.includes("session-b-run"), mainList);
@@ -479,50 +588,64 @@ describe("registered extension path: main-window navigator actions", () => {
 
     // @covers navigator.close
     // @level integration
-    it("registered main-list widget hides the section when only terminal subagents remain", async () => {
+    it("registered main-list widget retains recent terminal subagents until they expire", async (t) => {
+        const { refreshBackgroundWorkNavigator } = await import("../shared-navigator.ts");
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
         const now = Date.now();
         const recentFailedId = nav.seedRun({
-            id: trackDisk(`sa_t47_recent_failed_${now}`),
             name: "recent-failed-run",
+            sessionId: "recent-failed",
             status: "failed",
             pid: THIS_PID,
-            startedAt: now - 40_000,
-            endedAt: now - 29_000,
+            startedAt: now - 2_000,
+            endedAt: now - 1_000,
         });
         const oldFailedId = nav.seedRun({
-            id: trackDisk(`sa_t47_old_failed_${now}`),
             name: "old-failed-run",
+            sessionId: "old-failed",
             status: "failed",
             pid: THIS_PID,
-            startedAt: now - 50_000,
-            endedAt: now - 31_000,
+            startedAt: now - 61_000,
+            endedAt: now - 60_000,
         });
         const recentCompletedId = nav.seedRun({
-            id: trackDisk(`sa_t47_recent_completed_${now}`),
             name: "recent-completed-run",
+            sessionId: "recent-completed",
             status: "completed",
             pid: THIS_PID,
-            startedAt: now - 40_000,
-            endedAt: now - 29_000,
+            startedAt: now - 2_000,
+            endedAt: now - 1_000,
         });
         const oldCompletedId = nav.seedRun({
-            id: trackDisk(`sa_t47_old_completed_${now}`),
             name: "old-completed-run",
+            sessionId: "old-completed",
             status: "completed",
             pid: THIS_PID,
-            startedAt: now - 50_000,
-            endedAt: now - 31_000,
+            startedAt: now - 61_000,
+            endedAt: now - 60_000,
         });
 
-        await nav.start();
+        const widgetKey = "background-work-list";
+        await nav.start(() => {
+            const list = renderWidgetValue(nav.lastWidget(widgetKey));
+            return list.includes("recent-failed-run") && list.includes("recent-completed-run");
+        });
 
-        const mainList = renderWidgetValue(nav.lastWidget("background-work-list"));
-        assert.ok(!mainList.includes("subagents"), mainList);
-        assert.ok(!mainList.includes("recent-failed-run"), mainList);
-        assert.ok(!mainList.includes("recent-completed-run"), mainList);
-        assert.ok(!mainList.includes("old-failed-run"), mainList);
-        assert.ok(!mainList.includes("old-completed-run"), mainList);
+        const mainList = renderWidgetValue(nav.lastWidget(widgetKey));
+        assert.match(mainList, /subagents/);
+        assert.match(mainList, /recent-failed-run\s+failed/);
+        assert.match(mainList, /recent-completed-run\s+completed/);
+        assert.doesNotMatch(mainList, /old-failed-run|old-completed-run/);
+
+        // Retention starts when the Navigator sees a terminal row, not when the run ends.
+        const afterRetention = Date.now() + 31_000;
+        const clock = t.mock.method(Date, "now", () => afterRetention);
+        try {
+            refreshBackgroundWorkNavigator(nav.ctx);
+            assert.equal(nav.lastWidget(widgetKey), undefined, "the widget clears after the last terminal row expires");
+        } finally {
+            clock.mock.restore();
+        }
         assert.equal(registry.readMeta(recentFailedId).status, "failed");
         assert.equal(registry.readMeta(oldFailedId).status, "failed");
         assert.equal(registry.readMeta(recentCompletedId).status, "completed");

@@ -6,11 +6,12 @@ import type { SkillExposureMode } from "./skills.ts";
 import { createSkillPicker, type DiscoveredSkill } from "./skill-picker.ts";
 import { validatedTimingMinutes } from "./timing.ts";
 
-export type TimingSettingKey = "toolWaitMinutes" | "stuckMinutes";
+export type TimingSettingKey = "maxMinutes" | "toolWaitMinutes" | "stuckMinutes";
 
 export interface SubagentSettingsSnapshot {
     mode: DelegationMode;
     maxConcurrent: number;
+    maxMinutes: number;
     modeSource: "session" | "config";
     capSource: "session" | "config";
     defaultMode: DelegationMode;
@@ -45,13 +46,14 @@ export interface SubagentSettingsHandlers {
     openAgents?(): void;
 }
 
-type EditTarget = { kind: "cap" } | { kind: "toolWait" } | { kind: "stuck" };
+type EditTarget = { kind: "cap" } | { kind: "toolWait" } | { kind: "stuck" } | { kind: "timeout" };
 
 type Row =
     | { kind: "mode" }
     | { kind: "cap" }
     | { kind: "toolWait" }
     | { kind: "stuck" }
+    | { kind: "timeout" }
     | { kind: "skills" }
     | { kind: "choose" }
     | { kind: "agents" }
@@ -110,7 +112,7 @@ export function createSubagentSettingsPage(
 
     function rowsOf(settings: SubagentSettingsSnapshot): Row[] {
         const rows: Row[] = [
-            { kind: "mode" }, { kind: "cap" }, { kind: "toolWait" }, { kind: "stuck" },
+            { kind: "mode" }, { kind: "cap" }, { kind: "toolWait" }, { kind: "stuck" }, { kind: "timeout" },
             { kind: "skills" }, { kind: "choose" },
         ];
         rows.push({ kind: "agents" }, { kind: "reset" });
@@ -178,6 +180,8 @@ export function createSubagentSettingsPage(
                 startEditing({ kind: "toolWait" }, String(settings.toolWaitMinutes));
             } else if (selected.kind === "stuck") {
                 startEditing({ kind: "stuck" }, String(settings.stuckMinutes));
+            } else if (selected.kind === "timeout") {
+                startEditing({ kind: "timeout" }, String(settings.maxMinutes));
             } else if (selected.kind === "skills") {
                 if (settings.skillsMode === "explicit") rememberedSkillPaths = [...settings.skillsPaths];
                 const next = cycleSkillMode(settings.skillsMode);
@@ -219,11 +223,13 @@ export function createSubagentSettingsPage(
             }
             return;
         }
-        const key = target.kind === "toolWait" ? "toolWaitMinutes" : "stuckMinutes";
+        const key = target.kind === "toolWait" ? "toolWaitMinutes"
+            : target.kind === "stuck" ? "stuckMinutes" : "maxMinutes";
         try {
             const minutes = validatedTimingMinutes(value.trim(), key);
             handlers.changeTiming(key, minutes);
-            finishEditing(`${target.kind === "toolWait" ? "Tool-wait" : "No-progress"} alert updated.`);
+            finishEditing(target.kind === "toolWait" ? "Tool-wait alert updated."
+                : target.kind === "stuck" ? "No-progress alert updated." : "Timeout updated.");
         } catch (cause) {
             report(cause instanceof Error ? cause.message : String(cause), true);
         }
@@ -302,12 +308,15 @@ export function createSubagentSettingsPage(
             rows.forEach((entry, index) => {
                 const selected = index === row;
                 if (selected) selectedStart = lines.length;
-                if (entry.kind === "mode" || entry.kind === "cap" || entry.kind === "toolWait" || entry.kind === "stuck") {
+                if (entry.kind === "mode" || entry.kind === "cap" || entry.kind === "toolWait"
+                    || entry.kind === "stuck" || entry.kind === "timeout") {
                     const label = entry.kind === "mode" ? "Delegation mode"
                         : entry.kind === "cap" ? "Concurrent subagents"
-                        : entry.kind === "toolWait" ? "Tool-wait alert" : "No-progress alert";
+                        : entry.kind === "toolWait" ? "Tool-wait alert"
+                        : entry.kind === "stuck" ? "No-progress alert" : "Timeout (minutes)";
                     const value = entry.kind === "mode" ? settings.mode
                         : entry.kind === "cap" ? String(settings.maxConcurrent)
+                        : entry.kind === "timeout" ? String(settings.maxMinutes)
                         : `${entry.kind === "toolWait" ? settings.toolWaitMinutes : settings.stuckMinutes} min`;
                     const active = editing?.kind === entry.kind
                         ? input.render(compact ? Math.max(1, w - 2) : valueWidth)[0]!

@@ -14,6 +14,8 @@
  * far as `execute` is concerned).
  */
 
+import { createHash } from "node:crypto";
+import { assignmentFor, projectAssignment, createAssignmentProjector, withAssignmentObservations } from "./assignment-projection.mjs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus, type RunCallbackOrigin, type RunMeta, type RunStatus } from "./registry.ts";
 import { buildSubagentResultPayload } from "./finalization.ts";
@@ -25,6 +27,7 @@ import {
     collectSubagentList,
     formatSubagentListRow,
     listFolderScopeKey,
+    normalizeSubagentListOptions,
 } from "./list.ts";
 import {
     assembleOrphanedResult,
@@ -289,7 +292,7 @@ export type { SubagentToolSession };
 function forCall(session: SubagentToolSession, ctx: unknown): SubagentToolSession {
     const provider = session.getActiveOrigin;
     if (typeof provider !== "function") return session;
-    return { getActiveOrigin: () => provider(ctx) };
+    return { ...session, getActiveOrigin: () => provider(ctx) };
 }
 
 /**
@@ -329,6 +332,38 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 all?: boolean; limit?: number; status?: string[] | string; cursor?: string; maxBytes?: unknown;
             };
             const now = Date.now();
+            if (session.observeList) {
+                const options = normalizeSubagentListOptions(p);
+                const cwd = listCwd(ctx, resolveActiveOrigin(session).origin);
+                const statusCursor = p.cursor?.startsWith("work-status:") ? p.cursor.slice("work-status:".length) : undefined;
+                const snapshot = await session.observeList({ ...(options.all ? {} : { cwd }),
+                    ...(options.statuses ? { statuses: [...options.statuses] } : {}), limit: Math.max(1, options.limit),
+                    ...(p.cursor && !statusCursor ? { cursor: p.cursor } : {}) });
+                const incidents = new Map<string, ReturnType<typeof listIncidentCount>>(snapshot.rows.map((row: any) =>
+                    [row.meta.id, listIncidentCount(row.meta.id, row.meta.cwd, !["running", "orphaned"].includes(row.meta.status))]));
+                const revision = createHash("sha256").update(JSON.stringify([snapshot.scopeRevision,
+                    [...incidents].map(([id, incident]) => [id, incident.revision])])).digest("hex");
+                const status = `work-status:${revision}`;
+                if (statusCursor === revision && snapshot.status === "ready") return text(`Subagents unchanged. statusCursor=${status}`);
+                const budget = budgetFor("list", p.maxBytes);
+                const header = [...options.warnings, `Subagents: ${snapshot.totalMatching} matching${snapshot.status === "ready" ? "" : `; ${snapshot.status}: ${snapshot.reason ?? "source verification pending"}`}.`].join("\n");
+                const lines = [header];
+                let last: any;
+                for (const row of options.limit === 0 ? [] : snapshot.rows) {
+                    const incident = incidents.get(row.meta.id)!;
+                    const line = formatSubagentListRow(row.meta, { assignment: row.assignment, status: row.assignment.state,
+                        processStatus: row.assignment.processStatus, now, compact: true,
+                        health: row.health ? observeRunHealth({ ...row.health, status: row.assignment.processStatus === "exited" ? row.meta.status : row.assignment.processStatus, now, startedAt: row.meta.startedAt }) : undefined,
+                        failure: formatIncidentLabel(incident.count, incident.actionRequired) });
+                    const footer = `\nnextCursor=${row.cursor}\nstatusCursor=${status}`;
+                    if (Buffer.byteLength([...lines, line].join("\n") + footer) > budget) break;
+                    lines.push(line); last = row;
+                }
+                if (!last && snapshot.rows.length && options.limit > 0) throw new Error("The list row and cursor cannot fit max_bytes; retry with a larger budget.");
+                if (last && (snapshot.nextCursor || last !== snapshot.rows.at(-1))) lines.push(`nextCursor=${last.cursor}`);
+                lines.push(`statusCursor=${status}`);
+                return { ...text(lines.join("\n")), details: { snapshot: { ...snapshot, rows: snapshot.rows.slice(0, last ? snapshot.rows.indexOf(last) + 1 : 0) } } };
+            }
             const index = listRunRecords();
             const metas = index.metas;
             const resolved = resolveActiveOrigin(session);
@@ -336,6 +371,16 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
             // are listed even when they were spawned by another foreground.
             const cwd = listCwd(ctx, resolved.origin);
             const scopeKey = listFolderScopeKey(p.all === true, cwd);
+            const project = createAssignmentProjector();
+            const assignments = new Map<string, ReturnType<typeof assignmentFor>>();
+            const assignmentOf = (meta: RunMeta) => {
+                let assignment = assignments.get(meta.id);
+                if (!assignment) {
+                    assignment = project(meta, effectiveStatus(meta));
+                    assignments.set(meta.id, assignment);
+                }
+                return assignment;
+            };
             const healthCache = new Map<string, HealthObservation>();
             const healthById = (id: string) => {
                 const hit = healthCache.get(id);
@@ -351,7 +396,8 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 params: p,
                 cwd,
                 now,
-                statusOf: effectiveStatus,
+                statusOf: (meta: RunMeta) => assignmentOf(meta).state,
+                assignmentOf,
                 healthById,
             });
             const items = collected.items as Array<{ meta: RunMeta; status: string }>;
@@ -363,6 +409,7 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
             const revisions = listRevisions(
                 items.map((row) => ({ id: row.meta.id, status: String(row.status), meta: row.meta })),
                 items.map((row) => incidents.get(row.meta.id)?.revision ?? ""),
+                assignmentOf,
             );
             const statusesKey = Array.isArray(p.status) ? [...p.status].map(String).sort().join(",") : String(p.status ?? "");
             const incidentRuns = items.filter((row) => (incidents.get(row.meta.id)?.count ?? 0) > 0).length;
@@ -372,6 +419,8 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 render: (row) => {
                     const incident = incidents.get(row.meta.id);
                     return formatSubagentListRow(row.meta, {
+                        assignment: assignmentOf(row.meta),
+                        processStatus: effectiveStatus(row.meta),
                         status: row.status,
                         now,
                         health: healthById(row.meta.id),
@@ -434,7 +483,7 @@ export function subagentOutputTool(Type: TypeModule, baseSession: SubagentToolSe
             const healthLine = diagnosticLines(access.meta);
             const result = text(assembleSubagentOutput(p.id, access.meta, p, healthLine, scopeKey));
             const details = permissionDetails(p.id, budgetFor("log", p.maxBytes));
-            return Object.keys(details).length ? { ...result, details } : result;
+            return { ...result, details: { ...details, assignment: assignmentFor(access.meta, effectiveStatus(access.meta)) } };
         },
     } as ToolDefinition;
 }
@@ -450,8 +499,13 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
         promptGuidelines: [
             "Use subagent_result to collect a finished run's output. If it reports the run is still going, stop — do not poll; you'll be notified when it finishes.",
             "If the response includes nextCursor, call again with that cursor to read the rest of the answer. Do not summarize away unread pages.",
+            "For a durable assignment outcome, inspect its evidence, then call subagent_result with the exact outcome_revision, disposition consumed or dismissed, and an interpretation note. Delivery and reading never acknowledge the worker's dependency wait.",
         ],
         parameters: Type.Object({
+            operation_id: Type.Optional(Type.String({ description: "Assignment dependency whose bounded retained log to inspect." })),
+            outcome_revision: Type.Optional(Type.Number({ description: "Exact assignment outcome revision being disposed." })),
+            disposition: Type.Optional(Type.String({ description: "consumed or dismissed; records parent outcome disposition, never worker acknowledgement." })),
+            note: Type.Optional(Type.String({ description: "Parent interpretation of the inspected outcome." })),
             id: Type.String({ description: "Run id from subagent_spawn." }),
             cursor: Type.Optional(Type.String({ description: "Caller-owned answer page or status cursor from a previous response." })),
             max_bytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 2048 bytes, max 8192 bytes)." })),
@@ -477,10 +531,29 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
             }
             if (access.kind === "denied") return subagentResultText(access.payload);
             const meta = access.meta;
+            const observed = await session.observeAssignment?.(meta.id);
+            const outcome = meta.assignment ? baseSession.inspectOutcome?.(meta, params as Record<string, unknown>, ctx) : undefined;
+            // Exact inspection has already checked recipient and read authority.
+            // Its immutable terminal record supersedes an older shared projection
+            // without adding another read or changing the snapshot provenance.
+            const inspected = outcome as { outcome?: { outcome: string; reason: string }; dependencies?: Array<{ waitId: string; generation: number }> } | null;
+            const assignment = inspected?.outcome ? projectAssignment(meta, effectiveStatus(meta), {
+                verified: true, waits: inspected.dependencies ?? [], ...{ outcome: inspected.outcome },
+            }) : observed?.assignment;
+            return withAssignmentObservations(assignment ? [{ meta, assignment }] : [], () => {
             const resultText = (body: string) => {
-                const result = subagentResultText(body);
-                return { ...result, details: { ...result.details, ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
+                const evidence = outcome as { outcome?: { revision: number; outcome: string; reason: string }; dependencies?: Array<{ dependencies: Array<{ operationId: string }> }> } | null;
+                const operations = evidence?.dependencies?.flatMap((wait) => wait.dependencies.map((dependency) => dependency.operationId)).slice(0, 5) ?? [];
+                const header = evidence?.outcome ? `Outcome r${evidence.outcome.revision}: ${evidence.outcome.outcome}. ${evidence.outcome.reason.slice(0, 256)}${operations.length ? `\nEvidence operations: ${operations.join(", ")}` : ""}\n` : "";
+                const result = subagentResultText(header + body);
+                return { ...result, details: { ...result.details, outcome, outcomeSupport: meta.outcomeSupport, assignment: assignment ?? assignmentFor(meta, effectiveStatus(meta)), snapshot: observed?.snapshot, ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
             };
+            if ((params as Record<string, unknown>).operation_id && outcome) {
+                const evidence = outcome as { outcome: { revision: number; outcome: string; reason: string }; logs: Array<{ text: string }> };
+                const text = `Assignment outcome r${evidence.outcome.revision}: ${evidence.outcome.outcome}\n${evidence.outcome.reason}\n${evidence.logs.map((log) => log.text).join("\n")}`;
+                const bytes = Buffer.from(text);
+                return resultText(bytes.subarray(0, budgetFor("answer", p.maxBytes)).toString("utf8"));
+            }
             const scopeKey = requestScopeKey(p, session);
             const st = effectiveStatus(meta);
             const healthLine = diagnosticLines(meta);
@@ -488,13 +561,14 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
                 if (st === "orphaned") {
                     return resultText(assembleOrphanedResult(p.id, meta, healthLine, p, scopeKey));
                 }
-                return resultText(assembleRunningResult(p.id, meta, p, scopeKey, describeTiming({ ...meta, status: "running" })?.line));
+                return resultText(assembleRunningResult(p.id, meta, p, scopeKey, healthLine));
             }
             const body = buildSubagentResultPayload(p.id, p, healthLine, scopeKey);
             if (body === null) {
-                return resultText(assembleRunningResult(p.id, meta, p, scopeKey, describeTiming({ ...meta, status: "running" })?.line));
+                return resultText(assembleRunningResult(p.id, meta, p, scopeKey, healthLine));
             }
             return resultText(body);
+            });
         },
     } as ToolDefinition;
 }

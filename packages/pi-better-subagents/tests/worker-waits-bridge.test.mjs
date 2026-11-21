@@ -30,6 +30,7 @@ after(() => {
 
 import {
     OPERATION_RESUME_ADMISSION_EVENT,
+    createWorkerOperationsHost,
     createResumeOrchestration,
     finalizeWorkerParkAfterExit,
     planWorkerBridgeTools,
@@ -49,6 +50,23 @@ import {
 } from "./worker-waits-support.mjs";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
+test("standalone registration refuses a dependency-only host without assignment outcome capability", async () => {
+    const stack = await startStack();
+    const bridge = createWorkerOperationsHost({ pi: stack.pi, childExtensionPath: join(packageRoot, "child-operations.ts"), rpc: { call: async (method, params) => {
+        const reply = await stack.bridge.rpc.call(method, params);
+        if (method !== "register-run") return reply;
+        const { assignmentOutcomesVersion: _unsupported, ...legacy } = reply;
+        return legacy;
+    } } });
+    try {
+        await bridge.start();
+        const plan = defaultPlan();
+        await assert.rejects(() => bridge.register({ runId: "unsupported-outcomes", conversationId: "unsupported-conversation", workspace: stack.workspace,
+            authorityReference: "policy", policy: { version: 1, sandbox: null, tools: [], clean: false, deadlineAt: null, authorityReference: "policy", workspace: stack.workspace },
+            capabilities: plan.capabilities, tools: plan.tools, schemas: schemasFor(stack.pi, plan.tools), attemptId: "unsupported-outcomes", owner: { sessionId: "parent-session-1", workspace: stack.workspace, branchId: "branch-1", goalId: null } }), /durable assignment outcomes v1/);
+        assert.equal(bridge.getRun("unsupported-outcomes"), undefined);
+    } finally { await bridge.close(); }
+});
 const cleanup = [];
 afterEach(() => cleanupAll());
 
@@ -93,6 +111,14 @@ try {
             shell: false,
             name: "worker-build",
         }, {});
+    }
+    if (process.env.CHILD_SETTLE_BEFORE_WAIT === "1") {
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+            out.preWaitStatus = await client.request("bg_task_status", { id: out.spawn.id }, {});
+            if (out.preWaitStatus.terminalOutcome) break;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        if (!out.preWaitStatus.terminalOutcome) throw new Error("background task did not settle before the wait");
     }
     if (process.env.CHILD_STATUS_TASK) {
         out.status = await client.request("bg_task_status", { id: process.env.CHILD_STATUS_TASK }, {});
@@ -174,6 +200,11 @@ async function registerWorker(stack, { runId, conversationId = WORKER_CONVERSATI
         attemptId,
         owner: { sessionId: OWNER.sessionId, workspace: stack.workspace, branchId: OWNER.branchId, goalId: OWNER.goalId },
     });
+    const meta = registry.readMeta(runId);
+    if (meta) registry.writeMeta({ ...meta, operations: {
+        version: 1, bridgeRunId: runId, conversationId, workspace: stack.workspace,
+        authorityReference: policy.authorityReference, policy, tools: plan.tools,
+    } });
     return { handle, policy };
 }
 
@@ -333,12 +364,7 @@ test("a real worker parks, the exit proof finalizes the wait, and the ready task
     const outcome = await orchestration.resume(park);
     assert.equal(outcome, "resumed");
     assert.equal(launched.length, 1);
-    assert.deepEqual(goals[0], {
-        sessionId: OWNER.sessionId,
-        workspace: stack.workspace,
-        branchId: OWNER.branchId,
-        goalId: null,
-    });
+    assert.deepEqual(goals, [], "parent Goal is not worker authority");
     assert.equal(calls.commit, 1);
     const claim = stack.store.listResumeClaims({ waitId, generation }).find((entry) => entry.state === "published");
     assert.ok(claim);
@@ -356,6 +382,44 @@ test("a real worker parks, the exit proof finalizes the wait, and the ready task
     assert.equal(secondChild.result.status.taskId, taskId);
     assert.equal(secondChild.result.status.terminalOutcome, "succeeded");
     orchestration.stop();
+});
+
+test("a dependency settled before wait registration still parks and reaches ready after exit proof", async () => {
+    const stack = await startStack();
+    const attemptId = "sa_worker_pre_settled";
+    const { sessionDirectory, sessionFile } = sessionFixture(durableRoot, attemptId);
+    writeAttemptRecord(stack, { attemptId, sessionDirectory, sessionFile });
+    const plan = defaultPlan();
+    const { handle } = await registerWorker(stack, { runId: attemptId, conversationId: attemptId, plan });
+    const directory = tempDirectory("child-pre-settled");
+    const child = await runChild(childProgram(directory), {
+        ...handle.env,
+        CHILD_TASK: "1",
+        CHILD_SETTLE_BEFORE_WAIT: "1",
+        CHILD_WAIT: "1",
+        CHILD_SESSION_FILE: sessionFile,
+        CHILD_SESSION_ID: attemptId,
+        CHILD_WORKSPACE: stack.workspace,
+    });
+    assert.equal(child.code, 0, `child failed: ${child.stderr || child.stdout}`);
+    assert.equal(child.result.fatal, undefined, JSON.stringify(child.result));
+    assert.equal(child.result.wait.settled, true);
+    assert.equal(child.result.wait.phase, "parking");
+    assert.equal(child.result.checkpoint?.staged, true, JSON.stringify(child.result));
+
+    const waitId = child.result.wait.waitId;
+    const generation = child.result.wait.generation;
+    writeCoherentLog(registry.logPathFor(attemptId));
+    assert.equal(finalizeRun(attemptId, 0).park.parked, true);
+    const finalization = await finalizeWorkerParkAfterExit({
+        runId: attemptId,
+        service: stack.service,
+        writerLeaseReleased: true,
+        writerPidGone: true,
+    });
+    assert.equal(finalization.outcome, "parked", JSON.stringify(finalization));
+    assert.equal(finalization.wait.phase, "ready");
+    assert.equal(stack.store.getWait({ waitId, generation }).phase, "ready");
 });
 
 test("a checkpoint that does not describe the trusted saved conversation is refused", async () => {

@@ -8,6 +8,7 @@
 import { buildCompletionDelivery } from "./completion.ts";
 import { collectRunFailures, failurePath } from "./failures.ts";
 import { observeFailures } from "./shared-failure-observations.ts";
+import { commitAssignmentTerminal } from "./assignment-outcomes.ts";
 import {
     classifyChildExit,
     type ChildExitOutcome,
@@ -25,6 +26,7 @@ import {
 } from "./registry.ts";
 import { fmtElapsed, fmtSpend } from "./widget.ts";
 import { evaluateParkDisposition, type ParkDisposition } from "./worker-waits.ts";
+import { reconcileRun, type ProcessProbe, type ReconcileResult } from "./health.ts";
 
 export interface FinalizeHooks {
     renderWidget?: () => void;
@@ -42,6 +44,20 @@ export interface FinalizeResult {
     delivery?: { content: string; options: Record<string, unknown> };
     /** Present when this exit was a park or looked like one but could not be proven. */
     park?: ParkDisposition;
+}
+
+/** The current management owner calls this only for an interrupted, unobserved writer. */
+export function reconcileInterruptedRun(meta: RunMeta, probe: ProcessProbe, now: number, hooks: FinalizeHooks = {}): {
+    reconciliation: ReconcileResult; finalization?: FinalizeResult;
+} {
+    const reconciliation = reconcileRun(meta, probe, now);
+    if ((meta.status === "running" || meta.status === "orphaned") && meta.supervisionInterruptedAt !== undefined && reconciliation.status === "lost") {
+        const run = parseRunForLifecycle(meta.id);
+        if (run.sawEnd && run.unmatchedToolCalls.length === 0) {
+            return { reconciliation, finalization: finalizeRun(meta.id, null, hooks) };
+        }
+    }
+    return { reconciliation };
 }
 
 /**
@@ -114,6 +130,7 @@ export function finalizeRun(
         }
     }
     writeMeta(meta);
+    commitAssignmentTerminal(meta);
     if (!parked && park.record) {
         // A park disposition existed but could not be proven on exit. Hold it in
         // both durable copies (park.json + metadata) so nothing resumes it; the

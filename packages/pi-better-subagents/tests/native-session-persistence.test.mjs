@@ -34,12 +34,11 @@ import { register } from "node:module";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
-import { dirname, join, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join, sep } from "node:path";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { stopWorkObservation } from "../work-observation.ts";
 
-const PACKAGE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const REPO_ROOT = dirname(dirname(PACKAGE_DIR));
-const REAL_SDK_URL = pathToFileURL(join(REPO_ROOT, "node_modules/@earendil-works/pi-coding-agent/dist/index.js")).href;
+const REAL_SDK_URL = import.meta.resolve("@earendil-works/pi-coding-agent");
 
 const RUNTIME = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "subagent-persistence-")));
 const WORKSPACE = join(RUNTIME, "workspace");
@@ -57,9 +56,11 @@ process.env.TEMP = VOLATILE_A;
 process.env.PI_CONTINUATION_ARTIFACTS = ARTIFACTS;
 process.env.PI_CONTINUATION_SDK_URL = REAL_SDK_URL;
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT = "off";
+const stopRuntime = await startWorkRuntimeFixture();
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: betterSubagents } = await import("../index.ts");
 const {
     baseDir,
@@ -83,7 +84,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const DURABLE_SESSIONS = join(DURABLE, "sessions");
 const DURABLE_ATTEMPTS = join(DURABLE, "attempts");
 
-after(() => {
+after(async () => {
+    stopWorkObservation();
+    await stopRuntime();
     rmSync(RUNTIME, { recursive: true, force: true });
 });
 
@@ -157,7 +160,7 @@ function makeHarness() {
         ui: { notify() {}, setWidget() {} },
         sessionManager: { getSessionId: () => "foreground-session", getBranch: () => [] },
     };
-    betterSubagents(pi);
+    betterSubagents(pi, managedDomainPort());
     return {
         tools, ctx,
         shutdown() { handlers.get("session_shutdown")?.({}, ctx); },
@@ -268,7 +271,7 @@ describe("durable native-session persistence", () => {
                 prompt: "INITIAL TASK", clean: true, sandbox: false, cwd: WORKSPACE,
             }, undefined, undefined, h.ctx));
             const meta = await waitTerminal(id);
-            assert.equal(meta.status, "completed");
+            assert.equal(meta.status, "completed", JSON.stringify({ reason: meta.failureReason, log: readFileSync(meta.logPath, "utf8") }));
 
             // New child sessions live in the durable Pi agent directory, not TMPDIR.
             assert.equal(meta.recipe.sessionDir, sessionsDir());
@@ -288,7 +291,12 @@ describe("durable native-session persistence", () => {
             assert.equal(statSync(archive).mode & 0o777, 0o600, "the durable record is private");
             assert.equal(statSync(DURABLE_ATTEMPTS).mode & 0o777, 0o700, "the durable record directory is private");
 
-            // The daily sweep still bounds the volatile raw log, and keeps durable evidence.
+            // An unconsumed outcome pins evidence without turning retention into an error.
+            sweep(Date.now() + 30 * DAY_MS);
+            assert.equal(existsSync(runDir(id)), true, "unconsumed outcome evidence survives the sweep");
+            const inspected = await h.tools.get("subagent_result").execute("inspect", { id }, undefined, undefined, h.ctx);
+            const outcome = inspected.details.outcome.outcome;
+            await h.tools.get("subagent_result").execute("consume", { id, outcome_revision: outcome.revision, disposition: "consumed", note: "Inspected the durable answer before reclaiming volatile evidence." }, undefined, undefined, h.ctx);
             sweep(Date.now() + 30 * DAY_MS);
             assert.equal(existsSync(runDir(id)), false, "the volatile run directory and its log are reclaimed");
             assert.equal(existsSync(sessionPath), true, "the saved native conversation is durable");

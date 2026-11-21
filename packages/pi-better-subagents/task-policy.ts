@@ -174,6 +174,9 @@ export function parseTaskPolicy(value: unknown): TaskPolicy {    if (!value || t
 export function prepareTaskRuntime(options: {
     root: string; controlDir: string; tools: readonly string[]; piBin?: string;
     permissions?: SandboxPermissions & Partial<CommandSettings>; extensionPaths?: readonly string[]; runtimeRoots?: readonly string[];
+    capturedDenyWrite?: readonly string[];
+    /** Trusted launcher-selected bridge from the pinned worker release. */
+    operationBridgePath?: string;
     applyPatch?: boolean; extensionTools?: readonly TaskExtensionTool[];
 }): { file: string; fileArgs: string[]; policy: TaskPolicy; policyPath: string } {
     if (typeof PiCodingAgent.getAgentDir !== "function" || typeof PiCodingAgent.getPackageDir !== "function") {
@@ -205,6 +208,7 @@ export function prepareTaskRuntime(options: {
         version: 1, root, home, agentDir, profilePath: join(controlDir, "task.sb"), scratch: scratch.path,
         permissions,
         denyWrite: [...new Set([
+            ...(options.capturedDenyWrite ?? []),
             controlDir, scratch.anchor, agentDir, ...runtimeDirectories, ...(options.runtimeRoots ?? []), join(root, ".pi"),
             // Outside project = Write does not protect git hooks or config anywhere
             // (ADR 0008): guarding the workspace's hooks would break `git init` there.
@@ -214,7 +218,7 @@ export function prepareTaskRuntime(options: {
         tools: options.tools,
         applyPatch: options.applyPatch === true,
         operationBridge: options.tools.some(name => (OPERATION_BRIDGE_TOOL_NAMES as readonly string[]).includes(name)) &&
-            (options.extensionPaths ?? []).some(path => canonicalizePath(path) === canonicalizePath(fileURLToPath(new URL("./child-operations.ts", import.meta.url)))),
+            (options.extensionPaths ?? []).some(path => canonicalizePath(path) === canonicalizePath(options.operationBridgePath ?? fileURLToPath(new URL("./child-operations.ts", import.meta.url)))),
         extensionTools: (options.extensionTools ?? []).map((tool) => ({ ...tool, root: canonicalizePath(tool.root) })),
     });
     compileWritePolicy({ writableRoot: root, home, permissions: policy.permissions, denyWrite: policy.denyWrite, runtimeCompatibility: true });

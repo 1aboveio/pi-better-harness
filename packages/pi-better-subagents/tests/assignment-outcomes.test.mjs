@@ -1,0 +1,666 @@
+import assert from "node:assert/strict";
+import { test, mock, after } from "node:test";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
+import { workObservation, stopWorkObservation } from "../work-observation.ts";
+import { register } from "node:module";
+import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
+const { default: extension } = await import("../index.ts");
+const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
+const { finalizeRun } = await import("../finalization.ts");
+const { listMetasForOrigin, writeMeta, readMeta, runDir, logPathFor, removeRunDirectory } = await import("../registry.ts");
+const { registerAssignmentAttempt, coordinatorPath, readOutcome } = await import("../assignment-outcomes.ts");
+const { commitAssignmentTerminal, outcomeTranscriptReceipt } = await import("../assignment-outcomes.ts");
+const { assignmentFor } = await import("../assignment-projection.mjs");
+const { openStore } = await import("../shared-operation-coordinator/index.ts");
+const { createObservedWaitHost } = await import("../../pi-better-background-tasks/src/observed-waits.ts");
+const { retainObservation, pendingObservations } = await import("../outage-observations.ts");
+const { reconcileParkedWaits } = await import("../worker-waits.ts");
+const stopRuntime = await startWorkRuntimeFixture();
+after(async () => { stopWorkObservation(); await stopRuntime(); });
+
+// Domain receipt/admission tests use a fake ExtensionAPI but a real shared read
+// service. Native transcript and automatic SDK handoff are qualified separately
+// in Server runtime-assignment-sdk and runtime-assignment-slow-socket tests.
+async function observeFixture(sessionId = "parent", settleMs = 75) {
+    const expected = listMetasForOrigin({ cwd: process.cwd(), sessionId }).filter(meta => meta.assignment && readOutcome(meta) && !readOutcome(meta).deliveryReceipt && !readOutcome(meta).disposition).map(meta => meta.id);
+    const deadline = Date.now() + 3000;
+    while (workObservation()?.status !== "ready" || !expected.every(id => workObservation().rows.some(row => row.meta.id === id))) {
+        if (Date.now() > deadline) throw new Error(`Shared recipient observation did not arrive: ${JSON.stringify({ expected, snapshot: workObservation(), runtime: stopRuntime.diagnostics() })}`);
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    // Standalone admission has a bounded 50ms absent-provider response window.
+    await new Promise(resolve => setTimeout(resolve, settleMs));
+}
+
+function host(sessionId = "parent", options = {}) {
+    const tools = new Map(), handlers = new Map(), entries = options.entries ?? [], sent = [];
+    const notifications = new EventEmitter();
+    const events = new EventEmitter();
+    if (!options.noGoal) events.on("pi-better-goal:operation-resume-admission", (request) => request.reply({ allowed: options.allowed !== false, revision: 1, isCurrent: () => options.allowed !== false }));
+    const pi = { events, registerTool: (tool) => tools.set(tool.name, tool), on: (name, fn) => handlers.set(name, fn),
+        sendMessage: (message, sendOptions) => {
+            const notification = { message, options: sendOptions, entryId: `entry-${entries.length}` };
+            sent.push(notification);
+            entries.push({ id: notification.entryId, type: "message", message: { role: "custom", ...message } });
+            notifications.emit("sent", notification);
+        } };
+    const ctx = { cwd: process.cwd(), isIdle: () => true, hasUI: false,
+        ui: { notify() {}, setWidget() {} }, sessionManager: { getSessionId: () => sessionId, getBranch: () => entries } };
+    extension(pi);
+    return { pi, ctx, entries, sent, tools, handlers, notifications, async start({ settleMs = 75 } = {}) { await handlers.get("session_start")?.({}, ctx); await observeFixture(sessionId, settleMs); }, async close() { await handlers.get("session_shutdown")?.({ reason: "reload" }, ctx); } };
+}
+
+const representsOutcome = (notification, eventId) => notification.message.details?.completionEventIds?.includes(eventId);
+
+async function deliveredOutcome(h, meta) {
+    const eventId = readOutcome(meta).eventId;
+    let timer, onSent;
+    const advanced = new Set();
+    try {
+        const notification = await new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error(`Exact outcome ${eventId} was not delivered; batches=${JSON.stringify(h.sent.map(item => item.message.details))}`)), 3000);
+            onSent = item => {
+                if (representsOutcome(item, eventId)) { resolve(item); return; }
+                if (advanced.has(item) || !item.options.triggerTurn) return;
+                advanced.add(item);
+                // The real host runs the follow-up requested by an earlier batch.
+                void Promise.resolve().then(async () => {
+                    const isIdle = h.ctx.isIdle;
+                    h.ctx.isIdle = () => false;
+                    try { await h.handlers.get("agent_start")({}, h.ctx); }
+                    finally { h.ctx.isIdle = isIdle; }
+                    await h.handlers.get("agent_settled")({}, h.ctx);
+                }).catch(reject);
+            };
+            h.notifications.on("sent", onSent);
+            for (const item of h.sent) onSent(item);
+        });
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.filter(item => representsOutcome(item, eventId)).length, 1, "the exact outcome is handed off once");
+        assert.equal(readOutcome(meta).deliveryReceipt.entryId, notification.entryId, "receipt belongs to the exact containing batch");
+        return notification;
+    } finally {
+        clearTimeout(timer);
+        if (onSent) h.notifications.off("sent", onSent);
+    }
+}
+
+function failedAssignment(id, branchId = null) {
+    const owner = { kind: "worker-conversation", sessionId: `conversation-${id}`, workspace: process.cwd(), branchId, goalId: null };
+    const recipient = { kind: "parent-session", sessionId: "parent", workspace: process.cwd(), branchId, goalId: null };
+    const binding = { version: 1, assignmentId: id, owner, recipient };
+    registerAssignmentAttempt(binding, id);
+    mkdirSync(runDir(id), { recursive: true });
+    writeFileSync(logPathFor(id), "");
+    const dependencyLog = join(runDir(id), "dependency.log");
+    writeFileSync(dependencyLog, "retained failed-test evidence\n");
+    const store = openStore({ path: coordinatorPath() });
+    store.registerOperation({ operationId: `op-${id}`, taskId: `task-${id}`, launchToken: `launch-${id}`, owner, observer: { kind: "test", version: "1" } });
+    store.recordTerminalOutcome({ operationId: `op-${id}`, eventId: `terminal-${id}`, owner, outcome: "failed", evidence: [{ kind: "log", ref: dependencyLog }], reason: "Tests failed" });
+    const { wait } = store.registerWait({ owner, dependencies: [{ operationId: `op-${id}` }], continuationNote: "Interpret failed tests", origin: { assignmentRef: id, attemptId: id } });
+    const { claim } = store.claimResume({ waitId: wait.waitId, generation: 1, expectedCancelEpoch: 0, lease: { ownerId: "uncertain-writer" }, reservedCheckpointId: "checkpoint" });
+    store.publishResumeAttempt({ waitId: wait.waitId, generation: 1, claimId: claim.claimId, claimToken: claim.claimToken, attemptId: `resumed-${id}`, launchToken: "writer-token" });
+    writeMeta({ id, name: id, assignment: binding, status: "running", pid: 4194304, spawnPid: process.pid, cwd: process.cwd(), promptPreview: "work", startedAt: Date.now() - 100, sessionId: owner.sessionId, logPath: logPathFor(id), callbackOrigin: { cwd: process.cwd(), sessionId: "parent" }, callback: true });
+    finalizeRun(id, 1);
+    return { store, wait, meta: readMeta(id), operationId: `op-${id}` };
+}
+
+function endedAssignment(id, conversationId) {
+    const binding = { version: 1, assignmentId: id,
+        owner: { kind: "worker-conversation", sessionId: conversationId, workspace: process.cwd(), branchId: null, goalId: null },
+        recipient: { kind: "parent-session", sessionId: "parent", workspace: process.cwd(), branchId: null, goalId: null } };
+    registerAssignmentAttempt(binding, id);
+    const store = openStore({ path: coordinatorPath() });
+    mkdirSync(runDir(id), { recursive: true });
+    writeFileSync(logPathFor(id), `${JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: "The unit assessments are not completed." }] })}\n`);
+    writeMeta({ id, assignment: binding, status: "running", pid: 4194304, spawnPid: process.pid, cwd: process.cwd(), sessionId: conversationId,
+        promptPreview: "assess units", startedAt: 1, logPath: logPathFor(id), callback: true, callbackOrigin: { cwd: process.cwd(), sessionId: "parent" } });
+    finalizeRun(id, 0);
+    return { store, meta: readMeta(id) };
+}
+
+test("paused Goal still receives failed assignment notification without starting a turn", async () => {
+    const { store, meta } = failedAssignment("paused-notification");
+    const h = host("parent", { allowed: false });
+    try {
+        await h.start();
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 1, "failure must be visible while Goal admission is refused");
+        assert.equal(h.sent[0].options.triggerTurn, false);
+        assert.equal(h.sent[0].message.display, true);
+        assert.match(h.sent[0].message.content, /failed/);
+        assert.ok(readOutcome(meta).deliveryReceipt);
+        await h.close();
+        const replay = host("parent", { allowed: false, entries: h.entries });
+        try { await replay.start(); assert.equal(replay.sent.length, 0); }
+        finally { await replay.close(); }
+    } finally { await h.close(); store.close(); }
+});
+
+test("passive notification retries a failed transcript write without losing or duplicating the outcome", async () => {
+    const { store, meta } = failedAssignment("paused-write-retry");
+    const h = host("parent", { allowed: false });
+    const send = h.pi.sendMessage;
+    let fail = true;
+    h.pi.sendMessage = (message, options) => {
+        if (fail) throw new Error("fixture transcript unavailable");
+        return send(message, options);
+    };
+    try {
+        await h.start();
+        assert.equal(readOutcome(meta).deliveryReceipt, null);
+        assert.equal(h.sent.length, 0);
+        fail = false;
+        await h.handlers.get("agent_settled")({}, h.ctx);
+        await observeFixture();
+        assert.equal(h.sent.length, 1);
+        assert.equal(h.sent[0].options.triggerTurn, false);
+        assert.ok(readOutcome(meta).deliveryReceipt);
+        await h.handlers.get("agent_settled")({}, h.ctx);
+        await observeFixture();
+        assert.equal(h.sent.length, 1);
+    } finally { await h.close(); store.close(); }
+});
+
+test("ended outcomes notify without admission for two assignments in one conversation", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const options = { allowed: false };
+    const h = host("parent", options);
+    const fixtures = [];
+    try {
+        await h.start();
+        const first = endedAssignment("retry-ended-first", "same-assessment-conversation");
+        fixtures.push(first);
+        // The exit happens after session startup, while the parent is busy.
+        h.ctx.isIdle = () => false;
+        await h.handlers.get("agent_start")({}, h.ctx);
+        mock.timers.tick(1000);
+        await observeFixture();
+        assert.equal(readOutcome(first.meta).deliveryReceipt, null);
+        assert.equal(h.sent.length, 0, "busy passive delivery waits for an idle transcript");
+        options.allowed = true; // No workflow event, human input or result poll.
+        h.ctx.isIdle = () => true;
+        await h.handlers.get("agent_settled")({}, h.ctx);
+        await observeFixture();
+        await getCallbackBatcher(h.pi).flush();
+        assert.ok(readOutcome(first.meta).deliveryReceipt);
+        // A later explicit parent turn can inspect the retained notification.
+        h.ctx.isIdle = () => false;
+        await h.handlers.get("agent_start")({}, h.ctx);
+        const call = (meta, params) => h.tools.get("subagent_result").execute("result", { id: meta.id, ...params }, undefined, undefined, h.ctx);
+        const unfinished = await call(first.meta, {});
+        await assert.rejects(() => call(first.meta, { outcome_revision: 2, disposition: "dismissed", note: "Incomplete" }), /revision/);
+        await call(first.meta, { outcome_revision: 1, disposition: "dismissed", note: "Incomplete; continue same conversation" });
+        options.allowed = false;
+        h.ctx.isIdle = () => true;
+        await h.handlers.get("agent_settled")({}, h.ctx);
+        const second = endedAssignment("retry-ended-followup", first.meta.sessionId);
+        fixtures.push(second);
+        assert.equal(second.meta.sessionId, first.meta.sessionId);
+        options.allowed = false;
+        mock.timers.tick(1000);
+        await observeFixture();
+        assert.ok(readOutcome(second.meta).deliveryReceipt, "no user input is needed for notification");
+        options.allowed = true;
+        mock.timers.tick(1000);
+        await observeFixture();
+        assert.equal(readMeta(second.meta.id).outcomeDeliveryDeferredReason, undefined, "retry obtains fresh admission");
+        await getCallbackBatcher(h.pi).flush();
+        assert.ok(readOutcome(second.meta).deliveryReceipt, "ended follow-up must retry even with no running children or lifecycle event");
+        assert.equal(h.sent[1].options.triggerTurn, false);
+        assert.equal(unfinished.details.assignment.state, "failed");
+        assert.match(unfinished.details.assignment.reason, /continue unfinished work/);
+        assert.equal(readOutcome(second.meta).outcome, "failed");
+        assert.notEqual(readOutcome(first.meta).eventId, readOutcome(second.meta).eventId);
+        assert.equal((await call(second.meta, {})).details.assignment.state, "failed");
+        await call(second.meta, { outcome_revision: 1, disposition: "consumed", note: "Assessment evidence inspected" });
+        assert.equal(readOutcome(first.meta).disposition.kind, "dismissed");
+        assert.equal(readOutcome(second.meta).disposition.kind, "consumed");
+        assert.equal(h.sent.length, 2);
+        await h.close();
+        const replay = host("parent", { entries: h.entries });
+        try {
+            await replay.start();
+            mock.timers.tick(2000);
+            await observeFixture();
+            await getCallbackBatcher(replay.pi).flush();
+            assert.equal(replay.sent.length, 0, "reload and duplicate reconciliation do not deliver again");
+        } finally { await replay.close(); }
+    } finally {
+        await h.close();
+        for (const fixture of fixtures) fixture.store.close();
+        mock.timers.reset();
+    }
+});
+
+test("authorized terminal inspection overrides an older completed shared projection", async () => {
+    const fixture = endedAssignment("stale-shared-terminal", "stale-shared-conversation");
+    const { subagentResultTool } = await import("../tools.ts");
+    const { inspectOutcome } = await import("../assignment-outcomes.ts");
+    const Type = new Proxy({}, { get: () => value => value });
+    const stale = { state: "completed", reason: "old process-only observation", revision: "old", processStatus: "completed", evidence: [] };
+    const snapshot = { instanceId: "older-shared-snapshot", seq: 1 };
+    let inspections = 0;
+    const session = {
+        activeOrigin: { cwd: process.cwd(), sessionId: "parent" },
+        observeAssignment: async () => ({ assignment: stale, snapshot }),
+        inspectOutcome: meta => { inspections++; return inspectOutcome(meta, { recipient: meta.assignment.recipient }); },
+    };
+    try {
+        const result = await subagentResultTool(Type, session).execute("stale", { id: fixture.meta.id });
+        assert.equal(result.details.outcome.outcome.outcome, "failed");
+        assert.equal(result.details.assignment.state, "failed");
+        assert.match(result.details.assignment.reason, /continue unfinished work/);
+        assert.notEqual(result.details.assignment.revision, stale.revision);
+        assert.equal(result.details.snapshot, snapshot, "the original shared snapshot provenance remains explicit");
+        assert.equal(inspections, 1, "uses the existing authorized inspection, without another source read");
+        const body = result.content.map(part => part.text).join("\n");
+        assert.match(body, /Assignment failed/);
+        const forbidden = subagentResultTool(Type, { ...session, inspectOutcome: meta => inspectOutcome(meta,
+            { recipient: { ...meta.assignment.recipient, sessionId: "foreign" } }) });
+        await assert.rejects(() => forbidden.execute("foreign", { id: fixture.meta.id }), /different parent/);
+    } finally { fixture.store.close(); }
+});
+
+test("exit zero with an unfinished final answer does not establish assignment success", () => {
+    const id = "unfinished-exit-zero";
+    const binding = { version: 1, assignmentId: id,
+        owner: { kind: "worker-conversation", sessionId: id, workspace: process.cwd(), branchId: null, goalId: null },
+        recipient: { kind: "parent-session", sessionId: "parent", workspace: process.cwd(), branchId: null, goalId: null } };
+    registerAssignmentAttempt(binding, id);
+    mkdirSync(runDir(id), { recursive: true });
+    writeFileSync(logPathFor(id), `${JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: "The unit assessments are not completed." }] })}\n`);
+    writeMeta({ id, assignment: binding, status: "running", pid: 4194304, spawnPid: process.pid, cwd: process.cwd(), sessionId: id,
+        promptPreview: "assess units", startedAt: 1, logPath: logPathFor(id), callback: true, callbackOrigin: { cwd: process.cwd(), sessionId: "parent" } });
+    finalizeRun(id, 0);
+    assert.equal(readMeta(id).status, "completed", "process classification stays separate");
+    assert.equal(readOutcome(readMeta(id)).outcome, "failed");
+    assert.match(readOutcome(readMeta(id)).reason, /completion.*unverified/i);
+    assert.equal(assignmentFor(readMeta(id)).state, "failed");
+});
+
+test("ordinary failure uses actual finalizer, callback batcher and result acknowledgement without consuming worker interpretation", async () => {
+    const { store, wait, meta, operationId } = failedAssignment("ordinary-outcome");
+    const outcome = readOutcome(meta);
+    assert.equal(outcome.outcome, "failed");
+    assert.equal(store.getWait(wait).phase, "held");
+    assert.equal(store.getWait(wait).acknowledgement, null);
+    assert.equal(store.listResumeClaims({ waitId: wait.waitId })[0].state, "published");
+    assert.throws(() => removeRunDirectory(meta.id), /retains this run/);
+    assert.throws(() => store.transitionWaitPhase({ ...wait, from: "held", to: "ready" }), /terminal outcome/);
+    const h = host();
+    try {
+        await h.start();
+        const notification = await deliveredOutcome(h, meta);
+        assert.match(notification.message.content, new RegExp(outcome.eventId));
+        const result = await h.tools.get("subagent_result").execute("inspect", { id: meta.id, operation_id: operationId }, undefined, undefined, h.ctx);
+        assert.match(result.details.outcome.logs[0].text, /retained failed-test/);
+        assert.match(result.content[0].text, /retained failed-test/);
+        assert.equal(result.details.assignment.state, "failed");
+        assert.equal(store.getWait(wait).acknowledgement, null);
+        assert.ok(store.listEvidencePins({ waitId: outcome.eventId, generation: 1 }).length);
+        await h.tools.get("subagent_result").execute("consume", { id: meta.id, outcome_revision: 1, disposition: "consumed", note: "Inspected evidence; return diagnosis to requester" }, undefined, undefined, h.ctx);
+        assert.equal(store.listEvidencePins({ waitId: outcome.eventId, generation: 1 }).length, 0);
+        assert.equal(store.getWait(wait).acknowledgement, null);
+        assert.equal(store.listResumeClaims({ waitId: wait.waitId })[0].state, "published");
+        assert.throws(() => removeRunDirectory(meta.id), /retains this run/);
+    } finally { await h.close(); store.close(); }
+});
+
+test("a workflow admission slower than 50ms still wakes the parent", async () => {
+    const { store, meta } = failedAssignment("slow-workflow-admission");
+    const h = host("parent", { noGoal: true });
+    let request;
+    h.pi.events.on("pi-better-goal:operation-resume-admission", (value) => {
+        request = value;
+        request.pending?.();
+    });
+    try {
+        await h.start({ settleMs: 125 });
+        assert.ok(request);
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 0, "the callback waits for the pending workflow check");
+        request.reply({ allowed: true, revision: 1, isCurrent: () => true });
+        await new Promise(resolve => setImmediate(resolve));
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 1);
+        assert.equal(h.sent[0].options.triggerTurn, true);
+        assert.ok(readOutcome(meta).deliveryReceipt);
+    } finally { await h.close(); store.close(); }
+});
+
+test("an earlier legal batch cannot stand in for a later exact outcome or its receipt", async () => {
+    const earlier = failedAssignment("controlled-earlier-outcome");
+    const h = host();
+    let later;
+    try {
+        await h.start({ settleMs: 0 });
+        const first = await deliveredOutcome(h, earlier.meta);
+        // Create the later result only after the earlier batch has been handed off.
+        later = failedAssignment("controlled-later-outcome");
+        const eventId = readOutcome(later.meta).eventId;
+        assert.equal(representsOutcome(first, eventId), false);
+        await observeFixture("parent", 0);
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(readOutcome(later.meta).deliveryReceipt, null, "earlier handoff holds the foreground gate, not a receipt for later work");
+        const delivered = await deliveredOutcome(h, later.meta);
+        assert.notEqual(delivered.entryId, first.entryId);
+        assert.equal(h.sent.filter(item => representsOutcome(item, readOutcome(earlier.meta).eventId)).length, 1);
+        assert.equal(later.store.getWait(later.wait).acknowledgement, null);
+        assert.equal(later.store.listResumeClaims({ waitId: later.wait.waitId })[0].state, "published");
+        assert.ok(later.store.listEvidencePins({ waitId: eventId, generation: 1 }).length);
+    } finally { await h.close(); earlier.store.close(); later?.store.close(); }
+});
+
+test("two exact outcomes admitted while busy retain distinct receipts in one coalesced batch", async () => {
+    const fixtures = [failedAssignment("coalesced-outcome-a"), failedAssignment("coalesced-outcome-b")];
+    const h = host();
+    h.ctx.isIdle = () => false;
+    const batcher = getCallbackBatcher(h.pi), enqueue = batcher.enqueue;
+    const expected = new Set(fixtures.map(({ meta }) => readOutcome(meta).eventId));
+    let timer, release;
+    const admitted = new Promise((resolve, reject) => {
+        release = resolve;
+        timer = setTimeout(() => reject(new Error(`Exact outcomes not queued: ${JSON.stringify([...expected])}`)), 3000);
+    });
+    const enqueues = mock.method(batcher, "enqueue", event => {
+        const inserted = enqueue(event);
+        if (inserted) expected.delete(event.receiptId);
+        if (!expected.size) release();
+        return inserted;
+    });
+    try {
+        await h.start({ settleMs: 0 });
+        await admitted;
+        assert.ok(batcher.pendingCount() >= 2);
+        assert.equal(h.sent.length, 0, "busy foreground is a delivery gate, not a receipt");
+        for (const { meta } of fixtures) assert.equal(readOutcome(meta).deliveryReceipt, null);
+        h.ctx.isIdle = () => true;
+        await h.handlers.get("agent_settled")({}, h.ctx);
+        await batcher.flush();
+        const notifications = await Promise.all(fixtures.map(({ meta }) => deliveredOutcome(h, meta)));
+        assert.equal(notifications[0].entryId, notifications[1].entryId);
+        assert.notEqual(readOutcome(fixtures[0].meta).eventId, readOutcome(fixtures[1].meta).eventId);
+        for (const { store, wait, meta } of fixtures) {
+            assert.equal(store.getWait(wait).acknowledgement, null);
+            assert.ok(store.listEvidencePins({ waitId: readOutcome(meta).eventId, generation: 1 }).length);
+        }
+    } finally {
+        clearTimeout(timer); enqueues.mock.restore(); await h.close();
+        for (const { store } of fixtures) store.close();
+    }
+});
+
+test("quoted outcome text is not a recipient receipt", () => {
+    assert.equal(outcomeTranscriptReceipt([{ id: "quote", type: "message", message: { role: "custom", customType: "background-completion-batch", content: "[outcome:quoted-event]" } }], "quoted-event"), null);
+});
+
+for (const allowed of [true, false]) test(`admission returning after parent teardown cannot claim a retained outcome (allowed=${allowed})`, async () => {
+    const { store, meta } = failedAssignment(`late-parent-admission-${allowed}`);
+    const h = host("parent", { noGoal: true });
+    let request;
+    h.pi.events.on("pi-better-goal:operation-resume-admission", (value) => { request = value; });
+    const setTimeout = globalThis.setTimeout;
+    const expirations = [];
+    // Hold only admission's 50ms timer; shared observation startup uses real time.
+    // Otherwise slow CI can exercise admission-before-teardown instead of this race.
+    const clock = mock.method(globalThis, "setTimeout", (callback, ms, ...args) => {
+        if (ms !== 50) return setTimeout(callback, ms, ...args);
+        expirations.push(() => callback(...args));
+        return setTimeout(() => {}, 0);
+    });
+    try {
+        await h.start({ settleMs: 100 });
+        assert.ok(request);
+        assert.ok(expirations.length);
+        assert.equal(store.listOutbox().find((e) => e.eventId === readOutcome(meta).eventId).attempts, 0, "admission must still be pending before teardown");
+        await h.close();
+        request.reply({ allowed, revision: 1, isCurrent: () => true });
+        for (const expire of expirations) expire();
+        await new Promise(resolve => setImmediate(resolve));
+        await getCallbackBatcher(h.pi).flush();
+        const event = store.listOutbox().find((e) => e.eventId === readOutcome(meta).eventId);
+        assert.equal(event.attempts, 0);
+        assert.equal(event.state, "pending");
+        assert.equal(readOutcome(meta).deliveryReceipt, null);
+        assert.equal(h.sent.length, 0);
+    } finally { clock.mock.restore(); await h.close(); store.close(); }
+});
+
+test("verified missing wait history retains failure without claiming writer termination", async () => {
+    const id = "outage-missing-history";
+    const binding = { version: 1, assignmentId: id,
+        owner: { kind: "worker-conversation", sessionId: id, workspace: process.cwd(), branchId: null, goalId: null },
+        recipient: { kind: "parent-session", sessionId: "parent", workspace: process.cwd(), branchId: null, goalId: null } };
+    registerAssignmentAttempt(binding, id);
+    const meta = { id, assignment: binding, status: "lost", pid: 4194304, spawnPid: process.pid,
+        cwd: process.cwd(), sessionId: id, promptPreview: "outage evidence", startedAt: Date.now(), logPath: logPathFor(id) };
+    retainObservation(meta, { version: 1, waitId: "missing-required-wait", generation: 1,
+        attemptId: id, phase: "resuming", parkedAt: 1, updatedAt: 1 });
+    const h = host("unrelated");
+    const background = createObservedWaitHost(h.pi, { storePath: coordinatorPath(),
+        supervisorDirectory: join(process.env.TMPDIR, "missing-history-supervisor"), pollMs: 0 });
+    try {
+        background.start(h.ctx);
+        await reconcileParkedWaits(background.service, { resume: () => assert.fail("missing history cannot launch") });
+        const outcome = readOutcome(meta);
+        assert.equal(outcome.outcome, "failed");
+        assert.match(outcome.reason, /history is missing/);
+        assert.equal(outcome.processUncertain, true);
+        await reconcileParkedWaits(background.service, { resume: () => assert.fail("terminal replay cannot launch") });
+        assert.equal(readOutcome(meta).eventId, outcome.eventId);
+    } finally { background.close(); await h.close(); }
+});
+
+test("terminal commit before outage report receipt replays once and delivery retains pins until exact consumption", async () => {
+    const { store, wait, meta, operationId } = failedAssignment("outage-delivery");
+    const outcome = readOutcome(meta);
+    const claim = store.listResumeClaims({ waitId: wait.waitId })[0];
+    const report = retainObservation(meta, { version: 1, waitId: wait.waitId, generation: 1,
+        attemptId: meta.id, phase: "resuming", resumedBy: claim.attemptId,
+        resumeClaimId: claim.claimId, resumeClaimToken: claim.claimToken, resumeLaunchToken: claim.launchToken,
+        parkedAt: 1, updatedAt: 1 });
+    const inactive = host("unrelated");
+    const background = createObservedWaitHost(inactive.pi, { storePath: coordinatorPath(),
+        supervisorDirectory: join(process.env.TMPDIR, "outage-delivery-supervisor"), pollMs: 0 });
+    try {
+        background.start(inactive.ctx);
+        for (let replay = 0; replay < 2; replay++) await reconcileParkedWaits(background.service,
+            { resume: async () => assert.fail("terminal outcome cannot launch") });
+        assert.equal(pendingObservations().some((entry) => entry.id === report.id), false);
+        assert.equal(readOutcome(meta).eventId, outcome.eventId);
+        await inactive.start(); await getCallbackBatcher(inactive.pi).flush();
+        assert.equal(inactive.sent.length, 0);
+    } finally { background.close(); await inactive.close(); }
+    const parent = host();
+    try {
+        await parent.start(); await getCallbackBatcher(parent.pi).flush();
+        assert.equal(parent.sent.length, 1);
+        assert.ok(store.listEvidencePins({ waitId: outcome.eventId, generation: 1 }).length);
+        await parent.tools.get("subagent_result").execute("inspect", { id: meta.id, operation_id: operationId }, undefined, undefined, parent.ctx);
+        await parent.tools.get("subagent_result").execute("consume", { id: meta.id, outcome_revision: 1, disposition: "consumed", note: "Inspected retained outage evidence" }, undefined, undefined, parent.ctx);
+        assert.equal(store.listEvidencePins({ waitId: outcome.eventId, generation: 1 }).length, 0);
+        assert.equal(store.getWait(wait).acknowledgement, null);
+        assert.equal(store.listResumeClaims({ waitId: wait.waitId })[0].state, "published");
+    } finally { await parent.close(); store.close(); }
+});
+
+test("a host without transcript access defers retained outcomes without a callback or receipt", async () => {
+    const { store, meta } = failedAssignment("missing-transcript-outcome");
+    const h = host();
+    delete h.ctx.sessionManager.getBranch;
+    try {
+        await h.start();
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 0);
+        assert.equal(readOutcome(meta).deliveryReceipt, null);
+        assert.equal(readOutcome(meta).disposition, null);
+    } finally {
+        await h.close();
+        const request = { assignmentId: meta.assignment.assignmentId, recipient: meta.assignment.recipient, revision: 1 };
+        store.inspectAssignmentOutcome(request);
+        store.consumeAssignmentOutcome({ ...request, disposition: "dismissed", note: "Dispose isolated test evidence without a delivery receipt." });
+        store.close();
+    }
+});
+
+test("native Pi custom_message entries reconcile the exact structured outcome receipt", () => {
+    const native = { id: "native-entry", type: "custom_message", customType: "background-completion-batch", content: "Completion", details: { completionEventIds: ["outcome-event"] } };
+    assert.equal(outcomeTranscriptReceipt([native], "outcome-event"), "native-entry");
+    assert.equal(outcomeTranscriptReceipt([native], "another-outcome"), null);
+    assert.equal(outcomeTranscriptReceipt([{ ...native, customType: "quoted-transcript" }], "outcome-event"), null);
+});
+
+test("same-session different branch cannot receive or inspect the outcome", async () => {
+    const { store, meta } = failedAssignment("branch-outcome", "captured-branch");
+    const wrong = host("parent", { entries: [{ id: "other-branch", type: "custom", customType: "anchor" }] });
+    try {
+        await wrong.start(); await getCallbackBatcher(wrong.pi).flush();
+        assert.equal(wrong.sent.length, 0);
+        await assert.rejects(() => wrong.tools.get("subagent_result").execute("foreign-branch", { id: meta.id, all: true }, undefined, undefined, wrong.ctx), /different parent/);
+    } finally { await wrong.close(); }
+    const right = host("parent", { entries: [{ id: "captured-branch", type: "custom", customType: "anchor" }] });
+    try {
+        await right.start(); await getCallbackBatcher(right.pi).flush();
+        assert.equal(right.sent.length, 1);
+        await right.tools.get("subagent_result").execute("inspect", { id: meta.id }, undefined, undefined, right.ctx);
+    } finally { await right.close(); store.close(); }
+});
+
+test("inactive parents retain outcomes; transcript replay repairs lost receipts without another model handoff", async () => {
+    const { store, meta } = failedAssignment("replay-outcome");
+    const wrong = host("unrelated");
+    try { await wrong.start(); await getCallbackBatcher(wrong.pi).flush(); assert.equal(wrong.sent.length, 0); } finally { await wrong.close(); }
+    const eventId = readOutcome(meta).eventId;
+    const entries = [{ id: "durable-handoff", type: "message", message: { role: "custom", customType: "background-completion-batch", details: { completionEventIds: [eventId] }, content: "Retained outcome delivery" } }];
+    const replay = host("parent", { entries: JSON.parse(JSON.stringify(entries)) });
+    try { await replay.start(); await getCallbackBatcher(replay.pi).flush(); assert.equal(replay.sent.length, 0); assert.equal(readOutcome(meta).deliveryReceipt.entryId, "durable-handoff"); } finally { await replay.close(); store.close(); }
+});
+
+test("parent reads enforce current permissions, membership and exact dispositions even with all:true", async () => {
+    const { store, meta, operationId } = failedAssignment("permission-outcome");
+    const wrong = host("unrelated");
+    try {
+        await wrong.start();
+        await assert.rejects(() => wrong.tools.get("subagent_result").execute("foreign", { id: meta.id, all: true, operation_id: operationId }, undefined, undefined, wrong.ctx), /different parent/);
+    } finally { await wrong.close(); }
+    const h = host();
+    try {
+        await h.start();
+        const call = (params) => h.tools.get("subagent_result").execute("read", { id: meta.id, ...params }, undefined, undefined, h.ctx);
+        await getCallbackBatcher(h.pi).flush();
+        await assert.rejects(() => call({ operation_id: "not-a-dependency" }), /not an assignment dependency/);
+        await assert.rejects(() => call({ outcome_revision: 2 }), /revision/);
+        await assert.rejects(() => call({ disposition: "consumed", note: "not inspected" }), /exact outcome_revision/);
+        h.pi.events.emit("pi-better-sandbox:policy", { state: "enabled", permissions: { enabled: true, projectFiles: "off", outsideProject: "off", storedCredentials: "off", commands: true, network: false } });
+        await assert.rejects(() => call({ operation_id: operationId }), /read permission/);
+        assert.equal(readOutcome(meta).inspectedAt, null);
+        assert.equal(readOutcome(meta).disposition, null);
+    } finally { await h.close(); store.close(); }
+});
+
+test("busy parent queues a safe handoff and unverified/cancelled outcomes retain separate assignment identities", async () => {
+    const { store, meta } = failedAssignment("busy-outcome");
+    const h = host();
+    try {
+        h.ctx.isIdle = () => false;
+        await h.start();
+        getCallbackBatcher(h.pi).setForegroundRunning(true);
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 0);
+        getCallbackBatcher(h.pi).setForegroundRunning(false);
+        h.ctx.isIdle = () => true;
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 1);
+        for (const [id, status, outcome] of [["success-outcome", "completed", "failed"], ["cancel-outcome", "killed", "cancelled"]]) {
+            const binding = { ...meta.assignment, assignmentId: id };
+            registerAssignmentAttempt(binding, id);
+            mkdirSync(runDir(id), { recursive: true });
+            writeFileSync(logPathFor(id), "");
+            let next = { ...meta, id, assignment: binding, status, logPath: logPathFor(id), park: undefined, exitCode: status === "completed" ? 0 : undefined, signal: status === "killed" ? "SIGTERM" : undefined };
+            writeMeta(next);
+            if (status === "completed") {
+                writeFileSync(logPathFor(id), `${JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: "Assigned work complete" }] })}\n`);
+                writeMeta({ ...next, status: "running" });
+                finalizeRun(id, 0);
+                next = readMeta(id);
+            }
+            assert.equal(commitAssignmentTerminal(next).outcome, outcome);
+            const other = store.registerWait({ owner: binding.owner, dependencies: [{ operationId: "op-busy-outcome" }], continuationNote: "Explicit follow-up", origin: { assignmentRef: `follow-up-${id}` } });
+            assert.equal(assignmentFor(next).state, status === "completed" ? "failed" : "cancelled");
+            store.cancelWait({ ...other.wait, expectedCancelEpoch: other.wait.cancelEpoch, owner: binding.owner, reason: "End isolated fixture" });
+        }
+    } finally { await h.close(); store.close(); }
+});
+
+test("parent result reads logs from a real standalone Background dependency without adopting its task", async () => {
+    const h = host();
+    const background = createObservedWaitHost(h.pi, { storePath: coordinatorPath(), supervisorDirectory: join(process.env.TMPDIR, "outcome-supervisor"), pollMs: 0 });
+    const id = "actual-background-outcome";
+    const owner = { kind: "worker-conversation", sessionId: "actual-worker", workspace: process.cwd(), branchId: null, goalId: null };
+    const binding = { version: 1, assignmentId: id, owner, recipient: { kind: "parent-session", sessionId: "parent", workspace: process.cwd(), branchId: null, goalId: null } };
+    const store = openStore({ path: coordinatorPath() });
+    try {
+        background.start(h.ctx);
+        registerAssignmentAttempt(binding, id);
+        const scope = { runId: id, conversationId: owner.sessionId, workspace: owner.workspace, authorityReference: "test-policy" };
+        const launched = await background.service.launchForWorker(scope, { kind: "process", params: { shell: false, argv: [process.execPath, "-e", "process.stdout.write('actual failed-test evidence');process.exit(1)"], cwd: owner.workspace } });
+        for (let i = 0; i < 200 && store.getOperation(launched.operationId).phase !== "terminal"; i++) {
+            background.service.statusForWorker(scope, launched.id);
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert.equal(store.getOperation(launched.operationId).phase, "terminal");
+        const { wait } = store.registerWait({ owner, dependencies: [{ operationId: launched.operationId }], continuationNote: "Interpret command", origin: { assignmentRef: id } });
+        mkdirSync(runDir(id), { recursive: true }); writeFileSync(logPathFor(id), "");
+        writeMeta({ id, assignment: binding, status: "running", pid: 4194304, spawnPid: process.pid, cwd: owner.workspace, sessionId: owner.sessionId, promptPreview: "diagnose", startedAt: Date.now(), logPath: logPathFor(id), callback: true, callbackOrigin: { cwd: owner.workspace, sessionId: "parent" } });
+        finalizeRun(id, 1);
+        await h.start(); await getCallbackBatcher(h.pi).flush();
+        const result = await h.tools.get("subagent_result").execute("evidence", { id, operation_id: launched.operationId }, undefined, undefined, h.ctx);
+        assert.match(result.content[0].text, /actual failed-test evidence/);
+        assert.equal(store.getWait(wait).acknowledgement, null);
+        assert.equal(store.listEvidenceReads(wait).length, 0);
+        assert.equal(store.getOperation(launched.operationId).owner.sessionId, "actual-worker");
+    } finally { background.close(); await h.close(); store.close(); }
+});
+
+test("registered stop commits and delivers cancellation without asserting process termination", async () => {
+    const h = host();
+    const id = "stopped-outcome";
+    const binding = { version: 1, assignmentId: id,
+        owner: { kind: "worker-conversation", sessionId: "stopped-worker", workspace: process.cwd(), branchId: null, goalId: null },
+        recipient: { kind: "parent-session", sessionId: "parent", workspace: process.cwd(), branchId: null, goalId: null } };
+    registerAssignmentAttempt(binding, id);
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+    const exited = once(child, "close");
+    try {
+        await once(child, "spawn");
+        mkdirSync(runDir(id), { recursive: true }); writeFileSync(logPathFor(id), "");
+        writeMeta({ id, assignment: binding, status: "running", pid: child.pid, pgid: child.pid, spawnPid: process.pid, cwd: process.cwd(), sessionId: "stopped-worker", promptPreview: "stop fixture", startedAt: Date.now(), logPath: logPathFor(id), callback: true, callbackOrigin: { cwd: process.cwd(), sessionId: "parent" } });
+        await h.start();
+        await h.tools.get("subagent_stop").execute("stop", { id }, undefined, undefined, h.ctx);
+        await observeFixture();
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(readOutcome(readMeta(id)).outcome, "cancelled");
+        assert.equal(readOutcome(readMeta(id)).processUncertain, true);
+        assert.equal(h.sent.length, 1);
+    } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        await exited; await h.close();
+    }
+});
+
+test("standalone parent receives outcomes without Harness or Goal", async () => {
+    const { store, meta } = failedAssignment("no-goal-outcome");
+    const h = host("parent", { noGoal: true });
+    try {
+        await h.start();
+        await getCallbackBatcher(h.pi).flush();
+        assert.equal(h.sent.length, 1);
+        assert.ok(readOutcome(meta).deliveryReceipt);
+    } finally { await h.close(); store.close(); }
+});

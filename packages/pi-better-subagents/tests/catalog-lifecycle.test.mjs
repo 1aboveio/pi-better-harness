@@ -5,9 +5,12 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspectDaemonOwner } from "../../pi-better-server/src/daemon-owner.ts";
+import { removeOwnedFixture, stopOwnedRuntime } from "../../../scripts/test-support/remove-owned-fixture.mjs";
+import { startWorkRuntimeFixture } from "./work-runtime-fixture.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "catalog-lifecycle-"));
 const runtimeTmp = join(root, "tmp");
@@ -34,6 +37,7 @@ const { buildDetailLines, buildNavigatorDetail } = await import("../navigator.mj
 const { mergeJobOptions } = await import("../batch.mjs");
 const { baseDir, readMeta, writeMeta } = await import("../registry.ts");
 const { CATALOG_LABEL_DIRECTORY } = await import("../catalog-identity.ts");
+let releaseRegisteredForeground;
 
 function model(provider, id, extra = {}) {
     return { provider, id, reasoning: true, ...extra };
@@ -486,6 +490,7 @@ Edited instructions.
 
 describe("registered catalog spawn", { concurrency: false }, () => {
     let tools;
+    let lastContext, catalogHost;
     const fx = fixture();
 
     before(async () => {
@@ -517,19 +522,34 @@ fi
         process.env.PATH = `${binDir}:${process.env.PATH}`;
         process.env.PI_SUBAGENTS_TEST_REGISTRY = baseDir();
         process.env.PI_CODING_AGENT_DIR = fx.userRoot;
+        const stopRuntime = await startWorkRuntimeFixture();
+        catalogHost = await import("../catalog-host-admission.ts");
         writeAgent(fx.userRoot, "agent.payments", "role.developer", "Look at payments.");
         const extension = await import(`../index.ts?catalog-lifecycle=${Date.now()}`);
         tools = {};
+        const shutdownHandlers = [];
+        releaseRegisteredForeground = async () => {
+            await waitForNoRunning();
+            const serverDir = join(fx.userRoot, "server");
+            const owner = inspectDaemonOwner(serverDir);
+            for (const handler of shutdownHandlers) {
+                await handler({ type: "session_shutdown", reason: "shutdown" }, lastContext);
+            }
+            await stopOwnedRuntime(serverDir, owner.status === "live" ? owner.owner : undefined);
+            catalogHost.closeCatalogHost();
+            await stopRuntime();
+        };
+        const { managedDomainPort } = await import("./managed-domain-port.mjs");
         extension.default({
             registerTool(def) { tools[def.name] = def; },
             registerCommand() {},
-            on() {},
+            on(event, handler) { if (event === "session_shutdown") shutdownHandlers.push(handler); },
             sendMessage() {},
-        });
+        }, managedDomainPort());
     });
 
     function ctx() {
-        return {
+        lastContext = {
             cwd: fx.cwd,
             hasUI: false,
             mode: "tui",
@@ -542,6 +562,8 @@ fi
             isProjectTrusted: () => true,
             ui: { setWidget() {}, notify() {}, select: async () => undefined },
         };
+        catalogHost.noteCatalogHostContext(lastContext, () => ({}));
+        return lastContext;
     }
 
     function textOf(result) {
@@ -1268,4 +1290,8 @@ fi
     });
 });
 
-after(() => rmSync(root, { recursive: true, force: true }));
+after(async () => {
+    // The registered foreground owns a real observation even without session_start.
+    await releaseRegisteredForeground?.();
+    removeOwnedFixture(root);
+});

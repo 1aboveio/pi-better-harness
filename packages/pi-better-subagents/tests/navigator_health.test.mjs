@@ -438,7 +438,8 @@ describe("navigator detail health sections", () => {
             effortFor: (m) => m.effort,
             healthFor: () => obs,
         });
-        assert.equal(d.status, "orphaned");
+        assert.equal(d.status, "waiting");
+        assert.equal(d.assignment.processStatus, "orphaned");
         assert.equal(d.effort, "max");
         assert.equal(d.pid, 4242);
         assert.equal(d.pgid, 4242);
@@ -451,7 +452,7 @@ describe("navigator detail health sections", () => {
         }).map(strip);
         const text = lines.join("\n");
 
-        assert.ok(lines.some((l) => l.trimStart().startsWith("status") && l.includes("orphaned")), text);
+        assert.ok(lines.some((l) => l.trimStart().startsWith("status") && l.includes("waiting")), text);
         assert.ok(text.includes("model   grok-4.5 · effort max"), text);
         assert.ok(text.includes("process"), text);
         assert.ok(/pid 4242/.test(text) && /pgid 4242/.test(text), text);
@@ -478,7 +479,7 @@ describe("navigator detail health sections", () => {
         assert.ok(text.includes("output"), text);
         // Status color present before strip in raw lines.
         const raw = buildDetailLines(d, { width: 100, colorizeStatus: true, fg: themeFg });
-        assert.ok(raw.some((l) => l.includes("<warning>orphaned</>")), raw.join("\n"));
+        assert.ok(raw.some((l) => l.includes("<warning>waiting</>")), raw.join("\n"));
     });
 
     // @covers navigator.detail-health
@@ -556,11 +557,12 @@ describe("navigator detail health sections", () => {
             // Same contract as index observeNavigatorHealth: observe with effective status.
             healthFor: () => obsFromEffective,
         });
-        assert.equal(d.status, "exited");
+        assert.equal(d.status, "waiting");
+        assert.equal(d.assignment.processStatus, "exited");
 
         const text = buildDetailLines(d, { width: 100 }).map(strip).join("\n");
-        assert.match(text, /status\s+exited/);
-        assert.match(text, /liveness terminal/);
+        assert.match(text, /status\s+waiting/);
+        assert.match(text, /liveness exited; termination unproven/);
         assert.doesNotMatch(text, /liveness supervised/);
 
         // Defensive: even if a stale running observation leaks in, detail must not
@@ -578,7 +580,7 @@ describe("navigator detail health sections", () => {
         }, { width: 100 }).map(strip).join("\n");
         assert.match(leakedText, /status\s+exited/);
         assert.doesNotMatch(leakedText, /liveness supervised/);
-        assert.match(leakedText, /liveness terminal/);
+        assert.match(leakedText, /liveness exited; termination unproven/);
     });
 
     // @covers navigator.detail-health

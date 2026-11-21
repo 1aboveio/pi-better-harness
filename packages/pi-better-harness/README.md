@@ -55,6 +55,13 @@ changes. It does not rebuild reminders before each model call. Turning hooks off
 hooks without deleting saved state or starting a turn. `/goal` and skills never
 enable them.
 
+In `/harness-settings`, **Auto-start Goal** optionally starts
+a Goal after a successful explicit outcome save with an objective and nonempty
+`doneWhen` criteria. It defaults Off; `/goal settings auto-start-from-outcome on`
+enables it. Existing active, paused or budget-limited Goals stay unchanged, and
+restoring state or toggling settings never starts work. The outcome and Todo are
+preserved; subsequent continuation follows the existing Goal controls.
+
 Existing Plan session histories restore as Todo. Workflow task-plan files and
 revision checks stay unchanged; skills continue using their own records when the
 optional interface is off. See the [usage guide](docs/usage.md#outcome--todo).
@@ -208,6 +215,14 @@ packages without duplicating their configuration, plus the **Agents** shortcut
 to the `/agents` catalog. `/sandbox`, `/subagents settings`, `/agents`, and
 `/goal settings` remain available in standalone installations.
 Packages without a settings screen are not listed. Pi's `/settings` is unchanged.
+
+**View** selects `flatten` (the default) or `tree`. Flatten keeps the Subagents
+and Background Tasks groups and includes tasks launched by subagents. Tree puts
+Main and subagents at the same level, with each agent's background tasks indented
+beneath it. Switching applies immediately and saves `piBetterHarness.navigatorView`.
+Worker-owned tasks expose status and logs; their execution remains managed by the
+owning agent. Older worker tasks appear when a retained assignment wait proves
+their parent, so unrelated sessions are never inferred from a reused conversation.
 
 **Sticky navigator** controls the shared navigator used by Goal, Outcome & Todo,
 Subagents, and Background Tasks. **On** (the default) keeps it above the input;

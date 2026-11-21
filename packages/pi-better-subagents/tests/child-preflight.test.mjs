@@ -12,6 +12,7 @@ function run(t, scenario) {
   const root = mkdtempSync(join(tmpdir(), 'child-preflight-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const plan = { model: 'openai/test', tools: ['read', 'bash'], providers: [], modelGroups: [], declarations: [], fingerprints: [] };
+  if (scenario === 'inactive-inherited-tool') plan.optionalTrustedTools = ['bash'];
   const planPath = join(root, 'plan.json'); writeFileSync(planPath, JSON.stringify(plan));
   const source = `
     import preflight from ${JSON.stringify(pathToFileURL(fileURLToPath(new URL('../child-preflight.mjs', import.meta.url))).href)};
@@ -22,9 +23,10 @@ function run(t, scenario) {
     const selected = { provider: 'openai', id: 'test', api: 'openai-responses' };
     const ctx = { model: selected, modelRegistry: { getAvailable: () => ${scenario === 'missing-model' ? '[]' : '[selected]'} } };
     await hooks.get('session_start')({}, ctx);
-    active = ${JSON.stringify(scenario === 'inactive-tool' ? ['read'] : ['read', 'bash'])};
+    active = ${JSON.stringify(scenario.startsWith('inactive-') ? ['read'] : ['read', 'bash'])};
     await hooks.get('before_agent_start')({ systemPromptOptions: { sections: {} } }, ctx);
-    process.stdout.write('request permitted');
+    await hooks.get('before_agent_start')({ systemPromptOptions: { sections: {} } }, ctx);
+    process.stdout.write('request permitted: ' + active.join(','));
   `;
   return spawnSync(process.execPath, ['--input-type=module', '-e', source], {
     env: { ...process.env, PI_SUBAGENT_PREFLIGHT: planPath }, encoding: 'utf8', timeout: 10000,
@@ -39,6 +41,12 @@ test('registered but inactive tools fail before a request', t => {
   const result = run(t, 'inactive-tool'); assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /requested tool bash is unavailable/);
   assert.doesNotMatch(result.stdout, /request permitted/);
+});
+test('inactive inherited trusted tools are reported once without being reactivated', t => {
+  const result = run(t, 'inactive-inherited-tool');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'request permitted: read');
+  assert.equal(result.stderr.match(/inherited trusted tools are inactive in this child: bash/g)?.length, 1);
 });
 test('selected physical model without credentials fails even when ctx.model matches', t => {
   const result = run(t, 'missing-model'); assert.equal(result.status, 1, result.stderr);

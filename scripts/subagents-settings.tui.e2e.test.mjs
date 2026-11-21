@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 const piCli = process.env.PI_SUBAGENTS_SETTINGS_CLI ?? join(root, "node_modules/.bin/pi");
 
-test("subagent settings edit mode, timing, and cap, validate, save, reset, survive reload, and open Agents in the real TUI", { skip: !hasTmux }, () => {
+test("subagent settings edit mode, timing, and cap, validate, save, reset, survive reload, and open Agents in the real TUI", { skip: !hasTmux }, async () => {
     const fixture = mkdtempSync(join(tmpdir(), "pi-subagent-settings-"));
+    const agentDir = join(fixture, "agent");
+    let runtimeOwner;
     const config = join(fixture, "settings.json");
     const wrapper = join(fixture, "settings-extension.ts");
     writeFileSync(config, JSON.stringify({ piBetterHarness: { subagents: { delegationMode: "adaptive", maxConcurrent: 4, defaultTools: "read" } } }));
@@ -38,6 +41,7 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         assert.fail(`Missing ${pattern}:\n${screen}`);
     };
     try {
+        runtimeOwner = await prepareOwnedRuntime(agentDir);
         tmux("new-session", "-d", "-s", "settings", "-x", "100", "-y", "30", command);
         wait(/settings-extension\.ts/);
         literal("/subagents settings"); wait(/\/subagents settings/); key("Tab"); key("Enter");
@@ -62,6 +66,8 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         down(); key("Enter"); key("C-u"); literal("12.5"); key("Enter");
         wait(/No-progress alert\s+12\.5 min/);
         wait(/Tool-wait alert\s+6\.5 min/);
+        down(); key("Enter"); key("C-u"); literal("90"); key("Enter");
+        wait(/Timeout \(minutes\)\s+90/);
         assert.deepEqual(JSON.parse(readFileSync(config, "utf8")).piBetterHarness.subagents, {
             delegationMode: "adaptive", maxConcurrent: 4, defaultTools: "read",
         }, "editing session mode, cap, and timing must not save defaults");
@@ -71,15 +77,17 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         assert.equal(saved.maxConcurrent, 7);
         assert.equal(saved.toolWaitMinutes, 6.5);
         assert.equal(saved.stuckMinutes, 12.5);
+        assert.equal(saved.maxMinutes, 90);
         assert.equal(saved.defaultTools, "read");
-        up(2);
+        up(3);
         key("Enter"); key("C-u"); literal("2"); key("Enter");
         wait(/Concurrent subagents\s+2/);
-        down(6); key("Enter");
+        down(7); key("Enter");
         wait(/Concurrent subagents\s+7/);
         wait(/Tool-wait alert\s+6\.5 min/);
         wait(/No-progress alert\s+12\.5 min/);
-        up(6); key("Enter"); key("C-u"); literal("6"); key("Enter");
+        wait(/Timeout \(minutes\)\s+90/);
+        up(7); key("Enter"); key("C-u"); literal("6"); key("Enter");
         wait(/Concurrent subagents\s+6/);
         key("Escape"); wait(/^(?![\s\S]*Subagent settings)/);
         literal("/reload"); key("Enter"); wait(/Reloaded/);
@@ -88,18 +96,21 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         wait(/Concurrent subagents\s+6/);
         wait(/Tool-wait alert\s+6\.5 min/);
         wait(/No-progress alert\s+12\.5 min/);
+        wait(/Timeout \(minutes\)\s+90/);
         assert.equal(JSON.parse(readFileSync(config, "utf8")).piBetterHarness.subagents.maxConcurrent, 7, "an unsaved cap survives reload without changing defaults");
         tmux("resize-window", "-t", "settings", "-x", "40", "-y", "24");
         wait(/Concurrent subagents\s+6/);
         wait(/Tool-wait alert\s+6\.5 min/);
         wait(/No-progress alert\s+12\.5 min/);
-        down(6); key("Enter");
+        wait(/Timeout \(minutes\)\s+90/);
+        down(7); key("Enter");
         const catalog = wait(/Agents\s+.*definitions/);
         assert.doesNotMatch(catalog, /Subagent settings/, "the settings pane closes before opening Agents");
         key("Escape");
         wait(/^(?![\s\S]*Agents\s+.*definitions)/);
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
-        rmSync(fixture, { recursive: true, force: true });
+        await stopOwnedRuntime(join(agentDir, "server"), runtimeOwner);
+        removeOwnedFixture(fixture);
     }
 });

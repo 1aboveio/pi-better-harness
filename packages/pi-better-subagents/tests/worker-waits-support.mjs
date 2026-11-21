@@ -99,7 +99,7 @@ export async function startStack(options = {}) {
     const workspace = join(root, "workspace");
     mkdirSync(workspace, { recursive: true });
     const { pi, events, tools } = createPiStub();
-    const storePath = join(root, "operations.sqlite");
+    const storePath = options.storePath ?? join(root, "operations.sqlite");
     const supervisorDirectory = join(root, "supervisor");
     const notifications = [];
     const host = createObservedWaitHost(pi, {

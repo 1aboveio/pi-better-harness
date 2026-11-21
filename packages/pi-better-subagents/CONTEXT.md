@@ -1,5 +1,47 @@
 # Context
 
+## Delegated Assignment Authority
+
+An automatically resumed assignment keeps its captured parent recipient, saved
+conversation, scope and permissions. Parent Goal pause/completion/clearing or
+replacement and parent session/branch inactivity do not gate worker execution.
+The active runtime is a compatible supervisor, not a replacement recipient.
+Observed-waits service v2 advertises `assignmentContinuation: 1`; unsupported
+hosts refuse continuation explicitly. Storage remains compatible: pending records
+with captured policy migrate without changing it, and missing policy is refused.
+Current mandatory authority, cancellation, writer/launch fences and capacity still
+apply. No compatible host means queued work, with no reserved idle capacity.
+
+The real SDK replay uses `WORKER_SDK_ONLY=1` with
+`tests/worker-waits-kernel.test.mjs`. The default lane additionally proves kernel
+denials; `PI_WORKER_KERNEL_REQUIRE=1` makes unsupported kernel execution fail.
+
+## Bounded Assignment Repair
+
+Coordinator outages retain version-1 reports in the existing durable conversation
+root (`observations-v1`). They preserve the published claim, original checkpoint,
+assignment binding and last observed coordinator evidence. Reports are not wait
+authority. Compatible service hosts advertise `outageReconciliation: 1`; replay
+reads current generations and uses ordinary fenced repair and saved-conversation
+admission. Exact cancellation/consumption wins over stale reports. A report receipt
+releases neither evidence pins nor writer fences. Conversation storage refusal
+reports degraded supervision and refuses new park checkpoints. Legacy hosts cannot
+claim outage replay support. No Harness or Goal installation is required.
+
+Coordinator storage v4 owns one repair allowance per assignment/wait generation
+and structured unacknowledged-exit fault. The key includes the original park
+checkpoint and exact dependency revisions, never attempt IDs, timestamps or prose.
+`repairFailedResume` fences the exact publication and persists accounting before
+returning `ready`; a repeated notification is idempotent. A new published attempt
+that repeats the fault commits the ordinary retained #710 failure and parent
+event. Background exposes `repairFailedResumeForWorker` with ownership checks.
+Subagents verifies native checkpoint bytes and writer/lease exit before calling
+it, then reuses ordinary continuation admission and capacity. Missing capability,
+history, authority or an expired assignment deadline fails closed; uncertain
+writer fences remain. No command is rerun and no parent Goal gate is added.
+The SDK fixture also covers failed-test interpretation and real unacknowledged
+exits followed by repair success or recurring-fault failure.
+
 ## Glossary
 
 ### Role

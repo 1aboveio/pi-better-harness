@@ -16,14 +16,29 @@ import { actionableFailures, failureLabel, readFailureState } from "./shared-fai
 import { failurePath, failureView } from "./failures.js";
 import { readLog } from "./logs.js";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.js";
-import { getObservedWaitHost, type DurableTaskProjection } from "./observed-waits.js";
-import { stopTask, type BackgroundTaskRuntime } from "./runtime.js";
+import { getObservedWaitHost } from "./observed-wait-client.js";
+import { describeSupervisedProgress } from "./supervised-progress.js";
+import type { DurableTaskProjection } from "./observed-waits.js";
+import type { BackgroundTaskRuntime } from "./runtime.js";
 import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
 
 const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
+const DURABLE_ROW_CACHE_MS = 1_000;
+let durableRowCache: {
+  tasks: readonly DurableTaskProjection[];
+  at: number;
+  rows: BackgroundWorkRow[];
+} | undefined;
 
-export function createBackgroundTasksNavigator(runtime: Pick<BackgroundTaskRuntime, "stopTask"> = { stopTask }) {
+export interface ManagedBackgroundNavigator {
+  onOpen?(): void;
+  rows(): BackgroundWorkRow[];
+  prepareDetail(id:string,options?:{logTailLines?:number}): void;
+  detail(id: string, now: number, options?: {logTailLines?: number}): BackgroundWorkDetail | null;
+  close(id: string): {action:string;providerId:string;id:string;status?:string};
+}
+export function createBackgroundTasksNavigator(runtime?: Pick<BackgroundTaskRuntime, "stopTask">, managed?: ManagedBackgroundNavigator) {
 const owner = Symbol("background-tasks navigator factory");
 let unregister: (() => void) | undefined;
 let navigatorContext: ExtensionContext | undefined;
@@ -81,23 +96,28 @@ const provider: BackgroundWorkProvider = {
   id: "background-tasks",
   label: "Background Tasks",
   priority: 20,
+  onOpen: managed?.onOpen,
   visibleCount: () => {
     const now = Date.now();
-    return visibleMetas(now).filter((meta) => meta.status === "running").length
+    return (managed ? managed.rows().filter(row => row.status === "running").length : visibleMetas(now).filter((meta) => meta.status === "running").length)
       + visibleDurableTasks(now).filter((task) => task.active).length;
   },
   listRows: (now) => [
-    ...visibleMetas(now).map((meta) => rowFromMeta(meta, now)),
-    ...visibleDurableTasks(now).map((task) => rowFromDurable(task, now)),
+    ...(managed ? managed.rows() : visibleMetas(now).map((meta) => rowFromMeta(meta, now))),
+    ...durableRows(visibleDurableTasks(now), now),
   ],
+  prepareDetail: (id,options) => managed?.prepareDetail(id,options),
   detail: (id, now, options) => {
     const durable = durableTask(id);
     if (durable) return detailFromDurable(durable, options);
-    return detailFromMeta(readMeta(id), now, options);
+    return managed ? managed.detail(id,now,options) : detailFromMeta(readMeta(id), now, options);
   },
   armCloseLabel: (row) => row.status === "running" || row.status === "starting" ? "x again to stop" : "x again to dismiss",
   close: (id) => {
+    if (durableTask(id)?.readOnly) return {action: "not-closable", providerId: "background-tasks", id};
+    if(managed)return managed.close(id);
     const durable = durableTask(id);
+    if (durable?.readOnly) return {action: "not-closable", providerId: "background-tasks", id};
     if (durable) {
       const host = navigatorHost();
       const origin = activeNavigatorOrigin;
@@ -114,7 +134,9 @@ const provider: BackgroundWorkProvider = {
     const meta = readMeta(id);
     if (!meta) return { action: "missing", providerId: "background-tasks", id };
     if (meta.status === "running") {
-      void runtime.stopTask(piRef as ExtensionAPI, id);
+      const pi = piRef as ExtensionAPI;
+      if (runtime) void runtime.stopTask(pi, id);
+      else void import("./runtime.js").then(({ stopTask }) => stopTask(pi, id));
       return { action: "stopped", providerId: "background-tasks", id, status: "stopping" };
     }
     meta.dismissedAt = Date.now();
@@ -123,12 +145,12 @@ const provider: BackgroundWorkProvider = {
   },
   onVisibleChanged: (notify) => {
     const offMeta = onMetaChanged(notify);
-    const offDurable = getObservedWaitHost(piRef)?.onDurableTaskChange(() => {
-      invalidateDurableProjection();
+    const offDurable = getObservedWaitHost(piRef)?.onDurableTaskChange((change) => {
+      const active = activeNavigatorOrigin;
+      if (!active || change.workspace !== active.cwd || change.sessionId !== active.sessionId) return;
       notify();
     });
     return () => {
-      invalidateDurableProjection();
       offMeta();
       offDurable?.();
     };
@@ -139,30 +161,24 @@ function navigatorHost() {
   return piRef ? getObservedWaitHost(piRef) : undefined;
 }
 
-/**
- * One refresh asks for {@link provider.visibleCount} and then {@link provider.listRows},
- * and a detail view asks again. Rebuilding the projection re-reads every durable
- * record, so a single paint would pay for the same list up to three times. Hold
- * one result per paint window; a durable-change notification clears it.
- */
-const PROJECTION_MEMO_MS = 250;
-let projectionMemo: { at: number; tasks: DurableTaskProjection[] } | undefined;
-
-function invalidateDurableProjection(): void {
-  projectionMemo = undefined;
-}
-
 function visibleDurableTasks(now = Date.now()): DurableTaskProjection[] {
   const active = activeNavigatorOrigin;
   const host = navigatorHost();
   if (!active || !host) return [];
-  if (projectionMemo && now - projectionMemo.at < PROJECTION_MEMO_MS) {
-    return projectionMemo.tasks.filter((task) => !isExpiredDurableRow(task, now));
-  }
+  // ObservedWaitHost caches unchanged projections and invalidates them on every
+  // durable notification, so a host redraw no longer re-queries per panel.
   const listed = host.listDurableTasks(active, { retentionMs: TERMINAL_NAVIGATOR_RETENTION_MS });
-  const tasks = listed.filter((task) => task.dismissedAt === undefined);
-  projectionMemo = { at: now, tasks };
-  return tasks.filter((task) => !isExpiredDurableRow(task, now));
+  return listed;
+}
+
+function durableRows(tasks: readonly DurableTaskProjection[], now: number): BackgroundWorkRow[] {
+  if (durableRowCache && durableRowCache.tasks === tasks
+    && now >= durableRowCache.at && now - durableRowCache.at < DURABLE_ROW_CACHE_MS) {
+    return durableRowCache.rows;
+  }
+  const rows = tasks.map((task) => rowFromDurable(task, now));
+  durableRowCache = { tasks, at: now, rows };
+  return rows;
 }
 
 function durableTask(id: string): DurableTaskProjection | undefined {
@@ -172,15 +188,12 @@ function durableTask(id: string): DurableTaskProjection | undefined {
   return host.readDurableTask(active, id);
 }
 
-function isExpiredDurableRow(task: DurableTaskProjection, now: number): boolean {
-  if (!task.terminal || task.endedAt === undefined) return false;
-  return now - task.endedAt >= TERMINAL_NAVIGATOR_RETENTION_MS;
-}
-
 function rowFromDurable(task: DurableTaskProjection, now: number): BackgroundWorkRow {
   const command = durableCommandLabel(task);
   const elapsed = formatDuration((task.endedAt ?? now) - task.startedAt);
   const facts: string[] = [];
+  const progress = task.progress && describeSupervisedProgress(task.progress, now);
+  if (progress) facts.push(progress);
   if (task.attention && task.reason) facts.push(task.reason);
   else if (task.attention) facts.push(task.status);
   if (task.kind === "watch" && task.intervalSeconds) facts.push(`every ${formatDuration(task.intervalSeconds * 1000)}`);
@@ -189,6 +202,8 @@ function rowFromDurable(task: DurableTaskProjection, now: number): BackgroundWor
   return {
     providerId: "background-tasks",
     id: task.id,
+    parentAgentId: task.parentAgentId,
+    readOnly: task.readOnly,
     name: task.name,
     status: task.status,
     statusTone: toneForDurableStatus(task.status),
@@ -214,7 +229,9 @@ function detailFromDurable(task: DurableTaskProjection, options?: { logTailLines
   const metadata = [
     { label: "provider", value: "Background Tasks (durable)" },
     { label: "kind", value: task.kind },
+    ...(task.parentAgentId ? [{label: "agent", value: task.parentAgentId}] : []),
     { label: "operation", value: task.operationId },
+    ...(task.progress ? [{ label: "last progress", value: new Date(task.progress.observedAt).toISOString() }] : []),
     { label: "status", value: `${task.status}${task.terminalOutcome ? ` (${task.terminalOutcome})` : ""}` },
     { label: "started", value: new Date(task.startedAt).toISOString() },
     ...(task.endedAt !== undefined ? [{ label: "ended", value: new Date(task.endedAt).toISOString() }] : []),
@@ -252,7 +269,7 @@ function detailFromDurable(task: DurableTaskProjection, options?: { logTailLines
       label: log?.truncated ? "log tail" : "log",
       text: evidenceText,
     },
-    footerActions: [task.active ? "x stop" : "x dismiss"],
+    footerActions: task.readOnly ? ["Managed by owning agent"] : [task.active ? "x stop" : "x dismiss"],
   };
 }
 
@@ -321,7 +338,7 @@ function isExpiredTerminalNavigatorRow(meta: BackgroundTaskMeta, now: number): b
   return typeof endedAt === "number" && now - endedAt >= TERMINAL_NAVIGATOR_RETENTION_MS;
 }
 
-function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
+export function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
   // Only a failure that needs action replaces the row's command; history stays in the detail view (#332).
   const view = failureView(meta.id);
   const failure = view.actionable ? view.text : "";
@@ -346,7 +363,7 @@ function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
   };
 }
 
-function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
+export function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
   if (!meta) return null;
   const view = failureView(meta.id);
   const failure = view.text;

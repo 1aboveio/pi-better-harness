@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import test, { after } from "node:test";
-import { fileURLToPath } from "node:url";
+import test, { after, before } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeMeta as writeTaskMeta } from "../packages/pi-better-background-tasks/src/registry.ts";
 import { writeMeta as writeSubagentMeta } from "../packages/pi-better-subagents/registry.ts";
+import { inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+import { ensureRuntime } from "../packages/pi-better-subagents/runtime-client/src/runtime/client.mjs";
+import { removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const extensionRoot = resolve(process.env.PI_HARNESS_E2E_PACKAGE_ROOT ?? repoRoot);
 const piBin = process.env.PI_NAVIGATOR_CLI ?? join(repoRoot, "node_modules", ".bin", "pi");
+const sdkRequire = createRequire(realpathSync(piBin));
+const { visibleWidth } = await import(pathToFileURL(sdkRequire.resolve("@earendil-works/pi-tui")).href);
 const mouseRouting = existsSync(join(dirname(createRequire(realpathSync(piBin)).resolve("@earendil-works/pi-tui")), "tui-alt-screen.js"));
 const goldenSession = `pi-navigator-e2e-${process.pid}`;
 const closeSession = `pi-navigator-close-e2e-${process.pid}`;
@@ -26,9 +31,14 @@ let tmuxArgs = ["-L", session];
 const evidenceDir = resolve(process.env.PI_NAVIGATOR_EVIDENCE_DIR ?? join(tmpdir(), `${goldenSession}-evidence`));
 const unicodeLog = `GOLDEN_LOG_BEGIN${"甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳".repeat(4)}GOLDEN_LOG_END`;
 const taskTitle = `background golden path ${"中文任务标题".repeat(8)}`;
-const fixtures = mkdtempSync(join(tmpdir(), "pi-navigator-e2e-"));
+// Keep the private Unix socket below macOS's 103-byte limit.
+const fixtures = realpathSync(mkdtempSync("/tmp/pi-nav-"));
+const agentDir = join(fixtures, "agent");
+const serverDir = join(agentDir, "server");
+let runtimeOwner;
 const launches = [];
 let launchSequence = 0;
+const WARMUP_TIMEOUT_MS = 60_000;
 const defaultSubagentId = `sa_navigator_e2e_${process.pid}`;
 const defaultTaskId = `bg_navigator_e2e_${process.pid}`;
 const dummyWorkers = [];
@@ -42,11 +52,37 @@ const mouseSkip = skip || (mouseRouting || process.env.PI_NAVIGATOR_MOUSE === "1
   ? false
   : "requires a fullscreen mouse-capable Pi host; set PI_NAVIGATOR_MOUSE=1 and PI_NAVIGATOR_CLI to one");
 
-after(() => {
+// Populate only the module cache. Do not run extension factories or session
+// handlers here: their first execution must retain the journey's 10s budget.
+before(async (t) => {
+  if (skip) return;
+  mkdirSync(evidenceDir, { recursive: true });
+  assertPrivateRegistry();
+  assert.ok(hasTmux, "the navigator warmup requires tmux");
+  // Prepare the immutable runtime separately from the UI journey's readiness budget.
+  await ensureRuntime({ agentDir });
+  const owner = inspectDaemonOwner(serverDir);
+  assert.equal(owner.status, "live", "fixture runtime must have a verified owner");
+  runtimeOwner = owner.owner;
+  if (!/\.[cm]?js$/.test(realpathSync(piBin))) {
+    t.diagnostic("Import setup skipped for a compiled Pi host; its embedded loader owns compilation.");
+    return;
+  }
+  const result = spawnSync(process.execPath, [join(repoRoot, "scripts", "warm-tui-imports.mjs"), extensionRoot, piBin], {
+    cwd: repoRoot, encoding: "utf8", timeout: WARMUP_TIMEOUT_MS,
+  });
+  writeFileSync(join(evidenceDir, "import-setup.log"), `${result.stdout ?? ""}${result.stderr ?? ""}`);
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `extension import setup failed: ${result.stderr}`);
+});
+
+after(async () => {
   for (const launch of launches) stopLaunch(launch);
   for (const worker of dummyWorkers) {
     try { process.kill(-worker.pid, "SIGKILL"); } catch { /* already stopped */ }
   }
+  // Stop the registry writer before removing the state it supervises.
+  await stopOwnedRuntime(serverDir, runtimeOwner);
   // The registries live under the private TMPDIR from scripts/isolate-registry.mjs,
   // which removes it at exit. Never touch registries in any other TMPDIR (the tests
   // refuse to seed without the preload, so there is nothing of ours there).
@@ -54,7 +90,7 @@ after(() => {
     rmSync(join(tmpdir(), "pi-better-subagents"), { recursive: true, force: true });
     rmSync(join(tmpdir(), "pi-better-background-tasks"), { recursive: true, force: true });
   }
-  rmSync(fixtures, { recursive: true, force: true });
+  removeOwnedFixture(fixtures);
 });
 
 function isPrivateRegistry() {
@@ -97,7 +133,10 @@ test("golden path: navigate both providers and read complete Unicode logs withou
     assert.match(subagentPage, /transcript · latest 25 rows/, "subagent detail must default to a 25-row transcript tail");
     assert.match(subagentPage, /← main/, "subagent detail must use the structured transcript renderer");
     assertSubagentMetadata(subagentPage, "40-row subagent detail");
-    assert.deepEqual(transcriptRows(subagentPage), rowRange(18, 30), "a 40-row terminal shows the newest transcript rows that fit below the metadata");
+    // Assignment revision/reason/process/evidence occupy four additional rows.
+    // Metadata always renders; latest 25 is a cap on the remaining transcript space.
+    assert.deepEqual(transcriptRows(subagentPage), rowRange(22, 30), "a 40-row terminal shows the newest transcript rows that fit below the metadata");
+    assertDetailBounds(subagentPage, 100, 40, "40-row subagent detail");
 
     execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-y", "60"]);
     // A resize repaints the whole pane; wait for the input frame too so the capture is not mid-redraw.
@@ -106,14 +145,29 @@ test("golden path: navigate both providers and read complete Unicode logs withou
     saveScreen("expanded-subagent-detail", expandedPage);
     assertSingleInputFrame(expandedPage, "expanded subagent detail");
     assertSubagentMetadata(expandedPage, "60-row subagent detail");
+    assertDetailBounds(expandedPage, 100, 60, "60-row subagent detail");
     // The 25-row cap includes the transcript's closing fence line, so rows 07-30 are the newest 24 content rows.
     assert.deepEqual(transcriptRows(expandedPage), rowRange(7, 30), "a 60-row terminal fits the whole 25-row cap");
     sendKey("l");
     const shortPage = waitForScreen((screen) => screen.includes("transcript · latest 10 rows") && hasSettledInputFrame(screen));
+    saveScreen("short-subagent-detail", shortPage);
     assertSubagentMetadata(shortPage, "10-row subagent detail");
+    assertDetailBounds(shortPage, 100, 60, "10-row subagent detail");
     assert.deepEqual(transcriptRows(shortPage), rowRange(22, 30), "l switches to the latest 10 rows");
     sendKey("l");
-    waitForScreen((screen) => screen.includes("transcript · latest 25 rows") && screen.includes("transcript-row-07"));
+    const restoredPage = waitForScreen((screen) => screen.includes("transcript · latest 25 rows")
+      && screen.includes("transcript-row-07") && hasSettledInputFrame(screen));
+    saveScreen("restored-subagent-detail", restoredPage);
+    assert.deepEqual(transcriptRows(restoredPage), rowRange(7, 30), "switching back restores the whole 25-row cap");
+    assertDetailBounds(restoredPage, 100, 60, "restored subagent detail");
+    execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-y", "40"]);
+    const shrunkPage = waitForScreen((screen) => screen.split(/\r?\n/).length === 41
+      && screen.includes("transcript · latest 25 rows") && !screen.includes("transcript-row-21")
+      && screen.includes("transcript-row-22") && hasSettledInputFrame(screen));
+    saveScreen("shrunk-subagent-detail", shrunkPage);
+    assertSubagentMetadata(shrunkPage, "resized-back subagent detail");
+    assert.deepEqual(transcriptRows(shrunkPage), rowRange(22, 30), "shrinking back preserves the newest rows without overlap");
+    assertDetailBounds(shrunkPage, 100, 40, "resized-back subagent detail");
 
     sendKey("Down");
     for (const width of [100, 80]) {
@@ -125,6 +179,7 @@ test("golden path: navigate both providers and read complete Unicode logs withou
         && screen.split(/\r?\n/).some((line) => line.trimEnd() === "─".repeat(width)));
       saveScreen(`background-detail-${width}`, taskPage);
       assertSingleInputFrame(taskPage, `background-task detail at ${width} columns`);
+      assertDetailBounds(taskPage, width, 40, `background-task detail at ${width} columns`);
       for (const field of ["provider", "kind", "elapsed", "cwd", "pid", "pgid"]) {
         assert.match(taskPage, new RegExp(`^\\s+${field}\\s+\\S`, "m"), `background-task detail at ${width} columns: ${field} metadata must stay visible`);
       }
@@ -132,6 +187,18 @@ test("golden path: navigate both providers and read complete Unicode logs withou
       assert.match(taskPage, /log(?: tail)? · latest 25 rows/, "background-task detail must default to a 25-row log tail");
       assert.ok(taskPage.replace(/\s/g, "").includes(unicodeLog), `wrapped log lost content at ${width} columns:\n${taskPage}`);
     }
+
+    const expandedCommand = waitForScreen((screen) => screen.includes("provider Background Tasks")
+      && screen.includes("Enter collapse") && hasSettledInputFrame(screen));
+    assert.match(expandedCommand, /Enter collapse/, "the command section starts expanded");
+    sendKey("Enter");
+    const foldedCommand = waitForScreen((screen) => screen.includes("provider Background Tasks")
+      && screen.includes("Enter expand") && /^\s+command\s+.*folded\s*$/m.test(screen) && hasSettledInputFrame(screen));
+    saveScreen("background-command-folded", foldedCommand);
+    sendKey("Enter");
+    const unfoldedCommand = waitForScreen((screen) => screen.includes("provider Background Tasks")
+      && screen.includes("Enter collapse") && screen.includes("GOLDEN_LOG_BEGIN") && hasSettledInputFrame(screen));
+    saveScreen("background-command-unfolded", unfoldedCommand);
 
     sendKey("Escape");
     waitForScreen((screen) => !screen.includes("provider Background Tasks"));
@@ -271,8 +338,8 @@ test("closing work from its detail opens the next row, then returns the keyboard
   });
 
   const hiddenList = (screen) => /Work · \d|↑↓ select/.test(screen);
+  observeSeededRows("subagent to close", "task to close");
   sendKey("Left");
-  waitForScreen((screen) => screen.includes("subagent to close") && screen.includes("task to close"));
   sendKey("Down");
   waitForScreen((screen) => screen.includes("provider Subagents") && hasSettledInputFrame(screen));
   sendKey("x");
@@ -394,6 +461,7 @@ test("switching full-page details with multiline diagnostics keeps exactly one t
   execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-x", "132", "-y", "54"]);
   const ids = [`sa_diagnostic_alpha_${process.pid}`, `sa_diagnostic_beta_${process.pid}`];
   for (const id of ids) seedNavigatorState({ cwd: state.cwd, sessionId: state.sessionId, piPid, subagentId: id });
+  waitForScreen(value => (value.match(/subagent golden path/g) ?? []).length === ids.length);
 
   sendKey("Left");
   waitForScreen((screen) => screen.includes("subagent golden path") && !screen.includes("provider Subagents"));
@@ -405,7 +473,7 @@ test("switching full-page details with multiline diagnostics keeps exactly one t
   for (let index = 0; index < 6; index++) {
     sendKey(index % 2 ? "Up" : "Down");
     const id = index % 2 ? firstId : secondId;
-    screen = waitForScreen((value) => value.includes(id) && hasSettledInputFrame(value));
+    screen = waitForScreen((value) => value.includes(id) && value.includes("provider Subagents") && hasSettledInputFrame(value));
     saveScreen(`multiline-diagnostic-${index}`, screen);
     assert.equal(screen.split(/\r?\n/).filter((line) => /^━━ /u.test(line)).length, 1,
       `switch ${index}: previous detail title must not remain visible:\n${screen}`);
@@ -480,15 +548,82 @@ test("a launch that never becomes ready is stopped immediately", { skip }, () =>
   );
 });
 
+// @covers navigator.detail-overlay
+// @level e2e
+test("a Pi process exiting before readiness retains diagnostics and is cleaned up", { skip }, () => {
+  assertPrivateRegistry();
+  const gate = join(fixtures, "exiting-launch.gate");
+  execFileSync("mkfifo", [gate]);
+  const launch = startPiLaunch(`pi-navigator-exiting-e2e-${process.pid}`, { gatePath: gate });
+  try {
+    process.kill(launch.piPid, "SIGKILL");
+    waitFor(() => !isProcessAlive(launch.piPid), "the killed launch to exit", 2_000);
+    let failure;
+    try { finishPiLaunch(launch); } catch (error) { failure = error; }
+    assert.match(failure?.message ?? "", /Pi launch exited before Pi session probe/);
+    assert.equal(failure.launchDiagnostics.processAlive, false);
+    assert.equal(failure.launchDiagnostics.stateExists, false);
+    const saved = JSON.parse(readFileSync(join(evidenceDir, `${launch.launchId}-failure.json`), "utf8"));
+    assert.equal(saved.launchId, launch.launchId);
+    assert.equal(saved.processAlive, false);
+    assert.notEqual(spawnSync("tmux", [...launch.tmuxArgs, "has-session", "-t", launch.session], { stdio: "ignore" }).status, 0);
+  } finally {
+    stopLaunch(launch);
+  }
+});
+
 function launchPi(name, { multilineDiagnostic = false, gatePath = null, readyTimeoutMs = 10_000 } = {}) {
   const launch = startPiLaunch(name, { multilineDiagnostic, gatePath });
+  return finishPiLaunch(launch, readyTimeoutMs);
+}
+
+function finishPiLaunch(launch, readyTimeoutMs = 10_000) {
   try {
     return waitForLaunchReady(launch, readyTimeoutMs);
   } catch (error) {
+    saveLaunchDiagnostics(launch, error);
     stopLaunch(launch);
     error.launch = launch;
     throw error;
   }
+}
+
+function saveLaunchDiagnostics(launch, error) {
+  const diagnostics = launchDiagnostics(launch);
+  try {
+    writeFileSync(join(evidenceDir, `${launch.launchId}-failure.json`), JSON.stringify(diagnostics, null, 2) + "\n");
+  } catch { /* the evidence directory may not exist for a launch outside a test */ }
+  error.launchDiagnostics = diagnostics;
+}
+
+function launchDiagnostics(launch) {
+  const readTail = (path, lines) => {
+    try { return readFileSync(path, "utf8").split(/\r?\n/).slice(-lines); } catch { return []; }
+  };
+  let paneInfo = "";
+  try {
+    paneInfo = execFileSync("tmux", [...launch.tmuxArgs, "display-message", "-p", "-t", launch.session,
+      "#{pane_pid}|#{pane_current_command}|#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}"], { encoding: "utf8" }).trim();
+  } catch (error) {
+    paneInfo = `unavailable: ${String(error instanceof Error ? error.message : error).split(/\r?\n/)[0]}`;
+  }
+  let pane = "";
+  try { pane = captureScreen(); } catch { /* tmux may already be gone */ }
+  return {
+    launchId: launch.launchId,
+    piPid: launch.piPid,
+    processAlive: launch.piPid ? isProcessAlive(launch.piPid) : false,
+    processInfo: (() => {
+      try { return execFileSync("ps", ["-o", "pid,ppid,stat,pcpu,etime,time,args", "-p", String(launch.piPid)], { encoding: "utf8" }).trim(); } catch { return ""; }
+    })(),
+    paneInfo,
+    paneBlank: pane.replace(/\s/g, "") === "",
+    paneTail: pane.split(/\r?\n/).slice(-40),
+    stateExists: existsSync(launch.statePath),
+    activityExists: existsSync(launch.activityPath),
+    piLogTail: readTail(launch.piLogPath, 200),
+    files: (() => { try { return readdirSync(launch.dir); } catch { return []; } })(),
+  };
 }
 
 function startPiLaunch(name, { multilineDiagnostic = false, gatePath = null } = {}) {
@@ -500,6 +635,7 @@ function startPiLaunch(name, { multilineDiagnostic = false, gatePath = null } = 
     session: name,
     tmuxArgs: ["-L", name],
     launchId,
+    dir,
     probeId: `${launchId}-${process.pid}`,
     probePath: join(dir, "session-probe.mjs"),
     statePath: join(dir, "session-state.json"),
@@ -507,6 +643,7 @@ function startPiLaunch(name, { multilineDiagnostic = false, gatePath = null } = 
     focusStealPath: join(dir, "steal-focus"),
     replacePath: join(dir, "replace-editor"),
     sessionDir: join(dir, "sessions"),
+    piLogPath: join(dir, "pi.log"),
     gatePath,
   };
   // A launch never rewrites another launch's probe or fixtures. The exclusive
@@ -519,6 +656,7 @@ function startPiLaunch(name, { multilineDiagnostic = false, gatePath = null } = 
     startPiSession(launch);
     launch.piPid = panePid(launch);
   } catch (error) {
+    saveLaunchDiagnostics(launch, error);
     stopLaunch(launch);
     throw error;
   }
@@ -531,12 +669,17 @@ function waitForLaunchReady(launch, timeoutMs = 10_000) {
     timeoutMs,
     what: `Pi session probe for ${expected}`,
     validate: (value) => validateLaunchJson(launch, value, "session readiness"),
+    alive: () => isProcessAlive(launch.piPid),
   });
   waitForJson(launch.activityPath, {
     timeoutMs,
     what: `Pi activity probe for ${expected}`,
     validate: (value) => validateLaunchProducer(launch, value, "activity readiness"),
+    alive: () => isProcessAlive(launch.piPid),
   });
+  if (process.env.PI_NAVIGATOR_SAVE_PI_LOGS === "1") {
+    try { writeFileSync(join(evidenceDir, `${launch.launchId}-pi.log`), readFileSync(launch.piLogPath)); } catch { /* optional evidence */ }
+  }
   launch.state = state;
   return {
     state,
@@ -597,7 +740,7 @@ function waitFor(condition, what, timeoutMs = 5_000) {
     if (condition()) return;
     sleep(50);
   }
-  throw new Error(`Timed out waiting for ${what}. Current screen:\n${captureScreen()}`);
+  throw new Error(`Timed out waiting for ${what}.${screenForError()}`);
 }
 
 /** A stand-in process for a run the navigator can stop, in its own process group. */
@@ -627,6 +770,7 @@ function startPiSession(launch) {
     // Explicit, so Pi's registries follow the test's private TMPDIR whatever tmux's global env holds.
     `TMPDIR=${shellQuote(tmpdir())}`,
     "PI_OFFLINE=1",
+    "PI_TIMING=1",
     "OPENAI_API_KEY=sk-tui-e2e-placeholder",
     shellQuote(piBin),
     `-e ${shellQuote(extensionRoot)}`,
@@ -637,6 +781,7 @@ function startPiSession(launch) {
     `--session-dir ${shellQuote(launch.sessionDir)}`,
     "--name navigator-tui-e2e",
     "--model openai/gpt-4o-mini",
+    `2>${shellQuote(launch.piLogPath)}`,
   ].join(" ");
   execFileSync("tmux", [...launch.tmuxArgs, "new-session", "-d", "-s", launch.session, "-x", "100", "-y", "40", command]);
 }
@@ -697,7 +842,7 @@ export default function(pi) {
 `;
 }
 
-function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagentId, taskId = defaultTaskId }) {
+function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagentId, taskId = `${defaultTaskId}_${piPid}` }) {
   const now = Date.now();
   const callbackOrigin = { cwd, sessionId };
   const subagentDir = join(tmpdir(), "pi-better-subagents", "runs", subagentId);
@@ -734,7 +879,9 @@ function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagen
     startedAt: now - 30_000,
     logPath: taskLog,
     cwd,
-    command: "printf 'background task output\\n'",
+    // The canonical server resumes this watch; every real poll retains the
+    // Unicode evidence instead of pushing the initial seeded log out of the tail.
+    command: `printf '%s\\n' '${unicodeLog}'`,
     shell: true,
     pid: piPid,
     pgid: piPid,
@@ -744,6 +891,16 @@ function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagen
     intervalMs: 15_000,
     deadlineAt: now + 600_000,
   });
+  observeSeededRows("subagent golden path", "background golden path");
+}
+
+function observeSeededRows(subagentTitle, taskTitle) {
+  // External fixture writes bypass the tools. Open the navigator to subscribe, then
+  // give focus back to the editor so each scenario starts in its normal input state.
+  sendKey("Left");
+  const overview = waitForScreen(screen => screen.includes(subagentTitle) && screen.includes(taskTitle));
+  if (overview.includes("Esc unfocus")) sendKey("Escape");
+  waitForScreen(screen => screen.includes("← work navigator"));
 }
 
 function hasSettledInputFrame(screen) {
@@ -796,19 +953,30 @@ function captureScreen() {
 
 function waitForScreen(matches, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
-  let screen = "";
+  let screen = "", previous;
   while (Date.now() < deadline) {
     screen = captureScreen();
-    if (matches(screen)) return screen;
+    // tmux can expose a partially applied frame with both old and new rows.
+    // Require the same matching frame twice before asserting its exact layout.
+    if (matches(screen) && screen === previous) return screen;
+    previous = screen;
     sleep(50);
   }
   throw new Error(`Timed out waiting for navigator page. Current screen:\n${screen}`);
 }
 
-function waitForJson(path, { timeoutMs = 10_000, what = "Pi session probe", validate = () => true } = {}) {
+function waitForJson(path, {
+  timeoutMs = 10_000,
+  what = "Pi session probe",
+  validate = () => true,
+  alive = undefined,
+} = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastValue = "";
   while (Date.now() < deadline) {
+    if (alive && !alive()) {
+      throw new Error(`Pi launch exited before ${what}.${screenForError()}`);
+    }
     if (!existsSync(path)) {
       sleep(50);
       continue;
@@ -829,7 +997,16 @@ function waitForJson(path, { timeoutMs = 10_000, what = "Pi session probe", vali
     lastValue = JSON.stringify(value).slice(0, 500);
     sleep(50);
   }
-  throw new Error(`Timed out waiting for ${what}${lastValue ? `; last producer: ${lastValue}` : ""}. Current screen:\n${captureScreen()}`);
+  throw new Error(`Timed out waiting for ${what}${lastValue ? `; last producer: ${lastValue}` : ""}.${screenForError()}`);
+}
+
+function screenForError() {
+  try {
+    return ` Current screen:\n${captureScreen()}`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return ` No tmux screen was available: ${message.split(/\r?\n/)[0]}`;
+  }
 }
 
 function sleep(ms) {
@@ -848,7 +1025,34 @@ function rowRange(first, last) {
 }
 
 function assertSubagentMetadata(screen, label) {
-  for (const field of ["provider", "id", "model", "elapsed", "tools", "spend", "pid", "pgid"]) {
+  const rows = screen.split(/\r?\n/);
+  const transcriptHeading = rows.findIndex((row) => row.includes("transcript · latest"));
+  assert.ok(transcriptHeading >= 0, `${label}: transcript heading must be visible`);
+  for (const field of ["provider", "id", "model", "revision", "reason", "process", "evidence", "elapsed", "tools", "spend", "pid", "pgid"]) {
     assert.match(screen, new RegExp(`^\\s+${field}\\s+\\S`, "m"), `${label}: ${field} metadata must stay visible`);
+    const matches = rows.flatMap((row, index) => new RegExp(`^\\s+${field}\\s+\\S`).test(row) ? [index] : []);
+    assert.equal(matches.length, 1, `${label}: ${field} metadata must occupy exactly one row`);
+    assert.ok(matches[0] < transcriptHeading, `${label}: ${field} metadata must not overlap the transcript`);
+  }
+  assert.match(screen, /^\s+revision [a-f0-9]{16}\s*$/m);
+  assert.match(screen, /^\s+reason\s+Worker is advancing the assignment\.\s*$/m);
+  assert.match(screen, /^\s+process\s+running; termination unproven\s*$/m);
+  assert.match(screen, /^\s+evidence\s+run:sa_navigator_e2e_\d+:output\.log, run:sa_navigator_e2e_\d+:meta\.json\s*$/m);
+}
+
+function assertDetailBounds(screen, width, height, label) {
+  const rows = screen.split(/\r?\n/);
+  if (rows.at(-1) === "") rows.pop();
+  assert.equal(rows.length, height, `${label}: pane must retain its exact terminal height`);
+  for (const row of rows) assert.ok(visibleWidth(row) <= width, `${label}: row exceeds ${width} columns: ${row}`);
+  assert.equal(rows.filter((row) => /^━━ /u.test(row)).length, 1, `${label}: exactly one title must be visible`);
+  assertSingleInputFrame(screen, label);
+  const inputTop = rows.findIndex((row) => /^─{20,}$/u.test(row));
+  const railTop = rows.findIndex((row) => row.trim() === "subagents");
+  assert.ok(railTop > 0 && railTop < inputTop, `${label}: rail and input must remain below the detail`);
+  for (const [index, row] of rows.entries()) {
+    if (/transcript-row-\d{2}|GOLDEN_LOG_(?:BEGIN|END)/.test(row)) {
+      assert.ok(index < railTop, `${label}: transcript/log must not overlap the rail or input`);
+    }
   }
 }

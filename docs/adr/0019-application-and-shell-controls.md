@@ -1,5 +1,7 @@
 # Application and shell controls
 
+> Historical decision. The current sandbox contract is in [ADR 0027](0027-sandbox-tools-and-permissions.md#execution-boundaries).
+
 ## Status
 
 Accepted. Extends the trusted runtime and confined task boundary in

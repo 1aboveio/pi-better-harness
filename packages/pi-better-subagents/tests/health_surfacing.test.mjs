@@ -272,7 +272,7 @@ describe("subagent_list health surfacing", () => {
             health: healthyObs,
         });
         assert.equal(
-            row,
+            row.replace(/ · r[a-f0-9]{16}$/, ""),
             `• worker sa_quiet  [running]  session_id=sa_quiet  xai/grok-4.5  1m 00s\n    prompt for sa_quiet`,
         );
         assert.doesNotMatch(row, /health:| · stale| · model/);

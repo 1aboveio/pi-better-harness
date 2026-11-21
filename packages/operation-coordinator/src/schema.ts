@@ -1,5 +1,5 @@
 /**
- * Schema v1 for the durable operation coordinator.
+ * Schema v5 for the durable operation coordinator.
  *
  * The store refuses to open a database whose recorded version it does not
  * understand, and leaves the file untouched. An unreadable or newer database
@@ -17,7 +17,77 @@ import { SCHEMA_VERSION } from "./types.ts";
 import { StoreError } from "./errors.ts";
 import { columnText, getRow, getRows, run, type StoreContext } from "./sqlite.ts";
 
+// Enforce the handoff even for an older process still using its bundled store.
+// Unknown legacy scopes conservatively conflict with any managed root scope.
+const RESULT_ADMISSION_FENCE = `CREATE TRIGGER IF NOT EXISTS result_scope_admission_v1
+    BEFORE INSERT ON operations
+    WHEN NEW.observer_kind = 'local-supervisor'
+      AND COALESCE(json_extract(NEW.supervision_json, '$.resultAdapter'), 0) != 1
+      AND EXISTS (SELECT 1 FROM coordinator_state
+          WHERE key LIKE 'result-scope-v1:%'
+            AND (json_extract(NEW.supervision_json, '$.resultScope') IS NULL
+              OR key = 'result-scope-v1:' || json_extract(NEW.supervision_json, '$.resultScope')))
+    BEGIN SELECT RAISE(ABORT, 'permission-unavailable: legacy launch into managed result scope'); END`;
+
+const BACKGROUND_CALLBACK_DDL = [
+    `CREATE TABLE IF NOT EXISTS background_parent_callbacks (
+        operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id),
+        owner_kind TEXT NOT NULL CHECK(owner_kind='parent-session'),
+        owner_workspace TEXT NOT NULL,
+        owner_session_id TEXT NOT NULL
+    )`,
+    `CREATE TRIGGER IF NOT EXISTS background_parent_callback_registration
+        AFTER INSERT ON operations
+        WHEN NEW.owner_kind='parent-session' AND NEW.observer_kind='local-supervisor'
+        BEGIN INSERT OR IGNORE INTO background_parent_callbacks(operation_id,owner_kind,owner_workspace,owner_session_id)
+            VALUES(NEW.operation_id,NEW.owner_kind,NEW.owner_workspace,NEW.owner_session_id); END`,
+    `CREATE INDEX IF NOT EXISTS background_parent_callbacks_owner ON background_parent_callbacks(owner_kind,owner_workspace,owner_session_id,operation_id)`,
+    `CREATE INDEX IF NOT EXISTS operations_background_recent ON operations(terminal_at,operation_id) WHERE observer_kind='local-supervisor' AND terminal_revision>0`,
+    `CREATE INDEX IF NOT EXISTS operations_background_owner_recent ON operations(owner_kind,owner_workspace,owner_session_id,terminal_at,operation_id) WHERE observer_kind='local-supervisor' AND terminal_revision>0`,
+    `CREATE INDEX IF NOT EXISTS operations_background_parent_seed ON operations(operation_id) WHERE owner_kind='parent-session' AND observer_kind='local-supervisor'`,
+    `CREATE TABLE IF NOT EXISTS background_parent_callback_migration (
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+        after_operation_id TEXT NOT NULL,
+        through_operation_id TEXT NOT NULL,
+        done INTEGER NOT NULL CHECK(done IN (0,1))
+    )`,
+    `INSERT OR IGNORE INTO background_parent_callback_migration(singleton,after_operation_id,through_operation_id,done)
+        SELECT 1,'',COALESCE(MAX(operation_id),''),CASE WHEN MAX(operation_id) IS NULL THEN 1 ELSE 0 END
+        FROM operations WHERE owner_kind='parent-session' AND observer_kind='local-supervisor'`,
+];
+
+const ASSIGNMENT_ATTEMPTS_DDL = `CREATE TABLE IF NOT EXISTS assignment_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    assignment_id TEXT NOT NULL REFERENCES assignment_bindings (assignment_id)
+)`;
+const ASSIGNMENT_ATTEMPT_COLUMN = `assignment_attempt_id TEXT REFERENCES assignment_attempts (attempt_id)`;
+const ASSIGNMENT_CLEANUP_INDEX = `CREATE INDEX IF NOT EXISTS operations_assignment_cleanup
+    ON operations (operation_id, assignment_attempt_id)
+    WHERE assignment_attempt_id IS NOT NULL`;
+
 const DDL: readonly string[] = [
+    `CREATE TABLE task_cancellation_authorities (
+        credential_hash TEXT PRIMARY KEY,
+        request_json TEXT NOT NULL,
+        directory TEXT NOT NULL
+    )`,
+    `CREATE TABLE task_cancellation_requests (
+        owner_key TEXT NOT NULL,
+        request_key TEXT NOT NULL,
+        operation_id TEXT NOT NULL REFERENCES operations (operation_id),
+        intent_json TEXT NOT NULL,
+        result_json TEXT,
+        state TEXT NOT NULL CHECK (state IN ('accepted', 'stop-requested')),
+        PRIMARY KEY (owner_key, request_key)
+    )`,
+    `CREATE TABLE assignment_repairs (
+        fault_key TEXT PRIMARY KEY,
+        assignment_id TEXT NOT NULL,
+        wait_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        fault_json TEXT NOT NULL,
+        claim_id TEXT NOT NULL
+    )`,
     `CREATE TABLE schema_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -31,9 +101,11 @@ const DDL: readonly string[] = [
         owner_workspace TEXT NOT NULL,
         owner_branch_id TEXT,
         owner_goal_id TEXT,
+        ${ASSIGNMENT_ATTEMPT_COLUMN},
         observer_kind TEXT NOT NULL,
         observer_version TEXT NOT NULL,
         supervision_json TEXT,
+        supervision_host_id TEXT,
         authority_ref TEXT,
         intent_ref TEXT,
         phase TEXT NOT NULL,
@@ -48,8 +120,27 @@ const DDL: readonly string[] = [
         updated_at INTEGER NOT NULL,
         terminal_at INTEGER
     )`,
+    ...BACKGROUND_CALLBACK_DDL,
     `CREATE INDEX operations_owner ON operations (owner_kind, owner_session_id)`,
     `CREATE INDEX operations_phase ON operations (phase)`,
+    `CREATE INDEX operations_running_supervisor ON operations (phase, supervision_host_id)`,
+    ASSIGNMENT_CLEANUP_INDEX,
+    // Discovery leadership is separate from per-operation supervision. The token
+    // fences stale acquisition and release; the host id is checked with process
+    // identity before a replacement.
+    `CREATE TABLE discovery_claims (
+        scope TEXT PRIMARY KEY,
+        host_id TEXT NOT NULL,
+        token TEXT NOT NULL,
+        claimed_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )`,
+    // Small shared state for change notification. The table is additive so an
+    // older reader that understands schema version 1 can safely ignore it.
+    `CREATE TABLE coordinator_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )`,
     `CREATE TABLE operation_evidence (
         operation_id TEXT NOT NULL REFERENCES operations (operation_id),
         terminal_revision INTEGER NOT NULL,
@@ -63,6 +154,7 @@ const DDL: readonly string[] = [
         PRIMARY KEY (operation_id, terminal_revision, ordinal)
     )`,
     `CREATE TABLE waits (
+        dispatch_disarmed INTEGER NOT NULL DEFAULT 0,
         wait_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
         owner_kind TEXT NOT NULL,
@@ -86,7 +178,7 @@ const DDL: readonly string[] = [
     // At most one generation per owner identity (session + branch) may be pending.
     `CREATE UNIQUE INDEX waits_one_pending_per_owner
         ON waits (owner_kind, owner_session_id, coalesce(owner_branch_id, ''))
-        WHERE phase NOT IN ('consumed', 'cancelled')`,
+        WHERE phase NOT IN ('consumed', 'cancelled') AND dispatch_disarmed = 0`,
     `CREATE INDEX waits_owner ON waits (owner_kind, owner_session_id)`,
     `CREATE TABLE wait_dependencies (
         wait_id TEXT NOT NULL,
@@ -152,6 +244,7 @@ const DDL: readonly string[] = [
         ON evidence_pins (wait_id, generation, operation_id, terminal_revision, kind, ref)`,
     `CREATE INDEX evidence_pins_operation ON evidence_pins (operation_id, terminal_revision, released_at)`,
     `CREATE TABLE outbox_events (
+        event_type TEXT NOT NULL DEFAULT 'dependency-ready',
         event_id TEXT PRIMARY KEY,
         operation_id TEXT NOT NULL,
         terminal_revision INTEGER NOT NULL,
@@ -175,6 +268,24 @@ const DDL: readonly string[] = [
     )`,
     `CREATE INDEX outbox_recipient ON outbox_events (recipient_kind, recipient_session_id, state)`,
     `CREATE INDEX outbox_wait ON outbox_events (wait_id, generation)`,
+    `CREATE TABLE assignment_outcomes (
+        assignment_id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL UNIQUE,
+        record_json TEXT NOT NULL
+    )`,
+    `CREATE TABLE assignment_bindings (
+        assignment_id TEXT PRIMARY KEY,
+        owner_json TEXT NOT NULL,
+        recipient_json TEXT NOT NULL
+    )`,
+    ASSIGNMENT_ATTEMPTS_DDL,
+    `CREATE TABLE assignment_outcome_waits (
+        assignment_id TEXT NOT NULL REFERENCES assignment_outcomes (assignment_id),
+        wait_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        PRIMARY KEY (wait_id, generation)
+    )`,
+    RESULT_ADMISSION_FENCE,
 ];
 
 const SCHEMA_VERSION_KEY = "schema_version";
@@ -229,11 +340,97 @@ export function ensureSchema(ctx: StoreContext): void {
         );
     }
     if (recorded < SCHEMA_VERSION) {
-        throw new StoreError(
-            "schema-version",
-            `The database is at schema version ${recorded}; this build needs version ${SCHEMA_VERSION}. No migration is provided for this pair; records are left in place.`,
-        );
+        ctx.transaction(() => {
+            // Another opener may have finished the upgrade before we acquired the write lock.
+            const current = readSchemaVersion(ctx);
+            if (current === SCHEMA_VERSION) return;
+            if (current !== recorded) {
+                throw new StoreError("schema-version", "The coordinator schema changed during opening. Reopen the store to verify it.");
+            }
+            ensureAdditiveSchema(ctx);
+            if (recorded <= 2) {
+                if (recorded === 1) ctx.db.exec("ALTER TABLE outbox_events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'dependency-ready'");
+                for (const statement of DDL.filter((sql) => sql.startsWith("CREATE TABLE assignment_"))) ctx.db.exec(statement.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+                ctx.db.exec("ALTER TABLE waits ADD COLUMN dispatch_disarmed INTEGER NOT NULL DEFAULT 0");
+                ctx.db.exec("UPDATE waits SET dispatch_disarmed = 1 WHERE EXISTS (SELECT 1 FROM assignment_outcome_waits aw WHERE aw.wait_id = waits.wait_id AND aw.generation = waits.generation)");
+                ctx.db.exec("DROP INDEX waits_one_pending_per_owner");
+                ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE UNIQUE INDEX waits_one_pending_per_owner"))!);
+            } else if (recorded === 3) {
+                ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE assignment_repairs"))!);
+            }
+            ensureAssignmentCleanupSchema(ctx);
+            run(ctx, "UPDATE schema_meta SET value = ? WHERE key = ?", String(SCHEMA_VERSION), SCHEMA_VERSION_KEY);
+        });
+        return;
     }
+    ensureAdditiveSchema(ctx);
+    ensureAssignmentCleanupSchema(ctx);
+}
+
+function ensureAssignmentCleanupSchema(ctx: StoreContext): void {
+    const hasColumn = () => getRows(ctx, "PRAGMA table_info(operations)").some(row => row.name === "assignment_attempt_id");
+    if (hasColumn() && getRow(ctx, "SELECT 1 FROM sqlite_master WHERE name = 'operations_assignment_cleanup'")) return;
+    ctx.transaction(() => {
+        ctx.db.exec(ASSIGNMENT_ATTEMPTS_DDL);
+        // Legacy writers leave the nullable provenance unset.
+        if (!hasColumn()) ctx.db.exec(`ALTER TABLE operations ADD COLUMN ${ASSIGNMENT_ATTEMPT_COLUMN}`);
+        ctx.db.exec(ASSIGNMENT_CLEANUP_INDEX);
+    });
+}
+
+/**
+ * Schema version 1 is extended additively: older readers ignore the new column,
+ * index and tables, so a live session on the previous build does not lose its
+ * records during a rolling upgrade. Missing additions are created once on open.
+ */
+function ensureAdditiveSchema(ctx: StoreContext): void {
+    // Schema/index creation is atomic; legacy obligation seeding is performed
+    // separately in bounded batches by the canonical manager.
+    ctx.transaction(() => { for (const statement of BACKGROUND_CALLBACK_DDL) ctx.db.exec(statement); });
+    const hasColumn = (): boolean =>
+        getRows(ctx, "PRAGMA table_info(operations)").some((row) => columnText(row, "name") === "supervision_host_id");
+    const hasIndex = (): boolean =>
+        getRows(ctx, "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", "operations_running_supervisor").length > 0;
+    const hasTable = (name: string): boolean => existingTables(ctx).includes(name);
+    if (
+        hasColumn()
+        && hasIndex()
+        && hasTable("discovery_claims")
+        && hasTable("coordinator_state")
+        && hasTable("task_cancellation_requests")
+        && hasTable("task_cancellation_authorities")
+        && getRows(ctx, "PRAGMA table_info(task_cancellation_requests)").some(row => row.name === "result_json")
+    ) {
+        ctx.db.exec(RESULT_ADMISSION_FENCE);
+        return;
+    }
+
+    ctx.transaction(() => {
+        ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE task_cancellation_requests"))!.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+        if (!getRows(ctx, "PRAGMA table_info(task_cancellation_requests)").some(row => row.name === "result_json")) ctx.db.exec("ALTER TABLE task_cancellation_requests ADD COLUMN result_json TEXT");
+        ctx.db.exec(DDL.find((sql) => sql.startsWith("CREATE TABLE task_cancellation_authorities"))!.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+        if (!hasColumn()) {
+            ctx.db.exec("ALTER TABLE operations ADD COLUMN supervision_host_id TEXT");
+            ctx.db.exec(`UPDATE operations
+                SET supervision_host_id = CASE
+                    WHEN json_valid(supervision_json) THEN json_extract(supervision_json, '$.hostId')
+                    ELSE NULL
+                END`);
+        }
+        ctx.db.exec("CREATE INDEX IF NOT EXISTS operations_running_supervisor ON operations (phase, supervision_host_id)");
+        ctx.db.exec(`CREATE TABLE IF NOT EXISTS discovery_claims (
+            scope TEXT PRIMARY KEY,
+            host_id TEXT NOT NULL,
+            token TEXT NOT NULL,
+            claimed_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )`);
+        ctx.db.exec(`CREATE TABLE IF NOT EXISTS coordinator_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )`);
+        ctx.db.exec(RESULT_ADMISSION_FENCE);
+    });
 }
 
 /** Test and diagnostic seam: read the recorded schema version without opening a store. */

@@ -11,7 +11,7 @@ export interface CallbackSettingsControl {
 const CALLBACK_SETTING_ID = "callbacks:while-busy";
 const callbackLabel = (mode: "hold" | "steer") => mode === "steer" ? "Steer active run" : "Wait until idle";
 
-export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], selected?: string, callbacks?: CallbackSettingsControl, controls: SettingsControl[] = []): Promise<string | undefined> {
+export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], selected?: string, callbacks?: CallbackSettingsControl, controls: SettingsControl[] = [], navigatorView?: SettingsControl): Promise<string | undefined> {
   return ctx.ui.custom((tui: any, theme: Theme, _kb: unknown, done: (id?: string) => void) => {
     let callbackMode = callbacks?.get().mode ?? "hold";
     const callbackSetting: SettingItem | undefined = callbacks ? {
@@ -21,10 +21,14 @@ export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], sele
       description: callbacks.get().source === "session" ? "Session setting" : "User default",
       values: ["Wait until idle", "Steer active run"],
     } : undefined;
+    const controlItem = (control: SettingsControl): SettingItem => ({ id: `setting:${control.id}`, label: control.label, currentValue: control.get(), description: "User default", values: control.values });
+    const allControls = navigatorView ? [...controls, navigatorView] : controls;
     const items: SettingItem[] = [
       ...(callbackSetting ? [callbackSetting] : []),
-      ...controls.map(control => ({ id: `setting:${control.id}`, label: control.label, currentValue: control.get(), description: "User default", values: control.values })),
+      ...controls.map(controlItem),
       ...links.map(link => ({ id: `link:${link.id}`, label: link.label, currentValue: link.command, description: "Open package settings", values: [link.command] })),
+      // Append View so the existing controls and package links keep their positions.
+      ...(navigatorView ? [controlItem(navigatorView)] : []),
     ];
     const feedback = new Text("", 0, 0);
     let changing = false;
@@ -37,7 +41,7 @@ export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], sele
       value: (text, active) => active ? theme.inverse(text) : theme.fg("muted", text),
       description: text => theme.fg("muted", text), cursor: "> ", hint: text => theme.fg("dim", text),
     }, (id, value) => {
-      const control = controls.find(item => `setting:${item.id}` === id);
+      const control = allControls.find(item => `setting:${item.id}` === id);
       if (control) {
         const previous = control.get();
         changing = true;

@@ -73,6 +73,7 @@ export interface LaunchEnrichment {
 export type LaunchEnricher = (input: {
     inspection: CatalogInspection;
     snapshotDigest: string;
+    snapshot?: CatalogSnapshot;
 }) => LaunchEnrichment | undefined;
 
 /** The active default a launch would use when the definition chooses nothing. */
@@ -290,7 +291,7 @@ export function presentCatalogEntry(
     let enrichmentFailed = false;
     if (enrich && inspection.found) {
         try {
-            enrichment = enrich({ inspection, snapshotDigest: snapshot.digest });
+            enrichment = enrich({ inspection, snapshotDigest: snapshot.digest, snapshot });
         } catch (error) {
             enrichmentFailed = true;
             validation.push({

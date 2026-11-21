@@ -39,6 +39,7 @@ const CLOSURE = [
   { source: join(here, "store.ts"), out: "store.mjs" },
   { source: join(here, "types.ts"), out: "types.mjs" },
   { source: join(here, "identity.ts"), out: "identity.mjs" },
+  { source: join(here, "..", "watch-fingerprint.ts"), out: "watch-fingerprint.mjs" },
   { source: join(here, "..", "conditions.ts"), out: "conditions.mjs" },
   { source: join(here, "..", "process.ts"), out: "process.mjs" },
   { source: join(here, "..", "process-identity.ts"), out: "process-identity.mjs" },

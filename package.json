@@ -28,6 +28,7 @@
     ]
   },
   "scripts": {
+    "postinstall": "node scripts/sync-runtime-client.mjs",
     "catalog:check": "node --import tsx scripts/check-agent-catalog.mjs",
     "sync:shared-log-utils": "node scripts/sync-shared-log-utils.mjs",
     "sync:shared-ssh-core": "node scripts/sync-shared-ssh-core.mjs",
@@ -36,10 +37,11 @@
     "gallery:capture-real": "node scripts/capture-real-pi-session-gallery.mjs",
     "gallery:render": "node --import tsx scripts/render-package-gallery.mjs",
     "gallery:check": "node --import tsx scripts/render-package-gallery.mjs --check",
-    "test:tui-e2e": "node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/navigator-detail.tui.e2e.test.mjs scripts/plan-navigation.tui.e2e.test.mjs scripts/goal-pause.tui.e2e.test.mjs",
+    "test:tui-e2e": "node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 scripts/navigator-detail.tui.e2e.test.mjs scripts/plan-navigation.tui.e2e.test.mjs scripts/goal-pause.tui.e2e.test.mjs",
     "test:golden:sandbox": "npm run sync:shared-sandbox-core && npm run sync:task-sandbox && node scripts/run-sandbox-golden.mjs",
     "test:live-ssh": "PI_LIVE_SSH_REQUIRED=1 node --import tsx --import ./scripts/isolate-registry.mjs --test --test-name-pattern \"live SSH\" scripts/reload-ssh-durability.e2e.test.mjs",
     "test:golden:navigator": "PI_NAVIGATOR_REQUIRE_TMUX=1 node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/navigator-detail.tui.e2e.test.mjs",
+    "test:performance": "node --import tsx scripts/performance/assignment-projection-stress.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 scripts/*.test.mjs && npm run test --workspaces --if-present",
     "test:cross-session": "npm run test:cross-session -w packages/pi-better-background-tasks && npm run test:cross-session -w packages/pi-better-subagents",

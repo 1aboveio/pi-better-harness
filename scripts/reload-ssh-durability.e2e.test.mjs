@@ -32,10 +32,13 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
+import { inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+import { prepareOwnedRuntime, removeOwnedFixture, stopOwnedRuntime } from "./test-support/remove-owned-fixture.mjs";
 
 // `npm run test:live-ssh` sets PI_LIVE_SSH_REQUIRED so a missing host fails instead of skipping.
 const liveHost = process.env.PI_LIVE_SSH_HOST;
@@ -45,11 +48,13 @@ if (process.env.PI_LIVE_SSH_REQUIRED === "1" && !liveHost) {
 
 const repoRoot = resolve(import.meta.dirname, "..");
 // Stay outside the preload's exit-swept directory so failed cleanup can retain markers.
-const fixtureRoot = process.env.PI_SCRIPTS_TEST_MACHINE_TMPDIR ?? realpathSync(tmpdir());
+const fixtureRoot = realpathSync("/tmp");
 const fixtures = realpathSync(mkdtempSync(join(fixtureRoot, "pi-reload-ssh-")));
 const dir = (name) => { const path = join(fixtures, name); mkdirSync(path, { recursive: true }); return path; };
 const tmp = dir("tmp");
 const agentDir = dir("agent");
+const serverDir = join(agentDir, "server");
+let runtimeOwner;
 const fakeBin = dir("fake-bin");
 const sshLog = join(fixtures, "ssh-argv.log");
 
@@ -61,8 +66,10 @@ process.env.TEMP = tmp;
 process.env.PI_CODING_AGENT_DIR = agentDir;
 process.env.PI_BG_OBSERVED_WAITS_DEBUG = "1";
 
+const systemSsh = execFileSync("which", ["ssh"], { encoding: "utf8" }).trim();
 writeFileSync(join(fakeBin, "ssh"), [
   "#!/bin/sh",
+  `case "$*" in *fake-remote.test*) ;; *) exec '${systemSsh.replaceAll("'", "'\\''")}' "$@" ;; esac`,
   `printf '%s\\n' "$*" >> '${sshLog}'`,
   'while [ $# -gt 0 ]; do if [ "$1" = "--" ]; then shift; break; fi; shift; done',
   "shift # target",
@@ -73,15 +80,19 @@ chmodSync(join(fakeBin, "ssh"), 0o755);
 
 const originalPath = process.env.PATH ?? "";
 const originalWindow = process.env.PI_BETTER_CALLBACK_BATCH_MS;
+// The fixed server inherits transport configuration only at startup. The shim
+// handles the explicit fixture host and delegates real hosts to system SSH.
+process.env.PATH = `${fakeBin}:${originalPath}`;
 const originalObservedDebug = process.env.PI_BG_OBSERVED_WAITS_DEBUG;
 let retainFixtures = false;
-after(() => {
+after(async () => {
   process.env.PATH = originalPath;
   if (originalWindow === undefined) delete process.env.PI_BETTER_CALLBACK_BATCH_MS;
   else process.env.PI_BETTER_CALLBACK_BATCH_MS = originalWindow;
   if (originalObservedDebug === undefined) delete process.env.PI_BG_OBSERVED_WAITS_DEBUG;
   else process.env.PI_BG_OBSERVED_WAITS_DEBUG = originalObservedDebug;
-  if (!retainFixtures) rmSync(fixtures, { recursive: true, force: true });
+  await stopOwnedRuntime(serverDir, runtimeOwner);
+  if (!retainFixtures) removeOwnedFixture(fixtures);
 });
 
 const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
@@ -161,6 +172,7 @@ async function openSession(project) {
   });
   const sent = [];
   const errors = [];
+  const taskStatusProof = new Map();
   const sendCustomMessage = session.sendCustomMessage.bind(session);
   session.sendCustomMessage = (message, options) => {
     sent.push({ ...message, options });
@@ -171,14 +183,27 @@ async function openSession(project) {
     sent,
     requests,
     errors,
+    taskStatusProof,
     sessionId: session.sessionManager.getSessionId(),
-    start: () => session.bindExtensions({ onError: (error) => errors.push(error) }),
+    start: async () => {
+      runtimeOwner ??= await prepareOwnedRuntime(agentDir);
+      await session.bindExtensions({ onError: (error) => errors.push(error) });
+      const owner = inspectDaemonOwner(serverDir);
+      assert.equal(owner.status, "live", "fixture runtime must have a verified owner");
+      runtimeOwner ??= owner.owner;
+      assert.deepEqual(owner.owner, runtimeOwner, "fixture runtime must not be replaced between sessions");
+    },
     // Tools are looked up per call: after a reload they belong to the new extension instances.
     async call(name, params) {
       const tool = session.agent.state.tools.find((candidate) => candidate.name === name);
       assert.ok(tool, `${name} is registered`);
-      const result = await tool.execute(`call-${name}-${Date.now()}`, params, new AbortController().signal);
-      return result.content.map((part) => part.text ?? "").join("\n");
+      const result = await tool.execute(randomUUID(), params, new AbortController().signal);
+      const text = result.content.map((part) => part.text ?? "").join("\n");
+      if (name === "bg_task_status" && typeof params.id === "string") {
+        taskStatusProof.set(params.id, { terminal: isTerminalStatusText(text),
+          returnedTaskIdentity: text.includes(params.id), nativeError: result.isError === true });
+      }
+      return text;
     },
     completions: (id) => sent.filter((m) => m.customType === "background-completion-batch" && String(m.content).includes(id)),
   };
@@ -199,15 +224,25 @@ function readJson(path) {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; }
 }
 
+function supervisorDirectory(id) {
+  const store = openStore({ path: join(agentDir, "operation-coordinator.sqlite") });
+  try {
+    const operation = store.listOperations({ taskId: id })[0];
+    const grant = operation && store.resultSupervision(operation.operationId);
+    assert.ok(grant?.directory, `${id} must retain its captured supervisor directory`);
+    return grant.directory;
+  } finally { store.close(); }
+}
+
 function supervisorCommand(id) {
   if (!String(id).startsWith("bgs_")) return undefined;
-  const command = readJson(supervisorPaths(defaultSupervisorDirectory(), id).command);
+  const command = readJson(supervisorPaths(supervisorDirectory(id), id).command);
   return command && typeof command.pid === "number" ? { pid: command.pid, pgid: command.pgid } : undefined;
 }
 
 function supervisorTerminal(id) {
   if (!String(id).startsWith("bgs_")) return undefined;
-  const paths = supervisorPaths(defaultSupervisorDirectory(), id);
+  const paths = supervisorPaths(supervisorDirectory(id), id);
   return readJson(paths.result) ?? readJson(paths.lost);
 }
 
@@ -234,9 +269,43 @@ async function taskTerminal(host, id) {
 }
 
 async function dumpDurableCallbackDiagnostics(host, id, project) {
-  if (!String(id).startsWith("bgs_")) return;
+  let daemonLog;
   try {
-    const paths = supervisorPaths(defaultSupervisorDirectory(), id);
+    const fd = openSync(join(serverDir, "daemon.log"), "r");
+    try {
+      const size = fstatSync(fd).size, bytes = Buffer.alloc(Math.min(size, 64 * 1024));
+      const read = readSync(fd, bytes, 0, bytes.length, Math.max(0, size - bytes.length));
+      daemonLog = bytes.subarray(0, read).toString("utf8").split("\n")
+        .filter(line => line.startsWith("[background-handoff-server]")).slice(-32);
+    } finally { closeSync(fd); }
+  } catch (error) { daemonLog = { unavailable: String(error) }; }
+  console.error("[reload-server-handoff-tail]", JSON.stringify({ id, daemonLog }));
+  if (!String(id).startsWith("bgs_")) {
+    const meta = bgRegistry.readMeta(id);
+    const branch = host.session.sessionManager.getBranch();
+    const origin = meta?.callbackOrigin;
+    console.error("[reload-legacy-callback-diagnostics]", JSON.stringify({
+      id, fixtures, registry: bgRegistry.baseDir(), taskDirectoryExists: existsSync(bgRegistry.taskDir(id)),
+      meta: meta && { status: meta.status, kind: meta.kind, startedAt: meta.startedAt, endedAt: meta.endedAt,
+        callback: meta.callback, callbackOrigin: origin, callbackSentAt: meta.callbackSentAt,
+        callbackSuppressedAt: meta.callbackSuppressedAt, callbackSuppressedReason: meta.callbackSuppressedReason },
+      active: { cwd: project, sessionId: host.session.sessionManager.getSessionId(), branchIds: branch.map(entry => entry.id),
+        streaming: host.session.isStreaming, pendingMessages: host.session.pendingMessageCount },
+      completionBatches: host.completions(id).map(message => ({ customType: message.customType, details: message.details })),
+      transcriptReceipts: branch.flatMap(entry => {
+        const message = entry.type === "custom_message" ? entry : entry.message;
+        return message?.customType === "background-completion-batch"
+          ? [{ id: entry.id, completionEventIds: message.details?.completionEventIds }] : [];
+      }),
+      sent: host.sent.length, requests: host.requests.length,
+      errors: host.errors.map(error => ({ message: String(error?.message ?? error), extensionPath: error?.extensionPath })),
+      incidents: Object.values(readBgJournal(id).observations).map(item => ({ id: item.id, operation: item.operation,
+        status: item.status, count: item.count })),
+    }));
+    return;
+  }
+  try {
+    const paths = supervisorPaths(supervisorDirectory(id), id);
     let operation;
     let outbox = [];
     let waits = [];
@@ -258,8 +327,8 @@ async function dumpDurableCallbackDiagnostics(host, id, project) {
     }
     console.error("[reload-durable-diagnostics]", JSON.stringify({
       id,
-      sidecar: readJson(join(defaultSupervisorDirectory(), "observed", `${id}.json`)),
-      host: readJson(join(defaultSupervisorDirectory(), "observed", "host.json")),
+      sidecar: readJson(join(supervisorDirectory(id), "observed", `${id}.json`)),
+      host: readJson(join(supervisorDirectory(id), "observed", "host.json")),
       result: readJson(paths.result),
       lost: readJson(paths.lost),
       command: readJson(paths.command),
@@ -365,6 +434,7 @@ test("a real /reload keeps pending callback receipts, the incident journal, and 
   await delay(400);
   assert.equal(host.completions(pendingId).length, 1, "receipts survive a second reload");
   assert.deepEqual(host.errors, []);
+  await host.session._extensionRunner.emit({ type: "session_shutdown" });
   host.session.dispose();
 });
 
@@ -435,6 +505,7 @@ test("local and direct-SSH processes that exit after /reload deliver their compl
   t.after(async () => {
     try { await cleanupExitChildren(host, project, children); }
     finally {
+      await host.session._extensionRunner.emit({ type: "session_shutdown" });
       host.session.dispose();
       process.env.PATH = originalPath;
     }
@@ -474,13 +545,32 @@ test("local and direct-SSH processes that exit after /reload deliver their compl
       await dumpDurableCallbackDiagnostics(host, id, project);
       throw error;
     }
-    const meta = bgRegistry.readMeta(id);
+    const inspection = bgRegistry.inspectMeta(id);
+    let meta = inspection.meta;
     if (meta) {
+      // Native transcript delivery precedes the asynchronous Server receipt RPC.
+      // Observe its durable acknowledgment before asserting or reloading again.
+      meta = await waitFor(`${id} durable completion receipt`, () => {
+        const current = bgRegistry.readMeta(id);
+        return current?.callbackSentAt > 0 ? current : undefined;
+      });
       assert.equal(meta.callbackSuppressedAt, undefined, `${id} was suppressed: ${meta.callbackSuppressedReason}`);
       assert.ok(meta.callbackSentAt > 0);
     } else {
+      if (!id.startsWith("bgs_")) console.error("[reload-task-routing-failure]", JSON.stringify({
+        id, route: id === localId ? "local" : "direct-ssh", found: inspection.found, readable: inspection.readable,
+        registryDirectory: bgRegistry.tasksDir(), workspace: project, sessionId: host.sessionId,
+        callbacks: host.completions(id).length,
+      }));
       // A durable local task has no legacy receipt. Its exactly-once contract is
       // the single delivered batch plus the second reload below.
+      if (!/^bgs_/.test(id)) console.error("reload-exit-source", JSON.stringify({
+        phase: "completion-source-lookup", launchRoute: id === localId ? "local" : "structured-ssh-direct",
+        taskClass: /^bg_/.test(id) ? "legacy" : "unknown", fixtureRegistry: bgRegistry.baseDir(),
+        taskDirectoryExists: existsSync(bgRegistry.taskDir(id)), canonicalStatus: host.taskStatusProof.get(id),
+        runtimeOwner: inspectDaemonOwner(serverDir).status, bootstrapErrorCount: host.errors.length,
+        deliveredBatches: host.completions(id).length,
+      }));
       assert.match(id, /^bgs_/);
     }
     await host.session.waitForIdle();
@@ -505,6 +595,7 @@ for (const mode of ["release", "partial-spawn", "stop", "failed-reload"]) {
     t.after(async () => {
       try { await cleanupExitChildren(host, project, children); }
       finally {
+        await host.session._extensionRunner.emit({ type: "session_shutdown" });
         host.session.dispose();
         process.env.PATH = originalPath;
       }
@@ -607,21 +698,31 @@ function liveTransport() {
 }
 
 async function sshScenario(transport) {
+  let phase;
+  const notePhase = value => {
+    phase = value;
+    console.error("[reload-ssh-phase]", JSON.stringify({ transport: transport.name, phase }));
+  };
   process.env.PATH = transport.path;
   process.env.PI_BETTER_CALLBACK_BATCH_MS = "50";
   const project = dir(`bg-project-${transport.ssh.host}`);
+  notePhase("open-session");
   const host = await openSession(project);
   try {
+    notePhase("start-session");
     await host.start();
+    notePhase("launch-watch");
     const watchCommand = `if [ -f ${transport.markerPath} ]; then echo '{"status":"done"}'; else echo '{"status":"pending"}'; exit 7; fi`;
     const watchId = taskId(await host.call("bg_task_watch", {
       name: "reload-watch", command: watchCommand, ssh: transport.ssh, interval_seconds: 1,
       success_when: { type: "json_path_equals", path: "$.status", value: "done" },
     }));
+    notePhase("launch-task");
     const spawnId = taskId(await host.call("bg_task_spawn", {
       name: "reload-seq", command: "seq 1 3000", ssh: transport.ssh, remote: { session: "direct" }, callback: false,
     }));
     assert.ok(watchId && spawnId);
+    notePhase("observe-before-reload");
 
     // Before reload: the failing polls journal one incident that counts retries.
     const incident = await waitFor("the watch-poll incident", () => Object.values(readBgJournal(watchId).observations)
@@ -629,7 +730,9 @@ async function sshScenario(transport) {
     await waitFor("the remote process task", () => bgRegistry.readMeta(spawnId)?.status === "succeeded");
     const logPages = await followLog(host, spawnId);
 
+    notePhase("reload");
     await host.session.reload();
+    notePhase("observe-after-reload");
 
     // The reloaded extension resumes the same SSH watcher; the journal record keeps growing.
     const grown = await waitFor("a post-reload poll on the same incident", () => {
@@ -651,11 +754,20 @@ async function sshScenario(transport) {
     assert.equal(resolved.status, "resolved", "a later successful poll resolves the pre-reload incident");
     assert.ok(resolved.count >= grown.count);
 
-    await waitFor("the watch completion callback", () => host.completions(watchId).length > 0);
+    notePhase("completion-callback");
+    try {
+      await waitFor("the watch completion callback", () => host.completions(watchId).length > 0);
+    } catch (error) {
+      retainFixtures = true;
+      try { await dumpDurableCallbackDiagnostics(host, watchId, project); }
+      catch (diagnosticError) { console.error("[reload-callback-diagnostics-failed]", String(diagnosticError)); }
+      throw error;
+    }
     await delay(300);
     assert.equal(host.completions(watchId).length, 1, "one completion across the reload");
 
     // Log cursors issued before the reload replay identically after it.
+    notePhase("replay-log-cursors");
     const replayed = [logPages[0]];
     for (let next = continuation(logPages[0]); next; next = continuation(replayed.at(-1))) {
       replayed.push(await host.call("bg_task_log", { id: spawnId, raw: true, max_bytes: 4096, cursor: next }));
@@ -670,14 +782,23 @@ async function sshScenario(transport) {
       assert.ok(argv.some((line) => line.includes("-o BatchMode=yes") && line.includes(`-- ${transport.ssh.host} `)),
         "tasks went through the product's ssh argv");
     }
+    notePhase("verify-second-reload");
     await host.session.reload();
     await delay(300);
     assert.equal(host.completions(watchId).length, 1, "the watch receipt survives another reload");
     assert.deepEqual(host.errors, []);
+  } catch (error) {
+    console.error("[reload-ssh-first-failure]", JSON.stringify({ phase, error: String(error) }));
+    throw error;
   } finally {
+    notePhase("shutdown");
+    await host.session._extensionRunner.emit({ type: "session_shutdown" });
+    notePhase("dispose");
     host.session.dispose();
+    notePhase("transport-cleanup");
     transport.cleanup();
     process.env.PATH = originalPath;
+    notePhase("complete");
   }
 }
 

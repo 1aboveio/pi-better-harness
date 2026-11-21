@@ -206,6 +206,12 @@ supervised local commands. The bridge retains the worker's captured permissions
 and applies the current Background Tasks policy as well. Explicit tool exclusions
 and clean loadouts can withhold the bridge.
 
+An explicit tool list containing `wait_for_operations` must also contain
+`acknowledge_operation_result` and either `bg_task_status` or `bg_task_log`.
+The launcher checks this after permission filtering and refuses an incomplete
+combination. A default loadout with no authorized evidence reader withholds
+waiting instead of adding permissions.
+
 A worker starts a long validation command, continues independent work, then calls
 `wait_for_operations` with its owned task ids. Call this tool directly as the only
 tool call in its assistant message. A nested codemode call cannot deliver the
@@ -229,6 +235,23 @@ Capacity, Goal, workflow, permissions, writer ownership and cancellation are
 checked again. Full capacity leaves the wait ready. Missing or conflicting
 recovery evidence leaves it held with a reason. The runner survives worker and Pi
 exit, but v1 does not run an unattended model after Pi shuts down.
+
+## Reporting completion
+
+Bound assignments use `report_assignment_result` with evidence from inside the
+assigned workspace. A sibling results directory is outside that boundary. An
+existing workspace source file can be evidence; read-only workers need not write
+a new artifact. Use `offset` and `max_bytes` to retain an excerpt from a file
+larger than 65,536 bytes.
+
+Before accepting an unblocked incomplete report with concrete `remaining_work`,
+the child allows one chance to continue that work. A normal model stop without
+an accepted report can use the same correction allowance to submit or correct
+the report. The allowance belongs to the current attempt, survives reload, and
+keeps the original deadline and permissions. Concrete blockers, aborted/error
+stops, parked work and expired deadlines do not trigger correction. Accepted
+reports remain immutable; exhausted correction retains the incomplete or
+unverified result for the coordinator.
 
 ## Codemode batch launches
 
@@ -283,15 +306,18 @@ by the existing harness runtime.
 Timeout control belongs to the harness, not to the prompt or the skill that
 launched the run. A time limit written into a prompt is enforced by nothing, and
 a parent that only notices late tends to kill a child that was still making
-progress. Every run gets a tool-wait alert and stall detection by default.
-Elapsed-time limits are opt-in because total runtime does not distinguish a slow
-agent from a stalled one.
+progress. Every run gets a tool-wait alert, stall detection, and a 60-minute hard
+timeout by default. Soft deadlines remain opt-in because total runtime does not
+distinguish a slow agent from a stalled one.
+Use Timeout (minutes) in `/subagents settings` to change the session default;
+Ctrl+S saves it for future sessions. `0` disables the timeout. Changes apply to
+new attempts, not runs already in progress.
 
 | Control | Default | What happens |
 |---------|---------|--------------|
 | Soft deadline (`deadline_minutes`) | Off | When configured, the child gets one steering message (delivered through Pi's steer queue after its current tool call finishes): stop starting new work, commit or save what is done, and report what is complete, what is not, and where the work is. The parent gets one wake saying so. |
 | Grace (`grace_minutes`) | 5 | Grace starts when the steering message actually reaches the child, which is after its current tool call. While the message is still waiting behind a running tool call, the deadline stop is held, so a test run that began just before the deadline is not killed mid-run. If the child has not finished by the end of grace, the harness stops it; the ordinary completion callback reports `killed; stopped: deadline`. A child that completes inside grace is not stopped; its surfaces say `deadline: finished in grace`. |
-| Hard ceiling (`max_minutes`) | Off | When configured, the run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds the run, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
+| Hard ceiling (`max_minutes`) | 60 | When configured, the run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds the run, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
 | Tool-wait window (`tool_wait_minutes`) | 5 | One tool call that stays open this long sends one factual parent wake for that call, including when it is a normal long test. Parallel calls alert independently. The alert never stops, cancels, or restarts the run, and a later call can alert on its own. |
 | Stuck window (`stuck_minutes`) | 10 | No progress (see below) for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. Time inside a running tool call is excluded, so tool waiting and no-progress are reported separately. |
 
@@ -351,8 +377,9 @@ three times wakes the parent once as an `Action required` incident
 deadline), `deadline: passed` (ended some other way after the deadline, for
 example it crashed or a user stopped it), `stopped: ceiling`, or `stuck`. The spawn response lists the limits in force.
 
-**Global defaults.** Precedence is spawn parameter, then environment, then
-`config.json`, then the built-in default:
+**Global defaults.** Precedence is spawn parameter, then the session timeout
+choice (for `max_minutes`), then environment, then `config.json`, then the
+built-in default:
 
 | Setting | Environment | `config.json` |
 |---------|-------------|---------------|
@@ -448,8 +475,7 @@ an enabled human profile. Saved enabled profiles and session choices stay enable
   cache directories when Outside is Read or Read/write. Credential and control
   denials retain precedence. See the permission details below.
 - **Tool allowlist.** Confined children admit only verified read/write/edit/bash
-  implementations, guarded `run_application`, the guarded `apply_patch`, and the trusted tools ticked in
-  `/sandbox`. The fixed `process_list` adapter is available with Process access
+  implementations, guarded `run_application`, the guarded `apply_patch`, and the selected extension tools with verified providers. The fixed `process_list` adapter is available with Process access
   set to Read. Other requested tools are reported as unavailable, with the reason.
 - **No runaway recursion.** Confined children cannot spawn nested agents.
   `allow_nested:true` loads nested-agent support only for unconfined children.
@@ -493,7 +519,14 @@ does not start an emulator or allocate test resources. The setting governs
 the fixed adapter only, not every OS process operation available through bash
 or trusted tools. New launches capture changes; running children retain their
 launch-time setting. Raw macOS `/bin/ps` remains subject to setuid execution
-restrictions. See [ADR 0011](../../../docs/adr/0011-fixed-read-only-process-inventory.md).
+restrictions. With Process Read and Commands On, the task PATH includes a
+protected non-setuid compatibility entry for exactly
+`ps -p PID -o lstart= -o comm=`. It returns the current-user process's start time
+and executable path, without exposing arguments or environment. The harness
+requires Xcode Command Line Tools to build this fixed helper; failure refuses
+identity queries without disabling other commands. This does not alter absolute
+`/bin/ps` or callers that replace PATH. See [ADR 0024](../../../docs/adr/0024-sandbox-process-identity-compatibility.md)
+and [ADR 0011](../../../docs/adr/0011-fixed-read-only-process-inventory.md).
 Network Off blocks task network access while Pi's provider transport remains
 available. The confined file worker has an 8 MiB file limit and rejects larger
 files explicitly; use confined commands for larger files when commands are On.
@@ -518,9 +551,8 @@ limit to 10 min in `/sandbox`, then press Ctrl+S. New launches capture the polic
 running children keep theirs. An incompatible older consumer is rejected rather
 than silently dropping these restrictions.
 
-Extension tools are
-chosen in `/sandbox` → Subagents · Tools
-([ADR 0009](../../../docs/adr/0009-guarded-and-trusted-subagent-tools.md)):
+Select tools in the role, worker defaults or spawn request. Loading a tool grants access to call it. Use `/sandbox` to edit the resource rules.
+[Sandbox tool loading and permission to use tools](../../../docs/adr/0027-sandbox-tools-and-permissions.md) defines the contract.
 
 - **Guarded:** `apply_patch`, a harness adapter with the Codex tool's name,
   schema and patch format. Every add, update, move and delete goes through the
@@ -530,17 +562,14 @@ chosen in `/sandbox` → Subagents · Tools
   checked first; no file is left half-patched, and a failure part-way reports
   what was and wasn't applied. It is added for a child that may `edit` or
   `write`, or asks for it.
-- **Trusted:** third-party tools you tick (default `web_fetch` and `web_search`).
-  Their package is loaded into the child and they run in the child Pi process,
-  **outside the file rules**. The child admits one only when both its name and
-  its package match the ticked entry, so another package registering the same
-  name is refused. A single extension file with no package manifest is loaded
-  and admitted by itself, never its directory. Known network tool names
-  (`web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name) are refused while Network access is Off; this is a name list, not a
-  network sandbox. A ticked tool whose package can't be found is left out of a
-  default loadout and reported with its reason in the launch output; an explicit
-  `tools` request for a tool the task boundary cannot provide refuses the launch.
-  Ticked tools join the default tool list; an explicit `tools` list still decides.
+- **Extension tools:** the child loads the selected provider and checks its
+  canonical source at dispatch. A single user-installed extension entrypoint is
+  loaded by itself. Known network tools require Network access On. The extension
+  runs in the trusted Pi process, outside guarded file operations.
+  If a trusted tool is inherited from the defaults, registers in the child, and
+  is then inactive (for example, because the extension requires a different
+  model), the child logs the omission once and continues without it. Missing
+  registrations and unavailable explicitly requested tools still fail preflight.
 
 Other tools are disabled in confined children. One that only joined the default
 loadout is omitted from the child and listed in launch output with the reason;
@@ -709,12 +738,10 @@ The effective config also sets:
 
 ## The allowlist also decides what LOADS
 
-For confined children, the requested list is first restricted to tools with
-verified task adapters and the trusted tools ticked in `/sandbox`; only the
-ticked tools' packages load. `toolExtensions` still chooses which package to
-load for a tool (an override), but the child admits it only if that is the
-ticked package. Provider extensions can still load as trusted runtime
-dependencies. Nested spawning and
+For confined children, the requested list selects verified task adapters and
+extension providers. A worker mapping takes precedence over an active
+user-installed entrypoint. Previously saved trusted-package records can
+identify a provider for a selected tool. Nested spawning and
 inherited extension discovery are currently unavailable under confinement.
 
 The mapping behavior below applies to unconfined children and to admitted
@@ -727,9 +754,10 @@ which extension *code* is loaded into it. A child launches as
 pi -p --mode json --no-extensions -e <package backing a requested tool> ...
 ```
 
-so a package that backs no requested tool never loads. With the default
-allowlist (`read, bash, edit, write, web_search, web_fetch`) exactly one package
-loads — the web-tools one — and `web_fetch` works normally.
+The default editable worker gets the Harness `apply_patch` adapter. An explicit
+`process_list` request loads the bounded current-user inventory adapter. Each
+can use an ordinary provider override. The default web tools load their
+configured package. Both execution modes use the selected tools without an additional permission checkbox.
 
 Two maps in `config.json` drive it, with a built-in default for provider auth:
 
@@ -744,8 +772,9 @@ same provider replaces the built-in one, and an empty list disables it. A mapped
 package that is not installed still fails the launch with the explicit
 missing-extension error rather than starting without provider auth.
 
-Ask for a tool with no mapping and the spawn still succeeds, but says so at
-launch — the tool simply will not exist in the child.
+A required tool with no possible provider fails admission. If an extension
+could supply the name, the worker checks the active registration during
+startup. Both failures identify the missing tool.
 
 `clean:true` is the narrowest case of the same mechanism: no extensions at all.
 For unconfined children, `allow_nested:true` loads this package into the child;
@@ -1081,3 +1110,17 @@ Near-term:
   twice ([#2](https://github.com/1aboveio/pi-better-subagents/issues/2)) — **done**.
 - Named agent-definition files (per-agent system prompt + tool allowlist) and
   chain/parallel orchestration.
+# Historical Waits
+
+`/subagents history` lists retained waits from other sessions in this workspace.
+Each entry identifies its originating session and offers inspection or explicit
+cancellation. Inspection does not adopt the assignment, acknowledge its evidence,
+or start a continuation. Cancellation confirms the durable result; it does not
+claim that an uncertain writer has stopped. Failures leave the wait available
+for inspection and retry.
+
+`/subagents history dismiss` durably dismisses the current historical-attention
+notice without changing any wait or evidence. A changed wait generation, phase,
+publication or attention reason can produce a new notice. Ordinary task navigation
+remains scoped to the active session.
+

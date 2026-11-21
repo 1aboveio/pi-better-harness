@@ -27,7 +27,7 @@ import {
     statSync,
 } from "node:fs";
 import { readBoundedTail, tailTerminalDisplay } from "./shared-log-utils.ts";
-import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
+import { readAppendedLines, parseLogEvent, logReadMetrics, type LogCursor } from "./log-cursor.ts";
 import { logPathFor } from "./registry.ts";
 
 interface ContentBlock { type: string; text?: string; thinking?: string; name?: string }
@@ -183,11 +183,11 @@ function transcriptContent(msg: Msg | undefined): ContentBlock[] {
 /** Bounded, display-oriented transcript fold for the subagent detail view. */
 export function readRunTranscript(
     id: string,
-    options: { maxBytes?: number; maxEntries?: number } = {},
+    options: { maxBytes?: number; maxEntries?: number; logPath?: string } = {},
 ): RunTranscript {
     const maxBytes = Math.max(1024, options.maxBytes ?? DEFAULT_TRANSCRIPT_TAIL_BYTES);
     const maxEntries = Math.max(1, options.maxEntries ?? DEFAULT_TRANSCRIPT_ENTRIES);
-    const tail = readTail(logPathFor(id), maxBytes);
+    const tail = readTail(options.logPath ?? logPathFor(id), maxBytes);
     if (tail.error) return { entries: [], truncated: false, diagnostic: `Log unreadable: ${tail.error}` };
 
     const lines = tail.text.split(/\r?\n/);
@@ -1098,6 +1098,7 @@ function peekType(line: string): string | undefined {
 }
 
 interface ParseState {
+    catchingUp?: boolean;
     cursor: LogCursor;
     usage: Usage;
     finalText: string;
@@ -1122,6 +1123,16 @@ interface ParseState {
 const MAX_TRACKED_PARSE_RUNS = 64;
 
 const parseStates = new Map<string, ParseState>();
+
+export function encodeParseLogState(state: ParseState): unknown {
+    return { ...state, openToolCalls: [...state.openToolCalls] };
+}
+
+export function decodeParseLogState(saved: any): ParseState {
+    if (!saved?.usage || !Array.isArray(saved.openToolCalls) || !Array.isArray(saved.toolCalls)
+        || !Number.isSafeInteger(saved.cursor?.offset) || saved.cursor.offset < 0) throw new Error("Invalid display checkpoint");
+    return { ...saved, openToolCalls: new Map(saved.openToolCalls) };
+}
 
 /** Forget a run's accumulated parse (or all of them). */
 export function resetParseRunCursor(id?: string): void {
@@ -1208,7 +1219,7 @@ function selectParsableLines(lines: readonly string[]): Array<{ index: number; e
 
 function tryParse(line: string): Record<string, unknown> | undefined {
     try {
-        return JSON.parse(line) as Record<string, unknown>;
+        return parseLogEvent(line) as Record<string, unknown>;
     } catch {
         return undefined;
     }
@@ -1228,6 +1239,7 @@ function activityTextOf(e: Record<string, unknown>): string | undefined {
 
 /** Fold one event into the run's accumulated state. */
 function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
+    logReadMetrics.displayFolded++;
     const type = e.type as string | undefined;
     state.sawAnyEvent = true;
 
@@ -1312,15 +1324,25 @@ function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
  * rotated, truncated, or rewritten log is detected and re-read from a bounded
  * tail (see log-cursor.ts).
  */
-export function parseRun(id: string): ParsedRun {
-    const previous = parseStates.get(id);
-    const read = readAppendedLines(logPathFor(id), previous?.cursor, maxParseBytes());
+export function parseRun(id: string, options: { logPath?: string; states?: Map<string, ParseState>; summaryOnly?: boolean } = {}): ParsedRun {
+    const key = options.logPath ?? id;
+    const states = options.states ?? parseStates;
+    const previous = states.get(key);
+    const path = options.logPath ?? logPathFor(id);
+    let catchUp = false;
+    if (options.summaryOnly) {
+        try { catchUp = statSync(path).size > 1024 * 1024; } catch { /* read reports errors */ }
+    }
+    const read = readAppendedLines(path, previous?.cursor,
+        catchUp ? Math.min(maxParseBytes(), 1024 * 1024) : maxParseBytes(), catchUp);
     const state = read.restarted || !previous ? freshState(read.cursor) : previous;
     state.cursor = read.cursor;
+    state.catchingUp = read.more;
     if (read.totalBytes > 0) state.totalBytes = read.totalBytes;
     if (read.truncated) state.windowTruncated = true;
     state.error = read.error;
-    rememberParseState(id, state);
+    if (options.states) states.set(key, state);
+    else rememberParseState(key, state);
 
     if (read.error !== undefined) {
         return {
@@ -1331,6 +1353,11 @@ export function parseRun(id: string): ParsedRun {
     }
 
     for (const { event } of selectParsableLines(read.lines)) foldParseEvent(state, event);
+    if (options.summaryOnly) {
+        state.finalText = "";
+        state.lastActivity = "";
+        state.toolCalls = state.toolCalls.slice(-256);
+    }
 
     // A log whose final line was never terminated — a writer mid-event, or one
     // that simply did not end with a newline — still has to be readable. Fold it
@@ -1343,6 +1370,8 @@ export function parseRun(id: string): ParsedRun {
     }
 
     const diagnostics: string[] = [];
+    if (state.catchingUp) diagnostics.push(`Usage catch-up pending after byte ${state.cursor.offset} of ${state.totalBytes}.`);
+    if (options.summaryOnly && state.cursor.missing) diagnostics.push(`Incomplete usage: missing bytes [${state.cursor.missing[0]}, ${state.cursor.missing[1]}).`);
     if (view.windowTruncated) {
         diagnostics.push(
             `Log truncated: this session began reading at the last ${fmtBytes(maxParseBytes())} ` +
@@ -1371,6 +1400,20 @@ export function parseRun(id: string): ParsedRun {
         usage,
         diagnostics,
     };
+}
+
+/** Keep only the incremental facts needed by task-list displays. Detail reads use their own cursor. */
+export function parseRunDisplay(id: string, options: { logPath?: string; states: Map<string, ParseState>; summaryOnly?: boolean }): { usage: Usage; tool: string; diagnostics: string[] } {
+    const parsed = parseRun(id, options);
+    const state = options.states.get(options.logPath ?? id);
+    if (state) {
+        state.finalText = "";
+        state.lastActivity = "";
+        state.toolCalls = state.toolCalls.slice(-1);
+        state.openToolCalls.clear();
+        state.modelError = undefined;
+    }
+    return { usage: parsed.usage, tool: parsed.toolCalls.at(-1) ?? "", diagnostics: parsed.diagnostics };
 }
 
 /** Build the human-readable body for subagent_output. Exported for unit testing. */

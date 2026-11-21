@@ -1029,6 +1029,26 @@ describe("output-control aliases and opt-in facts (#321)", () => {
 });
 
 describe("subagent_list incident cache (#323)", () => {
+    it("shared-list status cursors include failure-only changes", async () => {
+        const id = trackDisk(`sa_shared_incident_${Date.now()}`);
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        writeEvents(id, completedLog("done"));
+        const meta = readMeta(id);
+        const tool = subagentListTool(TypeStub, { getActiveOrigin: () => ({ cwd: meta.cwd }),
+            observeList: async () => ({ scopeRevision: "fixed-source-revision", status: "ready", totalMatching: 1,
+                rows: [{ meta, assignment: { state: "completed", processStatus: "completed" }, cursor: "page" }] }) });
+        const initial = textOf(await tool.execute("tc", { max_bytes: 4096 }));
+        const cursor = statusCursorOf(initial);
+        assert.ok(cursor);
+        assert.match(textOf(await tool.execute("tc", { cursor, max_bytes: 4096 })), /Subagents unchanged/);
+        observeFailures(failurePath(id), [{ id: "shared-cursor-probe", operation: "shared-cursor-op", kind: "failure",
+            category: "operation", summary: "failure journal changed independently" }]);
+        const changed = textOf(await tool.execute("tc", { cursor, max_bytes: 4096 }));
+        assert.doesNotMatch(changed, /Subagents unchanged/);
+        assert.match(changed, /1 incident/);
+        assert.notEqual(statusCursorOf(changed), cursor);
+    });
+
     it("does not rescan unchanged runs and recomputes only a run whose journal or log changed", async () => {
         const stamp = Date.now() + 90_000_000;
         const ids = [];

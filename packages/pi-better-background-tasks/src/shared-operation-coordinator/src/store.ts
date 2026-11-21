@@ -7,7 +7,17 @@
  * synchronous and transactional; a refusal throws `StoreError` with a typed code
  * and leaves no partial record.
  */
+import { setUpgradeFence } from "./upgrade.ts";
+import { setParentCallbackPending, listPendingParentCallbacks, listRecentBackgroundTerminals, seedPendingParentCallbacks, type ParentCallbackScope, type ParentCallbackPage, type RecentBackgroundTerminalPage } from './background-parent-callbacks.ts';
+import { BackgroundRequests } from "./background-requests.ts";
 import { StoreError } from "./errors.ts";
+import { SubagentLaunchJournal } from "./subagent-launch.ts";
+import { resultSupervisionChanges, resultSupervision, resultSupervisions, resultScopeManaged, handoffResultScope, handoffResultSupervision, handoffResultSupervisions, recoverResultSupervision, publishSupervisedResult } from "./result-supervision.ts";
+import { acceptTaskCancellation, getTaskCancellation, recordTaskStopRequested, admitTaskCancellation, authorizedTaskCancellation, finishTaskCancellation, cancellationRuntimeEpoch, acceptAuthorizedTaskCancellation, taskCancellationManaged, pendingTaskCancellations, finishTaskCancellationIntent, unknownTaskCancellation } from "./task-cancellation.ts";
+import type { TaskCancellationIntent, TaskCancellationRequest } from "./task-cancellation.ts";
+import { repairFailedResume, type RepairResumeInput } from "./recovery.ts";
+import { recordAssignmentOutcome, getAssignmentOutcome, inspectAssignmentOutcome, consumeAssignmentOutcome, registerAssignment, receiptAssignmentOutcome } from "./assignment-outcomes.ts";
+import type { AssignmentOutcomeInput, AssignmentOutcomeRecord } from "./assignment-outcomes.ts";
 import {
     describeOwnerDiff,
     normalizeOwner,
@@ -16,14 +26,25 @@ import {
     requirePath,
 } from "./validate.ts";
 import { ensureSchema } from "./schema.ts";
-import { createContext, openDatabase, type StoreContext } from "./sqlite.ts";
+import { ensureAssignmentChanges } from "./assignment-changes.ts";
+import { createContext, openDatabase, run, type StoreContext } from "./sqlite.ts";
 import {
     getOperation as readOperationRecord,
+    listAssignmentCleanupOperations as readAssignmentCleanupOperations,
     listOperations as readOperationRecords,
+    listRunningSupervisedBy as readRunningSupervisedBy,
+    releaseSupervision as writeSupervisionRelease,
     recordSupervision as writeSupervision,
     recordTerminalOutcome as writeTerminalOutcome,
     registerOperation as writeOperation,
 } from "./operations.ts";
+import {
+    getChangeRevision as readChangeRevision,
+    readDiscoveryClaim as readClaim,
+    readDiscoveryState,
+    releaseDiscoveryClaim as deleteDiscoveryClaim,
+    tryClaimDiscovery as writeDiscoveryClaim,
+} from "./discovery.ts";
 import {
     acknowledgeResult as writeAcknowledgement,
     cancelWait as writeCancellation,
@@ -47,6 +68,7 @@ import {
 } from "./waits.ts";
 import {
     claimOutbox as writeOutboxClaim,
+    listDispatchableOutboxRecipients as readDispatchableOutboxRecipients,
     listOutbox as readOutbox,
     markOutboxDelivered as writeOutboxDelivery,
     releaseOutbox as writeOutboxRelease,
@@ -60,6 +82,7 @@ import {
     type CancelWaitResult,
     type ClaimOutboxInput,
     type ClaimResumeInput,
+    type DiscoveryClaimRecord,
     type EvidencePinRecord,
     type EvidenceReadRecord,
     type HoldFailedResumeInput,
@@ -77,6 +100,7 @@ import {
     type RecordEvidencePinResult,
     type RecordEvidenceReadInput,
     type RecordEvidenceReadResult,
+    type ReleaseSupervisionInput,
     type RecordSupervisionInput,
     type RecordTerminalOutcomeInput,
     type RecordTerminalOutcomeResult,
@@ -84,6 +108,7 @@ import {
     type RegisterOperationResult,
     type RegisterWaitInput,
     type RegisterWaitResult,
+    type ReleaseDiscoveryClaimInput,
     type ReleaseOutboxInput,
     type ReleaseResumeClaimInput,
     type ReleaseResumeClaimResult,
@@ -93,6 +118,7 @@ import {
     type StoreOptions,
     type TransitionWaitPhaseInput,
     type TransitionWaitPhaseResult,
+    type TryClaimDiscoveryInput,
     type WaitDependencyRecord,
     type WaitFilter,
     type WaitRecord,
@@ -100,6 +126,35 @@ import {
 } from "./types.ts";
 
 export interface Store {
+    hasSubagentManagement(): boolean;
+    resultSupervisionChanges(after?: Parameters<typeof resultSupervisionChanges>[1]): ReturnType<typeof resultSupervisionChanges>;
+    subagentLaunchJournal(): SubagentLaunchJournal;
+    resultScopeManaged(scope: string): boolean;
+    handoffResultScope(input: Parameters<typeof handoffResultScope>[1]): ReturnType<typeof handoffResultScope>;
+    resultSupervision(operationId: string): ReturnType<typeof resultSupervision>;
+    resultSupervisions(activeOnly?: boolean): ReturnType<typeof resultSupervisions>;
+    handoffResultSupervision(input: Parameters<typeof handoffResultSupervision>[1]): ReturnType<typeof handoffResultSupervision>;
+    handoffResultSupervisions(input: Parameters<typeof handoffResultSupervisions>[1]): ReturnType<typeof handoffResultSupervisions>;
+    recoverResultSupervision(input: Parameters<typeof recoverResultSupervision>[1]): void;
+    publishSupervisedResult(input: Parameters<typeof publishSupervisedResult>[1]): ReturnType<typeof publishSupervisedResult>;
+    unknownTaskCancellation(input: TaskCancellationRequest): TaskCancellationIntent;
+    taskCancellationManaged(operationId: string): boolean;
+    pendingTaskCancellations(): ReturnType<typeof pendingTaskCancellations>;
+    finishTaskCancellationIntent(input: Parameters<typeof finishTaskCancellationIntent>[1]): TaskCancellationIntent;
+    cancellationRuntimeEpoch(instanceId?: string): number;
+    acceptAuthorizedTaskCancellation(input: { credential: string; runtimeEpoch: number }): TaskCancellationIntent;
+    admitTaskCancellation(input: Parameters<typeof admitTaskCancellation>[1]): void;
+    authorizedTaskCancellation(credential: string): ReturnType<typeof authorizedTaskCancellation>;
+    finishTaskCancellation(input: Parameters<typeof finishTaskCancellation>[1]): TaskCancellationIntent;
+    acceptTaskCancellation(input: TaskCancellationRequest): TaskCancellationIntent;
+    getTaskCancellation(input: { owner: OwnerIdentity; idempotencyKey: string }): TaskCancellationIntent | null;
+    recordTaskStopRequested(input: TaskCancellationRequest): TaskCancellationIntent;
+    registerAssignment(input: Parameters<typeof registerAssignment>[1]): void;
+    receiptAssignmentOutcome(input: Parameters<typeof receiptAssignmentOutcome>[1]): AssignmentOutcomeRecord;
+    recordAssignmentOutcome(input: AssignmentOutcomeInput): AssignmentOutcomeRecord;
+    getAssignmentOutcome(assignmentId: string): AssignmentOutcomeRecord | null;
+    inspectAssignmentOutcome(input: Parameters<typeof inspectAssignmentOutcome>[1]): AssignmentOutcomeRecord;
+    consumeAssignmentOutcome(input: Parameters<typeof consumeAssignmentOutcome>[1]): AssignmentOutcomeRecord;
     /** Schema version this handle verified on open. */
     readonly schemaVersion: number;
     /** Database path this handle opened. */
@@ -109,18 +164,32 @@ export interface Store {
 
     // ---- operations ----
 
+    backgroundRequests(): BackgroundRequests;
+    setParentCallbackPending(taskId: string, pending: boolean): boolean;
+    listPendingParentCallbacks(scope: ParentCallbackScope, options?: ParentCallbackPage): OperationRecord[];
+    listRecentBackgroundTerminals(options: RecentBackgroundTerminalPage): OperationRecord[];
+    seedPendingParentCallbacks(options?: { limit?: number }): { done: boolean; seeded: number };
+    setUpgradeFence(epoch: string | null): void;
     /**
-     * Register a durable operation for one task launch. The owner, task id,
-     * launch token and observer are immutable: a replay of the same launch
-     * returns `created: false`, and any difference is refused with
-     * `operation-conflict` or `task-ownership`.
+     * Register a durable launch. Owner, task id, launch token, observer, and
+     * assignment attempt provenance are immutable. An exact replay returns
+     * `created: false`, even after assignment end, and admits no new work.
      */
     registerOperation(input: RegisterOperationInput): RegisterOperationResult;
     /**
      * Replace supervision identity and/or report observer health
-     * (`active`/`unmonitored`/`lost`). Ownership stays untouched.
+     * (`active`/`unmonitored`/`lost`). Ownership stays untouched. A supervision
+     * replacement requires `expectedHostId` and is refused with
+     * `supervision-conflict` when another host took over first.
      */
     recordSupervision(input: RecordSupervisionInput): OperationRecord;
+    /**
+     * Clear a closed host's supervision authority when the recorded host still
+     * matches. A newer holder is left untouched, and a terminal operation keeps
+     * its final supervision record. Returns `null` when another host already took
+     * over.
+     */
+    releaseSupervision(input: ReleaseSupervisionInput): OperationRecord | null;
     /**
      * Record the single terminal revision of an operation and settle every wait
      * that depends on it. Replaying the same event id is idempotent; a different
@@ -130,7 +199,31 @@ export interface Store {
     recordTerminalOutcome(input: RecordTerminalOutcomeInput): RecordTerminalOutcomeResult;
     getOperation(operationId: string): OperationRecord | null;
     listOperations(filter?: OperationFilter): OperationRecord[];
+    /**
+     * Read up to 256 unfinished cleanup obligations in operation id order.
+     * The cursor is exclusive. Start each new sweep without a cursor.
+     */
+    listAssignmentCleanupOperations(limit: number, afterOperationId?: string): OperationRecord[];
+    verifyAssignmentCleanup(operationId: string, launchToken: string, terminalRevision: number): boolean;
+    /** Running operations currently assigned to this supervising host. */
+    listRunningSupervisedBy(hostId: string): OperationRecord[];
     listOperationEvidence(operationId: string, terminalRevision?: number): OperationEvidenceRecord[];
+
+    // ---- discovery coordination ----
+
+    /** The shared discovery leader for this store/supervisor scope, if recorded. */
+    readDiscoveryClaim(scope: string): DiscoveryClaimRecord | null;
+    readDiscoveryState(scope: string): ReturnType<typeof readDiscoveryState>;
+    /**
+     * Compare-and-swap a discovery claim. The caller must name the exact claim it
+     * observed, or null for none; a stale contender receives null and must not
+     * start a global scan.
+     */
+    tryClaimDiscovery(input: TryClaimDiscoveryInput): DiscoveryClaimRecord | null;
+    /** Delete only this exact host/token claim; a successor is never released. */
+    releaseDiscoveryClaim(input: ReleaseDiscoveryClaimInput): boolean;
+    /** Monotonic revision for registration, authority changes and terminal publication. */
+    getChangeRevision(): number;
 
     // ---- waits ----
 
@@ -189,6 +282,7 @@ export interface Store {
      * refused untouched.
      */
     holdFailedResume(input: HoldFailedResumeInput): HoldFailedResumeResult;
+    repairFailedResume(input: RepairResumeInput): { phase: string; repaired: boolean };
     listResumeClaims(filter?: ResumeClaimFilter): ResumeClaimRecord[];
     /** Active claims a replacement host must reconcile before admitting resumes. */
     listUnreconciledClaims(): ResumeClaimRecord[];
@@ -224,6 +318,8 @@ export interface Store {
     // ---- outbox ----
 
     listOutbox(filter?: OutboxFilter): OutboxEventRecord[];
+    /** Lightweight dispatch candidates; evidence is read only after a claim succeeds. */
+    listDispatchableOutboxRecipients(): Array<{ recipient: OwnerIdentity; count: number }>;
     /** Claim pending deliveries for a `ready`/`resuming` generation. */
     claimOutbox(input: ClaimOutboxInput): OutboxEventRecord[];
     /** Mark a claimed delivery delivered; the result is still unconsumed. */
@@ -240,6 +336,7 @@ export function openStore(options: StoreOptions): Store {
     const ctx: StoreContext = createContext(db, options.now ? { now: options.now } : {});
     try {
         ensureSchema(ctx);
+        ensureAssignmentChanges(ctx);
     } catch (error) {
         try {
             db.close();
@@ -260,6 +357,32 @@ export function openStore(options: StoreOptions): Store {
     };
 
     const store: Store = {
+        subagentLaunchJournal() { alive(); return new SubagentLaunchJournal(ctx, alive); },
+        resultScopeManaged(scope) { alive(); return resultScopeManaged(ctx, scope); },
+        handoffResultScope(input) { alive(); return handoffResultScope(ctx, input); },
+        resultSupervision(id) { alive(); return resultSupervision(ctx, id); },
+        hasSubagentManagement() { alive(); return Boolean(ctx.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='subagent_management'").get()); },
+        resultSupervisionChanges(after) { alive(); return resultSupervisionChanges(ctx, after); },
+        resultSupervisions(activeOnly) { alive(); return resultSupervisions(ctx, activeOnly); },
+        handoffResultSupervision(input) { alive(); return handoffResultSupervision(ctx, input); },
+        handoffResultSupervisions(input) { alive(); return handoffResultSupervisions(ctx, input); },
+        recoverResultSupervision(input) { alive(); recoverResultSupervision(ctx, input); },
+        publishSupervisedResult(input) { alive(); return publishSupervisedResult(ctx, input); },
+        unknownTaskCancellation(input) { alive(); return unknownTaskCancellation(ctx, input); },
+        taskCancellationManaged(operationId) { alive(); return taskCancellationManaged(ctx, operationId); },
+        pendingTaskCancellations() { alive(); return pendingTaskCancellations(ctx); },
+        finishTaskCancellationIntent(input) { alive(); return finishTaskCancellationIntent(ctx, input); },
+        cancellationRuntimeEpoch(instanceId) { alive(); return cancellationRuntimeEpoch(ctx, instanceId); },
+        acceptAuthorizedTaskCancellation(input) { alive(); return acceptAuthorizedTaskCancellation(ctx, input); },
+        admitTaskCancellation(input) { alive(); admitTaskCancellation(ctx, input); },
+        authorizedTaskCancellation(credential) { alive(); return authorizedTaskCancellation(ctx, credential); },
+        finishTaskCancellation(input) { alive(); return finishTaskCancellation(ctx, input); },
+        registerAssignment(input) { alive(); registerAssignment(ctx, input); },
+        receiptAssignmentOutcome(input) { alive(); return receiptAssignmentOutcome(ctx, input); },
+        recordAssignmentOutcome(input) { alive(); return recordAssignmentOutcome(ctx, input); },
+        getAssignmentOutcome(assignmentId) { alive(); return getAssignmentOutcome(ctx, assignmentId); },
+        inspectAssignmentOutcome(input) { alive(); return inspectAssignmentOutcome(ctx, input); },
+        consumeAssignmentOutcome(input) { alive(); return consumeAssignmentOutcome(ctx, input); },
         schemaVersion: SCHEMA_VERSION,
         path,
         close() {
@@ -267,6 +390,12 @@ export function openStore(options: StoreOptions): Store {
             closed = true;
             db.close();
         },
+        setParentCallbackPending(taskId, pending) { alive(); return setParentCallbackPending(ctx, taskId, pending); },
+        listPendingParentCallbacks(scope, options) { alive(); return listPendingParentCallbacks(ctx, scope, options); },
+        listRecentBackgroundTerminals(options) { alive(); return listRecentBackgroundTerminals(ctx, options); },
+        seedPendingParentCallbacks(options) { alive(); return seedPendingParentCallbacks(ctx, options); },
+        backgroundRequests() { alive(); return new BackgroundRequests(ctx, alive); },
+        setUpgradeFence(epoch) { alive(); setUpgradeFence(ctx, epoch); },
         registerOperation(input) {
             alive();
             return writeOperation(ctx, input);
@@ -274,6 +403,10 @@ export function openStore(options: StoreOptions): Store {
         recordSupervision(input) {
             alive();
             return writeSupervision(ctx, input);
+        },
+        releaseSupervision(input) {
+            alive();
+            return writeSupervisionRelease(ctx, input);
         },
         recordTerminalOutcome(input) {
             alive();
@@ -287,6 +420,24 @@ export function openStore(options: StoreOptions): Store {
             alive();
             return readOperationRecords(ctx, filter);
         },
+        listAssignmentCleanupOperations(limit, afterOperationId) {
+            alive();
+            return readAssignmentCleanupOperations(ctx, limit, afterOperationId);
+        },
+        verifyAssignmentCleanup(operationId, launchToken, terminalRevision) {
+            alive();
+            if (!Number.isSafeInteger(terminalRevision) || terminalRevision < 1) return false;
+            return run(ctx, `INSERT OR IGNORE INTO coordinator_state (key, value)
+                SELECT 'assignment-cleanup-verified:' || op.operation_id, op.launch_token
+                FROM operations op JOIN assignment_attempts a ON a.attempt_id = op.assignment_attempt_id
+                JOIN assignment_outcomes o ON o.assignment_id = a.assignment_id
+                WHERE op.operation_id = ? AND op.launch_token = ? AND op.terminal_revision = ?`,
+            operationId, launchToken, terminalRevision) > 0;
+        },
+        listRunningSupervisedBy(hostId) {
+            alive();
+            return readRunningSupervisedBy(ctx, hostId);
+        },
         listOperationEvidence(operationId, terminalRevision) {
             alive();
             return readOperationEvidence(
@@ -295,9 +446,38 @@ export function openStore(options: StoreOptions): Store {
                 terminalRevision === undefined ? undefined : requireCounter("terminalRevision", terminalRevision),
             );
         },
+        readDiscoveryState(scope) { alive(); return readDiscoveryState(ctx, scope); },
+        readDiscoveryClaim(scope) {
+            alive();
+            return readClaim(ctx, scope);
+        },
+        tryClaimDiscovery(input) {
+            alive();
+            return writeDiscoveryClaim(ctx, input);
+        },
+        releaseDiscoveryClaim(input) {
+            alive();
+            return deleteDiscoveryClaim(ctx, input);
+        },
+        getChangeRevision() {
+            alive();
+            return readChangeRevision(ctx);
+        },
         registerWait(input) {
             alive();
             return writeWait(ctx, input);
+        },
+        acceptTaskCancellation(input) {
+            alive();
+            return acceptTaskCancellation(ctx, input);
+        },
+        getTaskCancellation(input) {
+            alive();
+            return getTaskCancellation(ctx, input);
+        },
+        recordTaskStopRequested(input) {
+            alive();
+            return recordTaskStopRequested(ctx, input);
         },
         transitionWaitPhase(input) {
             alive();
@@ -339,6 +519,10 @@ export function openStore(options: StoreOptions): Store {
             alive();
             return writeHoldFailedResume(ctx, input);
         },
+        repairFailedResume(input) {
+            alive();
+            return repairFailedResume(ctx, input);
+        },
         listResumeClaims(filter = {}) {
             alive();
             return readClaims(ctx, filter);
@@ -374,6 +558,10 @@ export function openStore(options: StoreOptions): Store {
         listOutbox(filter = {}) {
             alive();
             return readOutbox(ctx, filter);
+        },
+        listDispatchableOutboxRecipients() {
+            alive();
+            return readDispatchableOutboxRecipients(ctx);
         },
         claimOutbox(input) {
             alive();

@@ -15,7 +15,7 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DEFAULT_MAX_READ_BYTES, readAppendedLines } from "../log-cursor.ts";
+import { DEFAULT_MAX_READ_BYTES, readAppendedLines, withLogReadBatch, logReadMetrics } from "../log-cursor.ts";
 
 const dirs = [];
 after(() => {
@@ -33,6 +33,18 @@ function logFile(body = "") {
 }
 
 describe("readAppendedLines — append-only reading", () => {
+    for (const limits of [[1024, 4096], [4096, 1024]]) it(`shares overlapping windows ${limits}`, () => {
+        const body = "event\n".repeat(1000), path = logFile(body);
+        const before = logReadMetrics.bytes;
+        withLogReadBatch(() => {
+            for (const limit of limits) {
+                const read = readAppendedLines(path, undefined, limit);
+                assert.equal(read.truncated, true);
+                assert.ok(read.lines.every(line => line === "event"));
+            }
+        });
+        assert.equal(logReadMetrics.bytes - before, 4096 + 256);
+    });
     it("reads a whole small log cold, then only what was appended", () => {
         const path = logFile("one\ntwo\n");
 

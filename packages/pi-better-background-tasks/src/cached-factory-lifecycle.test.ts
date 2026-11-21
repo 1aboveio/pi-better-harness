@@ -1,14 +1,24 @@
-import { rmSync } from "node:fs";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createRequire } from "node:module";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import extension from "./index.js";
 import { createBackgroundTaskRuntime } from "./runtime.js";
 import { createFailureAttention } from "./failures.js";
-import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir } from "./registry.js";
 import { registerBackgroundWorkProvider, disposeBackgroundWorkNavigator, type BackgroundWorkProvider } from "./shared-navigator.ts";
 import { registerTools } from "./tools.js";
 import type { BackgroundTaskMeta } from "./types.js";
+import { startWorkRuntime } from "./test-support/work-runtime.js";
+import { nativeBackground } from "./test-support/native-background.js";
+
+// Exercise the canonical daemon, not a cold pinned-runtime installation, in
+// the unchanged five-second factory lifecycle budget.
+let stopRuntime: (() => Promise<void>) | undefined;
+beforeAll(async () => { stopRuntime = await startWorkRuntime(); });
+afterAll(async () => { await stopRuntime?.(); });
 
 // Deliberately import once: SDK extension factories share this cached module.
 function host() {
@@ -38,63 +48,108 @@ const globalState = () => (globalThis as any)[Symbol.for("pi-better-harness.navi
 
 describe("cached extension factory lifecycle", () => {
   it("child shutdown leaves the parent's tool watch and navigator owner intact", async () => {
-    const parent = host(), child = host();
-    extension(parent.pi);
-    extension(child.pi);
-    const parentCtx = ctx("cached-parent", ui()), childCtx = ctx("cached-child");
-    await parent.emit("session_start", parentCtx);
-    const state = globalState();
-    const provider = state.providers.get("background-tasks");
-    expect(provider).toBeDefined();
-    await child.emit("session_start", childCtx);
-    await child.emit("session_before_switch", childCtx);
-    await child.emit("session_shutdown", childCtx);
-    expect(state.providers.get("background-tasks")).toBe(provider);
-    expect(state.uiCtx).toBe(parentCtx);
-    // The parent still launches, and its launch is projected into the row rail the
-    // child's teardown must not have detached (#460).
-    const result = await parent.tools.get("bg_task_watch").execute("watch", {
-      command: "printf ready", callback: false, success_when: { type: "exit_code", equals: 0 },
-    }, undefined, undefined, parentCtx);
-    expect(result.content[0].text).toContain("First check: exit=0");
-    const id = result.content[0].text.match(/bgs_[0-9a-f]{20}/)?.[0];
-    expect(id).toBeDefined();
-    ids.push(id!);
-    const rows = provider.listRows(Date.now());
-    expect(rows.map((row: { id: string }) => row.id)).toContain(id);
-    await parent.emit("session_shutdown", parentCtx);
-    expect(state.providers.has("background-tasks")).toBe(false);
-    expect(state.uiCtx).toBeUndefined();
-  });
+    const parent = await nativeBackground({ sessionId: "cached-parent" });
+    let child: Awaited<ReturnType<typeof nativeBackground>> | undefined;
+    let parentClosed = false;
+    try {
+      await parent.session.bindExtensions({ mode: "tui", uiContext: {
+        ...parent.session.extensionRunner!.getUIContext(), ...ui(),
+      } });
+      const state = globalState(), parentCtx = state.uiCtx;
+      const provider = state.providers.get("background-tasks");
+      expect(provider).toBeDefined();
+      child = await nativeBackground({ sessionId: "cached-child" });
+      await child.session.extensionRunner!.emit({ type: "session_before_switch" } as any);
+      await child.close(); child = undefined;
+      expect(state.providers.get("background-tasks")).toBe(provider);
+      expect(state.uiCtx).toBe(parentCtx);
+      const result = await parent.execute("bg_task_watch", {
+        command: "printf ready", callback: false, success_when: { type: "exit_code", equals: 0 },
+      });
+      const id = result.match(/bgs_[0-9a-f]{20}/)?.[0];
+      expect(id).toBeDefined();
+      await vi.waitFor(async () => {
+        expect(await parent.execute("bg_task_status", { id })).toContain("succeeded");
+        expect(provider.listRows(Date.now()).map((row: { id: string }) => row.id)).toContain(id);
+      }, { timeout: 15_000, interval: 100 });
+      await parent.close(); parentClosed = true;
+      expect(state.providers.has("background-tasks")).toBe(false);
+      expect(state.uiCtx).toBeUndefined();
+    } finally { await child?.close(); if (!parentClosed) await parent.close(); }
+  }, 20_000);
 
   it("child shutdown does not starve a parent's terminal callback", async () => {
-    const parent = host(), child = host();
-    extension(parent.pi);
-    extension(child.pi);
-    const parentCtx = ctx("callback-parent", ui()), childCtx = ctx("callback-child");
-    await parent.emit("session_start", parentCtx);
-    await child.emit("session_start", childCtx);
-    const result = await parent.tools.get("bg_task_spawn").execute("spawn", {
-      name: "callback-parent-task", shell: false,
-      argv: [process.execPath, "-e", "setTimeout(() => {}, 50)"], callback: true,
-    }, undefined, undefined, parentCtx);
-    const id = result.content[0].text.match(/bgs_[0-9a-f]{20}/)?.[0];
-    expect(id).toBeDefined();
-    ids.push(id!);
-    await child.emit("session_shutdown", childCtx);
-    // The durable host reconciles the terminal outcome; the child's shutdown must
-    // not have taken the parent's delivery path with it.
-    await vi.waitFor(() => {
-      const status = parent.tools.get("bg_task_status");
-      return status.execute("status", { id }, undefined, undefined, parentCtx)
-        .then((reply: { content: Array<{ text: string }> }) => expect(reply.content[0].text).toContain("succeeded"));
-    }, { timeout: 20_000, interval: 100 });
-    await getCallbackBatcher(parent.pi).flush();
-    await getCallbackBatcher(parent.pi).flush();
-    expect(parent.pi.sendMessage).toHaveBeenCalledTimes(1);
-    expect(String((parent.pi.sendMessage as unknown as { mock: { calls: Array<[{ content: string }]> } }).mock.calls[0]?.[0]?.content)).toContain(id);
-    await parent.emit("session_shutdown", parentCtx);
-  });
+    const deliveries: any[] = [];
+    const parent = await nativeBackground({ sessionId: "callback-parent", decorate(api) {
+      return new Proxy(api, { get(target, key) {
+        if (key === "sendMessage") return (message: any, options: any) => {
+          deliveries.push(message); return target.sendMessage(message, options);
+        };
+        const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
+      } });
+    } });
+    let child: Awaited<ReturnType<typeof nativeBackground>> | undefined;
+    try {
+      child = await nativeBackground({ sessionId: "callback-child" });
+      const result = await parent.execute("bg_task_spawn", {
+        name: "callback-parent-task", shell: false,
+        argv: [process.execPath, "-e", "setTimeout(() => {}, 50)"], callback: true,
+      });
+      const id = result.match(/bgs_[0-9a-f]{20}/)?.[0]; expect(id).toBeDefined();
+      await child.close(); child = undefined;
+      await vi.waitFor(() => expect(deliveries.filter(message =>
+        message.customType === "background-completion-batch" && String(message.content).includes(id!))).toHaveLength(1),
+      { timeout: 15_000, interval: 100 });
+      expect(parent.manager.getBranch().some((entry: any) =>
+        entry.message?.customType === "background-completion-batch" || entry.customType === "background-completion-batch")).toBe(true);
+    } finally { await child?.close(); await parent.close(); }
+  }, 20_000);
+
+  it("reopens an old owed callback beyond UI retention and receipts the actual native transcript once", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bg-old-recipient-"));
+    const sessionFile = join(cwd, "recipient.jsonl");
+    const original = await nativeBackground({ cwd, sessionId: "old-native-owner" });
+    let originalClosed = false;
+    let reopened: Awaited<ReturnType<typeof nativeBackground>> | undefined;
+    let foreign: Awaited<ReturnType<typeof nativeBackground>> | undefined;
+    const deliveries: any[] = [];
+    const capture = (api: any) => new Proxy(api, { get(target, key) {
+      if (key === "sendMessage") return (message: any, options: any) => { deliveries.push(message); return target.sendMessage(message, options); };
+      const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
+    } });
+    const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+    const db = new DatabaseSync(join(process.env.PI_CODING_AGENT_DIR!, "operation-coordinator.sqlite"));
+    try {
+      original.manager.appendCustomEntry("saved-native-anchor", {});
+      const launched = await original.execute("bg_task_spawn", { name: "old owed callback", shell: false,
+        argv: [process.execPath, "-e", "setTimeout(() => {}, 1000)"], callback: true });
+      const id = launched.match(/bgs_[0-9a-f]{20}/)?.[0]; expect(id).toBeDefined();
+      writeFileSync(sessionFile, [original.manager.getHeader(), ...original.manager.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+      await original.close(); originalClosed = true;
+      await vi.waitFor(() => expect(db.prepare("SELECT terminal_revision FROM operations WHERE task_id=?").get(id)?.terminal_revision).toBe(1), { timeout: 15000, interval: 50 });
+      const operation = db.prepare("SELECT operation_id FROM operations WHERE task_id=?").get(id);
+      const grant = JSON.parse(db.prepare("SELECT value FROM coordinator_state WHERE key=?").get(`result-supervision-v1:${operation.operation_id}`).value);
+      const resultPath = join(grant.directory, "tasks", id!, "result.json");
+      const result = JSON.parse(readFileSync(resultPath, "utf8"));
+      // Move both canonical terminal timestamps beyond retention without waiting
+      // a minute; runner completion, native disconnect and receipt remain real.
+      const old = Date.now() - 60000;
+      writeFileSync(resultPath, JSON.stringify({ ...result, endedAt: old }));
+      db.prepare("UPDATE operations SET terminal_at=? WHERE task_id=?").run(old, id);
+      foreign = await nativeBackground({ cwd, sessionId: "foreign-native-owner", decorate: capture });
+      await foreign.execute("bg_task_list", {});
+      expect(deliveries).toHaveLength(0);
+      await foreign.close(); foreign = undefined;
+      reopened = await nativeBackground({ cwd, sessionFile, decorate: capture });
+      await vi.waitFor(() => expect(deliveries.filter(message => message.customType === "background-completion-batch" && String(message.content).includes(id!))).toHaveLength(1), { timeout: 15000, interval: 50 });
+      expect(reopened.manager.getBranch().some((entry: any) => entry.message?.customType === "background-completion-batch" || entry.customType === "background-completion-batch")).toBe(true);
+      await vi.waitFor(() => expect(db.prepare("SELECT 1 FROM background_parent_callbacks WHERE operation_id=?").get(operation.operation_id)).toBeUndefined());
+      await reopened.close(); reopened = undefined;
+      reopened = await nativeBackground({ cwd, sessionFile, decorate: capture });
+      await reopened.execute("bg_task_list", {});
+      expect(deliveries.filter(message => message.customType === "background-completion-batch")).toHaveLength(1);
+    } finally { db.close(); await foreign?.close(); await reopened?.close(); if (!originalClosed) await original.close(); rmSync(cwd, { recursive: true, force: true }); }
+  }, 20000);
 
   it("stale TUI factory shutdown cannot dispose its replacement sharing the same UI", async () => {
     const stale = host(), current = host();

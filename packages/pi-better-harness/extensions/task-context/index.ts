@@ -10,6 +10,7 @@ import { OUTCOME_ENTRY, prepareOutcome, restoreOutcome, formatOutcome, type Outc
 import { changeOutcomeTodoPreference, parseOutcomeTodoPreferences } from "./preferences.js";
 import { canRenderTaskRuntime, renderCompactTaskHeader, type CompactTaskHeader } from "./compact-task-header.js";
 import type { GoalSnapshot } from "pi-better-goal/src/types.ts";
+import { canStartGoalFromOutcome, OUTCOME_ACCEPTED_EVENT } from "pi-better-goal/src/task-context.ts";
 
 import {
   completedPlanClearDelay,
@@ -90,6 +91,8 @@ const WorkflowUpdateSchema = Type.Object({
     humanWords: Type.String({ description: "The human's words, quoted or closely paraphrased." }),
     changes: Type.String({ description: "What the decision changes: units, validation, forbidden actions." }),
     supersedes: Type.Optional(Type.String({ description: "Id of the earlier decision this one replaces." })),
+    answers: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Answer-file keys resolved by this decision, e.g. results/127-impl-1.json." })),
+    source: Type.Optional(Type.String({ minLength: 1, description: "Decision provenance, e.g. agent-recommendation." })),
   }, { description: "A human decision to record with this transition." })),
   profiling: Type.Optional(Type.Object({}, {
     additionalProperties: true,
@@ -585,6 +588,10 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
           if (currentPlan) clearPlan();
         }
         saveOutcome(nextOutcome);
+        const sessionId = ctx.sessionManager.getSessionId?.();
+        if (typeof sessionId === "string") {
+          pi.events.emit(OUTCOME_ACCEPTED_EVENT, { sessionId, outcome: { ...nextOutcome } });
+        }
       };
       if (!input.workflow && input.todo === undefined) {
         commitOutcome();
@@ -869,7 +876,11 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
         canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) && displayedWorkflowOwner === workflowPlanOwner(widgetContext));
     }
     if (!enabled || request.action === "inspect") return;
-    if (request.action === "start" && request.goalId && request.objective?.trim()) {
+    if (request.action === "bind") {
+      if (request.goalId && request.objective?.trim() === outcome?.objective && canStartGoalFromOutcome(outcome)) {
+        saveOutcome({ ...outcome, goalId: request.goalId });
+      }
+    } else if (request.action === "start" && request.goalId && request.objective?.trim()) {
       if (outcome?.goalId === request.goalId) return;
       clearWorkflowPlan();
       if (currentPlan) clearPlan();

@@ -18,17 +18,11 @@ pi -e npm:pi-better-ssh
 
 ## Sandboxed Subagents
 
-Open `/sandbox` and expand **Subagents · Tools → Trusted → pi-better-ssh**.
-Toggle `ssh_profile`, `remote_bash`, and/or `ssh_mux` with Space, or toggle the
-group to select all three. They are off by default and require Subagents Network
-access On (profile operations can probe mux state too). Ctrl+S saves defaults.
-
-Enabling a tool automatically loads the `pi-better-ssh` extension into new
-sandboxed subagents and admits only the selected tools. No separate
-`toolExtensions` mapping is needed. Default launches include ticked tools; when
-passing an explicit spawn `tools` list, include the tools the task needs, for
-example `read,bash,ssh_profile,remote_bash`. Do not use `clean:true`, which is
-builtins-only. The parent's active SSH profile is not inherited; provide a host
+Select `ssh_profile`, `remote_bash` or `ssh_mux` in the subagent role, defaults
+or spawn request. For example, use `tools: "read,bash,ssh_profile,remote_bash"`.
+The worker can load the active user-installed SSH provider or an explicit
+`toolExtensions` mapping. In `/sandbox`, enable Subagents Network access for
+these operations. A clean worker uses only builtins. The parent's active SSH profile is not inherited; provide a host
 or select a profile in the child.
 
 These are **trusted**, not guarded, tools: they run outside local task file,

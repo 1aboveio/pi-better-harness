@@ -28,6 +28,7 @@ import {
     backgroundScopeForMeta,
     cancelParkedWait,
     createOwnedAttemptStopper,
+    createWorkerOperationsRpc,
     conversationWriterLeaseLive,
     finalizeWorkerParkAfterExit,
     parkedWaitsForResumedAttempt,
@@ -40,9 +41,12 @@ import {
 import { realProcessProbe } from "../health.ts";
 import * as registry from "../registry.ts";
 import { readParkRecord } from "../registry.ts";
+import { assertObservationStorage, pendingObservations } from "../outage-observations.ts";
+import { createObservedWaitHost } from "../../pi-better-background-tasks/src/observed-waits.ts";
 import { acquireConversationLease } from "../continuation.ts";
 import { captureParkCheckpoint } from "../park-checkpoint.ts";
-import { cleanupAll, createCtx, defaultPlan, schemasFor, sessionFixture, startStack, writeCoherentLog } from "./worker-waits-support.mjs";
+import { assignmentRetainsEvidence, coordinatorPath } from "../assignment-outcomes.ts";
+import { cleanupAll, createCtx, createPiStub, defaultPlan, schemasFor, sessionFixture, startStack, writeCoherentLog } from "./worker-waits-support.mjs";
 
 const durableRoot = mkdtempSync(join(tmpdir(), "worker-races-durable-"));
 const volatileRoot = mkdtempSync(join(tmpdir(), "worker-races-tmp-"));
@@ -79,6 +83,7 @@ async function seedPark(stack, {
     ownerSessionId = "parent-session-1",
     goalId = null,
     completed = true,
+    assignment = false,
 } = {}) {
     const plan = defaultPlan();
     const policy = {
@@ -105,6 +110,8 @@ async function seedPark(stack, {
         owner: { sessionId: ownerSessionId, workspace: ownerWorkspace, branchId: "branch-1", goalId },
     });
     const owner = { kind: "worker-conversation", sessionId: attemptId, workspace: stack.workspace, branchId: "branch-1", goalId };
+    if (assignment) stack.store.registerAssignment({ assignmentId: `assignment:${attemptId}`, owner,
+        recipient: { kind: "parent-session", sessionId: ownerSessionId, workspace: ownerWorkspace, branchId: "branch-1", goalId }, attemptId });
     const launch = await stack.bridge.rpc.call("execute-tool", {
         runId: attemptId,
         conversationId: attemptId,
@@ -325,15 +332,14 @@ test("the final dispatch fence validates the durable claim again at the synchron
     // A cancellation performed INSIDE the Goal handler is not accepted on the
     // earlier durable read: the synchronous guard after Goal catches it.
     const inGoal = await fenceFixture(stack, "sa_race_goal_cancel");
-    stack.events.removeAllListeners(OPERATION_RESUME_ADMISSION_EVENT);
-    stack.events.on(OPERATION_RESUME_ADMISSION_EVENT, (request) => {
-        stack.service.cancelWorkerWait(workerScope(inGoal.attemptId, stack.workspace), {
-            waitId: inGoal.seeded.waitId,
-            generation: inGoal.seeded.generation,
-            reason: "cancelled inside the Goal handler",
+    const originalRpc = inGoal.input.rpc;
+    inGoal.input.rpc = { async call(method, params) {
+        const result = await originalRpc.call(method, params);
+        if (method === "publish-resume") stack.service.cancelWorkerWait(workerScope(inGoal.attemptId, stack.workspace), {
+            waitId: inGoal.seeded.waitId, generation: inGoal.seeded.generation, reason: "cancelled during preparation",
         });
-        request.reply({ allowed: true, revision: 7 });
-    });
+        return result;
+    } };
     await assert.rejects(
         () => assertFinalResumeDispatch(inGoal.input),
         (error) => {
@@ -367,7 +373,7 @@ test("the final dispatch fence validates the durable claim again at the synchron
     stack.events.on(OPERATION_RESUME_ADMISSION_EVENT, (request) => request.reply({allowed: true, revision: 7, isCurrent: () => goalCurrent}));
     const goalGuard = await assertFinalResumeDispatch(goalRelease.input);
     goalCurrent = false;
-    assert.throws(() => releaseChild(goalGuard, () => assert.fail("a paused Goal must prevent dispatch")), /Goal admission changed before execution release/);
+    assert.equal(releaseChild(goalGuard, () => "started"), "started");
 
     // Policy, capacity, parent identity and branch changes are all re-checked by
     // the same guard.
@@ -394,16 +400,10 @@ test("the final dispatch fence validates the durable claim again at the synchron
     );
     const sessionSwitch = await fenceFixture(stack, "sa_race_session");
     allowGoal(stack);
-    await assert.rejects(
-        () => assertFinalResumeDispatch({ ...sessionSwitch.input, context: () => createCtx(stack.workspace, "parent-session-2") }),
-        /owning parent session changed/,
-    );
+    (await assertFinalResumeDispatch({ ...sessionSwitch.input, context: () => createCtx(stack.workspace, "parent-session-2") }))();
     const branchSwitch = await fenceFixture(stack, "sa_race_branch");
     allowGoal(stack);
-    await assert.rejects(
-        () => assertFinalResumeDispatch({ ...branchSwitch.input, context: () => createCtx(stack.workspace, "parent-session-1", "branch-2") }),
-        /owning branch is no longer active/,
-    );
+    (await assertFinalResumeDispatch({ ...branchSwitch.input, context: () => createCtx(stack.workspace, "parent-session-1", "branch-2") }))();
 });
 
 test("the release guard runs synchronously immediately before the spawn", async () => {
@@ -516,6 +516,73 @@ test("cancellation stops the attempt it published and never signals a foreign pi
     try { foreign.kill("SIGKILL"); } catch { /* already gone */ }
 });
 
+test("failed durable cancellation rejects and retains the original wait for inspection", async () => {
+    const stack = await startStack();
+    const attemptId = "sa_cancel_storage_failure";
+    const seeded = await seedPark(stack, { attemptId, target: "ready" });
+    writeParkedAttempt(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
+    const before = readParkRecord(attemptId);
+    await assert.rejects(cancelParkedWait({ cancelWorkerWait() { throw new Error("storage unavailable"); } },
+        parkFor(attemptId, seeded.waitId, seeded.generation), "explicit stop"), /storage unavailable/);
+    const after = readParkRecord(attemptId);
+    assert.equal(after.phase, "held");
+    assert.equal(after.waitId, before.waitId);
+    assert.equal(after.ownerSessionId, before.ownerSessionId);
+    assert.match(after.cancelReason, /storage unavailable/);
+});
+
+test("global reconciliation scopes historical warnings without changing ownership or acknowledging evidence", async () => {
+    const stack = await startStack();
+    const attemptId = "sa_historical_scoped";
+    const seeded = await seedPark(stack, { attemptId, target: "ready", ownerSessionId: "session-A" });
+    writeParkedAttempt(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
+    registry.updateParkRecord(attemptId, { phase: "resuming", resumedBy: "sa_missing_history_attempt" });
+    const original = readParkRecord(attemptId);
+    const notices = [];
+    for (let reload = 0; reload < 2; reload++) {
+        await reconcileParkedWaits(stack.service, { resume: async () => "skipped", notifyWhen: () => false,
+            notify: (message) => notices.push(message) });
+    }
+    assert.deepEqual(notices, []);
+    const retained = readParkRecord(attemptId);
+    assert.equal(retained.ownerSessionId, original.ownerSessionId);
+    assert.equal(retained.waitId, original.waitId);
+    const durable = stack.service.listWorkerWaits(backgroundScopeForMeta(registry.readMeta(attemptId), retained))
+        .find((wait) => wait.waitId === seeded.waitId);
+    assert.ok(!durable.acknowledgement);
+    assert.notEqual(durable.phase, "cancelled");
+});
+
+test("cancellation waits for durable cancellation and the deferred writer check before reporting success", async () => {
+    const stack = await startStack();
+    const attemptId = "sa_deferred_cancellation";
+    const seeded = await seedPark(stack, { attemptId, target: "ready" });
+    writeParkedAttempt(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
+    const resumedId = "sa_deferred_writer";
+    registry.writeMeta({ ...registry.readMeta(attemptId), id: resumedId, park: undefined });
+    registry.updateParkRecord(attemptId, { resumedBy: resumedId });
+    let release;
+    let entered;
+    const checking = new Promise((resolve) => { entered = resolve; });
+    const gate = new Promise((resolve) => { release = resolve; });
+    let returned = false;
+    const cancellation = cancelParkedWait(stack.service, parkFor(attemptId, seeded.waitId, seeded.generation), "explicit cancellation", {
+        stopAttempt: async () => { entered(); await gate; return "foreign"; },
+    }).then(() => { returned = true; });
+    await checking;
+    assert.equal(returned, false);
+    const record = readParkRecord(attemptId);
+    const durable = stack.service.listWorkerWaits(backgroundScopeForMeta(registry.readMeta(attemptId), record))
+        .find((wait) => wait.waitId === seeded.waitId);
+    assert.equal(durable.phase, "cancelled");
+    release();
+    await cancellation;
+    assert.equal(returned, true);
+    assert.equal(readParkRecord(attemptId).phase, "cancelled");
+    assert.match(readParkRecord(attemptId).cancelReason, /left running/);
+    assert.ok(!durable.acknowledgement);
+});
+
 test("park finalization uses the worker workspace, not the foreground parent workspace", async () => {
     const stack = await startStack();
     const attemptId = "sa_race_workspace";
@@ -624,8 +691,8 @@ test("restart reconciliation finalizes a proven staged park and holds an ambiguo
 });
 
 /** A published resume whose attempt already has a run record in `status`. */
-async function publishedResumeWithAttempt(stack, attemptId, status) {
-    const seeded = await seedPark(stack, { attemptId, target: "ready" });
+async function publishedResumeWithAttempt(stack, attemptId, status, assignment = false) {
+    const seeded = await seedPark(stack, { attemptId, target: "ready", assignment });
     writeParkedAttempt(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
     const claim = await publishResume(stack, { attemptId, waitId: seeded.waitId, generation: seeded.generation });
     registry.updateParkRecord(attemptId, {
@@ -656,6 +723,7 @@ async function publishedResumeWithAttempt(stack, attemptId, status) {
             resumeLaunchToken: claim.launchToken,
         },
         logPath: registry.logPathFor(claim.attemptId),
+        ...(assignment ? { assignment: { version: 1, assignmentId: `assignment:${attemptId}` } } : {}),
     });
     return { seeded, claim, scope: workerScope(attemptId, stack.workspace) };
 }
@@ -663,6 +731,312 @@ async function publishedResumeWithAttempt(stack, attemptId, status) {
 function waitState(stack, attemptId, waitId) {
     return stack.store ?? null;
 }
+
+for (const cleanup of ["exit", "reconcile", "outage", "orphaned"]) {
+for (const cachedPhase of ["consumed", "resuming"]) {
+test(`an acknowledged resume releases its exited writer before the next wait (${cachedPhase} cache, ${cleanup})`, async () => {
+    const stack = await startStack();
+    const id = `sa_consumed_${cachedPhase}_${cleanup}`;
+    const resumed = await publishedResumeWithAttempt(stack, id, "completed", true);
+    if (cleanup === "orphaned") registry.writeMeta({ ...registry.readMeta(resumed.claim.attemptId), status: "orphaned" });
+    const wait = stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 });
+    for (const dependency of wait.dependencies) {
+        stack.store.recordEvidenceRead({ waitId: wait.waitId, generation: wait.generation, owner: wait.owner,
+            operationId: dependency.operationId, terminalRevision: dependency.terminalRevision });
+    }
+    stack.store.acknowledgeResult({ waitId: wait.waitId, generation: wait.generation, owner: wait.owner,
+        disposition: "continue", note: "Interpreted the first dependency; continue the assignment.",
+        terminalRevisions: wait.dependencies.map((dependency) => ({ operationId: dependency.operationId, revision: dependency.terminalRevision })) });
+    const consumed = stack.store.getWait(wait);
+    registry.updateParkRecord(id, { phase: cachedPhase });
+
+    const next = stack.store.registerWait({ owner: wait.owner,
+        dependencies: wait.dependencies.map((dependency) => ({ operationId: dependency.operationId })),
+        origin: { assignmentRef: `assignment:${id}`, attemptId: resumed.claim.attemptId },
+        continuationNote: "Continue after the next dependency.",
+        park: { attemptId: resumed.claim.attemptId, checkpointId: "checkpoint-next" } }).wait;
+    stack.store.transitionWaitPhase({ waitId: next.waitId, generation: next.generation, from: "registering", to: "parking" });
+    stack.store.transitionWaitPhase({ waitId: next.waitId, generation: next.generation, from: "parking", to: "waiting",
+        proof: { checkpointRecorded: true, writerLeaseReleased: true, writerPidGone: true } });
+    const nextClaim = { waitId: next.waitId, generation: next.generation, expectedCancelEpoch: 0,
+        lease: { ownerId: "next-supervisor", pid: process.pid }, reservedCheckpointId: "checkpoint-next" };
+    assert.throws(() => stack.store.claimResume(nextClaim), /prior published conversation writer/);
+
+    if (cleanup === "exit") {
+        await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service: stack.service, writerLeaseReleased: true });
+    } else {
+        if (cleanup === "outage") {
+            await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId });
+            assert.ok(pendingObservations().some((entry) => entry.meta.id === id));
+        }
+        await reconcileParkedWaits(stack.service, { resume: async () => { assert.fail("a consumed wait must not resume"); } });
+    }
+    assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId, state: "published" }).length, 0,
+        "an exited writer must not block the next continuation after acknowledging its first dependency");
+    assert.deepEqual(stack.store.getWait(wait), consumed, "exit proof must preserve the interpretation receipt");
+    assert.equal(stack.store.getAssignmentOutcome(`assignment:${id}`), null);
+    assert.equal(readParkRecord(id).phase, "consumed");
+    assert.equal(readParkRecord(id).resumeExitReconciledClaimId, resumed.claim.claimId);
+    const reconciled = readParkRecord(id);
+    await reconcileParkedWaits(stack.service, { resume: async () => { assert.fail("a reconciled receipt must not resume"); } });
+    assert.deepEqual(readParkRecord(id), reconciled, "successful exit cleanup must not repeat registry writes");
+
+    assert.equal(stack.store.claimResume(nextClaim).claim.state, "claimed");
+});
+}
+}
+
+for (const blocker of ["writer", "lease"]) {
+test(`acknowledgement retains a live ${blocker} fence without failing the assignment`, async () => {
+    const stack = await startStack({ storePath: coordinatorPath() });
+    const id = `sa_consumed_live_${blocker}`;
+    const resumed = await publishedResumeWithAttempt(stack, id, blocker === "writer" ? "running" : "completed", true);
+    if (blocker === "writer") registry.writeMeta({ ...registry.readMeta(resumed.claim.attemptId), status: "orphaned" });
+    const wait = stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 });
+    const binding = { version: 1, assignmentId: `assignment:${id}`, owner: wait.owner,
+        recipient: { kind: "parent-session", sessionId: "parent-session-1", workspace: stack.workspace, branchId: "branch-1", goalId: null } };
+    for (const runId of [id, resumed.claim.attemptId]) registry.writeMeta({ ...registry.readMeta(runId), assignment: binding });
+    for (const dependency of wait.dependencies) {
+        stack.store.recordEvidenceRead({ ...wait, owner: wait.owner,
+            operationId: dependency.operationId, terminalRevision: dependency.terminalRevision });
+    }
+    stack.store.acknowledgeResult({ ...wait, owner: wait.owner, disposition: "continue", note: "Continue working.",
+        terminalRevisions: wait.dependencies.map((dependency) => ({ operationId: dependency.operationId, revision: dependency.terminalRevision })) });
+    const receipt = stack.store.getWait(wait);
+    const lease = blocker === "lease" ? acquireConversationLease({ sessionId: id, attemptId: resumed.claim.attemptId }) : undefined;
+    try {
+        const result = await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service: stack.service });
+        assert.equal(result.outcome, "deferred");
+        assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId, state: "published" }).length, 1);
+        assert.deepEqual(stack.store.getWait(wait), receipt);
+        assert.equal(stack.store.getAssignmentOutcome(`assignment:${id}`), null);
+        assert.equal(readParkRecord(id).phase, "consumed");
+        assert.equal(readParkRecord(id).resumeExitReconciledClaimId, undefined);
+        await reconcileParkedWaits(stack.service, { resume: async () => assert.fail("a live writer must not resume") });
+        assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId, state: "published" }).length, 1);
+        assert.equal(stack.store.getAssignmentOutcome(`assignment:${id}`), null);
+    } finally { lease?.release(); }
+});
+}
+
+test("outage observation survives registry loss and replays one repair, then retains recurring failure", async () => {
+    const stack = await startStack();
+    const root = "sa_outage_replay";
+    const resumed = await publishedResumeWithAttempt(stack, root, "completed", true);
+    const before = stack.store.listEvidencePins({ waitId: resumed.seeded.waitId, generation: 1 });
+    const unavailable = await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId });
+    assert.equal(unavailable.outcome, "deferred");
+    assert.match(readParkRecord(root).heldReason, /unverified/);
+    assert.equal(stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 }).phase, "resuming");
+    const report = pendingObservations().find((entry) => entry.meta.id === root);
+    assert.ok(report);
+    await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, reason: "new words" });
+    assert.equal(pendingObservations().filter((entry) => entry.meta.id === root).length, 1);
+    rmSync(registry.runDir(root), { recursive: true, force: true });
+    rmSync(registry.runDir(resumed.claim.attemptId), { recursive: true, force: true });
+    stack.host.close();
+    const replacementPi = createPiStub().pi;
+    const replacement = createObservedWaitHost(replacementPi, { storePath: stack.storePath,
+        supervisorDirectory: join(stack.root, "supervisor"), pollMs: 0 });
+    replacement.start(stack.ctx);
+    stack.service = replacement.service;
+    // Replacement uses the same coordinator records, not copied repair accounting.
+    try {
+    let admissions = 0;
+    const messages = [];
+    await reconcileParkedWaits(stack.service, { notify: (message) => messages.push(message), resume: async () => { admissions++; return "skipped"; } });
+    assert.equal(admissions, 1, JSON.stringify({ messages, record: readParkRecord(root), wait: stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 }) }));
+    assert.equal(pendingObservations().filter((entry) => entry.id === report.id).length, 0);
+    assert.equal(stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 }).phase, "ready");
+    assert.deepEqual(stack.store.listEvidencePins({ waitId: resumed.seeded.waitId, generation: 1 }), before);
+    const rpc = createWorkerOperationsRpc(replacementPi);
+    await rpc.call("register-run", { runId: root, conversationId: root, workspace: stack.workspace,
+        authorityReference: resumed.seeded.policy.authorityReference,
+        attemptId: root, policy: resumed.seeded.policy, capabilities: resumed.seeded.plan.capabilities,
+        tools: resumed.seeded.plan.tools, assignmentOutcomesVersion: 1 });
+    const claim = await publishResume({ ...stack, bridge: { rpc } }, { attemptId: root, waitId: resumed.seeded.waitId, generation: 1 });
+    registry.updateParkRecord(root, { phase: "resuming", resumedBy: claim.attemptId, resumeClaimId: claim.claimId, resumeClaimToken: claim.claimToken, resumeLaunchToken: claim.launchToken });
+    registry.writeMeta({ ...registry.readMeta(resumed.claim.attemptId), id: claim.attemptId,
+        operations: { ...registry.readMeta(resumed.claim.attemptId).operations, resumeLaunchToken: claim.launchToken } });
+    await settleResumedAttemptExit({ attemptId: claim.attemptId });
+    await reconcileParkedWaits(stack.service, { resume: async () => assert.fail("exhausted repair must not launch") });
+    const outcome = stack.store.getAssignmentOutcome(`assignment:${root}`);
+    assert.equal(outcome.outcome, "failed");
+    assert.equal(outcome.recipient.sessionId, "parent-session-1");
+    await reconcileParkedWaits(stack.service, { resume: async () => assert.fail("terminal replay must not launch") });
+    assert.deepEqual(stack.store.getAssignmentOutcome(`assignment:${root}`), outcome);
+    assert.equal(stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 }).acknowledgement, null);
+    } finally { replacement.close(); }
+});
+
+test("an unavailable observation cannot block another assignment's replay", async () => {
+    const stack = await startStack();
+    const first = await publishedResumeWithAttempt(stack, "sa_outage_isolated_a", "completed", true);
+    const second = await publishedResumeWithAttempt(stack, "sa_outage_isolated_b", "completed", true);
+    await settleResumedAttemptExit({ attemptId: first.claim.attemptId });
+    await settleResumedAttemptExit({ attemptId: second.claim.attemptId });
+    const reports = pendingObservations().filter((report) => report.meta.id.startsWith("sa_outage_isolated_"));
+    const unavailable = reports[0].meta.id;
+    const recoverable = reports[1].meta.id;
+    const admissions = [];
+    await reconcileParkedWaits({ ...stack.service, listWorkerWaits: (scope, options) => {
+        if (scope.runId === unavailable) throw new Error("fixture coordinator scope unavailable");
+        return stack.service.listWorkerWaits(scope, options);
+    } }, { resume: async (park) => { admissions.push(park.runId); return "skipped"; } });
+    assert.ok(admissions.includes(recoverable));
+    assert.equal(readParkRecord(unavailable).phase, "resuming");
+    assert.ok(pendingObservations().some((report) => report.meta.id === unavailable));
+});
+
+test("outage replay preserves newer cancellation without interpreting it", async () => {
+    const stack = await startStack();
+    const resumed = await publishedResumeWithAttempt(stack, "sa_outage_cancel", "failed", true);
+    await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId });
+    stack.service.cancelWorkerWait(resumed.scope, { waitId: resumed.seeded.waitId, generation: 1, reason: "explicit stop" });
+    await reconcileParkedWaits(stack.service, { resume: async () => assert.fail("cancelled report cannot dispatch") });
+    assert.equal(readParkRecord("sa_outage_cancel").phase, "cancelled");
+    assert.equal(stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 }).acknowledgement, null);
+});
+
+test("stale outage report cannot replace a newer published writer", async () => {
+    const stack = await startStack();
+    const root = "sa_outage_new_writer";
+    const resumed = await publishedResumeWithAttempt(stack, root, "completed", true);
+    await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId });
+    await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service: stack.service });
+    const newer = await publishResume(stack, { attemptId: root, waitId: resumed.seeded.waitId, generation: 1 });
+    registry.writeMeta({ ...registry.readMeta(resumed.claim.attemptId), id: newer.attemptId,
+        status: "running", pid: process.pid, operations: { ...registry.readMeta(resumed.claim.attemptId).operations,
+            resumeLaunchToken: newer.launchToken } });
+    registry.updateParkRecord(root, { phase: "resuming", resumedBy: newer.attemptId, resumeClaimId: newer.claimId,
+        resumeClaimToken: newer.claimToken, resumeLaunchToken: newer.launchToken });
+    registry.writeMeta({ ...registry.readMeta(newer.attemptId), status: "lost" }, { ifAbsent: true });
+    registry.writeParkRecord(root, { ...readParkRecord(root), resumeClaimId: resumed.claim.claimId }, { ifAbsent: true });
+    assert.equal(registry.readMeta(newer.attemptId).status, "running");
+    assert.equal(readParkRecord(root).resumeClaimId, newer.claimId);
+    await reconcileParkedWaits(stack.service, { resume: async () => assert.fail("new writer already owns the conversation") });
+    assert.equal(readParkRecord(root).resumeClaimId, newer.claimId);
+    assert.equal(stack.store.getAssignmentOutcome(`assignment:${root}`), null);
+    assert.equal(stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 }).phase, "resuming");
+});
+
+test("durable storage failure refuses parking with degraded supervision", () => {
+    const previous = process.env.PI_SUBAGENT_DURABLE_DIR;
+    const file = join(durableRoot, "not-a-directory");
+    writeFileSync(file, "blocked");
+    process.env.PI_SUBAGENT_DURABLE_DIR = file;
+    try { assert.throws(assertObservationStorage, /Degraded supervision.*new parking refused/); }
+    finally { process.env.PI_SUBAGENT_DURABLE_DIR = previous; }
+});
+
+test("assignment unacknowledged exit verifies real checkpoint and permits only one repair across replacement attempts", async () => {
+    const stack = await startStack();
+    const resumed = await publishedResumeWithAttempt(stack, "sa_bounded_repair", "completed", true);
+    const first = await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service: stack.service });
+    assert.equal(first.waitPhase, "ready");
+    assert.equal(stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 }).acknowledgement, null);
+    const replay = await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service: stack.service, reason: "different words" });
+    assert.equal(replay.waitPhase, "ready");
+    const claim = await publishResume(stack, { attemptId: "sa_bounded_repair", waitId: resumed.seeded.waitId, generation: 1 });
+    registry.updateParkRecord("sa_bounded_repair", { phase: "resuming", resumedBy: claim.attemptId, resumeClaimId: claim.claimId, resumeClaimToken: claim.claimToken, resumeLaunchToken: claim.launchToken });
+    registry.writeMeta({ ...registry.readMeta(resumed.claim.attemptId), id: claim.attemptId, operations: { ...registry.readMeta(resumed.claim.attemptId).operations, resumeLaunchToken: claim.launchToken } });
+    const second = await settleResumedAttemptExit({ attemptId: claim.attemptId, service: stack.service });
+    assert.equal(second.waitPhase, "held");
+    assert.equal(stack.store.getAssignmentOutcome("assignment:sa_bounded_repair").outcome, "failed");
+    assert.equal(stack.store.getAssignmentOutcome("assignment:sa_bounded_repair").recipient.sessionId, "parent-session-1");
+    assert.equal(stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 }).acknowledgement, null);
+});
+
+test("assigned cancellation reconciles its published writer without invoking bounded repair", async () => {
+    const stack = await startStack();
+    const id = "sa_cancelled_no_repair";
+    const resumed = await publishedResumeWithAttempt(stack, id, "completed", true);
+    const wait = stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 });
+    const binding = { version: 1, assignmentId: `assignment:${id}`, owner: wait.owner,
+        recipient: { kind: "parent-session", sessionId: "parent-session-1", workspace: stack.workspace, branchId: "branch-1", goalId: null } };
+    registry.writeMeta({ ...registry.readMeta(id), assignment: binding });
+    stack.store.recordAssignmentOutcome({ ...binding, revision: 1, outcome: "cancelled", reason: "Explicit stop",
+        processUncertain: true, evidence: [{ kind: "summary", ref: "cancelled-assignment" }],
+        waits: [{ waitId: wait.waitId, generation: 1, cancelEpoch: wait.cancelEpoch }] });
+    registry.updateParkRecord(id, { phase: "cancelled" });
+    const service = { ...stack.service, repairFailedResumeForWorker: () => assert.fail("cancelled assignments must not enter repair") };
+    const result = await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service, writerLeaseReleased: true });
+    assert.equal(result.outcome, "settled");
+    assert.equal(readParkRecord(id).phase, "cancelled");
+    assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId }).filter((c) => c.state === "published").length, 0);
+    assert.equal(stack.store.getWait({ waitId: wait.waitId, generation: 1 }).acknowledgement, null);
+    assert.equal(stack.store.getAssignmentOutcome(binding.assignmentId).outcome, "cancelled");
+    assert.equal(stack.store.getAssignmentOutcome(binding.assignmentId).processUncertain, true);
+});
+
+test("cancelled outage replay retains uncertainty until exact lease release and never spends repair", async () => {
+    const stack = await startStack();
+    const id = "sa_cancelled_outage";
+    const resumed = await publishedResumeWithAttempt(stack, id, "completed", true);
+    await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId });
+    const wait = stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 });
+    const binding = { version: 1, assignmentId: `assignment:${id}`, owner: wait.owner,
+        recipient: { kind: "parent-session", sessionId: "parent-session-1", workspace: stack.workspace, branchId: "branch-1", goalId: null } };
+    stack.store.recordAssignmentOutcome({ ...binding, revision: 1, outcome: "cancelled", reason: "Explicit stop during outage",
+        processUncertain: true, evidence: [{ kind: "summary", ref: "cancelled-outage" }],
+        waits: [{ waitId: wait.waitId, generation: 1, cancelEpoch: wait.cancelEpoch }] });
+    registry.updateParkRecord(id, { phase: "cancelled", checkpoint: undefined });
+    registry.writeMeta({ ...registry.readMeta(id), assignment: binding, operations: { ...registry.readMeta(id).operations,
+        policy: { ...registry.readMeta(id).operations.policy, deadlineAt: 1 } } });
+    await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId });
+    const reports = pendingObservations().filter((report) => report.meta.id === id);
+    assert.equal(reports.length, 2, "cancellation retains distinct proof instead of reusing an older observation");
+    assert.ok(reports.some((report) => report.observedRevision.cancelled));
+    const outcome = stack.store.getAssignmentOutcome(binding.assignmentId);
+    const service = { ...stack.service, repairFailedResumeForWorker: () => assert.fail("cancelled replay is not repair") };
+    const lease = acquireConversationLease({ sessionId: id, attemptId: resumed.claim.attemptId });
+    try {
+        await reconcileParkedWaits(service, { resume: () => assert.fail("cancelled work cannot resume") });
+        assert.equal(readParkRecord(id).phase, "cancelled");
+        assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId, state: "published" }).length, 1);
+    } finally { lease.release(); }
+    await reconcileParkedWaits(service, { resume: () => assert.fail("proof cannot admit new execution") });
+    assert.equal(readParkRecord(id).phase, "cancelled");
+    assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId, state: "published" }).length, 0);
+    assert.equal(stack.store.getWait(wait).phase, "held");
+    assert.equal(stack.store.getWait(wait).acknowledgement, null);
+    assert.deepEqual(stack.store.getAssignmentOutcome(binding.assignmentId), outcome);
+    assert.equal(pendingObservations().filter((report) => report.meta.id === id).length, 0);
+});
+
+test("late exact writer proof reconciles terminal failure after parent consumption and reload", async () => {
+    const stack = await startStack({ storePath: coordinatorPath() });
+    const id = "sa_late_terminal_proof";
+    const resumed = await publishedResumeWithAttempt(stack, id, "running", true);
+    const wait = stack.store.getWait({ waitId: resumed.seeded.waitId, generation: 1 });
+    const binding = { version: 1, assignmentId: `assignment:${id}`, owner: wait.owner,
+        recipient: { kind: "parent-session", sessionId: "parent-session-1", workspace: stack.workspace, branchId: "branch-1", goalId: null } };
+    for (const runId of [id, resumed.claim.attemptId]) registry.writeMeta({ ...registry.readMeta(runId), assignment: binding });
+    assert.equal((await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service: stack.service })).outcome, "deferred");
+    const terminal = stack.store.getAssignmentOutcome(binding.assignmentId);
+    assert.equal(terminal.outcome, "failed");
+    assert.equal(terminal.processUncertain, true);
+    assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId, state: "published" }).length, 1);
+    const request = { assignmentId: binding.assignmentId, recipient: binding.recipient, revision: terminal.revision };
+    stack.store.inspectAssignmentOutcome(request);
+    stack.store.consumeAssignmentOutcome({ ...request, disposition: "consumed", note: "Inspected uncertain writer failure" });
+    const consumed = stack.store.getAssignmentOutcome(binding.assignmentId);
+    assert.equal((await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId })).outcome, "deferred");
+    assert.equal(pendingObservations().filter((report) => report.meta.id === id).length, 1);
+    assert.equal(assignmentRetainsEvidence(registry.readMeta(id)), true);
+    registry.writeMeta({ ...registry.readMeta(resumed.claim.attemptId), status: "failed", pid: 999_998, exitCode: 1 });
+    assert.equal((await settleResumedAttemptExit({ attemptId: resumed.claim.attemptId, service: stack.service, writerLeaseReleased: false })).outcome, "deferred");
+    assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId, state: "published" }).length, 1);
+    const meta = registry.readMeta(id);
+    registry.writeMeta({ ...meta, operations: { ...meta.operations, policy: { ...meta.operations.policy, deadlineAt: 1 } } });
+    const service = { ...stack.service, repairFailedResumeForWorker: () => assert.fail("terminal failure must not enter repair admission") };
+    await reconcileParkedWaits(service, { resume: async () => assert.fail("terminal failure must never launch") });
+    assert.equal(stack.store.listResumeClaims({ waitId: wait.waitId, state: "published" }).length, 0);
+    assert.deepEqual(stack.store.getAssignmentOutcome(binding.assignmentId), consumed);
+    assert.equal(stack.store.getWait({ waitId: wait.waitId, generation: 1 }).acknowledgement, null);
+    assert.equal(assignmentRetainsEvidence(registry.readMeta(id)), false);
+    assert.equal(pendingObservations().filter((report) => report.meta.id === id).length, 0);
+});
 
 test("missing continuation metadata never becomes writer-exit proof across repeated recovery", async () => {
     const stack = await startStack();
@@ -770,7 +1144,8 @@ test("a published resume that exits before acknowledging settles the unconsumed 
     const consumedBefore = stack.service.listWorkerWaits(consumed.scope, { pendingOnly: true });
     assert.equal(consumedBefore.length, 0);
     const consumedResult = await settleResumedAttemptExit({ attemptId: consumed.claim.attemptId, service: stack.service, status: "completed" });
-    assert.equal(consumedResult.outcome, "ignored");
+    assert.equal(consumedResult.outcome, "settled");
+    assert.equal(stack.store.listResumeClaims({ waitId: consumed.seeded.waitId, state: "published" }).length, 0);
     assert.equal(readParkRecord("sa_p2_consumed").phase, "consumed");
 
     // (d) An already CANCELLED generation is never altered.

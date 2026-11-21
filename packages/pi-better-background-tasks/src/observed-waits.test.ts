@@ -1,9 +1,11 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { DatabaseSync } from "node:sqlite";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -15,6 +17,7 @@ import {
   OBSERVED_WAITS_RPC_CHANNEL,
   type BackgroundOperationService,
   type ContinuationAdapter,
+  type DurableTaskChange,
   type ObservedWaitHost,
   type ParentDelivery,
   type ParentNotification,
@@ -25,7 +28,7 @@ import {
   FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
 } from "./sandbox.js";
 import type { LocalSupervisor, SupervisorStartOptions } from "./supervisor/index.js";
-import { supervisorTaskIdForToken } from "./supervisor/index.js";
+import { createLocalSupervisor, supervisorTaskIdForToken } from "./supervisor/index.js";
 import { advertiseBackgroundAdapter, BACKGROUND_ADAPTER_REQUEST } from "./adapter-contract.js";
 import { readProcessStartToken } from "./process-identity.js";
 import { openStore } from "./shared-operation-coordinator/index.js";
@@ -48,6 +51,10 @@ const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()!();
 });
+
+// These RPC journeys advance the coordinator explicitly. A delayed OS notification
+// for creation of the fixture's runs directory would measure an unrelated inventory.
+const manualSourceWatch = () => Object.assign(new EventEmitter(), { ready: Promise.resolve(), close() {} });
 
 function workspace(name: string): string {
   const root = mkdtempSync(join(tmpdir(), `observed-waits-${name}-`));
@@ -96,18 +103,20 @@ function createBranchCtx(cwd: string, sessionId: string, branchIds: readonly str
 }
 
 function startHost(options: {
+  storePath?: string;
   harness?: Harness;
   root: string;
   supervisor?: LocalSupervisor;
   notifyParent?: (notification: ParentNotification) => void;
   ctx?: ExtensionContext;
+  now?: () => number;
 }): { host: ObservedWaitHost; pi: ExtensionAPI; notifications: ParentNotification[] } {
   const harness = options.harness ?? createHarness();
   const notifications: ParentNotification[] = [];
   const host = createObservedWaitHost(harness.pi, {
-    storePath: join(options.root, "operations.sqlite"),
+    storePath: options.storePath ?? join(options.root, "operations.sqlite"),
     supervisorDirectory: join(options.root, "supervisor"),
-    pollMs: 0,
+    pollMs: 0, now: options.now,
     ...(options.supervisor ? { supervisor: options.supervisor } : {}),
     notifyParent: options.notifyParent ?? ((notification) => { notifications.push(notification); }),
   });
@@ -128,6 +137,31 @@ async function until(host: ObservedWaitHost, predicate: () => boolean, timeoutMs
 
 function nodeCommand(script: string): string[] {
   return [process.execPath, "-e", script];
+}
+
+function recordTerminalFromChild(
+  root: string,
+  operationId: string,
+  owner: unknown,
+  eventId: string,
+): void {
+  const storeModule = new URL("./shared-operation-coordinator/index.ts", import.meta.url).href;
+  const child = spawnSync(process.execPath, ["--import", "tsx", "-e", `
+    import { openStore } from ${JSON.stringify(storeModule)};
+    const store = openStore({ path: ${JSON.stringify(join(root, "operations.sqlite"))} });
+    try {
+      store.recordTerminalOutcome({
+        operationId: ${JSON.stringify(operationId)},
+        eventId: ${JSON.stringify(eventId)},
+        outcome: "succeeded",
+        owner: ${JSON.stringify(owner)},
+        evidence: [{ kind: "terminal-record", ref: "cross/result.json", summary: "exit 0" }],
+      });
+    } finally {
+      store.close();
+    }
+  `], { cwd: process.cwd(), encoding: "utf8", timeout: 60_000 });
+  expect(child.status, child.stderr || child.stdout).toBe(0);
 }
 
 function textOf(result: { content: Array<{ type: string; text: string }> }): string {
@@ -156,6 +190,116 @@ function sandboxPublisher(events: EventEmitter) {
 }
 
 describe("parent durable launches", () => {
+  it.each(["session", "workspace", "branch", "unknown identity", "notification channel"])(
+    "leaves an inactive parent's outbox untouched for a different %s and delivers on return",
+    async (mismatch) => {
+      const root = workspace("foreign-outbox");
+      const store = openStore({ path: join(root, "operations.sqlite") });
+      cleanups.push(() => store.close());
+      const owner = { kind: "parent-session" as const, sessionId: "outbox-owner", workspace: root, branchId: "owner-branch" };
+      store.registerOperation({ operationId: "op", taskId: "fixture-task", launchToken: "token", owner, observer: { kind: "fixture", version: "1" } });
+      store.registerWait({ owner, dependencies: [{ operationId: "op" }], continuationNote: "Inspect result" });
+      store.recordTerminalOutcome({ operationId: "op", owner, eventId: "terminal", outcome: "succeeded", evidence: [{ kind: "summary", ref: "fixture", summary: "done" }] });
+      const ctx = createCtx(
+        mismatch === "workspace" ? join(root, "other") : root,
+        mismatch === "session" ? "other-session" : "outbox-owner",
+        mismatch === "branch" ? "other-branch" : "owner-branch",
+      );
+      if (mismatch === "unknown identity") ctx.sessionManager.getSessionId = () => { throw new Error("unavailable"); };
+      const notifications: ParentNotification[] = [];
+      const options = {
+        storePath: join(root, "operations.sqlite"), supervisorDirectory: join(root, "supervisor"), pollMs: 0,
+      };
+      const notifyParent = (notification: ParentNotification, delivery: ParentDelivery) => { notifications.push(notification); delivery.delivered(); };
+      let host = createObservedWaitHost(createHarness().pi, { ...options,
+        ...(mismatch === "notification channel" ? {} : { notifyParent }),
+      });
+      cleanups.push(() => host.close());
+      host.start(ctx);
+      await host.reconcileNow();
+      for (let i = 0; i < 10; i++) await host.reconcileNow();
+      expect(store.listOutbox({ state: "pending" }).map(event => event.attempts)).toEqual([0]);
+      expect(notifications).toHaveLength(0);
+
+      if (mismatch === "notification channel") {
+        host.close();
+        host = createObservedWaitHost(createHarness().pi, { ...options, notifyParent });
+      }
+      host.start(createBranchCtx(root, "outbox-owner", ["owner-branch", "descendant"]));
+      await host.reconcileNow();
+      expect(notifications).toHaveLength(1);
+      expect(store.listOutbox({ state: "delivered" }).map(event => event.attempts)).toEqual([1]);
+      await host.reconcileNow();
+      expect(notifications).toHaveLength(1);
+    },
+  );
+
+  it("receipts each continuous period of silence separately", async () => {
+    const root = workspace("stall-receipts"), ctx = createCtx(root);
+    let now = Date.now();
+    const { host } = startHost({ root, ctx, now: () => now });
+    const launch = await host.launchParent({ ctx, kind: "process", params: { shell: false, callback: true,
+      argv: nodeCommand("const fs=require('node:fs');const t=setInterval(()=>{if(fs.existsSync('resume')){clearInterval(t);console.log('new output');setTimeout(()=>{},20000)}},50)") } });
+    const origin = { cwd: root, sessionId: ctx.sessionManager.getSessionId() };
+    const checkpoint = join(root, "supervisor", "tasks", launch.id, "progress.json");
+    const progressTime = () => JSON.parse(readFileSync(checkpoint, "utf8")).observedAt as number;
+    const alert = () => host.pendingStallAlert(origin, launch.id, []);
+    try {
+      await until(host, () => existsSync(checkpoint));
+      const firstTime = progressTime();
+      now = firstTime + 360_000;
+      const first = alert();
+      expect(first).toBeDefined();
+      first!.delivery.delivered();
+      expect(alert()).toBeUndefined();
+      writeFileSync(join(root, "resume"), "go");
+      await until(host, () => progressTime() > firstTime);
+      now = progressTime();
+      expect(alert()).toBeUndefined();
+      now += 360_000;
+      const second = alert();
+      expect(second).toBeDefined();
+      expect(second!.delivery.receiptId).not.toBe(first!.delivery.receiptId);
+      expect(second!.notification.event.content).toContain("new output");
+    } finally { await host.stopDurableTask(origin, launch.id); }
+  });
+
+  it("retries reconciliation after coordinator write contention", async () => {
+    const root = workspace("store-busy");
+    const supervisor = fakeSupervisor(root, "lost");
+    const inspect = supervisor.inspect.bind(supervisor);
+    supervisor.inspect = (taskId) => ({ ...inspect(taskId)!, status: "running", terminal: false });
+    const { host } = startHost({ root, supervisor });
+    const ctx = createCtx(root);
+    const launch = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("process.exit(0)"), shell: false, callback: false },
+      ctx,
+    });
+    const store = openStore({ path: join(root, "operations.sqlite") });
+    store.recordSupervision({ operationId: launch.operationId, owner: launch.owner, health: "unmonitored", reason: "test recovery" });
+    store.close();
+    const blocker = new DatabaseSync(join(root, "operations.sqlite"));
+    try {
+      blocker.exec("BEGIN IMMEDIATE");
+      await expect(host.reconcileNow()).resolves.toBeUndefined();
+      expect(host.statusForParent(ctx, launch.id).phase).toBe("running");
+    } finally {
+      blocker.exec("ROLLBACK");
+      blocker.close();
+    }
+    await host.reconcileNow();
+    const recovered = openStore({ path: join(root, "operations.sqlite") });
+    try {
+      expect(recovered.getOperation(launch.operationId)?.health).toBe("active");
+    } finally {
+      recovered.close();
+    }
+    supervisor.inspect = inspect;
+    await host.reconcileNow();
+    expect(host.statusForParent(ctx, launch.id).terminalOutcome).toBe("lost");
+  }, 15_000);
+
   it("runs a local process through the real supervisor and reconciles one terminal revision", async () => {
     const root = workspace("process");
     const marker = join(root, "ran.txt");
@@ -415,6 +559,393 @@ function fakeSupervisor(root: string, outcome: "lost"): LocalSupervisor {
   };
 }
 
+function fakeRunningSupervisor(): LocalSupervisor & { inspections: number } {
+  let inspections = 0;
+  const inspectionFor = (taskId: string): ReturnType<LocalSupervisor["inspect"]> => {
+    const now = Date.now();
+    return {
+      taskId,
+      token: "fake-running",
+      kind: "process",
+      status: "running",
+      terminal: false,
+      launch: {
+        taskId,
+        token: "fake-running",
+        kind: "process",
+        createdAt: now,
+        argv: [process.execPath, "-e", "process.exit(0)"],
+        cwd: process.cwd(),
+        requestHash: "fake-running",
+      },
+      taskDir: join(tmpdir(), "fake-running"),
+      logs: { stdout: "", stderr: "", events: "" },
+      observedAt: now,
+    };
+  };
+  return {
+    get inspections() {
+      return inspections;
+    },
+    async start() {
+      throw new Error("the reconciliation authority fixture does not launch");
+    },
+    inspect(taskId) {
+      inspections += 1;
+      return inspectionFor(taskId);
+    },
+    snapshot(taskId) {
+      return inspectionFor(taskId);
+    },
+    async stop() {
+      return undefined;
+    },
+  };
+}
+
+describe("supervision authority", () => {
+  it("limits startup terminal recovery to the active parent session", () => {
+    const root = workspace("scoped-terminal-recovery");
+    const storePath = join(root, "operations.sqlite");
+    const store = openStore({ path: storePath });
+    try {
+      for (let index = 0; index < 80; index += 1) {
+        const owner = { kind: "parent-session" as const, sessionId: `history-${index}`, workspace: root, branchId: null, goalId: null };
+        const operationId = `history-op-${index}`;
+        store.registerOperation({ operationId, taskId: `bgs_${index.toString(16).padStart(20, "0")}`, launchToken: `history-launch-${index}`, owner, observer: { kind: "fixture", version: "1" } });
+        store.recordTerminalOutcome({ operationId, owner, eventId: `history-terminal-${index}`, outcome: "succeeded", evidence: [{ kind: "summary", ref: "history", summary: "done" }] });
+      }
+    } finally {
+      store.close();
+    }
+
+    const host = createObservedWaitHost(createHarness().pi, { storePath, supervisorDirectory: join(root, "supervisor"), pollMs: 0, notifyParent: () => {} });
+    cleanups.push(() => host.close());
+    host.start();
+    const activeStore = (host as unknown as { store: ReturnType<typeof openStore> }).store;
+    const original = activeStore.listPendingParentCallbacks.bind(activeStore);
+    const pendingReads: Array<{ sessionId: string; workspace: string; limit?: number }> = [];
+    activeStore.listPendingParentCallbacks = (scope, page = {}) => {
+      pendingReads.push({ ...scope, limit: page.limit });
+      return original(scope, page);
+    };
+    host.start(createCtx(root, "current-session"));
+    expect(pendingReads.length).toBeGreaterThanOrEqual(2);
+    expect(pendingReads.every(scope => scope.sessionId === "current-session" && scope.workspace === root && scope.limit === 256)).toBe(true);
+  });
+
+  it("the first scoped recovery cannot coalesce into an unscoped startup pass", async () => {
+    const root = workspace("startup-scoped-recovery");
+    const storePath = join(root, "operation-coordinator.sqlite");
+    const store = openStore({ path: storePath });
+    cleanups.push(() => store.close());
+    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store, storePath,
+      supervisorDirectory: join(root, "supervisor"), pollMs: 0, serverOwnedResults: true });
+    cleanups.push(() => host.close());
+    host.start();
+    host.noteParentContext(createCtx(root, "first-owner"), { recover: false });
+    expect(host.hasPendingParentCallbackRecovery()).toBe(true);
+    const revision = store.getChangeRevision();
+    host.noteParentContext(createCtx(root, "first-owner"));
+    await host.reconcileNow();
+    expect(host.hasPendingParentCallbackRecovery(), "the first observation must recover its own scope").toBe(false);
+    expect(store.getChangeRevision()).toBe(revision);
+    for (let index = 0; index < 10; index++) {
+      host.noteParentContext(createCtx(root, "first-owner"), { recover: false });
+      expect(host.hasPendingParentCallbackRecovery()).toBe(false);
+    }
+    host.noteParentContext(createCtx(root, "first-owner", "other-branch"), { recover: false });
+    expect(host.hasPendingParentCallbackRecovery()).toBe(true);
+    await host.reconcileNow();
+    expect(host.hasPendingParentCallbackRecovery()).toBe(false);
+  });
+
+  it("recovers first and tail callback pages without claim-scan starvation or unbounded retries", async () => {
+    const root = workspace("paged-callback-recovery"), directory = join(root, "supervisor");
+    const storePath = join(root, "operation-coordinator.sqlite");
+    const store = openStore({ path: storePath });
+    cleanups.push(() => store.close());
+    mkdirSync(join(directory, "observed"), { recursive: true });
+    const delivered: string[] = [];
+    for (let index = 0; index < 600; index++) {
+      const id = `bgs_${index.toString(16).padStart(20, "0")}`, operationId = `operation-${String(index).padStart(4, "0")}`;
+      const branchId = index < 5 || index >= 595 ? "current" : "other-branch";
+      const owner = { kind: "parent-session" as const, sessionId: "paged-owner", workspace: root, branchId };
+      store.registerOperation({ operationId, taskId: id, launchToken: operationId, owner, observer: { kind: "local-supervisor", version: "1" } });
+      store.recordTerminalOutcome({ operationId, owner, eventId: operationId, outcome: "succeeded", evidence: [{ kind: "summary", ref: id, summary: "done" }] });
+      writeFileSync(join(directory, "observed", `${id}.json`), JSON.stringify({ kind: "process", cwd: root, callback: true, branchId, parentOrigin: { cwd: root, sessionId: owner.sessionId } }));
+    }
+    const host = createObservedWaitHost(createHarness().pi, { sharedStore: store, storePath, supervisorDirectory: directory, pollMs: 0, serverOwnedResults: true,
+      notifyParent(notification, delivery) { delivered.push(notification.taskId); delivery.delivered(); } });
+    cleanups.push(() => host.close());
+    expect(existsSync(storePath)).toBe(true);
+    const ctx = createCtx(root, "paged-owner", "current"); host.start(ctx);
+    expect((host as unknown as { storePath: string }).storePath).toBe(storePath);
+    expect((host as unknown as { changeWatcher?: unknown }).changeWatcher).toBeDefined();
+    for (let page = 0; page < 10; page++) {
+      host.noteParentContext(createCtx(root, "interleaved-owner")); await host.reconcileNow();
+      host.noteParentContext(ctx); await host.reconcileNow();
+    }
+    expect(delivered).toHaveLength(10);
+    expect(new Set(delivered).size).toBe(10);
+    expect((host as unknown as { pendingTerminalCallbacks: Set<string> }).pendingTerminalCallbacks.size).toBeLessThanOrEqual(256);
+    expect(store.listPendingParentCallbacks({ sessionId: "paged-owner", workspace: root }, { limit: 256 })).toHaveLength(256);
+    for (let index = 0; index < 129; index++) {
+      // Scope eviction is an identity-cache operation; it needs no worker reconciliation.
+      host.noteParentContext(createCtx(root, `scope-${index}`), { recover: false });
+    }
+    host.noteParentContext(ctx, { recover: false });
+    expect(host.hasPendingParentCallbackRecovery()).toBe(true);
+    expect((host as unknown as { callbackRecoveryScopes: Map<string, unknown> }).callbackRecoveryScopes.size).toBeLessThanOrEqual(128);
+    host.close();
+    expect((host as unknown as { changeWatcher?: unknown; changeRepair?: unknown }).changeWatcher).toBeUndefined();
+    expect((host as unknown as { changeRepair?: unknown }).changeRepair).toBeUndefined();
+  // This exercises 600 durable records and sidecars, not a wall-clock performance budget.
+  }, 30_000);
+
+  it("does not rewrite supervision while overlapping live hosts reconcile unchanged operations", async () => {
+    const root = workspace("supervision-authority");
+    const storePath = join(root, "operations.sqlite");
+    const owner = { kind: "parent-session" as const, sessionId: "owner-a", workspace: root, branchId: "branch-1", goalId: null };
+    const store = openStore({ path: storePath });
+    const taskIds = Array.from({ length: 14 }, (_, index) => `bgs_${(index + 1).toString(16).padStart(20, "0")}`);
+    try {
+      taskIds.forEach((taskId, index) => {
+        store.registerOperation({
+          operationId: `op_authority_${index}`,
+          taskId,
+          launchToken: `launch_authority_${index}`,
+          owner,
+          observer: { kind: "background-tasks", version: "1" },
+        });
+      });
+    } finally {
+      store.close();
+    }
+
+    // The trigger observes every SQLite update, not only this host's cached view.
+    const db = new DatabaseSync(storePath);
+    db.exec("CREATE TABLE probe_updates (host TEXT)");
+    db.exec(`CREATE TRIGGER probe_update AFTER UPDATE ON operations BEGIN
+      INSERT INTO probe_updates VALUES (json_extract(NEW.supervision_json, '$.hostId'));
+    END`);
+    const countUpdates = (): number => {
+      const row = db.prepare("SELECT count(*) AS count FROM probe_updates").get();
+      return Number(row?.count ?? 0);
+    };
+    const clearUpdates = (): void => { db.exec("DELETE FROM probe_updates"); };
+
+    try {
+      const ownerSupervisor = fakeRunningSupervisor();
+      const ownerHost = startHost({
+        root,
+        supervisor: ownerSupervisor,
+        ctx: createCtx(root, "owner-a"),
+      }).host;
+      await ownerHost.reconcileNow();
+      clearUpdates();
+
+      for (let pass = 0; pass < 10; pass += 1) await ownerHost.reconcileNow();
+      expect(countUpdates(), "an unchanged operation under one live host is not rewritten").toBe(0);
+      const ownerInspectionsBefore = ownerSupervisor.inspections;
+
+      const unrelatedSupervisor = fakeRunningSupervisor();
+      const unrelatedHost = startHost({
+        root,
+        supervisor: unrelatedSupervisor,
+        ctx: createCtx(root, "unrelated-b"),
+      }).host;
+      await unrelatedHost.reconcileNow();
+      clearUpdates();
+      const unrelatedInspectionsBefore = unrelatedSupervisor.inspections;
+
+      for (let pass = 0; pass < 5; pass += 1) {
+        await ownerHost.reconcileNow();
+        await unrelatedHost.reconcileNow();
+      }
+
+      expect(countUpdates(), "a live unrelated host must not replace the recorded supervisor").toBe(0);
+      expect(
+        unrelatedSupervisor.inspections - unrelatedInspectionsBefore,
+        "an unrelated host does not inspect another live host's healthy operations",
+      ).toBe(0);
+      expect(
+        ownerSupervisor.inspections - ownerInspectionsBefore,
+        "the recorded supervisor still performs exactly one inspection per operation per pass",
+      ).toBe(taskIds.length * 5);
+    } finally {
+      db.close();
+    }
+  }, 30_000);
+
+  it("releases a closed host's running authority for a replacement host", async () => {
+    const root = workspace("supervision-release");
+    const storePath = join(root, "operations.sqlite");
+    const owner = { kind: "parent-session" as const, sessionId: "owner-a", workspace: root, branchId: null, goalId: null };
+    const store = openStore({ path: storePath });
+    try {
+      store.registerOperation({
+        operationId: "op_release",
+        taskId: "bgs_00000000000000000001",
+        launchToken: "launch_release",
+        owner,
+        observer: { kind: "background-tasks", version: "1" },
+      });
+    } finally {
+      store.close();
+    }
+
+    const ownerHost = startHost({
+      root,
+      supervisor: fakeRunningSupervisor(),
+      ctx: createCtx(root, "owner-a"),
+    }).host;
+    await ownerHost.reconcileNow();
+    const claimed = openStore({ path: storePath });
+    try {
+      expect(claimed.getOperation("op_release")?.health).toBe("active");
+      expect(claimed.getOperation("op_release")?.supervision?.hostId).toBeTruthy();
+    } finally {
+      claimed.close();
+    }
+
+    ownerHost.close();
+    const released = openStore({ path: storePath });
+    try {
+      expect(released.getOperation("op_release")?.supervision).toBeNull();
+      expect(released.getOperation("op_release")?.health).toBe("unmonitored");
+      expect(released.getOperation("op_release")?.healthReason).toMatch(/closed/);
+    } finally {
+      released.close();
+    }
+
+    const replacementSupervisor = fakeRunningSupervisor();
+    const replacement = startHost({
+      root,
+      supervisor: replacementSupervisor,
+      ctx: createCtx(root, "replacement-b"),
+    }).host;
+    await replacement.reconcileNow();
+    expect(replacementSupervisor.inspections).toBeGreaterThan(0);
+    const takenOver = openStore({ path: storePath });
+    try {
+      expect(takenOver.getOperation("op_release")?.health).toBe("active");
+      expect(takenOver.getOperation("op_release")?.supervision?.hostId).toBeTruthy();
+    } finally {
+      takenOver.close();
+    }
+  }, 30_000);
+
+  it("does not let a stale contender replace a newly live authority", async () => {
+    const root = workspace("supervision-race");
+    const storePath = join(root, "operations.sqlite");
+    const ownerSupervisor = fakeRunningSupervisor();
+    const contenderSupervisor = fakeRunningSupervisor();
+    const ownerHost = startHost({
+      root,
+      supervisor: ownerSupervisor,
+      ctx: createCtx(root, "owner-a"),
+    }).host;
+    const contenderHost = startHost({
+      root,
+      supervisor: contenderSupervisor,
+      ctx: createCtx(root, "unrelated-b"),
+    }).host;
+    await ownerHost.reconcileNow();
+    await contenderHost.reconcileNow();
+
+    // Both hosts now hold a snapshot of an operation that has no supervisor.
+    const store = openStore({ path: storePath });
+    let first: string | undefined;
+    try {
+      store.registerOperation({
+        operationId: "op_race",
+        taskId: "bgs_00000000000000000002",
+        launchToken: "launch_race",
+        owner: { kind: "parent-session", sessionId: "owner-a", workspace: root, branchId: null, goalId: null },
+        observer: { kind: "background-tasks", version: "1" },
+      });
+      const stale = store.getOperation("op_race");
+      expect(stale).not.toBeNull();
+      expect(stale?.supervision).toBeNull();
+
+      const ownerBefore = ownerSupervisor.inspections;
+      (ownerHost as unknown as { reconcileOperation(operation: unknown): void }).reconcileOperation(stale);
+      expect(ownerSupervisor.inspections - ownerBefore).toBe(1);
+      first = store.getOperation("op_race")?.supervision?.hostId;
+      expect(first).toBeTruthy();
+
+      const contenderBefore = contenderSupervisor.inspections;
+      (contenderHost as unknown as { reconcileOperation(operation: unknown): void }).reconcileOperation(stale);
+      expect(contenderSupervisor.inspections - contenderBefore).toBe(0);
+      expect(store.getOperation("op_race")?.supervision?.hostId).toBe(first);
+    } finally {
+      store.close();
+    }
+  }, 30_000);
+
+  it("does not let an identityless follower scan or inspect a live foreign operation", async () => {
+    const root = workspace("supervision-identityless-follower");
+    const storePath = join(root, "operations.sqlite");
+    const owner = { kind: "parent-session" as const, sessionId: "owner-a", workspace: root, branchId: null, goalId: null };
+    const store = openStore({ path: storePath });
+    try {
+      store.registerOperation({
+        operationId: "op_identityless",
+        taskId: "bgs_00000000000000000003",
+        launchToken: "launch_identityless",
+        owner,
+        observer: { kind: "background-tasks", version: "1" },
+      });
+    } finally {
+      store.close();
+    }
+
+    const ownerHost = startHost({
+      root,
+      supervisor: fakeRunningSupervisor(),
+      ctx: createCtx(root, "owner-a"),
+    }).host;
+    await ownerHost.reconcileNow();
+
+    const followerSupervisor = fakeRunningSupervisor();
+    const anonymous = {
+      cwd: root,
+      sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
+      isIdle: () => true,
+    } as unknown as ExtensionContext;
+    const follower = startHost({
+      root,
+      supervisor: followerSupervisor,
+      ctx: anonymous,
+    }).host;
+    await follower.reconcileNow();
+    const inspectionsBefore = followerSupervisor.inspections;
+
+    let runningScans = 0;
+    let privateInspections = 0;
+    const privateFollower = follower as unknown as {
+      store: { listOperations(filter?: { phase?: string }): unknown };
+      inspect(taskId: string): unknown;
+    };
+    const originalList = privateFollower.store.listOperations.bind(privateFollower.store);
+    privateFollower.store.listOperations = (filter?: { phase?: string }) => {
+      if (filter?.phase === "running") runningScans += 1;
+      return originalList(filter);
+    };
+    const originalInspect = privateFollower.inspect.bind(privateFollower);
+    privateFollower.inspect = (taskId: string) => {
+      privateInspections += 1;
+      return originalInspect(taskId);
+    };
+
+    for (let pass = 0; pass < 5; pass += 1) await follower.reconcileNow();
+    expect(runningScans, "identityless followers do not enumerate the global running set").toBe(0);
+    expect(privateInspections, "identityless followers do not inspect a live foreign holder").toBe(0);
+    expect(followerSupervisor.inspections - inspectionsBefore).toBe(0);
+  }, 30_000);
+});
+
 describe("worker operation service", () => {
   function runScope(root: string, conversationId = "conv-1"): WorkerRunScope {
     return {
@@ -431,7 +962,7 @@ describe("worker operation service", () => {
     const harness = createHarness();
     const { host } = startHost({ root, harness });
     const service = getObservedWaitService(harness.pi);
-    expect(service?.version).toBe(1);
+    expect(service?.version).toBe(2);
     expect(service?.serviceId).toBe(host.service.serviceId);
     expect(service?.available).toBe(true);
     expect(service?.continuationReady).toBe(false);
@@ -448,7 +979,7 @@ describe("worker operation service", () => {
     });
     cleanups.push(() => host.close());
     const service = getObservedWaitService(harness.pi);
-    expect(service?.version).toBe(1);
+    expect(service?.version).toBe(2);
     expect(service?.serviceId).toBe(host.service.serviceId);
     expect(host.available).toBe(false); // the store opens on first use or activation
   });
@@ -480,7 +1011,7 @@ describe("worker operation service", () => {
       checkpointId: "checkpoint-1",
     })).toThrow(/continuation adapter/);
 
-    const ready: Array<{ waitId: string; taskIds: readonly string[]; evidence: readonly { operationId: string; terminalRevision: number }[] }> = [];
+    const ready: Parameters<ContinuationAdapter["onWaitReady"]>[0][] = [];
     const adapter: ContinuationAdapter = {
       version: 1,
       id: "subagents-test",
@@ -523,6 +1054,7 @@ describe("worker operation service", () => {
     expect(checkpointed.phase).toBe("waiting");
 
     await until(host, () => ready.length === 1);
+    expect(ready[0]?.parkedAttemptId).toBe("attempt-1");
     expect(ready[0]?.taskIds).toEqual([launch.id]);
     expect(ready[0]?.evidence.length).toBeGreaterThan(0);
     // The parent callback belongs to the parent owner; a worker wait is not a
@@ -732,8 +1264,11 @@ describe("parent tool integration", () => {
     }, undefined, undefined, ctx);
     const launchText = textOf(launched);
     expect(launchText).toContain("Started durable background process");
-    const taskId = /Started durable background process (bgs_[0-9a-f]{20})/.exec(launchText)?.[1];
+    const receipt = launched.details as { id: string; operationId: string; owner: { sessionId: string; workspace: string } };
+    const taskId = receipt.id;
     expect(taskId).toBeTruthy();
+    expect(receipt.owner).toMatchObject({ sessionId: "session-1", workspace: root });
+    expect(host.statusForParent(ctx, taskId).operationId).toBe(receipt.operationId);
 
     await until(host, () => host.statusForParent(ctx, taskId!).phase === "terminal");
     const status = await harness.tools.get("bg_task_status")!.execute("call-2", { id: taskId }, undefined, undefined, ctx);
@@ -775,14 +1310,14 @@ describe("parent tool integration", () => {
       callback: false,
     }, undefined, undefined, ctx);
     const text = textOf(spawned);
-    const taskId = /Started durable background process (bgs_[0-9a-f]{20})/.exec(text)?.[1];
+    const taskId = (spawned.details as { id: string }).id;
     expect(taskId).toBeTruthy();
     await until(host, () => host.statusForParent(ctx, taskId!).phase === "terminal");
     const status = await harness.tools.get("bg_task")!.execute("call-2", { action: "status", id: taskId }, undefined, undefined, ctx);
     expect(textOf(status)).toContain("succeeded");
   });
 
-  it("keeps the legacy route when the durable host could not open", async () => {
+  it("refuses launch instead of falling back to legacy execution when the installed durable host cannot open", async () => {
     const root = workspace("unavailable");
     const harness = createHarness();
     const host = createObservedWaitHost(harness.pi, {
@@ -795,6 +1330,11 @@ describe("parent tool integration", () => {
     expect(host.available).toBe(false);
     expect(host.reason).toBeTruthy();
     registerTools(harness.pi);
+    const marker = join(root, "must-not-run");
+    await expect(harness.tools.get("bg_task_spawn")!.execute("refused-launch", {
+      shell: false, argv: nodeCommand(`require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unauthorized fallback')`),
+    }, undefined, undefined, createCtx(root))).rejects.toThrow();
+    expect(existsSync(marker)).toBe(false);
 
     const wait = await harness.tools.get("wait_for_operations")!.execute("call-1", {
       task_ids: ["bgs_aaaaaaaaaaaaaaaaaaaa"],
@@ -884,7 +1424,14 @@ describe("Subagents request/reply surface", () => {
   it("registers a run, executes a tool, stages then releases a checkpoint, and acknowledges", async () => {
     const root = workspace("rpc");
     const harness = createHarness();
-    const { host } = startHost({ root, harness });
+    const { host } = startHost({ root, harness, storePath: join(root, "operation-coordinator.sqlite") });
+    const { WorkReadModel } = await import(new URL("../../pi-better-server/src/runtime/read-model.ts", import.meta.url).href);
+    mkdirSync(join(root, "runs", "attempt-rpc"), { recursive: true });
+    writeFileSync(join(root, "runs", "attempt-rpc", "meta.json"), JSON.stringify({ id: "attempt-rpc", sessionId: "conv-rpc", cwd: root, status: "completed", startedAt: 1, operations: { conversationId: "conv-rpc", workspace: root } }));
+    const model = new WorkReadModel(root, "tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000, watch: manualSourceWatch });
+    cleanups.push(() => model.close());
+    await model.reconcile();
+    const inventories = model.metrics.inventories;
     const call = rpcClient(harness.events);
     const readyEvents: Array<Record<string, unknown>> = [];
     harness.events.on(OBSERVED_WAITS_READY_CHANNEL, (value: unknown) => readyEvents.push(value as Record<string, unknown>));
@@ -937,6 +1484,11 @@ describe("Subagents request/reply surface", () => {
     expect(admitted.phase).toBe("parking");
     const waitId = String(admitted.waitId);
     const generation = Number(admitted.generation);
+
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-rpc" }).rows[0].assignment.state).toBe("waiting");
+    expect(model.snapshot({ id: "attempt-rpc" }).activity.active).toBe(1);
+    expect(model.metrics.inventories).toBe(inventories);
 
     // Stage while the child is alive: the wait must not look parked yet.
     const staged = await call("checkpoint", {
@@ -1003,13 +1555,23 @@ describe("Subagents request/reply surface", () => {
       note: "rpc worker result interpreted",
     });
     expect(ack.phase).toBe("consumed");
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-rpc" }).rows[0].assignment.state).toBe("completed");
+    expect(model.metrics.inventories).toBe(inventories);
     expect(await call("release-run", { runId })).toMatchObject({ released: true });
   });
 
   it("claims, publishes, releases and cancels resume generations through the service", async () => {
     const root = workspace("rpc-resume");
     const harness = createHarness();
-    const { host } = startHost({ root, harness });
+    const { host } = startHost({ root, harness, storePath: join(root, "operation-coordinator.sqlite") });
+    const { WorkReadModel } = await import(new URL("../../pi-better-server/src/runtime/read-model.ts", import.meta.url).href);
+    mkdirSync(join(root, "runs", "attempt-resume"), { recursive: true });
+    writeFileSync(join(root, "runs", "attempt-resume", "meta.json"), JSON.stringify({ id: "attempt-resume", sessionId: "conv-resume", cwd: root, status: "completed", startedAt: 1, operations: { conversationId: "conv-resume", workspace: root } }));
+    const model = new WorkReadModel(root, "claim-tool-journey", { baseDir: root, durableDir: join(root, "durable"), intervalMs: 60000, watch: manualSourceWatch });
+    cleanups.push(() => model.close());
+    await model.reconcile();
+    const inventories = model.metrics.inventories;
     const call = rpcClient(harness.events);
     const runId = "run-resume";
     const conversationId = "conv-resume";
@@ -1064,6 +1626,8 @@ describe("Subagents request/reply surface", () => {
     });
     expect(typeof first.claimId).toBe("string");
     expect(typeof first.claimToken).toBe("string");
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-resume" }).rows[0].assignment.reason).toBe("resume-claimed");
     const released = await call("release-resume", {
       runId, waitId, generation,
       claimId: first.claimId,
@@ -1101,6 +1665,10 @@ describe("Subagents request/reply surface", () => {
       reason: "owner cancelled the parked assignment",
     });
     expect(cancelled.phase).toBe("cancelled");
+    await model.reconcile(false);
+    expect(model.snapshot({ id: "attempt-resume" }).rows[0].assignment.state).toBe("cancelled");
+    expect(model.snapshot({ id: "attempt-resume" }).activity.active).toBe(0);
+    expect(model.metrics.inventories).toBe(inventories);
     expect((await call("wait-snapshot", { waitId, generation })).claim).toBeNull();
   });
 
@@ -1148,7 +1716,7 @@ describe("actual Subagents client integration", () => {
     const harness = createHarness();
     const { host } = startHost({ root, harness });
     const service = sibling.getWorkerOperationService(harness.pi);
-    expect(service?.version).toBe(1);
+    expect(service?.version).toBe(2);
     expect(service?.continuationReady).toBe(false);
     const run = {
       runId: "sa-integration",
@@ -1201,6 +1769,184 @@ describe("actual Subagents client integration", () => {
 });
 
 describe("durable read-only projections", () => {
+  it("does not decode another session's historical operations when listing", () => {
+    const root = workspace("projection-history");
+    const { host } = startHost({ root });
+    const store = openStore({ path: join(root, "operations.sqlite") });
+    try {
+      store.registerOperation({
+        operationId: "foreign-history", taskId: "foreign-history-task", launchToken: "foreign-token",
+        owner: { kind: "parent-session", sessionId: "foreign-session", workspace: root },
+        observer: { kind: "background-tasks", version: "1" },
+      });
+    } finally {
+      store.close();
+    }
+    const db = new DatabaseSync(join(root, "operations.sqlite"));
+    try {
+      db.exec("UPDATE operations SET supervision_json = 'invalid-json' WHERE operation_id = 'foreign-history'");
+    } finally {
+      db.close();
+    }
+    expect(host.listDurableTasks({ cwd: root, sessionId: "current-session" })).toEqual([]);
+    expect(host.listDurableTasks({ cwd: root })).toEqual([]);
+  });
+
+  it("keeps unchanged panel projections off unrelated history after warm-up", async () => {
+    const root = workspace("projection-cache");
+    const { host } = startHost({ root });
+    const store = openStore({ path: join(root, "operations.sqlite") });
+    try {
+      for (let index = 0; index < 3_140; index += 1) {
+        store.registerOperation({
+          operationId: `op-history-${index}`,
+          taskId: `bgs_${index.toString(16).padStart(20, "0")}`,
+          launchToken: `launch_history_${index}`,
+          owner: {
+            kind: "parent-session",
+            sessionId: `historical-session-${index % 37}`,
+            workspace: root,
+            branchId: `branch-${index % 5}`,
+            goalId: null,
+          },
+          observer: { kind: "background-tasks", version: "1" },
+        });
+      }
+      for (const [index, branchId] of ["main", "side", "other"].entries()) {
+        store.registerOperation({
+          operationId: `op-current-${index}`,
+          taskId: `bgs_${(0x100000 + index).toString(16).padStart(20, "0")}`,
+          launchToken: `launch_current_${index}`,
+          owner: { kind: "parent-session", sessionId: "current-session", workspace: root, branchId, goalId: null },
+          observer: { kind: "background-tasks", version: "1" },
+        });
+      }
+    } finally {
+      store.close();
+    }
+
+    const origin = { cwd: root, sessionId: "current-session" };
+    host.resetDurableProjectionMetrics();
+    const first = host.listDurableTasks(origin, { retentionMs: 30_000 });
+    expect(first).toHaveLength(3);
+    expect(host.getDurableProjectionMetrics()).toEqual({
+      listCalls: 1,
+      queries: 1,
+      rowsRead: 3,
+      projectionsBuilt: 3,
+      cacheHits: 0,
+    });
+
+    for (let render = 0; render < 25; render += 1) {
+      expect(host.listDurableTasks(origin, { retentionMs: 30_000 })).toHaveLength(3);
+    }
+    expect(host.getDurableProjectionMetrics()).toEqual({
+      listCalls: 26,
+      queries: 1,
+      rowsRead: 3,
+      projectionsBuilt: 3,
+      cacheHits: 25,
+    });
+  }, 120_000);
+
+  it("invalidates a cached projection when another process records the terminal revision", async () => {
+    const root = workspace("projection-cross-process");
+    const { host } = startHost({ root });
+    const ctx = createCtx(root, "session-projection-cross");
+    const origin = { cwd: root, sessionId: "session-projection-cross" };
+    const launch = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => {}, 5000)"), shell: false, callback: false },
+      ctx,
+    });
+    try {
+      await host.reconcileNow();
+      expect(host.listDurableTasks(origin)[0]).toMatchObject({ id: launch.id, status: "running", terminal: false });
+      let changes = 0;
+      const off = host.onDurableTaskChange(() => { changes += 1; });
+      try {
+        recordTerminalFromChild(root, launch.operationId, launch.owner, "cross-process-terminal");
+        const beforeReconcile = changes;
+        host.resetDurableProjectionMetrics();
+        await host.reconcileNow();
+        expect(changes).toBeGreaterThan(beforeReconcile);
+        expect(host.listDurableTasks(origin)[0]).toMatchObject({ id: launch.id, status: "succeeded", terminal: true });
+        expect(host.getDurableProjectionMetrics().queries).toBe(1);
+        expect(host.getDurableProjectionMetrics().rowsRead).toBe(1);
+      } finally {
+        off();
+      }
+    } finally {
+      await host.stopDurableTask(origin, launch.id);
+    }
+  });
+
+  it("leaves a warmed active projection untouched for foreign-session discovery and terminal changes", async () => {
+    const root = workspace("projection-foreign-isolation");
+    const { host } = startHost({ root });
+    const ctx = createCtx(root, "session-current", "projection-branch");
+    const origin = { cwd: root, sessionId: "session-current" };
+    const current = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => {}, 30000)"), shell: false, callback: false },
+      ctx,
+    });
+    const foreignTaskId = `bgs_${"f".repeat(20)}`;
+    const foreignOwner = {
+      kind: "parent-session" as const,
+      sessionId: "session-foreign",
+      workspace: root,
+      branchId: "foreign-branch",
+      goalId: null,
+    };
+    try {
+      await host.reconcileNow();
+      expect(host.listDurableTasks(origin).map((task) => task.id)).toEqual([current.id]);
+      host.resetDurableProjectionMetrics();
+      const changes: DurableTaskChange[] = [];
+      const off = host.onDurableTaskChange((change) => { changes.push(change); });
+      try {
+        const store = openStore({ path: join(root, "operations.sqlite") });
+        try {
+          store.registerOperation({
+            operationId: "op-foreign",
+            taskId: foreignTaskId,
+            launchToken: "launch-foreign",
+            owner: foreignOwner,
+            observer: { kind: "background-tasks", version: "1" },
+          });
+        } finally {
+          store.close();
+        }
+        mkdirSync(join(root, "supervisor", "observed"), { recursive: true });
+        writeFileSync(join(root, "supervisor", "observed", `${foreignTaskId}.json`), "{}");
+
+        await host.reconcileNow();
+        expect(changes).toEqual([]);
+        expect(host.listDurableTasks(origin)).toHaveLength(1);
+        expect(host.getDurableProjectionMetrics()).toMatchObject({ queries: 0, rowsRead: 0, cacheHits: 1 });
+
+        recordTerminalFromChild(root, "op-foreign", foreignOwner, "foreign-terminal");
+        host.resetDurableProjectionMetrics();
+        await host.reconcileNow();
+        expect(changes).toEqual([]);
+        expect(host.listDurableTasks(origin)?.map((task) => task.id)).toEqual([current.id]);
+        expect(host.getDurableProjectionMetrics()).toMatchObject({ queries: 0, rowsRead: 0, cacheHits: 1 });
+
+        recordTerminalFromChild(root, current.operationId, current.owner, "own-terminal");
+        host.resetDurableProjectionMetrics();
+        await host.reconcileNow();
+        expect(changes).toEqual([{ sessionId: "session-current", workspace: root, branchId: "projection-branch" }]);
+        expect(host.listDurableTasks(origin)[0]).toMatchObject({ id: current.id, status: "succeeded", terminal: true });
+        expect(host.getDurableProjectionMetrics()).toMatchObject({ queries: 1, rowsRead: 1 });
+      } finally {
+        off();
+      }
+    } finally {
+      await host.stopDurableTask(origin, current.id);
+    }
+  });
+
   it("projects only the exact parent origin, never a worker or foreign session", async () => {
     const root = workspace("projection");
     const { host } = startHost({ root });
@@ -1265,9 +2011,28 @@ describe("durable read-only projections", () => {
     }
   });
 
-  it("keeps read-only log access from satisfying acknowledgement evidence", async () => {
+  it.each(["natural", "snapshot-before-reconciliation"])("keeps read-only log access from satisfying acknowledgement evidence (%s)", async (timing) => {
     const root = workspace("projection-read");
-    const { host } = startHost({ root });
+    const supervisor = createLocalSupervisor({ directory: join(root, "supervisor") });
+    let terminalProjected = false;
+    let running: ReturnType<LocalSupervisor["inspect"]>;
+    // Expose the real runner result to the read-only snapshot before the next
+    // coordinator pass, the same window that exists between inspect and snapshot.
+    const controlled: LocalSupervisor = {
+      async start(options) {
+        const started = await supervisor.start(options);
+        running = { ...started.inspection, status: "running", terminal: false, result: undefined, lost: undefined };
+        return { ...started, status: "running", inspection: running };
+      },
+      inspect(taskId, options) { return terminalProjected ? supervisor.inspect(taskId, options) : running; },
+      snapshot(taskId) {
+        const snapshot = supervisor.snapshot(taskId);
+        if (snapshot?.terminal) terminalProjected = true;
+        return snapshot;
+      },
+      stop: (taskId, options) => supervisor.stop(taskId, options),
+    };
+    const { host } = startHost({ root, supervisor: timing === "natural" ? supervisor : controlled });
     const ctx = createCtx(root, "session-projection-read");
     const origin = { cwd: root, sessionId: "session-projection-read" };
     const launch = await host.launchParent({
@@ -1277,11 +2042,20 @@ describe("durable read-only projections", () => {
     });
     const wait = host.waitForParent(ctx, [launch.id], "read evidence");
     await until(host, () => host.readDurableTask(origin, launch.id)?.terminal === true);
+    if (timing === "snapshot-before-reconciliation") {
+      expect(host.waitViewForParent(ctx, wait.waitId)?.dependencies[0]?.terminalRevision).toBe(0);
+    }
+    // A runner snapshot can become terminal between reconciliation and projection.
+    // Wait for the coordinator revision without recording an evidence read.
+    await until(host, () => host.waitViewForParent(ctx, wait.waitId)?.settled === true);
 
     const log = host.readDurableTaskLog(origin, launch.id, 10)!;
     expect(log.stdout).toContain("projection-evidence");
     const view = host.waitViewForParent(ctx, wait.waitId) ?? host.listWaitsForParent(ctx, { pendingOnly: true })
       .find((entry) => entry.waitId === wait.waitId)!;
+    expect(view.phase).toBe("ready");
+    expect(view.dependencies).toHaveLength(1);
+    expect(view.dependencies[0]!.terminalRevision).toBeGreaterThan(0);
     expect(() => host.acknowledgeForParent(ctx, {
       waitId: view.waitId,
       generation: view.generation,
@@ -1291,7 +2065,8 @@ describe("durable read-only projections", () => {
     })).toThrow(/has not been read/);
 
     // The real status read is still the evidence read that unlocks acknowledgement.
-    host.statusForParent(ctx, launch.id);
+    const status = host.statusForParent(ctx, launch.id);
+    expect(status.terminalRevision).toBe(view.dependencies[0]!.terminalRevision);
     expect(host.acknowledgeForParent(ctx, {
       waitId: view.waitId,
       generation: view.generation,
@@ -1855,7 +2630,19 @@ describe("callback origin and delivery receipt", () => {
   });
 
   it("discovers a terminal result recorded after this host's initial scan", async () => {
-    const root = workspace("late-terminal-discovery");
+    const root = mkdtempSync(join(tmpdir(), "observed-waits-late-terminal-discovery-"));
+    let runnerClosed = false;
+    let runnerExit = Promise.resolve();
+    let runnerResult: string | undefined;
+    cleanups.push(async () => {
+      const before = { closed: runnerClosed, terminal: runnerResult ? existsSync(runnerResult) : false };
+      await runnerExit;
+      expect(runnerClosed, "the owned fixture writer must exit before its directory is removed").toBe(true);
+      expect(runnerResult).toBeDefined();
+      expect(JSON.parse(readFileSync(runnerResult!, "utf8")).attestedBy).toBe("runner");
+      console.log(JSON.stringify({ fixtureWriterQuiescence: { before, closed: runnerClosed, terminal: true } }));
+      rmSync(root, { recursive: true, force: true });
+    });
     const options = {
       storePath: join(root, "operations.sqlite"),
       supervisorDirectory: join(root, "supervisor"),
@@ -1870,29 +2657,35 @@ describe("callback origin and delivery receipt", () => {
     watcher.start(ctx);
     await watcher.reconcileNow();
 
-    // A separate launcher registers/starts the task, then another host with no
-    // session identity records terminal while the watcher is not reconciling.
+    // A separate launcher registers/starts the task, then another process
+    // records terminal while the watcher is not reconciling.
     const launcherHarness = createHarness();
     const launcher = createObservedWaitHost(launcherHarness.pi, { ...options, notifyParent: () => {} });
+    cleanups.push(() => launcher.close());
     launcher.start(ctx);
+    const childProcess = createRequire(import.meta.url)("node:child_process") as typeof import("node:child_process");
+    const originalSpawn = childProcess.spawn;
+    const capture = vi.spyOn(childProcess, "spawn").mockImplementation((...args: Parameters<typeof spawn>) => {
+      const child = originalSpawn(...args);
+      if (args[1]?.[1] === options.supervisorDirectory) {
+        runnerResult = join(options.supervisorDirectory, "tasks", args[1][2]!, "result.json");
+        runnerExit = new Promise<void>((resolve, reject) => {
+          child.once("error", reject);
+          child.once("close", code => { runnerClosed = true; code === 0 ? resolve() : reject(new Error(`fixture runner exit ${code}`)); });
+        });
+        // Cleanup still awaits the original promise and propagates any failure.
+        void runnerExit.catch(() => {});
+      }
+      return child;
+    });
+    syncBuiltinESMExports();
     const launch = await launcher.launchParent({
       kind: "process",
       params: { argv: nodeCommand('setTimeout(() => { console.log("late-terminal"); }, 300)'), shell: false, callback: true },
       ctx,
-    });
+    }).finally(() => { capture.mockRestore(); syncBuiltinESMExports(); });
     launcher.close();
-    const recorderHarness = createHarness();
-    const recorder = createObservedWaitHost(recorderHarness.pi, { ...options, notifyParent: () => {} });
-    cleanups.push(() => recorder.close());
-    const anonymous = {
-      cwd: root,
-      sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
-      isIdle: () => true,
-    } as unknown as ExtensionContext;
-    recorder.start(anonymous);
-    await until(recorder, () => (recorder as unknown as {
-      operationForTask(id: string): { terminalRevision: number } | undefined;
-    }).operationForTask(launch.id)?.terminalRevision === 1);
+    recordTerminalFromChild(root, launch.operationId, launch.owner, "late-terminal");
 
     // The watcher did not see the running phase. Normal reconcile discovers the
     // new shared sidecar/terminal result and hands off exactly once.
@@ -2031,20 +2824,8 @@ describe("callback origin and delivery receipt", () => {
     watcher.start(ctx);
     await watcher.reconcileNow();
 
-    // A different host with no session identity records the terminal revision.
-    const recorderHarness = createHarness();
-    const recorder = createObservedWaitHost(recorderHarness.pi, { ...options, notifyParent: () => {} });
-    cleanups.push(() => recorder.close());
-    const anonymous = {
-      cwd: root,
-      sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
-      isIdle: () => true,
-    } as unknown as ExtensionContext;
-    recorder.start(anonymous);
-    await until(recorder, () => (recorder as unknown as {
-      operationForTask(id: string): { terminalRevision: number } | undefined;
-    }).operationForTask(launch.id)?.terminalRevision === 1);
-    await recorder.reconcileNow();
+    // A different process records the terminal revision.
+    recordTerminalFromChild(root, launch.operationId, launch.owner, "watched-terminal");
     expect(notifier.calls).toHaveLength(0);
 
     // The active watcher sees the task leave the running set and recovers the
@@ -2197,4 +2978,17 @@ describe("callback origin and delivery receipt", () => {
       policy: null,
     })).rejects.toThrow(/outside the registered workspace/);
   });
+});
+
+it('rechecks accepted foreground authority at external dispatch and records refusal without spawning', async()=>{
+  const root=workspace('admission-revoked'),harness=createHarness(),storePath=join(root,'operations.sqlite');
+  let assertions=0,operationId='';
+  const host=createObservedWaitHost(harness.pi,{storePath,supervisorDirectory:join(root,'supervisor'),pollMs:0,
+    assertAdmission(){if(++assertions===2)throw new Error('captured permission revoked');},
+    beforeParentOperation(operation){operationId=operation.operationId;}});
+  host.start(createCtx(root));cleanups.push(()=>host.close());
+  const marker=join(root,'must-not-launch');
+  await expect(host.launchParent({kind:'process',params:{shell:false,argv:[process.execPath,'-e',`require('node:fs').writeFileSync(${JSON.stringify(marker)},'bad')`]},ctx:createCtx(root)})).rejects.toThrow('captured permission revoked');
+  expect(existsSync(marker)).toBe(false);
+  const store=openStore({path:storePath});try{expect(store.getOperation(operationId)?.terminalOutcome).toBe('failed');}finally{store.close();}
 });

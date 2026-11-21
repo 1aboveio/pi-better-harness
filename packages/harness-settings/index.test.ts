@@ -4,6 +4,7 @@ import { closeSync, lstatSync, mkdtempSync, openSync, readFileSync, rmSync, syml
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from "./index.ts";
 
@@ -80,20 +81,74 @@ test("independent Pi and Harness processes update settings without losing siblin
   const f = fixture(t);
   writeFileSync(f.path, '{"theme":"dark"}');
   const module = new URL("./index.ts", import.meta.url).href;
-  await Promise.all(["goal", "callbacks", "sandbox", "subagents", "pi"].map(key => new Promise<void>((resolve, reject) => {
-    const code = key === "pi"
-      ? `import {SettingsManager} from '@earendil-works/pi-coding-agent'; const pi=SettingsManager.create(${JSON.stringify(f.root)},${JSON.stringify(f.root)}); for(let i=0;i<10;i++){pi.setTheme('light'); await pi.flush();}`
-      : `import {updateHarnessSetting} from ${JSON.stringify(module)}; for(let i=0;i<10;i++) updateHarnessSetting(${JSON.stringify(key)},()=>({saved:true}),{agentDir:()=>${JSON.stringify(f.root)}});`;
+  const children = ["goal", "callbacks", "sandbox", "subagents", "pi"].map(key => {
+    const initialize = key === "pi"
+      ? `import assert from 'node:assert/strict'; import {SettingsManager} from '@earendil-works/pi-coding-agent'; const pi=SettingsManager.create(${JSON.stringify(f.root)},${JSON.stringify(f.root)}); assert.deepEqual(pi.drainErrors(),[]);`
+      : `import {updateHarnessSetting} from ${JSON.stringify(module)};`;
+    const writes = key === "pi"
+      ? `for(let i=0;i<10;i++){pi.setTheme('light'); await pi.flush(); assert.deepEqual(pi.drainErrors(),[]);}`
+      : `for(let i=0;i<10;i++) updateHarnessSetting(${JSON.stringify(key)},()=>({saved:true}),{agentDir:()=>${JSON.stringify(f.root)}});`;
+    const code = `import {once} from 'node:events'; ${initialize}
+      process.send('ready'); await once(process,'message'); ${writes} process.disconnect();`;
     const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
-      code], { stdio: ["ignore", "ignore", "pipe"] });
+      code], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
     let stderr = "";
-    child.stderr.on("data", data => { stderr += data; });
-    child.on("error", reject);
-    child.on("close", code => code === 0 ? resolve() : reject(new Error(stderr || `exit ${code}`)));
-  })));
+    child.stderr!.on("data", data => { stderr += data; });
+    const exited = new Promise<void>((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", code => code === 0 ? resolve() : reject(new Error(`${key}: ${stderr || `exit ${code}`}`)));
+    });
+    const ready = Promise.race([once(child, "message"), exited.then(() => { throw new Error(`${key} exited before ready`); })]);
+    return { child, ready, exited };
+  });
+  try {
+    // Pi retains an initial read error and silently skips later saves. Exercise
+    // concurrent writes only after every independent manager has loaded safely.
+    await Promise.all(children.map(value => value.ready));
+    for (const { child } of children) child.send("write");
+    await Promise.all(children.map(value => value.exited));
+  } finally {
+    for (const { child } of children) if (child.exitCode === null && child.signalCode === null) child.kill();
+    await Promise.allSettled(children.map(value => value.exited));
+  }
   assert.deepEqual(JSON.parse(readFileSync(f.path, "utf8")), {
     theme: "light", piBetterHarness: {
       goal: { saved: true }, callbacks: { saved: true }, sandbox: { saved: true }, subagents: { saved: true },
     },
   });
+});
+
+test("a Harness writer waits for a briefly delayed settings lock holder and preserves its update", async t => {
+  const f = fixture(t);
+  writeFileSync(f.path, '{"theme":"dark"}');
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `
+    import lockfile from 'proper-lockfile';
+    import {readFileSync, writeFileSync} from 'node:fs';
+    const path = ${JSON.stringify(f.path)};
+    const release = lockfile.lockSync(path, {realpath:false});
+    process.send('locked');
+    setTimeout(() => {
+      const settings = JSON.parse(readFileSync(path, 'utf8'));
+      settings.theme = 'light';
+      writeFileSync(path, JSON.stringify(settings));
+      release();
+      process.disconnect();
+    }, 350);
+  `], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  let stderr = "";
+  child.stderr!.on("data", data => { stderr += data; });
+  const exited = once(child, "close");
+  try {
+    await Promise.race([
+      once(child, "message"),
+      exited.then(() => { throw new Error(stderr || "lock holder exited before ready"); }),
+    ]);
+    updateHarnessSetting("goal", () => ({ saved: true }), f.seams);
+    assert.deepEqual(JSON.parse(readFileSync(f.path, "utf8")), {
+      theme: "light", piBetterHarness: { goal: { saved: true } },
+    });
+  } finally {
+    const [code] = await exited;
+    assert.equal(code, 0, stderr);
+  }
 });

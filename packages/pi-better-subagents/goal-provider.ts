@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { activateWorkObservation, hasWorkObservationContext, workObservation, onWorkObservation } from "./work-observation.ts";
 import {
     belongsToOrigin,
     effectiveStatus,
@@ -38,13 +39,42 @@ function parkActivity(meta: Parameters<typeof effectiveStatus>[0]): Record<strin
     };
 }
 
+function observedActivity(observed: any, ctx?: ExtensionContext) {
+    if (observed?.status !== "ready") throw new Error(observed?.reason ?? "Subagent activity is unverified");
+    return {
+        providerId: "subagents", label: "Subagents", nextDeadline: observed.nextDeadline ?? null,
+        items: observed.rows.filter((row: any) => !ctx || (
+            belongsToOrigin(row.meta, { cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() }) &&
+            (!row.meta.callbackOrigin?.branchId || ctx.sessionManager.getBranch().some(entry => entry.id === row.meta.callbackOrigin.branchId))
+        )).map((row: any) => {
+            const status = row.assignment.state;
+            const active = status === "running" || status === "waiting";
+            return { id: row.meta.id, label: row.meta.name, status, active, terminal: !active,
+                attention: !active && status !== "completed", unhealthy: row.meta.status === "orphaned",
+                startedAt: row.meta.startedAt, endedAt: row.meta.endedAt,
+                details: { assignment: row.assignment, sourceRevision: row.sourceRevision } };
+        }),
+    };
+}
+
 export function registerSubagentsGoalProvider(pi: ExtensionAPI): void {
     const emitProvider = (): void => {
         pi.events?.emit(GOAL_REGISTER_PROVIDER_EVENT, {
             id: "subagents",
             label: "Subagents",
             scope: "session",
-            getActivity: (ctx?: ExtensionContext) => {
+            activityVersion: 1,
+            getActivity: (ctx?: ExtensionContext, options?: { cachedOnly?: boolean }) => {
+                const observed = workObservation();
+                if (!observed && options?.cachedOnly) {
+                    return { providerId: "subagents", coverage: "unverified", items: [], nextDeadline: null };
+                }
+                if (!observed && hasWorkObservationContext()) {
+                    return activateWorkObservation().then(() => observedActivity(workObservation(), ctx));
+                }
+                if (observed) {
+                    return observedActivity(observed, ctx);
+                }
                 let sessionId: string | undefined;
                 try {
                     sessionId = ctx?.sessionManager?.getSessionId();
@@ -54,9 +84,11 @@ export function registerSubagentsGoalProvider(pi: ExtensionAPI): void {
                 const origin = ctx ? { cwd: ctx.cwd, sessionId } : undefined;
                 return {
                     providerId: "subagents",
+                    nextDeadline: null,
                     label: "Subagents",
                     items: listMetasForParent(process.pid)
                         .filter((meta) => !origin || belongsToOrigin(meta, origin))
+                        .filter((meta) => !ctx || !meta.callbackOrigin?.branchId || ctx.sessionManager.getBranch().some(entry => entry.id === meta.callbackOrigin?.branchId))
                         .map((meta) => {
                             const status = effectiveStatus(meta);
                             const active = status === "running" || status === "orphaned";
@@ -79,7 +111,17 @@ export function registerSubagentsGoalProvider(pi: ExtensionAPI): void {
                         }),
                 };
             },
-            onActivityChanged: onMetaChanged,
+            onActivityChanged: (notify: () => void, ctx?: ExtensionContext) => {
+                const offObservation = onWorkObservation(notify);
+                const offMeta = onMetaChanged((meta) => {
+                if (ctx && meta) {
+                    if (!belongsToOrigin(meta, { cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() })) return;
+                    if (meta.callbackOrigin?.branchId && !ctx.sessionManager.getBranch().some(entry => entry.id === meta.callbackOrigin?.branchId)) return;
+                }
+                notify();
+                });
+                return () => { offObservation(); offMeta(); };
+            },
         });
     };
     if (!goalReadySubscriptions.has(pi)) {

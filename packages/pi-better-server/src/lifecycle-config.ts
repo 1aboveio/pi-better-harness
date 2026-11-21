@@ -4,6 +4,7 @@ import { join } from "node:path";
 export interface LifecycleConfig {
   sessionIdleMs: number;
   daemonIdleMs: number;
+  runtimeIdleMs: number;
 }
 
 export function readLifecycleConfig(serverDir: string, overrides: Partial<LifecycleConfig> = {}, env = process.env): LifecycleConfig {
@@ -22,7 +23,10 @@ export function readLifecycleConfig(serverDir: string, overrides: Partial<Lifecy
     }
     return value;
   };
+  const runtimeIdleMs = duration("runtimeIdleMs", "PI_SERVER_RUNTIME_IDLE_MS", 30_000);
+  if (runtimeIdleMs === 0) throw new Error("runtimeIdleMs must be a positive safe integer in milliseconds");
   return {
+    runtimeIdleMs,
     sessionIdleMs: duration("sessionIdleMs", "PI_SERVER_SESSION_IDLE_MS", 24 * 60 * 60 * 1000),
     daemonIdleMs: duration("daemonIdleMs", "PI_SERVER_DAEMON_IDLE_MS", 30 * 60 * 1000),
   };

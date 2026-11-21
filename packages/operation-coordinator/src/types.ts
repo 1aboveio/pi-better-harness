@@ -18,8 +18,8 @@
  *   spawned, so a crash is reconciled instead of relaunched.
  */
 
-/** Schema version this build writes and accepts. Any other version is refused. */
-export const SCHEMA_VERSION = 1;
+/** Schema version this build writes after creating or migrating a store. */
+export const SCHEMA_VERSION = 4;
 
 /** Who receives an operation's result and decides what happens next. */
 export type OwnerKind = "parent-session" | "worker-conversation";
@@ -82,6 +82,10 @@ export interface ObserverIdentity {
  * (a replacement host takes over on reload) while launch identity is not.
  */
 export interface SupervisionIdentity {
+    /** Durable discovery scope, recorded before sidecar creation or runner start. */
+    resultScope?: string;
+    /** The host uses grant-before-runner result admission and performs no global discovery. */
+    resultAdapter?: 1;
     /** Host that owns supervision, e.g. the Pi process id plus a start token. */
     hostId: string;
     /** Runner process identity, when a separate runner owns the operation. */
@@ -102,6 +106,8 @@ export interface RegisterOperationInput {
      */
     launchToken: string;
     owner: OwnerIdentity;
+    /** Exact registered worker attempt for this launch. Omit when no binding is known. */
+    assignmentAttemptId?: string;
     observer: ObserverIdentity;
     supervision?: SupervisionIdentity | null;
     /** Reference to the permission/authority snapshot. Never credential material. */
@@ -111,10 +117,14 @@ export interface RegisterOperationInput {
 }
 
 export interface OperationRecord {
+    /** Grant presence in the same snapshot as a bulk operation read. */
+    resultManaged?: boolean;
     operationId: string;
     taskId: string;
     launchToken: string;
     owner: OwnerIdentity;
+    /** Immutable launch provenance. Absent on unbound and legacy operations. */
+    assignmentAttemptId?: string;
     observer: ObserverIdentity;
     supervision: SupervisionIdentity | null;
     authorityRef: string | null;
@@ -150,6 +160,48 @@ export interface RecordSupervisionInput {
     supervision?: SupervisionIdentity | null;
     health?: ObserverHealth;
     reason?: string | null;
+    /**
+     * The host id the caller observed as current, or null when no supervisor was
+     * recorded. Required when supplying `supervision`. The write is refused with
+     * `supervision-conflict` if another host took over after the caller read the
+     * operation, so a stale contender cannot replace a newly live holder.
+     */
+    expectedHostId?: string | null;
+}
+
+export interface ReleaseSupervisionInput {
+    operationId: string;
+    /** Must be the recorded owner; a replacement host acts for the same owner. */
+    owner: OwnerIdentity;
+    /** The exact host whose authority is being released. A newer holder is untouched. */
+    hostId: string;
+    /** Why the host stopped supervising, retained on the unmonitored record. */
+    reason?: string | null;
+}
+
+/** One shared discovery leader for a coordinator database and supervisor scope. */
+export interface DiscoveryClaimRecord {
+    /** Opaque canonical scope computed from the store path and supervisor directory. */
+    scope: string;
+    hostId: string;
+    /** Fences acquisition and release against a stale or ABA competitor. */
+    token: string;
+    claimedAt: number;
+    updatedAt: number;
+}
+
+export interface TryClaimDiscoveryInput {
+    scope: string;
+    /** The exact claim the caller observed, or null when it observed no claim. */
+    expected: Pick<DiscoveryClaimRecord, "hostId" | "token"> | null;
+    hostId: string;
+    token: string;
+}
+
+export interface ReleaseDiscoveryClaimInput {
+    scope: string;
+    hostId: string;
+    token: string;
 }
 
 // ---- terminal outcome ---------------------------------------------------
@@ -203,6 +255,8 @@ export interface RecordTerminalOutcomeResult {
 /** Filter for `listOperations`. */
 export interface OperationFilter {
     owner?: OwnerIdentity;
+    /** Session/workspace scope spanning all branches and goals. */
+    ownerScope?: Pick<OwnerIdentity, "kind" | "sessionId" | "workspace">;
     phase?: OperationPhase;
     taskId?: string;
 }
@@ -439,7 +493,7 @@ export interface ReleaseResumeClaimResult {
 }
 
 /**
- * Proof that the published resume attempt can never interpret the generation:
+ * Proof that the published resume attempt can no longer write the conversation:
  * its writer process is gone and its conversation writer lease is free. A live
  * writer or an unverifiable identity must never be passed here.
  */
@@ -454,6 +508,8 @@ export interface ResumeAttemptExitProof {
  * evidence pins stay, and the generation remains visible to its owner. The claim
  * is invalidated (it can never publish again), which is what makes a second
  * automatic attempt impossible.
+ * If interpretation already consumed the wait, exact exit proof only invalidates
+ * the published writer claim and preserves the interpretation receipt.
  */
 export interface HoldFailedResumeInput {
     waitId: string;
@@ -463,7 +519,7 @@ export interface HoldFailedResumeInput {
     attemptId: string;
     launchToken: string;
     proof: ResumeAttemptExitProof;
-    /** Why the attempt never interpreted the generation; retained on both records. */
+    /** Exit reason; a consumed generation's receipt is preserved. */
     reason: string;
 }
 
@@ -576,6 +632,7 @@ export interface OutboxDispatchClaim {
 }
 
 export interface OutboxEventRecord {
+    type: "dependency-ready" | "assignment-outcome";
     eventId: string;
     operationId: string;
     /** Terminal revision this event delivers. Unique per wait generation. */
@@ -607,6 +664,8 @@ export interface OutboxFilter {
 }
 
 export interface ClaimOutboxInput {
+    eventId?: string;
+    type?: OutboxEventRecord["type"];
     /** Restrict to one wait generation. Omit to claim across a recipient. */
     waitId?: string;
     generation?: number;

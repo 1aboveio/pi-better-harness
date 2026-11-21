@@ -195,6 +195,8 @@ export function statusThemeColor(status) {
         case "lost":
             return "error";
         case "killed":
+        case "cancelled":
+        case "waiting":
         case "orphaned":
             return "warning";
         case "running":

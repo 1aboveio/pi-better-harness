@@ -27,6 +27,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { LaunchRecipe, RunMeta } from "./registry.ts";
 
 /**
@@ -55,7 +56,7 @@ const ARCHIVE_META_KEYS = [
     "dismissedAt",
     // A parked attempt's disposition and operation binding outlive the volatile
     // run directory: the resume path and cleanup protection read this record.
-    "park", "operations",
+    "park", "operations", "assignment", "pidStartTime",
 ] as const satisfies readonly (keyof RunMeta)[];
 
 interface ArchivedAttemptRecord {
@@ -150,9 +151,10 @@ export function archivePublicationPending(meta: RunMeta): boolean {
 /**
  * Publish the compact record for a completed attempt, atomically.
  *
- * Returns true when this call published (or re-published) the record and false
- * when the attempt is not archivable at all. Rewriting an existing record is how
- * a failed publication is retried, so the call is idempotent. IO failures throw:
+ * Returns true when this call published or verified an identical record and
+ * false when the attempt is not archivable at all. Missing, corrupt or changed
+ * records are atomically replaced; redundant retries preserve source identity.
+ * IO failures throw:
  * the caller decides whether the volatile record is retained.
  */
 export function archiveCompletedAttempt(meta: RunMeta): boolean {
@@ -162,14 +164,25 @@ export function archiveCompletedAttempt(meta: RunMeta): boolean {
     const directory = durableAttemptsDir();
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const path = attemptPath(meta.id);
-    const temp = join(directory, `.${randomBytes(8).toString("hex")}.tmp`);
     const record: ArchivedAttemptRecord = { version: ARCHIVE_VERSION, meta: compactAttempt(meta) };
-    try {
-        writeFileSync(temp, JSON.stringify(record), { mode: 0o600, flag: "wx" });
-        renameSync(temp, path);
-    } catch (error) {
-        try { unlinkSync(temp); } catch { /* best effort */ }
-        throw error;
+    const payload = JSON.stringify(record);
+    let previous: string | undefined;
+    try { previous = readFileSync(path, "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    let identical = false;
+    if (previous !== undefined) {
+        try { identical = isDeepStrictEqual(JSON.parse(previous), JSON.parse(payload)); }
+        catch { /* A corrupt record must be repaired by the real writer. */ }
+    }
+    if (!identical) {
+        const temp = join(directory, `.${randomBytes(8).toString("hex")}.tmp`);
+        try {
+            writeFileSync(temp, payload, { mode: 0o600, flag: "wx" });
+            renameSync(temp, path);
+        } catch (error) {
+            try { unlinkSync(temp); } catch { /* best effort */ }
+            throw error;
+        }
     }
     // The published record now speaks for this conversation, so a marker left by
     // an older non-completing attempt no longer applies.
@@ -182,7 +195,7 @@ export function archiveCompletedAttempt(meta: RunMeta): boolean {
  * that does not match is treated as absent: guessing a conversation identity
  * from a damaged or foreign record would continue the wrong history.
  */
-function parseArchivedAttempt(raw: string, id: string): RunMeta | undefined {
+export function parseArchivedAttempt(raw: string, id: string, sessionRoot = durableSessionsDir()): RunMeta | undefined {
     let parsed: unknown;
     try {
         parsed = JSON.parse(raw);
@@ -204,18 +217,21 @@ function parseArchivedAttempt(raw: string, id: string): RunMeta | undefined {
     const recipe = meta.recipe as Partial<LaunchRecipe> | undefined;
     if (!recipe || typeof recipe !== "object" || recipe.version !== 1) return undefined;
     if (recipe.sessionId !== meta.sessionId) return undefined;
-    if (typeof recipe.sessionDir !== "string" || !isDurableSessionsPath(recipe.sessionDir)) return undefined;
+    if (typeof recipe.sessionDir !== "string" || !(recipe.sessionDir === sessionRoot || recipe.sessionDir.startsWith(sessionRoot.endsWith(sep) ? sessionRoot : `${sessionRoot}${sep}`))) return undefined;
     if (typeof recipe.cwd !== "string" || recipe.cwd === "") return undefined;
     return meta as RunMeta;
 }
 
 /** One published archived completed attempt, ignoring staleness. */
-function readPublishedAttempt(id: string): RunMeta | undefined {
+function readPublishedAttempt(id: string, requireReadable = false): RunMeta | undefined {
     if (!isSafeRunId(id)) return undefined;
     let raw: string;
     try {
         raw = readFileSync(attemptPath(id), "utf-8");
-    } catch {
+    } catch (error) {
+        // A direct lookup can refuse continuation as absent. A list also
+        // authorizes tombstone/cleanup decisions, so partial history is unsafe.
+        if (requireReadable) throw error;
         return undefined;
     }
     return parseArchivedAttempt(raw, id);
@@ -232,21 +248,23 @@ export function readArchivedAttempt(id: string): RunMeta | undefined {
 }
 
 let archiveListCache: { signature: string; metas: RunMeta[]; ids: Set<string> } | undefined;
+let archiveFiles = new Map<string, { signature: string; meta?: RunMeta }>();
 
 function attemptsSignature(): string {
     try {
         const stat = statSync(durableAttemptsDir());
-        return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}`;
-    } catch {
-        return "missing";
+        return `${durableAttemptsDir()}:${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        return `${durableAttemptsDir()}:missing`;
     }
 }
 
 /**
  * Every published compact record, staleness not applied. The directory
  * signature (which changes when a record is atomically replaced) keeps repeated
- * `listMetas` calls cheap; staleness is decided per record because a marker
- * written since the listing must take effect without re-listing.
+ * `listMetas` calls cheap. After a publication, reuse unchanged file identities
+ * rather than parsing the entire history again. Markers have their own boundary.
  */
 function archivedAttempts(): RunMeta[] {
     const signature = attemptsSignature();
@@ -254,15 +272,31 @@ function archivedAttempts(): RunMeta[] {
     let names: string[] = [];
     try {
         names = readdirSync(durableAttemptsDir());
-    } catch {
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        // A missing directory (or a file at that path) contains no archives.
+        // Permission and I/O refusals cannot establish that same absence.
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
         names = [];
     }
     const metas: RunMeta[] = [];
+    const files = new Map<string, { signature: string; meta?: RunMeta }>();
     for (const name of names) {
         if (!name.endsWith(".json")) continue;
-        const meta = readPublishedAttempt(name.slice(0, -".json".length));
-        if (meta) metas.push(meta);
+        const path = join(durableAttemptsDir(), name);
+        const fileSignature = stateSignature(path);
+        const cached = archiveFiles.get(path);
+        const entry = cached?.signature === fileSignature ? cached : {
+            signature: fileSignature,
+            meta: readPublishedAttempt(name.slice(0, -".json".length), true),
+        };
+        // Retain successful observations even if a later file refuses a read.
+        // The list signature is committed only after the entire scan succeeds.
+        archiveFiles.set(path, entry);
+        files.set(path, entry);
+        if (entry.meta) metas.push(entry.meta);
     }
+    archiveFiles = files;
     archiveListCache = { signature, metas, ids: new Set(metas.map((meta) => meta.id)) };
     return metas;
 }
@@ -272,9 +306,28 @@ function publishedAttemptIds(): ReadonlySet<string> {
     return archiveListCache!.ids;
 }
 
+let visibleArchiveCache: { metas: RunMeta[]; signature: string; visible: RunMeta[] } | undefined;
+
 /** Every archived completed attempt that may still speak for its conversation. */
 export function listArchivedAttempts(): RunMeta[] {
-    return archivedAttempts().filter((meta) => !archiveSuperseded(meta));
+    const metas = archivedAttempts();
+    const directory = durableSessionStateDir();
+    const signature = `${directory}:${stateSignature(directory)}`;
+    if (visibleArchiveCache?.metas === metas && visibleArchiveCache.signature === signature) {
+        return visibleArchiveCache.visible;
+    }
+    // Atomic marker add/replace/delete changes the directory identity. Enumerate
+    // published markers once; missing markers never need one stat per archive.
+    let names: string[];
+    try { names = readdirSync(directory); }
+    catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        names = [];
+    }
+    const sessions = new Set(names.filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -5)));
+    const visible = metas.filter((meta) => !sessions.has(meta.sessionId) || !archiveSuperseded(meta));
+    visibleArchiveCache = { metas, signature, visible };
+    return visible;
 }
 
 /** Whether this conversation has any published compact record at all. */
@@ -302,14 +355,15 @@ function statePath(sessionId: string): string {
 function stateSignature(path: string): string {
     try {
         const stat = statSync(path);
-        return `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
-    } catch {
+        return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         return "missing";
     }
 }
 
 /** Anything that does not match the requested conversation is treated as absent. */
-function parseState(raw: string, sessionId: string): ArchivedSessionState | undefined {
+export function parseArchivedSessionState(raw: string, sessionId: string): ArchivedSessionState | undefined {
     let parsed: unknown;
     try {
         parsed = JSON.parse(raw);
@@ -333,15 +387,16 @@ function readArchivedSessionState(sessionId: string): ArchivedSessionState | und
     if (!isSafeRunId(sessionId)) return undefined;
     const path = statePath(sessionId);
     const signature = stateSignature(path);
-    const cached = stateCache.get(sessionId);
+    const cached = stateCache.get(path);
     if (cached && cached.signature === signature) return cached.state;
     let state: ArchivedSessionState | undefined;
     try {
-        state = parseState(readFileSync(path, "utf-8"), sessionId);
-    } catch {
+        state = parseArchivedSessionState(readFileSync(path, "utf-8"), sessionId);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         state = undefined;
     }
-    stateCache.set(sessionId, { signature, state });
+    stateCache.set(path, { signature, state });
     return state;
 }
 

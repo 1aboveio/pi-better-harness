@@ -23,11 +23,12 @@ import { StoreError } from "./errors.ts";
 import {
     dependencyState,
     mapOutbox,
+    ownerFromRow,
     readOperationEvidence,
     readOutboxRow,
     requireWaitRow,
 } from "./rows.ts";
-import { columnJson, columnNullableText, columnText, getRows, run, type StoreContext } from "./sqlite.ts";
+import { columnJson, columnNullableText, columnNumber, columnText, getRows, run, type StoreContext } from "./sqlite.ts";
 import type {
     ClaimOutboxInput,
     OutboxDispatchClaim,
@@ -279,6 +280,23 @@ export function listOutbox(ctx: StoreContext, filter: OutboxFilter = {}): Outbox
     ).map((row) => mapOutbox(ctx, row));
 }
 
+/** Find recipients with deliverable dependencies without loading each event's evidence. */
+export function listDispatchableOutboxRecipients(ctx: StoreContext): Array<{ recipient: OwnerIdentity; count: number }> {
+    return getRows(
+        ctx,
+        `SELECT recipient_kind, recipient_session_id, recipient_workspace, recipient_branch_id, recipient_goal_id,
+                count(*) AS pending_count
+         FROM outbox_events
+         WHERE state = 'pending' AND event_type = 'dependency-ready'
+           AND EXISTS (SELECT 1 FROM waits w WHERE w.wait_id = outbox_events.wait_id
+                       AND w.generation = outbox_events.generation
+                       AND w.phase IN (${placeholders(DELIVERABLE_WAIT_PHASES.length)}))
+         GROUP BY recipient_kind, recipient_session_id, recipient_workspace, recipient_branch_id, recipient_goal_id
+         ORDER BY min(created_at), min(event_id)`,
+        ...DELIVERABLE_WAIT_PHASES,
+    ).map((row) => ({ recipient: ownerFromRow(row, "recipient"), count: columnNumber(row, "pending_count") }));
+}
+
 function readDispatchClaim(row: Record<string, unknown>): OutboxDispatchClaim | null {
     return columnJson<OutboxDispatchClaim>(row, "dispatch_claim_json");
 }
@@ -317,11 +335,20 @@ export function claimOutbox(ctx: StoreContext, input: ClaimOutboxInput): OutboxE
         assertDispatchTokenUnused(ctx, claimToken);
         const clauses = [
             "state = 'pending'",
-            `EXISTS (SELECT 1 FROM waits w WHERE w.wait_id = outbox_events.wait_id
+            `(event_type = 'assignment-outcome' OR EXISTS (SELECT 1 FROM waits w WHERE w.wait_id = outbox_events.wait_id
                      AND w.generation = outbox_events.generation
-                     AND w.phase IN (${placeholders(DELIVERABLE_WAIT_PHASES.length)}))`,
+                     AND w.phase IN (${placeholders(DELIVERABLE_WAIT_PHASES.length)})))`,
         ];
         const params: Array<string | number | null> = [...DELIVERABLE_WAIT_PHASES];
+        if (input.eventId !== undefined) {
+            clauses.push("event_id = ?");
+            params.push(requireId("eventId", input.eventId));
+        }
+        if (input.type !== undefined) {
+            if (!["dependency-ready", "assignment-outcome"].includes(input.type)) throw new StoreError("validation", "Unknown outbox event type.");
+            clauses.push("event_type = ?");
+            params.push(input.type);
+        }
         if (input.waitId !== undefined) {
             clauses.push("wait_id = ?");
             params.push(requireId("waitId", input.waitId));

@@ -18,20 +18,21 @@
  *   supervisor transport, permission intersection and dispatch. This module never
  *   opens that database and never imports Background code: it consumes the
  *   service object Background publishes on its versioned event channel.
- * - **Goal** answers `pi-better-goal:operation-resume-admission` (v1). A refused
- *   admission holds the wait; it never falls back to launching.
+ * - **Goal** controls parent execution only; assignment admission does not ask it.
  *
  * The service contract mirror below is intentionally structural: it names only
  * the members this module calls, so either package can load first and a missing
  * host reads as an unavailable capability instead of a broken import.
  */
 import { randomUUID } from "node:crypto";
+import { managedWorkerBridge } from "./managed-worker-bridge.ts";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
     OPERATIONS_ATTEMPT_ID_ENV,
     OPERATIONS_CHILD_ID_ENV,
+    OPERATIONS_DEADLINE_AT_ENV,
     OPERATIONS_CONVERSATION_ID_ENV,
     OPERATIONS_ENABLED_ENV,
     OPERATIONS_ENDPOINT_ENV,
@@ -39,6 +40,7 @@ import {
     OPERATIONS_TOKEN_ENV,
     OPERATIONS_WRITER_LEASE_ID_ENV,
     WAIT_OPERATIONS_TOOL,
+    assertWaitToolDependencies,
     createToolDescriptor,
     extractResultTaskIds,
     normalizeWaitForOperationsResult,
@@ -55,12 +57,20 @@ import {
     type OperationBridgeLogger,
     type OperationRunHandlers,
     type OperationRunInfo,
+    type OperationRequestContext,
+    type OperationRunRegistration,
 } from "./worker-operations-host.ts";
 import { captureParkCheckpoint, verifyParkCheckpoint, type ParkCheckpoint } from "./park-checkpoint.ts";
 import { findSavedConversation, readConversationLease } from "./continuation.ts";
+import { commitAssignmentTerminal, readOutcome, coordinatorPath, type AssignmentBinding } from "./assignment-outcomes.ts";
+import { openStore } from "./shared-operation-coordinator/index.ts";
+import { recordAssignmentReport, recordAssignmentReportRejection } from "./assignment-report.ts";
+import { currentSandboxPermissions } from "./permission-policy.ts";
 import {
     effectiveStatus,
     isPendingPark,
+    listParkRecordCandidates,
+    scanParkRecords,
     listMetas,
     listPendingParkedRuns,
     readMeta,
@@ -68,6 +78,7 @@ import {
     processStartToken,
     updateParkRecord,
     writeParkRecord,
+    writeMeta,
     type ParkRecord,
     type RunMeta,
 } from "./registry.ts";
@@ -76,6 +87,7 @@ import { realProcessProbe, type ProcessProbe } from "./health.ts";
 import { stopRun } from "./stop.ts";
 
 export type { ParkRecord };
+import { assertObservationStorage, pendingObservations, retainObservation, resolveObservation } from "./outage-observations.ts";
 
 // ---- Background service contract (versioned event bus) --------------------
 
@@ -87,7 +99,7 @@ export type { ParkRecord };
  */
 export const OBSERVED_WAITS_SERVICE_CHANNEL = "pi-better-background-tasks:observed-waits-service";
 export const OBSERVED_WAITS_SERVICE_REQUEST_CHANNEL = "pi-better-background-tasks:observed-waits-service-request";
-export const OBSERVED_WAITS_SERVICE_VERSION = 1 as const;
+export const OBSERVED_WAITS_SERVICE_VERSION = 2 as const;
 
 /**
  * Request/reply surface Background publishes for the Subagents coordinator. It
@@ -257,6 +269,7 @@ export interface WorkerWaitView {
     readonly park: boolean;
     /** Cancellation epoch the caller must echo; part of the synchronous release guard. */
     readonly cancelEpoch: number;
+    readonly publishedClaimId?: string | null;
     readonly ownerKind: string;
     readonly continuationNote: string;
     readonly taskIds: readonly string[];
@@ -320,6 +333,7 @@ export interface WorkerAcknowledgeView {
 export interface WorkerWaitReadyEvent {
     readonly waitId: string;
     readonly generation: number;
+    readonly parkedAttemptId?: string;
     readonly owner: { kind: string; sessionId: string; workspace: string; branchId?: string | null; goalId?: string | null };
     readonly parentOrigin?: { cwd: string; sessionId?: string };
     readonly taskIds: readonly string[];
@@ -342,6 +356,8 @@ export interface WorkerOperationService {
     readonly version: typeof OBSERVED_WAITS_SERVICE_VERSION;
     readonly serviceId: string;
     readonly available: true;
+    readonly assignmentContinuation?: 1;
+    readonly outageReconciliation?: 1;
     readonly continuationReady: boolean;
     ownsTask(run: WorkerRunScope, taskId: string): boolean;
     launchForWorker(run: WorkerRunScope, input: { kind: "process" | "watch"; params: JsonRecord; policy?: WorkerSandboxAuthority | null }): Promise<WorkerLaunchResult>;
@@ -376,6 +392,7 @@ export interface WorkerOperationService {
      * live claim instead of cancelling it.
      */
     holdFailedResumeForWorker?(run: WorkerRunScope, input: WorkerHoldResumeInput): WorkerHoldResumeView;
+    repairFailedResumeForWorker?(run: WorkerRunScope, input: WorkerHoldResumeInput & { checkpointId: string; expectedCancelEpoch: number }): { phase: string; repaired: boolean };
     registerContinuationAdapter(adapter: WorkerContinuationAdapter): void;
     unregisterContinuationAdapter(id: string): void;
 }
@@ -425,6 +442,11 @@ function mirrorOf(pi: unknown): { mirror: { service?: WorkerOperationService; re
         bus.on(OBSERVED_WAITS_SERVICE_CHANNEL, (data) => {
             const current = serviceMirrors.get(bus as object);
             if (!current) return;
+            if (data && typeof data === "object" && (data as { version?: unknown }).version !== OBSERVED_WAITS_SERVICE_VERSION) {
+                current.service = undefined;
+                current.reason = "The Background host does not support observed-waits service v2 assignment continuation";
+                return;
+            }
             if (isPublishedService(data)) {
                 current.service = data;
                 current.reason = undefined;
@@ -479,6 +501,7 @@ export function workerOperationsUnavailableReason(pi: unknown): string | undefin
  */
 export interface WorkerRunPolicy {
     version: 1;
+    mandatoryPermissions?: boolean;
     /** Confinement root and levels, or null for the `sandbox:false` opt-out. */
     sandbox: WorkerSandboxAuthority | null;
     /** Effective child tool allowlist (after exclusions). */
@@ -495,6 +518,7 @@ export interface WorkerRunPolicy {
 
 /** Build the policy Background needs; `taskPolicy` is the immutable task launch contract. */
 export function captureWorkerPolicy(input: {
+    mandatoryPermissions?: boolean;
     sandbox: boolean;
     tools: readonly string[];
     clean: boolean;
@@ -516,6 +540,7 @@ export function captureWorkerPolicy(input: {
         : null;
     return {
         version: 1,
+        mandatoryPermissions: input.mandatoryPermissions === true,
         sandbox,
         tools: [...input.tools],
         clean: input.clean,
@@ -523,6 +548,46 @@ export function captureWorkerPolicy(input: {
         authorityReference: input.authorityReference,
         workspace: input.workspace,
     };
+}
+
+/** Refuse permission loss or widening when reconstructing a captured assignment. */
+export function assertAssignmentPermissionScope(
+    captured: { sandbox: unknown; mandatoryPermissions?: boolean } | undefined,
+    current: { sandbox: unknown; mandatoryPermissions: boolean },
+    allowNarrowing = false,
+): void {
+    if (!captured) throw new PreSpawnResumeError("Captured assignment permissions are missing");
+    const requiresAuthority = captured.mandatoryPermissions === true
+        || (captured.mandatoryPermissions === undefined && captured.sandbox !== null);
+    if (requiresAuthority && !current.mandatoryPermissions) {
+        throw new PreSpawnResumeError("Expected mandatory permission authority is unavailable");
+    }
+    const normalize = (value: unknown): unknown => {
+        if (Array.isArray(value)) return value.map(normalize);
+        if (value && typeof value === "object") return Object.fromEntries(
+            Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, normalize(entry)]),
+        );
+        return value;
+    };
+    const oldSandbox = captured.sandbox as WorkerSandboxAuthority | null;
+    const newSandbox = current.sandbox as WorkerSandboxAuthority | null;
+    if (oldSandbox?.denyWrite?.some((path) => !newSandbox?.denyWrite?.includes(path))) {
+        throw new PreSpawnResumeError("Current permissions would remove captured assignment protected paths");
+    }
+    if (allowNarrowing && oldSandbox && newSandbox && oldSandbox.root === newSandbox.root && oldSandbox.permissions && newSandbox.permissions) {
+        const old = oldSandbox.permissions, next = newSandbox.permissions;
+        const access = ["off", "read", "write", "read-write"];
+        const files = (["projectFiles", "outsideProject", "storedCredentials"] as const).every(key =>
+            access.includes(next[key]) && access.indexOf(next[key]) <= access.indexOf(old[key]));
+        const commands = (!next.commands || old.commands) && (!next.network || old.network)
+            && (next.shell === false || old.shell !== false);
+        const oldCap = old.commandTimeoutSeconds ?? Infinity, nextCap = next.commandTimeoutSeconds ?? Infinity;
+        if (files && commands && nextCap <= oldCap) return;
+    }
+    const authority = (sandbox: WorkerSandboxAuthority | null) => sandbox ? { root: sandbox.root, permissions: sandbox.permissions } : null;
+    if (JSON.stringify(normalize(authority(oldSandbox))) !== JSON.stringify(normalize(authority(newSandbox)))) {
+        throw new PreSpawnResumeError("Current permissions would change the captured assignment scope");
+    }
 }
 
 // ---- child capability planning -------------------------------------------
@@ -592,22 +657,22 @@ export function planWorkerBridgeTools(input: {
         }
         tools.push(name);
     }
+    if (tools.includes(WAIT_OPERATIONS_TOOL)
+        && (!tools.includes("acknowledge_operation_result") || !tools.some(name => name === "bg_task_status" || name === "bg_task_log"))
+        && !(input.explicitTools && allow.has(WAIT_OPERATIONS_TOOL))) {
+        tools.splice(tools.indexOf(WAIT_OPERATIONS_TOOL), 1);
+        withheld.push({ name: WAIT_OPERATIONS_TOOL, reason: "the authorized tools cannot read and acknowledge terminal evidence" });
+    }
     const has = (name: OperationBridgeToolName): boolean => tools.includes(name);
+    const capabilities = {
+        background: { spawn: has("bg_task_spawn"), watch: has("bg_task_watch"), status: has("bg_task_status"), log: has("bg_task_log") },
+        wait: has(WAIT_OPERATIONS_TOOL), acknowledge: has("acknowledge_operation_result"), parking: has(WAIT_OPERATIONS_TOOL),
+    };
+    assertWaitToolDependencies(capabilities, tools);
     return {
         tools,
         withheld,
-        capabilities: {
-            background: {
-                spawn: has("bg_task_spawn"),
-                watch: has("bg_task_watch"),
-                status: has("bg_task_status"),
-                log: has("bg_task_log"),
-            },
-            wait: has(WAIT_OPERATIONS_TOOL),
-            acknowledge: has("acknowledge_operation_result"),
-            // The bridge derives `wait_for_operations` from `wait && parking`.
-            parking: has(WAIT_OPERATIONS_TOOL),
-        },
+        capabilities,
     };
 }
 
@@ -726,6 +791,9 @@ export const recipeCheckpointEvidenceValidator: CheckpointEvidenceValidator = (i
 };
 
 export interface WorkerOperationRegistration {
+    /** Restored only from protected runtime admission storage. */
+    token?: string;
+    assignment?: AssignmentBinding;
     /** Subagent attempt id. Equal to the bridge run id. */
     runId: string;
     /** Native conversation id (the saved session). */
@@ -769,6 +837,7 @@ export class WorkerOperationsHostUnavailable extends Error {
 }
 
 export interface WorkerOperationsHostOptions {
+    managedRoot?: string;
     pi: unknown;
     /** Request/reply fence calls. Injectable for tests. */
     rpc?: WorkerOperationsRpc;
@@ -797,6 +866,8 @@ export interface WorkerOperationsHost {
 
 function scopeOf(registration: {
     runId: string;
+    attemptId?: string;
+    assignment?: AssignmentBinding;
     conversationId: string;
     workspace: string;
     authorityReference: string;
@@ -806,6 +877,7 @@ function scopeOf(registration: {
     return {
         runId: registration.runId,
         conversationId: registration.conversationId,
+        ...(registration.assignment && registration.attemptId ? { assignmentAttemptId: registration.attemptId } : {}),
         workspace: registration.workspace,
         authorityReference: registration.authorityReference,
         branchId: registration.branchId ?? null,
@@ -823,7 +895,9 @@ function scopeOf(registration: {
  * sees the tasks that conversation launched earlier).
  */
 export function createWorkerOperationsHost(options: WorkerOperationsHostOptions): WorkerOperationsHost {
+    const durable = options.managedRoot ? managedWorkerBridge(options.managedRoot) : undefined;
     const created: { host?: OperationBridgeHost } = {};
+    const hosting: { promise?: Promise<OperationBridgeHost> } = {};
     const starting: { promise?: Promise<boolean> } = {};
     const capability: { available: boolean; service?: WorkerOperationService } = { available: false };
     const runs = new Map<string, WorkerRunScope>();
@@ -833,12 +907,16 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
 
     const ensureHost = async (): Promise<OperationBridgeHost> => {
         if (created.host) return created.host;
-        const factory = options.hostFactory ?? createOperationBridgeHost;
-        created.host = await factory({
-            ...(options.logger ? { logger: options.logger } : {}),
-            ...(options.now ? { now: options.now } : {}),
-        });
-        return created.host;
+        if (!hosting.promise) {
+            const factory = options.hostFactory ?? createOperationBridgeHost;
+            hosting.promise = factory({
+                ...(durable ? { socketPath: durable.socketPath } : {}),
+                ...(options.logger ? { logger: options.logger } : {}),
+                ...(options.now ? { now: options.now } : {}),
+            }).then((host) => { created.host = host; return host; })
+                .finally(() => { hosting.promise = undefined; });
+        }
+        return hosting.promise;
     };
 
     const start = async (): Promise<boolean> => {
@@ -852,6 +930,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             await ensureHost();
             capability.service = service;
             capability.available = true;
+            for (const registration of durable?.restore() ?? []) await register(registration);
             return true;
         })();
         return starting.promise;
@@ -867,11 +946,13 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
     };
 
     const register = async (registration: WorkerOperationRegistration): Promise<WorkerOperationHandle> => {
-        if (!capability.available) {
+        assertWaitToolDependencies(registration.capabilities, registration.tools);
+        const supervised = registration.tools.some((name) => name !== "report_assignment_result");
+        if (supervised && !capability.available) {
             const ready = await start();
             if (!ready) throw new WorkerOperationsHostUnavailable(workerOperationsUnavailableReason(options.pi) ?? "The Background observed-waits service is not available.");
         }
-        const service = requireService();
+        const service = supervised ? requireService() : undefined;
         const host = await ensureHost();
         const scope = scopeOf(registration);
         runs.set(registration.runId, scope);
@@ -885,7 +966,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
         // The durable run binding captures the worker's task authority and the
         // conversation identity. Every later tool call, checkpoint and resume fence
         // is checked against it by the Background host.
-        await rpc.call("register-run", {
+        const registered = supervised ? await rpc.call("register-run", {
             runId: registration.runId,
             conversationId: registration.conversationId,
             attemptId: registration.attemptId,
@@ -894,9 +975,16 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             policy: registration.policy as unknown as JsonRecord,
             tools: [...registration.tools],
             capabilities: registration.capabilities as unknown as JsonRecord,
+            assignmentOutcomesVersion: 1,
+            assignmentTaskOwnership: registration.assignment !== undefined,
             owner,
             ...(registration.writerLeaseId ? { writerLeaseId: registration.writerLeaseId } : {}),
-        });
+        }) : { assignmentOutcomesVersion: 1 };
+        if (registered.assignmentOutcomesVersion !== 1) {
+            runs.delete(registration.runId);
+            try { await rpc.call("release-run", { runId: registration.runId, reason: "assignment outcome capability mismatch" }); } catch { /* preserve the capability refusal */ }
+            throw new WorkerOperationsRefusal("service-unavailable", "Background host does not support durable assignment outcomes v1; upgrade the standalone packages together.");
+        }
 
         /**
          * Ownership is re-derived from the durable store (by conversation), so an
@@ -905,12 +993,53 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
          */
         const ownsTask = (taskId: string): boolean => {
             try {
-                return service.ownsTask(scope, taskId);
+                return service?.ownsTask(scope, taskId) ?? false;
             } catch {
                 return false;
             }
         };
         const handlers: OperationRunHandlers = {};
+        let onToolRejected: OperationRunRegistration["onToolRejected"];
+        if (registration.capabilities.reportAssignment && registration.assignment) {
+            const assertReportAuthority = (context: OperationRequestContext): RunMeta => {
+                const live = host.getRun(registration.runId);
+                const meta = readMeta(registration.runId);
+                if (!live || live.revoked || live.tokenGeneration !== context.tokenGeneration || context.signal.aborted
+                    || !runs.has(registration.runId) || !meta || meta.status !== "running" || meta.park
+                    || meta.sessionId !== registration.conversationId
+                    || JSON.stringify(meta.assignment) !== JSON.stringify(registration.assignment) || readOutcome(meta)) throw new Error("Assignment report writer is no longer authoritative.");
+                if (!processExists(meta.pid) || (meta.pidStartTime && processStartToken(meta.pid) !== meta.pidStartTime)) throw new Error("Assignment report writer has exited or changed identity.");
+                if (registration.writerLeaseId) {
+                    const lease = readConversationLease(registration.conversationId);
+                    if (!lease || lease.attemptId !== meta.id || lease.token !== registration.writerLeaseId) throw new Error("Assignment report writer lease changed.");
+                }
+                if (meta.operations?.resumeLaunchToken) {
+                    const store = openStore({ path: coordinatorPath() });
+                    try {
+                        const claims = store.listResumeClaims({ state: "published" });
+                        if (!claims.some((c) => {
+                            const wait = store.getWait({ waitId: c.waitId, generation: c.generation });
+                            return c.attemptId === meta.id && c.launchToken === meta.operations!.resumeLaunchToken
+                                && wait && wait.cancelEpoch === c.cancelEpoch && !["cancelled", "held"].includes(wait.phase);
+                        })) throw new Error("Assignment resume writer fence changed.");
+                    } finally { store.close(); }
+                }
+                return meta;
+            };
+            handlers.report_assignment_result = async (params, context) => {
+                let permissions: ReturnType<typeof currentSandboxPermissions>;
+                try { permissions = currentSandboxPermissions(options.pi as never); }
+                catch (error) {
+                    recordAssignmentReportRejection(reasonOf(error), () => assertReportAuthority(context));
+                    throw error;
+                }
+                return recordAssignmentReport(registration.runId, params,
+                    () => assertReportAuthority(context), permissions) as unknown as JsonRecord;
+            };
+            onToolRejected = (error, context) => {
+                if (context.tool === "report_assignment_result") recordAssignmentReportRejection(error.message, () => assertReportAuthority(context));
+            };
+        }
         const execute = (tool: string, params: JsonRecord): Promise<JsonRecord> => rpc.call("execute-tool", {
             runId: registration.runId,
             conversationId: registration.conversationId,
@@ -978,7 +1107,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
                     note: typeof params.note === "string" ? params.note : "",
                     owner,
                 }) as unknown as WorkerAcknowledgeView;
-                const parked = parkedWaitByGeneration(waitId, generation);
+                const parked = await parkedWaitByGeneration(waitId, generation);
                 if (parked) updateParkRecord(parked.runId, { phase: "consumed" });
                 return view;
             };
@@ -1007,6 +1136,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
                     throw new OperationBridgeError("checkpoint-invalid", reasonOf(error));
                 }
                 const note = waitNotes.get(`${waitId}:${generation}`);
+                assertObservationStorage();
                 const at = options.now?.() ?? Date.now();
                 // STAGED: the original writer is still alive, so the generation stays
                 // `parking`; Background records the evidence and the exit path proves
@@ -1027,6 +1157,15 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
                     version: 1,
                     waitId,
                     generation,
+                    observedCoordinator: (() => {
+                        try {
+                            const wait = capability.service?.listWorkerWaits({ runId: registration.runId,
+                                conversationId: registration.conversationId, workspace: registration.workspace,
+                                authorityReference: registration.authorityReference }).find((entry) => entry.waitId === waitId && entry.generation === generation);
+                            return wait ? { cancelEpoch: wait.cancelEpoch, dependencies: wait.dependencies.map((entry) => ({
+                                operationId: entry.operationId, terminalRevision: entry.terminalRevision })) } : undefined;
+                        } catch { return undefined; }
+                    })(),
                     phase: "parking",
                     attemptId: registration.attemptId,
                     ...(note ? { continuationNote: note } : {}),
@@ -1069,6 +1208,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
         }
 
         const handle = host.registerRun({
+            ...(registration.token ? { token: registration.token } : {}),
             runId: registration.runId,
             conversationId: registration.conversationId,
             workspace: registration.workspace,
@@ -1077,7 +1217,9 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
             tools: normalizeToolDescriptors(registration.schemas, registration.capabilities),
             ownership: (taskId) => ownsTask(taskId),
             handlers,
+            onToolRejected,
         });
+        durable?.save(registration, handle.token);
         return {
             runId: registration.runId,
             conversationId: registration.conversationId,
@@ -1092,12 +1234,14 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
     };
 
     const release = (runId: string, reason: string): void => {
+        durable?.remove(runId);
         runs.delete(runId);
         try { created.host?.unregisterRun(runId); } catch { /* already gone */ }
-        void rpc.call("release-run", { runId, reason }).catch(() => {});
+        if (capability.service) void rpc.call("release-run", { runId, reason }).catch(() => {});
     };
 
     const close = async (): Promise<void> => {
+        try { await hosting.promise; } catch { /* failed creation has no host to close */ }
         const host = created.host;
         created.host = undefined;
         starting.promise = undefined;
@@ -1129,7 +1273,7 @@ export function createWorkerOperationsHost(options: WorkerOperationsHostOptions)
 export function childEnvironment(
     token: string,
     endpoint: string,
-    registration: { runId: string; conversationId: string; attemptId: string },
+    registration: { runId: string; conversationId: string; attemptId: string; policy?: { deadlineAt: number | null } },
 ): Record<string, string> {
     return {
         [OPERATIONS_ENABLED_ENV]: "1",
@@ -1139,6 +1283,7 @@ export function childEnvironment(
         [OPERATIONS_CONVERSATION_ID_ENV]: registration.conversationId,
         [OPERATIONS_ATTEMPT_ID_ENV]: registration.attemptId,
         [OPERATIONS_CHILD_ID_ENV]: `${registration.runId}:${randomUUID()}`,
+        ...(registration.policy ? { [OPERATIONS_DEADLINE_AT_ENV]: String(registration.policy.deadlineAt ?? 0) } : {}),
     };
 }
 
@@ -1293,7 +1438,14 @@ export async function finalizeWorkerParkAfterExit(input: ParkFinalizationInput):
         updateParkRecord(input.runId, { phase: "held", heldReason: reason });
         return { outcome: "held", reason };
     };
-    if (!service) return hold("the Background operation service is unavailable; the park wait cannot be finalized");
+    const unverified = (reason: string): ParkFinalization => {
+        let detail = `Coordinator state is unverified; ${reason}`;
+        try { retainObservation(meta, record); }
+        catch (error) { detail = `Degraded supervision: observation not retained (${reasonOf(error)}); new parking requires durable storage.`; }
+        updateParkRecord(input.runId, { heldReason: detail });
+        return { outcome: "held", reason: detail };
+    };
+    if (!service) return unverified("the Background operation service is unavailable; park finalization awaits compatible supervision");
 
     const scope = backgroundScopeForMeta(meta, record);
     if (!scope) return hold("this run records no conversation workspace for its park wait");
@@ -1341,6 +1493,8 @@ export async function finalizeWorkerParkAfterExit(input: ParkFinalizationInput):
         });
         return { outcome: "parked", wait: view, proof };
     } catch (error) {
+        try { service.listWorkerWaits(scope); }
+        catch { return unverified(`park finalization could not be verified (${reasonOf(error)})`); }
         return hold(`the Background host refused the park checkpoint: ${reasonOf(error)}`);
     }
 }
@@ -1411,6 +1565,7 @@ export function ownerBindingFromContext(ctx: ExtensionContext): WaitOwnerBinding
 export interface ResumeAdmissionRequest {
     version: 1;
     owner: { sessionId: string; workspace: string; branchId?: string | null; goalId?: string | null };
+    pending?(): void;
     reply(gate: { allowed: boolean; reason?: string; revision: number; isCurrent?: () => boolean }): void;
 }
 
@@ -1419,15 +1574,13 @@ export type ResumeAdmission =
     | { allowed: false; reason: string; revision: number };
 
 /**
- * Ask Goal whether this owner may resume now. The owner binding is the one
- * CAPTURED when the worker parked, so an active Goal is matched by id instead of
- * by whatever goal happens to be current; a no-goal session records `null`, which
- * is exactly what Goal compares against when no goal exists.
+ * Legacy parent Goal admission helper. Delegated assignments do not call this.
+ * The owner binding is the one captured when the worker parked.
  */
 export async function requestResumeAdmission(
     pi: unknown,
     owner: WaitOwnerBinding,
-    options: { timeoutMs?: number } = {},
+    options: { timeoutMs?: number; pendingTimeoutMs?: number } = {},
 ): Promise<ResumeAdmission> {
     const bus = serviceBusOf(pi);
     if (!bus) {
@@ -1442,8 +1595,9 @@ export async function requestResumeAdmission(
             clearTimeout(timer);
             resolve(value);
         };
-        const timer = setTimeout(() => finish(null), timeoutMs);
+        let timer = setTimeout(() => finish(null), timeoutMs);
         timer.unref?.();
+        let pending = false;
         const request: ResumeAdmissionRequest = {
             version: 1,
             owner: {
@@ -1451,6 +1605,14 @@ export async function requestResumeAdmission(
                 workspace: owner.workspace,
                 branchId: owner.branchId,
                 goalId: owner.goalId,
+            },
+            pending: () => {
+                if (pending || settled || options.pendingTimeoutMs === undefined) return;
+                pending = true;
+                clearTimeout(timer);
+                const budget = Math.max(timeoutMs, Math.min(60_000, options.pendingTimeoutMs));
+                timer = setTimeout(() => finish({ allowed: false, reason: `Workflow admission did not answer within ${budget} ms`, revision: 0 }), budget);
+                timer.unref?.();
             },
             reply: (gate) => {
                 if (!gate || typeof gate.allowed !== "boolean") {
@@ -1518,14 +1680,15 @@ export function parkedWaits(): ParkedWait[] {
 }
 
 export function parkedWaitForRun(runId: string): ParkedWait | null {
-    return parkedWaits().find((entry) => entry.runId === runId) ?? null;
+    const meta = readMeta(runId);
+    const record = meta && readParkRecord(runId);
+    return meta && record && isPendingPark(record) ? parkedEntry(meta, record) : null;
 }
 
 /** A parked attempt's record for one wait generation, in any phase. */
-export function parkedWaitByGeneration(waitId: string, generation: number): ParkedWait | null {
-    for (const meta of listMetas()) {
-        const record = readParkRecord(meta.id);
-        if (!record || record.waitId !== waitId || record.generation !== generation) continue;
+export async function parkedWaitByGeneration(waitId: string, generation: number): Promise<ParkedWait | null> {
+    for await (const { meta, record } of scanParkRecords()) {
+        if (record.waitId !== waitId || record.generation !== generation) continue;
         return parkedEntry(meta, record);
     }
     return null;
@@ -1594,16 +1757,22 @@ export function createOwnedAttemptStopper(options: {
 }
 
 export interface ResumeOrchestrationOptions {
+    leaseOwnerId?: string;
     pi: unknown;
     service: () => WorkerOperationService | undefined;
     rpc: WorkerOperationsRpc;
-    context(): ExtensionContext | undefined;
-    capacity: ResumeCapacity;
+    /** Resolve execution context from the parked assignment, never a last-used server session. */
+    context(park: ParkedWait): ExtensionContext | undefined;
+    /** Server adapters select the original owner capacity domain for each assignment. */
+    capacity: ResumeCapacity | ((park: ParkedWait) => ResumeCapacity);
+    /** Serialize the full admission and launch inside the fixed runtime owner scope. */
+    dispatch?(park: ParkedWait, run: () => Promise<"resumed" | "held" | "skipped">): Promise<"resumed" | "held" | "skipped">;
     /** Launch one continuation through the existing admission path. */
     launch(input: ResumeLaunchInput): Promise<void>;
     /** Follow a cancelled generation to the attempt it already published. */
     stopAttempt?: StopPublishedAttempt;
     notify?(message: string, level: "info" | "warning"): void;
+    notifyWhen?(meta: RunMeta): boolean;
     now?: () => number;
 }
 
@@ -1672,38 +1841,22 @@ export interface FinalDispatchInput {
 /**
  * Final dispatch fence.
  *
- * The launch path awaits extension resolution, permission re-resolution, the
- * bridge registration and the writer lease. Any of those can take long enough for
- * the parent to switch branch, pause Goal, tighten permissions, cancel the wait or
- * shrink capacity. Immediately before a child may start, this re-reads the durable
- * claim, the cancellation epoch and the Goal gate, and re-checks the synchronous
- * parent identity and the captured policy. A refusal is a proven pre-spawn
- * failure: nothing was executed, and the caller releases the claim/capacity.
+ * Final dispatch checks the compatible host, captured permission scope, durable
+ * claim, cancellation epoch, launch identity and capacity. Parent Goal, session
+ * and branch changes do not revoke an existing assignment.
  */
 export async function assertFinalResumeDispatch(input: FinalDispatchInput): Promise<DispatchGuard> {
     const refusal = (message: string): never => {
         throw new FinalDispatchRefusal(message);
     };
-    const identityNow = (): WaitOwnerBinding => {
+    const assertIdentity = (_phase: string): void => {
         const ctx = input.context();
-        if (!ctx) refusal("The owning foreground session is no longer active");
-        return ownerBindingFromContext(ctx as ExtensionContext);
-    };
-    const assertIdentity = (phase: string): void => {
-        const ctx = input.context();
-        if (!ctx) refusal("The owning foreground session is no longer active");
-        const current = identityNow();
-        if (current.sessionId !== input.owner.sessionId) {
-            refusal(`The owning parent session changed during ${phase}; the resume was not executed`);
+        if (!ctx) refusal("No compatible supervisor host is available");
+        if (canonical(ctx!.cwd) !== canonical(input.owner.workspace)) {
+            refusal("The supervisor workspace is incompatible with the assignment");
         }
-        if (canonical(current.workspace) !== canonical(input.owner.workspace)) {
-            refusal(`The foreground workspace changed during ${phase}; the resume was not executed`);
-        }
-        if (input.owner.branchId && !branchContains(ctx as ExtensionContext, input.owner.branchId)) {
-            refusal(`The owning branch is no longer active during ${phase}; the resume was not executed`);
-        }
-        if ((current.goalId ?? null) !== (input.owner.goalId ?? null)) {
-            refusal(`The owning Goal binding changed during ${phase}; the resume was not executed`);
+        if (input.service()?.assignmentContinuation !== 1) {
+            refusal("The Background host does not support assignment-local continuation");
         }
     };
     /**
@@ -1737,9 +1890,7 @@ export async function assertFinalResumeDispatch(input: FinalDispatchInput): Prom
             refusal("The wait was cancelled or replaced at dispatch; the continuation was not started");
         }
     };
-    let goalProof: (() => boolean) | undefined;
     const guard = (): void => {
-        if (goalProof && !goalProof()) refusal("Goal admission changed before execution release; the continuation was not started");
         assertIdentity("dispatch");
         if (!input.permissionsUnchanged()) {
             refusal("The worker's permissions changed before dispatch; the continuation was not started");
@@ -1791,20 +1942,7 @@ export async function assertFinalResumeDispatch(input: FinalDispatchInput): Prom
         launchToken: input.claim.launchToken,
     });
 
-    // Goal gate last, because it is the only asynchronous authority check. Its
-    // revision must not move during the fence, and the durable confirmation is
-    // repeated synchronously afterwards: a cancellation performed inside the Goal
-    // handler is caught here, not accepted on an earlier read.
-    const admission = await requestResumeAdmission(input.pi, input.owner, {
-        ...(input.admissionTimeoutMs !== undefined ? { timeoutMs: input.admissionTimeoutMs } : {}),
-    });
-    if (!admission.allowed) {
-        refusal(`Goal refused the resume at dispatch: ${admission.reason}`);
-    }
-    if (admission.revision !== input.admissionRevision) {
-        refusal(`Goal admission advanced from revision ${input.admissionRevision} to ${admission.revision} during preparation; the continuation was not started`);
-    }
-    goalProof = (admission as { isCurrent?: () => boolean }).isCurrent;
+    // Parent workflow state is provenance, not assignment authority.
     // Validate the synchronous guard once here (so the returned guard is known to
     // hold after the last await) and hand it back for the release point.
     guard();
@@ -1814,8 +1952,8 @@ export async function assertFinalResumeDispatch(input: FinalDispatchInput): Prom
 /**
  * One resume at a time, through the existing continuation launch path.
  *
- * Order is fixed: capacity is reserved with the ordinary gate, the owner is
- * admitted (captured parent session/branch binding + Goal), the durable wait is
+ * Order is fixed: capacity is reserved with the ordinary gate, captured assignment
+ * scope is restored, the durable wait is
  * re-read, the attempt id/token are written to the park record, and only then is
  * a child spawned. A full capacity defers delivery without touching the wait, so
  * a queued resume never becomes "held". A proven pre-spawn failure holds the wait
@@ -1835,61 +1973,62 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
                 authorityReference: park.meta.operations?.authorityReference ?? `worker:${park.runId}`,
             }, { waitId: park.waitId, generation: park.generation, reason });
         } catch { /* the park record still shows the hold */ }
+        if (park.meta.assignment) commitAssignmentTerminal({ ...park.meta, status: "failed", failureReason: reason }, true);
         try {
-            options.notify?.(`Subagent ${park.runId} wait ${park.waitId} is held: ${reason}`, "warning");
+            if (!options.notifyWhen || options.notifyWhen(park.meta)) options.notify?.(`Subagent ${park.runId} wait ${park.waitId} is held: ${reason}`, "warning");
         } catch { /* ignore UI failures */ }
         return "held";
     };
 
-    const resume = async (park: ParkedWait): Promise<"resumed" | "held" | "skipped"> => {
+    const resumeInScope = async (park: ParkedWait): Promise<"resumed" | "held" | "skipped"> => {
         const key = `${park.waitId}:${park.generation}`;
         if (inFlight.has(key)) return "skipped";
         inFlight.add(key);
+        let capacity: ResumeCapacity | undefined;
         let reserved = false;
         try {
+            capacity = typeof options.capacity === "function" ? options.capacity(park) : options.capacity;
             // The durable wait is the authority for readiness (checked below). A
             // record that is in flight or already held must never start another
             // automatic attempt: `resuming` has a published attempt, and `held`
             // waits for its owner's interpretation.
             if (park.record.phase === "resuming" || park.record.phase === "held") return "skipped";
-            const ctx = options.context();
+            const ctx = options.context(park);
             if (!ctx) return "skipped";
             const current = ownerBindingFromContext(ctx);
-            if (park.record.ownerSessionId && current.sessionId !== park.record.ownerSessionId) return "skipped";
             if (park.record.ownerWorkspace && canonical(park.record.ownerWorkspace) !== canonical(current.workspace)) return "skipped";
-            if (park.record.ownerBranchId && !branchContains(ctx, park.record.ownerBranchId)) return "skipped";
             const prior = readMeta(park.runId);
             if (prior && prior.status === "running" && processExists(prior.pid)) return "skipped";
 
             const service = options.service();
             if (!service) return "skipped";
+            if (service.assignmentContinuation !== 1) return hold(park, "The Background host does not support assignment-local continuation");
+            if (!park.meta.operations?.policy) return hold(park, "The captured assignment permission policy is missing; migration refused");
+            if (park.meta.operations.policy.deadlineAt !== null && park.meta.operations.policy.deadlineAt <= now()) return hold(park, "The assignment-local deadline expired");
             const scope = backgroundScopeForMeta(park.meta, park.record);
             if (!scope) return "skipped";
+            if (!park.record.ownerSessionId && !park.meta.callbackOrigin?.sessionId) {
+                return hold(park, "The captured assignment recipient is missing; migration refused");
+            }
             // Capacity FIRST: a saturated pool leaves the generation ready and the
             // delivery pending, so a queued resume never becomes "held" and no
             // unresumable claim is published.
-            if (!options.capacity.tryReserve()) return "skipped";
+            if (!capacity.tryReserve()) return "skipped";
             reserved = true;
-            if (!options.capacity.recheck()) {
-                options.capacity.release();
+            if (!capacity.recheck()) {
+                capacity.release();
                 reserved = false;
                 return "skipped";
             }
 
-            // The captured binding is the owner: an active Goal must match by id,
-            // and a no-goal session records null.
+            // Captured recipient metadata is never replaced by the host's session.
             const owner: WaitOwnerBinding = {
-                sessionId: park.record.ownerSessionId ?? current.sessionId,
-                workspace: park.record.ownerWorkspace ?? current.workspace,
-                branchId: park.record.ownerBranchId ?? current.branchId,
+                sessionId: park.record.ownerSessionId ?? park.meta.callbackOrigin!.sessionId!,
+                workspace: park.record.ownerWorkspace ?? park.meta.callbackOrigin?.cwd ?? current.workspace,
+                branchId: park.record.ownerBranchId ?? null,
                 goalId: park.record.ownerGoalId ?? null,
             };
-            const admission = await requestResumeAdmission(options.pi, owner);
-            if (!admission.allowed) {
-                options.capacity.release();
-                reserved = false;
-                return hold(park, admission.reason);
-            }
+            const admission = { revision: 0 };
 
             // Rehydrate the parked attempt's run binding: the claim fence is
             // addressed by run id and requires a binding for this conversation.
@@ -1923,7 +2062,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
                 generation: park.generation,
             });
             if (snapshot.phase !== "ready") {
-                options.capacity.release();
+                capacity.release();
                 reserved = false;
                 if (snapshot.phase === "waiting" || snapshot.phase === "parking" || snapshot.phase === "resuming") {
                     if (snapshot.phase !== park.phase) updateParkRecord(park.runId, { phase: phaseOf(String(snapshot.phase)) });
@@ -1934,7 +2073,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
             }
             if (snapshot.claim) {
                 // Another supervisor holds or published this generation.
-                options.capacity.release();
+                capacity.release();
                 reserved = false;
                 return "skipped";
             }
@@ -1944,7 +2083,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
                 waitId: park.waitId,
                 generation: park.generation,
                 expectedCancelEpoch,
-                lease: { ownerId: `subagents:${process.pid}`, pid: process.pid },
+                lease: { ownerId: options.leaseOwnerId ?? `subagents:${process.pid}`, pid: process.pid, processStartToken: processStartToken(process.pid) ? Buffer.from(processStartToken(process.pid)!).toString("base64url") : undefined },
                 reservedCheckpointId: park.record.checkpoint?.entryId ?? park.waitId,
             });
             const claimId = String(claim.claimId ?? "");
@@ -1952,7 +2091,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
             const assignedRunId = `sa_${now().toString(36)}_${randomUUID().replace(/-/g, "").slice(0, 8)}`;
             const launchToken = `slt_${randomUUID()}`;
             if (!claimId || !claimToken) {
-                options.capacity.release();
+                capacity.release();
                 reserved = false;
                 return hold(park, "the Background host returned no usable resume claim");
             }
@@ -1967,7 +2106,7 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
                     launchToken,
                 });
             } catch (error) {
-                options.capacity.release();
+                capacity.release();
                 reserved = false;
                 try {
                     await options.rpc.call("release-resume", {
@@ -2013,31 +2152,45 @@ export function createResumeOrchestration(options: ResumeOrchestrationOptions): 
                 // for recovery. Capacity and admission already succeeded, so this is a
                 // spawn-time failure, not a queue condition.
                 updateParkRecord(park.runId, { phase: "held", heldReason: reason });
+                if (park.meta.assignment) commitAssignmentTerminal({ ...park.meta, status: "lost", failureReason: `Published launch could not be proved: ${reason}` }, true);
                 return "held";
             }
-            options.capacity.commit();
+            capacity.commit();
             reserved = false;
             void options.rpc.call("release-run", { runId: park.runId, reason: "resumed into a new attempt" }).catch(() => {});
             return "resumed";
         } catch (error) {
             return hold(park, reasonOf(error));
         } finally {
-            if (reserved) options.capacity.release();
+            if (reserved) capacity?.release();
             inFlight.delete(key);
         }
     };
+
+    const resume = (park: ParkedWait) => options.dispatch
+        ? options.dispatch(park, () => resumeInScope(park)).catch(error => hold(park, reasonOf(error)))
+        : resumeInScope(park);
 
     const adapter: WorkerContinuationAdapter = {
         version: 1,
         id: `subagents-continuation:${randomUUID()}`,
         async onWaitReady(event) {
-            const park = parkedWaitByGeneration(event.waitId, event.generation);
+            let park: ParkedWait | null;
+            if (event.parkedAttemptId !== undefined) {
+                const meta = readMeta(event.parkedAttemptId);
+                const record = meta && readParkRecord(meta.id);
+                if (!meta || meta.sessionId !== event.owner.sessionId || !record
+                    || record.waitId !== event.waitId || record.generation !== event.generation) return "deferred";
+                park = parkedEntry(meta, record);
+            } else {
+                park = await parkedWaitByGeneration(event.waitId, event.generation);
+            }
             if (!park) return "delivered";
             const outcome = await resume(park);
             return outcome === "skipped" ? "deferred" : "delivered";
         },
         async onWaitCancelled(event) {
-            const park = parkedWaitByGeneration(event.waitId, event.generation);
+            const park = await parkedWaitByGeneration(event.waitId, event.generation);
             if (!park || park.record.phase === "cancelled") return;
             const cancellation = await stopPublishedAttempt(park, event.reason, options.stopAttempt, options.now);
             updateParkRecord(park.runId, {
@@ -2081,6 +2234,13 @@ export async function cancelParkedWait(
     // same follow-up, so an already-recorded cancellation is left alone.
     const scope = backgroundScopeForMeta(park.meta, park.record);
     const at = (options.now ?? Date.now)();
+    if (park.meta.assignment) {
+        const outcome = commitAssignmentTerminal({ ...park.meta, status: "killed" });
+        if (outcome?.outcome !== "cancelled") throw new Error("The assignment already has a non-cancelled terminal outcome; cancellation was not committed.");
+        const cancellation = await stopPublishedAttempt(park, reason, options.stopAttempt, options.now);
+        updateParkRecord(park.runId, { phase: "cancelled", cancelReason: cancellation === "foreign" ? `${reason} (published writer termination remains unproven)` : reason, cancelledAt: at });
+        return;
+    }
     if (service && scope) {
         let view;
         try {
@@ -2089,10 +2249,10 @@ export async function cancelParkedWait(
             updateParkRecord(park.runId, {
                 phase: "held",
                 cancelReason: `${reason} (the durable cancellation failed: ${reasonOf(error)})`,
-                cancelledAt: at,
             });
-            return;
+            throw new Error(`Durable cancellation failed: ${reasonOf(error)}`);
         }
+        if (view.phase !== "cancelled") throw new Error(`Durable cancellation was not confirmed (wait is ${view.phase}).`);
         const settled = readParkRecord(park.runId);
         if (settled?.phase === "cancelled" && settled.cancelReason) return;
         const cancellation = await stopPublishedAttempt(park, reason, options.stopAttempt, options.now);
@@ -2107,14 +2267,7 @@ export async function cancelParkedWait(
         });
         return;
     }
-    const cancellation = await stopPublishedAttempt(park, reason, options.stopAttempt, options.now);
-    updateParkRecord(park.runId, {
-        phase: "cancelled",
-        cancelReason: cancellation === "foreign"
-            ? `${reason} (the published continuation could not be attributed to this parent and was left running)`
-            : reason,
-        cancelledAt: at,
-    });
+    throw new Error("Durable cancellation unavailable: the original worker scope and observed-waits service are required.");
 }
 
 /**
@@ -2242,7 +2395,7 @@ export async function recoverStagedPark(
 /** Every park record (any phase) that published `attemptId` as its resume. */
 export function parkedWaitsForResumedAttempt(attemptId: string): ParkedWait[] {
     const found: ParkedWait[] = [];
-    for (const meta of listMetas()) {
+    for (const meta of listParkRecordCandidates()) {
         const record = readParkRecord(meta.id);
         if (!record || record.resumedBy !== attemptId) continue;
         found.push(parkedEntry(meta, record));
@@ -2259,6 +2412,7 @@ export function isTerminalAttempt(meta: RunMeta): boolean {
 export interface ResumedAttemptExitInput {
     /** The attempt id published by the resume claim (NOT the parked attempt). */
     attemptId: string;
+    priorPark?: { runId: string; waitId: string; generation: number };
     service: WorkerOperationService | undefined;
     /** Recorded status for the reason text. */
     status?: string;
@@ -2296,36 +2450,69 @@ export function conversationWriterLeaseLive(
  *
  * This is a HOLD, not a cancellation: the store keeps the cancellation epoch and
  * the evidence pins, records the failure reason, and invalidates the publish-only
- * claim so a second automatic attempt can never be published. It requires the exact
+ * claim. Assignment-capable hosts instead atomically admit one bounded repair or
+ * retain terminal failure through the coordinator. This requires the exact
  * published identity (generation, claim id/token persisted with the attempt,
  * attempt id, launch token) and proven writer exit plus a free writer lease. An
  * ambiguous identity (live or unverifiable writer, live lease, missing claim
  * identity, missing host capability) is reported as a local hold and the durable
  * generation is left untouched with its live writer — never a fallback cancel.
+ * An interpreted generation needs only claim cleanup; its receipt and assignment
+ * remain unchanged, even if writer exit cannot yet be proved.
  */
 export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): Promise<ResumedAttemptExitResult> {
-    const candidates = parkedWaitsForResumedAttempt(input.attemptId);
+    if (input.priorPark) {
+        const { runId, waitId, generation } = input.priorPark;
+        const meta = readMeta(runId);
+        const record = meta && readParkRecord(runId);
+        if (!meta || !record || record.waitId !== waitId || record.generation !== generation || record.resumedBy !== input.attemptId) {
+            return { outcome: "ignored" };
+        }
+        return settleResumedAttemptExitForParks(input, [parkedEntry(meta, record)]);
+    }
+    const candidates: ParkedWait[] = [];
+    for await (const { meta, record } of scanParkRecords()) {
+        if (record.resumedBy === input.attemptId) candidates.push(parkedEntry(meta, record));
+    }
+    return settleResumedAttemptExitForParks(input, candidates);
+}
+
+async function settleResumedAttemptExitForParks(input: ResumedAttemptExitInput, candidates: readonly ParkedWait[]): Promise<ResumedAttemptExitResult> {
     if (candidates.length === 0) return { outcome: "ignored" };
     const attempt = readMeta(input.attemptId);
     const at = (input.now ?? Date.now)();
     let result: ResumedAttemptExitResult = { outcome: "ignored" };
     for (const park of candidates) {
-        if (park.record.phase === "consumed" || park.record.phase === "cancelled") {
+        if ((park.record.phase === "consumed" && park.record.resumeClaimId && park.record.resumeExitReconciledClaimId === park.record.resumeClaimId)
+            || (park.record.phase === "cancelled" && !park.meta.assignment)) {
             result = { outcome: "ignored", waitPhase: park.record.phase };
             continue;
         }
-        const reason = input.reason
-            ?? `the published resume attempt ${input.attemptId} exited (${input.status ?? attempt?.status ?? "unknown"}) without interpreting the wait`;
+        let interpreted = park.record.phase === "consumed";
+        const exitReason = `the published resume attempt ${input.attemptId} exited (${input.status ?? attempt?.status ?? "unknown"})`;
+        let reason = input.reason ?? `${exitReason}${interpreted ? "" : " without interpreting the wait"}`;
         const holdLocally = (cause: string, outcome: "deferred" | "settled" = "deferred"): void => {
-            updateParkRecord(park.runId, { phase: "held", heldReason: `${reason}; ${cause}` });
+            updateParkRecord(park.runId, { phase: interpreted ? "consumed" : park.record.phase === "cancelled" ? "cancelled" : "held", heldReason: `${reason}; ${cause}` });
+            const report = attempt ?? park.meta;
+            if (!interpreted && input.service && report.assignment) {
+                commitAssignmentTerminal({ ...report, status: "lost", failureReason: `${reason}; ${cause}` }, true);
+            }
             result = { outcome, reason };
+        };
+        const retainUnverified = (cause: string): void => {
+            let detail = `Coordinator state is unverified; ${cause}. Awaiting compatible supervision.`;
+            try { retainObservation(park.meta, park.record, attempt); }
+            catch (error) { detail = `Degraded supervision: observation could not be retained (${reasonOf(error)}); new parking requires durable storage.`; }
+            updateParkRecord(park.runId, { heldReason: detail });
+            input.notify?.(`Subagent ${park.runId}: ${detail}`, "warning");
+            result = { outcome: "deferred", reason: detail };
         };
         // The publication token is what identifies THIS resume of the record.
         const recordedToken = park.record.resumeLaunchToken;
         const attemptToken = attempt?.operations?.resumeLaunchToken;
         if (recordedToken && attemptToken && recordedToken !== attemptToken) {
             updateParkRecord(park.runId, {
-                phase: "held",
+                phase: park.record.phase === "cancelled" ? "cancelled" : "held",
                 heldReason: `attempt ${input.attemptId} does not match the launch token published for this wait; the wait was left for its owner`,
             });
             input.notify?.(`Subagent ${park.runId}: resume attempt ${input.attemptId} does not match the published launch token; the wait is held for inspection.`, "warning");
@@ -2333,7 +2520,21 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             continue;
         }
         if (!input.service) {
-            holdLocally("the Background operation service is unavailable");
+            retainUnverified("the Background operation service is unavailable");
+            continue;
+        }
+        const scope = backgroundScopeForMeta(park.meta, park.record);
+        if (!scope) {
+            holdLocally("the parked attempt records no worker conversation scope");
+            continue;
+        }
+        let wait: WorkerWaitView | undefined;
+        try {
+            wait = input.service.listWorkerWaits(scope).find((w) => w.waitId === park.waitId && w.generation === park.generation);
+            interpreted = wait?.phase === "consumed" || interpreted;
+            if (interpreted && !input.reason) reason = exitReason;
+        } catch (error) {
+            retainUnverified(`the coordinator could not verify the wait (${reasonOf(error)})`);
             continue;
         }
         if (typeof input.service.holdFailedResumeForWorker !== "function") {
@@ -2366,13 +2567,18 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
             holdLocally("a live conversation writer lease still holds the history, so writer exit is unproven");
             continue;
         }
-        const scope = backgroundScopeForMeta(park.meta, park.record);
-        if (!scope) {
-            holdLocally("the parked attempt records no worker conversation scope");
-            continue;
-        }
         try {
-            const held = input.service.holdFailedResumeForWorker(scope, {
+            // A held terminal writer needs proof-only reconciliation, not admission.
+            const reconcileOnly = interpreted || park.record.phase === "cancelled" || wait?.phase === "held";
+            if (!reconcileOnly && attempt.assignment && !input.service.repairFailedResumeForWorker) {
+                holdLocally("this Background host does not support bounded autonomous repair");
+                continue;
+            }
+            if (!reconcileOnly && park.meta.operations?.policy?.deadlineAt != null && park.meta.operations.policy.deadlineAt <= at) {
+                holdLocally("the assignment-local deadline expired");
+                continue;
+            }
+            const exitInput = {
                 waitId: park.waitId,
                 generation: park.generation,
                 claimId,
@@ -2381,13 +2587,26 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
                 launchToken: park.record.resumeLaunchToken ?? attemptToken ?? "",
                 proof: { writerPidGone: writerPidGone && writer !== "unverified", writerLeaseReleased },
                 reason,
-            });
+            };
+            let held: { phase: string };
+            if (!reconcileOnly && input.service.repairFailedResumeForWorker && attempt.assignment) {
+                if (!park.record.checkpoint) throw new Error("Required saved checkpoint is missing");
+                verifyParkCheckpoint({ ...park.record.checkpoint, version: 1, waitId: park.waitId, generation: park.generation });
+                if (!wait) throw new Error("Required authoritative wait history is missing");
+                held = input.service.repairFailedResumeForWorker(scope, { ...exitInput,
+                    checkpointId: `park:${park.record.attemptId}`,
+                    expectedCancelEpoch: wait.cancelEpoch });
+            } else {
+                held = input.service.holdFailedResumeForWorker(scope, exitInput);
+            }
             const phase = phaseOf(held.phase);
             updateParkRecord(park.runId, {
-                phase,
-                ...(phase === "held" ? { heldReason: reason } : {}),
+                phase: park.record.phase === "cancelled" ? "cancelled" : phase,
+                resumeExitReconciledClaimId: claimId,
+                ...(phase === "consumed" ? { heldReason: undefined } : {}),
+                ...(phase === "held" && park.record.phase !== "cancelled" ? { heldReason: reason } : {}),
             });
-            input.notify?.(`Subagent ${park.runId}: ${reason}. The wait is ${phase}; it will not resume automatically.`, "warning");
+            if (phase !== "consumed") input.notify?.(`Subagent ${park.runId}: ${reason}. The reconciled wait is ${phase}.`, "warning");
             result = { outcome: "settled", waitPhase: phase, reason };
         } catch (error) {
             // The store refused (stale identity, terminal generation, unproven exit).
@@ -2398,6 +2617,10 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
                 durablePhase = input.service.listWorkerWaits(scope)
                     .find((entry) => entry.waitId === park.waitId && entry.generation === park.generation)?.phase;
             } catch { /* durable state unreadable */ }
+            if (!durablePhase) {
+                retainUnverified(`the coordinator could not verify the exit (${reasonOf(error)})`);
+                continue;
+            }
             if (durablePhase === "consumed" || durablePhase === "cancelled") {
                 updateParkRecord(park.runId, { phase: phaseOf(durablePhase) });
                 result = { outcome: "ignored", waitPhase: durablePhase };
@@ -2413,46 +2636,140 @@ export async function settleResumedAttemptExit(input: ResumedAttemptExitInput): 
 
 export async function reconcileParkedWaits(
     service: WorkerOperationService | undefined,
-    options: {
+    outerOptions: {
         resume(park: ParkedWait): Promise<"resumed" | "held" | "skipped">;
         notify?(message: string, level: "warning"): void;
+        notifyWhen?(meta: RunMeta): boolean;
     },
 ): Promise<{ resumed: number; held: number; skipped: number }> {
     let resumed = 0;
     let held = 0;
     let skipped = 0;
-    for (const park of parkedWaits()) {
+    const options = outerOptions;
+    const scopedOptions = (meta: RunMeta) => ({ ...outerOptions,
+        notify: outerOptions.notifyWhen && !outerOptions.notifyWhen(meta) ? undefined : outerOptions.notify });
+    if (service?.outageReconciliation === 1) {
         try {
-            if (park.record.phase === "resuming") {
+            for (const report of pendingObservations()) {
+                const options = scopedOptions(report.meta);
+                try {
+                    const scope = backgroundScopeForMeta(report.meta, report.record);
+                    if (!scope) continue;
+                    const current = service.listWorkerWaits(scope).find((wait) =>
+                        wait.waitId === report.record.waitId && wait.generation === report.observedRevision.generation);
+                    if (!current) {
+                        // Missing required history is assignment failure, not process-exit proof.
+                        if (report.meta.assignment && commitAssignmentTerminal({ ...report.meta, status: "lost",
+                            failureReason: "Required authoritative wait history is missing after coordinator recovery; writer termination remains unproven." }, true)) {
+                            if (!readMeta(report.meta.id)) writeMeta(report.meta, { ifAbsent: true });
+                            resolveObservation(report);
+                        }
+                        continue;
+                    }
+                    const cached = readParkRecord(report.meta.id);
+                    const cancelled = (cached ?? report.record).phase === "cancelled";
+                    if ((cancelled || current.phase === "consumed") && report.attempt && current.publishedClaimId === report.record.resumeClaimId) {
+                        // Terminal waits still retain independent writer-exit proof.
+                        if (!readMeta(report.meta.id)) writeMeta(report.meta, { ifAbsent: true });
+                        if (!cached) writeParkRecord(report.meta.id, report.record, { ifAbsent: true });
+                        if (!readMeta(report.attempt.id)) writeMeta(report.attempt, { ifAbsent: true });
+                        const replay = await settleResumedAttemptExit({ attemptId: report.attempt.id, service,
+                            ...(options.notify ? { notify: options.notify } : {}) });
+                        if (replay.outcome !== "deferred") resolveObservation(report);
+                        continue;
+                    }
+                    if ((current.phase === "resuming" && current.publishedClaimId !== report.record.resumeClaimId)
+                        || (report.coordinatorEvidence && current.cancelEpoch !== report.coordinatorEvidence.cancelEpoch)) {
+                        resolveObservation(report);
+                        continue;
+                    }
+                    if (current.phase === "consumed" || current.phase === "cancelled") {
+                        const local = readParkRecord(report.meta.id);
+                        if (local?.waitId === current.waitId && local.generation === current.generation) {
+                            updateParkRecord(report.meta.id, { phase: local.phase === "cancelled" ? "cancelled" : phaseOf(current.phase), heldReason: undefined });
+                        }
+                        resolveObservation(report);
+                        continue;
+                    }
+                    // Restore missing conversation evidence, never replace a newer local publication.
+                    if (!readMeta(report.meta.id)) writeMeta(report.meta, { ifAbsent: true });
+                    if (!readParkRecord(report.meta.id)) writeParkRecord(report.meta.id, report.record, { ifAbsent: true });
+                    if (report.attempt && !readMeta(report.attempt.id)) writeMeta(report.attempt, { ifAbsent: true });
+                    const local = readParkRecord(report.meta.id);
+                    if (local?.resumeClaimId !== report.record.resumeClaimId
+                        || local?.resumeLaunchToken !== report.record.resumeLaunchToken) {
+                        resolveObservation(report);
+                        continue;
+                    }
+                    if (current.phase === "resuming" && report.attempt) {
+                        const replay = await settleResumedAttemptExit({ attemptId: report.attempt.id, service,
+                            ...(options.notify ? { notify: options.notify } : {}) });
+                        if (replay.outcome === "deferred") continue;
+                    }
+                    updateParkRecord(report.meta.id, { heldReason: undefined });
+                    resolveObservation(report);
+                } catch (error) {
+                    options.notify?.(`Subagent ${report.meta.id}: retained outage observation could not be reconciled (${reasonOf(error)}).`, "warning");
+                }
+            }
+        } catch (error) {
+            options.notify?.(`Degraded supervision: outage replay unavailable (${reasonOf(error)}).`, "warning");
+        }
+    }
+    // Consumed waits cannot resume, but a missed exit observer may have left
+    // their published writer claim behind. Reconcile that exact claim once.
+    const candidates: ParkedWait[] = [];
+    for await (const { meta, record } of scanParkRecords()) {
+        if (!isPendingPark(record) && !(record.phase === "consumed" && record.resumedBy
+            && record.resumeClaimId && record.resumeExitReconciledClaimId !== record.resumeClaimId)) continue;
+        candidates.push(parkedEntry(meta, record));
+    }
+    // Release earlier writers before admitting later waits in the conversation.
+    candidates.sort((a, b) => a.record.parkedAt - b.record.parkedAt);
+    for (const park of candidates) {
+        const options = scopedOptions(park.meta);
+        try {
+            if (park.record.phase === "resuming" || park.record.phase === "consumed") {
                 const attemptId = park.record.resumedBy ?? "";
                 const attempt = attemptId ? readMeta(attemptId) : undefined;
                 if (!attemptId || !attempt) {
+                    if (park.record.phase === "consumed") { skipped += 1; continue; }
                     updateParkRecord(park.runId, {
                         phase: "held",
-                        heldReason: `Resume attempt ${attemptId || "(unknown)"} was recorded before spawn but never started; reconcile it manually.`,
+                        heldReason: `Resume attempt ${attemptId || "(unknown)"} was published but launch and writer identity remain unproven.`,
                     });
+                    if (park.meta.assignment) commitAssignmentTerminal({ ...park.meta, status: "lost", failureReason: "Published continuation metadata is missing; launch and writer termination remain unproven." }, true);
                     options.notify?.(
-                        `Subagent ${park.runId}: resume attempt ${attemptId || "(unknown)"} was recorded but never started. The wait is held; take over with subagent_stop ${park.runId}.`,
+                        `Subagent ${park.runId}: resume attempt ${attemptId || "(unknown)"} has no verifiable launch metadata. The writer fence is retained.`,
                         "warning",
                     );
                     held += 1;
                     continue;
                 }
-                // The published attempt already ended without acknowledging: settle the
-                // unconsumed generation now instead of leaving it `resuming` forever.
-                if (isTerminalAttempt(attempt)) {
-                    const settled = await settleResumedAttemptExit({
+                // A missed exit needs either unconsumed-wait recovery or proof-only
+                // cleanup of a consumed wait's writer claim.
+                const consumedWriterGone = park.record.phase === "consumed" && attempt.pid > 0 && writerPresence(attempt) === "absent";
+                if (isTerminalAttempt(attempt) || consumedWriterGone) {
+                    const settled = await settleResumedAttemptExitForParks({
                         attemptId,
                         service,
                         status: effectiveStatus(attempt),
                         ...(options.notify ? { notify: options.notify } : {}),
-                    });
-                    if (settled.outcome === "settled") held += 1;
+                    }, [park]);
+                    if (settled.outcome === "settled" && settled.waitPhase !== "consumed") held += 1;
                     else skipped += 1;
                     continue;
                 }
+                if (park.record.phase === "consumed") { skipped += 1; continue; }
             }
             if (!service) {
+                let reason = "Coordinator state is unverified; awaiting compatible supervision.";
+                try { retainObservation(park.meta, park.record); }
+                catch (error) {
+                    reason = `Degraded supervision: ${reasonOf(error)}. New parking requires durable storage.`;
+                    options.notify?.(reason, "warning");
+                }
+                updateParkRecord(park.runId, { heldReason: reason });
                 skipped += 1;
                 continue;
             }
@@ -2461,27 +2778,37 @@ export async function reconcileParkedWaits(
                 skipped += 1;
                 continue;
             }
-            const wait = service.listWorkerWaits(scope, { pendingOnly: true })
+            const wait = service.listWorkerWaits(scope)
                 .find((entry) => entry.waitId === park.waitId && entry.generation === park.generation);
             if (!wait) {
-                // The generation was consumed, cancelled or superseded elsewhere.
-                updateParkRecord(park.runId, { phase: "consumed" });
+                // A missing generation is not an interpretation receipt.
+                retainObservation(park.meta, park.record);
+                updateParkRecord(park.runId, { heldReason: "Coordinator generation is unverified; retained observation awaits reconciliation." });
                 skipped += 1;
                 continue;
             }
-            if (wait.phase === "resuming") {
+            if (wait.phase === "consumed" || wait.phase === "cancelled") {
+                updateParkRecord(park.runId, { phase: phaseOf(wait.phase), heldReason: undefined });
+                if (wait.phase === "consumed" && park.record.resumedBy) {
+                    await settleResumedAttemptExitForParks({ attemptId: park.record.resumedBy, service,
+                        ...(options.notify ? { notify: options.notify } : {}) }, [park]);
+                }
+                skipped += 1;
+                continue;
+            }
+            if (wait.phase === "resuming" || (wait.phase === "held" && park.record.resumedBy)) {
                 // A published attempt owns this generation. If it already ended (or
                 // its record vanished), the unconsumed generation is settled
                 // explicitly; nothing else may resume or mirror it.
                 const attemptId = park.record.resumedBy ?? "";
                 const attempt = attemptId ? readMeta(attemptId) : undefined;
                 if (!attempt || isTerminalAttempt(attempt)) {
-                    const settled = await settleResumedAttemptExit({
+                    const settled = await settleResumedAttemptExitForParks({
                         attemptId: attemptId || park.runId,
                         service,
                         status: attempt ? effectiveStatus(attempt) : "missing",
                         ...(options.notify ? { notify: options.notify } : {}),
-                    });
+                    }, [park]);
                     // `deferred` means the local record was held while the durable
                     // generation could not be proven (ambiguous identity/capability);
                     // it is never a silent success.
@@ -2514,7 +2841,9 @@ export async function reconcileParkedWaits(
             if (phaseOf(wait.phase) !== park.phase) updateParkRecord(park.runId, { phase: phaseOf(wait.phase) });
             skipped += 1;
         } catch (error) {
-            updateParkRecord(park.runId, { phase: "held", heldReason: reasonOf(error) });
+            try { retainObservation(park.meta, park.record, park.record.resumedBy ? readMeta(park.record.resumedBy) : undefined); }
+            catch (storageError) { options.notify?.(`Degraded supervision: observation not retained (${reasonOf(storageError)}).`, "warning"); }
+            updateParkRecord(park.runId, { heldReason: `Coordinator state is unverified (${reasonOf(error)}).` });
             options.notify?.(`Subagent ${park.runId}: wait reconciliation failed (${reasonOf(error)}).`, "warning");
             held += 1;
         }

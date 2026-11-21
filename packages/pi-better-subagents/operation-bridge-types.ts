@@ -25,6 +25,7 @@ export const OPERATIONS_CONVERSATION_ID_ENV = "PI_BETTER_OPERATIONS_CONVERSATION
 export const OPERATIONS_ATTEMPT_ID_ENV = "PI_BETTER_OPERATIONS_ATTEMPT_ID";
 export const OPERATIONS_WRITER_LEASE_ID_ENV = "PI_BETTER_OPERATIONS_WRITER_LEASE_ID";
 export const OPERATIONS_CHILD_ID_ENV = "PI_BETTER_OPERATIONS_CHILD_ID";
+export const OPERATIONS_DEADLINE_AT_ENV = "PI_BETTER_OPERATIONS_DEADLINE_AT";
 
 /**
  * Parent-provided bridge environment. A launched background task must not
@@ -41,6 +42,7 @@ export const OPERATION_BRIDGE_ENV_KEYS: readonly string[] = Object.freeze([
     OPERATIONS_ATTEMPT_ID_ENV,
     OPERATIONS_WRITER_LEASE_ID_ENV,
     OPERATIONS_CHILD_ID_ENV,
+    OPERATIONS_DEADLINE_AT_ENV,
 ]);
 
 const BRIDGE_ENV_KEY_SET = new Set(OPERATION_BRIDGE_ENV_KEYS);
@@ -72,6 +74,7 @@ export const OPERATION_BRIDGE_TOOL_NAMES = [
     "bg_task_log",
     "wait_for_operations",
     "acknowledge_operation_result",
+    "report_assignment_result",
 ] as const;
 
 export type OperationBridgeToolName = (typeof OPERATION_BRIDGE_TOOL_NAMES)[number];
@@ -102,6 +105,7 @@ export const OPERATION_BRIDGE_METHODS: readonly OperationBridgeMethod[] = [
 export type JsonRecord = Record<string, unknown>;
 
 export interface OperationBridgeCapabilities {
+    reportAssignment?: boolean;
     background: {
         spawn: boolean;
         watch: boolean;
@@ -628,6 +632,27 @@ const HANDSHAKE_SCHEMA: JsonRecord = object({
 
 export function canonicalToolSchema(name: OperationBridgeToolName): JsonRecord {
     switch (name) {
+        case "report_assignment_result": return {
+            type: "object", additionalProperties: false, required: ["status", "reason", "evidence"],
+            properties: {
+                status: { type: "string", enum: ["complete", "incomplete"] },
+                reason: { type: "string", minLength: 1, maxLength: 2048 },
+                remaining_work: { type: "array", minItems: 1, maxItems: 8, items: { type: "string", minLength: 1, maxLength: 1024 }, description: "For incomplete work, list the concrete steps still required." },
+                blocker: { type: "object", additionalProperties: false, required: ["kind", "reason"], properties: {
+                    kind: { type: "string", enum: ["permission", "external-input"] },
+                    reason: { type: "string", minLength: 1, maxLength: 1024 },
+                }, description: "Use only for an actual permission or external-input blocker that prevents further local work." },
+                evidence: { type: "array", minItems: 1, maxItems: 4, items: {
+                    type: "object", additionalProperties: false, required: ["path", "explanation"],
+                    properties: {
+                        path: { type: "string", minLength: 1, maxLength: 1024, description: "An existing workspace file. Foreign paths and credential files are refused." },
+                        explanation: { type: "string", minLength: 1, maxLength: 1024 },
+                        offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER, description: "Zero-based byte offset, inclusive. Requires max_bytes." },
+                        max_bytes: { type: "integer", minimum: 1, maximum: 65536, description: "Retain at most this many bytes from offset (default zero), ending at EOF if earlier. Required for files larger than 65536 bytes." },
+                    },
+                } },
+            },
+        };
         case "wait_for_operations": return WAIT_FOR_OPERATIONS_SCHEMA;
         case "acknowledge_operation_result": return ACKNOWLEDGE_OPERATION_RESULT_SCHEMA;
         default: return LOOSE_BACKGROUND_SCHEMA;
@@ -635,6 +660,7 @@ export function canonicalToolSchema(name: OperationBridgeToolName): JsonRecord {
 }
 
 const TOOL_LABELS: Record<OperationBridgeToolName, string> = {
+    report_assignment_result: "Report Assignment Result",
     bg_task_spawn: "BG Spawn",
     bg_task_watch: "BG Watch",
     bg_task_status: "BG Status",
@@ -644,6 +670,7 @@ const TOOL_LABELS: Record<OperationBridgeToolName, string> = {
 };
 
 const TOOL_DESCRIPTIONS: Record<OperationBridgeToolName, string> = {
+    report_assignment_result: "Record your complete or incomplete assignment judgment with retained workspace file evidence before your final answer. Each retained file or explicit byte excerpt is limited to 65536 bytes; use offset and max_bytes for larger source files. A refused report may be corrected and retried. Once retained, only identical retries are allowed. Reporting does not terminalize the assignment, interpret waits or record parent acceptance.",
     bg_task_spawn: "Start one long-running background operation through the trusted parent supervisor. Returns immediately. The operation is owned by the parent, not by this worker process.",
     bg_task_watch: "Start one background command watch through the trusted parent supervisor. Returns immediately. The operation is owned by the parent, not by this worker process.",
     bg_task_status: "Inspect one operation owned by this worker conversation. Only task ids accepted by the parent ownership check are readable.",
@@ -653,6 +680,7 @@ const TOOL_DESCRIPTIONS: Record<OperationBridgeToolName, string> = {
 };
 
 const TOOL_GUIDELINES: Partial<Record<OperationBridgeToolName, readonly string[]>> = {
+    report_assignment_result: ["Continue available local work until the assignment is complete or a concrete blocker prevents progress. For incomplete work, provide remaining_work and any actual permission or external-input blocker. If evidence is refused, correct the path or excerpt range and retry before returning."],
     bg_task_spawn: ["Use bg_task_spawn for established long commands; do not emulate background execution with polling, sleep loops, nohup or shell detachment."],
     bg_task_watch: ["Use bg_task_watch for repeated observation. Do not run a foreground poll loop."],
     wait_for_operations: ["Call wait_for_operations only when no independent work remains. A final answer that says you are waiting is not a park request."],
@@ -664,7 +692,7 @@ export function createToolDescriptor(
 ): OperationToolDescriptor {
     // The wait/acknowledge schemas are fixed here; a parent descriptor may not
     // loosen the contract that decides when a worker parks or consumes evidence.
-    const parameters = name === WAIT_OPERATIONS_TOOL || name === ACKNOWLEDGE_OPERATION_TOOL
+    const parameters = name === WAIT_OPERATIONS_TOOL || name === ACKNOWLEDGE_OPERATION_TOOL || name === "report_assignment_result"
         ? canonicalToolSchema(name)
         : (overrides.parameters ?? canonicalToolSchema(name));
     return deepFreeze({
@@ -679,6 +707,7 @@ export function createToolDescriptor(
 
 export function descriptorsForCapabilities(capabilities: OperationBridgeCapabilities): OperationToolDescriptor[] {
     return deepFreeze([
+        ...(capabilities.reportAssignment === true ? [createToolDescriptor("report_assignment_result")] : []),
         ...(capabilities.background.spawn ? [createToolDescriptor("bg_task_spawn")] : []),
         ...(capabilities.background.watch ? [createToolDescriptor("bg_task_watch")] : []),
         ...(capabilities.background.status ? [createToolDescriptor("bg_task_status")] : []),
@@ -696,6 +725,7 @@ export function normalizeToolDescriptors(
     tools: readonly OperationToolDescriptor[],
     capabilities: OperationBridgeCapabilities,
 ): readonly OperationToolDescriptor[] {
+    assertWaitToolDependencies(capabilities, tools.map(tool => tool.name));
     const seen = new Set<string>();
     const normalized: OperationToolDescriptor[] = [];
     for (const tool of tools) {
@@ -718,8 +748,20 @@ export function normalizeToolDescriptors(
     return deepFreeze(normalized.sort((a, b) => a.name.localeCompare(b.name)));
 }
 
+/** A parked conversation must be able to read and interpret its terminal evidence. */
+export function assertWaitToolDependencies(capabilities: OperationBridgeCapabilities, names: readonly string[]): void {
+    if (!capabilities.wait && !capabilities.parking && !names.includes(WAIT_OPERATIONS_TOOL)) return;
+    if (!capabilities.wait || !capabilities.parking || !names.includes(WAIT_OPERATIONS_TOOL)
+        || !capabilities.acknowledge || !names.includes(ACKNOWLEDGE_OPERATION_TOOL)
+        || !((capabilities.background.status && names.includes("bg_task_status"))
+            || (capabilities.background.log && names.includes("bg_task_log")))) {
+        throw new OperationBridgeError("invalid-request", "wait_for_operations requires parking, acknowledge_operation_result and at least one terminal evidence reader (bg_task_status or bg_task_log) in the final authorized tools list. Add the missing tools explicitly or remove wait_for_operations.");
+    }
+}
+
 export function capabilityForTool(name: OperationBridgeToolName, capabilities: OperationBridgeCapabilities): boolean {
     switch (name) {
+        case "report_assignment_result": return capabilities.reportAssignment === true;
         case "bg_task_spawn": return capabilities.background.spawn;
         case "bg_task_watch": return capabilities.background.watch;
         case "bg_task_status": return capabilities.background.status;
@@ -957,6 +999,11 @@ export interface NormalizedWaitResult {
     taskIds: string[];
     dependencies: NormalizedWaitDependency[];
     continuationNote?: string;
+}
+
+/** Settled dependencies do not bypass a checkpoint while the writer is still parking. */
+export function requiresParkCheckpoint(wait: NormalizedWaitResult): boolean {
+    return wait.park && (wait.phase === "parking" || !wait.settled);
 }
 
 export function normalizeWaitForOperationsResult(value: unknown): { ok: true; result: NormalizedWaitResult } | { ok: false; message: string } {

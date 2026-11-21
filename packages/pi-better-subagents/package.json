@@ -1,10 +1,11 @@
 {
   "name": "pi-better-subagents",
-  "version": "0.29.0",
+  "version": "0.36.0",
   "description": "Pi extension for detached, sandboxed subagent runs that keep the foreground session free.",
   "license": "MIT",
   "type": "module",
   "bin": {
+    "pi-subagents-runtime-status": "./runtime-client/src/runtime/status-cli.mjs",
     "pi-agent-catalog": "./agent-catalog.mjs"
   },
   "exports": {
@@ -41,7 +42,7 @@
   },
   "scripts": {
     "pretest": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
-    "prepack": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
+    "prepack": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs && node ../../scripts/sync-runtime-client.mjs",
     "typecheck": "tsc -p tsconfig.task-runtime.json",
     "test": "node --import tsx --import ./tests/isolate-registry.mjs --test tests/*.test.mjs",
     "test:cross-session": "node --import tsx --import ./tests/isolate-registry.mjs --test --test-name-pattern \"callback session isolation\" tests/extension_health_lifecycle.test.mjs",
@@ -52,9 +53,12 @@
     "verify": "npm run typecheck && npm test"
   },
   "files": [
+    "runtime-client/**",
     "*.ts",
     "*.mjs",
+    "*.d.mts",
     "shared-operation-coordinator/**/*.ts",
+    "shared-operation-coordinator/assignment-observation.mjs",
     "config.json",
     "README.md",
     "roles/**/*.md",

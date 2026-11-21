@@ -33,6 +33,7 @@ process.env.TMPDIR = RUNTIME;
 process.env.PI_CODING_AGENT_DIR = join(RUNTIME, "agent");
 process.env.PI_SUBAGENT_DURABLE_DIR = join(RUNTIME, "durable-subagents");
 
+const { managedDomainPort } = await import("./managed-domain-port.mjs");
 const { default: betterSubagents } = await import("../index.ts");
 const { baseDir, listRunRecords } = await import("../registry.ts");
 
@@ -47,7 +48,7 @@ function makeHarness() {
         model: undefined,
         sessionManager: { getSessionId: () => "debris-session" },
     };
-    betterSubagents(pi);
+    betterSubagents(pi, managedDomainPort());
     return { tools, ctx };
 }
 

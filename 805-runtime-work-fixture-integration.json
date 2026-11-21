@@ -1,0 +1,89 @@
+{
+  "unit": "805",
+  "decisionNeeded": null,
+  "status": "reviewed-fixtures-integrated-focused-checks-pass-cancel-and-compat-failures-classified",
+  "head": "da8fd4437fe608ed52e3b0da769fdc4ac342b20d",
+  "headKind": "Tested integration merge; subsequent report-only commit does not change code/tests.",
+  "standingOrders": [],
+  "ciClassification": {
+    "run": 44255082242,
+    "head": "52ee5f9431c24ec4ecf6cb34cd17080d09d1ce9e",
+    "runConclusion": "cancelled",
+    "jobs": { "total": 32, "success": 29, "cancelled": 2, "failure": 1 },
+    "metadata": [".private-805/logs/runtime-work-ci-run.json", ".private-805/logs/runtime-work-ci-jobs.json"],
+    "annotationFinding": "BOTH cancelled jobs have provider failure annotation: The job has exceeded the maximum execution time of15m0s, followed by operation canceled. Not a cancellation-only/manual-retry interpretation. No job timeout changed.",
+    "jobsDetail": [
+      {
+        "id": 134634838336, "name": "server-tests (3/3)", "conclusion": "cancelled",
+        "firstBodyFailures": "No not-ok test record in primary log.",
+        "lastCompleted": "ok240 real HostedSession replays retained timing notification to its native recipient,2026-11-18T07:03:48.1913555Z",
+        "cancelledAt": "2026-11-18T07:12:19.0254312Z",
+        "evidence": [".private-805/logs/runtime-work-ci-server3.log", ".private-805/logs/runtime-work-ci-server3-annotations.json"]
+      },
+      {
+        "id": 134634837907, "name": "pi-1x-compat (3/3)", "conclusion": "cancelled",
+        "firstBodyFailures": [
+          { "caseNumber": 94, "case": "an 800 ms setup subscription cannot verify a source while fixture bootstrap is held", "durationMs": 2490.822062, "error": "runtime-timeout: caller read deadline exceeded; source was not verified", "location": "query-executor.test.ts; callback error surfaced through WorkClient response handling", "evidence": ".private-805/logs/runtime-work-ci-compat3.log:1049-1065" },
+          { "caseNumber": 98, "case": "cold bootstrap caller deadline does not imply a wedged read worker", "durationMs": 1430.407385, "error": "runtime-timeout: caller read deadline exceeded; source was not verified", "location": "query-executor.test.ts; callback error surfaced through WorkClient response handling", "evidence": ".private-805/logs/runtime-work-ci-compat3.log:1095-1111" }
+        ],
+        "lastCompleted": "ok240 real HostedSession replays retained timing notification to its native recipient,2026-11-18T07:02:12.1122381Z",
+        "cancelledAt": "2026-11-18T07:12:18.3710746Z",
+        "evidence": [".private-805/logs/runtime-work-ci-compat3.log", ".private-805/logs/runtime-work-ci-compat3-annotations.json"],
+        "contrast": "Same original cases94/98 explicitlyok in server3. Compat cancellation does not erase the two real test failures. Their generic error stack does not identify the exact awaited phase; source handles initial cold timeout then requires verified readiness after bootstrap. No further native replay or deadline policy patch attempted."
+      },
+      { "id": 134641145928, "name": "ci", "conclusion": "failure", "meaning": "Downstream required gate: WORKSPACE_RESULT success, SERVER_RESULT cancelled. Not another producer failure.", "evidence": ".private-805/logs/runtime-work-ci-gate.log" }
+    ],
+    "lastBoundaryLimit": "Last completed TAP case is an observation boundary, NOT proof that the next source callback hung. There is no runtime-work completion/phase receipt in these cancelled logs. Source has known eager reader-hook setup outside cleanup before reviewedb4; the reviewed correction and phase proof address that concrete fixture lifecycle, not a retrospective proof of the native15-minute hang cause.",
+    "retryLimit": "No CI retry dispatched. Both genuine compat failures and both15-minute provider annotations must remain in qualification history; do not treat this as a clean manual cancellation or declare full CI green."
+  },
+  "integration": {
+    "method": "Ordinary local fetch/no-ff merge; no reset/rebase/whole-side resolution. Both merges clean.",
+    "merges": [
+      { "head": "a32b102c8833961a2a5df070aba73879997eb8f1", "parents": ["52ee5f9431c24ec4ecf6cb34cd17080d09d1ce9e", "b4f41c28c2b68f2ec76d64e06b3b7a6a6cabdf04"], "scope": "Reviewed three runtime-work churn callbacks now acquire reader hooks at ordinary scan after deferred initialization, without warming up the initial scan. Coordinator-churn has existing-owner cleanup in try/finally and t.after using the same cleanup promise; opt-in phase capture retained." },
+      { "head": "da8fd4437fe608ed52e3b0da769fdc4ac342b20d", "parents": ["a32b102c8833961a2a5df070aba73879997eb8f1", "348afaae67c1fd393d03e1bab121e17b40b95dbc"], "scope": "Reviewed failure-only bounded original timing-reap writer/removal evidence, passive recipient-known-state metadata and pure owned-exit tests. Original deletion error and exact owner survive; no retry, receipt inference, contents capture or new process probe." }
+    ],
+    "preservation": "Goal unknown coverage/cache/generation rules, admission marker, production query executor/worker/read-model/Background and standalone readiness fixture byte-identical to52ee. Three changed churn callbacks exactly match reviewed802; whole runtime-work file intentionally also retains805's existing Goal integration and failure diagnostics. Four changed803 files exactly match reviewed348.",
+    "evidence": ".private-805/logs/runtime-work-preserved-scoped.log"
+  },
+  "focusedProof": [
+    {
+      "cwd": "packages/pi-better-server",
+      "command": "PI_TEST_RUNTIME_WORK_PHASES=1 TMPDIR=\"$PWD/../../.private-805/tmp\" node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-name-pattern '^concurrent coordinator writes|^source churn retries|^source retry invalidates|^pending recipient query|^old handled terminal records' test/runtime-work.test.ts",
+      "exit": 0, "passed": 5, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/runtime-work-focused-package.log",
+      "lifecycle": "callback-entered -> model-constructed(readerInitialized=false) -> assertions-complete(readerInitialized=true) -> finally-entered -> finally-complete(closed=true,watchers0,parentWatchers0) -> after-callback-before-cleanup -> after-cleanup. Initial projection churn, historical parse reuse, later journal wait, old pending recipient and new failure attention assertions pass. No extra initialization scan or deadline extension."
+    },
+    {
+      "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-goal/test/activity.test.ts packages/pi-better-goal/test/activity-notifications.test.ts packages/pi-better-goal/test/admission-scheduler.test.ts packages/pi-better-server/test/goal-recovery-readiness.test.ts",
+      "exit": 0, "passed": 39, "failed": 0, "skipped": 0,
+      "evidence": ".private-805/logs/runtime-work-goal.log",
+      "coverage": "Explicit unknown coverage, preserved tracker/no false wake, cache freshness/generation fences, verified same-subscription recovery, original admission marker and request sharing."
+    },
+    { "command": "TMPDIR=\"$PWD/.private-805/tmp\" node --import tsx --import ./scripts/isolate-registry.mjs --test packages/pi-better-subagents/tests/owned-exit.test.mjs", "exit": 0, "passed": 11, "failed": 0, "skipped": 0, "evidence": ".private-805/logs/runtime-work-owned-exit.log", "scope": "Pure original-reap AST boundary and metadata/owner/receipt tests; no native timing/SDK recipient replay." },
+    { "command": "npm run typecheck --workspace packages/pi-better-server --workspace packages/pi-better-goal --workspace packages/pi-better-subagents", "exit": 0, "evidence": ".private-805/logs/runtime-work-types.log" },
+    { "command": "TypeScript AST comparison against52ee", "exit": 0, "result": "All145 original runtime-work and193 original timing-lifecycle assertion/wait calls unchanged.", "evidence": ".private-805/logs/runtime-work-assertion-guards.log" },
+    { "command": "node .private-805/scripts2-phase-check.mjs", "exit": 0, "result": "All77 protected SSH assertion/wait calls retained.", "evidence": ".private-805/logs/runtime-work-ssh-guard.log" },
+    { "command": "node --check timing_lifecycle.test.mjs and sdk-recipient-fixture.mjs; git diff --check", "exit": 0 }
+  ],
+  "nativeOriginalPassesRetained": {
+    "head": "52ee5f9431c24ec4ecf6cb34cd17080d09d1ce9e",
+    "summary": ".private-805/logs/runtime-work-native-cancel-summary.txt",
+    "witnesses": [
+      { "job": 134634838283, "case": "Original SSH reload durability case94", "result": "ok", "durationMs": 7432.885101, "evidence": ".private-805/logs/runtime-work-ci-scripts2.log:922-927", "scope": "Fake-SSH-on-PATH original workflow; separate live-host case not inferred." },
+      { "job": 134634838316, "case": "Original readiness/cancellation case43", "result": "ok", "durationMs": 17462.841815, "evidence": ".private-805/logs/runtime-work-ci-scripts3.log:570-575" },
+      { "job": 134634838372, "case": "Mac lifecycle real SQLite runner obligations exclude terminal history, unread waits and corrupt records", "result": "ok8", "durationMs": 809.756625, "evidence": ".private-805/logs/runtime-work-ci-mac-lifecycle.log:230-235" },
+      { "job": 134634838177, "case": "Packed standalone pinned socket runtime including cached offline restart", "result": "PASS", "durationMs": 50400.178325, "evidence": ".private-805/logs/runtime-work-ci-linux-runtime.log:199-204" },
+      { "job": 134634838352, "case": "Previous workspace1 Background residuals", "result": "Workspace success; output.test.ts60/60 and golden-path.test.ts1/1 pass; original slow cancellation/projection/reload/sandbox cases explicitlypass. Whole Background workspace585PASS4SKIP,42filesPASS1SKIP.", "evidence": ".private-805/logs/runtime-work-ci-workspaces1.log", "limit": "Fast output case has file-level60/60 witness rather than an individual verbose case line. No claim a prior d904 failure was always healthy or all52ee matrix jobs passed." }
+    ],
+    "limit": "Retain exact52ee native acceptance; these are not new-head formal passes and do not erase compat94/98 failures or cancelled shards."
+  },
+  "retainedLocalAttemptHistory": [
+    { "attempt": "First runtime-work command from unit repository root", "exit": 1, "evidence": ".private-805/logs/runtime-work-focused.log", "cause": "fixtureRoot resolves ../../.work/753 relative to package cwd. Wrong command cwd targeted issue796/.work outside assigned checkout: SQLITE_IOERR2570 before hook setup and cleanup EPERM. Not classified as productRED. Rerun used normal package test cwd, keeping fixtures inside805; no outside cleanup retry or permission/runtime change." },
+    { "attempt": "Initial whole-file equality probe against reviewed802", "exit": 1, "evidence": ".private-805/logs/runtime-work-preserved.log", "cause": "Whole file correctly retains pre-existing805 Goal integration/diagnostics absent from802 base. Corrected read-only guard compares the exact three reviewed callbacks and unchanged production/Goal paths; scoped guard passes. No source overwritten to satisfy the erroneous probe." }
+  ],
+  "remaining": [
+    "Coordinator qualifies guarded runtime-work lifecycle and original native timing/reap on the exact integrated head. Existing last TAP boundary is not enough to prove native hang location or cleanup completion.",
+    "Retain and diagnose compat3 actual94/98 caller-deadline failures separately from the15-minute cancellation; the two reviewed fixture commits do not alter those tests or production deadlines.",
+    "No whole264 loop, job deadline change, native/SDK/socket replay, new supervision policy, authority/branch/recipient relaxation, shared runtime mutation, push or external wait performed."
+  ]
+}

@@ -55,6 +55,34 @@ function recordingHost() {
   return { host, messages };
 }
 
+for (const urgent of [false, true]) for (const succeeds of [false, true]) {
+  test(`cancelled canonical batcher awaits ${urgent ? "urgent" : "ordinary"} ${succeeds ? "accepted" : "refused"} in-flight handoff`, async () => {
+    let accept!: () => void, refuse!: (error: Error) => void;
+    const handoff = new Promise<void>((resolve, reject) => { accept = resolve; refuse = reject; });
+    let sends = 0, receipts = 0;
+    const batcher = createCallbackBatcher({ sendMessage() { sends++; return handoff; } });
+    const notification = event("owned", { onDelivered: () => { receipts++; } });
+    let pending: boolean | Promise<boolean>;
+    if (urgent) pending = batcher.deliverUrgent({ ...notification, customType: "health", content: "attention" });
+    else { batcher.enqueue(notification); pending = batcher.flush(); }
+    assert.equal(sends, 1);
+    batcher.cancel();
+    let quiescent = false;
+    const completion = batcher.settled().then(() => { quiescent = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(quiescent, false, "cancel and a released owner cannot overtake a started handoff");
+    assert.equal(receipts, 0, "receipt cannot precede actual handoff acceptance");
+    if (succeeds) accept(); else refuse(new Error("recipient refused"));
+    assert.equal(await pending, succeeds);
+    await completion;
+    assert.equal(quiescent, true);
+    assert.equal(receipts, succeeds ? 1 : 0, "refused handoff cannot manufacture a receipt");
+    batcher.cancel();
+    await batcher.settled();
+    assert.equal(sends, 1, "settlement is observation, not a retry or fresh delivery");
+  });
+}
+
 function preferencesFixture(t: { after(fn: () => void): void }) {
   const dir = mkdtempSync(join(tmpdir(), "callback-settings-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

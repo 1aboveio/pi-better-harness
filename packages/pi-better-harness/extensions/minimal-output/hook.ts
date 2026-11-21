@@ -91,6 +91,73 @@ export interface MinimalOutputHook {
 
 const HOOK = Symbol.for("pi-better-harness.minimal-output-hook");
 const emptyResult = () => ({ render: () => [] as string[], invalidate() {} });
+interface CompactCallSnapshot {
+  version: number;
+  argsKey: string;
+  renderer: Component | undefined;
+  hasCallRenderer: boolean;
+  hasResult: boolean;
+  isPartial: boolean;
+  failed: boolean;
+  headerWidth: number;
+  text: string;
+  detail: string;
+}
+const compactCallVersions = new WeakMap<ToolComponent, number>();
+const compactCallSnapshots = new WeakMap<ToolComponent, CompactCallSnapshot>();
+const compactCallLines = new WeakMap<ToolComponent, {
+  snapshot: CompactCallSnapshot;
+  theme: Theme | undefined;
+  width: number;
+  indent: number;
+  line: string;
+}>();
+function invalidateCompactCall(component: ToolComponent): void {
+  compactCallVersions.set(component, (compactCallVersions.get(component) ?? 0) + 1);
+  compactCallSnapshots.delete(component);
+  compactCallLines.delete(component);
+}
+function compactArgsKey(args: unknown): string {
+  try { return JSON.stringify(args) ?? ""; } catch { return String(args); }
+}
+function compactCallSnapshot(component: ToolComponent, width: number): CompactCallSnapshot {
+  const version = compactCallVersions.get(component) ?? 0;
+  const argsKey = compactArgsKey(component.args);
+  const renderer = component.callRendererComponent;
+  const hasCallRenderer = Boolean(component.getCallRenderer?.());
+  const hasResult = Boolean(component.result);
+  const isPartial = component.isPartial === true;
+  const failed = component.result?.isError === true;
+  const headerWidth = Math.max(4096, width + 1);
+  const cached = compactCallSnapshots.get(component);
+  if (cached && cached.version === version && cached.argsKey === argsKey && cached.renderer === renderer
+    && cached.hasCallRenderer === hasCallRenderer && cached.hasResult === hasResult
+    && cached.isPartial === isPartial && cached.failed === failed && cached.headerWidth === headerWidth) {
+    return cached;
+  }
+  // Rendering the native call at a wide fixed width is the expensive part of a
+  // compact row. Keep its stripped text until an argument, renderer, result or
+  // explicit invalidate changes the visible call.
+  const header = hasCallRenderer && renderer?.render(headerWidth)
+    .map((line) => stripVTControlCharacters(line).trim())
+    .find((line) => line.length > 0);
+  let text = header;
+  if (!text) {
+    const args = component.args as Record<string, unknown> | undefined;
+    const hint = args?.command ?? args?.path ?? args?.pattern;
+    const detail = typeof hint === "string" ? hint.replace(/\r?\n/g, " ") : JSON.stringify(component.args);
+    text = `${component.toolName}${detail && detail !== "{}" ? ` ${detail}` : ""}`;
+  }
+  const detail = (hasCallRenderer ? undefined : harnessCallDetail(component.toolName, component.args)) ??
+    (text.startsWith(`${component.toolName} `) ? text.slice(component.toolName.length).trimStart()
+      : text === component.toolName ? "" : text);
+  const snapshot = {
+    version, argsKey, renderer, hasCallRenderer, hasResult, isPartial, failed, headerWidth, text, detail,
+  };
+  compactCallSnapshots.set(component, snapshot);
+  return snapshot;
+}
+
 const TOOL_ICONS: Record<string, string> = {
   bash: "\u2318",
   run_application: "\u2318",
@@ -158,22 +225,15 @@ function harnessCallDetail(name: string, input: unknown): string | undefined {
 
 function compactCall(component: ToolComponent, width: number, theme?: Theme, indent = 3, animationTime?: number): string[] {
   if (width <= 0) return [];
-  // Render the call alone at a wider width so terminal wrapping becomes truncation.
-  const header = Boolean(component.getCallRenderer?.()) && component.callRendererComponent?.render(Math.max(4096, width + 1))
-    .map((line) => stripVTControlCharacters(line).trim())
-    .find((line) => line.length > 0);
-  let text = header;
-  if (!text) {
-    const args = component.args as Record<string, unknown> | undefined;
-    const hint = args?.command ?? args?.path ?? args?.pattern;
-    const detail = typeof hint === "string" ? hint.replace(/\r?\n/g, " ") : JSON.stringify(component.args);
-    text = `${component.toolName}${detail && detail !== "{}" ? ` ${detail}` : ""}`;
+  const snapshot = compactCallSnapshot(component, width);
+  const failed = snapshot.failed;
+  const running = !snapshot.hasResult || snapshot.isPartial;
+  const detail = snapshot.detail;
+  const cachedLine = compactCallLines.get(component);
+  if (animationTime === undefined && cachedLine && cachedLine.snapshot === snapshot
+    && cachedLine.theme === theme && cachedLine.width === width && cachedLine.indent === indent) {
+    return [cachedLine.line];
   }
-  const failed = component.result?.isError === true;
-  const running = !component.result || component.isPartial;
-  const detail = (component.getCallRenderer?.() ? undefined : harnessCallDetail(component.toolName, component.args)) ??
-    (text.startsWith(`${component.toolName} `) ? text.slice(component.toolName.length).trimStart()
-      : text === component.toolName ? "" : text);
   const label = component.toolName === "bash" ? "Shell"
     : component.toolName.replace(/_/g, " ").replace(/^./, letter => letter.toUpperCase());
   const suffix = failed ? " (failed)" : running ? " (running)" : "";
@@ -184,7 +244,9 @@ function compactCall(component: ToolComponent, width: number, theme?: Theme, ind
   const styled = theme
     ? ` ${toolIdentity(icon, label, failed ? "error" : running ? "accent" : "muted", theme, animationTime, visibleDetail)}${theme.fg(failed ? "error" : "dim", suffix)}`
     : `${title}${detail ? `  ${detail}` : ""}${suffix}`;
-  return [truncateToWidth(`${" ".repeat(Math.min(indent, Math.max(0, width - 1)))}${styled}`, width)];
+  const line = truncateToWidth(`${" ".repeat(Math.min(indent, Math.max(0, width - 1)))}${styled}`, width);
+  if (animationTime === undefined) compactCallLines.set(component, { snapshot, theme, width, indent, line });
+  return [line];
 }
 
 function toolParent(component: ToolComponent): TranscriptComponent | undefined {
@@ -304,6 +366,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
       getResultRenderer: prototype.getResultRenderer,
       getTextOutput: prototype.getTextOutput,
       setExpanded: prototype.setExpanded,
+      invalidate: prototype.invalidate,
       render: prototype.render,
       ...(typeof prototype.handleMouse === "function" ? { handleMouse: prototype.handleMouse } : {}),
     };
@@ -601,6 +664,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
     }
     const wrappers = {
       updateDisplay(this: ToolComponent, ...args: unknown[]) {
+        invalidateCompactCall(this);
         if (typeof this.ui.handleViewportInput === "function" && !inputWrappers.has(this.ui)) {
           const original = this.ui.handleViewportInput;
           const wrapper = function(this: ToolUI, data: string) {
@@ -625,6 +689,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         }
       },
       setExpanded(this: ToolComponent, ...args: unknown[]) {
+        invalidateCompactCall(this);
         clearHover();
         const group = groups.get(this);
         const wasExpanded = this.expanded;
@@ -633,6 +698,10 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         if (group) group.expanded += Number(this.expanded) - Number(wasExpanded);
         pruneAnimation();
         return result;
+      },
+      invalidate(this: ToolComponent, ...args: unknown[]) {
+        invalidateCompactCall(this);
+        return originals.invalidate.apply(this, args);
       },
       getResultRenderer(this: ToolComponent, ...args: unknown[]) {
         return current.enabled && !this.expanded ? emptyResult : originals.getResultRenderer.apply(this, args);

@@ -1,0 +1,141 @@
+import { createHash, randomBytes } from "node:crypto";
+import type { StoreContext } from "./sqlite.ts";
+
+export interface LaunchAttempt {
+    id: string;
+    sessionId: string;
+    lease: string;
+    leasePath: string;
+    preflightPath: string;
+    preflightDigest: string;
+    policyPath?: string;
+    policyDigest?: string;
+    capacityOwner: { pid: number; start: string };
+    launchAuthority?: unknown;
+    recipe: unknown;
+    permissions: unknown;
+    token: string;
+    state: "prepared" | "spawned";
+    pid?: number;
+    writerPid?: number;
+    writerStartTime?: string;
+    pidStartTime?: string;
+    recoveryMeta?: unknown;
+    bootstrapped?: boolean;
+}
+export interface LaunchIntent {
+    owner: string; request_key: string; digest: string; epoch: number;
+    state: "accepted" | "returned"; attempts: string; result: string | null;
+}
+
+/** Fixed launch journal on the coordinator's existing connection and transaction. */
+export class SubagentLaunchJournal {
+    private context: StoreContext;
+    private alive: () => void;
+    constructor(context: StoreContext, alive: () => void) {
+        this.context = context;
+        this.alive = alive;
+        this.transaction(() => this.db.exec(`CREATE TABLE IF NOT EXISTS subagent_launch_intents (
+            owner TEXT NOT NULL, request_key TEXT NOT NULL, digest TEXT NOT NULL,
+            epoch INTEGER NOT NULL, state TEXT NOT NULL, attempts TEXT NOT NULL, result TEXT,
+            PRIMARY KEY(owner, request_key));
+            CREATE TABLE IF NOT EXISTS subagent_management (singleton INTEGER PRIMARY KEY CHECK(singleton=1), instance TEXT NOT NULL, epoch INTEGER NOT NULL);`));
+    }
+    private get db() { this.alive(); return this.context.db; }
+    private transaction<T>(run: () => T): T { this.alive(); return this.context.transaction(run); }
+    epoch(instance: string) {
+        return this.transaction(() => {
+            const previous = this.db.prepare("SELECT * FROM subagent_management WHERE singleton=1").get();
+            if (previous?.instance === instance) return Number(previous.epoch);
+            const epoch = (Number(previous?.epoch ?? 0)) + 1;
+            this.db.prepare("INSERT OR REPLACE INTO subagent_management VALUES (1, ?, ?)").run(instance, epoch);
+            return epoch;
+        });
+    }
+    current(epoch: number) {
+        if (this.db.prepare("SELECT epoch FROM subagent_management WHERE singleton=1").get()?.epoch !== epoch) throw new Error("stale-runtime-epoch");
+    }
+    read(owner: string, key: string): LaunchIntent | undefined { return this.db.prepare("SELECT * FROM subagent_launch_intents WHERE owner=? AND request_key=?").get(owner, key) as unknown as LaunchIntent | undefined; }
+    attempt(id: string): LaunchAttempt | undefined {
+        const row = this.db.prepare("SELECT j.value AS attempt FROM subagent_launch_intents, json_each(subagent_launch_intents.attempts) j WHERE json_extract(j.value, '$.id')=? LIMIT 1").get(id);
+        return row ? JSON.parse(String(row.attempt)) : undefined;
+    }
+    unresolvedAttempts() {
+        return this.db.prepare("SELECT j.value AS attempt FROM subagent_launch_intents, json_each(subagent_launch_intents.attempts) j WHERE subagent_launch_intents.state='accepted'").all().map(row => JSON.parse(String(row.attempt)));
+    }
+    pendingIntents(): LaunchIntent[] {
+        return this.db.prepare("SELECT * FROM subagent_launch_intents WHERE state='accepted'").all() as unknown as LaunchIntent[];
+    }
+    private progressKey(owner: string, key: string) { return `launch-progress:${createHash('sha256').update(JSON.stringify([owner, key])).digest('hex')}`; }
+    private progress(owner: string, key: string) {
+        const row = this.db.prepare('SELECT value FROM coordinator_state WHERE key=?').get(this.progressKey(owner, key));
+        return row ? JSON.parse(String(row.value)) as { acceptedAt: number; lastProgressAt: number } : undefined;
+    }
+    private noteProgress(owner: string, key: string) {
+        const previous = this.progress(owner, key), now = Date.now();
+        this.db.prepare('INSERT OR REPLACE INTO coordinator_state (key,value) VALUES (?,?)').run(this.progressKey(owner, key),
+            JSON.stringify({ acceptedAt: previous?.acceptedAt ?? now, lastProgressAt: now }));
+    }
+    lifecycleReasons(owner?: string, key?: string) {
+        const exact = owner !== undefined && key !== undefined ? this.read(owner, key) : undefined;
+        const intents = owner !== undefined ? exact?.state === 'accepted' ? [exact] : [] : this.pendingIntents();
+        return intents.map(intent => ({ kind: 'task', id: this.progressKey(intent.owner, intent.request_key),
+            owner: intent.owner, management: { epoch: intent.epoch }, acceptedAt: this.progress(intent.owner, intent.request_key)?.acceptedAt ?? null,
+            lastProgressAt: this.progress(intent.owner, intent.request_key)?.lastProgressAt ?? null, executionDeadline: null, nextDeadline: null,
+            attempts: (JSON.parse(intent.attempts) as LaunchAttempt[]).map(attempt => ({ id: attempt.id, sessionId: attempt.sessionId,
+                state: attempt.state, writer: { pid: attempt.writerPid ?? attempt.pid, start: attempt.writerStartTime ?? attempt.pidStartTime } })),
+            recovery: 'drain-accepted-launch-until-journal-return-or-authoritative-handoff' }));
+    }
+    finishRecovery(owner: string, key: string, epoch: number, result: unknown) {
+        this.transaction(() => {
+            this.current(epoch);
+            this.db.prepare("UPDATE subagent_launch_intents SET state='returned', result=? WHERE owner=? AND request_key=? AND state='accepted' AND epoch<?")
+                .run(JSON.stringify(result), owner, key, epoch);
+        });
+    }
+    accept(owner: string, key: string, digest: string, epoch: number) {
+        return this.transaction(() => {
+            this.current(epoch);
+            const prior = this.read(owner, key);
+            if (prior) {
+                if (prior.digest !== digest) throw new Error("request-conflict: launch key has different content");
+                return { prior: true, ...prior };
+            }
+            this.db.prepare("INSERT INTO subagent_launch_intents VALUES (?, ?, ?, ?, 'accepted', '[]', NULL)").run(owner, key, digest, epoch);
+            this.noteProgress(owner, key);
+            return this.read(owner, key);
+        });
+    }
+    prepare(owner: string, key: string, epoch: number, input: Omit<LaunchAttempt, "token" | "state">) {
+        return this.transaction(() => {
+            this.current(epoch);
+            const row = this.read(owner, key);
+            if (!row || row.epoch !== epoch || row.state !== "accepted") throw new Error("Launch intent is not admitted");
+            const attempts: LaunchAttempt[] = JSON.parse(row.attempts);
+            if (attempts.some(attempt => attempt.id === input.id)) throw new Error("Attempt already dispatched; reconcile exact identity");
+            const attempt: LaunchAttempt = { ...input, token: randomBytes(32).toString("hex"), state: "prepared" };
+            attempts.push(attempt);
+            this.db.prepare("UPDATE subagent_launch_intents SET attempts=? WHERE owner=? AND request_key=?").run(JSON.stringify(attempts), owner, key);
+            this.noteProgress(owner, key);
+            return attempt;
+        });
+    }
+    spawned(owner: string, key: string, epoch: number, id: string, pid: number, pidStartTime?: string) {
+        this.transaction(() => {
+            this.current(epoch);
+            const attempts = JSON.parse(this.read(owner, key)!.attempts) as LaunchAttempt[];
+            const attempt = attempts.find(value => value.id === id);
+            if (!attempt || attempt.state !== "prepared") throw new Error("Launch publication is ambiguous");
+            if (attempt.writerPid && attempt.writerPid !== pid) throw new Error("Launch writer does not match spawned process");
+            Object.assign(attempt, { state: "spawned", pid, pidStartTime });
+            this.db.prepare("UPDATE subagent_launch_intents SET attempts=? WHERE owner=? AND request_key=?").run(JSON.stringify(attempts), owner, key);
+            this.noteProgress(owner, key);
+        });
+    }
+    finish(owner: string, key: string, epoch: number, result: unknown) {
+        this.transaction(() => {
+            this.current(epoch);
+            this.db.prepare("UPDATE subagent_launch_intents SET state='returned', result=? WHERE owner=? AND request_key=? AND epoch=?").run(JSON.stringify(result), owner, key, epoch);
+        });
+    }
+}

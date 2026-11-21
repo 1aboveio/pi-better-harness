@@ -6,8 +6,7 @@
  * the published meta package's own manifest and loaded through its own shims, in
  * its own order; the tools are the ones those extensions register; the writes are
  * real writes checked against the real filesystem; and the confinement is the
- * kernel's, not a string check. The only scaffolding is the ExtensionAPI surface
- * pi itself would provide.
+ * kernel's, not a string check. The native Pi SDK supplies session identity, extension registration and lifecycle.
  *
  * Fixtures live under the canonical /var/tmp — never os.tmpdir(), which on macOS
  * is /private/var/folders and is always writable inside the profile, so an
@@ -16,13 +15,14 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test, { after, before } from "node:test";
 
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { describeSandboxSupport } from "../packages/sandbox-core/index.ts";
+import { inspectDaemonOwner } from "../packages/pi-better-server/src/daemon-owner.ts";
+import { prepareOwnedRuntime, removeOwnedFixture } from "./test-support/remove-owned-fixture.mjs";
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT ??= "off"; // never create real APFS snapshots from tests
 
 const repoRoot = resolve(import.meta.dirname, "..");
@@ -61,16 +61,48 @@ writeFileSync(join(outside, "readable.txt"), "readable from inside the sandbox\n
 const agentDir = join(fixtures, "agent");
 mkdirSync(agentDir, { recursive: true });
 process.env.PI_CODING_AGENT_DIR = agentDir;
+const serverDir = join(agentDir, "server");
+process.env.PI_SERVER_DIR = serverDir;
+let runtimeOwner;
+
+async function stopOwnedRuntime() {
+  const owner = inspectDaemonOwner(serverDir);
+  if (owner.status === "missing" || owner.status === "dead") return;
+  assert.equal(owner.status, "live", "fixture runtime ownership must be known before cleanup");
+  assert.deepEqual(owner.owner, runtimeOwner, "cleanup must not stop a replacement runtime");
+  try { process.kill(owner.owner.pid, "SIGTERM"); }
+  catch (error) { if (error.code !== "ESRCH") throw error; }
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const current = inspectDaemonOwner(serverDir);
+    if (current.status === "missing" || current.status === "dead") return;
+    assert.deepEqual(current, owner, "runtime ownership changed during fixture shutdown");
+    assert.ok(Date.now() < deadline, `fixture runtime ${owner.owner.pid} did not stop`);
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
 
 const originalCwd = process.cwd();
-const sessionShutdownHandlers = [];
+let session;
 after(async () => {
+  const errors = [];
   try {
-    for (const handler of [...sessionShutdownHandlers].reverse()) await handler({ type: "session_shutdown" }, ctx);
+    if (session) {
+      try { await session.abort(); await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
+      catch (error) { errors.push(error); }
+      finally { session.dispose(); }
+    }
   } finally {
     process.chdir(originalCwd);
-    rmSync(fixtures, { recursive: true, force: true });
   }
+  try {
+    await stopOwnedRuntime();
+    removeOwnedFixture(fixtures);
+    assert.equal(existsSync(fixtures), false, "the exact owned fixture is removed");
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length) throw new AggregateError(errors, "session shutdown or owned fixture cleanup failed");
 });
 
 /**
@@ -84,58 +116,15 @@ function defaultExtensionEntries() {
 }
 
 const tools = new Map();
-const activeTools = new Set();
+let activeTools;
 const commands = new Map();
-const sessionStartHandlers = [];
 const userBashHandlers = [];
-const events = new EventEmitter();
 const notifications = [];
 let initialForegroundPolicy;
-const sessionManager = SessionManager.inMemory(projectRoot);
-
-const ctx = {
-  cwd: projectRoot,
-  hasUI: true,
-  mode: "tui",
-  model: { provider: "test-provider", id: "test-model" },
-  thinkingLevel: "off",
-  sessionManager,
-  isIdle: () => true,
-  ui: {
-    theme: { fg: (_color, text) => text },
-    notify: (message) => notifications.push(message),
-    setStatus: () => undefined,
-    setWidget: () => undefined,
-    getEditorComponent: () => undefined,
-    setEditorComponent: () => undefined,
-    custom: () => Promise.resolve(null),
-    confirm: async () => true,
-  },
-};
-
-const pi = {
-  appendEntry: (customType, data) => { sessionManager.appendCustomEntry(customType, data); },
-  events: {
-    emit: (channel, payload) => events.emit(channel, payload),
-    on: (channel, handler) => {
-      events.on(channel, handler);
-      return () => events.off(channel, handler);
-    },
-  },
-  registerTool: (tool) => { tools.set(tool.name, tool); activeTools.add(tool.name); },
-  getActiveTools: () => [...activeTools],
-  setActiveTools: (names) => {
-    activeTools.clear();
-    for (const name of names) activeTools.add(name);
-  },
-  registerCommand: (name, command) => commands.set(name, command),
-  on: (event, handler) => {
-    if (event === "session_start") sessionStartHandlers.push(handler);
-    if (event === "session_shutdown") sessionShutdownHandlers.push(handler);
-    if (event === "user_bash") userBashHandlers.push(handler);
-  },
-  sendMessage: () => undefined,
-};
+const sessionManager = SessionManager.create(projectRoot, join(fixtures, "sessions"));
+let ctx;
+let pi;
+let backgroundPi;
 
 before(async () => {
   if (!support.supported) return;
@@ -148,20 +137,45 @@ before(async () => {
   execFileSync(process.execPath, [join(repoRoot, "scripts/stage-harness-dependencies.mjs")], {
     cwd: repoRoot, stdio: "pipe",
   });
+  runtimeOwner = await prepareOwnedRuntime(agentDir);
+  const factories = [];
   for (const source of defaultExtensionEntries()) {
     const extension = (await import(source)).default;
     assert.equal(typeof extension, "function", `${source} must export an extension factory`);
-    await extension(pi);
+    factories.push(api => {
+      const wrapped = new Proxy(api, { get(target, key) {
+        if (key === "registerTool") return tool => { tools.set(tool.name, tool); target.registerTool(tool); };
+        if (key === "registerCommand") return (name, command) => { commands.set(name, command); target.registerCommand(name, command); };
+        if (key === "on") return (event, handler) => { if (event === "user_bash") userBashHandlers.push(handler); target.on(event, handler); };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+      pi = wrapped;
+      if (source.includes("background")) backgroundPi = wrapped;
+      return extension(wrapped);
+    });
   }
-
-  for (const handler of sessionStartHandlers) {
-    await handler({ type: "session_start", reason: "startup" }, ctx);
-  }
+  const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
+  const resourceLoader = new DefaultResourceLoader({ cwd: projectRoot, agentDir, settingsManager,
+    noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true,
+    extensionFactories: factories });
+  await resourceLoader.reload();
+  assert.deepEqual(resourceLoader.getExtensions().errors, []);
+  ({ session } = await createAgentSession({ cwd: projectRoot, agentDir, settingsManager, resourceLoader, sessionManager, noTools: "builtin" }));
+  await session.bindExtensions({ mode: "tui", uiContext: {
+    ...session.extensionRunner.getUIContext(),
+    theme: { fg: (_color, text) => text },
+    notify: message => notifications.push(message),
+    setStatus() {}, setWidget() {}, getEditorComponent() {}, setEditorComponent() {},
+    custom: () => Promise.resolve(null), confirm: async () => true,
+  } });
+  ctx = session.extensionRunner.createContext();
+  activeTools = new Set(pi.getActiveTools());
 
   const { currentForegroundSandboxPolicy } = await import(
     "../packages/pi-better-background-tasks/src/sandbox.ts"
   );
-  initialForegroundPolicy = currentForegroundSandboxPolicy(pi);
+  initialForegroundPolicy = currentForegroundSandboxPolicy(backgroundPi);
   await commands.get("sandbox").handler("on", ctx);
 });
 
@@ -224,7 +238,7 @@ test("the harness starts unconfined, then Main and Background opt in independent
   const { currentForegroundSandboxPolicy } = await import(
     "../packages/pi-better-background-tasks/src/sandbox.ts"
   );
-  assert.equal(currentForegroundSandboxPolicy(pi).state, "disabled");
+  assert.equal(currentForegroundSandboxPolicy(backgroundPi).state, "disabled");
   const previousCustom = ctx.ui.custom;
   ctx.ui.custom = async (factory) => {
     const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text, inverse: (text) => text };
@@ -237,7 +251,7 @@ test("the harness starts unconfined, then Main and Background opt in independent
   };
   try { await commands.get("sandbox").handler("", ctx); }
   finally { ctx.ui.custom = previousCustom; }
-  const policy = currentForegroundSandboxPolicy(pi);
+  const policy = currentForegroundSandboxPolicy(backgroundPi);
   assert.equal(policy.state, "enabled");
   assert.equal(policy.writableRoot, projectRoot, "consumers must see the same writable root");
   assert.ok(
@@ -329,7 +343,7 @@ test("local background tasks use their explicitly enabled independent policy", {
 
   // The plan the task runtime resolves at launch, from the policy the sandbox
   // extension published into this same session.
-  const plan = resolveForegroundSandboxPlan(pi);
+  const plan = resolveForegroundSandboxPlan(backgroundPi);
   assert.equal(plan.confined, true, "a local task launched now must be confined");
   assert.equal(plan.writableRoot, projectRoot);
   assert.ok(plan.denyWrite.includes(join(projectRoot, ".env")));
@@ -352,6 +366,7 @@ test("local background tasks use their explicitly enabled independent policy", {
 
   const id = launch.text.match(/Started (?:durable )?background process (bgs_[0-9a-f]{20}|bg_[a-z0-9_]+)/)?.[1];
   assert.ok(id, `no task id in: ${launch.text}`);
+  assert.match(id, /^bgs_/, "the real Harness session must use server-owned durable execution");
 
   const deadline = Date.now() + 30_000;
   let status;

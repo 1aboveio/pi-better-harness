@@ -110,3 +110,30 @@ test("tool-wait and no-progress times save, reload, validate, and leave unrelate
         rmSync(root, { recursive: true, force: true });
     }
 });
+
+test("timeout minutes save, reload, disable, and validate", () => {
+    const root = mkdtempSync(join(tmpdir(), "subagents-timeout-config-"));
+    const user = join(root, "settings.json");
+    setConfigPathForTests(user);
+    try {
+        writeSubagentSettings({ delegationMode: "adaptive", maxConcurrent: 4, maxMinutes: 90 });
+        setConfigForTests(undefined);
+        assert.equal(loadConfig().maxMinutes, 90);
+        assert.equal(resolveRunTiming({ settings: loadConfig(), startedAt: 0 }).ceilingAt, 90 * 60_000);
+
+        writeSubagentSettings({ delegationMode: "adaptive", maxConcurrent: 4, maxMinutes: 0 });
+        setConfigForTests(undefined);
+        assert.equal(loadConfig().maxMinutes, 0, "0 disables the timeout");
+        assert.equal(resolveRunTiming({ settings: loadConfig(), startedAt: 0 }).ceilingAt, undefined);
+
+        assert.throws(() => writeSubagentSettings({ delegationMode: "adaptive", maxConcurrent: 4, maxMinutes: -1 }),
+            /maxMinutes must be/);
+        assert.throws(() => writeSubagentSettings({ delegationMode: "adaptive", maxConcurrent: 4, maxMinutes: 10081 }),
+            /maxMinutes must be/);
+        setConfigForTests(undefined);
+        assert.equal(loadConfig().maxMinutes, 0, "a rejected save leaves the prior timeout intact");
+    } finally {
+        setConfigPathForTests(undefined);
+        rmSync(root, { recursive: true, force: true });
+    }
+});

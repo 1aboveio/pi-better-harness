@@ -209,7 +209,7 @@ function loadExtension(policy) {
         on: () => {},
         sendMessage: () => {},
     };
-    mod.default(pi);
+    mod.default(pi, domainPort());
     return { tools, pi };
 }
 
@@ -251,7 +251,7 @@ async function waitForTerminal(id, { attempts = 200, delayMs = 25 } = {}) {
     return undefined;
 }
 
-let mod;
+let mod, domainPort;
 let workspace;
 let restorePath;
 
@@ -259,6 +259,7 @@ before(async () => {
     const sdkRoot = setupStubs();
     restorePath = pinPiBinaryOnPath(sdkRoot);
     mod = await import("../index.ts");
+    ({ managedDomainPort: domainPort } = await import("./managed-domain-port.mjs"));
     workspace = join(RUNTIME, "workspace");
     mkdirSync(workspace, { recursive: true });
 });
@@ -307,18 +308,21 @@ describe("refused task tools never reach the child loadout (#669)", () => {
         const preflight = readJson(join(runPath(id), "child-preflight.json"));
         const policy = readJson(join(runPath(id), "control", "task-policy.json"));
         const meta = registry.readMeta(id);
-        assert.deepEqual(preflight.tools, ["read", "edit", "apply_patch"],
+        assert.deepEqual(preflight.tools, ["read", "edit", "report_assignment_result", "apply_patch"],
             "the child preflight must list only tools the task boundary can provide");
         assert.deepEqual(policy.tools, preflight.tools,
             "the immutable task policy must admit exactly the preflight loadout");
         assert.equal(meta.recipe.tools, "read,edit,apply_patch",
-            "the frozen recipe must describe the effective loadout, not the requested one");
-        assert.ok(!meta.recipe.tools.split(",").includes("tool_search"));
+            "the frozen caller loadout excludes the supervisor's reporting capability");
+        for (const loadout of [preflight.tools, policy.tools, meta.recipe.tools.split(",")]) {
+            assert.ok(!loadout.includes("tool_search"));
+            assert.ok(!loadout.includes("web_fetch"));
+        }
 
         // The drop is reported, with the reason, where the operator can act.
         assert.match(text, /Task sandbox: /);
-        assert.match(text, /tool_search disabled \(not a guarded tool and not ticked as trusted in \/sandbox \(Subagents · Tools\)\)/);
-        assert.match(text, /web_fetch disabled \(its package @juicesharp\/rpiv-web-tools can't be found/);
+        assert.match(text, /tool_search disabled \(no provider selected for this worker\)/);
+        assert.match(text, /web_fetch disabled \(provider @juicesharp\/rpiv-web-tools is unavailable/);
         assert.doesNotMatch(text, /trusted web_fetch/);
     });
 
@@ -336,7 +340,7 @@ describe("refused task tools never reach the child loadout (#669)", () => {
             }, undefined, undefined, ctx),
             (error) => {
                 assert.match(error.message, /tool_search/);
-                assert.match(error.message, /not a guarded tool and not ticked as trusted/);
+                assert.match(error.message, /no provider selected for this worker/);
                 // The refusal is the parent's, not the child launcher's fallback.
                 assert.doesNotMatch(error.message, /Task sandbox requires a supported active Pi SDK/);
                 return true;
@@ -363,7 +367,15 @@ describe("refused task tools never reach the child loadout (#669)", () => {
         await waitForTerminal(id);
 
         const preflight = readJson(join(runPath(id), "child-preflight.json"));
-        assert.deepEqual(preflight.tools, ["read"], "an excluded tool is never planned or admitted");
+        assert.deepEqual(preflight.tools, ["read", "report_assignment_result"], "only the caller's read tool and internal reporter are admitted");
+        const policy = readJson(join(runPath(id), "control", "task-policy.json"));
+        const meta = registry.readMeta(id);
+        assert.deepEqual(policy.tools, preflight.tools);
+        assert.equal(meta.recipe.tools, "read,tool_search", "the caller's original selection stays frozen");
+        assert.equal(meta.recipe.excludeTools, "tool_search", "the frozen denylist still overrides that selection");
+        for (const loadout of [preflight.tools, policy.tools]) {
+            assert.ok(!loadout.includes("tool_search"), "excluded user tool stays absent from runtime authority");
+        }
         assert.doesNotMatch(text, /tool_search/, "an excluded tool is not reported as disabled");
     });
 
@@ -414,7 +426,7 @@ describe("refused task tools never reach the child loadout (#669)", () => {
             (error) => {
                 assert.match(error.message, new RegExp(`Cannot continue ${sessionId}`));
                 assert.match(error.message, /frozen launch requires/);
-                assert.match(error.message, /web_fetch \(its package @juicesharp\/rpiv-web-tools can't be found/);
+                assert.match(error.message, /web_fetch \(provider @juicesharp\/rpiv-web-tools is unavailable/);
                 assert.match(error.message, /Launch a new run/);
                 assert.doesNotMatch(error.message, /Task sandbox requires a supported active Pi SDK/);
                 return true;
