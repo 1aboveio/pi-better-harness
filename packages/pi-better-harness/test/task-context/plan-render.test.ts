@@ -326,6 +326,22 @@ test("a code-done unit without a HEAD keeps the plain in-progress state", () => 
   assert.equal(renderRushPlan(unit, 100)[0], "todo  0/1 complete · 1 in progress");
 });
 
+test("stage headers use saved fleet blockers for issues with no delivery-stage evidence", () => {
+  const workflow = projectRushPlan({
+    runId: "legacy", planRevision: 1,
+    fleet: { implement: { status: "succeeded" }, ci: { status: "blocked" } },
+    units: [{ id: "1", title: "Validate release", stage: "validate", status: "blocked" }],
+  }, "legacy");
+  assert.match(renderRushPlan(workflow, 100)[1]!, /implement ✓\s+review ○\s+ci !/);
+
+  workflow.issues[0] = { ...workflow.issues[0]!, stage: "review" };
+  assert.match(renderRushPlan(workflow, 100)[1]!, /implement ✓\s+review !\s+ci ○/);
+
+  workflow.issues[0] = { ...workflow.issues[0]!, stage: "validate", delivery: "ci" };
+  workflow.fleet.ci = { status: "pending" };
+  assert.match(renderRushPlan(workflow, 100)[1]!, /implement ✓\s+review ○\s+ci !/);
+});
+
 test("the canary cell shows, last, only when a unit carries warehouse canary work", () => {
   const raw = (warehouseCanary?: unknown) => ({
     runId: "canary", planRevision: 3,

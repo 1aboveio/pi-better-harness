@@ -182,7 +182,7 @@ function unitStatus(unit: RushUnit): DisplayStatus {
   return unit.reviewedHead === unit.headSha ? "reviewed" : "implemented";
 }
 
-function unitStages(unit: RushUnit): Record<"implement" | "review" | "ci", DisplayStatus> {
+function unitStages(unit: RushUnit, fleet: RushPlan["fleet"]): Record<"implement" | "review" | "ci", DisplayStatus> {
   const status = workflowStatus(unit.status);
   if (status === "completed" || status === "skipped") return { implement: status, review: status, ci: status };
 
@@ -195,9 +195,18 @@ function unitStages(unit: RushUnit): Record<"implement" | "review" | "ci", Displ
 
   // An issue can stop in one phase while retaining evidence from another.
   if (status === "blocked" || status === "failed") {
-    if (!implemented) return { implement: status, review: reviewed ? "completed" : "pending", ci: "pending" };
     if (reviewed || inCI) return { implement: "completed", review: reviewed ? "completed" : "pending", ci: status };
-    return { implement: "completed", review: status, ci: "pending" };
+    if (implemented || inReview) return { implement: "completed", review: status, ci: "pending" };
+    if (unit.stage !== "implement" && unit.stage !== "pending") {
+      // Older plans record stages such as validate without a delivery marker.
+      const saved = {
+        implement: workflowStatus(fleet.implement?.status ?? "pending"),
+        review: workflowStatus(fleet.review?.status ?? "pending"),
+        ci: workflowStatus(fleet.ci?.status ?? "pending"),
+      };
+      if (Object.values(saved).some(stage => stage === "blocked" || stage === "failed")) return saved;
+    }
+    return { implement: status, review: "pending", ci: "pending" };
   }
 
   return {
@@ -237,7 +246,7 @@ function presentRushPlan(plan: RushPlan, owner: string, readOnly = false): PlanP
       stageLabels.push({ color: style.color, text: ` ${style.glyph}` });
     }
   };
-  const issueStages = plan.issues.map(unitStages);
+  const issueStages = plan.issues.map(unit => unitStages(unit, plan.fleet));
   for (const name of ["implement", "review", "ci"] as const) {
     addStage(name, issueStages.map((issue) => issue[name]));
   }
