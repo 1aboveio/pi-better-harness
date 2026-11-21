@@ -26,10 +26,13 @@ export const plainPlanTheme: PlanRenderTheme = { fg: (_color, value) => value };
 
 export const COMPACT_PLAN_ROWS = 5;
 
+function isInProgress(status: DisplayStatus): boolean {
+  return status === "in_progress" || status === "implemented" || status === "reviewed";
+}
+
 function compactRowIndices(rows: PlanRow[]): number[] {
   if (rows.length <= COMPACT_PLAN_ROWS) return rows.map((_, index) => index);
-  let active = rows.flatMap((row, index) =>
-    ["in_progress", "implemented", "reviewed"].includes(row.status) ? [index] : []);
+  let active = rows.flatMap((row, index) => isInProgress(row.status) ? [index] : []);
   if (!active.length) active = rows.flatMap((row, index) =>
     row.status === "blocked" || row.status === "failed" ? [index] : []);
   const firstPending = rows.findIndex((row) => row.status === "pending");
@@ -78,7 +81,8 @@ export function renderPlanPresentation(
     if (count(status)) summary.push(`${count(status)} ${label}`);
   }
   if (count("pending") && summary.length === 1) summary.push(`${count("pending")} pending`);
-  const lines = !full && header ? renderCompactTaskHeader(summary[0], size, theme, header)
+  const lines = !full && header
+    ? renderCompactTaskHeader(summary[0], size, theme, header, plan.rows.some((row) => isInProgress(row.status)))
     : [theme.fg("warning", "todo") + theme.fg("dim", `  ${summary.join(" · ")}`)];
   for (const metadata of plan.metadata ?? []) {
     const content = metadata.map((part) => theme.fg(part.color, planText(part.text))).join("");
@@ -103,7 +107,7 @@ export function renderPlanPresentation(
       theme.fg(style.color, style.glyph) + " " + theme.fg("dim", label) +
       " ".repeat(Math.max(0, labelWidth - visibleWidth(label)) + 1);
     const titleColor = row.status === "blocked" ? "warning" : row.status === "failed" ? "error" :
-      row.status === "in_progress" || row.status === "implemented" || row.status === "reviewed" ? "text" : "muted";
+      isInProgress(row.status) ? "text" : "muted";
     const badge = planText(row.statusLabel ?? style.label);
     const available = size - visibleWidth(prefix);
     // At narrow widths use an inline status so it survives title truncation.

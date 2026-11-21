@@ -17,10 +17,12 @@ interface RushUnit {
   cancelledAt?: number;
   dependsOn: string[];
   worker?: string | number | undefined;
+  workerKind?: string | undefined;
   note?: string | undefined;
   headSha?: string | undefined;
   reviewedHead?: string | undefined;
   delivery?: string | undefined;
+  canaryStatus?: DisplayStatus | undefined;
 }
 
 export interface RushPlan {
@@ -98,10 +100,12 @@ export function projectRushPlan(data: unknown, runId: string, expectedRunDir?: s
       id: unit.id, title: unit.title, stage: unit.stage, status: unit.status,
       dependsOn: Array.isArray(unit.dependsOn) ? unit.dependsOn.filter((id): id is string => typeof id === "string") : [],
       worker: typeof unit.worker === "string" || typeof unit.worker === "number" ? unit.worker : undefined,
+      workerKind: typeof unit.workerKind === "string" ? unit.workerKind : undefined,
       note: typeof unit.note === "string" ? unit.note : undefined,
       headSha: typeof unit.headSha === "string" && unit.headSha ? unit.headSha : undefined,
       reviewedHead: typeof unit.reviewedHead === "string" && unit.reviewedHead ? unit.reviewedHead : undefined,
       delivery: typeof unit.delivery === "string" && unit.delivery ? unit.delivery : undefined,
+      canaryStatus: readCanaryStatus(unit.warehouseCanary),
     };
   });
   const fleet: RushPlan["fleet"] = {};
@@ -117,7 +121,7 @@ export function projectRushPlan(data: unknown, runId: string, expectedRunDir?: s
     fleet,
     // The skill marks canary work per unit (`warehouseCanary`); older plans set a run-level flag.
     warehouseCanaryRequired: data.warehouseCanaryRequired === true ||
-      persistedUnits.some((unit: unknown) => isRecord(unit) && unit.warehouseCanary != null && unit.warehouseCanary !== false),
+      issues.some((unit) => unit.canaryStatus !== undefined),
     spec: isRecord(data.spec) && typeof data.spec.title === "string" ? { title: data.spec.title } : undefined,
   };
 }
@@ -157,6 +161,18 @@ function workflowStatus(status: string): DisplayStatus {
   }
 }
 
+function readCanaryStatus(value: unknown): DisplayStatus | undefined {
+  if (value == null || value === false) return undefined;
+  if (!isRecord(value)) return "pending";
+  if (value.required === false || value.applicable === false || value.status === "not-applicable") return undefined;
+
+  const resultStatus = isRecord(value.result) ? value.result.status : value.result;
+  const status = value.status ?? resultStatus;
+  if (status === "pass" || status === "passed") return "completed";
+  if (status === "fail") return "failed";
+  return typeof status === "string" ? workflowStatus(status) : "pending";
+}
+
 // A unit is delivered (completed) only at `status: succeeded`, whether its change landed by a
 // merged PR or a direct push. Between code done and delivery, a unit with a HEAD shows
 // whether that HEAD passed review; without one it shows plain in-progress, as before.
@@ -166,16 +182,74 @@ function unitStatus(unit: RushUnit): DisplayStatus {
   return unit.reviewedHead === unit.headSha ? "reviewed" : "implemented";
 }
 
+function unitStages(unit: RushUnit): Record<"implement" | "review" | "ci", DisplayStatus> {
+  const status = workflowStatus(unit.status);
+  if (status === "completed" || status === "skipped") return { implement: status, review: status, ci: status };
+
+  const implemented = unit.stage === "done" || unit.stage === "review";
+  const reviewed = !!unit.headSha && unit.headSha === unit.reviewedHead;
+  // Delivery enters CI before those checks are known to have passed.
+  const inCI = unit.delivery === "ci";
+  const inReview = unit.stage === "review" || unit.delivery === "review" || inCI ||
+    (unit.worker !== undefined && unit.workerKind === "review") || (implemented && !!unit.headSha && unit.delivery === undefined);
+
+  // An issue can stop in one phase while retaining evidence from another.
+  if (status === "blocked" || status === "failed") {
+    if (!implemented) return { implement: status, review: reviewed ? "completed" : "pending", ci: "pending" };
+    if (reviewed || inCI) return { implement: "completed", review: reviewed ? "completed" : "pending", ci: status };
+    return { implement: "completed", review: status, ci: "pending" };
+  }
+
+  return {
+    implement: implemented ? "completed" : status,
+    review: reviewed ? "completed" : inReview ? status : "pending",
+    ci: inCI ? status : "pending",
+  };
+}
+
+function summarizeStage(statuses: DisplayStatus[]): DisplayStatus | "partial" {
+  const applicable = statuses.filter((status) => status !== "skipped");
+  if (applicable.length === 0) return statuses.length ? "skipped" : "pending";
+  if (applicable.every((status) => status === "completed")) return "completed";
+  for (const status of ["failed", "blocked", "unknown"] as const) {
+    if (applicable.includes(status)) return status;
+  }
+  if (applicable.includes("in_progress")) return "in_progress";
+  return applicable.includes("completed") ? "partial" : "pending";
+}
+
 function presentRushPlan(plan: RushPlan, owner: string, readOnly = false): PlanPresentation {
+  const stageLabel = (name: string, status: DisplayStatus | "partial", suffix = "") => {
+    const style = statusStyle(status === "partial" ? "implemented" : status);
+    return { color: style.color, text: `  ${name} ${style.glyph}${suffix}` };
+  };
+  const fleetLabel = (name: string) => {
+    const raw = plan.fleet[name]?.status ?? "pending";
+    const status = workflowStatus(raw);
+    return stageLabel(name, status, status === "unknown" ? ` ${planText(raw)}` : "");
+  };
+  const stageLabels = [fleetLabel("explore")];
+  const addStage = (name: string, statuses: DisplayStatus[]) => {
+    const status = summarizeStage(statuses);
+    stageLabels.push(stageLabel(name, status));
+    if (status !== "in_progress" && statuses.includes("in_progress")) {
+      const style = statusStyle("in_progress");
+      stageLabels.push({ color: style.color, text: ` ${style.glyph}` });
+    }
+  };
+  const issueStages = plan.issues.map(unitStages);
+  for (const name of ["implement", "review", "ci"] as const) {
+    addStage(name, issueStages.map((issue) => issue[name]));
+  }
   // The warehouse canary only applies to data work; hide it otherwise.
-  const stages = ["explore", "implement", "review", "ci", ...(plan.warehouseCanaryRequired ? ["canary"] : [])];
-  const fleet = stages.map((stage) => {
-    const status = plan.fleet[stage]?.status ?? "pending";
-    const display = workflowStatus(status);
-    const style = statusStyle(display);
-    return { color: style.color, text: `  ${stage} ${style.glyph}${display === "unknown" ? ` ${planText(status)}` : ""}` };
-  });
-  const metadata = [[{ color: "dim", text: `${planText(owner)} · rev ${plan.planRevision}  ·` }, ...fleet]];
+  if (plan.warehouseCanaryRequired) {
+    const canaries = plan.issues.flatMap((unit) => unit.canaryStatus === undefined ? [] : [
+      workflowStatus(unit.status) === "skipped" ? "skipped" as const : unit.canaryStatus,
+    ]);
+    if (canaries.length) addStage("canary", canaries);
+    else stageLabels.push(fleetLabel("canary"));
+  }
+  const metadata = [[{ color: "dim", text: `${planText(owner)} · rev ${plan.planRevision}  ·` }, ...stageLabels]];
   if (readOnly) metadata.push([{ color: "warning", text: "read-only handoff" }]);
   if (plan.spec?.title) metadata.push([{ color: "dim", text: plan.spec.title }]);
   return {
