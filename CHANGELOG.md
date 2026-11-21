@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.50.1] - 2026-11-22
+
+### Changed
+
+- Clarify the labels and descriptions in `/harness-settings` so the display, tools, and project work ledger are easier to distinguish. (#868)
+
+### Fixed
+
+- Summarize Rush Todo stages from every issue in the saved plan, including folded rows. Show an in-progress dot alongside a blocker when other issues are still moving through that stage. (#870)
+
 ## [pi-better-harness@0.50.0] - 2026-11-20
 
 ### Changed
