@@ -42,7 +42,7 @@ export function loadRunRecord(id) {
     if (live.kind === "unreadable" || (live.kind === "ok" && existsSync(runDir(id))))
         return live;
     const retained = readRetainedResult(id);
-    return retained ? { kind: "ok", meta: retained } : live;
+    return retained ? { kind: "ok", meta: retained, retained: true } : live;
 }
 export function isRawMode(mode) {
     return String(mode ?? "").trim().toLowerCase() === "raw";
@@ -364,14 +364,14 @@ export function resolveRunAccess(id, request, session) {
     if (loaded.kind === "unreadable")
         return loaded;
     if (isAll(request.all))
-        return { kind: "ok", meta: loaded.meta };
+        return loaded;
     const resolved = resolveActiveOrigin(session);
     // Unwired factories (no session provider) exist only for unit tests that
     // build a tool without the extension. index.ts always passes a provider,
     // so registered tools never take this branch; see the
     // "registered tools fail closed" test in subagent_output_budget.test.mjs.
     if (!resolved.wired)
-        return { kind: "ok", meta: loaded.meta };
+        return loaded;
     if (!resolved.available || !resolved.origin) {
         return { kind: "denied", payload: assembleOwnershipGap(id, "unavailable", request) };
     }
@@ -379,7 +379,7 @@ export function resolveRunAccess(id, request, session) {
     if (owner !== "own") {
         return { kind: "denied", payload: assembleOwnershipGap(id, owner, request) };
     }
-    return { kind: "ok", meta: loaded.meta };
+    return loaded;
 }
 function defaultScope() {
     return listScopeKey(false, undefined, process.pid);

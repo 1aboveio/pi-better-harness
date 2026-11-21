@@ -97,7 +97,7 @@ export interface PayloadRequest {
 }
 
 export type LoadedRun =
-    | { kind: "ok"; meta: RunMeta }
+    | { kind: "ok"; meta: RunMeta; retained?: true }
     | { kind: "missing" }
     | { kind: "unreadable"; detail: string };
 
@@ -131,7 +131,7 @@ export function loadRunRecord(id: string): LoadedRun {
     const live = inspectRunMeta(id);
     if (live.kind === "unreadable" || (live.kind === "ok" && existsSync(runDir(id)))) return live;
     const retained = readRetainedResult(id);
-    return retained ? { kind: "ok", meta: retained } : live;
+    return retained ? { kind: "ok", meta: retained, retained: true } : live;
 }
 
 export function isRawMode(mode: unknown): boolean {
@@ -514,17 +514,17 @@ export function resolveRunAccess(
     id: string,
     request: PayloadRequest,
     session: SubagentToolSession | undefined,
-): { kind: "missing" } | { kind: "unreadable"; detail: string } | { kind: "denied"; payload: string } | { kind: "ok"; meta: RunMeta } {
+): LoadedRun | { kind: "denied"; payload: string } {
     const loaded = loadRunRecord(id);
     if (loaded.kind === "missing") return loaded;
     if (loaded.kind === "unreadable") return loaded;
-    if (isAll(request.all)) return { kind: "ok", meta: loaded.meta };
+    if (isAll(request.all)) return loaded;
     const resolved = resolveActiveOrigin(session);
     // Unwired factories (no session provider) exist only for unit tests that
     // build a tool without the extension. index.ts always passes a provider,
     // so registered tools never take this branch; see the
     // "registered tools fail closed" test in subagent_output_budget.test.mjs.
-    if (!resolved.wired) return { kind: "ok", meta: loaded.meta };
+    if (!resolved.wired) return loaded;
     if (!resolved.available || !resolved.origin) {
         return { kind: "denied", payload: assembleOwnershipGap(id, "unavailable", request) };
     }
@@ -532,7 +532,7 @@ export function resolveRunAccess(
     if (owner !== "own") {
         return { kind: "denied", payload: assembleOwnershipGap(id, owner, request) };
     }
-    return { kind: "ok", meta: loaded.meta };
+    return loaded;
 }
 
 function defaultScope(): string {

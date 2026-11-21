@@ -531,7 +531,8 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
             }
             if (access.kind === "denied") return subagentResultText(access.payload);
             const meta = access.meta;
-            const observed = await session.observeAssignment?.(meta.id);
+            // A saved result remains readable after its row leaves the live observation.
+            const observed = access.retained ? undefined : await session.observeAssignment?.(meta.id);
             const outcome = meta.assignment ? baseSession.inspectOutcome?.(meta, params as Record<string, unknown>, ctx) : undefined;
             // Exact inspection has already checked recipient and read authority.
             // Its immutable terminal record supersedes an older shared projection

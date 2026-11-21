@@ -598,17 +598,23 @@ describe("harness timing: a steer queued behind a long tool call", () => {
                 const meta = readMeta(run.id);
                 assert.equal(meta.status, "killed");
                 assert.equal(meta.timing.stopReason, "ceiling");
-                const read = async () => (await h.tools.get("subagent_result").execute("result",{id:run.id},undefined,undefined,h.ctx)).content[0].text;
-                const result = await read();
-                for (const evidence of ["ceiling","unverified","bash","Captured profile.txt",directory]) assert.ok(result.includes(evidence),result);
-                assert.equal(readFileSync(artifact,"utf8"),"observed profile\n");
+                const read = () => h.tools.get("subagent_result").execute("result", { id: run.id }, undefined, undefined, h.ctx);
+                const result = (await read()).content[0].text;
+                for (const evidence of ["ceiling", "unverified", "bash", "Captured profile.txt", directory]) {
+                    assert.ok(result.includes(evidence), result);
+                }
+                assert.equal(readFileSync(artifact, "utf8"), "observed profile\n");
                 // Retire the quiescent attempt, then read through the same registered tool.
-                const {retainResult}=await import("../retained-result.ts");
-                retainResult(meta,join(runDir(run.id),"output.log"));
+                const { retainResult } = await import("../retained-result.ts");
+                retainResult(meta, join(runDir(run.id), "output.log"));
                 await reap(run);
-                const retained=await read();
-                for (const evidence of ["ceiling","unverified","Captured profile.txt",directory]) assert.ok(retained.includes(evidence),retained);
-                assert.equal(readFileSync(artifact,"utf8"),"observed profile\n");
+                const archived = await read();
+                assert.equal(archived.details.snapshot, undefined, "a saved attempt needs no live observation");
+                const retained = archived.content[0].text;
+                for (const evidence of ["ceiling", "unverified", "Captured profile.txt", directory]) {
+                    assert.ok(retained.includes(evidence), retained);
+                }
+                assert.equal(readFileSync(artifact, "utf8"), "observed profile\n");
             } finally { await h.shutdown(); }
         });
     });
