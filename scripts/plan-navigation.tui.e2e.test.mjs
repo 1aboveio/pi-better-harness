@@ -44,7 +44,7 @@ test("golden path: the todo stays passive and right arrow remains editor input",
   assertBlankRowBefore(initial, /^todo  1\/3 complete/im, "generic todo section");
   assert.match(initial, /●\s+2\s+Implement todo navigation\s+active/);
   const initialHeader = initial.split("\n").find((line) => /^todo(?:\s|$)/.test(line));
-  assert.equal(initialHeader, "todo  1/3 complete", "a short Todo has no fold caret and keeps n/total on the left");
+  assert.equal(initialHeader, "todo  1/3 complete · ●", "a short Todo has no fold caret and shows active work");
   assert.doesNotMatch(initial, /^› /m, "the todo starts visible but unfocused");
   assert.doesNotMatch(initial, /→ (plan|todo)/, "the footer does not advertise todo navigation");
 
@@ -75,8 +75,8 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
     runId: "e2e-run", planRevision: 7, warehouseCanaryRequired: false,
     fleet: { explore: { status: "succeeded" }, implement: { status: "pending" } },
     issues: [
-      { id: "214", title: "Extract shared core", stage: "self-review", status: "in-flight", dependsOn: [] },
-      { id: "215", title: "Add mux support", stage: "pending", status: "pending", dependsOn: ["214"] },
+      { id: "214", title: "Extract shared core", stage: "done", status: "in-flight", headSha: "abc", reviewedHead: "abc", delivery: "ci", dependsOn: [] },
+      { id: "215", title: "Add mux support", stage: "done", status: "blocked", headSha: "def", reviewedHead: "def", delivery: "ci", dependsOn: [] },
     ],
   }));
   rmSync(readyPath, { force: true });
@@ -89,8 +89,8 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   const widget = waitForScreen((screen) => screen.includes("Reloaded keybindings") && screen.includes("rush-issues · rev 7") && screen.includes("Extract shared core"));
   assertBlankRowBefore(widget, /^todo  0\/2 complete/i, "Rush todo section");
   const rushHeader = widget.split("\n").find((line) => /^todo(?:\s|$)/.test(line));
-  assert.equal(rushHeader, "todo  0/2 complete", "a short Rush Todo also has no caret");
-  assert.match(widget, /●\s+#214\s+Extract shared core\s+active/);
+  assert.equal(rushHeader, "todo  0/2 complete · ●", "the icon reflects the reviewed issue in CI");
+  assert.match(widget, /◑\s+#214\s+Extract shared core\s+review passed/);
   assert.match(widget, /Add mux support/);
   assert.doesNotMatch(widget, /Old generic step/);
   sendLiteral("\x1b[200~/todo hide\x1b[201~");
@@ -100,10 +100,10 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   sendKey("Enter");
   const revealed = waitForScreen((screen) => screen.includes("rush-issues · rev 7") &&
     /^todo  0\/2 complete/im.test(screen) && !/^› /m.test(screen));
-  assert.match(revealed, /explore ✓\s+implement ○\s+review ○\s+ci ○/, "the workflow overview keeps its stage line");
+  assert.match(revealed, /explore ✓\s+implement ✓\s+review ✓\s+ci ! ●\s/, "CI shows both the blocked issue and the active issue");
   assert.match(revealed, /Extract shared core/);
   assert.match(revealed, /Add mux support/);
-  assert.doesNotMatch(revealed, /self-review · in-flight|after: #214|↑↓ navigate/,
+  assert.doesNotMatch(revealed, /done · in-flight|after: #214|↑↓ navigate/,
     "the workflow overview does not open the removed detail view");
 });
 
