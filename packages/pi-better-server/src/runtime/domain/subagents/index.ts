@@ -2756,12 +2756,12 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             restoreDelegationMode(ctx);
             await workerOperations.start();
             return definition.execute(key, params, signal, onUpdate, ctx);
-        } } : { ...definition, async execute(key, params, _signal, _onUpdate, ctx) {
+        } } : { ...definition, async execute(key, params, signal, _onUpdate, ctx) {
             ctx = captureLaunchContext(ctx);
             catalogHostFrom(ctx);
             const { submitManagedLaunch } = await import("./managed-launch-client.ts");
             void activateWorkObservation();
-            return await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, params)) as never;
+            return await observeNavigatorLaunch(ctx, "subagents", key, "Subagent launch", () => submitManagedLaunch(pi, ctx, key, definition.name, params, signal)) as never;
         } });
     };
     announceExecutionAdapter(pi, {
