@@ -112,7 +112,7 @@ thresholds continue to take precedence for subagent health.
 
 | Tool | Blocks? | What it does |
 |------|---------|--------------|
-| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `skills` ([skill exposure](#skill-exposure)), `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-tool-wait-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `tool_wait_minutes`, `stuck_minutes`. |
+| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `skills` ([skill exposure](#skill-exposure)), `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `isolation`, `git_clone_workspace`, `recover_in_clone`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-tool-wait-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `tool_wait_minutes`, `stuck_minutes`. |
 | `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; optional per-job `session_id` or `session_name` continues a saved conversation), `onCapacity` (`reject` or `launch-available`). |
 | `subagent_settings` | never | Read-only effective settings and capacity snapshot. No parameters. Returns `delegationMode`, `maxConcurrent`, `toolWaitMinutes`, `stuckMinutes`, per-setting `sources`/`timingSources` (`environment`, `session`, `config`, or `default`), a stable settings `revision`, `runningCount`, `pendingCount`, `occupiedSlots`, and `availableSlots`. Timing values already account for the same environment precedence a launch uses. The limit is a ceiling, not a target; spawn admission rechecks live capacity. |
 | `subagent_list` | never | Compact list for the current folder and descendants across foreground sessions (default 10 rows / 1 KiB page). Each row includes `session_id`. Params: `all` (machine-global search), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. Abandoned launch records are reported separately and are never counted as runs. |
@@ -303,14 +303,15 @@ by the existing harness runtime.
 
 ## Run timing (deadline, ceiling, tool wait, stuck)
 
+When a limit stops the run, `subagent_result` identifies the limit, the last recorded work, open tool calls and the available files. Unfinished checks remain unverified. The same read works with `callback:false`.
+
 Timeout control belongs to the harness, not to the prompt or the skill that
 launched the run. A time limit written into a prompt is enforced by nothing, and
 a parent that only notices late tends to kill a child that was still making
 progress. Every run gets a tool-wait alert, stall detection, and a 60-minute hard
 timeout by default. Soft deadlines remain opt-in because total runtime does not
 distinguish a slow agent from a stalled one.
-Use Timeout (minutes) in `/subagents settings` to change the session default;
-Ctrl+S saves it for future sessions. `0` disables the timeout. Changes apply to
+Choose **Run timeout** in `/subagents settings`. Enter a duration in minutes, type **No limit**, or press Space to select **No limit**. Ctrl+S saves the choice for future sessions. Changes apply to
 new attempts, not runs already in progress.
 
 | Control | Default | What happens |
@@ -594,45 +595,30 @@ there but refuse unlink, leaving an empty lock even when status exits zero.
 The default skips optional index refreshes; it does not disable required locks
 for `git add` or commits, grant metadata removal, or remove existing locks.
 
-A sandboxed subagent that will mutate Git should set **`git_clone_workspace:true`**
-on `subagent_spawn`. The parent prepares a fresh, self-contained Git clone whose
-`.git/` directory lives **inside the sandbox writable root**, then runs the child
-in that clone.
+### Git workspaces
 
-Why this matters: a linked Git worktree (created with `git worktree add`) has a
-`.git` file that points back to administrative state under the main repository,
-typically outside the sandbox directory. A sandbox that only allows writes under
-the worktree directory therefore cannot support normal Git producer operations
-such as fetch, rebase, commit, and push — the child stalls or fails when Git
-tries to write metadata it cannot reach. `git_clone_workspace:true` avoids this
-by cloning the repository with a real `.git/` directory inside the writable root.
+Single and batch launches give each Git writer an independent checkout of the
+source HEAD. **Git workspace** in `/subagents settings` selects **Clone** (the
+default) or **Worktree** for new launches. Ctrl+S saves the selection. Clone
+keeps Git metadata inside the checkout. Worktree shares the source object store.
+A read-only launch, an explicit `sandbox_dir`, or `isolation:false` can use the
+supplied directory. The explicit `git_clone_workspace:true` option keeps its
+existing branch and upstream selection.
 
-The clone uses:
+`subagent_result` reports the checkout or its saved result. Inspect and apply the
+changes you want. Cleanup verifies an independent copy before reclaiming an idle
+checkout and its Worktree registration. The saved files include the exact Git
+index, working files, ignored outputs and local commits. Identical file contents
+share storage. After cleanup, use `pi-subagents-recover <run-id> <new-directory>`
+to inspect an independent copy, including an unsuccessful attempt. An eligible
+continuation restores its saved workspace and history.
 
-```
-git clone --reference-if-able <local-reference-repo> --dissociate \
-          <remote-url> <sandbox-workspace>
-```
-
-`--reference-if-able` borrows local objects from the parent repository during
-setup; `--dissociate` removes the alternates link afterwards, so the clone is
-self-contained and safe to delete. The clone source prefers the source
-workspace's upstream remote URL (`origin` when set) so the disposable
-workspace's `origin` points at the real remote rather than the parent working
-tree — pushes therefore target upstream, not the sandboxed parent. The local
-repository is used only as a reference (and as a content fallback when no
-remote is configured). Source remotes are re-synced after clone. The
-checked-out branch/commit matches the source workspace at spawn time.
-Repo-local Git identity settings from the source (`user.name`, `user.email`,
-and `user.signingkey` when set) are copied into the clone so ordinary commits
-work without reconfiguring identity inside the disposable workspace.
-
-If the source workspace is a linked worktree, the clone is prepared from the
-main repository's object database and the requested branch/commit; the child is
-never launched into the structurally broken linked-worktree sandbox. If clone
-preparation fails, the spawn fails fast with a message explaining that the
-linked-worktree Git metadata is outside the sandbox and recommending
-`git_clone_workspace:true`.
+When sandbox rules block a Git metadata update in Worktree, the parent can
+review the existing changes or continue with `session_id` and
+`recover_in_clone:true`. The handoff verifies the copy under the conversation's
+writer lease. The next attempt uses the same sandbox policy. If Git has an open
+transaction or recovery cannot verify the copy, inspect the original directory
+reported in the result.
 
 The mandatory task guard is independent of optional guardrails extensions.
 Adding a package to the tool map does not make its tools safe to execute outside

@@ -6,7 +6,8 @@
   "type": "module",
   "bin": {
     "pi-subagents-runtime-status": "./runtime-client/src/runtime/status-cli.mjs",
-    "pi-agent-catalog": "./agent-catalog.mjs"
+    "pi-agent-catalog": "./agent-catalog.mjs",
+    "pi-subagents-recover": "./bin/recover-workspace.mjs"
   },
   "exports": {
     "./catalog": "./worker-catalog.ts",
@@ -53,6 +54,7 @@
     "verify": "npm run typecheck && npm test"
   },
   "files": [
+    "bin/**",
     "runtime-client/**",
     "*.ts",
     "*.mjs",

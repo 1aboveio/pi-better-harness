@@ -583,8 +583,11 @@ describe("harness timing: a steer queued behind a long tool call", () => {
         await withFakeClock(async () => {
             const h = await makeHarness();
             try {
-                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 10, stuck_minutes: 0 });
-                appendEvents(run.id, longCallStart("hang"));
+                const directory = mkdtempSync(join(tmpdir(),"partial-result-"));
+                const artifact = join(directory,"profile.txt");
+                const run = await spawnRun(h, { cwd:directory, callback:false, deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 10, stuck_minutes: 0 });
+                writeFileSync(artifact, "observed profile\n");
+                appendEvents(run.id, [{type:"message_end",message:{role:"assistant",content:[{type:"text",text:"Captured profile.txt before verification."}]}},...longCallStart("hang")]);
                 await untilSteerRequested(run.id);
                 rewindTiming(run.id, (timing) => ({ steerRequestedAt: timing.steerRequestedAt - 11 * MINUTE }));
                 await tick();
@@ -595,7 +598,17 @@ describe("harness timing: a steer queued behind a long tool call", () => {
                 const meta = readMeta(run.id);
                 assert.equal(meta.status, "killed");
                 assert.equal(meta.timing.stopReason, "ceiling");
+                const read = async () => (await h.tools.get("subagent_result").execute("result",{id:run.id},undefined,undefined,h.ctx)).content[0].text;
+                const result = await read();
+                for (const evidence of ["ceiling","unverified","bash","Captured profile.txt",directory]) assert.ok(result.includes(evidence),result);
+                assert.equal(readFileSync(artifact,"utf8"),"observed profile\n");
+                // Retire the quiescent attempt, then read through the same registered tool.
+                const {retainResult}=await import("../retained-result.ts");
+                retainResult(meta,join(runDir(run.id),"output.log"));
                 await reap(run);
+                const retained=await read();
+                for (const evidence of ["ceiling","unverified","Captured profile.txt",directory]) assert.ok(retained.includes(evidence),retained);
+                assert.equal(readFileSync(artifact,"utf8"),"observed profile\n");
             } finally { await h.shutdown(); }
         });
     });

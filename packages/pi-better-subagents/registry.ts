@@ -1,3 +1,5 @@
+import { reclaimWorkspace } from "./isolated-workspace.ts";
+import { retainResult } from "./retained-result.ts";
 /**
  * Run registry — durable metadata for each spawned subagent.
  *
@@ -30,7 +32,7 @@ import {
     durableSessionsDir,
     listArchivedAttempts,
     readArchivedAttempt,
-    recordArchiveStatusTombstone,
+    recordArchiveStatusTombstone, retainedLogPath,
 } from "./session-store.ts";
 import { failureIdentity, observeFailures, readFailureState } from "./shared-failure-observations.ts";
 
@@ -129,6 +131,8 @@ export interface LaunchRecipe {
     /** Confinement root when the attempt was sandboxed. */
     sandboxDir?: string;
     gitCloneWorkspace: boolean;
+    workspace?: import("./isolated-workspace.ts").IsolatedWorkspace;
+    workspaceAuthority?: Pick<import("./worker-waits.ts").WorkerRunPolicy, "sandbox" | "mandatoryPermissions">;
     callback: boolean;
     name?: string;
     agent?: string;
@@ -326,6 +330,11 @@ export function runDir(id: string): string {
 }
 export function logPathFor(id: string): string {
     return join(runDir(id), "output.log");
+}
+export function evidenceLogPath(id: string): string {
+    const live = logPathFor(id);
+    if (existsSync(live) || existsSync(runDir(id))) return live;
+    return retainedLogPath(id) ?? live;
 }
 export function promptPathFor(id: string): string {
     return join(runDir(id), "prompt.md");
@@ -1338,6 +1347,7 @@ export interface RemoveMetaArtifactsOptions {
      * only its volatile log, metadata, and task scratch are reclaimed.
      */
     keepWorkspace?: boolean;
+    errors?: string[];
 }
 
 export function removeMetaArtifacts(meta: RunMeta, options: RemoveMetaArtifactsOptions = {}): boolean {
@@ -1348,14 +1358,21 @@ export function removeMetaArtifacts(meta: RunMeta, options: RemoveMetaArtifactsO
         // conversation's visible last word and could be continued as if this
         // attempt had never happened. A marker that cannot be published retains
         // the run (the throw below): the unsafe direction is deleting both.
+        // Called under the conversation mutation lock by both retention sweeps.
+        if (assignmentRetainsEvidence(meta)) throw new Error("Assignment outcome or uncertain writer still retains this run's evidence.");
+        const scratch = meta.taskRuntime && meta.taskScratch && dirname(meta.taskScratch) === realpathSync(tmpdir()) &&
+            /^pi-task-scratch-[a-z0-9]{6}$/i.test(basename(meta.taskScratch)) ? meta.taskScratch : undefined;
+        if (meta.timing?.stopReason || meta.recipe?.workspace || scratch) retainResult(meta, logPathFor(meta.id), scratch);
+        const workspace = meta.recipe?.workspace;
+        if (workspace) reclaimWorkspace(workspace, meta.id);
         recordArchiveStatusTombstone(meta);
         removeRunDirectory(meta.id);
-        if (!options.keepWorkspace
+        if (!workspace && !meta.timing?.stopReason && !options.keepWorkspace
             && meta.taskRuntime && /^sa_[a-z0-9]+_[a-z0-9]+$/i.test(meta.id) && meta.cwd === taskWorkspaceDir(meta.id)) {
             rmSync(taskWorkspaceDir(meta.id), { recursive: true, force: true });
         }
-        if (meta.taskRuntime && meta.taskScratch && dirname(meta.taskScratch) === realpathSync(tmpdir()) && /^pi-task-scratch-[a-z0-9]{6}$/i.test(basename(meta.taskScratch))) {
-            rmSync(meta.taskScratch, { recursive: true, force: true });
+        if (scratch) {
+            rmSync(scratch, { recursive: true, force: true });
         }
         metaCache.delete(meta.id);
         removeIndexEntry(join(baseDir(), "by-parent", String(meta.spawnPid)), meta.id);
@@ -1365,7 +1382,8 @@ export function removeMetaArtifacts(meta: RunMeta, options: RemoveMetaArtifactsO
             try { listener(meta); } catch { /* best effort */ }
         }
         return true;
-    } catch {
+    } catch (error) {
+        options.errors?.push(meta.cwd + ": " + String(error));
         return false;
     }
 }

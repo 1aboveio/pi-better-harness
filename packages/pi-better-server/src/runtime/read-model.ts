@@ -1,3 +1,4 @@
+import { discoveryWorkspace } from "./domain/subagents/workspace-scope.domain.mjs";
 import { affectedAttempts } from "./attempt-invalidation.ts";
 import { processMatchesStart } from "../daemon-owner.ts";
 import { createHash } from "node:crypto";
@@ -425,7 +426,8 @@ export class WorkReadModel {
       if (scope.sessionId !== m.callbackOrigin?.sessionId || scope.cwd !== (m.callbackOrigin?.cwd ?? m.cwd)) return false;
     } else if (scope.cwd) {
       const cwd = resolve(scope.cwd), prefix = cwd.endsWith(sep) ? cwd : cwd + sep;
-      if (m.cwd !== cwd && !m.cwd.startsWith(prefix)) return false;
+      const folder = discoveryWorkspace(m);
+      if (folder !== cwd && !folder.startsWith(prefix)) return false;
     }
     const active = ["running", "waiting"].includes(row.assignment.state);
     if (activity) return active;
@@ -1057,7 +1059,7 @@ export class WorkReadModel {
           changedRows.push({ before: this.projected.get(row.meta.id), after: row });
           const m = row.meta;
           if (m.management?.root !== this.agentDir || m.status === "running") this.db.prepare("DELETE FROM terminal_log_folds WHERE id=?").run(m.id);
-          insert.run(m.id, m.cwd, m.callbackOrigin?.cwd ?? m.cwd, m.callbackOrigin?.sessionId ?? null,
+          insert.run(m.id, discoveryWorkspace(m), m.callbackOrigin?.cwd ?? m.cwd, m.callbackOrigin?.sessionId ?? null,
             m.startedAt, row.assignment.state, ["running", "waiting"].includes(row.assignment.state) ? 1 : 0, m.endedAt ?? m.lostAt ?? null, row.recipientPending ? 1 : 0, JSON.stringify(row));
           this.db.prepare("DELETE FROM assignment_members WHERE id=?").run(m.id);
           const session = m.assignment?.owner?.sessionId ?? m.operations?.conversationId ?? m.sessionId;

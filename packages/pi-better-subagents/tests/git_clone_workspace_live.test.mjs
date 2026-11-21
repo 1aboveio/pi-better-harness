@@ -372,3 +372,49 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
         }
     });
 });
+
+it('selects independent checkouts through single and batch launch and honors live or read-only requests', async (t) => {
+    installEarendilResolver();
+    const base = mkdtempSync(join(tmpdir(),'pi-isolation-live-'));
+    const repo = makeRepo(base,'source');
+    const bin = join(base,'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin,'pi'),'#!/bin/sh\nprintf \'{"type":"agent_end"}\\n\'\n',{mode:0o755});
+    const originalPath=process.env.PATH;
+    process.env.PATH=bin+':'+originalPath;
+    const { setConfigForTests }=await import('../config.ts');
+    const { readMeta }=await import('../registry.ts');
+    const { managedDomainPort }=await import('./managed-domain-port.mjs');
+    const { default:extension }=await import('../index.ts');
+    const harness=createExtensionHarness(repo);
+    extension(harness.pi,managedDomainPort());
+    t.after(async ()=>{
+        for(const handler of harness.handlers.get('session_shutdown')??[]) await handler({},harness.ctx);
+        process.env.PATH=originalPath;
+        setConfigForTests(undefined);
+        rmSync(base,{recursive:true,force:true});
+    });
+    const options={clean:true,sandbox:false,callback:false,tools:'read,edit',cwd:repo};
+    const single=async (overrides)=>{
+        const receipt=await harness.tools.get('subagent_spawn').execute('single',{prompt:'inspect',...options,...overrides},undefined,undefined,harness.ctx);
+        return readMeta(receipt.content[0].text.match(/id=(sa_[a-z0-9_]+)/)[1]);
+    };
+    for(const mode of ['clone','worktree']) {
+        setConfigForTests({maxConcurrent:12,...(mode==='worktree'?{gitWorkspace:mode}:{})});
+        const receipt=await harness.tools.get('subagent_spawn_batch').execute('batch',{shared:options,jobs:[{prompt:'first'},{prompt:'second'}]},undefined,undefined,harness.ctx);
+        assert.equal(receipt.details.launched.length,2,JSON.stringify(receipt));
+        const [a,b]=receipt.details.launched.map(row=>readMeta(row.id));
+        assert.equal(a.recipe.workspace.mode,mode);
+        assert.equal(b.recipe.workspace.mode,mode);
+        assert.notEqual(a.cwd,b.cwd);
+        assert.equal(lstatSync(join(a.cwd,'.git')).isDirectory(),mode==='clone');
+        writeFileSync(join(a.cwd,'README.md'),'worker');
+        assert.equal(readFileSync(join(b.cwd,'README.md'),'utf8'),'# source\n');
+        assert.equal(readFileSync(join(repo,'README.md'),'utf8'),'# source\n');
+    }
+    assert.equal((await single({tools:'read'})).cwd,repo);
+    assert.equal((await single({isolation:false})).cwd,repo);
+    const caller=join(base,'caller');
+    mkdirSync(caller);
+    assert.equal((await single({sandbox_dir:caller})).cwd,caller);
+});

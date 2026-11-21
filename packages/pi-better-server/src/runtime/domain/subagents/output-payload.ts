@@ -1,3 +1,7 @@
+import { existsSync } from "node:fs";
+import { readRetainedResult } from "./retained-result.ts";
+import { worktreeDenialText } from "./worktree-feedback.ts";
+import { workspaceDelivery } from "./isolated-workspace.ts";
 /**
  * Model-facing subagent payloads (#312).
  *
@@ -41,8 +45,8 @@ import {
     ABANDONED_LAUNCH_GRACE_MS,
     belongsToOrigin,
     effectiveStatus,
-    inspectRunMeta,
-    logPathFor,
+    inspectRunMeta, runDir,
+    evidenceLogPath,
     originOf,
     type RunCallbackOrigin,
     type RunMeta,
@@ -124,7 +128,10 @@ function isAll(value: unknown): boolean {
  * run directory is missing.
  */
 export function loadRunRecord(id: string): LoadedRun {
-    return inspectRunMeta(id);
+    const live = inspectRunMeta(id);
+    if (live.kind === "unreadable" || (live.kind === "ok" && existsSync(runDir(id)))) return live;
+    const retained = readRetainedResult(id);
+    return retained ? { kind: "ok", meta: retained } : live;
 }
 
 export function isRawMode(mode: unknown): boolean {
@@ -203,7 +210,7 @@ function contentRevisionFor(id: string, meta: RunMeta): string {
         meta.endedAt ?? null,
         meta.lifecycleClassification ?? null,
         meta.failureReason ?? null,
-    ], logPathFor(id));
+    ], evidenceLogPath(id));
 }
 
 function assignmentLabel(meta: RunMeta): string {
@@ -236,7 +243,7 @@ function outputIdentity(id: string, status: string, elapsed: string): string {
 
 function logGaps(id: string): EvidenceGap[] {
     try {
-        statSync(logPathFor(id));
+        statSync(evidenceLogPath(id));
         return [];
     } catch (error) {
         return [{ kind: "read", detail: error instanceof Error ? error.message : String(error) }];
@@ -414,7 +421,7 @@ function wantsTail(request: PayloadRequest): boolean {
 }
 
 function rawPage(ctx: CallContext, cursor: string | undefined, remaining: number): VerbatimPage {
-    const page = pageRetainedFile(logPathFor(ctx.id), {
+    const page = pageRetainedFile(evidenceLogPath(ctx.id), {
         cursor,
         maxBytes: remaining,
         resource: `raw:${ctx.scopeKey}:${ctx.id}`,
@@ -702,6 +709,13 @@ export function assembleSubagentResult(
     const ctx = callContext(id, meta, request, scopeKey, "subagent_result", true);
     const exit = meta.exitCode === undefined ? "?" : String(meta.exitCode);
     const run = parseRunForLifecycle(id);
+    const stop = meta.timing?.stopReason;
+    const delivery = meta.recipe?.workspace ? workspaceDelivery(meta.recipe.workspace, meta.cwd, Boolean(meta.sandbox), id) : undefined;
+    const partial = stop ? `Partial result · stopped: ${stop}. Unfinished checks remain unverified.${run.unmatchedToolCalls.length ? "\nOpen at stop: " + run.unmatchedToolCalls.map(call => call.toolName).join(", ") : ""}${delivery ? "" : "\nWorkspace: " + meta.cwd}` : undefined;
+    const denial = meta.sandbox && meta.recipe?.workspace?.mode === "worktree" && run.deniedWorktreeGitOperation
+        ? worktreeDenialText(run.deniedWorktreeGitOperation, meta.cwd) : undefined;
+    const scratch = meta.taskScratch ? "Task scratch: " + meta.taskScratch : undefined;
+    healthLine = joinSections([partial, delivery, denial, scratch, healthLine]) ?? "";
     const lifecycle = resolveLifecycle(meta, run);
     const identity = resultIdentity(id, assignmentLabel(meta), exit, elapsedFor(meta), lifecycle.classification);
     if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
@@ -814,7 +828,7 @@ const LIST_INCIDENT_CACHE_MAX = 4096;
 let listIncidentComputations = 0;
 
 function listIncidentKey(id: string, terminal: boolean): string {
-    return JSON.stringify([terminal, fileChangeIdentity(logPathFor(id)), failureJournalFingerprint(failurePath(id))]);
+    return JSON.stringify([terminal, fileChangeIdentity(evidenceLogPath(id)), failureJournalFingerprint(failurePath(id))]);
 }
 
 export function listIncidentCount(id: string, cwd: string, terminal: boolean): ListIncidentCount {

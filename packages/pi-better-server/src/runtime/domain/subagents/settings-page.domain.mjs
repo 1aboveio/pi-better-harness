@@ -3,13 +3,24 @@ import * as Tui from "@earendil-works/pi-tui";
 import { isConcurrencyCap } from "./config.domain.mjs";
 import { DELEGATION_MODES } from "./delegation.domain.mjs";
 import { createSkillPicker } from "./skill-picker.domain.mjs";
-import { validatedTimingMinutes } from "./timing.domain.mjs";
+import { isTimingMinutes, MAX_TIMING_MINUTES, validatedTimingMinutes } from "./timing.domain.mjs";
 const SKILL_MODES = [
     { mode: "inherit", label: "Discover automatically" },
     { mode: "none", label: "No skill catalog" },
     { mode: "explicit", label: "Selected skills" },
 ];
 const LABEL_WIDTH = 26;
+const NO_LIMIT = "No limit";
+function parseRunTimeout(input) {
+    const text = input.trim();
+    if (text.toLowerCase() === NO_LIMIT.toLowerCase())
+        return 0;
+    const minutes = Number(text);
+    if (!text || !isTimingMinutes(minutes)) {
+        throw new Error(`Enter No limit or a duration up to ${MAX_TIMING_MINUTES} minutes.`);
+    }
+    return minutes;
+}
 function skillLabel(mode) {
     return SKILL_MODES.find((entry) => entry.mode === mode).label;
 }
@@ -49,7 +60,7 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
             { kind: "mode" }, { kind: "cap" }, { kind: "toolWait" }, { kind: "stuck" }, { kind: "timeout" },
             { kind: "skills" }, { kind: "choose" },
         ];
-        rows.push({ kind: "agents" }, { kind: "reset" });
+        rows.push({ kind: "agents" }, { kind: "workspace" }, { kind: "reset" });
         return rows;
     }
     function startEditing(target, value) {
@@ -57,7 +68,7 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
         input.setValue(value);
         input.handleInput("\x05");
         input.focused = focused;
-        report("");
+        report(target.kind === "timeout" ? "Enter minutes or No limit." : "");
     }
     function finishEditing(text) {
         input.focused = false;
@@ -99,9 +110,12 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
         picker.focused = focused;
         requestRender();
     }
-    function action(settings, selected) {
+    function action(settings, selected, key) {
         try {
-            if (selected.kind === "mode") {
+            if (selected.kind === "workspace") {
+                handlers.changeWorkspace(settings.gitWorkspace === "worktree" ? "clone" : "worktree");
+            }
+            else if (selected.kind === "mode") {
                 const next = DELEGATION_MODES[(DELEGATION_MODES.indexOf(settings.mode) + 1) % DELEGATION_MODES.length];
                 handlers.changeMode(next);
                 report("Session mode updated.");
@@ -116,7 +130,13 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
                 startEditing({ kind: "stuck" }, String(settings.stuckMinutes));
             }
             else if (selected.kind === "timeout") {
-                startEditing({ kind: "timeout" }, String(settings.maxMinutes));
+                if (key === " ") {
+                    handlers.changeTiming("maxMinutes", 0);
+                    report("Run timeout set to No limit.");
+                }
+                else {
+                    startEditing(selected, settings.maxMinutes === 0 ? NO_LIMIT : String(settings.maxMinutes));
+                }
             }
             else if (selected.kind === "skills") {
                 if (settings.skillsMode === "explicit")
@@ -146,7 +166,6 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
         const target = editing;
         if (!target)
             return;
-        const settings = handlers.get();
         if (target.kind === "cap") {
             const cap = /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN;
             if (!isConcurrencyCap(cap)) {
@@ -165,7 +184,7 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
         const key = target.kind === "toolWait" ? "toolWaitMinutes"
             : target.kind === "stuck" ? "stuckMinutes" : "maxMinutes";
         try {
-            const minutes = validatedTimingMinutes(value.trim(), key);
+            const minutes = target.kind === "timeout" ? parseRunTimeout(value) : validatedTimingMinutes(value.trim(), key);
             handlers.changeTiming(key, minutes);
             finishEditing(target.kind === "toolWait" ? "Tool-wait alert updated."
                 : target.kind === "stuck" ? "No-progress alert updated." : "Timeout updated.");
@@ -211,7 +230,7 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
             else if (Tui.matchesKey(data, Tui.Key.down))
                 row = Math.min(rows.length - 1, row + 1);
             else if (Tui.matchesKey(data, Tui.Key.enter) || data === " ")
-                action(settings, selected);
+                action(settings, selected, data);
             else if (Tui.matchesKey(data, "ctrl+s")) {
                 const result = handlers.save();
                 if (result.ok) {
@@ -257,10 +276,10 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
                     const label = entry.kind === "mode" ? "Delegation mode"
                         : entry.kind === "cap" ? "Concurrent subagents"
                             : entry.kind === "toolWait" ? "Tool-wait alert"
-                                : entry.kind === "stuck" ? "No-progress alert" : "Timeout (minutes)";
+                                : entry.kind === "stuck" ? "No-progress alert" : "Run timeout";
                     const value = entry.kind === "mode" ? settings.mode
                         : entry.kind === "cap" ? String(settings.maxConcurrent)
-                            : entry.kind === "timeout" ? String(settings.maxMinutes)
+                            : entry.kind === "timeout" ? (settings.maxMinutes === 0 ? NO_LIMIT : `${settings.maxMinutes} min`)
                                 : `${entry.kind === "toolWait" ? settings.toolWaitMinutes : settings.stuckMinutes} min`;
                     const active = editing?.kind === entry.kind
                         ? input.render(compact ? Math.max(1, w - 2) : valueWidth)[0]
@@ -280,6 +299,10 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
                     const value = settings.skillsMode === "explicit" ? `${settings.skillsPaths.length} checked` : "Choose…";
                     pushSetting("Selected skills", value, selected, value);
                 }
+                else if (entry.kind === "workspace") {
+                    const value = settings.gitWorkspace === "worktree" ? "Worktree" : "Clone";
+                    pushSetting("Git workspace", value, selected, value);
+                }
                 else if (entry.kind === "agents") {
                     lines.push(highlight(theme.fg(selected ? "accent" : "text", marker(selected) + "Agents"), selected));
                 }
@@ -294,9 +317,12 @@ export function createSubagentSettingsPage(theme, handlers, requestRender, close
             const footer = [];
             if (message)
                 footer.push("", theme.fg(error ? "error" : "muted", message));
-            footer.push("", theme.fg("dim", editing
+            const hint = editing
                 ? "Enter Apply · Esc Cancel"
-                : "Up/Down Select · Space/Enter Change · ctrl+s Save default · Esc Back"));
+                : rows[row]?.kind === "timeout"
+                    ? "Space No limit · Enter Edit minutes · ctrl+s Save default · Esc Back"
+                    : "Up/Down Select · Space/Enter Change · ctrl+s Save default · Esc Back";
+            footer.push("", theme.fg("dim", hint));
             const height = Math.max(1, Math.floor(getHeight()));
             const room = Math.max(1, height - 2 - footer.length);
             if (selectedEnd - 2 > viewportStart + room)

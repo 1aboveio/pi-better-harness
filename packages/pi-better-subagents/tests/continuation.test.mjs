@@ -33,7 +33,7 @@
  */
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
     existsSync,
@@ -476,6 +476,100 @@ describe("sandbox tool loading and use permissions (ADR 0027)", () => {
 });
 
 describe("completed-subagent continuation", () => {
+    for (const sandbox of [false, true]) {
+        it(`resumes a reclaimed Worktree in a Clone through the managed SDK (sandbox ${sandbox}) and preserves the earlier result`, async () => {
+            const path = join(RUNTIME, "agent", "settings.json");
+            const saved = readFileSync(path, "utf8"),
+                settings = JSON.parse(saved);
+            settings.piBetterHarness.subagents.gitWorkspace = "worktree";
+            writeFileSync(path, JSON.stringify(settings));
+            const repo = mkdtempSync(join(RUNTIME, "source-"));
+            const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "pipe" });
+            git("init", "-q");
+            writeFileSync(join(repo, "profile.txt"), "base");
+            git("add", ".");
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "initial");
+            const policy = { state: "enabled", permissions: policyMain, subagentPermissions: policyChildEnforced };
+            const h = makeHarness({ cwd: repo, ...(sandbox ? { policy } : {}) });
+            const ids = [];
+            try {
+                const first = await spawnRun(h, {
+                    cwd: repo,
+                    sandbox,
+                    tools: "read,edit",
+                    callback: false,
+                    name: "profile-worker",
+                });
+                ids.push(first);
+                const meta = await waitTerminal(first);
+                assert.equal(meta.recipe.workspace.mode, "worktree");
+                assert.equal(meta.status, "completed");
+                writeFileSync(join(meta.cwd, "profile.txt"), "captured before handoff");
+                const listed = await h.tools
+                    .get("subagent_list")
+                    .execute("list", { limit: 20 }, undefined, undefined, h.ctx);
+                assert.ok(listed.content[0].text.includes(first), listed.content[0].text);
+                const { removeMetaArtifacts } = await import("../registry.ts");
+                assert.equal(removeMetaArtifacts(meta), false, "an unconsumed assignment still owns its checkout");
+                assert.equal(readFileSync(join(meta.cwd, "profile.txt"), "utf8"), "captured before handoff");
+                const { parseRunForLifecycle } = await import("../parse.ts");
+                const originalAnswer = parseRunForLifecycle(first).finalText;
+                assert.ok(originalAnswer);
+                await resultText(h, first);
+                await h.tools.get("subagent_result").execute(
+                    "consume",
+                    {
+                        id: first,
+                        outcome_revision: readOutcome(meta).revision,
+                        disposition: "consumed",
+                        note: "Reviewed captured profile.",
+                    },
+                    undefined,
+                    undefined,
+                    h.ctx,
+                );
+                const errors = [];
+                assert.ok(removeMetaArtifacts(meta, { errors }), JSON.stringify(errors));
+                assert.equal(existsSync(meta.cwd), false);
+                const response = await h.tools.get("subagent_spawn").execute(
+                    "resume",
+                    {
+                        session_name: "profile-worker",
+                        prompt: "Read the saved profile",
+                        recover_in_clone: true,
+                        callback: false,
+                    },
+                    undefined,
+                    undefined,
+                    h.ctx,
+                );
+                const second = idOf(response);
+                ids.push(second);
+                const resumed = await waitTerminal(second);
+                assert.equal(resumed.status, "completed");
+                assert.equal(resumed.recipe.workspace.mode, "clone");
+                assert.equal(resumed.sessionId, meta.sessionId);
+                assert.equal(resumed.recipe.sandbox, sandbox);
+                assert.equal(readFileSync(join(resumed.cwd, "profile.txt"), "utf8"), "captured before handoff");
+                assert.equal(readFileSync(join(repo, "profile.txt"), "utf8"), "base");
+                const oldResult = await resultText(h, first);
+                assert.match(oldResult, /pi-subagents-recover/);
+                assert.ok(oldResult.includes(originalAnswer), oldResult);
+                const exported = join(RUNTIME, "export-" + first);
+                execFileSync(process.execPath, [
+                    fileURLToPath(new URL("../bin/recover-workspace.mjs", import.meta.url)),
+                    first,
+                    exported,
+                ]);
+                assert.equal(readFileSync(join(exported, "profile.txt"), "utf8"), "captured before handoff");
+            } finally {
+                await reap(ids);
+                await h.shutdown();
+                writeFileSync(path, saved);
+            }
+        });
+    }
+
     it("continues the SAME saved conversation under a new attempt id and preserves the old attempt", async () => {
         const h = makeHarness();
         let rootId;

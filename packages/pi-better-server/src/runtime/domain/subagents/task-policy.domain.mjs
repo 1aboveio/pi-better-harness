@@ -125,6 +125,7 @@ export function parseTaskPolicy(value) {
         throw new Error("Invalid task sandbox extension tools.");
     return Object.freeze({
         version: 1, root: absolute("root"), home: absolute("home"), agentDir: absolute("agentDir"), profilePath: absolute("profilePath"), scratch: absolute("scratch"),
+        ...(v.worktreeGitDir !== undefined ? { worktreeGitDir: absolute("worktreeGitDir") } : {}),
         permissions: Object.freeze({
             projectFiles: p.projectFiles, outsideProject: p.outsideProject, storedCredentials: p.storedCredentials,
             commands: p.commands, network: p.network,
@@ -172,7 +173,7 @@ export function prepareTaskRuntime(options) {
     const scratch = createTaskScratch();
     const policy = parseTaskPolicy({
         version: 1, root, home, agentDir, profilePath: join(controlDir, "task.sb"), scratch: scratch.path,
-        permissions,
+        permissions, worktreeGitDir: options.worktreeGitDir,
         denyWrite: [...new Set([
                 ...(options.capturedDenyWrite ?? []),
                 controlDir, scratch.anchor, agentDir, ...runtimeDirectories, ...(options.runtimeRoots ?? []), join(root, ".pi"),

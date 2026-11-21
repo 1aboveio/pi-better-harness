@@ -4,12 +4,13 @@ import { isConcurrencyCap } from "./config.ts";
 import { DELEGATION_MODES, type DelegationMode } from "./delegation.ts";
 import type { SkillExposureMode } from "./skills.ts";
 import { createSkillPicker, type DiscoveredSkill } from "./skill-picker.ts";
-import { validatedTimingMinutes } from "./timing.ts";
+import { isTimingMinutes, MAX_TIMING_MINUTES, validatedTimingMinutes } from "./timing.ts";
 
 export type TimingSettingKey = "maxMinutes" | "toolWaitMinutes" | "stuckMinutes";
 
 export interface SubagentSettingsSnapshot {
     mode: DelegationMode;
+    gitWorkspace: "clone" | "worktree";
     maxConcurrent: number;
     maxMinutes: number;
     modeSource: "session" | "config";
@@ -34,6 +35,7 @@ export interface SubagentSettingsSnapshot {
 
 export interface SubagentSettingsHandlers {
     get(): SubagentSettingsSnapshot;
+    changeWorkspace(mode: "clone" | "worktree"): void;
     changeMode(mode: DelegationMode): void;
     changeCap(cap: number): void;
     changeTiming(key: TimingSettingKey, minutes: number): void;
@@ -56,6 +58,7 @@ type Row =
     | { kind: "timeout" }
     | { kind: "skills" }
     | { kind: "choose" }
+    | { kind: "workspace" }
     | { kind: "agents" }
     | { kind: "reset" };
 
@@ -66,6 +69,17 @@ const SKILL_MODES: readonly { mode: SkillExposureMode; label: string }[] = [
 ];
 
 const LABEL_WIDTH = 26;
+const NO_LIMIT = "No limit";
+
+function parseRunTimeout(input: string): number {
+    const text = input.trim();
+    if (text.toLowerCase() === NO_LIMIT.toLowerCase()) return 0;
+    const minutes = Number(text);
+    if (!text || !isTimingMinutes(minutes)) {
+        throw new Error(`Enter No limit or a duration up to ${MAX_TIMING_MINUTES} minutes.`);
+    }
+    return minutes;
+}
 
 function skillLabel(mode: SkillExposureMode): string {
     return SKILL_MODES.find((entry) => entry.mode === mode)!.label;
@@ -115,7 +129,7 @@ export function createSubagentSettingsPage(
             { kind: "mode" }, { kind: "cap" }, { kind: "toolWait" }, { kind: "stuck" }, { kind: "timeout" },
             { kind: "skills" }, { kind: "choose" },
         ];
-        rows.push({ kind: "agents" }, { kind: "reset" });
+        rows.push({ kind: "agents" }, { kind: "workspace" }, { kind: "reset" });
         return rows;
     }
 
@@ -124,7 +138,7 @@ export function createSubagentSettingsPage(
         input.setValue(value);
         input.handleInput("\x05");
         input.focused = focused;
-        report("");
+        report(target.kind === "timeout" ? "Enter minutes or No limit." : "");
     }
 
     function finishEditing(text: string): void {
@@ -168,9 +182,11 @@ export function createSubagentSettingsPage(
         requestRender();
     }
 
-    function action(settings: SubagentSettingsSnapshot, selected: Row): void {
+    function action(settings: SubagentSettingsSnapshot, selected: Row, key: string): void {
         try {
-            if (selected.kind === "mode") {
+            if (selected.kind === "workspace") {
+                handlers.changeWorkspace(settings.gitWorkspace === "worktree" ? "clone" : "worktree");
+            } else if (selected.kind === "mode") {
                 const next = DELEGATION_MODES[(DELEGATION_MODES.indexOf(settings.mode) + 1) % DELEGATION_MODES.length]!;
                 handlers.changeMode(next);
                 report("Session mode updated.");
@@ -181,7 +197,12 @@ export function createSubagentSettingsPage(
             } else if (selected.kind === "stuck") {
                 startEditing({ kind: "stuck" }, String(settings.stuckMinutes));
             } else if (selected.kind === "timeout") {
-                startEditing({ kind: "timeout" }, String(settings.maxMinutes));
+                if (key === " ") {
+                    handlers.changeTiming("maxMinutes", 0);
+                    report("Run timeout set to No limit.");
+                } else {
+                    startEditing(selected, settings.maxMinutes === 0 ? NO_LIMIT : String(settings.maxMinutes));
+                }
             } else if (selected.kind === "skills") {
                 if (settings.skillsMode === "explicit") rememberedSkillPaths = [...settings.skillsPaths];
                 const next = cycleSkillMode(settings.skillsMode);
@@ -208,7 +229,6 @@ export function createSubagentSettingsPage(
     const submit = (value: string) => {
         const target = editing;
         if (!target) return;
-        const settings = handlers.get();
         if (target.kind === "cap") {
             const cap = /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN;
             if (!isConcurrencyCap(cap)) {
@@ -226,7 +246,7 @@ export function createSubagentSettingsPage(
         const key = target.kind === "toolWait" ? "toolWaitMinutes"
             : target.kind === "stuck" ? "stuckMinutes" : "maxMinutes";
         try {
-            const minutes = validatedTimingMinutes(value.trim(), key);
+            const minutes = target.kind === "timeout" ? parseRunTimeout(value) : validatedTimingMinutes(value.trim(), key);
             handlers.changeTiming(key, minutes);
             finishEditing(target.kind === "toolWait" ? "Tool-wait alert updated."
                 : target.kind === "stuck" ? "No-progress alert updated." : "Timeout updated.");
@@ -268,7 +288,7 @@ export function createSubagentSettingsPage(
             if (Tui.matchesKey(data, Tui.Key.escape)) close();
             else if (Tui.matchesKey(data, Tui.Key.up)) row = Math.max(0, row - 1);
             else if (Tui.matchesKey(data, Tui.Key.down)) row = Math.min(rows.length - 1, row + 1);
-            else if (Tui.matchesKey(data, Tui.Key.enter) || data === " ") action(settings, selected);
+            else if (Tui.matchesKey(data, Tui.Key.enter) || data === " ") action(settings, selected, data);
             else if (Tui.matchesKey(data, "ctrl+s")) {
                 const result = handlers.save();
                 if (result.ok) {
@@ -313,10 +333,10 @@ export function createSubagentSettingsPage(
                     const label = entry.kind === "mode" ? "Delegation mode"
                         : entry.kind === "cap" ? "Concurrent subagents"
                         : entry.kind === "toolWait" ? "Tool-wait alert"
-                        : entry.kind === "stuck" ? "No-progress alert" : "Timeout (minutes)";
+                        : entry.kind === "stuck" ? "No-progress alert" : "Run timeout";
                     const value = entry.kind === "mode" ? settings.mode
                         : entry.kind === "cap" ? String(settings.maxConcurrent)
-                        : entry.kind === "timeout" ? String(settings.maxMinutes)
+                        : entry.kind === "timeout" ? (settings.maxMinutes === 0 ? NO_LIMIT : `${settings.maxMinutes} min`)
                         : `${entry.kind === "toolWait" ? settings.toolWaitMinutes : settings.stuckMinutes} min`;
                     const active = editing?.kind === entry.kind
                         ? input.render(compact ? Math.max(1, w - 2) : valueWidth)[0]!
@@ -334,6 +354,9 @@ export function createSubagentSettingsPage(
                 } else if (entry.kind === "choose") {
                     const value = settings.skillsMode === "explicit" ? `${settings.skillsPaths.length} checked` : "Choose…";
                     pushSetting("Selected skills", value, selected, value);
+                } else if (entry.kind === "workspace") {
+                    const value = settings.gitWorkspace === "worktree" ? "Worktree" : "Clone";
+                    pushSetting("Git workspace", value, selected, value);
                 } else if (entry.kind === "agents") {
                     lines.push(highlight(theme.fg(selected ? "accent" : "text", marker(selected) + "Agents"), selected));
                 } else {
@@ -346,9 +369,12 @@ export function createSubagentSettingsPage(
             const body = lines.slice(2);
             const footer: string[] = [];
             if (message) footer.push("", theme.fg(error ? "error" : "muted", message));
-            footer.push("", theme.fg("dim", editing
+            const hint = editing
                 ? "Enter Apply · Esc Cancel"
-                : "Up/Down Select · Space/Enter Change · ctrl+s Save default · Esc Back"));
+                : rows[row]?.kind === "timeout"
+                    ? "Space No limit · Enter Edit minutes · ctrl+s Save default · Esc Back"
+                    : "Up/Down Select · Space/Enter Change · ctrl+s Save default · Esc Back";
+            footer.push("", theme.fg("dim", hint));
             const height = Math.max(1, Math.floor(getHeight()));
             const room = Math.max(1, height - 2 - footer.length);
             if (selectedEnd - 2 > viewportStart + room) viewportStart = selectedEnd - 2 - room;

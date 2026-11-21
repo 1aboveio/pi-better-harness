@@ -69,6 +69,8 @@ export type TaskPermissions = Readonly<SandboxPermissions> & CommandSettings;
 export type TaskPolicy = Readonly<{
     version: 1;
     root: string;
+    /** Actual linked checkout metadata recorded by the launcher. */
+    worktreeGitDir?: string;
     home: string;
     agentDir: string;
     profilePath: string;
@@ -154,6 +156,7 @@ export function parseTaskPolicy(value: unknown): TaskPolicy {    if (!value || t
     })) throw new Error("Invalid task sandbox extension tools.");
     return Object.freeze({
         version: 1, root: absolute("root"), home: absolute("home"), agentDir: absolute("agentDir"), profilePath: absolute("profilePath"), scratch: absolute("scratch"),
+        ...(v.worktreeGitDir !== undefined ? { worktreeGitDir: absolute("worktreeGitDir") } : {}),
         permissions: Object.freeze({
             projectFiles: p.projectFiles, outsideProject: p.outsideProject, storedCredentials: p.storedCredentials,
             commands: p.commands, network: p.network,
@@ -175,6 +178,7 @@ export function prepareTaskRuntime(options: {
     root: string; controlDir: string; tools: readonly string[]; piBin?: string;
     permissions?: SandboxPermissions & Partial<CommandSettings>; extensionPaths?: readonly string[]; runtimeRoots?: readonly string[];
     capturedDenyWrite?: readonly string[];
+    worktreeGitDir?: string;
     /** Trusted launcher-selected bridge from the pinned worker release. */
     operationBridgePath?: string;
     applyPatch?: boolean; extensionTools?: readonly TaskExtensionTool[];
@@ -206,7 +210,7 @@ export function prepareTaskRuntime(options: {
     const scratch = createTaskScratch();
     const policy = parseTaskPolicy({
         version: 1, root, home, agentDir, profilePath: join(controlDir, "task.sb"), scratch: scratch.path,
-        permissions,
+        permissions, worktreeGitDir: options.worktreeGitDir,
         denyWrite: [...new Set([
             ...(options.capturedDenyWrite ?? []),
             controlDir, scratch.anchor, agentDir, ...runtimeDirectories, ...(options.runtimeRoots ?? []), join(root, ".pi"),

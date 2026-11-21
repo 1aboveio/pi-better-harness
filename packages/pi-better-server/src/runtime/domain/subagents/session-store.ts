@@ -83,6 +83,15 @@ export function durableSubagentRoot(env: NodeJS.ProcessEnv = process.env, home: 
     return join(agentDir || join(home, ".pi", "agent"), "subagents");
 }
 
+export function resultDir(id: string): string | undefined {
+    return /^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id) ? join(durableSubagentRoot(), "results", id) : undefined;
+}
+
+export function retainedLogPath(id: string): string | undefined {
+    const dir = resultDir(id);
+    return dir && join(dir, "output.log");
+}
+
 /** Durable `--session-dir` for new child launches. */
 export function durableSessionsDir(): string {
     return join(durableSubagentRoot(), "sessions");

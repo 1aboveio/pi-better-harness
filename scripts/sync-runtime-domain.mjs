@@ -50,6 +50,10 @@ function copyLaunchDomain(source, destination) {
 writeFileSync(join(root, "packages/pi-better-subagents/shared-work-client.mjs"), readFileSync(join(root, "packages/pi-better-server/src/runtime/work-client.mjs")));
 writeFileSync(join(root, "packages/pi-better-background-tasks/src/shared-work-client.mjs"), readFileSync(join(root, "packages/pi-better-server/src/runtime/work-client.mjs")));
 copyLaunchDomain(join(root, "packages/pi-better-subagents"), subagents);
+const scopeSource = readFileSync(join(subagents,"workspace-scope.ts"),"utf8");
+writeFileSync(join(subagents,"workspace-scope.domain.d.mts"), ts.transpileDeclaration(scopeSource, {
+  compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext},
+}).outputText);
 copyLaunchDomain(join(root, "packages/pi-better-background-tasks/src"), join(target, "background-service"));
 copyLaunchDomain(join(root, "packages/pi-better-sandbox"), join(target, "sandbox-policy"));
 const catalog = join(target, "catalog");
@@ -108,9 +112,9 @@ writeFileSync(join(target, "session-store.mjs"), "// Generated from packages/pi-
 
 const registry = ts.createSourceFile("registry.ts", readFileSync(join(root, "packages/pi-better-subagents/registry.ts"), "utf8"), ts.ScriptTarget.Latest, true);
 const printer = ts.createPrinter();
-const paths = registry.statements.filter(statement => ts.isFunctionDeclaration(statement) && ["baseDir", "runDir", "logPathFor"].includes(statement.name?.text));
+const paths = registry.statements.filter(statement => ts.isFunctionDeclaration(statement) && ["baseDir", "runDir", "logPathFor", "evidenceLogPath"].includes(statement.name?.text));
 writeFileSync(join(target, "log-paths.mjs"), ts.transpileModule(
-  'import { realpathSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";\n' +
+  'import { retainedLogPath } from "./session-store.mjs"; import { existsSync, realpathSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";\n' +
   paths.map(statement => printer.printNode(ts.EmitHint.Unspecified, statement, registry)).join("\n"),
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText);
 for (const name of ["parse.ts", "log-cursor.ts", "shared-log-utils.ts", "health-observation.ts", "shared-stall-detector.ts", "shared-harness-settings.ts"]) {

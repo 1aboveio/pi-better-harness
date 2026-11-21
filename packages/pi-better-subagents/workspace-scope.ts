@@ -48,3 +48,9 @@ export function isWithinWorkspace(candidateCwd: string, scopeCwd: string): boole
     if (rel === "") return true;
     return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
+
+/** Folder where the parent requested the work. The execution cwd stays on the run for delivery and authorization. */
+export function discoveryWorkspace(meta: { cwd: string; recipe?: { workspace?: { source: string; subdir: string } } }): string {
+    const workspace = meta.recipe?.workspace;
+    return workspace ? resolve(workspace.source, workspace.subdir) : meta.cwd;
+}

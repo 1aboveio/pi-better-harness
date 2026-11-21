@@ -453,7 +453,7 @@ function removeAgedRunArtifacts(meta, cutoff, retained, scope, errors) {
         const fresh = readMeta(meta.id) ?? meta;
         if (!ageSweepEligible(fresh, cutoff, retained, scope))
             return false;
-        if (removeMetaArtifacts(fresh, { keepWorkspace: scope.persistent.has(fresh.sessionId) }))
+        if (removeMetaArtifacts(fresh, { keepWorkspace: scope.persistent.has(fresh.sessionId), errors }))
             return true;
         errors.push(`${runDir(meta.id)}: could not remove run artifacts`);
         return false;
@@ -686,6 +686,7 @@ export function collectSizeCapEntries() {
         return [];
     }
     const entries = [];
+    const workspaces = new Map();
     for (const id of ids) {
         const dir = runDir(id);
         const meta = readMeta(id);
@@ -696,7 +697,15 @@ export function collectSizeCapEntries() {
             dirMtimeMs: safeStatMtime(dir) ?? 0,
             bytes: dirBytes(dir),
         });
+        const workspace = meta?.recipe?.workspace;
+        if (workspace && meta && meta.startedAt >= (workspaces.get(workspace.owner)?.started ?? 0)) {
+            workspaces.set(workspace.owner, { root: workspace.root, started: meta.startedAt, entry: entries[entries.length - 1] });
+        }
     }
+    // A restored conversation may have outlived its first attempt. Charge its
+    // one shared checkout to the most recent writer still in the registry.
+    for (const { root, entry } of workspaces.values())
+        entry.bytes += dirBytes(root);
     return entries;
 }
 /**
@@ -798,7 +807,7 @@ function removeSizeCappedRun(id, scope, errors) {
             return "retained";
         if (scope.occupancy.runIds.has(fresh.id))
             return "retained";
-        if (removeMetaArtifacts(fresh, { keepWorkspace: scope.persistent.has(fresh.sessionId) }))
+        if (removeMetaArtifacts(fresh, { keepWorkspace: scope.persistent.has(fresh.sessionId), errors }))
             return "removed";
         errors.push(`${runDir(id)}: could not remove run artifacts`);
         return "failed";

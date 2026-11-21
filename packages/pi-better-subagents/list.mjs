@@ -2,7 +2,7 @@ import { assignmentFor, assignmentDiagnostic } from "./assignment-projection.mjs
 import { describeTiming } from "./timing.ts";
 import { fmtElapsed } from "./widget.mjs";
 import { formatListHealthSuffix } from "./health-surface.mjs";
-import { isWithinWorkspace, normalizeWorkspacePath } from "./workspace-scope.ts";
+import { discoveryWorkspace, isWithinWorkspace, normalizeWorkspacePath } from "./workspace-scope.ts";
 
 export const SUBAGENT_LIST_DEFAULT_LIMIT = 10;
 export const SUBAGENT_LIST_MAX_LIMIT = 100;
@@ -119,7 +119,7 @@ export function collectSubagentList(p) {
     const statusOf = p.statusOf ?? ((meta) => meta.status);
     const healthById = p.healthById ?? (() => undefined);
     const failureById = p.failureById ?? (() => "");
-    const inScope = p.inScope ?? ((meta) => options.all || isWithinWorkspace(meta.cwd, cwd));
+    const inScope = p.inScope ?? ((meta) => options.all || isWithinWorkspace(discoveryWorkspace(meta), cwd));
     const offset = Math.max(0, Math.floor(Number(p.offset) || 0));
 
     const scoped = (p.metas ?? [])

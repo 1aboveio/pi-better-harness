@@ -1,6 +1,7 @@
 /** Installed as the final inline extension by the trusted native launcher. */
 import { SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { canonicalizePath, describeSandboxSupport } from "./shared-sandbox-core.ts";
+import { deniedGitOperation, worktreeDenialText } from "./worktree-feedback.ts";
+import { canonicalizePath, compileWritePolicy, describeSandboxSupport } from "./shared-sandbox-core.ts";
 import { GUARDED_TASK_TOOLS, installTaskTools, TASK_BUILTINS } from "./shared-task-sandbox.ts";
 import { parseTaskPolicy, RUN_APPLICATION, selectTaskTools, type TaskPolicy } from "./task-policy.ts";
 import { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } from "./permission-policy.ts";
@@ -51,6 +52,17 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
         policy: Object.freeze({ writableRoot: policy.root, home: policy.home, permissions: policy.permissions, denyWrite: policy.denyWrite,
             runtimeCompatibility: true, runtimeWrite: Object.freeze([policy.scratch]) }),
     });
+    if (policy.worktreeGitDir) {
+        const gitDir = policy.worktreeGitDir;
+        const compiled = compileWritePolicy(plan.policy);
+        pi.on("tool_result", event => {
+            const operation = deniedGitOperation(event, gitDir, compiled);
+            if (operation) return {
+                content: [...event.content, {type: "text", text: worktreeDenialText(operation, policy.root)}],
+                details: { ...(event.details && typeof event.details === "object" ? event.details : {}), deniedWorktreeGitOperation: operation },
+            };
+        });
+    }
     const controller = Object.freeze({ requireLaunchPlan: () => plan });
     let shellPath: string | undefined;
     let currentCwd = process.cwd();

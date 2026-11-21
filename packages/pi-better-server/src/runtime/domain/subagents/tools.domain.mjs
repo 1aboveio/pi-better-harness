@@ -17,10 +17,9 @@
 import { createHash } from "node:crypto";
 import { assignmentFor, projectAssignment, createAssignmentProjector, withAssignmentObservations } from "./assignment-projection.mjs";
 import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus } from "./registry.domain.mjs";
-import { buildSubagentResultPayload } from "./finalization.domain.mjs";
 import { stopRun } from "./stop.domain.mjs";
 import { SUBAGENT_LIST_DEFAULT_LIMIT, SUBAGENT_LIST_MAX_LIMIT, SUBAGENT_LIST_STATUSES, collectSubagentList, formatSubagentListRow, listFolderScopeKey, normalizeSubagentListOptions, } from "./list.domain.mjs";
-import { assembleOrphanedResult, assembleRunningResult, assembleSubagentListPayload, assembleSubagentOutput, assembleUnreadableMetadata, listIncidentCount, formatIncidentLabel, listRevisions, requestScopeKey, resolveActiveOrigin, resolveRunAccess, unknownRunError, } from "./output-payload.domain.mjs";
+import { assembleOrphanedResult, assembleRunningResult, assembleSubagentListPayload, assembleSubagentOutput, assembleUnreadableMetadata, listIncidentCount, formatIncidentLabel, listRevisions, requestScopeKey, resolveActiveOrigin, resolveRunAccess, assembleSubagentResult, unknownRunError, } from "./output-payload.domain.mjs";
 import { budgetFor, readOutputControls } from "./shared-log-utils.domain.mjs";
 import { readRunFailures } from "./failures.domain.mjs";
 import { actionablePermissionBlockers } from "./shared-failure-observations.domain.mjs";
@@ -497,11 +496,7 @@ export function subagentResultTool(Type, baseSession = {}) {
                     }
                     return resultText(assembleRunningResult(p.id, meta, p, scopeKey, healthLine));
                 }
-                const body = buildSubagentResultPayload(p.id, p, healthLine, scopeKey);
-                if (body === null) {
-                    return resultText(assembleRunningResult(p.id, meta, p, scopeKey, healthLine));
-                }
-                return resultText(body);
+                return resultText(assembleSubagentResult(p.id, meta, p, healthLine, scopeKey));
             });
         },
     };

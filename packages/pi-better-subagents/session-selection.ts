@@ -1,4 +1,5 @@
 /** Exact-name selection of saved conversations; attempt IDs never become session IDs. */
+import { discoveryWorkspace } from "./workspace-scope.ts";
 import type { RunMeta } from "./registry.ts";
 
 /**
@@ -21,7 +22,7 @@ export function selectSessionByName(
         if (!previous || meta.startedAt > previous.startedAt) latest.set(meta.sessionId, meta);
     }
     const matches = [...latest.values()]
-        .filter((meta) => meta.name === requested && inWorkspace(meta.cwd))
+        .filter((meta) => meta.name === requested && inWorkspace(discoveryWorkspace(meta)))
         .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
     if (matches.length === 0) {
         throw new Error(`No saved subagent conversation named ${JSON.stringify(requested)} in the current folder. Use subagent_list({all:true}) to find its session_id.`);

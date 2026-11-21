@@ -82,7 +82,8 @@ import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime, applyDirectApplicationLoadout, DEFAULT_TASK_PERMISSIONS, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.ts";
-import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.ts";
+import { worktreePolicyNotice } from "./worktree-feedback.ts";
+import { canonicalizePath, compileWritePolicy, takeRecoverySnapshot } from "./shared-sandbox-core.ts";
 import { TASK_BUILTINS } from "./shared-task-sandbox.ts";
 import { describeTaskTools, planTaskTools, selectEffectiveTaskTools } from "./subagent-tools.ts";
 import {
@@ -2423,6 +2424,12 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
     let catalogModelRegistry: ExtensionContext["modelRegistry"] | undefined;
     let delegationOverride: DelegationMode | undefined;
     let capOverride: number | undefined;
+    let workspaceOverride: "clone" | "worktree" | undefined;
+    const activeWorkspace = () => workspaceOverride ?? (loadConfig().gitWorkspace === "worktree" ? "worktree" : "clone");
+    const changeWorkspace = (mode: "clone" | "worktree") => {
+        workspaceOverride = mode;
+        pi.appendEntry("pi-better-subagents-workspace", { version: 1, mode });
+    };
     let timingOverride: { maxMinutes?: number; toolWaitMinutes?: number; stuckMinutes?: number } = {};
     interface SkillSelection { mode: SkillExposureMode; paths: string[] }
     let skillsOverride: SkillSelection | undefined;
@@ -2550,7 +2557,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         capOverride = undefined;
         delegationOverride = undefined;
         timingOverride = {};
+        workspaceOverride = undefined;
         skillsOverride = undefined;
+        pi.appendEntry("pi-better-subagents-workspace", { version: 1, mode: null });
         pi.appendEntry("pi-better-subagents-cap", { version: 1, maxConcurrent: null });
         pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: null });
         pi.appendEntry("pi-better-subagents-timing", { version: 1, maxMinutes: null, toolWaitMinutes: null, stuckMinutes: null });
@@ -2643,6 +2652,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 savedTiming.stuckMinutes = cfg.stuckMinutes;
             }
             writeSubagentSettings({
+                ...(workspaceOverride ? { gitWorkspace: workspaceOverride } : {}),
                 delegationMode: activeDelegationMode(),
                 maxConcurrent: activeConcurrencyCap(),
                 ...savedTiming,
@@ -2683,6 +2693,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         delegationOverride = undefined;
         capOverride = undefined;
         timingOverride = {};
+        workspaceOverride = undefined;
         skillsOverride = undefined;
         const branch = ctx.sessionManager?.getBranch?.();
         if (!Array.isArray(branch)) return;
@@ -2716,6 +2727,10 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                     skillsOverride = { mode: "explicit", paths: [...data.paths] };
                 }
                 continue;
+            }
+            if (entry.type === "custom" && entry.customType === "pi-better-subagents-workspace") {
+                const data = entry.data as { version?: number; mode?: unknown } | null;
+                if (data?.version === 1 && (data.mode === "worktree" || data.mode === "clone" || data.mode === null)) workspaceOverride = data.mode ?? undefined;
             }
             if (entry.type === "custom" && entry.customType === "pi-better-subagents-timing") {
                 const data = entry.data as {
@@ -2851,7 +2866,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         /** Skill exposure for this launch; omit to inherit catalog/config/discovery. */
         skills?: readonly string[];
         sandbox_dir?: string; callback?: boolean; cwd?: string;
-        git_clone_workspace?: boolean; approve?: boolean; allow_nested?: boolean;
+        git_clone_workspace?: boolean; isolation?: boolean; recover_in_clone?: boolean; approve?: boolean; allow_nested?: boolean;
         agent?: string; role?: string | readonly string[]; alias?: string;
         catalog?: CatalogRunRecord; catalogResolved?: boolean;
         /**
@@ -2916,7 +2931,8 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         modelNote?: string;
     }> {
         const { resolveChildClosure, resolveChildLaunch, configSnapshot } = await import("./child-dependencies.mjs");
-        const { resolveSubagentWorkspace } = await import("./git-workspace.ts");
+        const { resolveSubagentWorkspace, inspectGitWorkspace } = await import("./git-workspace.ts");
+        const { workspaceChoice, createIsolatedWorkspace, restoreWorkspace, discardWorkspace, markWorkspaceWriter } = await import("./isolated-workspace.ts");
         const { PREFLIGHT_ENV } = await import("./child-preflight.mjs");
         assertThinkingLevel(p.thinking);
         // Skill exposure is a caller choice, not a launch: validate its shape
@@ -3008,7 +3024,29 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         // The disposable clone this launch owns (removed if the spawn fails); a caller's sandbox_dir is not ours.
         // A continuation never prepares another clone: the recipe's workspace already
         // holds the prior attempt's uncommitted work.
-        const ownedCloneWorkspace = !resume && !p.sandbox_dir && sandboxEnabled && p.git_clone_workspace ? taskWorkspaceDir(id) : undefined;
+        if (p.isolation === false && p.git_clone_workspace) throw new Error("Choose either live checkout or git_clone_workspace.");
+        if (p.recover_in_clone && (!resume || resume.recipe.workspace?.mode !== "worktree" || internal?.resumeWait)) {
+            throw new Error("Clone handoff requires an explicit continuation of a linked worktree.");
+        }
+        if (resume && p.isolation !== undefined && Boolean(resume.recipe.workspace || resume.recipe.gitCloneWorkspace) !== p.isolation) {
+            throw new ContinuationError("Changing isolation would replace the saved workspace.");
+        }
+        const handoffAuthority = p.recover_in_clone ? resume?.recipe.workspaceAuthority : undefined;
+        if (p.recover_in_clone && resume) {
+            const previous = handoffAuthority?.sandbox;
+            const permissions = taskPermissions ?? DEFAULT_TASK_PERMISSIONS;
+            assertAssignmentPermissionScope(handoffAuthority, {
+                mandatoryPermissions:permissionPlan.enforced,
+                sandbox:sandboxEnabled ? { root:resume.recipe.sandboxDir, denyWrite:previous?.denyWrite ?? [],
+                    permissions:{...DEFAULT_TASK_PERMISSIONS, ...permissions, ...resolveCommandSettings(permissions),
+                        processAccess:permissions.processAccess ?? "off"} } : null,
+            });
+        }
+        const selected = normalizeTools(p.tools ?? cfg.defaultTools ?? (p.clean ? SAFE_CLEAN_TOOLS : SAFE_DEFAULT_TOOLS));
+        const automatic = !resume && !p.sandbox_dir && p.isolation !== false;
+        let isolated = resume?.recipe.workspace ?? (automatic
+            ? workspaceChoice(p.cwd ?? ctx.cwd, id, p.git_clone_workspace ? "clone" : activeWorkspace(), p.git_clone_workspace ? "write" : selected, p.git_clone_workspace ? "" : p.exclude_tools ?? "") : undefined);
+        const ownedCloneWorkspace = !resume && !p.sandbox_dir && (isolated || p.git_clone_workspace) ? taskWorkspaceDir(id) : undefined;
         // A launch attempt only becomes a run when `writeMeta` commits. Until
         // then everything it creates (prompt, control/, provenance, its own
         // session dir, clone workspace, task scratch) belongs to the attempt and
@@ -3018,6 +3056,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
         let spawned: ReturnType<typeof spawnDetached> | undefined;
         let launchScratch: string | undefined;
         let committed = false;
+        let createdWorkspace = false;
         try {
             if (!resume) mkdirSync(childSessionDir, { recursive: true });
             mkdirSync(runDir(id), { recursive: true });
@@ -3027,17 +3066,30 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             // (#623 R1). The outer catch drops the whole directory on failure.
             recordLaunchAttempt(id);
 
+            // Cleanup, restoration and the actual writer share the conversation lease.
+            if (resume || managed) lease = acquireConversationLease({ sessionId, attemptId: id });
+            if (resume) {
+                revalidateContinuationUnderLease(resume, callbackOrigin);
+                if (isolated) isolated = restoreWorkspace(isolated, p.recover_in_clone, resume.prior.id);
+            }
+            if (!resume && isolated) {
+                const root = taskWorkspaceDir(id);
+                mkdirSync(dirname(root), { recursive: true });
+                mkdirSync(root, { mode: 0o700 });
+                createdWorkspace = true;
+            }
+            const isolatedCwd = isolated && !resume && !p.git_clone_workspace ? createIsolatedWorkspace(isolated, true) : undefined;
             const workspace = resume
                 ? { cwd: resume.recipe.cwd, requestedSandboxDir: resume.recipe.sandboxDir }
+                : isolatedCwd ? { cwd: isolatedCwd, requestedSandboxDir: sandboxEnabled ? isolatedCwd : undefined }
                 : resolveSubagentWorkspace({
-                    ctxCwd: ctx.cwd,
-                    cwd: p.cwd,
-                    sandboxDir: p.sandbox_dir ?? ownedCloneWorkspace,
-                    gitCloneWorkspace: p.git_clone_workspace,
-                    runId: id,
-                    runDirPath: runDir(id),
-                    sandboxEnabled,
+                    ctxCwd: ctx.cwd, cwd: p.cwd, sandboxDir: p.sandbox_dir ?? ownedCloneWorkspace,
+                    gitCloneWorkspace: p.git_clone_workspace, runId: id, runDirPath: runDir(id), sandboxEnabled,
                 });
+            // Legacy explicit clones launch at the repository root, even when the source is a subdirectory.
+            if (!resume && isolated && p.git_clone_workspace) isolated = { ...isolated, subdir: "" };
+            let workspaceNote = isolated ? `Git workspace: ${isolated.mode} at ${workspace.cwd}. Base ${isolated.base}.`
+                + (isolated.mode === "worktree" && sandboxEnabled ? " Git metadata is shared outside this checkout. If the sandbox denies a Git operation, report the operation and current changes. The parent can review them here or continue this session with recover_in_clone:true." : "") : "";
             const cwd = workspace.cwd;
             const requestedSandboxDir = workspace.requestedSandboxDir;
 
@@ -3064,7 +3116,8 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 });
 
             if (requestedSandboxDir) mkdirSync(requestedSandboxDir, { recursive: true });
-            writeFileSync(promptPathFor(id), p.prompt);
+            const workerPrompt = workspaceNote ? workspaceNote + "\n\n" + p.prompt : p.prompt;
+            writeFileSync(promptPathFor(id), workerPrompt);
 
             // A continuation keeps the recipe's launch intent; only current
             // permission-driven adjustments are re-derived from it.
@@ -3073,7 +3126,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             const clean = resume ? resume.recipe.clean : p.clean === true;
             const allowNested = resume ? resume.recipe.allowNested : p.allow_nested === true;
             const approve = resume ? resume.recipe.approve : p.approve === true;
-            const gitCloneWorkspace = resume ? resume.recipe.gitCloneWorkspace : p.git_clone_workspace === true;
+            const gitCloneWorkspace = isolated ? isolated.mode === "clone" : resume ? resume.recipe.gitCloneWorkspace : p.git_clone_workspace === true;
             const callbackEnabled = resume ? p.callback ?? resume.recipe.callback : p.callback !== false;
             const launchName = resume ? resume.recipe.name : p.name;
             // The frozen launch snapshot is the same shape a fresh spawn freezes.
@@ -3309,7 +3362,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 ...(allow && !sandboxEnabled ? ["--tools", allow] : []),
                 ...(excludes.size ? ["--exclude-tools", [...excludes].join(",")] : []),
                 ...(sandboxEnabled ? ["--no-builtin-tools", "--no-approve"] : approve ? ["--approve"] : []),
-                p.prompt,
+                workerPrompt,
             ];
 
             const selectedTools = allow.split(",").filter((name) => name && !excludes.has(name));
@@ -3318,6 +3371,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 && (inheritedTrusted ? inheritedTrusted.has(name) : requestedTools === undefined)).map(({ name }) => name) ?? [];
             const dropped = toolSelection?.dropped ?? [];
             const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
+                worktreeGitDir: isolated?.mode === "worktree" ? inspectGitWorkspace(cwd).gitDir : undefined,
                 root: requestedSandboxDir, controlDir: join(runDir(id), "control"),
                 tools: selectedTools,
                 permissions: taskPermissions && { ...taskPermissions, ...commandSettings },
@@ -3334,8 +3388,20 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 runtimeRoots: [baseDir()],
                 capturedDenyWrite: internal?.resumeWait
                     ? (resume?.prior.operations?.policy.sandbox as WorkerSandboxAuthority | null)?.denyWrite
-                    : undefined,
+                    : handoffAuthority?.sandbox?.denyWrite,
             }) : undefined;
+            if (taskRuntime?.policy.worktreeGitDir) {
+                const policy = taskRuntime.policy;
+                const notice = worktreePolicyNotice(policy.worktreeGitDir!, compileWritePolicy({
+                    writableRoot:policy.root, home:policy.home, permissions:policy.permissions,
+                    denyWrite:policy.denyWrite, runtimeCompatibility:true, runtimeWrite:[policy.scratch],
+                }));
+                if (notice) {
+                    workspaceNote += " " + notice;
+                    args[args.length-1] = workspaceNote + "\n\n" + p.prompt;
+                    writeFileSync(promptPathFor(id),args[args.length-1]!);
+                }
+            }
             launchScratch = taskRuntime?.policy.scratch;
             if (sandboxEnabled && !taskRuntime) throw new Error("Task sandbox has no workspace; refusing an unconfined child.");
             // Parent-authored trust record, written before the child can run (#325).
@@ -3364,18 +3430,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             if (countRunning() >= maxConcurrent) {
                 throw new Error(`Max concurrent subagents (${maxConcurrent}) reached. Stop or let some finish first.`);
             }
-            // One writer per conversation, held across admission, child lifetime,
-            // and finalization. A live duplicate continuation is refused instead of
-            // letting two processes rewrite one session file. A fresh launch has a
-            // brand-new native session id, so it cannot contend with anyone and
-            // needs no lease; every continuation does.
-            if (resume || managed) {
-                lease = acquireConversationLease({ sessionId, attemptId: id });
-            }
-            // The lease is the first moment no other process can retire this
-            // conversation: re-prove the history identity the cached plan was
-            // built from, so `--session` can never reopen a file another sweep
-            // removed as an empty replacement.
+            // Recheck the saved conversation after asynchronous launch preparation.
             if (resume) revalidateContinuationUnderLease(resume, callbackOrigin);
             const preflightPath = join(runDir(id), "child-preflight.json");
             writeFileSync(preflightPath, JSON.stringify({ ...fullResolution, model, tools: selectedTools,
@@ -3461,6 +3516,11 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             // Freeze the ordinary recipe before the durable external-launch intent.
             const recipe = buildLaunchRecipe({
                 ...(!legacyToolLoading ? { toolLoadingVersion: 1 as const } : {}),
+                ...(isolated ? { workspace: isolated, workspaceAuthority: {
+                    mandatoryPermissions:permissionPlan.enforced, sandbox:taskRuntime ? {
+                        root:taskRuntime.policy.root, permissions:taskRuntime.policy.permissions, denyWrite:[...taskRuntime.policy.denyWrite],
+                    } : null,
+                } } : {}),
                 attemptId: id, sessionId, sessionDir: childSessionDir, cwd, model, effort: thinking,
                 tools: callerLaunchTools(allow), excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
                 ...(optionalTrustedTools.length ? { optionalTrustedTools } : {}),
@@ -3524,6 +3584,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 timing: resolveRunTiming({ params: launchTimingParams(p), settings: timingSettingsFor(cfg), env: process.env, startedAt }),
             };
             const dispatchGuard = await internal?.beforeSpawn?.({ runId: id, permissionPlan });
+            if (isolated) markWorkspaceWriter(isolated,id);
             const managedEnv = managed?.beforeSpawn({ id, sessionId, lease: lease!.token, leasePath: lease!.path,
                 preflightPath, policyPath: taskRuntime?.policyPath, permissions: permissionPlan, recipe, recoveryMeta: meta });
             spawned = releaseChild(dispatchGuard, () => spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
@@ -3595,7 +3656,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                     : resolution.specs.length
                     ? `Runtime: isolated · extensions ${resolution.specs.join(", ")}\n`
                     : `Runtime: isolated · built-in tools only\n`;
-            const warn = (dropped.length ? `Task sandbox: ${dropped.map((tool) => `${tool.name} disabled (${withheldBridgeReasons.get(tool.name) ?? tool.reason})`).join("; ")}.\n` : "") +
+            const warn = (workspaceNote ? workspaceNote + "\n" : "") + (dropped.length ? `Task sandbox: ${dropped.map((tool) => `${tool.name} disabled (${withheldBridgeReasons.get(tool.name) ?? tool.reason})`).join("; ")}.\n` : "") +
                 (!sandboxEnabled && resolution.unmapped.length
                 ? `NOTE: no extension mapped for ${resolution.unmapped.join(", ")} — ` +
                   `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
@@ -3620,8 +3681,9 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 const { abortUncommittedLaunch } = await import("./launch-abort.ts");
                 await abortUncommittedLaunch(id, {
                     child: spawned, lease,
-                    artifacts: { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch },
+                    artifacts: { sessionDir: childSessionDir, workspaceDir: isolated ? undefined : ownedCloneWorkspace, scratch: launchScratch },
                 });
+                if (createdWorkspace && isolated) discardWorkspace(isolated);
             }
             throw error;
         }
@@ -3893,7 +3955,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             ...CATALOG_GUIDELINES,
             "Subagent sandboxing defaults to off. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Set sandbox:true to request kernel confinement, including without published settings. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
             "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. A tool call still open for tool_wait_minutes (default 5) or no progress for stuck_minutes (default 10) sends one factual alert; these alerts never stop, cancel, or restart the run. Hard timeouts default to 60 minutes; max_minutes overrides that default (0 disables). Soft deadlines remain opt-in for work with a real wall-clock bound: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace. Do not set elapsed-time limits merely because a task may take a while; use them only when the work needs a real wall-clock bound.",
-            "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
+            "Git writers receive separate checkouts by default. /subagents settings selects Clone or Worktree. isolation:false selects the live checkout. A sandboxed Worktree can return its files or explicitly continue in a verified Clone with recover_in_clone:true.",
             "Saved conversations persist automatically. To continue a completed or stopped worker in its own history, call subagent_spawn with session_id (the native session id reported for the saved conversation) and the new feedback as prompt. Omit session_id for a brand-new conversation.",
             "On a continuation, pass prompt, session_id, and only optional model, thinking, callback, or timing overrides. Launch-only options (name, agent, role, alias, tools, exclude_tools, skills, clean, sandbox, sandbox_dir, cwd, git_clone_workspace, approve, allow_nested) keep the saved recipe; repeat them only with the same value, otherwise the launch is refused.",
             "Do not restate the original task or role when continuing: they already live in the saved conversation. A running or orphaned latest attempt blocks continuation until it stops, and missing saved history is refused rather than recreated.",
@@ -3916,6 +3978,8 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
             sandbox_dir: Type.Optional(Type.String({ description: "Confine writes to (and run the child in) this directory instead of the working dir. Created if missing." })),
             callback: Type.Optional(Type.Boolean({ description: "Default TRUE: on completion, trigger a turn that calls subagent_result and presents the result. Set false to finish quietly — the result is then read on demand via subagent_result." })),
             cwd: Type.Optional(Type.String({ description: "Working directory (default: current)." })),
+            isolation: Type.Optional(Type.Boolean({ description: "Use false to work in the live checkout. By default each Git writer gets its own workspace." })),
+            recover_in_clone: Type.Optional(Type.Boolean({ description: "Continue a stopped or completed linked-worktree conversation in a verified clone with the same history and permissions." })),
             git_clone_workspace: Type.Optional(Type.Boolean({ description: "Prepare a disposable Git clone workspace for sandboxed Git-mutating subagents. The clone has a real .git/ directory inside the sandbox writable root and is self-contained after setup." })),
             approve: Type.Optional(Type.Boolean({ description: "Trust project-local files in the child (default: false; headless runs cannot prompt for trust)." })),
             allow_nested: Type.Optional(Type.Boolean({ description: "Allow the child to spawn its own subagents (default: false). Loads this extension in the child and allowlists its tools." })),
@@ -3959,6 +4023,8 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                         model: p.model,
                         thinking: p.thinking,
                         callback: p.callback,
+                        isolation: p.isolation,
+                        recover_in_clone: p.recover_in_clone,
                         deadline_minutes: p.deadline_minutes,
                         grace_minutes: p.grace_minutes,
                         max_minutes: p.max_minutes,
@@ -4086,6 +4152,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 callback: Type.Optional(Type.Boolean({ description: "Default TRUE: post result back on completion." })),
                 clean: Type.Optional(Type.Boolean({ description: "Hermetic builtins-only child; no extensions load." })),
                 cwd: Type.Optional(Type.String({ description: "Working directory (default: current)." })),
+                isolation: Type.Optional(Type.Boolean({ description: "Use false to work in the live checkout. By default each Git writer gets its own workspace." })),
                 git_clone_workspace: Type.Optional(Type.Boolean({ description: "Prepare a disposable Git clone workspace for each job (same semantics as subagent_spawn)." })),
                 approve: Type.Optional(Type.Boolean({ description: "Trust project-local files in children." })),
                 allow_nested: Type.Optional(Type.Boolean({ description: "Allow children to spawn their own subagents." })),
@@ -4109,6 +4176,8 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 callback: Type.Optional(Type.Boolean()),
                 clean: Type.Optional(Type.Boolean()),
                 cwd: Type.Optional(Type.String()),
+                isolation: Type.Optional(Type.Boolean({ description: "Use false to work in the live checkout. By default each Git writer gets its own workspace." })),
+                recover_in_clone: Type.Optional(Type.Boolean({ description: "Continue this job in a verified Clone." })),
                 git_clone_workspace: Type.Optional(Type.Boolean()),
                 approve: Type.Optional(Type.Boolean()),
                 allow_nested: Type.Optional(Type.Boolean()),
@@ -4411,6 +4480,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                     const timing = timingState();
                     return {
                         mode: settings.delegationMode, maxConcurrent: settings.maxConcurrent,
+                        gitWorkspace: activeWorkspace(),
                         maxMinutes: timing.maxMinutes,
                         modeSource: settings.sources.delegationMode,
                         capSource: settings.sources.maxConcurrent,
@@ -4426,7 +4496,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                         skillsError: skills.error,
                     };
                 },
-                changeMode, changeCap, changeTiming, changeSkills, save: saveSettings, reset: resetSettings,
+                changeMode, changeWorkspace, changeCap, changeTiming, changeSkills, save: saveSettings, reset: resetSettings,
                 discoverSkills: () => discoveredSkillsFromContext(ctx),
                 // Close this page first; the catalog opens after ui.custom resolves.
                 openAgents: () => done("agents"),
@@ -4438,7 +4508,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                 : skills.mode === "none" ? "no skills" : `${skills.paths.length} selected skills`;
             const timing = timingState();
             ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. ` +
-                `Timeout: ${timing.maxMinutes} minutes (0 disables). Tool-wait alert: ${timing.toolWaitMinutes} min. ` +
+                `Run timeout: ${timing.maxMinutes ? timing.maxMinutes + " minutes" : "No limit"}. Tool-wait alert: ${timing.toolWaitMinutes} min. ` +
                 `No-progress alert: ${timing.stuckMinutes} min. Skills: ${skillChoice}. ` +
                 `Use /subagents mode <mode>, cap <number>, tool-wait <minutes>, stuck <minutes>, or settings; /subagents save persists them.`, "info");
         }
@@ -4524,7 +4594,7 @@ export default function (pi: ExtensionAPI, managed?: import("./managed-launch-po
                     const timing = timingState();
                     if (ctx.hasUI && !(await ctx.ui.confirm("Save subagent defaults?",
                         `Future sessions will start in ${activeDelegationMode()} with a cap of ${activeConcurrencyCap()}, ` +
-                        `timeout ${timing.maxMinutes} minutes (0 disables), tool-wait alert ${timing.toolWaitMinutes} min, ` +
+                        `run timeout ${timing.maxMinutes ? timing.maxMinutes + " minutes" : "No limit"}, tool-wait alert ${timing.toolWaitMinutes} min, ` +
                         `no-progress alert ${timing.stuckMinutes} min, and ${skillChoice}.`))) {
                         ctx.ui.notify("Subagent defaults unchanged.", "info");
                         return;

@@ -1,4 +1,5 @@
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { resultDir } from "./session-store.ts";
+import { existsSync, closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { logPathFor, runDir, taskRuntimeTrust } from "./registry.ts";
 import { activeFailures, actionableFailures, disposeIncidents, failureIdentity, findIncident, formatFailureSummary, formatTerminalFailureFacts, markFailureAttentionDelivered,
@@ -18,7 +19,10 @@ const workerDiagnostics = new SandboxDiagnostics({ context: "worker",
 
 export { formatFailureSummary, pendingFailureAttention, markFailureAttentionDelivered, toolOperation };
 export const failurePath = (id: string) => join(runDir(id), "failures.jsonl");
-export const readRunFailures = (id: string): FailureState => readFailureState(failurePath(id));
+export function readRunFailures(id: string): FailureState {
+    const retained = !existsSync(runDir(id)) && resultDir(id);
+    return readFailureState(retained ? join(retained,"failures.jsonl") : failurePath(id));
+}
 interface Scan {
     offset: number; head: string; identity: string; model: IncidentModel; retry?: number;
     /**
@@ -162,6 +166,10 @@ function exactRuleLeftovers(path: string, prior: FailureState): Set<string> {
 /** Scan complete source records, independent of the finite progress/transcript tail. */
 export function collectRunFailures(id: string, cwd: string, terminal = false, assertCurrent: () => void = () => {}): FailureState {
     assertCurrent();
+    if (!existsSync(runDir(id))) {
+        const retained = resultDir(id);
+        if (retained && existsSync(join(retained,"result.json"))) return readRunFailures(id);
+    }
     const path = failurePath(id);
     let fd: number;
     try { fd = openSync(logPathFor(id), "r"); }
