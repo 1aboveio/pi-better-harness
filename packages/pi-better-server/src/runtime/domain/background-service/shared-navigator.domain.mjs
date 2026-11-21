@@ -1137,6 +1137,8 @@ function openNavigator() {
     catch { /* keep foreground usable */ }
 }
 function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, initialDetailId) {
+    let editorRendersSeen = state().editorRenders ?? 0;
+    let sawLiveEditor = liveEditorMounted(tui) === true;
     // The overlay only ever shows one row's detail; the rail below it is the list.
     const overlayState = { rows: initialRows, selected: 0 };
     let logTailRows = DEFAULT_LOG_TAIL_ROWS;
@@ -1296,19 +1298,24 @@ function createOverlayComponent(initialRows, deps, tui, theme, done, onClosed, i
         closeArmTimer.unref?.();
         requestRender();
     }
-    let editorRendersSeen;
     /**
-     * Our editor wrapper was uninstalled: close, since no key of ours can reach this overlay again and
-     * it would cover the editor that replaced ours (#332). An extension that composes the editor inside
-     * its own non-container component still renders ours, so the wrapper also counts as live while it
-     * rendered since the previous overlay frame (Pi renders the editor before it composites overlays).
+     * Close when a replacement editor takes over while the sheet is open (#332).
+     * A wrapper inside another extension's editor still counts as live if it rendered since
+     * the last overlay frame. Pi renders the editor before it composites overlays.
      */
     function closeIfEditorReplaced() {
-        const rendersBefore = editorRendersSeen;
         const renders = state().editorRenders ?? 0;
+        const rendered = renders !== editorRendersSeen;
         editorRendersSeen = renders;
-        state().editorRenderedLastFrame = rendersBefore === undefined ? undefined : renders !== rendersBefore;
-        if (closed || liveEditorMounted(tui) !== false || rendersBefore === undefined || renders !== rendersBefore)
+        state().editorRenderedLastFrame = rendered;
+        if (closed)
+            return;
+        const mounted = liveEditorMounted(tui);
+        if (rendered || mounted === true) {
+            sawLiveEditor = true;
+            return;
+        }
+        if (mounted !== false || !sawLiveEditor)
             return;
         // Not from inside pi-tui's render pass: hiding an overlay there would change the stack it is drawing.
         queueMicrotask(() => {
