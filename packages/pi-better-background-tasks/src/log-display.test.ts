@@ -174,16 +174,17 @@ describe("background task log folded display", () => {
 
   it("keeps emoji and styled text within the requested width", () => {
     const wide = ` 🪜 汉字与 emoji 混排行 ${"⚙️".repeat(6)}${"🪟".repeat(30)}`;
-    const styled = `${theme.fg("accent", "bg_task_log")} ${wide.repeat(3)}`;
+    const styled = `\x1b[36m${wide.repeat(3)}\x1b[0m`;
     const result = {
-      content: [{ type: "text", text: `[log]\n${wide}` }],
+      content: [{ type: "text", text: `[log]\n${styled}` }],
       details: { kind: "background-task-log-display", head: styled, fullLineCount: 2, compactLines: [wide, styled], foldedLineCount: 0 },
     };
     for (const expanded of [false, true]) {
       for (const width of [24, 87, 115]) {
-        const lines = renderBackgroundTaskLogDisplay(result, { expanded }, theme).render(width);
+        const lines = renderBackgroundTaskLogDisplay(result, { expanded }).render(width);
+        expect(lines.some((line) => line.includes("\x1b[36m"))).toBe(true);
         for (const line of lines) {
-          expect(widthOf(line), `expanded=${expanded} width=${width}`).toBeLessThanOrEqual(width);
+          expect(visibleWidth(line), `expanded=${expanded} width=${width}`).toBeLessThanOrEqual(width);
         }
       }
     }

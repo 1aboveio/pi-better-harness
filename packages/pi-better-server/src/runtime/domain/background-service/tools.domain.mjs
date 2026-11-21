@@ -1,5 +1,6 @@
 // Generated fixed launch domain from packages/pi-better-background-tasks/src/tools.ts. Do not edit directly.
 import { Type } from "typebox";
+import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth, wrapTextWithAnsi as piWrapTextWithAnsi, } from "@earendil-works/pi-tui";
 import { advertiseBackgroundAdapter } from "./adapter-contract.domain.mjs";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.domain.mjs";
 import { classifyOwnership, formatLaunch, formatList, formatLog, formatMissingTask, formatMutationRefusal, formatStatus, formatDurableStatusMetadata, formatStopResult, } from "./output.domain.mjs";
@@ -951,29 +952,34 @@ function renderLines(lines, mode = "truncate") {
         invalidate() { },
     };
 }
+/**
+ * Split one display line into rows of at most `width` terminal columns.
+ *
+ * Measures columns rather than characters: a CJK grapheme or emoji occupies two,
+ * so counting characters emitted rows wider than the width Pi asked for. Pi
+ * asserts every rendered line fits the terminal and exits the process when one
+ * does not, which turned any log holding double-width text into a crash that
+ * replayed on resume, because the tool result stays in session history.
+ */
 function wrapLineToVisibleWidth(line, width) {
     const str = String(line ?? "");
     const max = Math.max(1, Number(width) || 80);
-    if (truncateToVisibleWidth(str, max) === str)
+    if (piVisibleWidth(str) <= max)
         return [str];
-    const out = [];
-    let current = "";
-    let visible = 0;
-    for (const char of str) {
-        if (visible >= max) {
-            out.push(current);
-            current = "";
-            visible = 0;
-        }
-        current += char;
-        visible += 1;
-    }
-    out.push(current);
-    return out;
+    const wrapped = piWrapTextWithAnsi(str, max);
+    return (wrapped.length > 0 ? wrapped : [str]).map((row) => fitToVisibleWidth(row, max));
 }
 function truncateToVisibleWidth(value, width) {
     const max = Math.max(0, Math.floor(width || 0));
-    return String(value ?? "").slice(0, max);
+    return fitToVisibleWidth(String(value ?? ""), max);
+}
+/** Last resort for anything a wrap missed: never return a line wider than `max`. */
+function fitToVisibleWidth(value, max) {
+    const str = String(value ?? "");
+    const limit = Math.max(0, Math.floor(max || 0));
+    if (piVisibleWidth(str) <= limit)
+        return str;
+    return piTruncateToWidth(str, limit, "");
 }
 async function formatStop(pi, id, _ctx, getActiveSession, options = {}, runtime) {
     const { stopTask } = runtime ?? await import("./runtime.domain.mjs");

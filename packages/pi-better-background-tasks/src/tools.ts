@@ -1064,8 +1064,7 @@ function wrapLineToVisibleWidth(line: string, width: number): string[] {
   const max = Math.max(1, Number(width) || 80);
   if (piVisibleWidth(str) <= max) return [str];
   const wrapped = piWrapTextWithAnsi(str, max);
-  const rows = (wrapped.length > 0 ? wrapped : [str]).map((row) => fitToVisibleWidth(row, max));
-  return rows.length > 0 ? rows : [""];
+  return (wrapped.length > 0 ? wrapped : [str]).map((row) => fitToVisibleWidth(row, max));
 }
 
 function truncateToVisibleWidth(value: string, width: number): string {
