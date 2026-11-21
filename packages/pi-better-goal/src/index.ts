@@ -997,15 +997,20 @@ export default function (pi: ExtensionAPI): void {
         typeof event.sessionId !== "string" || event.sessionId !== ctx.sessionManager.getSessionId()) return;
     const current = getGoal(ctx);
     if (current && current.status !== "complete") return;
-    const reopening = current?.status === "complete" && current.goalId === event.reopenedGoalId;
-    if ((!reopening && !preferences.autoStartFromOutcome) || !canStartGoalFromOutcome(event.outcome, reopening)) return;
+    const reopenedGoal = current?.status === "complete" && current.goalId === event.reopenedGoalId ? current : undefined;
+    if ((!reopenedGoal && !preferences.autoStartFromOutcome) || !canStartGoalFromOutcome(event.outcome, reopenedGoal)) return;
     const objective = event.outcome.objective.trim();
     if (validateObjective(objective)) return;
     const owner = getWorkflow(ctx);
     if (owner && !workflowAvailable(owner)) return;
-    const command = owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null;
+    const retainedCommand = objective.startsWith("/") ? reopenedGoal?.command : undefined;
+    const command = retainedCommand ?? (owner ? resolveGoalCommand(pi, `/skill:${owner.name}`) : null);
     const goal = createGoalSnapshot(objective, null, undefined, command ?? undefined);
     setGoal(goal, ctx, "runtime", true);
+    if (retainedCommand) {
+      const retainedOwner = goalWorkflowOwner(goal);
+      if (retainedOwner && (owner?.name !== retainedOwner.name || owner?.path !== retainedOwner.path)) recordWorkflow(retainedOwner);
+    }
     resetContinuationState(goal);
   });
 

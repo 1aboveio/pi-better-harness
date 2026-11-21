@@ -281,6 +281,27 @@ test("restoring a legacy follow-up preserves its active work and an explicit Goa
   assert.deepEqual((await h.complete()).details.openSteps, ["Verify receipts"]);
 });
 
+test("explicitly reopening a command-backed Outcome retains the Goal's original skill binding", async t => {
+  const h = await fixture(t, { autoStart: false, workflow: "available" });
+  const objective = "/skill:rush-issues verify deployment";
+  await h.command(objective);
+  const first = h.goal()!;
+  assert.equal(first.command?.args, "verify deployment");
+  assert.equal(h.outcome()?.objective, objective);
+  await h.command("complete");
+  assert.equal(h.goal()?.status, "complete");
+  const messages = h.messages.length;
+
+  await h.update({ outcome: { objective, status: "active" } });
+
+  assert.notEqual(h.goal()?.goalId, first.goalId);
+  assert.equal(h.goal()?.status, "active");
+  assert.deepEqual(h.goal()?.command, first.command);
+  assert.equal(h.outcome()?.goalId, h.goal()?.goalId);
+  assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+  assert.equal(h.messages.length, messages, "reopening during the tool turn must not queue another kickoff");
+});
+
 test("Goal completion checks the associated work ledger in a headless session", async t => {
   const h = await fixture(t, { ledger: true });
   await h.update({ outcome: accepted });

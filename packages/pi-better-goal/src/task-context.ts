@@ -20,12 +20,14 @@ export interface OutcomeAcceptedEvent {
 }
 
 /** Only explicit, actionable outcomes qualify; prose and restored state do not. */
-export function canStartGoalFromOutcome(value: unknown, reopening = false): value is OutcomeAcceptedEvent["outcome"] {
+export function canStartGoalFromOutcome(value: unknown, reopenedGoal?: Pick<GoalSnapshot, "objective" | "command">): value is OutcomeAcceptedEvent["outcome"] {
   if (!value || typeof value !== "object") return false;
   const outcome = value as Partial<OutcomeAcceptedEvent["outcome"]>;
+  const objective = typeof outcome.objective === "string" ? outcome.objective.trim() : "";
+  const retainsCommand = reopenedGoal?.command && reopenedGoal.objective.trim() === objective;
   return outcome.status === "active" && outcome.goalId === undefined &&
-    typeof outcome.objective === "string" && !!outcome.objective.trim() && !outcome.objective.trim().startsWith("/") &&
-    (reopening || (Array.isArray(outcome.doneWhen) && outcome.doneWhen.length > 0 &&
+    !!objective && (!objective.startsWith("/") || !!retainsCommand) &&
+    (reopenedGoal !== undefined || (Array.isArray(outcome.doneWhen) && outcome.doneWhen.length > 0 &&
       outcome.doneWhen.every(item => typeof item === "string" && !!item.trim())));
 }
 
