@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendLine, appendTaskOutput, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.js";
 import { evaluateCondition, validateCondition } from "./conditions.js";
-import { parseStepGateFailure, processExists, runCommandOnce, spawnCommand, STEP_GATE_COMMAND_ENV, stepGateScript, stopProcessGroup } from "./process.js";
+import { commandExecution, parseStepGateFailure, processExists, resolveWindowsLaunchShell, runCommandOnce, spawnCommand, STEP_GATE_COMMAND_ENV, stepGateScript, stopProcessGroup } from "./process.js";
 import { currentProcessStartToken, readProcessStartToken } from "./process-identity.js";
 import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./remote-task-preset.js";
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
@@ -315,6 +315,7 @@ function spawnTask(
   // launch cwd is passed so a relative alias resolves where the task will run.
   assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
   const commandLimits = backgroundExecutionLimits(sandboxPlan);
+  const resolvedWindowsShell = params.ssh ? undefined : resolveWindowsLaunchShell(pi);
   const id = nextTaskId();
   admission?.prepared?.(id);
   const logPath = logPathFor(id);
@@ -330,7 +331,7 @@ function spawnTask(
       remote: params.remote,
     }, dependencies.remoteRunner)
     : undefined;
-  const operatorSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+  const operatorSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true, resolvedWindowsShell };
   const commandSpec = withStepGate(operatorSpec, id, stepGated);
   const sandboxNotices: string[] = [];
   const launchSpec = remoteTask
@@ -629,6 +630,7 @@ function startWatchTask(
   const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh, params, "bg_task_watch");
   assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
   const commandLimits = backgroundExecutionLimits(sandboxPlan);
+  const resolvedWindowsShell = params.ssh || params.shell === false ? undefined : resolveWindowsLaunchShell(pi);
   const id = nextTaskId();
   admission?.prepared?.(id);
   const now = Date.now();
@@ -643,11 +645,12 @@ function startWatchTask(
       remote: params.remote,
     }, dependencies.remoteRunner)
     : undefined;
-  const commandSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+  const commandSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true, resolvedWindowsShell };
   const sandboxNotices: string[] = [];
   const launchSpec = remoteTask
     ? commandSpec
     : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id), {}, (line) => sandboxNotices.push(line), "bg_task_watch");
+  const invocation = resolvedWindowsShell ? commandExecution(launchSpec) : undefined;
   const meta = withCommandPolicy({
     id,
     name: params.name,
@@ -665,7 +668,7 @@ function startWatchTask(
     shell: commandSpec.shell,
     cwd,
     env: params.env,
-    launchArgv: launchArgvOf(commandSpec, launchSpec),
+    launchArgv: invocation ? [invocation.execPath, ...invocation.execArgs] : launchArgvOf(commandSpec, launchSpec),
     sandbox: sandboxProvenance(sandboxPlan, !!remoteTask),
     maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
     spawnPid: process.pid,

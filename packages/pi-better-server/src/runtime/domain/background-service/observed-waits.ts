@@ -37,6 +37,7 @@ import {
   commandExecution,
   parseStepGateFailure,
   processExists,
+  resolveWindowsLaunchShell,
   stepGateScript,
   validateCommandSpec,
 } from "./process.js";
@@ -3251,6 +3252,7 @@ export class ObservedWaitHost {
       ? resolveWorkerSandboxPlan(this.pi, workerPolicy, params, tool)
       : resolveForegroundSandboxPlan(this.pi, false, params, tool);
     assertBackgroundExecutionAllowed(spec, plan, { remote: false, cwd });
+    if (spec.shell !== false) spec.resolvedWindowsShell = resolveWindowsLaunchShell(this.pi);
     const limits = backgroundExecutionLimits(plan);
     const gated = kind === "process" && params.require_successful_steps === true;
     if (gated) {

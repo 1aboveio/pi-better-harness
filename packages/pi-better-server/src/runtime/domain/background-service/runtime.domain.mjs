@@ -3,7 +3,7 @@ import { WATCH_FINGERPRINT_VERSION, watchOutcomeFingerprint } from "./watch-fing
 import { readFileSync, statSync } from "node:fs";
 import { appendLine, appendTaskOutput, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.domain.mjs";
 import { evaluateCondition, validateCondition } from "./conditions.domain.mjs";
-import { parseStepGateFailure, processExists, runCommandOnce, spawnCommand, STEP_GATE_COMMAND_ENV, stepGateScript, stopProcessGroup } from "./process.domain.mjs";
+import { commandExecution, parseStepGateFailure, processExists, resolveWindowsLaunchShell, runCommandOnce, spawnCommand, STEP_GATE_COMMAND_ENV, stepGateScript, stopProcessGroup } from "./process.domain.mjs";
 import { currentProcessStartToken, readProcessStartToken } from "./process-identity.domain.mjs";
 import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./remote-task-preset.domain.mjs";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.domain.mjs";
@@ -224,6 +224,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         // launch cwd is passed so a relative alias resolves where the task will run.
         assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
         const commandLimits = backgroundExecutionLimits(sandboxPlan);
+        const resolvedWindowsShell = params.ssh ? undefined : resolveWindowsLaunchShell(pi);
         const id = nextTaskId();
         admission?.prepared?.(id);
         const logPath = logPathFor(id);
@@ -239,7 +240,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
                 remote: params.remote,
             }, dependencies.remoteRunner)
             : undefined;
-        const operatorSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+        const operatorSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true, resolvedWindowsShell };
         const commandSpec = withStepGate(operatorSpec, id, stepGated);
         const sandboxNotices = [];
         const launchSpec = remoteTask
@@ -536,6 +537,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
         const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh, params, "bg_task_watch");
         assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
         const commandLimits = backgroundExecutionLimits(sandboxPlan);
+        const resolvedWindowsShell = params.ssh || params.shell === false ? undefined : resolveWindowsLaunchShell(pi);
         const id = nextTaskId();
         admission?.prepared?.(id);
         const now = Date.now();
@@ -550,11 +552,12 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
                 remote: params.remote,
             }, dependencies.remoteRunner)
             : undefined;
-        const commandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+        const commandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true, resolvedWindowsShell };
         const sandboxNotices = [];
         const launchSpec = remoteTask
             ? commandSpec
             : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id), {}, (line) => sandboxNotices.push(line), "bg_task_watch");
+        const invocation = resolvedWindowsShell ? commandExecution(launchSpec) : undefined;
         const meta = withCommandPolicy({
             id,
             name: params.name,
@@ -572,7 +575,7 @@ export function createBackgroundTaskRuntime(attention = createFailureAttention()
             shell: commandSpec.shell,
             cwd,
             env: params.env,
-            launchArgv: launchArgvOf(commandSpec, launchSpec),
+            launchArgv: invocation ? [invocation.execPath, ...invocation.execArgs] : launchArgvOf(commandSpec, launchSpec),
             sandbox: sandboxProvenance(sandboxPlan, !!remoteTask),
             maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
             spawnPid: process.pid,

@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, writeSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { accessSync, appendFileSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, win32 } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { CommandResult, CommandSpec, StepGateFailure } from "./types.js";
 
@@ -17,7 +18,8 @@ const WINDOWS_BASH_CANDIDATES = [
  * POSIX keeps `/bin/bash`. Windows has no `/bin/bash`, and the `bash.exe` found
  * on PATH is usually the WSL launcher in System32 or the WindowsApps alias,
  * either of which would run the command inside WSL instead of Windows. Prefer
- * an explicit override, then Git for Windows, then a non-WSL `bash.exe` on PATH.
+ * an explicit override, then Pi's shellPath, Git for Windows, and a non-WSL
+ * `bash.exe` on PATH.
  *
  * Resolved lazily at spawn time, not module load: env-injection extensions
  * (e.g. pi-env) may apply settings.json `env` values after this module is
@@ -25,22 +27,53 @@ const WINDOWS_BASH_CANDIDATES = [
  *
  * Exposed for tests and reuse.
  */
-export function resolveDefaultShell(): string {
+export function resolveDefaultShell(shellPath?: string): string {
   const fromEnv = process.env.PI_BETTER_BACKGROUND_TASKS_SHELL;
   if (fromEnv) return fromEnv;
   if (process.platform !== "win32") return "/bin/bash";
-  for (const candidate of WINDOWS_BASH_CANDIDATES) {
+  const configured = shellPath ?? readWindowsShellSetting();
+  const tried: string[] = [];
+  if (configured?.trim()) {
+    const candidate = /^~[\\/]/.test(configured) ? win32.join(homedir(), configured.slice(2)) : configured;
+    tried.push(candidate);
+    try {
+      accessSync(candidate, constants.F_OK);
+      return candidate;
+    } catch { /* An unavailable setting leaves standard Windows discovery enabled. */ }
+  }
+  const gitCandidates = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]]
+    .filter((directory): directory is string => Boolean(directory))
+    .map(directory => win32.join(directory, "Git", "bin", "bash.exe"));
+  for (const candidate of new Set([...gitCandidates, ...WINDOWS_BASH_CANDIDATES])) {
+    tried.push(candidate);
     if (existsSync(candidate)) return candidate;
   }
-  for (const dir of (process.env.PATH ?? "").split(";")) {
+  for (const dir of (process.env.PATH ?? process.env.Path ?? "").split(";")) {
     const trimmed = dir.trim();
     if (!trimmed || /(^|[\\/])(system32|windowsapps)([\\/]|$)/i.test(trimmed)) continue;
-    const candidate = join(trimmed, "bash.exe");
+    const candidate = win32.join(trimmed, "bash.exe");
+    tried.push(candidate);
     if (existsSync(candidate)) return candidate;
   }
-  // Nothing usable found: keep the POSIX default so the failure surfaces as a
-  // logged spawn error for the task instead of crashing the whole host process.
-  return "/bin/bash";
+  throw new Error("No Bash executable found for Windows Background tasks. Set Pi's shellPath in settings.json or "
+    + "PI_BETTER_BACKGROUND_TASKS_SHELL to a working bash.exe. Searched:\n  " + [...new Set(tried)].join("\n  "));
+}
+
+function readWindowsShellSetting(): string | undefined {
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  try {
+    const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+    return typeof settings?.shellPath === "string" ? settings.shellPath : undefined;
+  } catch { return undefined; }
+}
+
+/** Capture effective session settings before dispatching a Windows launch. */
+export function resolveWindowsLaunchShell(pi: object): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  const override = process.env.PI_BETTER_BACKGROUND_TASKS_SHELL;
+  if (override) return override;
+  const settings = (pi as { getSettings?(): { shellPath?: unknown } }).getSettings?.();
+  return resolveDefaultShell(typeof settings?.shellPath === "string" ? settings.shellPath : undefined);
 }
 
 /** How long a timed-out process group has to exit on SIGTERM before SIGKILL. */
@@ -507,7 +540,8 @@ export function commandExecution(spec: CommandSpec): { execPath: string; execArg
     const [command, ...args] = spec.argv!;
     return { execPath: command!, execArgs: args };
   }
-  return { execPath: resolveDefaultShell(), execArgs: [spec.loginShell === false ? "-c" : "-lc", spec.command!] };
+  const resolved = process.platform === "win32" ? spec.resolvedWindowsShell : undefined;
+  return { execPath: resolved ?? resolveDefaultShell(), execArgs: [spec.loginShell === false ? "-c" : "-lc", spec.command!] };
 }
 
 /** Stdio for a spawned task: stdin is always ignored; stdout/stderr are piped (collected) or ignored (redirected into the log by the child itself). */
