@@ -18,12 +18,13 @@ Set `delegationMode` in the user config described under
 [Tool scoping](#tool-scoping-allowlist) to `manual`, `adaptive`, or
 `coordinator` (default `adaptive`). This controls foreground delegation guidance,
 not child permissions or catalog definitions. `/subagents settings` (or simply
-`/subagents`) opens the terminal settings page with mode, concurrent-subagent
-cap, tool-wait alert, no-progress alert, and default skill-exposure controls, an
-Agents shortcut to `/agents`, and Reset to defaults. The two time values are
-edited independently in minutes; `0` turns one alert off. The page uses the same
-selected-row and active-cell styling as `/sandbox`, with one editable value
-column. Skill exposure cycles between
+`/subagents`) opens the terminal settings page. Delegation mode, the concurrency cap, and
+Git workspace appear together. Run timeout and the two alert intervals come next,
+followed by skills, the Agents catalog, and Reset to defaults. As in
+`/harness-settings`, the cursor marks the active row and its help appears
+below the list. On Run timeout, Space selects **No limit** and Enter edits
+the duration. Each alert has a separate interval in minutes. Enter `0`
+to turn that alert off. Skill exposure cycles between
 Discover automatically and No skill catalog. The Selected skills row opens the
 shared searchable checkbox picker, which lists loaded skills by name and
 description, uses Space to toggle, Enter to apply, and Esc to cancel. Typing
@@ -36,8 +37,8 @@ than being dropped.
 Edits automatically persist for this session, including across reloads; Escape
 closes the page without undoing them.
 Enter edits the cap as a positive whole number or a timing value in minutes;
-Escape cancels an unfinished edit. Ctrl+S saves mode, cap, timing alerts, and
-skill exposure as defaults. Reset to defaults restores them from the saved
+Escape cancels an unfinished edit. Ctrl+S saves the session’s delegation, workspace,
+timing, and skill settings as defaults. Reset to defaults restores them from the saved
 config. Sandbox permissions remain in `/sandbox`.
 
 Command equivalents also work outside the terminal UI:
@@ -438,11 +439,10 @@ given.
   pending completion, so the caller receives one `killed`/`completed`/`failed`
   row instead of discovering the outcome by polling `subagent_list()`. A run
   stopped while the session is shutting down is recovered by the next session.
-- **Optional busy steering.** In `/harness-settings`, set **Completions while
-  busy** to **Steer active run** to receive ordinary completions during
+- **Optional busy steering.** In `/harness-settings`, set **Completion delivery** to **During run** to receive ordinary completions during
   foreground work. Changes autosave to the current session branch and apply
   immediately; **Ctrl+S** saves the choice as the user default for future
-  sessions, including standalone callback packages. **Wait until idle** is the
+  sessions, including standalone callback packages. **When idle** is the
   default. The former `PI_BETTER_CALLBACK_WHILE_BUSY` environment variable is
   no longer supported. Completions spanning multiple accumulation windows during
   one tool call stay together until the final active tool ends, then share one

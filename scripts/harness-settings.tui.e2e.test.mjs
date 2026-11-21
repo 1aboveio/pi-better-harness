@@ -65,6 +65,19 @@ export default function(pi){
     }
     throw new Error(`TUI condition timed out:\n${screen()}\nANSI: ${JSON.stringify(ansiScreen())}\n${existsSync(log) ? readFileSync(log, "utf8") : "no calls"}`);
   };
+  const select = label => {
+    // The native list wraps, so this also works after returning from a package page.
+    const target = new RegExp("^> " + label + "(?:  |$)", "m");
+    for (let step = 0; step < 16; step++) {
+      const pane = screen();
+      if (target.test(pane)) return;
+      const active = pane.split("\n").find(line => line.startsWith("> "));
+      assert.ok(active, "a setting has focus");
+      key("Down");
+      wait(next => !next.split("\n").includes(active));
+    }
+    assert.fail(`Could not select ${label}`);
+  };
   const calls = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
   try {
     const command = ["exec env", `PI_CODING_AGENT_DIR=${q(agent)}`, "PI_OFFLINE=1", q(piCli),
@@ -77,6 +90,7 @@ export default function(pi){
     assert.equal(typeof originalSessionFile, "string");
     send("/harness-settings"); key("Enter");
     wait(pane => pane.includes("Harness settings") && /Goal settings\s+Open/.test(pane));
+    select("Completion delivery");
     wait(pane => /Completion delivery\s+When idle/.test(pane) && pane.includes("Ctrl+S saves your default"));
     key("Enter");
     wait(pane => /Completion delivery\s+During run/.test(pane) && pane.includes("Session setting saved"));
@@ -89,7 +103,7 @@ export default function(pi){
     key("C-s");
     wait(pane => pane.includes("Callback default saved"));
     assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.callbacks.mode, "steer");
-    key("Down");
+    select("Auto-start Goal");
     wait(pane => /^> Auto-start Goal\s+Off/m.test(pane));
     key("Space");
     wait(pane => /Auto-start Goal\s+On/.test(pane) && pane.includes("Setting saved"));
@@ -97,18 +111,18 @@ export default function(pi){
     key("Space");
     wait(pane => /Auto-start Goal\s+Off/.test(pane) && pane.includes("Setting saved"));
     assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.goal.autoStartFromOutcome, false);
-    key("Down");
+    select("Pin work panels");
     wait(pane => /^> Pin work panels\s+On/m.test(pane) && pane.includes("Keeps the work panels above the editor"));
-    key("Down");
+    select("Navigator layout");
     wait(pane => /^> Navigator layout\s+Flat list/m.test(pane));
     tmux("resize-window", "-t", "test", "-x", "48", "-y", "28");
     wait(pane => /^> Navigator layout\s+Flat list/m.test(pane) && /Tree nests tasks under their\s+agent/.test(pane));
     tmux("resize-window", "-t", "test", "-x", "100", "-y", "32");
-    key("Down");
+    select("Tool output");
     wait(pane => /^> Tool output\s+Normal/m.test(pane));
     key("Space");
     wait(pane => /Tool output\s+Compact/.test(pane) && pane.includes("Setting saved"));
-    key("Down");
+    select("Tool progress animation");
     wait(pane => /^> Tool progress animation\s+On/m.test(pane));
     key("Space");
     wait(pane => /Tool progress animation\s+Off/.test(pane));
@@ -156,13 +170,13 @@ export default function(pi){
     assert.match(reloaded, /Tool progress animation\s+Off/);
     assert.equal((reloaded.match(/Auto-start Goal/g) ?? []).length, 1);
     assert.match(reloaded, /Auto-start Goal\s+Off/);
-    for (let index = 0; index < 6; index++) key("Down");
+    select("Goal settings");
     wait(pane => /^> Goal settings\s+Open/m.test(pane) && pane.includes("You can also run /goal settings."));
     key("Enter");
     wait(pane => pane.includes("Goal settings") && pane.includes("Automatic continuation"));
     key("Escape");
     wait(pane => pane.includes("Harness settings") && /^> Goal settings\s+Open/m.test(pane));
-    for (let index = 0; index < 3; index++) key("Up");
+    select("Navigator layout");
     wait(pane => /^> Navigator layout\s+Flat list/m.test(pane));
     key("Space");
     wait(pane => /^> Navigator layout\s+Tree/m.test(pane) && pane.includes("Setting saved"));
@@ -177,11 +191,13 @@ export default function(pi){
     tmux("new-window", "-t", "test", "-n", "fresh-session", command);
     wait(() => existsSync(ready));
     send("/harness-settings"); key("Enter");
-    wait(pane => pane.includes("Harness settings") && /Completion delivery\s+During run/.test(pane) && pane.includes("Using the default.") && /Tool output\s+Compact/.test(pane));
+    wait(pane => pane.includes("Harness settings"));
+    select("Completion delivery");
+    wait(pane => /Completion delivery\s+During run/.test(pane) && pane.includes("Using the default.") && /Tool output\s+Compact/.test(pane));
     assert.match(screen(), /Navigator layout\s+Tree/);
     key("Enter");
     wait(pane => /Completion delivery\s+When idle/.test(pane) && pane.includes("Session setting saved"));
-    key("Down"); key("Down"); key("Down"); key("Down"); key("Space");
+    select("Tool output"); key("Space");
     wait(pane => /Tool output\s+Normal/.test(pane) && pane.includes("Setting saved"));
     assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.toolOutput.enabled, false);
     key("Escape");
@@ -189,6 +205,8 @@ export default function(pi){
     tmux("new-window", "-t", "test", "-n", "resumed-session", `${command} --session ${q(originalSessionFile)}`);
     wait(() => existsSync(ready));
     send("/harness-settings"); key("Enter");
+    wait(pane => pane.includes("Harness settings"));
+    select("Completion delivery");
     wait(pane => /Tool output\s+Compact/.test(pane) && /Completion delivery\s+During run/.test(pane) && pane.includes("Using this session’s setting."));
     key("Escape");
     wait(pane => pane.includes("2 tool calls") && pane.includes("Settings journey answer") && !pane.includes("TOOL_DETAIL_SENTINEL"));

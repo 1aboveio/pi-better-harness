@@ -96,19 +96,18 @@ Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or ne
 
 The user config sets `delegationMode` to `manual`, `adaptive` (default), or
 `coordinator`. `/subagents settings` (or `/subagents`) opens a settings page
-for delegation mode, the concurrent-subagent cap (default 6), the tool-wait
-alert (default 5 minutes), the no-progress alert (default 10 minutes), and the
-default skill exposure. The two time values are edited independently; `0` turns
-one alert off. Skill exposure cycles between Discover automatically and No skill
+for delegation mode, the concurrent-subagent cap (default 6), and Git workspace
+(Clone or Worktree). Run timeout supports a duration or **No limit**. The
+tool-wait alert (default 5 minutes) and no-progress alert (default 10 minutes)
+have separate intervals. Enter `0` to turn an alert off. Skill exposure cycles between Discover automatically and No skill
 catalog. The Selected skills row opens the same searchable checkbox picker used
 by `/agents`: it lists loaded skills by name and description, Space toggles one,
 Enter applies, and typing filters without dropping checked items. Saved paths
 missing from discovery stay visible as unavailable and survive apply. Zero
 checked applies No skill catalog, not discovery. Manual Add skill path remains
-available. The page names whether the current value comes from the saved config
-or this session. The session choice controls the next launch before Ctrl+S, and
-edits persist across reloads. Ctrl+S saves mode, cap, timing alerts, and skill
-exposure as defaults, and Reset to defaults clears session overrides, including
+available. The Skill exposure row shows where the current skill setting comes from. The session choice controls the next launch before Ctrl+S, and
+edits persist across reloads. Ctrl+S saves delegation, workspace, timing, and skill
+settings as defaults, and Reset to defaults clears session overrides, including
 the skill list. Agents opens the same catalog as `/agents`; a definition that inherits
 skill exposure shows whether the live value comes from this session, saved
 config, or discovery, and an invalid draft is marked invalid rather than shown

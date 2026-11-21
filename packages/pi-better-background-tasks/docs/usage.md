@@ -217,11 +217,11 @@ wait for the next available boundary while
 that run is active. Failed sends leave all affected events unmarked and
 retryable; ownership is rechecked at flush so another cwd/session is suppressed.
 
-In `/harness-settings`, set **Completions while busy** to **Steer active run** to
+In `/harness-settings`, set **Completion delivery** to **During run** to
 opt into ordinary completion delivery during foreground work. Changes autosave
 to the current session branch and apply immediately; **Ctrl+S** saves the
 choice as the user default for future sessions, including standalone callback
-packages. **Wait until idle** is the default. The former
+packages. **When idle** is the default. The former
 `PI_BETTER_CALLBACK_WHILE_BUSY` environment variable is no longer supported.
 Completions spanning multiple
 accumulation windows during one tool call stay queued until the final active

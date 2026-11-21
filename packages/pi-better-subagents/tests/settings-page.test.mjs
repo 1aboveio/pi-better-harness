@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { createSubagentSettingsPage } from "../settings-page.ts";
 
 const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text, inverse: (text) => text };
@@ -88,7 +88,7 @@ function harness({ openAgents = true, skills, height, discovered = [] } = {}) {
 }
 
 const LABELS = [
-    "Delegation mode", "Concurrent subagents", "Tool-wait alert", "No-progress alert", "Run timeout",
+    "Delegation mode", "Concurrent subagents", "Git workspace", "Run timeout", "Tool-wait alert", "No-progress alert",
     "Skill exposure", "Selected skills", "Agents", "Reset to defaults",
 ];
 
@@ -97,7 +97,7 @@ test("run timeout accepts minutes or No limit, supports the existing zero value,
     assert.equal(h.settings().maxMinutes, 60);
     selectLabel(h.page, "Run timeout");
     assert.match(selectedText(h.page), /60 min/);
-    assert.match(h.page.render(40).join("\n"), /Space No limit/);
+    assert.match(h.page.render(40).join("\n"), /Space for No limit/);
     h.page.handleInput(" ");
     assert.match(selectedText(h.page), /No limit/);
     h.page.handleInput("\r");
@@ -273,7 +273,7 @@ test("tool-wait and no-progress alerts are separate editable times that save and
     typeAndSubmit(h.page, "0");
     assert.equal(h.settings().stuckMinutes, 0, "0 turns the alert off");
     assert.equal(h.settings().toolWaitMinutes, 7.5);
-    assert.match(h.page.render(100).join("\n"), /No-progress alert\s+0 min/);
+    assert.match(h.page.render(100).join("\n"), /No-progress alert\s+Off/);
 
     for (const [label, value] of [["Tool-wait alert", "-1"], ["No-progress alert", "soon"], ["Tool-wait alert", ""]]) {
         selectLabel(h.page, label);
@@ -338,6 +338,46 @@ test("failed save keeps session choices and narrow rendering fits the terminal",
     for (const line of h.page.render(20)) assert.ok(visibleWidth(line) <= 20);
 });
 
+test("the footer follows remapped keys for selection, input, and cancellation", () => {
+    const previous = getKeybindings();
+    try {
+        setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, {
+            "tui.select.confirm": "x", "tui.input.submit": "ctrl+g", "tui.select.cancel": "q",
+        }));
+        const h = harness();
+        selectLabel(h.page, "Run timeout");
+        const screen = () => h.page.render(120).join("\n");
+        assert.match(screen(), /Space for No limit · x to edit minutes/);
+        assert.match(screen(), /q to go back/);
+        h.page.handleInput("x");
+        assert.match(screen(), /Ctrl\+g to apply · q to cancel/);
+        h.page.handleInput("\x15");
+        h.page.handleInput("75");
+        h.page.handleInput("\x07");
+        assert.equal(h.settings().maxMinutes, 75);
+        h.page.handleInput("x");
+        h.page.handleInput("q");
+        assert.equal(h.closed(), 0);
+        h.page.handleInput("q");
+        assert.equal(h.closed(), 1);
+    } finally { setKeybindings(previous); }
+});
+
+test("a short terminal keeps the active input and its validation visible", () => {
+    const h = harness({ height: () => 8 });
+    selectLabel(h.page, "Run timeout");
+    h.page.handleInput("\r");
+    typeAndSubmit(h.page, "-1");
+    const lines = h.page.render(22);
+    assert.ok(lines.length <= 8);
+    assert.ok(lines.every(line => visibleWidth(line) <= 22));
+    const screen = stripAnsi(lines.join("\n"));
+    assert.match(screen, /> Run timeout/);
+    assert.match(screen, /-1/);
+    assert.match(screen, /Enter No limit/);
+    assert.equal(h.settings().maxMinutes, 60);
+});
+
 test("Skill exposure cycles discovery and none, and an empty picker applies No skill catalog", () => {
     const h = harness();
     selectLabel(h.page, "Skill exposure");
@@ -388,6 +428,7 @@ test("a checked path is applied, saved, and shown with its source", (t) => {
     h.page.handleInput("\x13");
     assert.equal(h.saved(), 1);
     assert.deepEqual(h.settings().skillsPaths, [skill.path]);
+    selectLabel(h.page, "Skill exposure");
     assert.match(h.page.render(100).join("\n"), /Source: config defaultSkills/);
 });
 
@@ -517,7 +558,7 @@ test("Agents row opens the catalog action without touching settings", () => {
     assert.equal(h.closed(), 1, "Escape still closes once");
 });
 
-test("Agents sits before Reset to defaults and reset still restores saved defaults", () => {
+test("settings follow task order and Reset restores saved defaults", () => {
     const h = harness();
     assert.deepEqual(rowLabels(h.page), LABELS);
     h.page.handleInput("\r");
@@ -553,6 +594,7 @@ test("selected paths render inside narrow and normal widths and name their sourc
         for (const line of lines) assert.ok(visibleWidth(line) <= width, `${width}: ${JSON.stringify(line)}`);
     }
     assert.match(h.page.render(120).join("\n"), /Skill exposure/);
+    selectLabel(h.page, "Skill exposure");
     assert.match(h.page.render(120).join("\n"), /Source: config defaultSkills/);
     assert.match(h.page.render(120).join("\n"), /Selected skills\s+2 checked/);
     openSkillPicker(h.page);

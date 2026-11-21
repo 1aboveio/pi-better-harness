@@ -98,7 +98,7 @@ test("the selected setting explains its effect at narrow and wide terminal width
   const view = { id: "navigator-view", label: "View", values: ["tree", "flatten"], get: () => "flatten", change() {} };
   const links = [{ id: "subagents", label: "Subagents", command: "/subagents settings", open() {} }];
   const callbacks = { get: () => ({ mode: "hold", source: "default" }), change() {}, save() {} };
-  const opening = chooseHarnessSetting(ctx, links, undefined, callbacks, [], view);
+  const opening = chooseHarnessSetting(ctx, links, "callbacks:while-busy", callbacks, [], view);
   for (const width of [48, 100]) {
     const lines = page.render(width);
     assert.ok(lines.every(line => visibleWidth(line) <= width));
@@ -119,6 +119,32 @@ test("the selected setting explains its effect at narrow and wide terminal width
   await opening;
 });
 
+test("keyboard order groups controls with their package pages and keeps third-party contributions reachable", async () => {
+  const controls = ["tool-animation", "extra-control", "outcome-todo-display", "background-review-interval",
+    "goal-auto-start", "tool-output", "navigator-sticky", "outcome-todo-ledger", "tool-call-guard", "outcome-todo", "navigator-view"]
+    .map(id => ({ id, label: id, values: ["Off", "On"], get: () => "Off", change() {} }));
+  const links = ["agents", "extra-page", "goal", "sandbox", "subagents"]
+    .map(id => ({ id, label: id, command: `/${id}`, open() {} }));
+  const callbacks = { get: () => ({ mode: "hold", source: "default" }), change() {}, save() {} };
+  let page;
+  const opening = chooseHarnessSetting({ ui: { custom: build => new Promise(resolve => {
+    page = build({}, theme, {}, resolve);
+  }) } }, links, undefined, callbacks, controls);
+  const expected = [
+    "Outcome and Todo tools", "goal-auto-start", "Goal settings", "Project work ledger",
+    "Subagent settings", "Agent catalog", "Sandbox settings",
+    "Foreground wait guard", "Background wait reviews", "Completion delivery",
+    "Navigator layout", "Pin work panels", "Outcome and Todo panel", "tool-output", "Tool progress animation",
+    "extra-control", "extra-page",
+  ];
+  for (const label of expected) {
+    assert.ok(page.render(80).some(line => line.startsWith(`> ${label}  `)), label);
+    page.handleInput("\x1b[B");
+  }
+  page.handleInput("\x1b");
+  await opening;
+});
+
 test("selection restoration preserves ordering and rebound native navigation", async () => {
   const original = getKeybindings();
   const rebound = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.down": "j", "tui.select.up": "k" });
@@ -131,10 +157,10 @@ test("selection restoration preserves ordering and rebound native navigation", a
     assert.equal(getKeybindings(), rebound, "restore never replaces the user's active bindings");
     const lines = page.render(80).join("\n");
     assert.match(lines, /> Subagent settings/);
-    assert.ok(lines.indexOf("Goal settings") < lines.indexOf("Sandbox settings") && lines.indexOf("Sandbox settings") < lines.indexOf("Subagent settings"));
-    page.handleInput("k");
-    assert.match(page.render(80).join("\n"), /> Sandbox settings/);
+    assert.ok(lines.indexOf("Goal settings") < lines.indexOf("Subagent settings") && lines.indexOf("Subagent settings") < lines.indexOf("Sandbox settings"));
     page.handleInput("j");
+    assert.match(page.render(80).join("\n"), /> Sandbox settings/);
+    page.handleInput("k");
     page.handleInput("\r");
     assert.equal(await chosen, "link:subagents");
   } finally { setKeybindings(original); }
@@ -152,7 +178,7 @@ test("hub opens package-owned settings, returns to selection and reports opener 
   const ctx = { mode: "tui", ui: { notify: (...args) => notifications.push(args), custom(build) {
     return new Promise(resolve => {
       const page = build({}, theme, {}, resolve);
-      if (++pages === 1) { page.handleInput("\x1b[B"); page.handleInput("\x1b[B"); page.handleInput("\r"); }
+      if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Goal settings/); page.handleInput("\r"); }
       else page.handleInput("\x1b");
     });
   } } };
@@ -281,7 +307,7 @@ test("an invalid callback default reports once, leaves package settings usable, 
         return new Promise(resolve => {
           const page = build({}, theme, {}, resolve);
           assert.match(page.render(80).join("\n"), /^[ >]+Completion delivery\s+When idle/m);
-          if (++pages === 1) { page.handleInput("\x1b[B"); page.handleInput("\x1b[B"); page.handleInput("\r"); }
+          if (++pages === 1) { assert.match(page.render(80).join("\n"), /> Goal settings/); page.handleInput("\r"); }
           else {
             if (pages === 2) {
               page.handleInput("\x13");

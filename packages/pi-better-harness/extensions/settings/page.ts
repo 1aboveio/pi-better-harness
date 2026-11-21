@@ -17,7 +17,15 @@ const callbackDescription = (source: "session" | "default") => [
   "Changes apply to this session. Ctrl+S saves your default.",
 ].join("\n");
 
-const controlOrder = new Map([...controlCopy.keys()].map((id, index) => [id, index]));
+// Keep each package page beside the controls used for the same task.
+const taskOrder = [
+  "setting:outcome-todo", "setting:goal-auto-start", "link:goal", "setting:outcome-todo-ledger",
+  "link:subagents", "link:agents", "link:sandbox",
+  "setting:tool-call-guard", "setting:background-review-interval", CALLBACK_SETTING_ID,
+  "setting:navigator-view", "setting:navigator-sticky", "setting:outcome-todo-display",
+  "setting:tool-output", "setting:tool-animation",
+];
+const position = new Map(taskOrder.map((id, index) => [id, index]));
 
 function presentControl(control: SettingsControl) {
   const copy = controlCopy.get(control.id);
@@ -62,14 +70,12 @@ export async function chooseHarnessSetting(ctx: ExtensionCommandContext, links: 
       values: Object.values(callbackLabels),
     };
     const allControls = navigatorView ? [...controls, navigatorView] : [...controls];
-    const orderedControls = allControls.sort((a, b) =>
-      (controlOrder.get(a.id) ?? controlOrder.size) - (controlOrder.get(b.id) ?? controlOrder.size)
-    ).map(presentControl);
+    const entries = allControls.map(presentControl);
     const items = [
       ...(callbackSetting ? [callbackSetting] : []),
-      ...orderedControls.map(({ item }) => item),
+      ...entries.map(({ item }) => item),
       ...links.map(presentLink),
-    ];
+    ].sort((a, b) => (position.get(a.id) ?? position.size) - (position.get(b.id) ?? position.size));
     const feedback = new Text("", 2, 0);
     let changing = false;
     const report = (message: string, error = false) => {
@@ -81,7 +87,7 @@ export async function chooseHarnessSetting(ctx: ExtensionCommandContext, links: 
       value: (text, active) => active ? theme.inverse(text) : theme.fg("muted", text),
       description: text => theme.fg("text", text), cursor: "> ", hint: text => theme.fg("dim", text),
     }, (id, value) => {
-      const entry = orderedControls.find(({ item }) => item.id === id);
+      const entry = entries.find(({ item }) => item.id === id);
       if (entry) {
         const previous = entry.display(entry.control.get());
         const next = entry.control.values[entry.values.indexOf(value)]!;
