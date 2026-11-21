@@ -2309,6 +2309,15 @@ describe("shared background work navigator", () => {
       assert.equal(mounted.length, 0, "the overlay closes instead of covering the replacement editor");
       assert.deepEqual(unfocusTargets, [], "focus is never handed to a replaced wrapper");
       assert.doesNotMatch(renderWidget(widgets.at(-1), 100, ui.theme).join("\n"), /^› /m, "the rail is unfocused");
+
+      ui.setEditorComponent(inner);
+      editorSlot.handleInput("left");
+      editorSlot.handleInput("down");
+      assert.equal(mounted.length, 1);
+      ui.setEditorComponent(undefined);
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 0, "the overlay closes even when the replacement precedes its first frame");
+      assert.deepEqual(unfocusTargets, [], "focus stays with the replacement editor");
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
