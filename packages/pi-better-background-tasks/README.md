@@ -129,12 +129,16 @@ new Pi process, a task whose process is gone is marked lost.
 
 ## Progress And Suspected Stalls
 
-SSH and legacy tasks support the stall alerts below. For supervised local
-tasks (`bgs_`), delivery of stall alerts during a wait is pending implementation.
+Supervised local tasks (`bgs_`) can notify their owning session while a wait
+is pending. The alert includes available output and the state of the other wait
+dependencies. The wait delivers its completion once all dependencies finish.
+The server recovers a pending alert on the owning branch after a reconnect and
+checks the runner for fresh progress before delivery. [Background task policy](../../docs/adr/0028-background-task-policy.md)
 
 A task can remain `running` without recent progress evidence. Compact status and
-navigator use the same observation. Process tasks use recorded progress and the
-log's modification time. A watch advances only when a poll observes a changed
+navigator use the same observation. Supervised processes record the time of new output, including bytes beyond the
+log retention limit. SSH and legacy processes use recorded progress and the log's
+modification time. A watch advances only when a poll observes a changed
 outcome: running a poll, appending its result to the watch log, or polling on
 schedule is activity, not progress. Before any progress, the task's launch time
 anchors the silence duration. This does not measure CPU activity, network waits,
@@ -168,9 +172,11 @@ records an observation, not a process failure. After the existing 60-second
 attention grace, callback-enabled tasks wake the parent once per silent spell.
 New progress closes the observation and a later spell can notify again. Quiet
 work does not alert, `callback:false` suppresses notification, and no silence
-threshold stops a task or changes its lifecycle. The active session's runtime
-checks observations once per second, including an in-flight watch poll. Reload
-restores monitoring and the persisted attention receipts. Log-retention writes
+threshold stops a task or changes its lifecycle. For supervised tasks the server
+schedules the next silence threshold, including during an in-flight watch poll.
+A supervised watch launched by an older runner lacks the progress checkpoint
+needed to classify silence. Its next launch uses the new runner. Reload restores
+monitoring and persisted delivery receipts. Log-retention writes
 are excluded from task progress.
 
 ## Launch Policy And Diagnostics

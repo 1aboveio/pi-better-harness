@@ -50,6 +50,19 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
     };
     const notify = () => { for (const listener of listeners)
         listener({ workspace: ctx?.cwd, sessionId: ctx?.sessionManager.getSessionId() }); };
+    let handoffRetry: ReturnType<typeof setTimeout> | undefined;
+    let retryAt = Infinity;
+    const scheduleHandoffPoll = (delayMs: number) => {
+        if (!ctx || retryAt <= Date.now() + delayMs) return;
+        clearTimeout(handoffRetry);
+        retryAt = Date.now() + delayMs;
+        // Poll again before attempting delivery: the task or its recipient may have changed.
+        handoffRetry = setTimeout(() => {
+            handoffRetry = undefined; retryAt = Infinity;
+            if (ctx) void reconcile().catch(() => undefined);
+        }, delayMs);
+        handoffRetry.unref();
+    };
     const reconcile = () => {
         if (!ctx)
             return Promise.resolve();
@@ -62,6 +75,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
             trace('poll-received', { stale: version !== generation, total: snapshot.deliveries?.length ?? 0, deliveries: (snapshot.deliveries ?? []).slice(0, 8).map((item: any) => ({ taskId: item.notification.taskId, receiptId: item.receiptId })) });
             if (version !== generation)
                 return;
+            if (Number.isFinite(snapshot.retryAfterMs)) scheduleHandoffPoll(snapshot.retryAfterMs);
             if (snapshot.recoveryPending === true) dirty = true;
             // A rebuilding snapshot is not evidence that visible tasks vanished.
             if (snapshot.status !== 'rebuilding' && snapshot.status !== 'degraded') {
@@ -96,7 +110,14 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
                 }
                 const n = item.notification;
                 trace('queue', { ...facts, urgent: n.urgent === true, recipientActive: active(n.origin, n.branchId) });
-                if(n.urgent){void getCallbackBatcher(pi).deliverUrgent({...n.event,receiptId:item.receiptId,getSuppressionReason:()=>active(n.origin,n.branchId)?undefined:'The originating session or branch is no longer active',onDelivered:()=>receipt(true),onSuppressed:(reason)=>receipt(false,reason)});continue;}
+                if (n.urgent) {
+                    const handoff = getCallbackBatcher(pi).deliverUrgent({ ...n.event, receiptId: item.receiptId,
+                        getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active',
+                        onDelivered: () => receipt(true), onSuppressed: reason => receipt(false, reason) });
+                    const retry = () => { queued.delete(item.token); if (version === generation) scheduleHandoffPoll(1000); };
+                    void Promise.resolve(handoff).then(ok => { if (!ok) retry(); }, retry);
+                    continue;
+                }
                 getCallbackBatcher(pi).enqueue({ ...n.event, source: 'background-task', id: n.taskId, label: n.taskId, status: n.waitId ? `${n.status}; wait ${n.waitId} ready` : n.status,
                     detailTool: 'bg_task_status', outcome: n.outcome, callback: true, receiptId: item.receiptId,
                     getSuppressionReason: () => active(n.origin, n.branchId) ? undefined : 'The originating session or branch is no longer active',
@@ -119,7 +140,7 @@ export function createManagedBackgroundFrontend(pi: ExtensionAPI) {
             if (restore) activate();
         },
         noteParentContext(context: ExtensionContext) { adoptContext(context); generation++; void reconcile().catch(() => undefined); },
-        close() { observing = false; ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
+        close() { clearTimeout(handoffRetry); handoffRetry = undefined; retryAt = Infinity; observing = false; ctx = undefined; adoptedScope = undefined; generation++; rows = []; legacyRows = []; details.clear(); logs.clear(); retainedTasks.clear(); queued.clear(); ownership.clear(); },
         isParentOriginActive: active,
         onDurableTaskChange(listener: (change: any) => void) { listeners.add(listener); return () => listeners.delete(listener); },
         listDurableTasks(origin: any, _options: any = {}) { return active(origin) ? rows : []; },

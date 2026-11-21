@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. This ADR is the source of policy for Background task execution, progress, waits, and notifications. Stall alerts for supervised local tasks are an outstanding implementation requirement.
+Accepted. This ADR is the source of policy for Background task execution, progress, waits, and notifications.
 
 ## Execution and ownership
 
@@ -43,3 +43,5 @@ The launching parent may declare `operation_id` and `expected_exit_codes` on `bg
 - **Single dependency (fmm-express#2727).** A Gradle build emits one line and stays running. Advance time through the stall threshold and grace period. Verify the owning session receives the alert with that line while its wait is still pending. Reload after receipt and verify that continued silence produces no new alert.
 - **Multiple dependencies (fmm-express#2732).** An Android test fails, a CI watch observes a failed run reach completion, and a PostgreSQL check stays silent. Verify the parent receives the PostgreSQL stall alert while the wait is pending and the navigator still shows the running task. Cancel the PostgreSQL task and verify the parent then receives all three terminal results and can acknowledge their exact revisions.
 - **Recovery.** Disconnect the parent before alert delivery. Reattach on the owning branch and verify a continuing stall is delivered. Repeat with progress or termination before reattachment and verify the obsolete alert is retired. With callbacks disabled, verify the stall remains inspectable.
+
+The [native acceptance test](../../packages/pi-better-server/test/runtime-background-stall.test.ts) runs in the server CI shards.

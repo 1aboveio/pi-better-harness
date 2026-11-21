@@ -230,6 +230,22 @@ describe('managed native UI boundary', () => {
       expect(frontend.host.ownsDurableTask('durable')).toBe(true);
       frontend.host.close();
     });
+    it.each([true, false])("revalidates a deferred health handoff before retry (still eligible=%s)", async stillEligible => {
+        vi.useFakeTimers();
+        const frontend = createManagedBackgroundFrontend({ registerTool() {} } as any);
+        const item = { token: "pending", receiptId: "episode", notification: { urgent: true, taskId: "bgs_one",
+            origin: { cwd: "/workspace", sessionId: "native" }, event: { customType: "background-task-stall" } } };
+        let attempt = 0;
+        fixture.request.mockImplementation(async () => ({ tasks: [], deliveries: ++attempt === 1 || stillEligible ? [item] : [] }));
+        fixture.urgent.mockReturnValueOnce(false).mockReturnValue(true);
+        try {
+            frontend.host.start(context(), false);
+            await frontend.host.reconcileNow();
+            await vi.advanceTimersByTimeAsync(1000);
+            expect(fixture.urgent).toHaveBeenCalledTimes(stillEligible ? 2 : 1);
+            expect(attempt).toBe(2);
+        } finally { frontend.host.close(); vi.useRealTimers(); }
+    });
     it.each([false,true])('acknowledges exact native structured transcript proof without appending again (urgent=%s)', async (urgent) => {
         let acknowledged=false;
         fixture.request.mockImplementation(async (_pi, _ctx, _key, tool) => tool === '__background_poll' ? { tasks: [], legacyRows: [], deliveries: acknowledged?[]:[{ token: 'new-lease', receiptId: 'receipt', notification: {urgent,event:{customType:'background-task-failure'}, taskId: 'task', origin: { cwd: '/workspace', sessionId: 'native' }, status: 'succeeded' } }] } : (acknowledged=true,{ receipted: true }));
