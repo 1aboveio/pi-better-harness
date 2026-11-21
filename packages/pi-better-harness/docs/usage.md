@@ -41,9 +41,9 @@ again. The explicit installer removes the selected registration instead.
 
 ## Outcome & Todo
 
-In `/harness-settings`, **Outcome & Todo display** (`outcome-todo-display`)
-defaults to **On**, independently of **Outcome & Todo hooks** (legacy id
-`outcome-todo`), which defaults to **Off**, and **Long-term work ledger**
+In `/harness-settings`, **Outcome and Todo panel** (`outcome-todo-display`)
+defaults to **On**, independently of **Outcome and Todo tools** (legacy id
+`outcome-todo`), which defaults to **Off**, and **Project work ledger**
 (`outcome-todo-ledger`), which defaults to **Off**. Saved outcomes and checklists
 render with hooks off. If state is missing, Harness creates no placeholder, state,
 or settings. Turning display off leaves hooks active. Saved v1 `enabled` remains
@@ -85,7 +85,7 @@ compaction and reload. Existing Plan histories remain readable as Todo.
 
 ### Durable work ledgers
 
-**Long-term work ledger** is a separate setting, default Off. When it and the
+**Project work ledger** is a separate setting, default Off. When it and the
 Outcome & Todo hooks are on, the same `update_todo` / `get_todo` interface keeps a
 high-level work record that is independent of session history:
 

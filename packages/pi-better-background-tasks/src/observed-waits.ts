@@ -30,6 +30,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { describeSupervisedProgress, supervisedProgress, type SupervisedProgress } from "./supervised-progress.js";
+import { formatProgressDuration } from "./stall.js";
 import { validateCondition } from "./conditions.js";
 import {
   STEP_GATE_COMMAND_ENV,
@@ -1814,7 +1815,8 @@ export class ObservedWaitHost {
     try {
       if (readFileSync(receiptPath, "utf8") === receiptId) return;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    const lines = [describeSupervisedProgress(progress, now)!];
+    const lines = [describeSupervisedProgress(progress, now)!,
+      `Task has run for ${formatProgressDuration(now - inspection.launch.createdAt)}.`];
     for (const ref of waits) {
       const wait = this.requireStore().getWait(ref);
       if (!wait || wait.phase === "cancelled" || wait.phase === "consumed" || !sameOwner(wait.owner, operation.owner)) continue;
@@ -1833,6 +1835,60 @@ export class ObservedWaitHost {
       event: { source: "background-task", id: receiptId, inspectId: taskId, label: context.name ?? taskId,
         status: "suspected stall", customType: "background-task-stall", content: lines.join("\n"), detailTool: "bg_task_status" } };
     return { notification, delivery: { receiptId, delivered: () => writeTextAtomic(receiptPath, receiptId), defer: () => {} } };
+  }
+
+  /** Review an ongoing parent wait using durable launch, progress and handoff evidence. */
+  backgroundWaitReview(origin: BackgroundTaskCallbackOrigin, taskId: string, waits: readonly { waitId: string; generation: number }[], intervalMs: number) {
+    const operation = this.operationForTask(taskId);
+    if (!operation || operation.terminalRevision || !this.belongsToParentOrigin(operation, origin)) return;
+    const branchId = operation.owner.branchId;
+    if (!this.isParentOriginActive(origin, branchId)) return;
+    const wait = waits.map(ref => this.requireStore().getWait(ref)).find(record => record?.phase === "waiting"
+      && sameOwner(record.owner, operation.owner)
+      && record.dependencies.some(dep => dep.operationId === operation.operationId));
+    if (!wait) return;
+    const directory = this.observationDirectory(operation);
+    if (!directory) return;
+    const context = this.readLaunchContext(taskId, directory);
+    if (!context?.callback) return;
+    const inspection = this.passiveSnapshot(taskId, directory);
+    if (!inspection || inspection.token !== operation.launchToken || inspection.stopRequestedAt !== undefined) return;
+    const clock = this.options.now ?? Date.now;
+    const now = clock();
+    const progress = supervisedProgress(inspection, now);
+    if (!progress) return;
+    const receiptPath = join(inspection.taskDir, "wait-review-receipt.json");
+    const incident = [wait.waitId, wait.generation, progress.observedAt].join(":");
+    const firstReviewAnchor = Math.max(wait.createdAt, progress.observedAt);
+    let anchor = firstReviewAnchor;
+    try {
+      const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+      if (receipt?.incident === incident && Number.isFinite(receipt.deliveredAt)) {
+        anchor = Math.max(anchor, receipt.deliveredAt);
+      }
+    } catch (error) {
+      if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const dueAt = anchor + intervalMs;
+    if (now < dueAt) return { dueAt };
+
+    const receiptId = `background-wait-review:${operation.operationId}:${incident}:${anchor}`;
+    const lines = [
+      `Task has run for ${formatProgressDuration(now - inspection.launch.createdAt)}. No observed progress for ${formatProgressDuration(now - progress.observedAt)}.`,
+      `Wait ${wait.waitId} is still waiting. Reassess the blocker and report the next step.`,
+      `Continuation note: ${oneLine(wait.continuationNote, 250)}`,
+    ];
+    if (inspection.kind === "watch") {
+      const lastCheck = lastLines(tail(inspection.logs.events).text, 12).split("\n").reverse().find(line => / check #\d+ exit=/.test(line));
+      if (lastCheck) lines.push(`Latest check: ${oneLine(lastCheck, 200)}`);
+    }
+    const output = [inspection.logs.stdout, inspection.logs.stderr].map(path => lastLines(tail(path).text, 1).slice(-300)).filter(Boolean);
+    lines.push(...output, `Evidence: bg_task_log id=${taskId}`);
+    const notification = { taskId, operationId: operation.operationId, origin, branchId, urgent: true,
+      event: { source: "background-task", id: receiptId, inspectId: taskId, label: context.name ?? taskId,
+        status: "wait review due", customType: "background-wait-review", content: lines.join("\n"), detailTool: "bg_task_status" } };
+    return { dueAt, alert: { notification, delivery: { receiptId,
+      delivered: () => writeTextAtomic(receiptPath, JSON.stringify({ incident, deliveredAt: clock() })), defer: () => {} } } };
   }
 
   /** Accumulated projection work, for performance regression proof. */

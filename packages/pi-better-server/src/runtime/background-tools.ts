@@ -10,9 +10,9 @@ import { acquireMutationStore } from './mutation-store.ts';
 export async function createBackgroundTools(root: string, instance: string, draining: () => boolean = () => false, observe?: (scope: Record<string, unknown>) => Promise<any>, verificationMs = 30000,
     trace?: (slot: number, phase: 'queued' | 'executing' | 'recovery' | 'read-pending' | 'read-returned' | 'tool-pending' | 'tool-returned' | 'settled') => void) {
     const load = (file: string) => import(`./domain/background-service/${file}.domain.mjs`);
-    const [{ createObservedWaitHost }, { registerTools }, { createBackgroundTaskRuntime }, sandbox, authority, permissions, registry, navigator, failures] = await Promise.all([
+    const [{ createObservedWaitHost }, { registerTools }, { createBackgroundTaskRuntime }, sandbox, authority, permissions, registry, navigator, failures, reviewSettings] = await Promise.all([
         load('observed-waits'), load('tools'), load('runtime'), load('sandbox'), load('managed-authority'),
-        import(String('./domain/sandbox-policy/permission-settings.domain.mjs')), load('registry'), load('navigator-provider'), load('failures'),
+        import(String('./domain/sandbox-policy/permission-settings.domain.mjs')), load('registry'), load('navigator-provider'), load('failures'), load('review-settings'),
     ]);
     const identity = await load('process-identity');
     const lease = acquireMutationStore(root);
@@ -34,7 +34,10 @@ export async function createBackgroundTools(root: string, instance: string, drai
         traceSeen.add(line);
         try { console.error('[background-handoff-server]', output); } catch { /* diagnostics never own delivery */ }
     };
-    const isStallDelivery = (item: any) => item.notification.event?.customType === 'background-task-stall';
+    const isAttentionDelivery = (item: any) => {
+        const type = item.notification.event?.customType;
+        return type === 'background-task-stall' || type === 'background-wait-review';
+    };
     const sameNativeHost = (item: any, record: any) => item.scope.pid === record.pid && item.scope.start === record.start;
     const deliveryLeaseMs = 30000;
     const ownerKey = (owner: any) => JSON.stringify([owner.workspace, owner.sessionId]);
@@ -205,7 +208,7 @@ export async function createBackgroundTools(root: string, instance: string, drai
                     const item = deliveries.get(record.params.token);
                     traceHandoff('receipt', { sessionId: record.owner.sessionId, taskId: item?.notification.taskId,
                         receiptId: item?.receiptId, found: Boolean(item), delivered: record.params.delivered === true });
-                    if (!item || ownerKey(item.scope.owner) !== key || isStallDelivery(item) && !sameNativeHost(item, record))
+                    if (!item || ownerKey(item.scope.owner) !== key || isAttentionDelivery(item) && !sameNativeHost(item, record))
                         throw new Error('delivery-receipt-refused');
                     if (record.params.delivered === true && !service.isParentOriginActive(item.notification.origin, item.notification.branchId))
                         throw new Error('delivery-recipient-inactive');
@@ -271,23 +274,34 @@ export async function createBackgroundTools(root: string, instance: string, drai
                         }
                     }
                     const origin = { cwd: record.owner.workspace, sessionId: record.owner.sessionId };
-                    const liveStalls = new Set<string>();
-                    for (const task of tasks) {
-                        if (!task.active || !task.progress?.alertDue || !task.callback || task.owner.kind !== 'parent-session') continue;
-                        const alert = service.pendingStallAlert(origin, task.id, task.waits);
-                        if (!alert) continue;
-                        liveStalls.add(alert.delivery.receiptId);
-                        notifyParent(alert.notification, alert.delivery);
+                    const liveAlerts = new Set<string>();
+                    const reviewTasks = tasks.filter(task => task.active && task.progress && task.callback && task.owner.kind === 'parent-session');
+                    let intervalMinutes = reviewSettings.DEFAULT_BACKGROUND_REVIEW_INTERVAL_MINUTES;
+                    if (reviewTasks.some(task => task.waits.length)) {
+                        try { intervalMinutes = reviewSettings.readBackgroundReviewInterval({ agentDir: () => root }); }
+                        catch { /* An unreadable settings file must not interrupt Background delivery. */ }
+                    }
+                    let nextReviewAt = Infinity;
+                    for (const task of reviewTasks) {
+                        const stall = task.progress.alertDue ? service.pendingStallAlert(origin, task.id, task.waits) : undefined;
+                        const review = task.waits.length ? service.backgroundWaitReview(origin, task.id, task.waits, intervalMinutes * 60_000) : undefined;
+                        for (const alert of [stall, review?.alert]) {
+                            if (!alert) continue;
+                            liveAlerts.add(alert.delivery.receiptId);
+                            notifyParent(alert.notification, alert.delivery);
+                        }
+                        if (review && !review.alert) nextReviewAt = Math.min(nextReviewAt, review.dueAt);
                     }
                     const outgoing = [];
-                    let retryAfterMs = liveStalls.size && deliveries.size >= 256 ? 1000 : undefined;
+                    let retryAfterMs = Number.isFinite(nextReviewAt) ? Math.max(1, nextReviewAt - Date.now()) : undefined;
+                    if (liveAlerts.size && deliveries.size >= 256) retryAfterMs = Math.min(retryAfterMs ?? 1000, 1000);
                     for (const [token, item] of deliveries) {
                         if (ownerKey(item.scope.owner) !== key) continue;
-                        if (isStallDelivery(item)) {
+                        if (isAttentionDelivery(item)) {
                             if (item.notification.branchId && !record.branchIds.includes(item.notification.branchId)) continue;
-                            if (!liveStalls.has(item.receiptId)) { deliveries.delete(token); continue; }
+                            if (!liveAlerts.has(item.receiptId)) { deliveries.delete(token); continue; }
                             // Two frontends can share a session and branch. Only the holder may hand off
-                            // this incident. A survivor polls again at lease expiry if no receipt arrives.
+                            // each alert. A survivor polls again at lease expiry if no receipt arrives.
                             if (!sameNativeHost(item, record)) {
                                 const remaining = Math.max(1, item.createdAt + deliveryLeaseMs - Date.now());
                                 retryAfterMs = Math.min(retryAfterMs ?? remaining, remaining);

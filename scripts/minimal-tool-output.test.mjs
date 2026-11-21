@@ -1115,7 +1115,7 @@ test("the contributed hub control changes real tool rows, shares command state, 
   assert.match(stripVTControlCharacters(page.render(80).join("\n")), /Tool output.*Normal/);
   page.handleInput(" ");
   await new Promise(resolve => setImmediate(resolve));
-  assert.match(stripVTControlCharacters(page.render(80).join("\n")), /Tool output.*Minimal/);
+  assert.match(stripVTControlCharacters(page.render(80).join("\n")), /Tool output.*Compact/);
   assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
   assert.equal(entries.at(-1).data.enabled, true);
   assert.equal(entries.length, 1);
@@ -1123,7 +1123,7 @@ test("the contributed hub control changes real tool rows, shares command state, 
   failSave = true;
   page.handleInput("\r");
   await new Promise(resolve => setImmediate(resolve));
-  assert.match(stripVTControlCharacters(page.render(80).join("\n")), /Tool output.*Minimal/);
+  assert.match(stripVTControlCharacters(page.render(80).join("\n")), /Tool output.*Compact/);
   assert.match(stripVTControlCharacters(page.render(80).join("\n")), /Disk write failed/);
   await handlers.get("session_tree")({}, ctx);
   assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);

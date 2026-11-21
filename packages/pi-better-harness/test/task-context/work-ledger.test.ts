@@ -420,7 +420,7 @@ test("the unified update_todo ledger payload preserves items and history across 
     f.tools.get("update_todo")!.execute("create-disabled", {
       ledger: { action: "create", outcome: "Should not persist" },
     }, undefined, undefined, f.ctx),
-    /hooks are off/,
+    /Outcome and Todo tools are off/,
   );
 
   await f.setting()!.change("On", f.ctx);
@@ -432,11 +432,11 @@ test("the unified update_todo ledger payload preserves items and history across 
     updateTodo.execute("ledger-disabled", {
       ledger: { action: "create", outcome: "Should not persist while the capability is off" },
     }, undefined, undefined, f.ctx),
-    /Long-term work ledger is off/,
+    /Project work ledger is off/,
   );
   await assert.rejects(
     getTodo.execute("ledger-disabled-read", { ledger: { action: "list" } }, undefined, undefined, f.ctx),
-    /Long-term work ledger is off/,
+    /Project work ledger is off/,
   );
   await f.ledgerSetting()!.change("On", f.ctx);
   assert.deepEqual(f.active(), ["read", "update_todo", "get_todo"], "the unified interface adds no public tool");
