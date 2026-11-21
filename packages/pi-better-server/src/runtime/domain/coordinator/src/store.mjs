@@ -23,7 +23,7 @@ import { createContext, openDatabase, run } from "./sqlite.mjs";
 import { getOperation as readOperationRecord, listAssignmentCleanupOperations as readAssignmentCleanupOperations, listOperations as readOperationRecords, listRunningSupervisedBy as readRunningSupervisedBy, releaseSupervision as writeSupervisionRelease, recordSupervision as writeSupervision, recordTerminalOutcome as writeTerminalOutcome, registerOperation as writeOperation, } from "./operations.mjs";
 import { getChangeRevision as readChangeRevision, readDiscoveryClaim as readClaim, readDiscoveryState, releaseDiscoveryClaim as deleteDiscoveryClaim, tryClaimDiscovery as writeDiscoveryClaim, } from "./discovery.mjs";
 import { acknowledgeResult as writeAcknowledgement, cancelWait as writeCancellation, claimResume as writeClaim, findPendingWaitForOwner, getWait as readWait, listDependencies as readDependencies, listEvidencePins as readPins, listEvidenceReads as readReads, listResumeClaims as readClaims, listUnreconciledClaims, listWaits as readWaits, publishResumeAttempt as writeAttemptPublication, recordEvidencePin as writePin, recordEvidenceRead as writeRead, registerWait as writeWait, releaseEvidencePins as writePinRelease, holdFailedResume as writeHoldFailedResume, releaseResumeClaim as writeClaimRelease, transitionWaitPhase as writePhase, } from "./waits.mjs";
-import { claimOutbox as writeOutboxClaim, listDispatchableOutboxRecipients as readDispatchableOutboxRecipients, listOutbox as readOutbox, markOutboxDelivered as writeOutboxDelivery, releaseOutbox as writeOutboxRelease, } from "./outbox.mjs";
+import { claimOutbox as writeOutboxClaim, hasDeliveredWaitDependency as readDeliveredWaitDependency, listDispatchableOutboxRecipients as readDispatchableOutboxRecipients, listOutbox as readOutbox, markOutboxDelivered as writeOutboxDelivery, releaseOutbox as writeOutboxRelease, } from "./outbox.mjs";
 import { readOperationEvidence } from "./rows.mjs";
 import { SCHEMA_VERSION, } from "./types.mjs";
 export function openStore(options) {
@@ -248,6 +248,10 @@ export function openStore(options) {
         listOutbox(filter = {}) {
             alive();
             return readOutbox(ctx, filter);
+        },
+        hasDeliveredWaitDependency(operationId, terminalRevision, recipient) {
+            alive();
+            return readDeliveredWaitDependency(ctx, operationId, terminalRevision, recipient);
         },
         listDispatchableOutboxRecipients() {
             alive();

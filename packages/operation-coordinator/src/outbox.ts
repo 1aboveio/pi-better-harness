@@ -280,6 +280,15 @@ export function listOutbox(ctx: StoreContext, filter: OutboxFilter = {}): Outbox
     ).map((row) => mapOutbox(ctx, row));
 }
 
+/** Check a wait handoff without loading the retained evidence for its generations. */
+export function hasDeliveredWaitDependency(ctx: StoreContext, operationId: string, terminalRevision: number, recipient: OwnerIdentity): boolean {
+    const owner = ownerClause("recipient", recipient);
+    return getRows(ctx, `SELECT 1 FROM outbox_events
+        WHERE operation_id = ? AND terminal_revision = ? AND event_type = 'dependency-ready'
+          AND delivered_at IS NOT NULL AND ${owner.sql} LIMIT 1`,
+        requireId("operationId", operationId), requireCounter("terminalRevision", terminalRevision), ...owner.params).length > 0;
+}
+
 /** Find recipients with deliverable dependencies without loading each event's evidence. */
 export function listDispatchableOutboxRecipients(ctx: StoreContext): Array<{ recipient: OwnerIdentity; count: number }> {
     return getRows(
